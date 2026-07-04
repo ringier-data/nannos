@@ -31,6 +31,7 @@ from agent_common.backends.attachments_store import (
 )
 from agent_common.core.stream_watchdog import StreamStallError, inter_chunk_timeout, watch_stream
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
+from agent_common.middleware.tool_status import TOOL_STATUS_EVENT
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk
@@ -62,14 +63,17 @@ logger = logging.getLogger(__name__)
 #   - response schemas: not real tool calls;
 #   - ``task``: the dispatch middleware emits "Delegating to {subagent}…" instead;
 #   - ``write_todos``: rendered as a work-plan, not an activity line;
-#   - ``eval`` (the PTC code interpreter): an internal REPL. Sub-agents run their
-#     tools *inside* ``eval``, and those sub-agent ``eval`` tool-call chunks leak
-#     into the orchestrator's ``messages`` stream via inherited streaming
-#     callbacks — arriving with the orchestrator's own ``thread_id`` and an empty
-#     ``ns``, so the thread-id guard below cannot distinguish them. Surfacing them
-#     would duplicate the sub-agent's already-sourced "eval-agent › Using eval…"
-#     entry as an unattributed "Using eval…". The orchestrator's own PTC eval is
-#     likewise an internal mechanism, not user-facing activity.
+#   - ``eval`` (the PTC code interpreter): excluded *here*, on the messages path,
+#     because sub-agents run their tools *inside* ``eval`` and those sub-agent
+#     ``eval`` tool-call chunks leak into the orchestrator's ``messages`` stream
+#     via inherited streaming callbacks — arriving with the orchestrator's own
+#     ``thread_id`` and an empty ``ns``, so the thread-id guard below cannot
+#     distinguish them. Surfacing them here would render an unattributed, partial
+#     "Using eval…". The orchestrator's *own* eval is instead surfaced from the
+#     richer ``tool_status`` custom-event channel (see the TOOL_STATUS_EVENT
+#     handler below), which fires only on the orchestrator's own stream and
+#     carries a descriptive "Running …" message — mirroring how a sub-agent's
+#     eval surfaces via its generic tool_status→ActivityLog forwarding.
 _ACTIVITY_LOG_EXCLUDED_TOOLS: frozenset[str] = frozenset(
     {
         "FinalResponseSchema",
@@ -687,6 +691,26 @@ class OrchestratorDeepAgent:
                                 content=status_msg,
                                 metadata=metadata,
                             )
+                        continue  # Process next event
+
+                    elif event_type == TOOL_STATUS_EVENT:
+                        # DESCRIPTIVE TOOL STATUS from ToolStatusMiddleware, on the
+                        # orchestrator's own stream. Regular tools already surface via
+                        # the ``messages`` tool_call_chunks path above, so forwarding
+                        # every status here would duplicate them. We surface only
+                        # ``eval`` (the PTC code interpreter), which the messages path
+                        # deliberately drops (see _ACTIVITY_LOG_EXCLUDED_TOOLS) and
+                        # would otherwise be silent — mirroring how a sub-agent's eval
+                        # surfaces via its generic tool_status→ActivityLog forwarding.
+                        if event_data.get("tool") == PTC_CODE_INTERPRETER_TOOL_NAME:
+                            status_msg = event_data.get("status", "")
+                            if status_msg and status_msg not in emitted_updates:
+                                emitted_updates.add(status_msg)
+                                yield AgentStreamResponse(
+                                    state=TaskState.TASK_STATE_WORKING,
+                                    content=status_msg,
+                                    metadata={"activity_log": True},
+                                )
                         continue  # Process next event
 
                     elif event_type == "subagent_chunk":

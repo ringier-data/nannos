@@ -201,6 +201,29 @@ class TestToolStatusMiddleware:
         assert len(captured) == 0
 
     @pytest.mark.asyncio
+    async def test_payload_carries_tool_name(self, middleware, handler):
+        """The payload includes the originating tool name so consumers can route
+        by tool (e.g. the orchestrator surfaces only ``eval`` from this channel)."""
+        request = MagicMock()
+        request.tool_call = {
+            "name": "eval",
+            "args": {"code": "tools.fetchMarkdown({url: 'x'})"},
+        }
+
+        captured = []
+
+        def fake_writer(event):
+            captured.append(event)
+
+        with patch("agent_common.middleware.tool_status.get_stream_writer", return_value=fake_writer):
+            await middleware.awrap_tool_call(request, handler)
+
+        assert len(captured) == 1
+        payload = captured[0][1]
+        assert payload["tool"] == "eval"
+        assert payload["status"] == "Running fetch_markdown…"
+
+    @pytest.mark.asyncio
     async def test_graceful_when_no_stream_writer(self, middleware, handler):
         """No crash when stream_writer is unavailable."""
         request = MagicMock()

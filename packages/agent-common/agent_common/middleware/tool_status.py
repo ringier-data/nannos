@@ -64,7 +64,7 @@ class ToolStatusMiddleware(AgentMiddleware[AgentState, ContextT]):
             args = request.tool_call.get("args", {})
             status = _build_status(tool_name, args)
             if status:
-                await _emit_status(status)
+                await _emit_status(status, tool_name)
 
         return await handler(request)
 
@@ -157,15 +157,21 @@ def _truncate(text: str, max_len: int) -> str:
     return text[:max_len] + "\u2026"
 
 
-async def _emit_status(message: str) -> None:
-    """Push a ``(TOOL_STATUS_EVENT, {...})`` custom event into the stream."""
+async def _emit_status(message: str, tool_name: str) -> None:
+    """Push a ``(TOOL_STATUS_EVENT, {...})`` custom event into the stream.
+
+    The payload carries the originating ``tool`` name alongside the human
+    ``status`` so consumers can route by tool — e.g. the orchestrator surfaces
+    only ``eval`` from this channel (its other tools come from the ``messages``
+    stream), while sub-agents forward every status generically.
+    """
     try:
         stream_writer = get_stream_writer()
     except Exception:
         return
 
     try:
-        result = stream_writer((TOOL_STATUS_EVENT, {"status": message}))
+        result = stream_writer((TOOL_STATUS_EVENT, {"status": message, "tool": tool_name}))
         if inspect.iscoroutine(result):
             await result
     except Exception as e:
