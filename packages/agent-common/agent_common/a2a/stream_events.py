@@ -124,7 +124,21 @@ class IntermediateOutputMeta(BaseModel):
     intermediate_output: Literal[True] = True
 
 
-EventMetadata = Union[ActivityLogMeta, WorkPlanMeta, IntermediateOutputMeta]
+class ClientActionMeta(BaseModel):
+    """Metadata carrying a client-action directive (Embedded Nannos).
+
+    Emitted only by the embedded entrypoint sub-agent (``client_action_enabled``):
+    the in-process ``client_action`` tool writes an apply/highlight/navigate
+    directive to the custom stream, which ``_astream_impl`` forwards on a
+    ``TaskUpdate`` so the execute-only adapter can surface it to the client as a
+    CLIENT_ACTION extension status update. Absent on every normal sub-agent, so
+    delegated-path consumers never see it.
+    """
+
+    client_action: Dict[str, Any] = Field(default_factory=dict)
+
+
+EventMetadata = Union[ActivityLogMeta, WorkPlanMeta, IntermediateOutputMeta, ClientActionMeta]
 
 # ---------------------------------------------------------------------------
 # Top-level stream event models
@@ -189,4 +203,6 @@ def parse_event_metadata(raw: Optional[Dict[str, Any]]) -> Optional[EventMetadat
         return ActivityLogMeta()
     if raw.get("intermediate_output"):
         return IntermediateOutputMeta()
+    if raw.get("client_action"):
+        return ClientActionMeta(client_action=raw["client_action"])
     return None
