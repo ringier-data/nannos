@@ -661,6 +661,20 @@ class OrchestratorDeepAgent:
                             )
                         continue  # Process next event
 
+                    elif event_type == "client_action":
+                        # CLIENT-ACTION DIRECTIVE (Embedded Nannos): emitted by the
+                        # client_action tool via the custom stream; forwarded to the
+                        # client as an extension-tagged status update.
+                        directive = event_data.get("directive")
+                        if directive:
+                            logger.info(f"[ORCHESTRATOR] Client-action directive: {directive}")
+                            yield AgentStreamResponse(
+                                state=TaskState.TASK_STATE_WORKING,
+                                content="",
+                                metadata={"client_action": directive},
+                            )
+                        continue  # Process next event
+
                     elif event_type == "status_history":
                         # ACTIVITY LOG from tool calls (orchestrator or sub-agents via middleware)
                         status_msg = event_data.get("message", "")
@@ -888,6 +902,175 @@ class OrchestratorDeepAgent:
             # Clear the per-turn attachments context registration.
             if _attachments_token is not None:
                 reset_current_attachments_backend(_attachments_token)
+
+    async def stream_subagent(
+        self,
+        runnable: Any,
+        message_parts: list[Part],
+        config: dict[str, Any],
+        context_id: str,
+        resume: Any = None,
+        turn_state: "TurnState | None" = None,
+        client_objects: list | None = None,
+    ) -> AsyncIterable[AgentStreamResponse]:
+        """Stream a scoped domain sub-agent as the top-level graph (Embedded Nannos, execute-only).
+
+        Mirrors ``stream()``'s contract — yields ``AgentStreamResponse`` items the
+        executor's streaming/extension loop already understands — but drives a
+        ``DynamicLocalAgentRunnable`` directly instead of the routing orchestrator
+        graph. This is the execute-only substrate (ADR-0004): the embedded
+        entrypoint sub-agent (``client_action_enabled=True``) runs in-process with
+        the orchestrator's interactive executor (streaming + A2A extensions + HITL),
+        skipping the routing main-graph turn.
+
+        Rather than re-implement token/structured-response parsing, this reuses the
+        sub-agent's own tested ``astream`` pipeline (attachments, sandbox, pregel
+        de-nesting, structured ``SubAgentResponseSchema`` streaming, interrupt
+        suppress+re-raise) and adapts its typed ``StreamEvent`` output into the
+        ``AgentStreamResponse`` shape ``_handle_stream_item`` consumes.
+
+        Args:
+            runnable: A built ``DynamicLocalAgentRunnable`` (from the runtime
+                context's ``subagent_registry``), already ``_ensure_agent()``-ed.
+            message_parts: User message parts (text; files via attachment blocks).
+            config: Sub-agent RunnableConfig — ``configurable.thread_id`` must be
+                the sub-agent thread (``{context_id}::dynamic-{name}``) and
+                ``metadata`` the per-turn context. ``client_objects`` is injected here.
+            context_id: Conversation id (orchestrator conversation id for the
+                sub-agent's tracking waterfall).
+            resume: Optional HITL resume value → fed as ``Command(resume=...)``.
+            turn_state: Per-turn carrier (populated best-effort for executor reuse).
+            client_objects: On-screen manifest for ``ClientObjectsMiddleware``.
+
+        Yields:
+            AgentStreamResponse: same shape as ``stream()`` (streaming chunks,
+            activity-log / work-plan / client-action status, terminal result, or a
+            HITL ``input_required`` pause).
+        """
+        from agent_common.a2a.base import SubAgentInput
+        from agent_common.a2a.stream_events import (
+            ActivityLogMeta,
+            ArtifactUpdate,
+            ClientActionMeta,
+            ErrorEvent,
+            IntermediateOutputMeta,
+            TaskUpdate,
+            WorkPlanMeta,
+        )
+        from langgraph.errors import GraphInterrupt
+
+        # Surface the on-screen manifest to ClientObjectsMiddleware, which reads it
+        # from the RunnableConfig metadata (keys "client_objects"/"clientObjects").
+        if client_objects:
+            config.setdefault("metadata", {})["client_objects"] = client_objects
+
+        # Build the stream input: a Command for HITL resume (bypasses message
+        # extraction inside the runnable), else a fresh SubAgentInput. Embedded is
+        # single-user (identity-bound), so there is no channel user prefix.
+        if resume is not None:
+            stream_input: Any = Command(resume=resume)
+            logger.info("[EMBEDDED] Resuming sub-agent '%s' from interrupt", getattr(runnable, "name", "?"))
+        else:
+            text_content, pending_file_blocks = await build_text_content(parts=message_parts, user_prefix=None)
+            serialized_blocks = [b if isinstance(b, dict) else b.model_dump() for b in pending_file_blocks]
+            human = HumanMessage(
+                content=text_content,
+                additional_kwargs={"file_blocks": serialized_blocks} if serialized_blocks else {},
+            )
+            stream_input = SubAgentInput(
+                messages=[human],
+                orchestrator_conversation_id=context_id,
+                a2a_tracking={},
+            )
+
+        try:
+            async for ev in runnable.astream(stream_input, config):
+                # --- Streaming content chunk ---
+                if isinstance(ev, ArtifactUpdate):
+                    if not ev.content:
+                        continue
+                    md: dict[str, Any] = {"streaming_chunk": True}
+                    if isinstance(ev.event_metadata, IntermediateOutputMeta):
+                        md["intermediate_output"] = True
+                        md["agent_name"] = getattr(runnable, "name", "assistant")
+                    yield AgentStreamResponse(
+                        state=TaskState.TASK_STATE_WORKING,
+                        content=ev.content,
+                        metadata=md,
+                    )
+                    continue
+
+                # --- Error signal ---
+                if isinstance(ev, ErrorEvent):
+                    yield AgentStreamResponse(
+                        state=TaskState.TASK_STATE_FAILED,
+                        content=ev.error or "The assistant hit an error. Please try again.",
+                    )
+                    continue
+
+                # --- Task updates: work-plan / client-action / activity-log / terminal ---
+                if isinstance(ev, TaskUpdate):
+                    meta = ev.event_metadata
+                    if isinstance(meta, WorkPlanMeta):
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content="",
+                            metadata={"work_plan": True, "todos": meta.todos},
+                        )
+                        continue
+                    if isinstance(meta, ClientActionMeta):
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content="",
+                            metadata={"client_action": meta.client_action},
+                        )
+                        continue
+                    if isinstance(meta, ActivityLogMeta) or ev.status_text:
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content=ev.status_text or "",
+                            metadata={"activity_log": True},
+                        )
+                        continue
+                    # Terminal result (no event_metadata, no status_text): the final answer.
+                    data = ev.data
+                    answer = ""
+                    if data is not None and data.messages:
+                        last = data.messages[-1]
+                        answer = last.content if isinstance(last.content, str) else str(last.content)
+                    if turn_state is not None:
+                        turn_state.captured = True
+                    yield AgentStreamResponse(
+                        state=data.state if data is not None else TaskState.TASK_STATE_COMPLETED,
+                        content=answer,
+                    )
+
+        except GraphInterrupt as gi:
+            # HITL pause: the sub-agent's astream re-raises the suppressed interrupt.
+            # Surface it as input_required with the pending action requests so the
+            # executor emits the approval card; the next turn resumes via Command.
+            interrupts = gi.args[0] if gi.args else ()
+            last_intr = interrupts[-1] if interrupts else None
+            value = getattr(last_intr, "value", {}) if last_intr is not None else {}
+            if not isinstance(value, dict):
+                value = {}
+            action_requests = value.get("action_requests")
+            review_configs = value.get("review_configs")
+            if action_requests and isinstance(action_requests, list):
+                description = action_requests[0].get("description", "") if action_requests else ""
+                yield AgentStreamResponse(
+                    state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                    content=description or "This action needs your approval.",
+                    action_requests=action_requests,
+                    review_configs=review_configs,
+                )
+            else:
+                task_state = value.get("task_state", TaskState.TASK_STATE_INPUT_REQUIRED)
+                yield AgentStreamResponse(
+                    state=task_state,
+                    content=value.get("message", "Process interrupted. Human intervention required."),
+                    interrupt_reason=value.get("reason", "graph_interrupted"),
+                )
 
     def get_agent_response(self, final_state) -> AgentStreamResponse:
         """Parse the agent response to extract structured information and check for auth requirements."""

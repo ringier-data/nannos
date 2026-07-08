@@ -166,6 +166,7 @@ class TtlTokenCache:
 
 _discovery_cache: TtlTokenCache | None = None
 _user_cache: TtlTokenCache | None = None
+_embedded_runnable_cache: TtlTokenCache | None = None
 
 
 def get_discovery_cache(ttl_seconds: float | None = None) -> TtlTokenCache:
@@ -184,6 +185,25 @@ def get_user_cache(ttl_seconds: float | None = None) -> TtlTokenCache:
     return _user_cache
 
 
+def get_embedded_runnable_cache(ttl_seconds: float | None = None) -> TtlTokenCache:
+    """Process-wide cache of built embedded (execute-only) sub-agent runnables.
+
+    The embedded path builds the scoped sub-agent per turn — ``_ensure_agent`` runs an
+    OAuth token exchange, MCP gateway ``list_tools`` handshakes, console-tool discovery,
+    and LangGraph compilation — which is seconds of time-to-first-token on every message
+    while the non-embedded path reuses ``GraphFactory._graphs``. Entries are keyed like
+    the discovery cache (entitlements + sub-agent config hash + target id): the runnable's
+    tools embed exchanged bearer tokens, so entries are token-bounded exactly like
+    discovery entries, and the same owner-scoped ``invalidate_users`` flush applies.
+    """
+    global _embedded_runnable_cache
+    if _embedded_runnable_cache is None:
+        _embedded_runnable_cache = TtlTokenCache(
+            ttl_seconds if ttl_seconds is not None else 300.0, name="EMBEDDED-RUNNABLE-CACHE"
+        )
+    return _embedded_runnable_cache
+
+
 def invalidate_users(user_subs: list[str]) -> int:
     """Drop cached discovery + user records for the given users only. Returns total removed.
 
@@ -198,6 +218,8 @@ def invalidate_users(user_subs: list[str]) -> int:
             removed += _discovery_cache.invalidate_owner(sub)
         if _user_cache is not None:
             removed += _user_cache.invalidate_owner(sub)
+        if _embedded_runnable_cache is not None:
+            removed += _embedded_runnable_cache.invalidate_owner(sub)
     return removed
 
 
@@ -211,3 +233,5 @@ def invalidate_all() -> None:
         _discovery_cache.clear()
     if _user_cache is not None:
         _user_cache.clear()
+    if _embedded_runnable_cache is not None:
+        _embedded_runnable_cache.clear()
