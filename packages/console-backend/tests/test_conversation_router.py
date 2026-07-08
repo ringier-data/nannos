@@ -155,3 +155,58 @@ def test_get_conversations_permission(mock_config):
         app.dependency_overrides[conversation_router.require_auth] = lambda: MagicMock(
             id="test-user-id", email="test@example.com", is_administrator=False
         )
+
+
+def _conv(conversation_id: str, metadata: dict) -> MagicMock:
+    return MagicMock(
+        conversation_id=conversation_id,
+        user_id="0490f8d6-67ee-439b-8178-6ed66a72b0c9",
+        started_at=datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc),
+        last_message_at=datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc),
+        status="active",
+        metadata=metadata,
+        title="t",
+        agent_url="",
+        sub_agent_config_hash=None,
+    )
+
+
+def test_get_conversations_embedded_scope_filter():
+    """embedded_sub_agent_id scopes the list to ONE application's conversations —
+    a host page must never receive console or other-app conversation titles."""
+    mock_service = MagicMock()
+    mock_service.get_conversations_by_user_id = AsyncMock(
+        return_value=[
+            _conv("app42", {"embedded_sub_agent_id": "42"}),
+            _conv("console-conv", {}),
+            _conv("app7", {"embedded_sub_agent_id": "7"}),
+        ]
+    )
+    app.state.conversation_service = mock_service
+
+    resp = client.get(
+        "/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9&embedded_sub_agent_id=42"
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [c["conversation_id"] for c in data["conversations"]] == ["app42"]
+    assert data["count"] == 1
+
+
+def test_get_conversations_unfiltered_includes_embedded():
+    """Without the param (console main list) embedded conversations stay visible
+    (they render with a badge and read-only input client-side)."""
+    mock_service = MagicMock()
+    mock_service.get_conversations_by_user_id = AsyncMock(
+        return_value=[
+            _conv("app42", {"embedded_sub_agent_id": "42"}),
+            _conv("console-conv", {}),
+        ]
+    )
+    app.state.conversation_service = mock_service
+
+    resp = client.get("/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9")
+
+    assert resp.status_code == 200
+    assert {c["conversation_id"] for c in resp.json()["conversations"]} == {"app42", "console-conv"}

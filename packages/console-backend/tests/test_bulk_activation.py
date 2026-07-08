@@ -436,7 +436,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession, test_user:
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, type, owner_user_id, current_version, default_version)
-            VALUES (7, 'Test Agent 7', 'remote', 'owner-123', 1, 1)
+            VALUES (9007, 'Test Agent 7', 'remote', 'owner-123', 1, 1)
         """)
     )
     await pg_session.commit()
@@ -446,7 +446,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession, test_user:
         db=pg_session,
         actor=test_user,
         user_ids=[],
-        sub_agent_id=7,
+        sub_agent_id=9007,
         activated_by=ActivationSource.GROUP,
         group_id=1,
     )
@@ -457,7 +457,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession, test_user:
         db=pg_session,
         actor=test_user,
         user_ids=[],
-        sub_agent_id=7,
+        sub_agent_id=9007,
         group_id=1,
     )
     assert len(user_ids_deactivated) == 0
