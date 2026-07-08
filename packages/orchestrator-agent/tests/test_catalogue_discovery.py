@@ -43,6 +43,7 @@ def _settings(stateless: bool) -> Mock:
     config.MCP_DISCOVERY_CONCURRENCY = 5
     config.MCP_CATALOGUE_STATELESS_LIST = stateless
     config.MCP_TOKEN_LEEWAY_SECONDS = 90
+    config.MCP_DIRECT_SERVERS = None
     return config
 
 
