@@ -47,7 +47,7 @@ from agent_common.core.model_factory import (
     is_valid_model,
     require_default_model,
 )
-from agent_common.core.stream_watchdog import watch_stream
+from agent_common.core.stream_watchdog import watch_stream_with_resume
 from google.protobuf.json_format import ParseDict
 from object_storage import get_object_storage_service
 
@@ -1185,8 +1185,14 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             #   {"type": "values", "ns": (), "data": <state snapshot>}
             # We consume all and use the final state.
             final_state = None
-            async for part in watch_stream(
-                graph.astream({"messages": messages}, config=config, stream_mode="values", version="v2"),
+            # Auto-resume once on a watchdog stall (e.g. slow cold-cache prompt
+            # ingestion tripping the first-token budget) instead of hard-failing the
+            # whole sub-agent run; the checkpointer (Postgres, or the MemorySaver
+            # placeholder) lets the resume pick up pending work with input=None.
+            async for part in watch_stream_with_resume(
+                lambda resuming: graph.astream(
+                    None if resuming else {"messages": messages}, config=config, stream_mode="values", version="v2"
+                ),
                 label="agent-runner",
             ):
                 if part["type"] == "values":

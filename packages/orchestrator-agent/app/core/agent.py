@@ -15,7 +15,6 @@ Architecture:
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -29,7 +28,7 @@ from agent_common.backends.attachments_store import (
     reset_current_attachments_backend,
     set_current_attachments_backend,
 )
-from agent_common.core.stream_watchdog import StreamStallError, inter_chunk_timeout, watch_stream
+from agent_common.core.stream_watchdog import StreamStallError, watch_stream_with_resume
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.middleware.tool_status import TOOL_STATUS_EVENT
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
@@ -449,44 +448,28 @@ class OrchestratorDeepAgent:
             # model hang). The inter-chunk watchdog should not trip during a long
             # sub-agent step now that sub-agent dispatch emits keepalives (see
             # DynamicToolDispatchMiddleware), but if the orchestrator's OWN model
-            # stream hangs we transparently resume from the checkpoint a single time
-            # (input=None) with a more generous idle budget, surfacing a "recovering"
-            # status. A second stall propagates to the warm hand-off handler below
-            # instead of cold-failing.
-            stall_resume_budget_multiplier = float(os.getenv("LLM_STALL_RESUME_BUDGET_MULTIPLIER", "3"))
+            # stream hangs, watch_stream_with_resume transparently resumes from the
+            # checkpoint a single time (input=None) with the tripped budget scaled
+            # up, surfacing a "recovering" status. A second stall propagates to the
+            # warm hand-off handler below instead of cold-failing.
+            def _make_stream(resuming: bool):
+                return graph.astream(  # type: ignore
+                    None if resuming else input_data,
+                    config,
+                    stream_mode=["custom", "messages"],
+                    context=runtime_context,
+                    version="v2",
+                )
 
-            async def _astream_with_resume():
-                stream_input = input_data
-                chunk_budget: float | None = None  # None → watchdog env default on the first pass
-                resumed = False
-                while True:
-                    try:
-                        async for raw_part in watch_stream(
-                            graph.astream(  # type: ignore
-                                stream_input,
-                                config,
-                                stream_mode=["custom", "messages"],
-                                context=runtime_context,
-                                version="v2",
-                            ),
-                            label="orchestrator",
-                            chunk_timeout=chunk_budget,
-                        ):
-                            yield raw_part
-                        return
-                    except StreamStallError as stall:
-                        if resumed:
-                            raise
-                        resumed = True
-                        logger.warning("[ORCHESTRATOR] Stream stalled (%s); auto-resuming once from checkpoint", stall)
-                        # Synthetic custom part: tells the consumer loop below to reset
-                        # its parse/buffer state and surface a "recovering" status. Then
-                        # resume pending checkpoint work with a more generous idle budget.
-                        yield {"type": "custom", "ns": (), "data": ("stream_recovering", {})}
-                        stream_input = None
-                        chunk_budget = inter_chunk_timeout() * stall_resume_budget_multiplier
+            _stream_with_resume = watch_stream_with_resume(
+                _make_stream,
+                label="orchestrator",
+                # Synthetic custom part: tells the consumer loop below to reset its
+                # parse/buffer state and surface a "recovering" status.
+                recovery_part={"type": "custom", "ns": (), "data": ("stream_recovering", {})},
+            )
 
-            async for part in _astream_with_resume():
+            async for part in _stream_with_resume:
                 chunk_count += 1
                 part_type = part["type"]
 
