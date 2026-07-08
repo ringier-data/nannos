@@ -1,0 +1,9 @@
+{
+  "name": "nannos-monorepo",
+  "private": true,
+  "description": "Root workspace for Node packages that share code (embed-sdk consumers). Python services and standalone Node clients are unaffected.",
+  "workspaces": [
+    "packages/embed-sdk",
+    "packages/console-frontend"
+  ]
+}
