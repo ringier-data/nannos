@@ -74,6 +74,7 @@ from agent_common.core.ptc_discovery import (
     build_discovery_tools,
 )
 from agent_common.core.ptc_signatures import render_tools_namespace
+from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import (
     ContextGatedTool,
     ConversationContextToolsMiddleware,
@@ -1240,6 +1241,10 @@ def build_common_middleware_stack(
        (``sub_agent:``/``sub_agent_config_version:``/``conversation:``/``scheduled_job:``)
        so litellm spend logs bill the right user / sub-agent / config version, even
        for in-process sub-agent calls.
+    1b. ``ContinueOnTruncationMiddleware`` - always second. Detects a turn cut off
+        mid-generation (``finish_reason == "length"`` with no tool call) and re-runs it
+        with a wrap-up nudge and raised ``max_tokens``, so a reasoning turn that overran
+        its budget isn't laundered into a fake "Task completed successfully".
 
     The following run only when *exclude_deep_agents_middlewares* is ``False``:
 
@@ -1312,7 +1317,7 @@ def build_common_middleware_stack(
     # Outermost: stamp gateway cost-attribution ContextVars from each model call's
     # own tags, so in-process sub-agent LLM calls are billed to the sub-agent
     # (not the orchestrator) regardless of which dispatch path invoked them.
-    middleware: list = [GatewayAttributionMiddleware()]
+    middleware: list = [GatewayAttributionMiddleware(), ContinueOnTruncationMiddleware()]
     if not exclude_deep_agents_middlewares:
         summarization_defaults = compute_summarization_defaults(model)
         fs_cls = _FilesystemMiddlewareWithDocstoreHint if add_docstore_hint else FilesystemMiddleware

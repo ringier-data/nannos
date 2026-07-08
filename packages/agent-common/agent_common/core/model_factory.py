@@ -267,6 +267,38 @@ def get_reasoning_effort(
     return value
 
 
+# When reasoning is on, thinking tokens are drawn from the SAME output budget as the
+# visible response (Anthropic: thinking counts toward max_tokens; the gateway's
+# OpenAI-compatible surface reports the exhaustion as finish_reason="length"). If we send
+# no max_tokens the gateway applies its own low default (~4096), so a deep-reasoning turn
+# can spend the entire budget thinking and get cut off before emitting content or the
+# FinalResponseSchema tool call — surfacing as an empty "Task completed successfully".
+# Give higher effort tiers proportionally more headroom above the thinking budget. Keyed by
+# the resolved reasoning_effort; only applied when reasoning is active (thinking-off turns
+# keep the gateway default so we don't raise the ceiling for non-reasoning models that may
+# cap output lower). Opus 4.8 — the fleet default — supports 128k output, so these are safe.
+_MAX_TOKENS_BY_EFFORT: dict[str, int] = {
+    "minimal": 8192,
+    "low": 8192,
+    "medium": 16000,
+    "high": 32000,
+    "xhigh": 32000,
+}
+_DEFAULT_REASONING_MAX_TOKENS = 16000
+
+
+def max_tokens_for_effort(effort: str | None) -> int | None:
+    """Output-token ceiling to request for a given reasoning ``effort``.
+
+    Returns ``None`` when no effort is active (reasoning off) — callers should leave
+    ``max_tokens`` unset so the gateway default applies and we don't lower a non-reasoning
+    model's own output cap. See ``_MAX_TOKENS_BY_EFFORT`` for the rationale.
+    """
+    if not effort:
+        return None
+    return _MAX_TOKENS_BY_EFFORT.get(effort, _DEFAULT_REASONING_MAX_TOKENS)
+
+
 def create_model(
     model_type: ModelType,
     thinking_level: ThinkingLevel | None = None,
@@ -297,6 +329,12 @@ def create_model(
     if effort:
         model_kwargs["reasoning_effort"] = effort
 
+    # Reasoning shares the output budget — give it headroom so thinking doesn't consume the
+    # whole (low) gateway-default max_tokens and truncate the answer. Unset for reasoning-off
+    # turns (leave the gateway default). ContinueOnTruncationMiddleware raises this further
+    # per-retry when a turn still gets cut off. See max_tokens_for_effort.
+    max_tokens = max_tokens_for_effort(effort)
+
     # NOTE: Native Gemini server-side web search (googleSearch) is NOT enabled here.
     # Enabling it for a tool-using deep agent requires `include_server_side_tool_invocations`
     # (so LiteLLM doesn't drop the search tool when function tools are present). But that flag
@@ -307,7 +345,16 @@ def create_model(
     # unrelated multi-region caching fix); whether that bump also resolves this tools+cached-content
     # 400 is UNVERIFIED — re-test before enabling server-side tools.
 
-    logger.info("Creating gateway model alias=%s thinking=%s streaming=%s", model_type, effort, streaming)
+    logger.info(
+        "Creating gateway model alias=%s thinking=%s streaming=%s max_tokens=%s",
+        model_type,
+        effort,
+        streaming,
+        max_tokens,
+    )
+    optional: dict = {}
+    if max_tokens is not None:
+        optional["max_tokens"] = max_tokens
     return ChatOpenAI(
         base_url=_gateway_base_url(),
         api_key=_gateway_api_key(),
@@ -317,6 +364,7 @@ def create_model(
         callbacks=callbacks,
         http_async_client=build_attribution_http_client(),  # per-request attribution
         model_kwargs=model_kwargs,
+        **optional,
     )
 
 

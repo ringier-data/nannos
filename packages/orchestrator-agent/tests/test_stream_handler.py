@@ -194,6 +194,37 @@ class TestParseAgentResponse:
         assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == ""
 
+    def test_parse_agent_response_truncated_turn_not_faked_as_completed(self):
+        """A turn cut off mid-generation (finish_reason=length, no tool call, no structured
+        response) must NOT be reported as a successful completion — surface input_required so
+        the user can ask to continue."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Do a hard reasoning task"),
+                AIMessage(content="", response_metadata={"finish_reason": "length"}),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert response.content != "Task completed successfully"
+        assert response.metadata and response.metadata.get("truncated") is True
+
+    def test_parse_agent_response_empty_but_not_truncated_stays_completed(self):
+        """An empty completion that stopped normally (finish_reason=stop) is a real empty
+        answer, not a truncation — it stays completed."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Test"),
+                AIMessage(content="", response_metadata={"finish_reason": "stop"}),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.TASK_STATE_COMPLETED
+
 
 class TestStreamHandlerEdgeCases:
     """Test edge cases and error handling."""
