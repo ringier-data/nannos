@@ -9,12 +9,18 @@ present in ``_create_middleware_stack`` and configured with the channel-only
 
 from unittest.mock import MagicMock
 
+from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import (
     ConversationContextToolsMiddleware,
 )
 
 from app.core.graph_factory import GraphFactory
 from app.middleware import DynamicToolDispatchMiddleware
+
+
+def _gate(stack):
+    """The conversation-context gate, located by type (index-agnostic)."""
+    return next(m for m in stack if isinstance(m, ConversationContextToolsMiddleware))
 
 
 def _make_factory() -> GraphFactory:
@@ -32,18 +38,21 @@ def _make_factory() -> GraphFactory:
     return factory
 
 
-def test_context_gate_is_outermost():
+def test_context_gate_is_outermost_tool_shaping_middleware():
     stack = _make_factory()._create_middleware_stack()
 
-    assert isinstance(stack[0], ConversationContextToolsMiddleware)
-    # DynamicToolDispatch stays the first tool-call handler (the gate has no
-    # tool-call hook), so it must immediately follow the gate.
-    assert isinstance(stack[1], DynamicToolDispatchMiddleware)
+    # ContinueOnTruncationMiddleware is the outermost middleware overall, but it only
+    # wraps the model call — it shapes no tools. The context gate must remain the
+    # outermost *tool-shaping* middleware, immediately followed by DynamicToolDispatch
+    # (the first tool-call handler), so the gate's injected tool flows through it.
+    assert isinstance(stack[0], ContinueOnTruncationMiddleware)
+    assert isinstance(stack[1], ConversationContextToolsMiddleware)
+    assert isinstance(stack[2], DynamicToolDispatchMiddleware)
 
 
 def test_context_gate_rules_read_personal_file_channel_only():
     stack = _make_factory()._create_middleware_stack()
-    gate = stack[0]
+    gate = _gate(stack)
     assert isinstance(gate, ConversationContextToolsMiddleware)
 
     assert gate._runtime_gated_tools == {"read_personal_file": frozenset({"channel"})}
@@ -57,7 +66,7 @@ def test_gate_injects_read_personal_file_from_registry_in_channel():
 
     from langchain_core.tools import BaseTool
 
-    gate = _make_factory()._create_middleware_stack()[0]
+    gate = _gate(_make_factory()._create_middleware_stack())
 
     read_personal_file = MagicMock(spec=BaseTool)
     read_personal_file.name = "read_personal_file"
