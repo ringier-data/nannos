@@ -2,6 +2,13 @@
 @import "tw-animate-css";
 @plugin "@tailwindcss/typography";
 
+/* The chat surface is @nannos/embed-sdk components rendered in the console's
+   light DOM, styled by THIS sheet (the SDK's own compiled sheet is only adopted
+   in shadow-DOM embed mounts). Tailwind v4 auto-detection skips node_modules,
+   so without this @source any utility used only by the SDK (flex-row-reverse
+   on user rows, max-w-[85%] bubbles, …) is silently absent here. */
+@source '../../embed-sdk/src';
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
