@@ -892,6 +892,10 @@ class SubAgentService:
         - Name updates go to sub_agents table
         - Configuration changes (description, model, config) create a new version
         """
+        # Serialize concurrent updates per agent: version numbers are assigned
+        # MAX(version)+1 from the config read below, so both must happen under
+        # the row lock (released on commit).
+        await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
@@ -2100,6 +2104,10 @@ class SubAgentService:
         Raises:
             ValueError: If the agent has no default version
         """
+        # Lock before reading the skills list: concurrent activations each
+        # rebuild the list from the current config, so an unserialized read
+        # would drop the other transaction's skill.
+        await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing or not existing.config_version:
             raise ValueError(
@@ -2159,6 +2167,7 @@ class SubAgentService:
             new_hash: Updated content hash
             actor: User performing the update
         """
+        await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing or not existing.config_version:
             return
@@ -2221,6 +2230,7 @@ class SubAgentService:
             registry_id: UUID of the skill to remove
             actor: User performing the action
         """
+        await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing or not existing.config_version:
             return
@@ -2289,6 +2299,8 @@ class SubAgentService:
         is_admin: bool = False,
     ) -> SubAgent | None:
         """Revert to a previous version by creating a new version with its config."""
+        # Serialize with other version-creating updates (see lock_for_update)
+        await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
