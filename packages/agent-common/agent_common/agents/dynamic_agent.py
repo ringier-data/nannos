@@ -79,10 +79,12 @@ from agent_common.backends.attachments_store import (
 )
 from agent_common.core.graph_utils import (
     build_sub_agent_graph,
+    code_interpreter_ptc_enabled,
     denest_parent_pregel_context,
     isolate_parent_stream_context,
 )
 from agent_common.core.model_factory import get_model_input_capabilities
+from agent_common.core.tool_catalog import TOOL_CATALOG_PROMPT_ADDENDUM, ToolCatalogMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ContextGatedTool
 from agent_common.utils import get_language_display_name
 
@@ -217,6 +219,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         sandbox_pool: SandboxPool | None = None,
         extra_middlewares: Optional[List[Any]] = None,
         inject_all_tools: Optional[List[BaseTool]] = None,
+        tool_catalog: Optional[dict[str, BaseTool]] = None,
         risk_scorer: RiskScorerFn | None = None,
         tool_risk_cache: ToolRiskCache | None = None,
         tool_bypass_rules: dict[str, Any] | None = None,
@@ -246,6 +249,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             extra_middlewares: Optional list of middleware instances to prepend to the standard stack.
             inject_all_tools: Optional pre-discovered tools to use directly (bypasses MCP discovery).
                 When set, these tools are used as the agent's MCP tools without gateway discovery.
+            tool_catalog: Optional name -> BaseTool mapping (held by reference) of a large
+                pre-discovered catalog exposed via lazy discovery instead of binding. Unlike
+                ``inject_all_tools``, catalog tools are NEVER materialized into ``create_agent``
+                (per-tool schema conversion over a huge catalog is what OOM-killed the
+                orchestrator): under PTC they are exposed inside ``eval`` via the runtime
+                context (``expose_context_registry``); without PTC the model reaches them
+                through the native ``search_tools``/``describe_tool``/``call_tool`` meta-tools
+                (``ToolCatalogMiddleware``). Takes precedence over ``inject_all_tools``.
             risk_scorer: Optional function to score tool calls for conditional HITL.
             tool_risk_cache: Optional cache for tool risk scores to optimize conditional HITL.
             tool_bypass_rules: Optional dict of tool bypass rules for conditional HITL.
@@ -282,6 +293,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self.sandbox_pool = sandbox_pool
         self.extra_middlewares = extra_middlewares
         self.inject_all_tools = inject_all_tools
+        self.tool_catalog = tool_catalog
         self._risk_scorer: RiskScorerFn | None = risk_scorer
         self._tool_risk_cache: ToolRiskCache | None = tool_risk_cache
         self._tool_bypass_rules: dict[str, Any] = tool_bypass_rules if tool_bypass_rules is not None else {}
@@ -834,6 +846,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         """Get the effective tools for this agent.
 
         Logic:
+        - If tool_catalog is set: bind ONLY essential orchestrator tools — the catalog
+          stays out of the graph and is reached via discovery (PTC ``eval`` or the
+          native catalog meta-tools added by ``ToolCatalogMiddleware``)
         - If inject_all_tools is set: use those directly + essential orchestrator tools
         - If mcp_tools is a non-empty list: use discovered tools + essential orchestrator tools
         - Otherwise (None or empty list): only essential orchestrator tools (NO MCP tools)
@@ -861,6 +876,19 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             "catalog_search",
         ]
         essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
+
+        # Catalog mode: bind only the essential core. The catalog itself is never
+        # passed to create_agent — schema-converting hundreds of MCP tools at graph
+        # build is what OOM-killed the orchestrator. Catalog tools stay callable via
+        # PTC ``eval`` (expose_context_registry) or, without PTC, via the
+        # search_tools/describe_tool/call_tool meta-tools that
+        # ToolCatalogMiddleware contributes in _build_graph.
+        if self.tool_catalog is not None:
+            logger.info(
+                f"Catalog mode for '{self.name}': binding {len(essential_tools)} essential tools; "
+                f"{len(self.tool_catalog)} catalog tools stay unbound (lazy discovery)"
+            )
+            return [_validate_tool_schema(tool) for tool in essential_tools]
 
         # If inject_all_tools is set, use those directly (pre-discovered by orchestrator)
         if self.inject_all_tools is not None:
@@ -969,7 +997,10 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # The instance is sourced from any available pool; the middleware injects
         # it only in the allowed conversation contexts.
         gated_pool = (
-            list(self.orchestrator_tools) + list(self.inject_all_tools or []) + list(self._discovered_tools or [])
+            list(self.orchestrator_tools)
+            + list(self.inject_all_tools or [])
+            + list((self.tool_catalog or {}).values())
+            + list(self._discovered_tools or [])
         )
         seen_gated: set[str] = set()
         gated_tools: list[ContextGatedTool] = []
@@ -1000,6 +1031,13 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if self_improvement_addendum:
             system_prompt += self_improvement_addendum
             logger.debug(f"Added self-improvement addendum to {self.name} system prompt")
+
+        # Catalog mode without PTC: tell the model how to reach the unbound catalog
+        # (search_tools/describe_tool/call_tool). Under PTC the code-interpreter
+        # middleware renders its own discovery instruction inside the eval prompt.
+        if self.tool_catalog is not None and not code_interpreter_ptc_enabled():
+            system_prompt += TOOL_CATALOG_PROMPT_ADDENDUM
+            logger.debug(f"Added tool-catalog addendum to {self.name} system prompt")
 
         # Get provider-specific response_format strategy (may mutate tools list for Bedrock/Anthropic+thinking)
         response_format = get_response_format(
@@ -1083,11 +1121,23 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             A compiled CompiledStateGraph
         """
         # Combine instance-level extra_middlewares with call-level ones
-        combined_middlewares = list(self.extra_middlewares or []) + list(extra_middlewares or []) or None
+        combined_middlewares = list(self.extra_middlewares or []) + list(extra_middlewares or [])
 
-        # Build tool_server_map from tool metadata for server slug resolution
+        # Catalog mode without PTC: contribute the native discovery surface
+        # (search_tools/describe_tool) and the call_tool dispatch. Inserted with the
+        # extra middlewares (outer to HITL/retry) so a rewritten call_tool request
+        # reaches the inner chain under the real tool's name. Under PTC the catalog
+        # is exposed inside ``eval`` instead (expose_context_registry below).
+        exposed_catalog = self._exposed_catalog()
+        if exposed_catalog is not None and not code_interpreter_ptc_enabled():
+            combined_middlewares.append(ToolCatalogMiddleware(exposed_catalog))
+
+        # Build tool_server_map from tool metadata for server slug resolution.
+        # Include catalog tools: the PTC guard and HITL bypass rules resolve
+        # per-server rules through this map, and catalog tools are no longer in
+        # _cached_tools.
         tool_server_map: dict[str, str] = {}
-        for tool in self._cached_tools or []:
+        for tool in list(self._cached_tools or []) + list((exposed_catalog or {}).values()):
             metadata = getattr(tool, "metadata", None)
             if metadata and isinstance(metadata, dict):
                 server_name = metadata.get("server_name")
@@ -1111,7 +1161,24 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             tool_risk_cache=self._tool_risk_cache,
             tool_server_map=tool_server_map or None,
             context_gated_tools=self._cached_context_gated_tools or None,
+            expose_context_registry=exposed_catalog is not None,
         ).with_config({"recursion_limit": _SUB_AGENT_RECURSION_LIMIT})
+
+    def _exposed_catalog(self) -> dict[str, BaseTool] | None:
+        """The tool_catalog subset reachable via lazy discovery, or ``None``.
+
+        Context-gated tools (``_CONTEXT_GATED_TOOL_RULES``) are excluded: they are
+        injected per-conversation-context by ``ConversationContextToolsMiddleware``,
+        and exposing them through the catalog (eval bridge / call_tool) would bypass
+        that gate.
+        """
+        if self.tool_catalog is None:
+            return None
+        return {
+            name: tool
+            for name, tool in self.tool_catalog.items()
+            if isinstance(tool, BaseTool) and name not in _CONTEXT_GATED_TOOL_RULES
+        }
 
     def _build_attachments_backend(self, input_data: SubAgentInput) -> "AttachmentsStoreBackend | None":
         """Build an ephemeral attachments backend from the incoming message.
@@ -1352,6 +1419,16 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 tool_risk_cache=self._tool_risk_cache,
                 _pending_bypass_rules=self._pending_bypass_rules,
             )
+            # Catalog mode: expose the catalog through the runtime context so the
+            # PTC middleware (expose_context_registry=True) can route it into
+            # ``eval`` — mirroring how the orchestrator's own graph reaches its
+            # registry. Whitelist = the full exposed catalog: unlike the
+            # orchestrator (which binds only console-enabled tools), the catalog
+            # handed to this agent is already the intended exposure set.
+            exposed_catalog = self._exposed_catalog()
+            if exposed_catalog is not None:
+                subagent_context.tool_registry = exposed_catalog
+                subagent_context.whitelisted_tool_names = set(exposed_catalog)
 
             # Stream the agent with custom events and messages using v2 format
             # v2: every chunk is a StreamPart dict: {"type": ..., "ns": ..., "data": ...}
@@ -1550,6 +1627,7 @@ def create_dynamic_local_subagent(
     sandbox_pool: SandboxPool | None = None,
     extra_middlewares: Optional[List[Any]] = None,
     inject_all_tools: Optional[List[BaseTool]] = None,
+    tool_catalog: Optional[dict[str, BaseTool]] = None,
     risk_scorer: RiskScorerFn | None = None,
     tool_risk_cache: ToolRiskCache | None = None,
     tool_bypass_rules: dict[str, Any] | None = None,
@@ -1580,6 +1658,9 @@ def create_dynamic_local_subagent(
         group_ids: User's group IDs for group playbook loading (all groups)
         extra_middlewares: Optional middleware instances to prepend to the standard stack.
         inject_all_tools: Optional pre-discovered tools (bypasses MCP discovery).
+        tool_catalog: Optional name -> BaseTool mapping of a large pre-discovered catalog
+            exposed via lazy discovery (PTC ``eval`` or native catalog meta-tools) instead
+            of being bound into the graph. See ``DynamicLocalAgentRunnable``.
         tool_bypass_rules: User's persisted HITL bypass rules keyed by tool/server.
         pending_bypass_rules: Per-turn pending bypass rules list shared with executor persistence.
 
@@ -1618,6 +1699,7 @@ def create_dynamic_local_subagent(
         sandbox_pool=sandbox_pool,
         extra_middlewares=extra_middlewares,
         inject_all_tools=inject_all_tools,
+        tool_catalog=tool_catalog,
         risk_scorer=risk_scorer,
         tool_risk_cache=tool_risk_cache,
         tool_bypass_rules=tool_bypass_rules,

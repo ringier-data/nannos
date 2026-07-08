@@ -58,6 +58,17 @@ def _wrap_tool_with_agent_name(tool: Any, agent_name: str) -> Any:
     )
 
 
+def _gp_tool_catalog_enabled() -> bool:
+    """Whether the GP agent gets its registry as a lazy catalog (default on).
+
+    ``GP_TOOL_CATALOG=false`` restores the legacy bind-all path (all registry
+    tools materialized into ``create_agent``) as a rollback lever. Bind-all is
+    known to OOM the orchestrator on large registries (~700 tools once a whole
+    API is exposed as an MCP server), so only disable it to bisect regressions.
+    """
+    return os.getenv("GP_TOOL_CATALOG", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def build_runtime_context(
     user_config: UserConfig,
     agent_settings: AgentSettings | None = None,
@@ -368,41 +379,61 @@ def build_runtime_context(
                     # layer re-surfaces and the orchestrator maps to TaskState.TASK_STATE_AUTH_REQUIRED.
                     subagent_extra_middlewares: list[Any] = [AuthErrorDetectionMiddleware()]
                     gp_inject_all_tools = None
+                    gp_tool_catalog = None
                     if config.name == "general-purpose":
-                        # Inject ALL MCP tools from tool_registry (already discovered by orchestrator).
-                        # Under PTC these are exposed (bridge-installed) inside ``eval``; the model
-                        # finds the relevant ones at runtime via ``tools.search`` / ``tools.describe``.
-                        gp_inject_all_tools = [t for t in tool_registry.values() if isinstance(t, BaseTool)]
-                        # ToolsetSelectorMiddleware (per-turn LLM tool filtering) is only needed on the
-                        # native (PTC-off) path, where the full catalog would otherwise be bound to the
-                        # model. Under PTC, ``tools.search`` supersedes it (runtime discovery, no recall
-                        # ceiling, no per-turn selection LLM call) AND keeping the selector would re-break
-                        # prompt caching by varying the bound/exposed set per turn. So gate it on PTC-off.
-                        if not code_interpreter_ptc_enabled():
-                            subagent_extra_middlewares.append(
-                                ToolsetSelectorMiddleware(
-                                    always_include=[
-                                        "get_current_time",
-                                        "generate_presigned_url",
-                                        "docstore_search",
-                                        "semantic_search_file",
-                                        "docstore_export",
-                                        "copy_file",
-                                        # The PTC code interpreter (`eval`) is the gateway to all
-                                        # PTC-exposed tools; it is a "base" tool (no server_name) so
-                                        # it survives Phase 1, but Phase 2 tool-selection can drop it.
-                                        # Pin it so the GP model never loses `tools.*` access.
-                                        PTC_CODE_INTERPRETER_TOOL_NAME,
-                                    ],
-                                    cost_logger=cost_logger,
-                                    compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,
-                                )
+                        if _gp_tool_catalog_enabled():
+                            # Catalog mode (default): hand the registry to GP as a lazy
+                            # catalog — NEVER materialized into create_agent. Binding the
+                            # full registry (~700 tools once a whole API is exposed as an
+                            # MCP server) schema-converts every tool at graph build and
+                            # OOM-killed the orchestrator. The model reaches the catalog
+                            # via discovery instead: ``tools.search``/``tools.describe``
+                            # inside ``eval`` under PTC (expose_context_registry), or the
+                            # native search_tools/describe_tool/call_tool meta-tools
+                            # (ToolCatalogMiddleware) when PTC is off — same surface
+                            # either way, so no per-mode special-casing downstream.
+                            gp_tool_catalog = {
+                                name: t for name, t in tool_registry.items() if isinstance(t, BaseTool)
+                            }
+                            logger.info(
+                                f"GP agent: catalog mode with {len(gp_tool_catalog)} tools "
+                                f"(PTC={'on' if code_interpreter_ptc_enabled() else 'off'})"
                             )
-                        _selector_state = "off (PTC runtime discovery)" if code_interpreter_ptc_enabled() else "on"
-                        logger.info(
-                            f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
-                            f"(ToolsetSelectorMiddleware={_selector_state})"
-                        )
+                        else:
+                            # Legacy bind-all mode (GP_TOOL_CATALOG=false rollback lever).
+                            # Inject ALL MCP tools from tool_registry; under PTC these are
+                            # exposed inside ``eval`` via the request.tools harvest.
+                            gp_inject_all_tools = [t for t in tool_registry.values() if isinstance(t, BaseTool)]
+                            # ToolsetSelectorMiddleware (per-turn LLM tool filtering) is only needed on the
+                            # native (PTC-off) path, where the full catalog would otherwise be bound to the
+                            # model. Under PTC, ``tools.search`` supersedes it (runtime discovery, no recall
+                            # ceiling, no per-turn selection LLM call) AND keeping the selector would re-break
+                            # prompt caching by varying the bound/exposed set per turn. So gate it on PTC-off.
+                            if not code_interpreter_ptc_enabled():
+                                subagent_extra_middlewares.append(
+                                    ToolsetSelectorMiddleware(
+                                        always_include=[
+                                            "get_current_time",
+                                            "generate_presigned_url",
+                                            "docstore_search",
+                                            "semantic_search_file",
+                                            "docstore_export",
+                                            "copy_file",
+                                            # The PTC code interpreter (`eval`) is the gateway to all
+                                            # PTC-exposed tools; it is a "base" tool (no server_name) so
+                                            # it survives Phase 1, but Phase 2 tool-selection can drop it.
+                                            # Pin it so the GP model never loses `tools.*` access.
+                                            PTC_CODE_INTERPRETER_TOOL_NAME,
+                                        ],
+                                        cost_logger=cost_logger,
+                                        compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,
+                                    )
+                                )
+                            _selector_state = "off (PTC runtime discovery)" if code_interpreter_ptc_enabled() else "on"
+                            logger.info(
+                                f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
+                                f"(ToolsetSelectorMiddleware={_selector_state})"
+                            )
 
                     # Auto-expand non-GP sub-agent MCP whitelist with compression
                     # server tools when any whitelisted tool is from a compression-enabled server
@@ -452,6 +483,7 @@ def build_runtime_context(
                         sandbox_pool=sandbox_pool if getattr(config, "sandbox_enabled", False) else None,
                         extra_middlewares=subagent_extra_middlewares,
                         inject_all_tools=gp_inject_all_tools,
+                        tool_catalog=gp_tool_catalog,
                         risk_scorer=_get_risk_scorer(),
                         tool_risk_cache=tool_risk_cache,
                         tool_bypass_rules=user_config.tool_bypass_rules,
