@@ -13,6 +13,7 @@ Graph creation with actual models should be tested in integration tests.
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from langchain.agents.middleware import ToolRetryMiddleware
@@ -113,35 +114,61 @@ class TestMiddlewareStack:
         # cache, user prefs after steering, playbook after prefs, then the code
         # interpreter (_PTCToleranceCodeInterpreterMiddleware, which exposes the
         # eval REPL + PTC bridge and hides PTC-exposed tools from the model itself).
-        assert len(stack) == 17
-        assert stack[0].__class__.__name__ == "ConversationContextToolsMiddleware"
-        assert isinstance(stack[1], DynamicToolDispatchMiddleware)
-        assert isinstance(stack[2], StoragePathsInstructionMiddleware)
+        assert len(stack) == 18
+        # stack[0] = ContinueOnTruncationMiddleware — outermost model-call wrapper; re-runs a
+        # turn cut off mid-generation with a nudge + raised max_tokens. Only implements
+        # wrap_model_call, so the context gate remains the outermost *tool-shaping* middleware.
+        assert stack[0].__class__.__name__ == "ContinueOnTruncationMiddleware"
+        assert stack[1].__class__.__name__ == "ConversationContextToolsMiddleware"
+        assert isinstance(stack[2], DynamicToolDispatchMiddleware)
+        assert isinstance(stack[3], StoragePathsInstructionMiddleware)
         # Provider-agnostic caching under the gateway: the cache breakpoint
         # is injected as an OpenAI-format cache_control block that LiteLLM translates
         # per provider, replacing the old Bedrock-only BedrockPromptCachingMiddleware.
-        assert isinstance(stack[3], LiteLLMPromptCachingMiddleware)
-        # stack[4] = SteeringMiddleware (from ringier_a2a_sdk)
-        assert stack[4].__class__.__name__ == "SteeringMiddleware"
-        assert isinstance(stack[5], UserPreferencesMiddleware)
-        # stack[6] = PlaybookInjectionMiddleware
-        assert stack[6].__class__.__name__ == "PlaybookInjectionMiddleware"
-        # stack[7] = CodeInterpreterMiddleware (eval REPL + PTC bridge; also hides
+        assert isinstance(stack[4], LiteLLMPromptCachingMiddleware)
+        # stack[5] = SteeringMiddleware (from ringier_a2a_sdk)
+        assert stack[5].__class__.__name__ == "SteeringMiddleware"
+        assert isinstance(stack[6], UserPreferencesMiddleware)
+        # stack[7] = PlaybookInjectionMiddleware
+        assert stack[7].__class__.__name__ == "PlaybookInjectionMiddleware"
+        # stack[8] = CodeInterpreterMiddleware (eval REPL + PTC bridge; also hides
         # every PTC-exposed tool from the model's bound tool list)
-        assert stack[7].__class__.__name__ == "_PTCToleranceCodeInterpreterMiddleware"
-        # stack[8] = ToolStatusMiddleware (emits status for tool calls)
-        assert stack[8].__class__.__name__ == "ToolStatusMiddleware"
-        assert isinstance(stack[9], RepeatedToolCallMiddleware)
-        assert isinstance(stack[10], AuthErrorDetectionMiddleware)
-        assert stack[11].__class__.__name__ == "ErrorClassificationMiddleware"
-        # stack[12] = ConditionalHumanInTheLoopMiddleware
-        assert stack[12].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
-        assert isinstance(stack[13], ToolRetryMiddleware)
-        assert isinstance(stack[14], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[15], TodoStatusMiddleware)
+        assert stack[8].__class__.__name__ == "_PTCToleranceCodeInterpreterMiddleware"
+        # stack[9] = ToolStatusMiddleware (emits status for tool calls)
+        assert stack[9].__class__.__name__ == "ToolStatusMiddleware"
+        assert isinstance(stack[10], RepeatedToolCallMiddleware)
+        assert isinstance(stack[11], AuthErrorDetectionMiddleware)
+        assert stack[12].__class__.__name__ == "ErrorClassificationMiddleware"
+        # stack[13] = ConditionalHumanInTheLoopMiddleware
+        assert stack[13].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
+        assert isinstance(stack[14], ToolRetryMiddleware)
+        assert isinstance(stack[15], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[16], TodoStatusMiddleware)
         # Innermost: strips duplicate plain-text content from AIMessages that
         # carry a FinalResponseSchema tool call.
-        assert stack[16].__class__.__name__ == "FinalResponseTextStripMiddleware"
+        assert stack[17].__class__.__name__ == "FinalResponseTextStripMiddleware"
+
+    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
+    def test_continue_on_truncation_wired_into_orchestrator_stack(self, mock_pg_store, _mock_creds, mock_config):
+        """Regression guard: ContinueOnTruncationMiddleware MUST be in the orchestrator's own
+        middleware stack, as the outermost model-call wrapper.
+
+        The orchestrator's graph is assembled here (not via build_common_middleware_stack,
+        which only reaches sub-agents). When the middleware was wired only into the common
+        stack, a truncated orchestrator turn (finish_reason=length, no tool call) never got
+        the nudge+retry and fell through to the honest-fallback path — verified live. If this
+        assertion ever fails, the recovery is silently gone for the orchestrator's own turns.
+        """
+        factory = GraphFactory(config=mock_config)
+        stack = factory._create_middleware_stack(model=Mock())
+
+        assert any(isinstance(m, ContinueOnTruncationMiddleware) for m in stack), (
+            "ContinueOnTruncationMiddleware missing from the orchestrator stack — truncated "
+            "orchestrator turns will no longer be recovered"
+        )
+        # Outermost so its retry re-runs the full inner request-shaping chain.
+        assert isinstance(stack[0], ContinueOnTruncationMiddleware)
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
@@ -165,7 +192,7 @@ class TestMiddlewareStack:
         # LiteLLM caching is present even for non-Bedrock models...
         assert any(isinstance(m, LiteLLMPromptCachingMiddleware) for m in stack)
         # ...and the stack matches the Bedrock case (no provider-conditional branch).
-        assert len(stack) == 17
+        assert len(stack) == 18
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
@@ -209,7 +236,7 @@ class TestMiddlewareStack:
         factory = GraphFactory(config=mock_config)
 
         stack = factory._create_middleware_stack()
-        dynamic_middleware = stack[1]
+        dynamic_middleware = next(m for m in stack if isinstance(m, DynamicToolDispatchMiddleware))
 
         assert isinstance(dynamic_middleware, DynamicToolDispatchMiddleware)
         # Static tools are added directly to graph, not via middleware
