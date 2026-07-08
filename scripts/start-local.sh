@@ -754,6 +754,11 @@ _GW_CONFIG=$(mktemp /tmp/nannos-litellm-XXXXXX).yaml
 cat > "$_GW_CONFIG" <<'EOF'
 litellm_settings:
   callbacks: custom_logger.proxy_handler_instance
+  # Allow MCP OpenAPI backends on the docker host (Embedded Nannos: cockpit
+  # MCP hosted by this gateway). NOTE: v1.90.0 only honors this under
+  # litellm_settings — the SSRF error message says general_settings, which is
+  # wrong (verified 2026-07-06).
+  user_url_allowed_hosts: ["host.docker.internal", "192.168.65.254"]
   # Total per-request bound for non-streaming calls; streaming hangs are caught by the
   # client-side inter-chunk watchdog (Bedrock ignores stream_timeout).
   request_timeout: 600
