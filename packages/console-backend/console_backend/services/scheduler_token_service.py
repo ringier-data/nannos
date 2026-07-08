@@ -163,6 +163,16 @@ class SchedulerTokenService:
         logger.debug("Refreshed access token for user %s", user_id)
         return data["access_token"]
 
+    async def mint_user_access_token(self, db: AsyncSession, user_id: str) -> str:
+        """Return a fresh, *un-exchanged* nannos access token for the user from their
+        vaulted offline token — the mint step of the cross-IdP federated-exchange
+        (ADR-0002 Amendment 2). Un-exchanged on purpose: the embedded widget presents
+        it on the socket, and OrchestratorAuth performs the audience exchange itself.
+
+        Raises ValueError if the user has no stored offline token (not enrolled).
+        """
+        return await self._refresh_access_token(db, user_id)
+
     async def get_exchanged_token(self, db: AsyncSession, user_id: str, audience: str) -> str:
         """Refresh the user's offline token and exchange it for *audience* (RFC 8693).
 

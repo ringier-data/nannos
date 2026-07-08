@@ -18,13 +18,14 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
+from ringier_a2a_sdk.auth import JWTValidationError
 
 from ..config import config
 from ..db.session import DbSession
 from ..dependencies import get_client_id_from_request
 from ..models.sub_agent import SubAgentListItem, SubAgentListResponse
 from ..models.user import User, UserRole
+from ..utils.jwt_validators import get_jwt_validator
 from ..models.voice_session import (
     VoiceSessionCreate,
     VoiceSessionHandleUpdate,
@@ -76,7 +77,7 @@ async def require_voice_agent_service(request: Request) -> User:
         sub = f"service:{client_id}"
         if token:
             try:
-                validator = JWTValidator(issuer=config.oidc.issuer)
+                validator = get_jwt_validator(issuer=config.oidc.issuer)
                 payload = await validator.validate(token)
                 sub = payload.get("sub", sub)
             except JWTValidationError:
