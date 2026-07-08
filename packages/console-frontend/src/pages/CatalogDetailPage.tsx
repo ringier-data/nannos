@@ -55,7 +55,7 @@ export function CatalogDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user, adminMode } = useAuth();
-  const { onCatalogSyncProgress } = useSocket();
+  const { onEvent } = useSocket();
   const { embeddingConfigured } = useEmbeddingConfigured();
 
   const [showEditDialog, setShowEditDialog] = useState(false);
@@ -89,7 +89,8 @@ export function CatalogDetailPage() {
     const syncStatusKey = getCatalogSyncStatusQueryKey({ path: { catalog_id: id! } });
     const filesKey = listCatalogFilesQueryKey({ path: { catalog_id: id! } });
     const catalogKey = getCatalogQueryKey({ path: { catalog_id: id! } });
-    return onCatalogSyncProgress((data) => {
+    return onEvent('catalog_sync_progress', (raw) => {
+      const data = raw as { catalog_id: string; job_id: string; [key: string]: unknown };
       if (data.catalog_id !== id) return;
       // Merge incremental fields into the cached sync status
       queryClient.setQueryData(syncStatusKey, (prev: typeof syncStatus) => {
@@ -115,7 +116,7 @@ export function CatalogDetailPage() {
         queryClient.invalidateQueries({ queryKey: filesKey });
       }
     });
-  }, [id, onCatalogSyncProgress, queryClient]);
+  }, [id, onEvent, queryClient]);
 
   const invalidateSyncStatus = () => {
     queryClient.invalidateQueries({ queryKey: getCatalogSyncStatusQueryKey({ path: { catalog_id: id! } }) });

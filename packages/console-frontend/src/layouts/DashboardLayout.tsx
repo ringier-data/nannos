@@ -22,6 +22,7 @@ import { NotificationInbox } from '@/components/notifications/NotificationInbox'
 import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 import { SchedulerNotifications } from '@/components/SchedulerNotifications';
 import { SocketProvider, ChatProvider } from '@/components/chat/contexts';
+import { ConsoleHostAdapterProvider } from '@/components/chat';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -31,6 +32,7 @@ export function DashboardLayout() {
   };
 
   return (
+    <ConsoleHostAdapterProvider>
     <SocketProvider socketPath="/api/v1/socket.io">
     <ChatProvider>
       <SidebarProvider>
@@ -132,5 +134,6 @@ export function DashboardLayout() {
     </SidebarProvider>
     </ChatProvider>
     </SocketProvider>
+    </ConsoleHostAdapterProvider>
   );
 }
