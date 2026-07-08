@@ -161,6 +161,14 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
         default=False,
         description="Whether sandbox execution is enabled for this sub-agent",
     )
+    client_action_enabled: bool = Field(
+        default=False,
+        description=(
+            "Embedded Nannos: when true this sub-agent is the embedded entrypoint — it gets the "
+            "client_action tool (apply/highlight/navigate) and renders <client_objects>. Set by the "
+            "embedded-mode invocation, not persisted per-agent."
+        ),
+    )
     effective_permission: Optional[Literal["owner", "write", "read"]] = Field(
         default=None,
         description="User's effective permission level on this sub-agent (owner/write/read)",
