@@ -38,6 +38,7 @@ from agent_common.core.model_factory import (
 )
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
+from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.steering_middleware import SteeringMiddleware
@@ -674,6 +675,13 @@ class GraphFactory:
         )
 
         middleware_stack: list[Any] = [
+            # Outermost model-call wrapper: recover a turn cut off mid-generation
+            # (finish_reason == "length", no tool call) by re-running with a wrap-up
+            # nudge + raised max_tokens, instead of ending on an empty/truncated turn.
+            # Only implements wrap_model_call, so it doesn't affect the tool-dispatch
+            # ordering below. Must live here too — the orchestrator's own graph does not
+            # go through build_common_middleware_stack (which only reaches sub-agents).
+            ContinueOnTruncationMiddleware(),
             context_gate_middleware,
             dynamic_tool_middleware,
             storage_paths_middleware,
