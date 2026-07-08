@@ -578,6 +578,23 @@ class SubAgentRepository(AuditedRepository):
             fetch_before=True,
         )
 
+    async def lock_for_update(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+    ) -> None:
+        """Acquire a row lock on the sub-agent, serializing concurrent config updates.
+
+        Version numbers are assigned via MAX(version)+1, and skill add/remove
+        rebuilds the skills list from the current config — both are
+        read-then-write, so concurrent transactions must be serialized per
+        agent. The lock is held until the surrounding transaction commits.
+        """
+        await db.execute(
+            text("SELECT id FROM sub_agents WHERE id = :id FOR UPDATE"),
+            {"id": sub_agent_id},
+        )
+
     async def update_current_version(
         self,
         db: AsyncSession,

@@ -2110,3 +2110,119 @@ async def test_pricing_config_read_write_integration(
     assert sub_agent_read.config_version is not None
     assert sub_agent_read.config_version.pricing_config is not None
     assert sub_agent_read.config_version.pricing_config == pricing_config
+
+
+class TestConcurrentVersionCreation:
+    """Concurrent config updates must serialize on the sub-agent row lock.
+
+    Regression: parallel MCP skill activations each computed the same
+    MAX(version)+1 and violated the (sub_agent_id, version) unique constraint;
+    concurrent skill adds could also silently drop each other's skill.
+    """
+
+    def _session_factory(self, postgres_with_migrations):
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.orm import sessionmaker
+
+        engine = create_async_engine(postgres_with_migrations["dsn"], echo=False)
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        schema = postgres_with_migrations["schema"]
+        return engine, factory, schema
+
+    @pytest.mark.asyncio
+    async def test_concurrent_updates_create_distinct_versions(
+        self,
+        sub_agent_service: SubAgentService,
+        pg_session: AsyncSession,
+        test_user_db: User,
+        postgres_with_migrations,
+    ):
+        import asyncio
+
+        from sqlalchemy import text
+
+        service = sub_agent_service
+        user = test_user_db
+        agent = await _create_sub_agent(pg_session, user, "Concurrent Update Agent", service)
+
+        engine, factory, schema = self._session_factory(postgres_with_migrations)
+
+        async def do_update(i: int) -> None:
+            async with factory() as session:
+                await session.execute(text(f"SET search_path TO {schema}"))
+                await service.update_sub_agent(
+                    session,
+                    agent.id,
+                    SubAgentUpdate(description=f"Concurrent update {i}"),
+                    user,
+                )
+
+        try:
+            await asyncio.gather(*(do_update(i) for i in range(5)))
+        finally:
+            await engine.dispose()
+
+        versions = (
+            (
+                await pg_session.execute(
+                    text(
+                        "SELECT version FROM sub_agent_config_versions "
+                        "WHERE sub_agent_id = :id ORDER BY version"
+                    ),
+                    {"id": agent.id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert versions == [1, 2, 3, 4, 5, 6]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_skill_adds_keep_all_skills(
+        self,
+        sub_agent_service: SubAgentService,
+        pg_session: AsyncSession,
+        test_user_db: User,
+        postgres_with_migrations,
+    ):
+        import asyncio
+        import uuid
+
+        from sqlalchemy import text
+
+        service = sub_agent_service
+        user = test_user_db
+        agent = await _create_sub_agent(pg_session, user, "Concurrent Skill Agent", service)
+
+        registry_ids = [str(uuid.uuid4()) for _ in range(3)]
+        engine, factory, schema = self._session_factory(postgres_with_migrations)
+
+        async def add_skill(i: int) -> None:
+            async with factory() as session:
+                await session.execute(text(f"SET search_path TO {schema}"))
+                await service.add_skill_to_config(
+                    db=session,
+                    sub_agent_id=agent.id,
+                    registry_id=registry_ids[i],
+                    skill_name=f"skill-{i}",
+                    skill_description=f"Skill {i}",
+                    content_hash=f"hash-{i}",
+                    actor=user,
+                )
+
+        try:
+            await asyncio.gather(*(add_skill(i) for i in range(3)))
+        finally:
+            await engine.dispose()
+
+        skills = (
+            await pg_session.execute(
+                text(
+                    "SELECT skills FROM sub_agent_config_versions "
+                    "WHERE sub_agent_id = :id ORDER BY version DESC LIMIT 1"
+                ),
+                {"id": agent.id},
+            )
+        ).scalar_one()
+        stored_ids = {ref["registry_id"] for ref in skills}
+        assert stored_ids == set(registry_ids)
