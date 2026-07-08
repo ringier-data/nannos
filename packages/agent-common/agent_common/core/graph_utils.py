@@ -1228,6 +1228,7 @@ def build_common_middleware_stack(
     tool_server_map: dict[str, str] | None = None,
     context_gated_tools: list[ContextGatedTool] | None = None,
     broaden_baseline_tools: list[BaseTool] | None = None,
+    expose_context_registry: bool = False,
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
@@ -1297,6 +1298,12 @@ def build_common_middleware_stack(
         hitl_guarded_tools: Optional dict of tool names -> config for
             HumanInTheLoopMiddleware. When provided, adds HITL middleware
             that interrupts execution for approval before running these tools.
+        expose_context_registry: Forwarded to
+            ``build_code_interpreter_middlewares``: when ``True`` and PTC is
+            enabled, the runtime context's ``tool_registry`` (filtered by
+            ``whitelisted_tool_names``) is exposed inside ``eval`` instead of
+            being bound to the model. Used by catalog-mode agents (GP) whose
+            large tool catalog must stay out of ``create_agent``.
 
     Returns:
         Ordered list of middleware instances ready to be included in a
@@ -1318,6 +1325,7 @@ def build_common_middleware_stack(
         middleware += build_code_interpreter_middlewares(
             backend,
             broaden_baseline_tools=broaden_baseline_tools,
+            expose_context_registry=expose_context_registry,
             risk_scorer=risk_scorer,
             tool_risk_cache=tool_risk_cache,
             default_risk_threshold=default_risk_threshold,
@@ -1674,6 +1682,7 @@ def build_sub_agent_graph(
     tool_risk_cache: ToolRiskCache | None = None,
     tool_server_map: dict[str, str] | None = None,
     context_gated_tools: list[ContextGatedTool] | None = None,
+    expose_context_registry: bool = False,
     **kwargs: Any,
 ) -> CompiledStateGraph:
     """Build a standard deep-agent LangGraph graph.
@@ -1742,6 +1751,7 @@ def build_sub_agent_graph(
         tool_server_map=tool_server_map,
         context_gated_tools=context_gated_tools,
         broaden_baseline_tools=all_tools,
+        expose_context_registry=expose_context_registry,
     )
     if extra_middlewares:
         # Insert extra middlewares *after* GatewayAttributionMiddleware (always
