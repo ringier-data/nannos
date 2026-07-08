@@ -1155,6 +1155,10 @@ procs:
       LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
       LOG_LEVEL: "INFO"
       USE_SHORT_PROMPTS: "true"
+      # Enable the wasm-sandboxed ``eval`` REPL. When on, the orchestrator reaches
+      # all its tools through ``eval`` (opinionated single exposure model — see
+      # graph_factory); when off, tools stay natively bound. Set in the repo-root .env.
+      CODE_INTERPRETER_PTC: "${CODE_INTERPRETER_PTC:-0}"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
       AZURE_API_BASE: "$AZURE_API_BASE"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
