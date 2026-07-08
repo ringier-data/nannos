@@ -22,6 +22,7 @@ from a2a.types import (
     TaskStatusUpdateEvent,
 )
 from agent_common.a2a.client_runnable import A2AClientRunnable
+from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.models.base import ModelType, ThinkingLevel
 from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
@@ -37,11 +38,13 @@ from app.models.responses import AgentStreamResponse
 from ..models.config import AgentSettings, UserConfig
 from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    CLIENT_ACTION_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
     new_activity_log_message,
+    new_client_action_message,
     new_feedback_request_message,
     new_hitl_interrupt_message,
     new_work_plan_message,
@@ -51,7 +54,7 @@ from .a2a_extensions import (
 from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
-from .discovery_cache import cache_key, get_discovery_cache, get_user_cache
+from .discovery_cache import cache_key, get_discovery_cache, get_embedded_runnable_cache, get_user_cache
 from .registry import RegistryService, User
 from .turn_state import TurnState, count_tool_messages
 from .steering_state import (
@@ -213,6 +216,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         sub_agent_config_hash: str | None,
         enable_thinking: bool | None = None,
         thinking_level: str | None = None,
+        client_objects: list | None = None,
     ) -> UserConfig:
         """Build complete UserConfig with all data and discovered capabilities.
 
@@ -256,6 +260,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             thinking_level=thinking_level,
             user_system_role=user.system_role,
             tool_bypass_rules=user.tool_bypass_rules,
+            client_objects=client_objects,
         )
 
         # Discover capabilities (tools and sub-agents), memoized per-user to avoid
@@ -512,6 +517,37 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         request_metadata = {**params_metadata, **message_metadata}
 
         model_choice = user.preferred_model or request_metadata.get("model")
+        # Embedded Nannos: per-turn manifest of on-screen ontology objects the
+        # embedding client registered ({type, id, scope, label?, fields?}).
+        # Message.metadata is a protobuf Struct, so the value arrives as a
+        # ListValue wrapper — unwrap it to plain python before use.
+        raw_client_objects = request_metadata.get("clientObjects")
+        client_objects: list | None = None
+        if raw_client_objects is not None:
+            if hasattr(raw_client_objects, "DESCRIPTOR"):
+                from google.protobuf.json_format import MessageToDict
+
+                converted = MessageToDict(raw_client_objects)
+                if isinstance(converted, list) and converted:
+                    client_objects = converted
+            elif isinstance(raw_client_objects, list) and raw_client_objects:
+                client_objects = raw_client_objects
+        if client_objects:
+            logger.info(f"[CLIENT-OBJECTS] Manifest received: {client_objects}")
+
+        # Embedded Nannos (execute-only, ADR-0004): the console-backend maps the
+        # embedding app-id → a scoped domain sub-agent and passes its id here. When
+        # present we run THAT sub-agent as the top-level graph — bypassing the routing
+        # orchestrator turn — via the same interactive executor loop below.
+        # Numbers arrive through the protobuf Struct as floats, so coerce defensively.
+        embedded_sub_agent_id: int | None = None
+        _raw_embedded_id = request_metadata.get("executeOnlySubAgentId") or request_metadata.get("subAgentId")
+        if _raw_embedded_id is not None:
+            try:
+                embedded_sub_agent_id = int(float(_raw_embedded_id))
+            except (TypeError, ValueError):
+                logger.warning(f"[EMBEDDED] Ignoring non-numeric execute-only sub-agent id: {_raw_embedded_id!r}")
+
         enable_thinking = user.enable_thinking or request_metadata.get("enableThinking") in ("true", "1", "yes")
         thinking_level = user.thinking_level or request_metadata.get("thinkingLevel") if enable_thinking else None
         logger.debug(
@@ -623,6 +659,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 sub_agent_config_hash=sub_agent_config_hash,
                 enable_thinking=enable_thinking,
                 thinking_level=thinking_level,
+                client_objects=client_objects,
             )
 
             # Extract message parts for multimodal support (text + files)
@@ -651,21 +688,138 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 thinking_level = thinking_level.value
 
             model_type = user_config.model if user_config.model else self.agent._default_model_type
-            graph = await self.agent.get_or_create_graph(
-                model_type=model_type,
-                thinking_level=thinking_level,
-            )
+
+            # Embedded execute-only: build the scoped sub-agent and use ITS graph as
+            # the top-level graph, instead of the routing orchestrator graph. The rest
+            # of the loop (resume detection, streaming, extensions) is generic over the
+            # graph + the stream source selected at the astream call below.
+            embedded_runnable = None
+            embedded_target: LocalLangGraphSubAgentConfig | None = None
+            if embedded_sub_agent_id is not None:
+                embedded_target = next(
+                    (
+                        c
+                        for c in (user_config.local_subagents or [])
+                        if isinstance(c, LocalLangGraphSubAgentConfig) and c.sub_agent_id == embedded_sub_agent_id
+                    ),
+                    None,
+                )
+                if embedded_target is None:
+                    logger.error(
+                        f"[EMBEDDED] Requested execute-only sub-agent id={embedded_sub_agent_id} "
+                        f"is not among the user's {len(user_config.local_subagents or [])} local sub-agent(s)"
+                    )
+                    await updater.update_status(
+                        TaskState.TASK_STATE_FAILED,
+                        new_text_message(
+                            "This assistant isn't available for your account.",
+                            context_id=task.context_id,
+                            task_id=task.id,
+                        ),
+                    )
+                    return
+                # Reuse the built runnable across turns: _ensure_agent() re-runs the
+                # OAuth exchange + MCP gateway list_tools + graph compilation, which is
+                # seconds of time-to-first-token per message. Keyed like the discovery
+                # cache (entitlements + sub-agent config hash) plus the target id;
+                # entries are token-bounded and flushed by the same owner-scoped
+                # invalidation. The per-turn <client_objects> manifest is NOT baked in —
+                # ClientObjectsMiddleware reads it from config metadata per invocation.
+                ecache = get_embedded_runnable_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
+                ekey = (
+                    cache_key(
+                        user_sub=user_config.user_sub,
+                        groups=user_config.groups,
+                        sub_agent_config_hash=user_config.sub_agent_config_hash,
+                        policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
+                    )
+                    + f":{embedded_sub_agent_id}"
+                )
+                embedded_runnable = ecache.get(ekey)
+                if embedded_runnable is None:
+                    # Mark as the embedded entrypoint (adds the client_action tool +
+                    # <client_objects> rendering) and isolate to just this agent —
+                    # execute-only means no routing and no peer sub-agents. Copy first:
+                    # the config instance is shared by reference with the per-user cache,
+                    # so an in-place mutation would leak the embedded-only flag into
+                    # subsequent non-embedded turns for this user.
+                    embedded_target = embedded_target.model_copy(update={"client_action_enabled": True})
+                    user_config.local_subagents = [embedded_target]
+                    runtime_context = self.agent.build_runtime_context(
+                        user_config, sandbox_pool=self.agent.sandbox_pool
+                    )
+                    compiled = (runtime_context.subagent_registry or {}).get(embedded_target.name)
+                    embedded_runnable = compiled.get("runnable") if compiled else None
+                    if embedded_runnable is None:
+                        logger.error(f"[EMBEDDED] Sub-agent '{embedded_target.name}' failed to build")
+                        await updater.update_status(
+                            TaskState.TASK_STATE_FAILED,
+                            new_text_message(
+                                "This assistant couldn't be started. Please try again.",
+                                context_id=task.context_id,
+                                task_id=task.id,
+                            ),
+                        )
+                        return
+                    await embedded_runnable._ensure_agent()
+                    if embedded_runnable._agent is None:
+                        # Sandbox sub-agents build their graph per-invocation (no cached
+                        # ._agent); execute-only embedded doesn't support that path yet.
+                        logger.error(f"[EMBEDDED] Sub-agent '{embedded_target.name}' has no cached graph (sandbox?)")
+                        await updater.update_status(
+                            TaskState.TASK_STATE_FAILED,
+                            new_text_message(
+                                "This assistant isn't configured for embedded use.",
+                                context_id=task.context_id,
+                                task_id=task.id,
+                            ),
+                        )
+                        return
+                    # Only a fully-built runnable (graph compiled, tools discovered) is
+                    # cached, so a hit can use ._agent directly.
+                    ecache.put(
+                        ekey,
+                        embedded_runnable,
+                        user_config.access_token.get_secret_value(),
+                        owner=user_config.user_sub,
+                    )
+                    logger.info(
+                        f"[EMBEDDED] Built sub-agent '{embedded_target.name}' "
+                        f"(id={embedded_sub_agent_id}) execute-only (cached for reuse)"
+                    )
+                else:
+                    logger.info(
+                        f"[EMBEDDED] Reusing cached sub-agent runnable '{embedded_runnable.name}' "
+                        f"(id={embedded_sub_agent_id}) execute-only"
+                    )
+                graph = embedded_runnable._agent
+            else:
+                graph = await self.agent.get_or_create_graph(
+                    model_type=model_type,
+                    thinking_level=thinking_level,
+                )
 
             # NOTE: we decide to use channel_id as part of the filesystem namespace since if one has access to the
             # channel, she should have access to all files shared in that channel.
             # This is a design decision based on Slack's permission model.
             # Create config for graph execution with interrupt support
             # CRITICAL: Include __pregel_checkpointer to prevent LangGraph from misinterpreting checkpoint_ns as subgraph
-            config = {
-                "configurable": {
+            # Embedded execute-only runs the sub-agent as a standalone pregel root
+            # (its _astream_impl forces checkpoint_ns=""); resume aget_state below must
+            # match, and the thread is namespaced per sub-agent. The orchestrator path
+            # keeps its own thread + __pregel_checkpointer for subgraph isolation.
+            if embedded_runnable is not None:
+                configurable = {
+                    "thread_id": f"{task.context_id}::dynamic-{embedded_runnable.name}",
+                    "checkpoint_ns": "",
+                }
+            else:
+                configurable = {
                     "thread_id": task.context_id,
                     "__pregel_checkpointer": graph.checkpointer,  # Required for proper checkpoint isolation
-                },
+                }
+            config = {
+                "configurable": configurable,
                 "metadata": {
                     "assistant_id": stream_info.assistant_id,
                     "user_id": user.id,  # Stable database ID (not OIDC sub)
@@ -685,6 +839,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     f"conversation:{task.context_id}",
                 ],
             }
+            # ClientObjectsMiddleware reads the on-screen manifest from config metadata.
+            if embedded_runnable is not None and client_objects:
+                config["metadata"]["client_objects"] = client_objects
 
             current_state = await graph.aget_state(config)  # type: ignore
 
@@ -750,9 +907,22 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # shared singletons.
                 turn_state = TurnState()
 
-                async for item in self.agent.stream(
-                    message_parts, user_config, config=config, resume=resume_value, turn_state=turn_state
-                ):
+                if embedded_runnable is not None:
+                    stream_source = self.agent.stream_subagent(
+                        embedded_runnable,
+                        message_parts,
+                        config=config,
+                        context_id=task.context_id,
+                        resume=resume_value,
+                        turn_state=turn_state,
+                        client_objects=client_objects,
+                    )
+                else:
+                    stream_source = self.agent.stream(
+                        message_parts, user_config, config=config, resume=resume_value, turn_state=turn_state
+                    )
+
+                async for item in stream_source:
                     # Buffer the terminal completed item so we can check for unconsumed
                     # steering messages before emitting it to the SSE stream.
                     # Other terminal states are emitted immediately.
@@ -1018,6 +1188,22 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 TaskState.TASK_STATE_WORKING,
                 new_work_plan_message(
                     todos,
+                    task.context_id,
+                    task.id,
+                ),
+            )
+            return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
+
+        # --- Client-action directives (Embedded Nannos) → status-update with DataPart extension ---
+        if metadata.get("client_action"):
+            if not _ext_active(CLIENT_ACTION_EXTENSION):
+                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
+            directive = metadata["client_action"]
+            logger.info(f"[CLIENT_ACTION] Emitting directive: {directive}")
+            await updater.update_status(
+                TaskState.TASK_STATE_WORKING,
+                new_client_action_message(
+                    directive,
                     task.context_id,
                     task.id,
                 ),
