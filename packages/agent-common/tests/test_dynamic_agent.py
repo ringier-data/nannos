@@ -60,7 +60,74 @@ class TestDynamicLocalAgentRunnable:
         """Test that agent is not created on initialization."""
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
         assert runnable._agent is None
+
+    # --- Embedded Nannos: client-action gate (Phase 7 step 3) ---
+
+    def test_client_action_disabled_by_default(self, basic_config, mock_model):
+        """Ordinary sub-agents don't get the embedded machinery."""
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        assert runnable.client_action_enabled is False
+
+    def test_client_action_enabled_flag_read(self, mock_model):
+        """The embedded entrypoint config turns the capability on."""
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="cockpit",
+            description="Embedded cockpit agent",
+            system_prompt="You are the cockpit assistant.",
+            client_action_enabled=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        assert runnable.client_action_enabled is True
+
+    def _prime_cached_state(self, runnable):
+        runnable._cached_tools = []
+        runnable._cached_system_prompt = "p"
+        runnable._cached_response_format = None
+        runnable._cached_hitl_guarded = None
+        runnable._cached_context_gated_tools = None
+
+    def test_client_objects_middleware_attached_when_enabled(self, mock_model):
+        """When enabled, _build_graph attaches ClientObjectsMiddleware."""
+        from agent_common.middleware.client_objects_middleware import ClientObjectsMiddleware
+
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="cockpit",
+            description="Embedded cockpit agent",
+            system_prompt="You are the cockpit assistant.",
+            client_action_enabled=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        self._prime_cached_state(runnable)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph") as mock_build:
+            runnable._build_graph()
+        mws = mock_build.call_args.kwargs.get("extra_middlewares") or []
+        assert any(isinstance(mw, ClientObjectsMiddleware) for mw in mws)
+
+    def test_client_objects_middleware_absent_when_disabled(self, basic_config, mock_model):
+        """Disabled (default) sub-agents get no ClientObjectsMiddleware."""
+        from agent_common.middleware.client_objects_middleware import ClientObjectsMiddleware
+
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        self._prime_cached_state(runnable)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph") as mock_build:
+            runnable._build_graph()
+        mws = mock_build.call_args.kwargs.get("extra_middlewares") or []
+        assert not any(isinstance(mw, ClientObjectsMiddleware) for mw in mws)
         assert runnable._discovered_tools is None
+
+    def test_client_action_meta_round_trips(self):
+        """The client_action directive survives the shared stream-event contract that
+        _astream_impl uses to forward it to the execute-only adapter."""
+        from agent_common.a2a.stream_events import ClientActionMeta, TaskUpdate, parse_event_metadata
+
+        directive = {"kind": "apply", "payload": {"name": "Spring sale"}}
+        meta = parse_event_metadata({"client_action": directive})
+        assert isinstance(meta, ClientActionMeta)
+        assert meta.client_action == directive
+        # And it is accepted on a TaskUpdate's event_metadata union.
+        assert TaskUpdate(event_metadata=meta).event_metadata is meta
 
     def test_inherits_orchestrator_tools(self, basic_config, mock_model):
         """Test that no tool is inherited when no MCP tools specified."""

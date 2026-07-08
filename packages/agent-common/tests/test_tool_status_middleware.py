@@ -102,6 +102,26 @@ class TestBuildStatus:
         # Single-word camel names round-trip; underscores survive.
         assert _build_status("eval", {"code": "await tools.search({q: 1})"}) == "Running search\u2026"
 
+    def test_eval_skill_read_shows_skill_name(self):
+        """A skill load routed through the code interpreter is named, not listed."""
+        code = "const r = await tools.readFile({file_path: '/skills/weather/SKILL.md'});"
+        assert _build_status("eval", {"code": code}) == "Loading skill weather\u2026"
+
+    def test_eval_skill_read_camel_and_double_quotes(self):
+        """camelCase arg key and double-quoted path are both handled."""
+        code = 'await tools.readFile({filePath: "/skills/summarizer/README.md"})'
+        assert _build_status("eval", {"code": code}) == "Loading skill summarizer\u2026"
+
+    def test_eval_non_skill_read_still_lists_tool(self):
+        """Reads outside /skills/ keep the generic tool listing."""
+        code = "await tools.readFile({file_path: '/project/main.py'});"
+        assert _build_status("eval", {"code": code}) == "Running read_file\u2026"
+
+    def test_eval_skill_read_wins_over_other_tools(self):
+        """When a snippet loads a skill, the skill label takes priority."""
+        code = "await tools.grep({}); await tools.readFile({path: '/skills/weather/x.md'});"
+        assert _build_status("eval", {"code": code}) == "Loading skill weather\u2026"
+
 
 # ---------------------------------------------------------------------------
 # Integration tests for awrap_tool_call

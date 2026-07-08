@@ -242,14 +242,32 @@ def _resolve_server_slug(
     tool_name: str,
     context: Any,
     static_map: dict[str, str] | None,
+    tool: BaseTool | None = None,
 ) -> str:
-    """Resolve the MCP server slug for a tool (mirrors ConditionalHITL logic)."""
+    """Resolve the MCP server slug for a tool (mirrors ConditionalHITL logic).
+
+    Resolution order matches ``ConditionalHITL._get_server_slug`` so a tool scores
+    under the SAME slug whether the risk gate fires at the model boundary or here,
+    inside the PTC code interpreter — otherwise the same tool splits across two
+    rows (real slug vs ``_self``) and per-tool HITL overrides silently miss the
+    eval path:
+      1. ``context.tool_server_map`` (orchestrator path)
+      2. wrap-time ``static_map`` (sub-agent injects at build)
+      3. ``tool.metadata["server_name"]`` (stamped by MCP discovery)
+      4. ``_self`` (in-process platform tools)
+    """
     if context is not None:
         ctx_map: dict[str, str] | None = getattr(context, "tool_server_map", None)
         if ctx_map and tool_name in ctx_map:
             return ctx_map[tool_name]
     if static_map and tool_name in static_map:
         return static_map[tool_name]
+    if tool is not None:
+        metadata = getattr(tool, "metadata", None)
+        if isinstance(metadata, dict):
+            server_name = metadata.get("server_name")
+            if server_name:
+                return server_name
     return "_self"
 
 
@@ -338,7 +356,7 @@ def wrap_tool_for_ptc(
         )
 
         context: Any = getattr(runtime, "context", None)
-        server_slug = _resolve_server_slug(tool_name, context, tool_server_map)
+        server_slug = _resolve_server_slug(tool_name, context, tool_server_map, inner)
         thread_id = resolve_ptc_thread_id(runtime)
         turn = get_ptc_turn(thread_id)
         call_key = _call_key(tool_name, kwargs)

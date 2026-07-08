@@ -1,0 +1,13 @@
+{
+  "_comment": "Canonical registry of nannos A2A extension URNs. Three runtimes keep their own copy of this list (orchestrator app/core/a2a_extensions.py, console-backend console_backend/utils/a2a_extensions.py, embed-sdk src/core/extensions.ts) because they share no code artifact — this file is what their conformance tests pin against, so adding an extension in one place fails the others' tests until every copy (and this file) agrees. The console-backend copy feeds the X-A2A-Extensions negotiation header, which is the actual on/off switch for extension emission (executor _ext_active): a URN missing there is silently never streamed.",
+  "extensions": [
+    "urn:nannos:a2a:activity-log:1.0",
+    "urn:nannos:a2a:work-plan:1.0",
+    "urn:nannos:a2a:intermediate-output:1.0",
+    "urn:nannos:a2a:feedback-request:1.0",
+    "urn:nannos:a2a:human-in-the-loop:1.0",
+    "urn:nannos:a2a:client-action:1.0"
+  ],
+  "_clientActionKindsComment": "Directive kinds of the client-action extension. Copies live in agent-common client_action_tool.py (the tool's arg schema) and embed-sdk schemas.ts (the widget's zod boundary); the risk scorer must carry a deterministic score for each. A kind added to the Python tool but not the zod union is emitted by the agent, refused client-side, and reported to the user as done — that is the failure these pins prevent.",
+  "clientActionKinds": ["apply", "highlight", "navigate"]
+}
