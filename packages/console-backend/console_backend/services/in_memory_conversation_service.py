@@ -100,6 +100,7 @@ class InMemoryConversationService:
         agent_url: str = "",
         message: str | None = None,
         sub_agent_config_hash: str | None = None,
+        embedded_sub_agent_id: str | None = None,
     ) -> Conversation:
         existing = await self.get_conversation(conversation_id, user_id)
         if existing:
@@ -111,4 +112,5 @@ class InMemoryConversationService:
             agent_url=agent_url,
             conversation_id=conversation_id,
             sub_agent_config_hash=sub_agent_config_hash,
+            metadata={"embedded_sub_agent_id": embedded_sub_agent_id} if embedded_sub_agent_id else None,
         )

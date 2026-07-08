@@ -21,6 +21,7 @@ async def get_conversations_by_user(
     limit: int = 20,
     sub_agent_config_hash: str | None = None,
     exclude_playground: bool = False,
+    embedded_sub_agent_id: str | None = None,
     search: str | None = None,
     user: User = Depends(require_auth),
 ) -> dict:
@@ -30,6 +31,10 @@ async def get_conversations_by_user(
         limit: Maximum number of conversations to return (default: 20, max: 50)
         sub_agent_config_hash: Optional filter by sub-agent config version hash
         exclude_playground: If True, exclude conversations with sub_agent_config_hash set
+        embedded_sub_agent_id: Only conversations created by the embedded widget scoped
+            to this sub-agent (metadata stamp). The embed SDK passes this so a host
+            application only ever receives its OWN conversations — console and
+            other-app conversation titles must not reach a third-party page.
         search: Optional case-insensitive substring to filter conversations by title
 
     Returns:
@@ -62,6 +67,12 @@ async def get_conversations_by_user(
         elif exclude_playground:
             # Exclude playground conversations (those with sub_agent_config_hash set)
             conversations = [c for c in conversations if c.sub_agent_config_hash is None]
+
+        # Scope to one embedded application's conversations (see docstring).
+        if embedded_sub_agent_id is not None:
+            conversations = [
+                c for c in conversations if c.metadata.get("embedded_sub_agent_id") == embedded_sub_agent_id
+            ]
 
         return {
             "user_id": user_id,

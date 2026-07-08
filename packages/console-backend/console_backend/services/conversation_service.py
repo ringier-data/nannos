@@ -182,6 +182,7 @@ class ConversationService:
         agent_url: str = "",
         message: str | None = None,
         sub_agent_config_hash: str | None = None,
+        embedded_sub_agent_id: str | None = None,
     ) -> Conversation:
         """Ensure a conversation exists, creating it if necessary.
 
@@ -191,6 +192,10 @@ class ConversationService:
             agent_url: Agent URL for this conversation
             message: Optional user message text to extract title from
             sub_agent_config_hash: Optional version hash for playground mode
+            embedded_sub_agent_id: Set when the conversation is created by the
+                embedded widget (execute-only sub-agent). Stamped into metadata so
+                the console can label it and render it read-only — its turns assume
+                a live host page (registered client objects, scoped agent).
 
         Returns:
             The existing or newly created conversation
@@ -219,7 +224,7 @@ class ConversationService:
                 user_id=user_id,
                 agent_url=agent_url,
                 title=title,
-                metadata={},
+                metadata={"embedded_sub_agent_id": embedded_sub_agent_id} if embedded_sub_agent_id else {},
                 sub_agent_config_hash=sub_agent_config_hash,
             )
             logger.info(f"Created new conversation: {conversation_id} with title: {title[:50]}")

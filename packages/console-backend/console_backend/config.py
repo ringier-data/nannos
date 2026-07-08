@@ -1,8 +1,12 @@
 """Configuration for the A2A Inspector application."""
 
+import json
+import logging
 import os
 
 from pydantic import BaseModel, Field, SecretStr
+
+_config_logger = logging.getLogger(__name__)
 
 
 class OidcConfig(BaseModel):
@@ -12,6 +16,41 @@ class OidcConfig(BaseModel):
     client_secret: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("OIDC_CLIENT_SECRET", "")))
     issuer: str = Field(default_factory=lambda: os.getenv("OIDC_ISSUER", ""))
     scope: str = Field(default="openid profile email offline_access")
+
+
+class FederatedIdp(BaseModel):
+    """A single external IdP trusted for cross-IdP token exchange (ADR-0002
+    Amendment 2, browser leg). Its tokens are validated OFFLINE against the
+    issuer's JWKS (no client credentials at the foreign IdP)."""
+
+    name: str
+    issuer: str
+    # Expected audience/azp on the incoming foreign token (optional but recommended).
+    audience: str | None = None
+
+
+class FederationConfig(BaseModel):
+    """Cross-IdP federation for the embedded browser leg. Populated from the
+    ``FEDERATED_IDPS`` env var — a JSON array of ``{name, issuer, audience?}``.
+    EMPTY by default, which leaves ``/api/v1/auth/federated-exchange`` inert; the
+    endpoint only accepts issuers listed here (the trust allowlist)."""
+
+    idps: list[FederatedIdp] = Field(default_factory=list)
+
+    @staticmethod
+    def _load_idps() -> list["FederatedIdp"]:
+        raw = os.getenv("FEDERATED_IDPS", "").strip()
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+            return [FederatedIdp(**item) for item in data]
+        except Exception as exc:  # noqa: BLE001 — bad config must not crash boot
+            _config_logger.error("Ignoring FEDERATED_IDPS: could not parse (%s)", exc)
+            return []
+
+    def issuer_map(self) -> dict[str, "FederatedIdp"]:
+        return {idp.issuer: idp for idp in self.idps}
 
 
 class FileStorageConfig(BaseModel):
@@ -320,6 +359,7 @@ class Config(BaseModel):
     cookie_name: str = Field(default="a2a-chatui")
 
     oidc: OidcConfig = Field(default_factory=OidcConfig)
+    federation: FederationConfig = Field(default_factory=lambda: FederationConfig(idps=FederationConfig._load_idps()))
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     voice_agent: VoiceAgentConfig = Field(default_factory=VoiceAgentConfig)
     docstore: DocstoreConfig = Field(default_factory=DocstoreConfig)

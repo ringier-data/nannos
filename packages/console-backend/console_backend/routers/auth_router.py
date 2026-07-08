@@ -8,6 +8,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import config
 from ..controllers.auth_controller import AuthController, register_oauth_provider
 from ..db.session import get_db_session
 from ..dependencies import require_auth, require_auth_or_bearer_token
@@ -118,6 +119,97 @@ async def login_callback(request: Request, response: Response, db: DbSession) ->
     """
     auth_controller = get_auth_controller(request)
     return await auth_controller.get_login_callback(request, response, db=db)
+
+
+class FederatedExchangeRequest(BaseModel):
+    """A foreign (trusted external IdP) access token to exchange for a nannos one."""
+
+    token: str
+
+
+class FederatedExchangeResponse(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+
+
+@router.post("/federated-exchange", response_model=FederatedExchangeResponse)
+async def federated_exchange(
+    payload: FederatedExchangeRequest,
+    request: Request,
+    db: DbSession,
+) -> FederatedExchangeResponse:
+    """Cross-IdP token exchange — the embedded browser leg (ADR-0002 Amendment 2).
+
+    A host whose user is authenticated to a *foreign* IdP (e.g. the Alloy cockpit)
+    posts that foreign access token here. We:
+      1. pick the trusted IdP by the token's issuer (allowlist = ``FEDERATED_IDPS``),
+      2. validate the token OFFLINE against that IdP's JWKS,
+      3. require a **verified email** (guardrail),
+      4. map it to a **provisioned** nannos user by email (existence == the link),
+      5. mint a fresh nannos access token from that user's vaulted offline token
+         (``user_offline_tokens``, via SchedulerTokenService — no new store).
+
+    The widget then presents the returned nannos token on the socket. Inert unless
+    ``FEDERATED_IDPS`` lists trusted issuers.
+    """
+    import jwt as _pyjwt
+
+    from ringier_a2a_sdk.auth.jwt_validator import JWTValidationError
+
+    from ..utils.jwt_validators import get_jwt_validator
+
+    federation = config.federation
+    if not federation.idps:
+        raise HTTPException(status_code=404, detail="Federated exchange is not enabled")
+
+    # 1. Peek the (unverified) issuer to select the trusted IdP; the signature is
+    #    verified in step 2 against that IdP's JWKS.
+    try:
+        unverified = _pyjwt.decode(payload.token, options={"verify_signature": False})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Federated exchange: malformed token (%s)", exc)
+        raise HTTPException(status_code=400, detail="Malformed token")
+
+    issuer = unverified.get("iss")
+    idp = federation.issuer_map().get(issuer) if issuer else None
+    if not idp:
+        raise HTTPException(status_code=403, detail="Token issuer is not a trusted IdP")
+
+    # 2. Validate against the FOREIGN issuer's JWKS (pins iss/exp; aud if configured).
+    validator = get_jwt_validator(issuer=idp.issuer, expected_aud=idp.audience)
+    try:
+        claims = await validator.validate(payload.token)
+    except JWTValidationError as exc:
+        logger.warning("Federated exchange: token validation failed (%s)", exc)
+        raise HTTPException(status_code=401, detail="Foreign token failed validation")
+
+    # 3. Guardrail: only a verified email may be used as the identity join key.
+    email = claims.get("email")
+    if not email or claims.get("email_verified") is not True:
+        raise HTTPException(status_code=403, detail="A verified email is required to federate")
+
+    # 4. Map to a PROVISIONED nannos user (the user existing here IS the link).
+    user_service = get_user_service(request)
+    user = await user_service.get_user_by_email(db, email)
+    if user is None:
+        logger.warning("Federated exchange: no provisioned nannos user for asserted identity")
+        raise HTTPException(status_code=403, detail="No provisioned nannos account for this identity")
+
+    # 5. Mint from the vaulted offline token (user_offline_tokens).
+    scheduler_token_service = getattr(request.app.state, "scheduler_token_service", None)
+    if scheduler_token_service is None:
+        raise HTTPException(status_code=503, detail="Token minting is not configured")
+    try:
+        access_token = await scheduler_token_service.mint_user_access_token(db, user.id)
+    except ValueError:
+        # User exists but never logged into nannos, so no offline token is vaulted.
+        raise HTTPException(status_code=409, detail="User has not enrolled with nannos (no offline token)")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Federated exchange: mint failed (%s)", exc)
+        raise HTTPException(status_code=502, detail="Failed to mint nannos token")
+
+    logger.info("Federated exchange succeeded for user %s via IdP %s", user.id, idp.name)
+    return FederatedExchangeResponse(access_token=access_token)
 
 
 @router.get("/logout")
