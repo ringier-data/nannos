@@ -41,6 +41,7 @@ from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMi
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
+from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
@@ -174,7 +175,19 @@ class GraphFactory:
         self._a2a_middleware = a2a_middleware or A2ATaskTrackingMiddleware()
         self._auth_middleware = AuthErrorDetectionMiddleware()
         self._todo_middleware = TodoStatusMiddleware()
-        self._loop_detection_middleware = RepeatedToolCallMiddleware(max_repeats=5, max_tool_repeats=10, window_size=10)
+        self._loop_detection_middleware = RepeatedToolCallMiddleware(
+            max_repeats=5,
+            max_tool_repeats=10,
+            window_size=10,
+            # ``task`` (sub-agent dispatch) and ``eval`` (the PTC code interpreter)
+            # are meta/gateway tools legitimately called many times with *different*
+            # arguments — distinct delegations / distinct code. They must be exempt
+            # from the per-tool-name ``max_tool_repeats`` cap (otherwise a normal
+            # multi-step PTC agent gets blocked mid-task and force-stopped). They
+            # remain subject to ``max_repeats`` (identical-args) detection, which
+            # still catches true loops.
+            dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
+        )
         self._retry_middleware = ToolRetryMiddleware(
             max_retries=config.MAX_RETRIES,
             backoff_factor=config.BACKOFF_FACTOR,
