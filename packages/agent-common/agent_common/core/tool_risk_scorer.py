@@ -24,6 +24,7 @@ from langchain_core.tools import BaseTool
 from langsmith import traceable
 from pydantic import BaseModel, Field
 
+from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
 from agent_common.core.tool_risk_cache import ParamRiskProfile, ToolRiskCache, ToolRiskEntry
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,24 @@ async def score_tool_risk(
     Returns:
         Tuple of (risk_score, entry). Entry is None only if scoring completely fails.
     """
+    # Embedded Nannos: the client_action tool is the SINGLE HITL path for on-screen
+    # actions (the SDK no longer has its own approval card). Score it deterministically
+    # by `kind` — never via the LLM/cache — so an ``apply`` (writes into the user's form)
+    # always interrupts for approval while ``highlight``/``navigate`` (benign) never do.
+    if tool_name == CLIENT_ACTION_TOOL_NAME:
+        kind = (args or {}).get("kind")
+        score = _CLIENT_ACTION_KIND_SCORES.get(kind, _CLIENT_ACTION_DEFAULT_SCORE)
+        now = datetime.now(timezone.utc)
+        entry = ToolRiskEntry(
+            base_score=score,
+            risk_factors={},
+            allowed_actions=["approve", "reject"],
+            schema_hash="",
+            updated_at=now,
+            last_accessed_at=now,
+        )
+        return score, entry
+
     if cache is None:
         # No cache available — deterministic fallback
         return _deterministic_fallback(tool_name), None
@@ -143,6 +162,21 @@ async def score_tool_risk(
 
         entry = await _score_tool_via_llm(tool_name, description, input_schema)
         entry.schema_hash = current_hash
+
+        # Safety floor: an LLM under-rating must never drop a clearly irreversible /
+        # destructive operation below the HITL approval gate. Observed in practice:
+        # `alloy-riad_delete_campaign_by_id` was LLM-scored 0.75 (< 0.80 threshold)
+        # and deleted a campaign without asking. Floor destructive verbs so they
+        # always require approval regardless of the model's estimate.
+        floor = _destructive_floor(tool_name)
+        if floor > entry.base_score:
+            logger.info(
+                "Flooring destructive tool '%s' risk %.2f -> %.2f (LLM under-rated)",
+                tool_name,
+                entry.base_score,
+                floor,
+            )
+            entry.base_score = floor
 
         # Update cache immediately
         cache.put(tool_name, server_slug, entry)
@@ -248,6 +282,34 @@ async def _score_tool_via_llm(
 # ---------------------------------------------------------------------------
 # Deterministic fallback (when LLM is unavailable)
 # ---------------------------------------------------------------------------
+
+
+# Irreversible / data-loss verbs. A tool whose name contains one of these must
+# never sit below the HITL gate on the strength of an LLM estimate alone. Kept
+# narrow (only clearly-destructive verbs) so read-ish names containing "run"/"exec"
+# aren't over-gated.
+_HARD_DESTRUCTIVE_KEYWORDS: tuple[str, ...] = ("delete", "remove", "drop", "destroy")
+_DESTRUCTIVE_FLOOR_SCORE = 0.9
+
+# Deterministic risk per client_action `kind` (Embedded Nannos). Mutating kinds
+# gate for approval; benign ones never do. Unknown/new kinds default to gating
+# (fail safe). ``refresh``/``invalidate`` are listed ahead of that kind landing.
+_CLIENT_ACTION_KIND_SCORES: dict[str | None, float] = {
+    "apply": 0.9,
+    "refresh": 0.9,
+    "invalidate": 0.9,
+    "highlight": 0.1,
+    "navigate": 0.1,
+}
+_CLIENT_ACTION_DEFAULT_SCORE = 0.9  # unknown kind → gate (fail safe)
+
+
+def _destructive_floor(tool_name: str) -> float:
+    """Minimum base_score for a clearly-destructive tool (0.0 if it isn't one)."""
+    tool_lower = tool_name.lower()
+    if any(kw in tool_lower for kw in _HARD_DESTRUCTIVE_KEYWORDS):
+        return _DESTRUCTIVE_FLOOR_SCORE
+    return 0.0
 
 
 def _deterministic_fallback(tool_name: str) -> float:

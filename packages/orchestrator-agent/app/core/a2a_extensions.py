@@ -31,6 +31,21 @@ INTERMEDIATE_OUTPUT_EXTENSION = "urn:nannos:a2a:intermediate-output:1.0"
 FEEDBACK_REQUEST_EXTENSION = "urn:nannos:a2a:feedback-request:1.0"
 """Non-blocking hint asking clients to prompt for user feedback."""
 
+CLIENT_ACTION_EXTENSION = "urn:nannos:a2a:client-action:1.0"
+"""Agent→widget directive targeting a host-registered ontology object.
+
+The message carries a DataPart with {"directive": {...}}:
+- kind: "apply" | "highlight" | "navigate"
+- target: {"type": <ontology type>, "id": <instance id>}  (apply/highlight)
+- values: {...}   (apply — field values written through the host's form layer)
+- to: <string>    (navigate)
+- confirm: bool   (apply — widget must ask the human before applying)
+
+The widget executes directives ONLY against objects the host app registered
+via the Embed SDK; unknown targets are refused client-side (see
+embed-sdk core client-action executor).
+"""
+
 HUMAN_IN_THE_LOOP_EXTENSION = "urn:nannos:a2a:human-in-the-loop:1.0"
 """Structured interrupt requiring a human decision before tool execution.
 
@@ -56,12 +71,16 @@ Decision formats:
   - reject:  {"type": "reject", "message": "reason text"}
 """
 
+# Keep in sync with the repo-root a2a-extensions.json registry (pinned by
+# tests/test_a2a_extensions_conformance.py) — console-backend's negotiation
+# header and the embed SDK carry their own copies of the same list.
 ALL_EXTENSIONS = [
     ACTIVITY_LOG_EXTENSION,
     WORK_PLAN_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
+    CLIENT_ACTION_EXTENSION,
 ]
 
 
@@ -121,6 +140,32 @@ def new_work_plan_message(
         context_id=context_id or "",
         task_id=task_id or "",
         extensions=[WORK_PLAN_EXTENSION],
+    )
+
+
+def new_client_action_message(
+    directive: dict,
+    context_id: str | None = None,
+    task_id: str | None = None,
+) -> Message:
+    """Build a Message carrying a client-action directive.
+
+    The message carries:
+      - A DataPart with {"directive": {...}} as structured JSON
+      - extensions=[CLIENT_ACTION_EXTENSION] for client classification
+    """
+    return Message(
+        role=Role.ROLE_AGENT,
+        parts=[
+            Part(
+                data=ParseDict({"directive": directive}, Value()),
+                metadata={"media_type": "application/json"},
+            )
+        ],
+        message_id=str(uuid.uuid4()),
+        context_id=context_id or "",
+        task_id=task_id or "",
+        extensions=[CLIENT_ACTION_EXTENSION],
     )
 
 

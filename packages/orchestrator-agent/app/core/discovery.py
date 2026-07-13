@@ -5,6 +5,7 @@ including caching and error handling.
 """
 
 import asyncio
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -312,6 +313,35 @@ class ToolDiscoveryService:
         # Should never reach here, but just in case
         raise last_error or Exception(f"Failed to load MCP tools from {server_name}")
 
+    def _direct_servers(self) -> List[Dict[str, Any]]:
+        """Parse MCP_DIRECT_SERVERS (JSON array of {slug, url, headers?}).
+
+        Invalid JSON or malformed entries are logged and skipped — a broken
+        direct-server config must never take down gateway/console discovery.
+        """
+        raw = getattr(self.config, "MCP_DIRECT_SERVERS", "") or ""
+        if not raw.strip():
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.error(f"MCP_DIRECT_SERVERS is not valid JSON ({e}); ignoring")
+            return []
+        if not isinstance(parsed, list):
+            logger.error("MCP_DIRECT_SERVERS must be a JSON array; ignoring")
+            return []
+        servers = []
+        for entry in parsed:
+            if not isinstance(entry, dict) or not entry.get("slug") or not entry.get("url"):
+                logger.error(f"Skipping malformed MCP_DIRECT_SERVERS entry: {entry!r}")
+                continue
+            headers = entry.get("headers")
+            if headers is not None and not isinstance(headers, dict):
+                logger.error(f"Skipping MCP_DIRECT_SERVERS entry with non-object headers: {entry.get('slug')}")
+                continue
+            servers.append({"slug": str(entry["slug"]), "url": str(entry["url"]), "headers": headers})
+        return servers
+
     async def discover_tools(
         self,
         token: str,
@@ -334,57 +364,76 @@ class ToolDiscoveryService:
         """
         logger.debug("Discovering tools for orchestrator deep agent")
         try:
-            # Exchange user token for gatana token
-            # The target client is 'gatana' in the same Keycloak realm
-            mcp_gateway_token = await self.oauth2_client.exchange_token(
-                subject_token=token,
-                target_client_id="gatana",
-                requested_scopes=["openid", "profile", "offline_access"],
-            )
-            logger.info("Successfully exchanged token for gatana")
+            connections: dict[str, StreamableHttpConnection] = {}
+            compression_server_slugs: set[str] = set()
 
-            # Fetch available servers to create per-server connections
-            servers = await self.fetch_available_servers(mcp_gateway_token)
+            # --- Gateway (Gatana) servers via per-user token exchange. Non-fatal:
+            # console + direct servers below must survive a missing/unreachable
+            # gateway (e.g. local dev without Gatana).
+            try:
+                # Exchange user token for gatana token
+                # The target client is 'gatana' in the same Keycloak realm
+                mcp_gateway_token = await self.oauth2_client.exchange_token(
+                    subject_token=token,
+                    target_client_id="gatana",
+                    requested_scopes=["openid", "profile", "offline_access"],
+                )
+                logger.info("Successfully exchanged token for gatana")
 
-            if not servers:
-                logger.warning("No MCP servers discovered, returning empty tool list")
-                return []
+                # Fetch available servers to create per-server connections
+                servers = await self.fetch_available_servers(mcp_gateway_token)
 
-            # Identify compression-enabled servers (Gatana-specific, always active).
-            # Gateway returns isOutputCompressionEnabled and isOutputCompressionTransformEnabled
-            # per server; we consider a server compression-enabled when both flags are true.
-            compression_server_slugs: set[str] = {
-                s["slug"]
-                for s in servers
-                if s.get("slug")
-                and s.get("isOutputCompressionEnabled")
-            }
-            if compression_server_slugs:
-                logger.info(f"Compression-enabled servers: {compression_server_slugs}")
+                # Identify compression-enabled servers (Gatana-specific, always active).
+                # Gateway returns isOutputCompressionEnabled and isOutputCompressionTransformEnabled
+                # per server; we consider a server compression-enabled when both flags are true.
+                compression_server_slugs = {
+                    s["slug"]
+                    for s in servers
+                    if s.get("slug")
+                    and s.get("isOutputCompressionEnabled")
+                }
+                if compression_server_slugs:
+                    logger.info(f"Compression-enabled servers: {compression_server_slugs}")
 
-            # Filter servers if include_server_slugs is provided
-            if include_server_slugs:
-                servers = [s for s in servers if s.get("slug") in include_server_slugs]
-                logger.debug(f"Filtered to {len(servers)} servers: {[s.get('slug') for s in servers]}")
+                # Filter servers if include_server_slugs is provided
+                if include_server_slugs:
+                    servers = [s for s in servers if s.get("slug") in include_server_slugs]
+                    logger.debug(f"Filtered to {len(servers)} servers: {[s.get('slug') for s in servers]}")
 
-            # Create one connection per MCP server
-            # This allows MultiServerMCPClient to naturally track which tools come from which server
-            connections = {}
-            for server in servers:
-                server_slug = server.get("slug")
-                if not server_slug:
-                    continue
+                # Create one connection per MCP server
+                # This allows MultiServerMCPClient to naturally track which tools come from which server
+                for server in servers:
+                    server_slug = server.get("slug")
+                    if not server_slug:
+                        continue
 
-                # Each connection uses the gateway URL but filtered to one server
-                connections[server_slug] = StreamableHttpConnection(
-                    transport="streamable_http",
-                    url=f"{self.config.MCP_GATEWAY_URL}?includeOnlyServerSlugs={server_slug}",
-                    headers={"Authorization": f"Bearer {mcp_gateway_token}"},
+                    # Each connection uses the gateway URL but filtered to one server
+                    connections[server_slug] = StreamableHttpConnection(
+                        transport="streamable_http",
+                        url=f"{self.config.MCP_GATEWAY_URL}?includeOnlyServerSlugs={server_slug}",
+                        headers={"Authorization": f"Bearer {mcp_gateway_token}"},
+                    )
+            except Exception as gateway_error:
+                logger.warning(
+                    f"MCP gateway discovery unavailable ({gateway_error}); continuing without gateway servers"
                 )
 
-            if not connections:
-                logger.warning("No valid server connections created, returning empty tool list")
-                return []
+            # --- Direct MCP servers (no gateway, static headers) from config.
+            # Local dev + Embedded Nannos hosts not fronted by Gatana. The static
+            # bearer is a service identity — per-user exchange is the production
+            # path (ADR-0002), so keep these to dev/spike scopes.
+            direct_slugs: set[str] = set()
+            for direct in self._direct_servers():
+                slug = direct["slug"]
+                if include_server_slugs and slug not in include_server_slugs:
+                    continue
+                connections[slug] = StreamableHttpConnection(
+                    transport="streamable_http",
+                    url=direct["url"],
+                    headers=direct.get("headers") or {},
+                )
+                direct_slugs.add(slug)
+                logger.info(f"Added direct MCP connection '{slug}': {direct['url']}")
 
             # Add agent-console backend as an additional MCP server
             # Exchange token for agent-console audience (separate from gatana)
@@ -401,6 +450,10 @@ class ToolDiscoveryService:
                     headers={"Authorization": f"Bearer {console_token}"},
                 )
                 logger.debug(f"Added agent-console MCP connection: {console_mcp_url}")
+
+            if not connections:
+                logger.warning("No MCP server connections available, returning empty tool list")
+                return []
 
             logger.debug(f"Created {len(connections)} MCP server connections: {list(connections.keys())}")
 
@@ -438,6 +491,13 @@ class ToolDiscoveryService:
                             if tool.metadata is None:
                                 tool.metadata = {}
                             tool.metadata["compression_enabled"] = True
+                    # Tag direct-server tools: they have no per-user registry entry,
+                    # so the orchestrator auto-whitelists them (see build_runtime_context).
+                    if slug in direct_slugs:
+                        for tool in result:
+                            if tool.metadata is None:
+                                tool.metadata = {}
+                            tool.metadata["direct_server"] = True
                     tools.extend(result)
 
             if failed_servers:

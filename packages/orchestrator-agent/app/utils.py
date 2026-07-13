@@ -250,6 +250,13 @@ def build_runtime_context(
         "docstore_export",
     }
     orchestrator_auto_tools.update(name for name in _ORCHESTRATOR_DOCSTORE_TOOLS if name in tool_registry)
+    # Direct MCP servers (MCP_DIRECT_SERVERS) have no per-user registry entry to
+    # enable their tools from — auto-whitelist them (dev/spike scope by design).
+    orchestrator_auto_tools.update(
+        name
+        for name, tool in tool_registry.items()
+        if getattr(tool, "metadata", None) and tool.metadata.get("direct_server")
+    )
     whitelisted_tool_names.update(orchestrator_auto_tools)
     logger.debug(
         f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/console tools)"
@@ -523,6 +530,16 @@ def build_runtime_context(
                 tool_server_map[tool_name] = server_name
         # In-process tools without server_name fall back to "_self" in middleware
 
+    # Embedded Nannos: when the client sent an on-screen object manifest,
+    # register the per-turn client_action tool so the agent can act on those
+    # objects (directives executed client-side against host-registered handles).
+    if user_config.client_objects:
+        from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME, create_client_action_tool
+
+        tool_registry[CLIENT_ACTION_TOOL_NAME] = create_client_action_tool()
+        # DynamicToolDispatchMiddleware only binds whitelisted registry tools.
+        whitelisted_tool_names.add(CLIENT_ACTION_TOOL_NAME)
+
     context = GraphRuntimeContext(
         user_id=user_config.user_id,  # Database ID (stable)
         user_sub=user_config.user_sub,  # OIDC sub (current)
@@ -533,6 +550,7 @@ def build_runtime_context(
         message_formatting=user_config.message_formatting,
         client_user_handle=user_config.client_user_handle,
         custom_prompt=user_config.custom_prompt,
+        client_objects=user_config.client_objects,
         groups=user_config.groups,
         tool_registry=tool_registry,
         subagent_registry=subagent_registry,

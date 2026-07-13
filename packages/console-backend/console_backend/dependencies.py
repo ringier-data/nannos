@@ -3,7 +3,7 @@
 import logging
 
 from fastapi import HTTPException, Request, status
-from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
+from ringier_a2a_sdk.auth import JWTValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
@@ -11,6 +11,7 @@ from .config import config
 from .db.session import DbSession
 from .models.user import User, UserRole, UserStatus
 from .services.user_service import UserService
+from .utils.jwt_validators import get_jwt_validator
 
 logger = logging.getLogger(__name__)
 
@@ -95,14 +96,12 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
         try:
-            # Validate the user's access token against OIDC provider
-            validator = JWTValidator(
-                issuer=config.oidc.issuer,
-                # Don't validate azp/aud - accept any valid token from the issuer
-                # The token could be issued to the frontend, orchestrator, or other clients
-                # TODO: we do not validate the audience here. Consider tightening this in the future.
-                # this requires the sub-agent to exchange the token with agent-console as target audience.
-            )
+            # Validate the user's access token against OIDC provider.
+            # Don't validate azp/aud - accept any valid token from the issuer
+            # The token could be issued to the frontend, orchestrator, or other clients
+            # TODO: we do not validate the audience here. Consider tightening this in the future.
+            # this requires the sub-agent to exchange the token with agent-console as target audience.
+            validator = get_jwt_validator(issuer=config.oidc.issuer)
 
             payload = await validator.validate(token)
             sub = payload.get("sub")
@@ -164,7 +163,7 @@ async def get_client_id_from_request(request: Request) -> str | None:
         return None
     token = auth_header.split(" ", 1)[1]
     try:
-        validator = JWTValidator(issuer=config.oidc.issuer)
+        validator = get_jwt_validator(issuer=config.oidc.issuer)
         payload = await validator.validate(token)
         return payload.get("azp") or payload.get("client_id") or None
     except JWTValidationError:
@@ -268,7 +267,7 @@ async def require_admin_or_orchestrator(request: Request, db: DbSession) -> User
         sub = ""
         if token:
             try:
-                validator = JWTValidator(issuer=config.oidc.issuer)
+                validator = get_jwt_validator(issuer=config.oidc.issuer)
                 payload = await validator.validate(token)
                 sub = payload.get("sub", "")
             except JWTValidationError:

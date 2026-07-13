@@ -331,6 +331,8 @@ build-pkg pkg:
       --build-context "ringier-a2a-sdk=packages/ringier-a2a-sdk"
       --build-context "agent-common=packages/agent-common"
       --build-context "object-storage=packages/object-storage"
+      --build-context "embed-sdk=packages/embed-sdk"
+      --build-context "workspace-root=."
     )
 
     # Multi-stage target support: some packages build a specific Dockerfile stage

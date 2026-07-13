@@ -42,6 +42,14 @@ _SUPPRESSED_TOOLS = frozenset({"FinalResponseSchema", "SubAgentResponseSchema"})
 # Matches ``tools.<camelCaseName>(`` calls inside a PTC ``eval`` snippet — the
 # dot-notation form the PTC prompt instructs the model to use.
 _PTC_TOOL_CALL_RE = re.compile(r"\btools\.([A-Za-z_$][\w$]*)\s*\(")
+# Extracts the ``file_path``/``path`` argument of a ``tools.readFile({…})`` call
+# in a PTC ``eval`` snippet, so a skill load routed through the code interpreter
+# is described like a native ``read_file`` would be. ``[^{}]*?`` keeps the match
+# inside a single (non-nested) argument object.
+_PTC_READ_FILE_RE = re.compile(
+    r"\btools\.readFile\s*\(\s*\{[^{}]*?\b(?:file_path|filePath|path)\s*:\s*"
+    r"(['\"`])(.*?)\1"
+)
 # camelCase word boundary, used to invert the PTC ``snake_case → camelCase`` map.
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # Max distinct tool names to list in an ``eval`` status before summarising.
@@ -69,6 +77,14 @@ class ToolStatusMiddleware(AgentMiddleware[AgentState, ContextT]):
         return await handler(request)
 
 
+def _describe_skill_path(file_path: str) -> str:
+    """Describe a read of a ``/skills/{name}/…`` path as a skill load."""
+    parts = PurePosixPath(file_path).parts  # ('/', 'skills', name, …)
+    if len(parts) >= 3:
+        return f"Loading skill {parts[2]}…"
+    return "Loading skill…"
+
+
 def _build_status(tool_name: str, args: dict) -> str | None:
     """Return a human-readable status string, or *None* to skip."""
     if tool_name == "read_file":
@@ -78,10 +94,7 @@ def _build_status(tool_name: str, args: dict) -> str | None:
 
         # Skill path: /skills/{skill_name}/…
         if file_path.startswith("/skills/"):
-            parts = PurePosixPath(file_path).parts  # ('/', 'skills', name, …)
-            if len(parts) >= 3:
-                return f"Loading skill {parts[2]}\u2026"
-            return "Loading skill\u2026"
+            return _describe_skill_path(file_path)
 
         return f"Reading {file_path}\u2026"
 
@@ -92,6 +105,12 @@ def _build_status(tool_name: str, args: dict) -> str | None:
         code = args.get("code", "")
         if not code:
             return f"Using {tool_name}\u2026"
+        # A skill load reaches the embedded agent as a ``tools.readFile`` of a
+        # /skills/ path inside an eval snippet; describe it the same way a
+        # native read_file would, not the generic "Running read_file\u2026".
+        for path in _extract_ptc_read_paths(code):
+            if path.startswith("/skills/"):
+                return _describe_skill_path(path)
         called = _extract_ptc_tool_calls(code)
         if called:
             shown = ", ".join(called[:_PTC_STATUS_MAX_TOOLS])
@@ -147,6 +166,15 @@ def _extract_ptc_tool_calls(code: str) -> list[str]:
     for match in _PTC_TOOL_CALL_RE.finditer(code):
         seen.setdefault(_camel_to_snake(match.group(1)), None)
     return list(seen)
+
+
+def _extract_ptc_read_paths(code: str) -> list[str]:
+    """Return the ``file_path`` argument of each ``tools.readFile`` call, in order.
+
+    Lets the ``eval`` status distinguish a skill load (``/skills/…``) from a
+    plain file read, mirroring the native ``read_file`` branch of _build_status.
+    """
+    return [match.group(2) for match in _PTC_READ_FILE_RE.finditer(code)]
 
 
 def _truncate(text: str, max_len: int) -> str:

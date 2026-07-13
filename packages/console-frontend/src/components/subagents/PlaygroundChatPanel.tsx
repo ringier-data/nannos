@@ -4,10 +4,15 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { useChat, ConnectionStatus, MessageList, ChatInput } from '@/components/chat';
-import { WorkingBlock } from '@/components/chat/components/WorkingBlock';
-import { InterruptConfirmCard } from '@/components/chat/components/InterruptConfirmCard';
-import { formatTimestamp } from '@/components/chat/utils';
+import {
+  useChat,
+  ConnectionStatus,
+  MessageList,
+  ChatInput,
+  WorkingBlock,
+  InterruptConfirmCard,
+  formatTimestamp,
+} from '@/components/chat';
 
 interface PlaygroundChatPanelProps {
   /** Whether the conversation-list middle panel is visible */

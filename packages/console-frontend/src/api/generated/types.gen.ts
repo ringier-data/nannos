@@ -1620,6 +1620,32 @@ export type EngagementResponse = {
 };
 
 /**
+ * FederatedExchangeRequest
+ *
+ * A foreign (trusted external IdP) access token to exchange for a nannos one.
+ */
+export type FederatedExchangeRequest = {
+    /**
+     * Token
+     */
+    token: string;
+};
+
+/**
+ * FederatedExchangeResponse
+ */
+export type FederatedExchangeResponse = {
+    /**
+     * Access Token
+     */
+    access_token: string;
+    /**
+     * Token Type
+     */
+    token_type?: string;
+};
+
+/**
  * FeedbackRating
  *
  * Feedback rating enum.
@@ -7303,6 +7329,31 @@ export type LoginCallbackApiV1AuthLoginCallbackGetResponses = {
     200: unknown;
 };
 
+export type FederatedExchangeApiV1AuthFederatedExchangePostData = {
+    body: FederatedExchangeRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/federated-exchange';
+};
+
+export type FederatedExchangeApiV1AuthFederatedExchangePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type FederatedExchangeApiV1AuthFederatedExchangePostError = FederatedExchangeApiV1AuthFederatedExchangePostErrors[keyof FederatedExchangeApiV1AuthFederatedExchangePostErrors];
+
+export type FederatedExchangeApiV1AuthFederatedExchangePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: FederatedExchangeResponse;
+};
+
+export type FederatedExchangeApiV1AuthFederatedExchangePostResponse = FederatedExchangeApiV1AuthFederatedExchangePostResponses[keyof FederatedExchangeApiV1AuthFederatedExchangePostResponses];
+
 export type LogoutApiV1AuthLogoutGetData = {
     body?: never;
     path?: never;
@@ -7581,6 +7632,10 @@ export type GetConversationsByUserApiV1ConversationsGetData = {
          * Exclude Playground
          */
         exclude_playground?: boolean;
+        /**
+         * Embedded Sub Agent Id
+         */
+        embedded_sub_agent_id?: string | null;
         /**
          * Search
          */

@@ -329,3 +329,82 @@ class TestUserPreferencesMiddlewareIntegration:
         """Middleware should not register any tools."""
         middleware = UserPreferencesMiddleware()
         assert middleware.tools == []
+
+
+class TestClientObjectsInjection:
+    """The Embedded Nannos <client_objects> manifest must ride the human message,
+    not the system prompt, so the cached system prefix stays byte-stable."""
+
+    MANIFEST = [{"type": "form", "id": "f1", "scope": "page", "fields": ["name"]}]
+
+    @pytest.fixture
+    def middleware(self):
+        return UserPreferencesMiddleware()
+
+    def _context(self, **kwargs):
+        return GraphRuntimeContext(
+            user_id="u1",
+            user_sub="s1",
+            name="Test User",
+            email="t@example.com",
+            language="de",
+            **kwargs,
+        )
+
+    def _request(self, context, messages, system_message=None):
+        from langchain.agents.middleware.types import ModelRequest
+
+        return ModelRequest(
+            model=None,
+            messages=messages,
+            system_message=system_message,
+            tool_choice=None,
+            tools=[],
+            response_format=None,
+            state={},
+            runtime=MagicMock(context=context),
+            model_settings={},
+        )
+
+    def test_manifest_not_in_system_prompt_addendum(self, middleware):
+        """The addendum builder must no longer emit <client_objects>."""
+        addendum = middleware._build_preferences_addendum(self._context(client_objects=self.MANIFEST))
+        assert "<client_objects>" not in addendum
+
+    def test_manifest_rides_human_message_prefs_stay_in_system(self, middleware):
+        from langchain_core.messages import HumanMessage
+
+        ctx = self._context(client_objects=self.MANIFEST)
+        request = self._request(
+            ctx, [HumanMessage(content="do it")], system_message=SystemMessage(content="sys")
+        )
+        out = middleware._apply(request, ctx)
+
+        # Stable prefs land in the system prompt; manifest does not.
+        sys_str = str(out.system_message.content)
+        assert "<user_preferences>" in sys_str
+        assert "German" in sys_str
+        assert "<client_objects>" not in sys_str
+        # Manifest rides the human message.
+        assert "<client_objects>" in str(out.messages[0].content)
+
+    def test_manifest_falls_back_to_system_without_human_message(self, middleware):
+        from langchain_core.messages import AIMessage
+
+        ctx = self._context(client_objects=self.MANIFEST)
+        request = self._request(
+            ctx, [AIMessage(content="ai")], system_message=SystemMessage(content="sys")
+        )
+        out = middleware._apply(request, ctx)
+        assert "<client_objects>" in str(out.system_message.content)
+
+    def test_no_manifest_leaves_messages_untouched(self, middleware):
+        from langchain_core.messages import HumanMessage
+
+        ctx = self._context()  # no client_objects
+        request = self._request(
+            ctx, [HumanMessage(content="do it")], system_message=SystemMessage(content="sys")
+        )
+        out = middleware._apply(request, ctx)
+        assert out.messages[0].content == "do it"
+        assert "<client_objects>" not in str(out.messages[0].content)

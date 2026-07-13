@@ -1,0 +1,1795 @@
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { toast } from 'sonner';
+import type { AgentResponseData, Conversation, Message, PendingInterrupt, Settings, Task, TaskHistoryEntry, TodoItem, TimelineEvent } from '../types';
+import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT, FEEDBACK_REQUEST_EXT, HITL_EXT, CLIENT_ACTION_EXT } from '../types';
+import { useSocket } from './SocketContext';
+import { useSessionId } from '../hooks/useLocalStorage';
+import { extractPartTexts, generateUUID, getPartKind, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
+import { executeClientAction } from '../../../core';
+import { useHostAdapter, useNannosCoreOptional, type UploadedFileInfo, type UserChatSettings } from '../../adapter';
+
+/** A client-action `apply` directive awaiting user approval (in-widget HITL). */
+interface ChatContextType {
+  // State
+  conversations: Conversation[];
+  activeConversationId: string | null;
+  messages: Message[];
+  tasks: Task[];
+  settings: Settings | null;
+  userSettings: {
+    preferred_model?: string | null;
+    preferred_model_retired?: boolean;
+    effective_preferred_model?: string | null;
+    enable_thinking?: boolean | null;
+    thinking_level?: string | null;
+  } | null;
+  isLoadingConversations: boolean;
+  isLoadingMessages: boolean;
+  /** True when the active conversation was created by an embedded widget OTHER
+   *  than this host (e.g. viewed from the console): label it and refuse new
+   *  input — its turns assume a live host page with registered client objects. */
+  activeConversationReadOnly: boolean;
+  isConnected: boolean;
+  isWaiting: boolean;
+  streamingMessage: string | null;
+  liveWorkingSteps: TodoItem[];
+  liveSubagentThoughts: Array<{agent_name: string; content: string; complete: boolean}>;
+  liveStatusHistory: Array<{timestamp: Date; message: string}>;
+  liveTimeline: TimelineEvent[];
+  pendingInterrupt: PendingInterrupt | null;
+  pendingFeedbackRequest: { conversationId: string; subAgents: string[] } | null;
+
+  // Actions
+  createConversation: () => void;
+  selectConversation: (id: string) => void;
+  sendMessage: (content: string, files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>) => void;
+  sendSilentMessage: (content: string, dataParts?: Record<string, unknown>[]) => void;
+  interruptTask: () => void;
+  dismissInterrupt: () => void;
+  dismissFeedbackRequest: () => void;
+  updateSettings: (settings: Settings) => Promise<boolean>;
+  loadConversations: (search?: string) => Promise<void>;
+}
+
+const ChatContext = createContext<ChatContextType | undefined>(undefined);
+
+// Embedded widgets resume only the conversation THIS browser session was on
+// (sessionStorage: survives reloads in the tab, not new tabs or later visits).
+// Keyed by subAgentId so two widgets on one host don't cross wires. Access is
+// guarded — sandboxed frames may deny storage.
+const sessionConversationKey = (scope: unknown) => `nannos-active-conversation:${String(scope)}`;
+
+function readSessionConversation(scope: unknown): string | null {
+  try {
+    return sessionStorage.getItem(sessionConversationKey(scope));
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionConversation(scope: unknown, conversationId: string): void {
+  try {
+    sessionStorage.setItem(sessionConversationKey(scope), conversationId);
+  } catch {
+    /* storage unavailable — resume simply won't survive a reload */
+  }
+}
+
+/**
+ * Playground mode configuration for testing specific sub-agent versions.
+ */
+export interface PlaygroundMode {
+  /** The version hash of the sub-agent config being tested */
+  subAgentConfigHash: string;
+  /** Human-readable name for display */
+  subAgentName: string;
+}
+
+interface ChatProviderProps {
+  children: ReactNode;
+  /** When set, filters conversations by this config hash and tags new ones */
+  playgroundMode?: PlaygroundMode;
+  /** Embedded hosts start on a fresh conversation instead of auto-selecting the
+   *  user's most recent (console) conversation. Default true (console behavior). */
+  autoSelectConversation?: boolean;
+}
+
+// Helper to build unified timeline from thoughts and status history
+// Todos are kept in sticky widget only, not in timeline
+const buildTimeline = (
+  thoughts: Array<{ agent_name: string; content: string; complete?: boolean; startedAt?: Date }> | undefined,
+  history: Array<{ timestamp: Date; message: string; source?: string }> | undefined,
+  baseTimestamp: Date
+): TimelineEvent[] => {
+  const events: TimelineEvent[] = [];
+  
+  // Add status history items (they have individual timestamps)
+  if (history && history.length > 0) {
+    history.forEach(item => {
+      events.push({ type: 'status', timestamp: item.timestamp, message: item.message, ...(item.source && { source: item.source }) });
+    });
+  }
+  
+  // Add thoughts (use their own startedAt timestamp when available)
+  if (thoughts && thoughts.length > 0) {
+    thoughts.forEach(thought => {
+      const ts = thought.startedAt || baseTimestamp;
+      events.push({ type: 'thought_start', timestamp: ts, agent_name: thought.agent_name });
+      events.push({ type: 'thought_end', timestamp: ts, agent_name: thought.agent_name, content: thought.content, complete: thought.complete ?? true });
+    });
+  }
+  
+  // Sort chronologically
+  return events.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+};
+
+// Helper to reconstruct timeline from saved message data
+const reconstructTimelineFromMessage = (msg: Record<string, unknown>): TimelineEvent[] => {
+  const events: TimelineEvent[] = [];
+  const timestamp = msg.created_at ? new Date(msg.created_at as string) : new Date();
+  
+  // Parse raw_payload if available (contains full response_data)
+  let responseData: Record<string, unknown> | null = null;
+  if (typeof msg.raw_payload === 'string' && msg.raw_payload) {
+    try {
+      responseData = JSON.parse(msg.raw_payload);
+    } catch (e) {
+      console.warn('Failed to parse raw_payload:', e);
+    }
+  }
+  
+  const metadata = (msg.metadata || (responseData?.metadata)) as Record<string, unknown> | undefined;
+  const kind = (msg.kind || responseData?.kind) as string | undefined;
+  
+  // Extract activity-log events (status message with activity-log extension)
+  const statusObj = responseData?.status as Record<string, unknown> | undefined;
+  const statusMsg = statusObj?.message as Record<string, unknown> | undefined;
+  const messageExtensions = (statusMsg?.extensions || []) as string[];
+  if (messageExtensions.includes(ACTIVITY_LOG_EXT)) {
+    // Try to get message from status object or from parts
+    let message = '';
+    let source: string | undefined;
+    
+    if (responseData) {
+      const status = responseData.status as Record<string, unknown> | undefined;
+      if (status?.message) {
+        // status.message can be either a string or a nested Message object with parts
+        if (typeof status.message === 'string') {
+          message = status.message;
+        } else if (typeof status.message === 'object' && status.message !== null) {
+          // Extract text from nested message parts
+          const nestedParts = (status.message as Record<string, unknown>).parts as Array<{ kind?: string; text?: string }> | undefined;
+          if (nestedParts && Array.isArray(nestedParts)) {
+            message = nestedParts.map(p => p.text || '').join(' ').trim();
+          }
+        }
+      }
+      // Extract source from status message metadata (for sub-agent attribution)
+      const msgMetadata = statusMsg?.metadata as Record<string, unknown> | undefined;
+      if (msgMetadata?.source && typeof msgMetadata.source === 'string') {
+        source = msgMetadata.source;
+      } else if (metadata?.source && typeof metadata.source === 'string') {
+        source = metadata.source;
+      }
+    }
+    
+    if (!message) {
+      // Fallback: extract from parts
+      const parts = msg.parts as Array<{ kind?: string; text?: string }> | undefined;
+      if (parts && parts.length > 0) {
+        message = parts.map(p => p.text || '').join(' ').trim();
+      }
+    }
+    
+    if (message) {
+      events.push({ type: 'status', timestamp, message, ...(source && { source }) });
+    }
+  }
+  
+  // Extract intermediate output (sub-agent thoughts) via artifact extensions
+  if (kind === 'artifact-update' && responseData) {
+    const artifact = responseData.artifact as Record<string, unknown> | undefined;
+    const artifactExtensions = (artifact?.extensions || []) as string[];
+    const artifactMetadata = artifact?.metadata as Record<string, unknown> | undefined;
+    
+    if (artifactExtensions.includes(INTERMEDIATE_OUTPUT_EXT)) {
+      const agentName = (artifactMetadata?.agent_name || 'sub-agent') as string;
+
+      // Extract thought content from artifact parts
+      let content = '';
+      const parts = artifact?.parts as Array<{ kind?: string; text?: string }> | undefined;
+      if (parts && parts.length > 0) {
+        content = parts.map(p => p.text || '').join('').trim();
+      }
+
+      if (content) {
+        events.push({ type: 'thought_start', timestamp, agent_name: agentName });
+        events.push({ type: 'thought_end', timestamp, agent_name: agentName, content, complete: true });
+      }
+    }
+  }
+
+  // Plain status-update with working state (no activity-log extension):
+  // sub-agent progress messages (e.g. "Initiating call...", "Call ringing...").
+  // During live streaming these are accumulated as working steps in the timeline;
+  // reconstruct the same behavior from persisted messages.
+  const statusState = getTaskState(statusObj?.state as string | undefined);
+  if (kind === 'status-update' && !messageExtensions.includes(ACTIVITY_LOG_EXT) && statusState === 'working') {
+    let message = '';
+    const parts = msg.parts as Array<{ kind?: string; text?: string }> | undefined;
+    if (parts && parts.length > 0) {
+      message = parts.map(p => p.text || '').join(' ').trim();
+    }
+    if (message) {
+      events.push({ type: 'status', timestamp, message });
+    }
+  }
+  
+  return events;
+};
+
+export function ChatProvider({ children, playgroundMode, autoSelectConversation = true }: ChatProviderProps) {
+  const sessionId = useSessionId();
+  const { routing, defaults, api } = useHostAdapter();
+  const core = useNannosCoreOptional();
+  const coreRef = useRef(core);
+  useEffect(() => {
+    coreRef.current = core;
+  }, [core]);
+  const routingRef = useRef(routing);
+  const {
+    isConnected,
+    isSocketReady,
+    initializeClient,
+    sendMessage: socketSendMessage,
+    cancelTask,
+    subscribeConversation,
+    unsubscribeConversation,
+    onAgentResponse,
+    onConversationSnapshot,
+  } = useSocket();
+
+  // Keep ref in sync for use inside event handler closures
+  useEffect(() => {
+    routingRef.current = routing;
+  }, [routing]);
+
+  // Load user settings to use as defaults
+  const [userSettings, setUserSettings] = useState<UserChatSettings | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getUserSettings()
+      .then((s) => {
+        if (!cancelled) setUserSettings(s);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  // State
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [messagesMap, setMessagesMap] = useState<Map<string, Message[]>>(new Map());
+  const [tasksMap, setTasksMap] = useState<Map<string, Task[]>>(new Map());
+  const [contextIdsMap, setContextIdsMap] = useState<Map<string, string>>(new Map());
+  const [waitingMap, setWaitingMap] = useState<Map<string, boolean>>(new Map());
+  const [streamingMap, setStreamingMap] = useState<Map<string, string>>(new Map());
+  const [workingStepsMap, setWorkingStepsMap] = useState<Map<string, TodoItem[]>>(new Map());
+  const [subagentThoughtsMap, setSubagentThoughtsMap] = useState<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
+  const [statusHistoryMap, setStatusHistoryMap] = useState<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
+  const [pendingInterruptMap, setPendingInterruptMap] = useState<Map<string, PendingInterrupt>>(new Map());
+  const [pendingFeedbackRequest, setPendingFeedbackRequest] = useState<{ conversationId: string; subAgents: string[] } | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState<{ text: string; silent?: boolean } | null>(null);
+
+  const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
+  const streamingMapRef = useRef<Map<string, string>>(new Map());
+  // Server-side offset (Unicode code points, from the backend's turnOffset/snapshot
+  // offset) that streamingMapRef's buffer corresponds to. Kept as its own ref because
+  // JS string.length counts UTF-16 units — deriving the offset from the buffer length
+  // would disagree with the backend as soon as the reply contains an astral-plane
+  // character (emoji) and silently drop chunks. Must be cleared wherever the streaming
+  // buffer is cleared.
+  const streamingOffsetMapRef = useRef<Map<string, number>>(new Map());
+  // Mirror of waitingMap for synchronous reads inside socket-event handlers.
+  const waitingMapRef = useRef<Map<string, boolean>>(new Map());
+  useEffect(() => {
+    waitingMapRef.current = waitingMap;
+  }, [waitingMap]);
+  const subagentThoughtsMapRef = useRef<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
+  const statusHistoryMapRef = useRef<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
+  const [isLoadingConversations, setIsLoadingConversations] = useState(false);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  // Settings are ephemeral and not persisted to localStorage
+  const [settings, setSettings] = useState<Settings | null>(null);
+
+  const messageCounterRef = useRef(0);
+  const taskCounterRef = useRef(0);
+  const playgroundModeRef = useRef(playgroundMode);
+  const activeConversationIdRef = useRef(activeConversationId);
+  const pendingMessagesRef = useRef<Map<string, string>>(new Map()); // messageId → conversationId
+  const persistedMessageIdRef = useRef<Map<string, string>>(new Map()); // conversationId → DB message_id
+
+  // Keep ref in sync
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  // Keep playground-mode ref in sync so config-hash filtering and message
+  // tagging pick up changes (e.g. when the user views a different sub-agent
+  // version in the playground) without relying solely on a provider remount.
+  useEffect(() => {
+    playgroundModeRef.current = playgroundMode;
+  }, [playgroundMode]);
+
+  // Derived state
+  const pendingInterrupt = useMemo(
+    () => (activeConversationId ? pendingInterruptMap.get(activeConversationId) ?? null : null),
+    [pendingInterruptMap, activeConversationId]
+  );
+  const messages = activeConversationId ? messagesMap.get(activeConversationId) || [] : [];
+  const tasks = activeConversationId ? tasksMap.get(activeConversationId) || [] : [];
+  const isWaiting = activeConversationId ? waitingMap.get(activeConversationId) === true : false;
+  const streamingMessage = activeConversationId ? streamingMap.get(activeConversationId) ?? null : null;
+  const liveWorkingSteps = activeConversationId ? workingStepsMap.get(activeConversationId) || [] : [];
+  const liveSubagentThoughts = activeConversationId ? subagentThoughtsMap.get(activeConversationId) || [] : [];
+  const liveStatusHistory = activeConversationId ? statusHistoryMap.get(activeConversationId) || [] : [];
+  
+  // Build live unified timeline during streaming (maintains chronological order)
+  const liveTimeline = activeConversationId 
+    ? buildTimeline(liveSubagentThoughts, liveStatusHistory, new Date())
+    : [];
+
+  // Helper to add a message
+  const addMessage = useCallback((conversationId: string, message: Message) => {
+    setMessagesMap((prev) => {
+      const newMap = new Map(prev);
+      const existing = newMap.get(conversationId) || [];
+      newMap.set(conversationId, [...existing, message]);
+      return newMap;
+    });
+  }, []);
+
+  // Helper to show toast notification for new agent messages
+  // Only shows when user is NOT actively viewing the conversation
+  const showMessageToast = useCallback((conversationId: string, content: string) => {
+    if (!content.trim()) return;
+    const isChatVisible = routingRef.current.isChatVisible?.() ?? true;
+    const isViewingThisConversation = activeConversationIdRef.current === conversationId;
+    if (isChatVisible && isViewingThisConversation) return;
+
+    const preview = content.slice(0, 60) + (content.length > 60 ? '...' : '');
+    const convId = conversationId;
+    toast.info('New message', {
+      description: preview,
+      duration: 5000,
+      action: {
+        label: 'View',
+        onClick: () => {
+          setActiveConversationId(convId);
+          routingRef.current.onActiveConversationChange?.(convId);
+          routingRef.current.openChat?.();
+        },
+      },
+    });
+  }, []);
+
+  // Helper to add/update a task
+  const addOrUpdateTask = useCallback((conversationId: string, task: Task) => {
+    setTasksMap((prev) => {
+      const newMap = new Map(prev);
+      const existing = newMap.get(conversationId) || [];
+      const existingIndex = existing.findIndex((t) => t.id === task.id);
+      if (existingIndex >= 0) {
+        const updated = [...existing];
+        updated[existingIndex] = task;
+        newMap.set(conversationId, updated);
+      } else {
+        newMap.set(conversationId, [...existing, task]);
+      }
+      return newMap;
+    });
+  }, []);
+
+  // Helper to update conversation
+  const updateConversation = useCallback((id: string, updates: Partial<Conversation>) => {
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)));
+  }, []);
+
+  // Handle agent responses
+  useEffect(() => {
+    const unsubscribe = onAgentResponse((data: AgentResponseData) => {
+      // Debug: log all incoming events
+      if (data.role === 'agent' && data.kind === 'status-update') {
+        console.log('[SOCKET EVENT] status-update:', data);
+      }
+      
+      // Route to the correct conversation using contextId, pending message lookup, or active conversation
+      const resolvedConversationId =
+        data.contextId ??
+        (data.id ? pendingMessagesRef.current.get(data.id) : undefined) ??
+        activeConversationIdRef.current;
+
+      if (!resolvedConversationId) {
+        console.warn('Received response but no conversation could be resolved');
+        return;
+      }
+
+      // Steering ack: the backend confirmed the follow-up was queued for the
+      // running agent. Nothing to render — the original stream is still active.
+      if ((data as any).steering) {
+        console.log('[STEERING] Follow-up message accepted for', resolvedConversationId);
+        return;
+      }
+
+      // Save context_id
+      if (data.contextId) {
+        setContextIdsMap((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(resolvedConversationId, data.contextId!);
+          return newMap;
+        });
+      }
+
+      // Handle work-plan (todo snapshot) — detect via extensions on status.message
+      const statusMessage = data.status?.message;
+      const statusExtensions = (statusMessage?.extensions || []) as string[];
+      if (statusExtensions.includes(WORK_PLAN_EXT) && Array.isArray(statusMessage?.parts)) {
+        // Extract todos from DataPart (part with kind === 'data')
+        const dataPart = statusMessage.parts.find((p: any) => p.kind === 'data' || p.data);
+        const todosData = dataPart?.data as Record<string, unknown> | undefined;
+        const incomingTodos = (todosData?.todos || []) as TodoItem[];
+        if (incomingTodos.length > 0) {
+        const wsMap = workingStepsMapRef.current;
+        const existing = wsMap.get(resolvedConversationId) || [];
+
+        // Determine which source(s) this snapshot covers
+        const incomingSources = new Set(incomingTodos.map((t) => t.source || ''));
+
+        // Keep existing todos from OTHER sources
+        const retained = existing.filter((t) => !incomingSources.has(t.source || ''));
+
+        // Merge: orchestrator todos (no source) first, then sub-agent groups
+        const merged = [...retained, ...incomingTodos];
+        merged.sort((a, b) => {
+          const aSource = a.source || '';
+          const bSource = b.source || '';
+          if (!aSource && bSource) return -1;
+          if (aSource && !bSource) return 1;
+          return aSource.localeCompare(bSource);
+        });
+
+        wsMap.set(resolvedConversationId, merged);
+        setWorkingStepsMap(new Map(wsMap));
+        return;
+        }
+      }
+
+      // Capture persisted message ID from backend (injected after DB flush)
+      if (data.persistedMessageId) {
+        persistedMessageIdRef.current.set(resolvedConversationId, data.persistedMessageId as string);
+      }
+
+      // Handle streaming artifact chunks (A2A artifact-append pattern)
+      if (data.kind === 'artifact-update' && data.artifact?.parts) {
+        const parts = data.artifact.parts;
+        if (Array.isArray(parts)) {
+          const text = extractPartTexts(parts).join('');
+          if (text) {
+            // Classify artifact via extensions array (A2A 1.0.0)
+            const artifactExtensions = ((data.artifact as any)?.extensions || []) as string[];
+            const artifactMetadata = (data.artifact as any)?.metadata || {};
+            const isIntermediateOutput = artifactExtensions.includes(INTERMEDIATE_OUTPUT_EXT);
+            const agentName = (artifactMetadata.agent_name as string) || 'sub-agent';
+            
+            if (isIntermediateOutput) {
+              // Accumulate sub-agent thoughts separately
+              const existingThoughts = subagentThoughtsMapRef.current.get(resolvedConversationId) || [];
+              const lastThought = existingThoughts[existingThoughts.length - 1];
+              
+              if (lastThought && lastThought.agent_name === agentName && !lastThought.complete) {
+                // Append to existing in-progress thought from same agent
+                lastThought.content += text;
+              } else {
+                // New thought: different agent OR same agent re-invoked after completion
+                existingThoughts.forEach(t => { t.complete = true; });
+                existingThoughts.push({ agent_name: agentName, content: text, complete: false, startedAt: new Date() });
+              }
+              
+              subagentThoughtsMapRef.current.set(resolvedConversationId, existingThoughts);
+              setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current)); // Trigger re-render
+            } else {
+              // Orchestrator's final response chunks — thinking is done for all agents
+              const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+              if (thoughts?.some(t => !t.complete)) {
+                thoughts.forEach(t => { t.complete = true; });
+                setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+              }
+              // Dedupe against a resume snapshot: turnOffset is the cumulative reply
+              // length (in code points, per the backend) after this chunk. Compare it to
+              // the applied offset we track alongside the buffer — NOT to the buffer's
+              // .length, which counts UTF-16 units and runs ahead of the backend offset
+              // whenever the reply contains emoji, wrongly discarding chunks. Skip any
+              // chunk already covered so reconnect/reload never double-appends.
+              const existing = streamingMapRef.current.get(resolvedConversationId) || '';
+              const applied = streamingOffsetMapRef.current.get(resolvedConversationId) ?? 0;
+              const chunkOffset = data.turnOffset;
+              if (typeof chunkOffset === 'number' && chunkOffset <= applied) {
+                return;
+              }
+              streamingMapRef.current.set(resolvedConversationId, existing + text);
+              if (typeof chunkOffset === 'number') {
+                streamingOffsetMapRef.current.set(resolvedConversationId, chunkOffset);
+              }
+              setStreamingMap(new Map(streamingMapRef.current));
+            }
+          }
+        }
+        // Don't finalize here - let the completion status handler finalize the stream
+        return;
+      }
+
+      // Handle feedback-request extension — show proactive feedback prompt
+      if (data.kind === 'status-update') {
+        const statusMsg = data.status?.message;
+        const exts = ((statusMsg as any)?.extensions || []) as string[];
+        if (exts.includes(FEEDBACK_REQUEST_EXT)) {
+          // Extract sub_agents from DataPart
+          const dataPart = statusMsg?.parts?.find((p: any) => p.kind === 'data' || p.data);
+          const subAgents = ((dataPart?.data as any)?.sub_agents || []) as string[];
+          console.log('[FEEDBACK] Received feedback request for conversation:', resolvedConversationId, 'sub_agents:', subAgents);
+          setPendingFeedbackRequest({ conversationId: resolvedConversationId, subAgents });
+          return;
+        }
+      }
+
+      // Handle client-action directives (Embedded Nannos): execute against
+      // host-registered object handles ONLY (the registry is the trust
+      // boundary; without a core/registry the directive is ignored).
+      if (data.kind === 'status-update') {
+        const statusMsg = data.status?.message;
+        const exts = ((statusMsg as any)?.extensions || []) as string[];
+        if (exts.includes(CLIENT_ACTION_EXT)) {
+          const dataPart = statusMsg?.parts?.find((p: any) => p.kind === 'data' || p.data);
+          const directive = (dataPart?.data as any)?.directive;
+          const core = coreRef.current;
+          if (directive && core?.registry) {
+            // When the host also wired core-level bindClientActions (<NannosProvider
+            // navigate/highlight>), that subscription executes the directive — skip
+            // here so it runs exactly once.
+            if (!core.clientActionsBound) {
+              // No confirm layer here: consequential actions (apply) were already
+              // approved once at the agent's tool-call HITL gate upstream, so the
+              // directive that arrives is pre-approved and applied directly.
+              void executeClientAction(directive, {
+                registry: core.registry,
+                navigate: routingRef.current.navigate,
+                highlight: routingRef.current.highlight,
+              }).catch((err) => {
+                console.warn('[CLIENT-ACTION] handler threw:', err);
+              });
+            }
+          } else {
+            console.warn('[CLIENT-ACTION] Directive ignored (no registry or malformed):', directive);
+          }
+          return;
+        }
+      }
+
+      // Capture activity-log events for linear display (similar to VSCode Copilot chat)
+      // Detected via extensions on status.message (A2A 1.0.0)
+      if (data.kind === 'status-update') {
+        const statusMsg = data.status?.message;
+        const exts = ((statusMsg as any)?.extensions || []) as string[];
+        if (exts.includes(ACTIVITY_LOG_EXT)) {
+        // Extract text from message parts (status.message.parts)
+        if (statusMsg && Array.isArray(statusMsg.parts)) {
+          const text = extractPartTexts(statusMsg.parts).join('');
+          
+          if (text && text.trim()) {
+            // Extract source attribution from message metadata (sub-agent name)
+            const msgMetadata = (statusMsg as any)?.metadata as Record<string, unknown> | undefined;
+            const source = msgMetadata?.source && typeof msgMetadata.source === 'string' ? msgMetadata.source : undefined;
+            // This is an activity-log event (tool call, delegation) - add to history
+            const history = statusHistoryMapRef.current.get(resolvedConversationId) || [];
+            history.push({
+              timestamp: new Date(),
+              message: text,
+              ...(source && { source })
+            });
+            statusHistoryMapRef.current.set(resolvedConversationId, history);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+            // Mark any in-progress thoughts as complete — the orchestrator moved
+            // on to a new action so the previous sub-agent thinking is done.
+            const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+            if (thoughts?.some(t => !t.complete)) {
+              thoughts.forEach(t => { t.complete = true; });
+              setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+            }
+            return; // Don't process as regular status update
+          }
+        }
+        }
+      }
+
+      // Clear streaming buffer only on final message responses (not status updates)
+      // Status updates can happen during streaming, so we shouldn't clear the buffer
+      if (data.role === 'agent' && Array.isArray(data.parts) && shouldDisplayMessageParts(data.parts)) {
+        if (streamingMapRef.current.has(resolvedConversationId)) {
+          streamingMapRef.current.delete(resolvedConversationId);
+          streamingOffsetMapRef.current.delete(resolvedConversationId);
+          setStreamingMap(new Map(streamingMapRef.current));
+        }
+      }
+
+      // Handle error
+      if (data.error) {
+        messageCounterRef.current++;
+        const errorMsg: Message = {
+          id: `msg-${messageCounterRef.current}`,
+          conversationId: resolvedConversationId,
+          type: 'agent',
+          content: `Error: ${data.error}`,
+          timestamp: new Date(),
+        };
+        addMessage(resolvedConversationId, errorMsg);
+        updateConversation(resolvedConversationId, { lastMessage: errorMsg.content });
+        // Clean up pending message tracking
+        if (data.id) pendingMessagesRef.current.delete(data.id);
+        setWaitingMap((prev) => { const m = new Map(prev); m.delete(resolvedConversationId); return m; });
+        workingStepsMapRef.current.delete(resolvedConversationId);
+        setWorkingStepsMap(new Map(workingStepsMapRef.current));
+        return;
+      }
+
+      // Handle message response
+      if (data.role === 'agent' && Array.isArray(data.parts)) {
+        if (shouldDisplayMessageParts(data.parts)) {
+          const text = extractPartTexts(data.parts).join('\n');
+          const steps = workingStepsMapRef.current.get(resolvedConversationId);
+          messageCounterRef.current++;
+          const timestamp = new Date();
+          const agentMsg: Message = {
+            id: (data.messageId as string) || `msg-${messageCounterRef.current}`,
+            conversationId: resolvedConversationId,
+            type: 'agent',
+            content: text,
+            timestamp,
+            ...(steps && steps.length > 0 && { workingSteps: steps }),
+            timeline: buildTimeline(undefined, undefined, timestamp),
+          };
+          addMessage(resolvedConversationId, agentMsg);
+          updateConversation(resolvedConversationId, {
+            lastMessage: text.slice(0, 50),
+            timestamp: new Date(),
+          });
+          // Keep working steps visible in sticky widget (don't delete)
+          // Clear waiting state and pending message tracking
+          if (data.id) pendingMessagesRef.current.delete(data.id);
+          setWaitingMap((prev) => { const m = new Map(prev); m.delete(resolvedConversationId); return m; });
+        }
+        return;
+      }
+
+      // Handle task status update
+      if (data.status) {
+        const normalizedStatus = getTaskState(data.status?.state);
+
+        // Finalize streaming message when task completes, fails, or requires input
+        let finalizedFromStream = false;
+        if (normalizedStatus === 'completed' || normalizedStatus === 'failed' || normalizedStatus === 'canceled' || normalizedStatus === 'input-required') {
+          const streamedText = streamingMapRef.current.get(resolvedConversationId);
+          const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+          // Mark all thoughts as complete — task is done
+          if (thoughts) thoughts.forEach(t => { t.complete = true; });
+          const steps = workingStepsMapRef.current.get(resolvedConversationId);
+          const history = statusHistoryMapRef.current.get(resolvedConversationId);
+
+          const finalizeMessage = (content: string) => {
+            messageCounterRef.current++;
+            const persistedId = persistedMessageIdRef.current.get(resolvedConversationId);
+            persistedMessageIdRef.current.delete(resolvedConversationId);
+            const timestamp = new Date();
+            const agentMsg: Message = {
+              id: persistedId || `msg-${messageCounterRef.current}`,
+              conversationId: resolvedConversationId,
+              type: 'agent',
+              content,
+              timestamp,
+              ...(steps && steps.length > 0 && { workingSteps: steps }),
+              ...(thoughts && thoughts.length > 0 && { subagentThoughts: thoughts }),
+              ...(history && history.length > 0 && { statusHistory: history }),
+              timeline: buildTimeline(thoughts, history, timestamp),
+            };
+            addMessage(resolvedConversationId, agentMsg);
+            updateConversation(resolvedConversationId, {
+              lastMessage: content.slice(0, 50),
+              timestamp: new Date(),
+            });
+            // Keep todos visible in sticky widget (don't delete workingStepsMapRef)
+            // Clear only thoughts and history
+            subagentThoughtsMapRef.current.delete(resolvedConversationId);
+            setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+            statusHistoryMapRef.current.delete(resolvedConversationId);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+
+            showMessageToast(resolvedConversationId, content);
+          };
+
+          // The backend tags the terminal status with `final_answer_source: "fallback"`
+          // when the streamed artifact is only a partial prefix of the real answer —
+          // notably delegations where the orchestrator streams an empty/stub message
+          // (e.g. include_subagent_output with message='') and the full answer is
+          // assembled into the terminal message. In that case the terminal message is
+          // authoritative, so we must NOT finalize from the (stub) streamed text, or the
+          // real answer (carried in data.status.message below) would be dropped.
+          const statusMeta = ((data as any)?.metadata
+            || (data.status as any)?.metadata
+            || (data.status?.message as any)?.metadata) as Record<string, unknown> | undefined;
+          const fallbackSupersedes =
+            normalizedStatus === 'completed' && statusMeta?.final_answer_source === 'fallback';
+
+          if (streamedText && streamedText.trim() && !fallbackSupersedes) {
+            // Orchestrator streamed its own response token-by-token
+            finalizeMessage(streamedText);
+            finalizedFromStream = true;
+          }
+
+          // Always clear streaming buffer and waiting indicator on completion
+          streamingMapRef.current.delete(resolvedConversationId);
+          streamingOffsetMapRef.current.delete(resolvedConversationId);
+          setStreamingMap(new Map(streamingMapRef.current));
+          setWaitingMap((prev) => {
+            const m = new Map(prev);
+            m.delete(resolvedConversationId);
+            return m;
+          });
+
+          // Detect HITL interrupt from orchestrator via extension
+          if (normalizedStatus === 'input-required') {
+            const extensions: string[] = data.status.message?.extensions || [];
+            const isHitlInterrupt = extensions.includes(HITL_EXT);
+
+            if (isHitlInterrupt) {
+              // Extract action_requests + review_configs from DataPart
+              let actionRequests: Array<{ name: string; args: Record<string, unknown>; description?: string }> | undefined;
+              let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
+              let reason = '';
+              if (data.status.message?.parts) {
+                for (const part of data.status.message.parts) {
+                  const partKind = getPartKind(part);
+                  if (partKind === 'data') {
+                    const partData = part.data as Record<string, unknown> | undefined;
+                    if (partData?.action_requests) {
+                      actionRequests = partData.action_requests as typeof actionRequests;
+                    }
+                    if (partData?.review_configs) {
+                      reviewConfigs = partData.review_configs as typeof reviewConfigs;
+                    }
+                  } else if (partKind === 'text') {
+                    reason = part.text || '';
+                  }
+                }
+              }
+
+              // Set a single generic interrupt — no tool-specific branching
+              const firstAction = actionRequests?.[0];
+              const toolName = firstAction?.name || '';
+              setPendingInterruptMap((prev) => {
+                const next = new Map(prev);
+                next.set(resolvedConversationId, {
+                  conversationId: resolvedConversationId,
+                  taskId: data.taskId as string | undefined,
+                  toolName,
+                  reason: (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || reason,
+                  actionRequests,
+                  reviewConfigs,
+                });
+                return next;
+              });
+            }
+          }
+        }
+
+        // Extract nested message if present (skip if already finalized from streamed content)
+        const nestedMsg = data.status.message;
+        if (!finalizedFromStream && nestedMsg && Array.isArray(nestedMsg.parts) && shouldDisplayMessageParts(nestedMsg.parts)) {
+          const text = extractPartTexts(nestedMsg.parts).join('\n');
+
+          if (normalizedStatus === 'working') {
+            // Add to status history for timeline display (same as activity-log events).
+            // These are sub-agent progress messages (e.g. "Initiating call...") that
+            // should appear in the live timeline.
+            const history = statusHistoryMapRef.current.get(resolvedConversationId) || [];
+            history.push({ timestamp: new Date(), message: text });
+            statusHistoryMapRef.current.set(resolvedConversationId, history);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+          } else {
+            // Terminal/final state — create message bubble with the full accumulated timeline
+            const steps = workingStepsMapRef.current.get(resolvedConversationId);
+            const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+            const history = statusHistoryMapRef.current.get(resolvedConversationId);
+            messageCounterRef.current++;
+            const timestamp = new Date();
+            const agentMsg: Message = {
+              id: (nestedMsg.messageId as string) || `msg-${messageCounterRef.current}`,
+              conversationId: resolvedConversationId,
+              type: 'agent',
+              content: text,
+              timestamp,
+              ...(steps && steps.length > 0 && { workingSteps: steps }),
+              ...(thoughts && thoughts.length > 0 && { subagentThoughts: thoughts }),
+              ...(history && history.length > 0 && { statusHistory: history }),
+              timeline: buildTimeline(thoughts, history, timestamp),
+            };
+            addMessage(resolvedConversationId, agentMsg);
+            updateConversation(resolvedConversationId, {
+              lastMessage: text.slice(0, 50),
+              timestamp: new Date(),
+            });
+            // Keep todos visible in sticky widget (don't delete workingStepsMapRef)
+            // Clear only thoughts and history so live timeline/spinner clears
+            subagentThoughtsMapRef.current.delete(resolvedConversationId);
+            setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+            statusHistoryMapRef.current.delete(resolvedConversationId);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+
+            showMessageToast(resolvedConversationId, text);
+          }
+        }
+
+        // Update task
+        const taskId = data.id || `task-${taskCounterRef.current++}`;
+        const existingTasks = tasksMap.get(resolvedConversationId) || [];
+        const existingTask = existingTasks.find((t) => t.id === taskId);
+
+        const historyEntries: TaskHistoryEntry[] = Array.isArray(data.history) ? data.history : [];
+        const validationErrors = Array.isArray(data.validation_errors) ? data.validation_errors : [];
+        const progressValue =
+          typeof data.progress === 'number'
+            ? data.progress
+            : typeof data.status?.progress === 'number'
+              ? data.status.progress
+              : null;
+        const contextId = data.contextId || historyEntries[0]?.contextId || existingTask?.contextId || null;
+
+        const task: Task = existingTask
+          ? {
+              ...existingTask,
+              status: normalizedStatus as Task['status'],
+              statusDetails: data.status,
+              title: data.title || existingTask.title,
+              contextId: contextId || existingTask.contextId,
+              history: historyEntries.length ? historyEntries : existingTask.history,
+              validationErrors: validationErrors.length ? validationErrors : existingTask.validationErrors,
+              progress: typeof progressValue === 'number' ? progressValue : existingTask.progress,
+              taskId: data.taskId || existingTask.taskId,
+              timestamp: new Date(),
+            }
+          : {
+              id: taskId,
+              conversationId: resolvedConversationId,
+              title: data.title || 'Task',
+              status: normalizedStatus as Task['status'],
+              statusDetails: data.status,
+              contextId,
+              history: historyEntries,
+              validationErrors,
+              progress: typeof progressValue === 'number' ? progressValue : 0,
+              timestamp: new Date(),
+              result: null,
+              source: data,
+              taskId: data.taskId || null,
+            };
+
+        addOrUpdateTask(resolvedConversationId, task);
+
+        // Update conversation active tasks status
+        const allTasks = tasksMap.get(resolvedConversationId) || [];
+        const hasActiveTasks = allTasks.some((t) => !isTaskComplete(t.status));
+        updateConversation(resolvedConversationId, { hasActiveTasks });
+
+        // Clean up pending message tracking on terminal states
+        if (isTaskComplete(normalizedStatus)) {
+          if (data.id) pendingMessagesRef.current.delete(data.id);
+          setWaitingMap((prev) => { const m = new Map(prev); m.delete(resolvedConversationId); return m; });
+          // Keep todos visible in sticky widget (don't delete workingStepsMapRef)
+        }
+        return;
+      }
+
+      // Handle artifact update
+      if (data.artifact || data.kind === 'artifact-update') {
+        const art =
+          data.artifact ||
+          (Array.isArray(data.artifacts) ? (data.artifacts as { parts?: { text?: string }[] }[])[0] : null);
+        if (art && Array.isArray(art.parts) && shouldDisplayMessageParts(art.parts)) {
+          const text = extractPartTexts(art.parts).join('\n');
+          messageCounterRef.current++;
+          const agentMsg: Message = {
+            id: `msg-${messageCounterRef.current}`,
+            conversationId: resolvedConversationId,
+            type: 'agent',
+            content: text,
+            timestamp: new Date(),
+          };
+          addMessage(resolvedConversationId, agentMsg);
+          updateConversation(resolvedConversationId, {
+            lastMessage: text.slice(0, 50),
+            timestamp: new Date(),
+          });
+        }
+
+        // Update task with artifact
+        const taskId = data.id || `task-${taskCounterRef.current++}`;
+        const existingTasks = tasksMap.get(resolvedConversationId) || [];
+        const existingTask = existingTasks.find((t) => t.id === taskId);
+
+        const task: Task = existingTask
+          ? {
+              ...existingTask,
+              result: JSON.stringify(data.artifacts || data.artifact, null, 2),
+              status: 'completed',
+              statusDetails: { state: 'completed' },
+              progress: 100,
+              timestamp: new Date(),
+            }
+          : {
+              id: taskId,
+              conversationId: resolvedConversationId,
+              title: 'Task Result',
+              status: 'completed',
+              statusDetails: { state: 'completed' },
+              contextId: null,
+              history: [],
+              validationErrors: [],
+              progress: 100,
+              timestamp: new Date(),
+              result: JSON.stringify(data.artifacts || data.artifact, null, 2),
+              source: data,
+              taskId: null,
+            };
+
+        addOrUpdateTask(resolvedConversationId, task);
+        return;
+      }
+
+      // Unknown response - display as JSON
+      messageCounterRef.current++;
+      const genericMsg: Message = {
+        id: `msg-${messageCounterRef.current}`,
+        conversationId: resolvedConversationId,
+        type: 'agent',
+        content: JSON.stringify(data, null, 2),
+        timestamp: new Date(),
+      };
+      addMessage(resolvedConversationId, genericMsg);
+    });
+
+    return unsubscribe;
+  }, [onAgentResponse, addMessage, addOrUpdateTask, updateConversation, tasksMap]);
+
+  // Subscribe to the active conversation's stream room, and re-subscribe on reconnect
+  // (isSocketReady flips) so an in-flight turn resumes after a drop or page reload.
+  useEffect(() => {
+    if (!isSocketReady || !activeConversationId) return;
+    subscribeConversation(activeConversationId);
+    return () => unsubscribeConversation(activeConversationId);
+  }, [isSocketReady, activeConversationId, subscribeConversation, unsubscribeConversation]);
+
+  // Load conversations from backend
+  const loadConversations = useCallback(async (search?: string) => {
+    setIsLoadingConversations(true);
+    try {
+      const effectiveAgentUrl = settings?.agentUrl || null;
+      const params = new URLSearchParams();
+      params.set('limit', '50');
+      if (search && search.trim()) params.set('search', search.trim());
+      if (effectiveAgentUrl) params.set('agent_url', effectiveAgentUrl);
+      // In playground mode, filter by sub_agent_config_hash
+      if (playgroundModeRef.current?.subAgentConfigHash) {
+        params.set('sub_agent_config_hash', playgroundModeRef.current.subAgentConfigHash);
+      } else {
+        // In main chat, exclude playground conversations
+        params.set('exclude_playground', 'true');
+      }
+      // Embedded widget: scope to THIS application's conversations, server-side.
+      // A host page must only ever receive its own conversations — console and
+      // other-app conversation titles must not reach a third-party page.
+      const embeddedScopeId = coreRef.current?.config?.subAgentId;
+      if (embeddedScopeId !== undefined) {
+        params.set('embedded_sub_agent_id', String(embeddedScopeId));
+      }
+
+      // Host headers (e.g. console impersonation/admin-mode) ride via api.fetch.
+      const resp = await api.fetch(`/api/v1/conversations/?${params.toString()}`);
+      if (!resp.ok) {
+        throw new Error(`Failed to load conversations (status=${resp.status})`);
+      }
+      const data = await resp.json();
+
+      const raw = Array.isArray(data.items) ? data.items : Array.isArray(data.conversations) ? data.conversations : [];
+
+      const mapped: Conversation[] = raw.map((c: Record<string, unknown>) => {
+        const id = (c.id || c.conversation_id || c.conversationId) as string;
+        const title = (c.title || (c.metadata as Record<string, unknown>)?.title || 'Conversation') as string;
+        const lastMessage = (c.last_message || c.lastMessage || '') as string;
+        const ts =
+          c.last_message_at ||
+          c.lastMessageAt ||
+          c.last_updated ||
+          c.lastUpdated ||
+          c.updated_at ||
+          c.started_at ||
+          c.created_at ||
+          null;
+        const timestamp = ts ? new Date(ts as string) : new Date();
+        const embeddedSubAgentId = (c.metadata as Record<string, unknown> | undefined)?.embedded_sub_agent_id;
+        return {
+          id,
+          title,
+          lastMessage,
+          timestamp,
+          lastUpdatedRaw: (ts as string) || undefined,
+          status: (c.status as 'active' | 'archived') || 'active',
+          hasActiveTasks: !!c.has_active_tasks,
+          embeddedSubAgentId: embeddedSubAgentId != null ? String(embeddedSubAgentId) : undefined,
+        };
+      });
+
+      setConversations(mapped);
+
+      // Cache context ids
+      if (Array.isArray(data.items)) {
+        const newContextIds = new Map(contextIdsMap);
+        data.items.forEach((c: Record<string, unknown>) => {
+          if (c.context_id) {
+            newContextIds.set(c.id as string, c.context_id as string);
+          }
+        });
+        setContextIdsMap(newContextIds);
+      }
+
+      // Auto-select if none selected: the console adopts the most recent
+      // conversation; the embedded widget resumes ONLY the conversation this
+      // browser session was already on (a reload restores it — including an
+      // in-flight turn's pending HITL prompt — but a fresh visit starts clean,
+      // with history one tap away).
+      if (!activeConversationId && mapped.length > 0) {
+        if (autoSelectConversation) {
+          setActiveConversationId(mapped[0].id);
+        } else if (embeddedScopeId !== undefined) {
+          const sessionConversation = readSessionConversation(embeddedScopeId);
+          if (sessionConversation && mapped.some((c) => c.id === sessionConversation)) {
+            setActiveConversationId(sessionConversation);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('loadConversations failed', e);
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  }, [settings?.agentUrl, activeConversationId, contextIdsMap, api, autoSelectConversation]);
+
+  // Load messages for a conversation
+  const loadMessages = useCallback(async (conversationId: string) => {
+    setIsLoadingMessages(true);
+    try {
+      // Host headers (e.g. console impersonation/admin-mode) ride via api.fetch.
+      const resp = await api.fetch(`/api/v1/messages/${encodeURIComponent(conversationId)}?limit=100`);
+      if (!resp.ok) {
+        // 404 means conversation doesn't exist yet (brand new) - that's okay, just skip loading
+        if (resp.status === 404) {
+          return;
+        }
+        throw new Error(`Failed to load messages (status=${resp.status})`);
+      }
+      const data = await resp.json();
+
+      const raw = Array.isArray(data.items) ? data.items : Array.isArray(data.messages) ? data.messages : [];
+
+      const mapped: Message[] = raw
+        .map((m: Record<string, unknown>) => {
+          const partArray = m.parts as
+            | Array<{ kind?: string; text?: string; file?: { uri: string; mimeType?: string; name?: string } }>
+            | undefined;
+          if (partArray && !shouldDisplayMessageParts(partArray) && typeof m.content !== 'string') {
+            return null;
+          }
+          const id = (m.id || m.message_id || m.messageId || `msg-${Math.random().toString(36).slice(2, 9)}`) as string;
+          const role = (m.role || (m.user_id ? 'user' : 'agent')) as string;
+          let content = '';
+          if (typeof m.content === 'string') {
+            content = m.content;
+          } else if (partArray) {
+            content = extractPartTexts(partArray).join('\n');
+          } else if (typeof m.parts === 'string') {
+            content = m.parts;
+          }
+          const ts = m.created_at || m.timestamp || m.sort_key || null;
+          const timestamp = ts ? new Date(ts as string) : new Date();
+          
+          // Reconstruct timeline from saved message data
+          const timeline = reconstructTimelineFromMessage(m);
+          
+          // Determine whether this message should render as a MessageCard bubble
+          // or only contribute to the timeline. This mirrors the live streaming
+          // behavior where:
+          //   - activity-log status-updates → timeline only
+          //   - working-state status-updates → timeline only (working steps)
+          //   - task kind → timeline only (protocol artifact)
+          //   - terminal status-updates and artifacts with content → bubble
+          const kind = m.kind as string | undefined;
+          const state = getTaskState(m.state as string | undefined);
+          let rawPayload: Record<string, unknown> | null = null;
+          if (typeof m.raw_payload === 'string' && m.raw_payload) {
+            try { rawPayload = JSON.parse(m.raw_payload); } catch { /* ignore */ }
+          }
+          const savedStatusMsg = (rawPayload?.status as any)?.message;
+          const savedExtensions = (savedStatusMsg?.extensions || []) as string[];
+          const isActivityLogOnly = savedExtensions.includes(ACTIVITY_LOG_EXT);
+          
+          // Check for intermediate-output artifact (sub-agent reasoning)
+          const savedArtifact = rawPayload?.artifact as Record<string, unknown> | undefined;
+          const savedArtifactExtensions = (savedArtifact?.extensions || []) as string[];
+          const isIntermediateOutput = savedArtifactExtensions.includes(INTERMEDIATE_OUTPUT_EXT);
+          
+          // Messages that should only appear in the timeline, not as chat bubbles:
+          // 1. Activity-log events (have ACTIVITY_LOG_EXT extension)
+          // 2. Status-updates with working state (sub-agent progress)
+          // 3. Task kind messages (protocol-level task submissions)
+          // 4. Intermediate-output artifacts (sub-agent reasoning blocks)
+          const isTimelineOnly =
+            isActivityLogOnly ||
+            isIntermediateOutput ||
+            (kind === 'status-update' && state === 'working') ||
+            kind === 'task' ||
+            (!content || content.trim().length === 0);
+          
+          const showMessageCard = !isTimelineOnly;
+          
+          return {
+            id,
+            conversationId,
+            type: role === 'user' ? 'user' : 'agent',
+            content,
+            timestamp,
+            parts: partArray, // Include parts array for file attachments
+            timeline: timeline.length > 0 ? timeline : undefined, // Only include if we have events
+            showMessageCard, // Control whether to render MessageCard component
+          } as Message;
+        });
+
+      // Aggregate timeline events from consecutive timeline-only messages
+      // into the next bubble message. This mirrors the live streaming behavior
+      // where working steps accumulate and render as a single timeline block
+      // above the final response.
+      const aggregated: Message[] = [];
+      let pendingTimeline: TimelineEvent[] = [];
+      for (const msg of mapped.filter((m): m is Message => m !== null)) {
+        if (msg.showMessageCard === false) {
+          // Collect timeline events from hidden messages
+          if (msg.timeline) pendingTimeline.push(...msg.timeline);
+        } else {
+          // Attach accumulated timeline to the next visible message
+          if (pendingTimeline.length > 0) {
+            const merged = [...pendingTimeline, ...(msg.timeline || [])];
+            merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+            msg.timeline = merged;
+            pendingTimeline = [];
+          }
+          aggregated.push(msg);
+        }
+      }
+      // If there are leftover timeline-only messages at the end (no following
+      // bubble), create a synthetic timeline-only message so they're still visible
+      if (pendingTimeline.length > 0) {
+        pendingTimeline.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        aggregated.push({
+          id: `timeline-${pendingTimeline[0].timestamp.getTime()}`,
+          conversationId,
+          type: 'agent',
+          content: '',
+          timestamp: pendingTimeline[0].timestamp,
+          timeline: pendingTimeline,
+          showMessageCard: false,
+        } as Message);
+      }
+
+      setMessagesMap((prev) => {
+        const newMap = new Map(prev);
+        const existing = newMap.get(conversationId) || [];
+        const existingIds = new Set(existing.map((x) => x.id));
+        const merged = [...existing, ...aggregated.filter((m) => !existingIds.has(m.id))];
+        merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        newMap.set(conversationId, merged);
+        return newMap;
+      });
+
+      // Restore pending HITL interrupt if the last agent status is still input-required.
+      // Find the most recent input-required + HITL message, then check whether a later
+      // non-input-required status-update exists (which would mean the interrupt was resolved).
+      const hitlMsg = [...raw].reverse().find((m: Record<string, unknown>) => {
+        if (m.kind !== 'status-update' || getTaskState(m.state as string | undefined) !== 'input-required') return false;
+        try {
+          const payload = typeof m.raw_payload === 'string' ? JSON.parse(m.raw_payload as string) : null;
+          const extensions = (payload?.status?.message?.extensions || []) as string[];
+          return extensions.includes(HITL_EXT);
+        } catch { return false; }
+      });
+
+      if (hitlMsg) {
+        const hitlTs = new Date(((hitlMsg.created_at || hitlMsg.timestamp) as string | undefined) ?? 0).getTime();
+        const isResolved = raw.some((m: Record<string, unknown>) => {
+          if (m.kind !== 'status-update' || getTaskState(m.state as string | undefined) === 'input-required') return false;
+          const ts = new Date(((m.created_at || m.timestamp) as string | undefined) ?? 0).getTime();
+          return ts > hitlTs;
+        });
+
+        if (!isResolved) {
+          try {
+            const payload = JSON.parse(hitlMsg.raw_payload as string);
+            const parts = (payload?.status?.message?.parts || []) as Array<Record<string, unknown>>;
+            let actionRequests: Array<{ name: string; args: Record<string, unknown>; description?: string }> | undefined;
+            let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
+            let reason = '';
+            for (const part of parts) {
+              const partKind = getPartKind(part);
+              if (partKind === 'data') {
+                const d = part.data as Record<string, unknown> | undefined;
+                if (d?.action_requests) actionRequests = d.action_requests as typeof actionRequests;
+                if (d?.review_configs) reviewConfigs = d.review_configs as typeof reviewConfigs;
+              } else if (partKind === 'text') {
+                reason = (part.text as string) || '';
+              }
+            }
+            const firstAction = actionRequests?.[0];
+            setPendingInterruptMap((prev) => {
+              if (prev.has(conversationId)) return prev; // live interrupt already set, don't overwrite
+              const next = new Map(prev);
+              next.set(conversationId, {
+                conversationId,
+                taskId: payload?.taskId as string | undefined,
+                toolName: firstAction?.name || '',
+                reason: (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || reason,
+                actionRequests,
+                reviewConfigs,
+              });
+              return next;
+            });
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    } catch (e) {
+      console.error('loadMessages failed', e);
+    } finally {
+      setIsLoadingMessages(false);
+    }
+  }, [api]);
+
+  // Apply the snapshot returned when (re)subscribing to a conversation.
+  //
+  // inFlight: seeds the streaming buffer with the reply produced while the client was
+  // away. A pending HITL prompt (if any) is restored separately via the normal
+  // agent_response path (see SocketContext). Only overwrite when the snapshot is AHEAD
+  // of what we already hold: a live chunk can race ahead of the snapshot (server enters
+  // the room, then reads the buffer), and rewinding to the shorter snapshot would drop
+  // that segment.
+  //
+  // Not inFlight: the turn (if any) ended while we were out of the room — its terminal
+  // events went to a room we had left, so nothing cleared our in-flight UI state.
+  // Reconcile: drop the stale spinner/stream state and refetch the persisted messages,
+  // which include the reply we missed. Without this the spinner never clears and the
+  // stale buffer makes the next turn's turnOffset dedup drop its chunks.
+  useEffect(() => {
+    const unsubscribe = onConversationSnapshot((snap) => {
+      if (!snap?.conversationId) return;
+      const conversationId = snap.conversationId;
+
+      if (!snap.inFlight) {
+        const hadStaleStream = streamingMapRef.current.has(conversationId);
+        const hadWaiting = !!waitingMapRef.current.get(conversationId);
+        if (!hadStaleStream && !hadWaiting) return;
+        if (hadStaleStream) {
+          streamingMapRef.current.delete(conversationId);
+          streamingOffsetMapRef.current.delete(conversationId);
+          setStreamingMap(new Map(streamingMapRef.current));
+        }
+        if (hadWaiting) {
+          setWaitingMap((prev) => {
+            const m = new Map(prev);
+            m.delete(conversationId);
+            return m;
+          });
+        }
+        // Match the live finalize path: thoughts/history were attached to the persisted
+        // messages at turn end server-side, so drop the in-progress copies.
+        subagentThoughtsMapRef.current.delete(conversationId);
+        setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+        statusHistoryMapRef.current.delete(conversationId);
+        setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+        loadMessages(conversationId);
+        return;
+      }
+
+      if (typeof snap.offset === 'number') {
+        const applied = streamingOffsetMapRef.current.get(conversationId) ?? 0;
+        if (snap.offset > applied) {
+          streamingMapRef.current.set(conversationId, snap.replyText || '');
+          streamingOffsetMapRef.current.set(conversationId, snap.offset);
+          setStreamingMap(new Map(streamingMapRef.current));
+        }
+        // A pending HITL prompt means the turn is waiting on the USER, not the agent.
+        // The prompt was just replayed through the agent_response path (SocketContext),
+        // which rendered it and cleared the waiting spinner — don't re-set the spinner
+        // on top of it; nothing would ever clear it until the user answers.
+        if (snap.pendingHitl) {
+          setWaitingMap((prev) => {
+            if (!prev.has(conversationId)) return prev;
+            const m = new Map(prev);
+            m.delete(conversationId);
+            return m;
+          });
+        } else {
+          setWaitingMap((prev) => {
+            const m = new Map(prev);
+            m.set(conversationId, true);
+            return m;
+          });
+        }
+      }
+    });
+    return unsubscribe;
+  }, [onConversationSnapshot, loadMessages]);
+
+  // Create a new conversation
+  const createConversation = useCallback(() => {
+    const timestamp = new Date();
+    const newConv: Conversation = {
+      id: generateUUID(),
+      title: 'New Conversation',
+      lastMessage: '',
+      timestamp,
+      lastUpdatedRaw: timestamp.toISOString(),
+      status: 'active',
+      hasActiveTasks: false,
+    };
+    setConversations((prev) => [newConv, ...prev]);
+    // Pre-seed an empty messages array so loadMessages doesn't fire for this new conversation
+    setMessagesMap((prev) => {
+      const newMap = new Map(prev);
+      newMap.set(newConv.id, []);
+      return newMap;
+    });
+    setActiveConversationId(newConv.id);
+  }, []);
+
+  // Interrupt/cancel the current task
+  const interruptTask = useCallback(() => {
+    if (!activeConversationId) return;
+    cancelTask(activeConversationId);
+    setWaitingMap((prev) => {
+      const m = new Map(prev);
+      m.delete(activeConversationId);
+      return m;
+    });
+  }, [activeConversationId, cancelTask]);
+
+  const dismissInterrupt = useCallback(() => {
+    if (!activeConversationId) return;
+    setPendingInterruptMap((prev) => {
+      const next = new Map(prev);
+      next.delete(activeConversationId);
+      return next;
+    });
+  }, [activeConversationId]);
+
+  const dismissFeedbackRequest = useCallback(() => {
+    setPendingFeedbackRequest(null);
+  }, []);
+
+  // Select a conversation
+  const selectConversation = useCallback(
+    (id: string) => {
+      setActiveConversationId(id);
+      setPendingFeedbackRequest(null);
+      const existingMessages = messagesMap.get(id);
+      if (!existingMessages || existingMessages.length === 0) {
+        loadMessages(id);
+      }
+    },
+    [messagesMap, loadMessages]
+  );
+
+  // Send a message
+  const sendMessageAction = useCallback(
+    (
+      content: string,
+      files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>,
+      opts?: { hidden?: boolean },
+    ) => {
+      // Allow messages with either text content or file attachments
+      const hasContent = content.trim().length > 0;
+      const hasFiles = files && files.length > 0;
+
+      if (!isConnected || (!hasContent && !hasFiles)) return;
+
+      let conversationId = activeConversationId;
+      const isFirstMessage = conversationId ? (messagesMap.get(conversationId)?.length || 0) === 0 : true;
+
+      // Create new conversation if needed
+      if (!conversationId) {
+        conversationId = generateUUID();
+        // Use content for title if available, otherwise use file attachment info
+        const displayText = hasContent
+          ? content
+          : hasFiles
+            ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}`
+            : 'New conversation';
+        const title = displayText.slice(0, 40) + (displayText.length > 40 ? '...' : '');
+        const timestamp = new Date();
+        const newConv: Conversation = {
+          id: conversationId,
+          title,
+          lastMessage: displayText.slice(0, 50),
+          timestamp,
+          lastUpdatedRaw: timestamp.toISOString(),
+          status: 'active',
+          hasActiveTasks: false,
+        };
+        setConversations((prev) => [newConv, ...prev]);
+        setActiveConversationId(conversationId);
+      }
+
+      // Add user message
+      const messageId = generateUUID();
+      pendingMessagesRef.current.set(messageId, conversationId);
+      messageCounterRef.current++;
+
+      // Build parts array for message (text + files)
+      const parts: Array<{ kind: string; text?: string; file?: { uri: string; mimeType?: string; name?: string } }> =
+        [];
+
+      // Add text part only if there's content
+      if (hasContent) {
+        parts.push({ kind: 'text', text: content });
+      }
+
+      if (hasFiles) {
+        files!.forEach((file) => {
+          parts.push({
+            kind: 'file',
+            file: {
+              uri: file.uri,
+              mimeType: file.mimeType,
+              name: file.name,
+            },
+          });
+        });
+      }
+
+      // Use content for display if available, otherwise describe the attachments
+      const displayContent = hasContent
+        ? content
+        : hasFiles
+          ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}: ${files!.map((f) => f.name).join(', ')}`
+          : '';
+
+      const userMsg: Message = {
+        id: messageId,
+        conversationId,
+        type: 'user',
+        content: displayContent,
+        timestamp: new Date(),
+        parts,
+      };
+      // Hidden (auto-instrumentation) priming: send through the normal path so
+      // the manifest rides along and the agent replies, but render no user bubble.
+      if (!opts?.hidden) addMessage(conversationId, userMsg);
+
+      // Update conversation with appropriate last message text
+      const lastMessageText = hasContent
+        ? content.slice(0, 50)
+        : hasFiles
+          ? `📎 ${files!.length} file${files!.length > 1 ? 's' : ''}`
+          : 'New message';
+
+      updateConversation(conversationId, {
+        lastMessage: lastMessageText,
+        timestamp: new Date(),
+      });
+
+      if (isFirstMessage) {
+        const displayText = hasContent
+          ? content
+          : hasFiles
+            ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}`
+            : 'New conversation';
+        const title = displayText.slice(0, 40) + (displayText.length > 40 ? '...' : '');
+        updateConversation(conversationId, { title });
+      }
+
+      // Build metadata - prefer local settings, fallback to user preferences from database
+      const metadata: Record<string, any> = {};
+      const effectiveModel = settings?.model || userSettings?.preferred_model;
+      const effectiveEnableThinking = settings?.enableThinking ?? userSettings?.enable_thinking;
+      const effectiveThinkingLevel = settings?.thinkingLevel || userSettings?.thinking_level;
+
+      if (effectiveModel) {
+        metadata.model = effectiveModel;
+      }
+      if (effectiveEnableThinking !== undefined) {
+        metadata.enableThinking = String(effectiveEnableThinking);
+      }
+      if (effectiveThinkingLevel) {
+        metadata.thinkingLevel = effectiveThinkingLevel;
+      }
+
+      // In playground mode, tag every message with the sub-agent config hash and
+      // name. The backend requires this on send_message (in addition to the
+      // socket init header) to route/persist the conversation against the
+      // version being tested.
+      if (playgroundModeRef.current) {
+        metadata.subAgentConfigHash = playgroundModeRef.current.subAgentConfigHash;
+        metadata.playgroundSubagentName = playgroundModeRef.current.subAgentName;
+      }
+
+      // Embedded Nannos: push the compact manifest of host-registered on-screen
+      // objects so the agent can target them with client-action directives.
+      const clientObjects = coreRef.current?.manifest();
+      if (clientObjects && clientObjects.length > 0) {
+        metadata.clientObjects = clientObjects;
+      }
+
+      // Embedded Nannos (ADR-0004): when this integration is bound to a scoped
+      // domain sub-agent, tell the orchestrator to run THAT agent execute-only
+      // (client_action + <client_objects>, no routing turn). Safe to send from the
+      // client: the orchestrator validates the id against the user's accessible
+      // sub-agents, so identity — not the client's claim — is the boundary.
+      const embeddedSubAgentId = coreRef.current?.config?.subAgentId;
+      if (embeddedSubAgentId != null) {
+        metadata.executeOnlySubAgentId = embeddedSubAgentId;
+      }
+
+      // Get context ID if available
+      const contextId = contextIdsMap.get(conversationId);
+
+      // Build file attachments array
+      let fileAttachments: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }> | undefined;
+      if (hasFiles) {
+        fileAttachments = files!.map((f) => ({
+          uri: f.uri,
+          mimeType: f.mimeType,
+          name: f.name,
+          s3Url: f.s3Url, // Include s3Url for backend processing
+        }));
+      }
+
+      // Send simple payload - backend converts to A2A format
+      const payload: any = {
+        id: messageId,
+        conversationId,
+        message: content,
+        sessionId,
+        metadata,
+        ...(contextId && { contextId }),
+      };
+
+      if (fileAttachments && fileAttachments.length > 0) {
+        payload.fileAttachments = fileAttachments;
+      }
+
+      // Send via socket
+      setWaitingMap((prev) => new Map(prev).set(conversationId, true));
+      socketSendMessage(payload);
+    },
+    [
+      activeConversationId,
+      isConnected,
+      messagesMap,
+      settings,
+      userSettings,
+      contextIdsMap,
+      sessionId,
+      addMessage,
+      updateConversation,
+      socketSendMessage,
+    ]
+  );
+
+  // Send a message to the orchestrator without displaying it in the UI (e.g., HITL decisions)
+  const sendSilentMessageAction = useCallback(
+    (content: string, dataParts?: Record<string, unknown>[]) => {
+      if (!isConnected || (!content.trim() && !dataParts?.length)) return;
+      const conversationId = activeConversationId;
+      if (!conversationId) return;
+
+      const contextId = contextIdsMap.get(conversationId);
+      const messageId = generateUUID();
+
+      const metadata: Record<string, any> = {};
+      if (playgroundModeRef.current) {
+        metadata.subAgentConfigHash = playgroundModeRef.current.subAgentConfigHash;
+        metadata.playgroundSubagentName = playgroundModeRef.current.subAgentName;
+      }
+
+      // Embedded Nannos (ADR-0004): the silent path also carries HITL decisions
+      // (resume). execute() re-runs from the top on resume, so it must re-see the
+      // execute-only directive to re-enter the sub-agent branch and find its pending
+      // interrupt — otherwise the resume would hit the routing graph. Re-send the
+      // on-screen manifest too so the resumed turn keeps its client context.
+      const embeddedSubAgentId = coreRef.current?.config?.subAgentId;
+      if (embeddedSubAgentId != null) {
+        metadata.executeOnlySubAgentId = embeddedSubAgentId;
+        const clientObjects = coreRef.current?.manifest();
+        if (clientObjects && clientObjects.length > 0) {
+          metadata.clientObjects = clientObjects;
+        }
+      }
+
+      const payload: any = {
+        id: messageId,
+        conversationId,
+        message: content,
+        sessionId,
+        metadata,
+        ...(contextId && { contextId }),
+        ...(dataParts && { dataParts }),
+      };
+
+      setWaitingMap((prev) => new Map(prev).set(conversationId, true));
+      socketSendMessage(payload);
+    },
+    [activeConversationId, isConnected, contextIdsMap, sessionId, socketSendMessage]
+  );
+
+  // Update settings and initialize connection
+  const updateSettings = useCallback(
+    async (newSettings: Settings): Promise<boolean> => {
+      setSettings(newSettings);
+      const success = await initializeClient(newSettings, sessionId);
+      if (success) {
+        // Reload conversations with new agent URL
+        loadConversations();
+      }
+      return success;
+    },
+    [initializeClient, sessionId, setSettings, loadConversations]
+  );
+
+  // Load messages when activeConversationId changes
+  // This ensures messages are loaded when returning to a conversation after navigation
+  // Skip if messagesMap already has an entry (including empty [] from createConversation)
+  useEffect(() => {
+    if (!activeConversationId) return;
+    
+    if (!messagesMap.has(activeConversationId)) {
+      loadMessages(activeConversationId);
+    }
+  }, [activeConversationId, messagesMap, loadMessages]);
+
+  // Default settings for auto-initialization — no model preset so the
+  // orchestrator uses its own default (the gateway's default-for-chat model).
+  const DEFAULT_SETTINGS: Settings = {
+    agentUrl: defaults.agentUrl ?? '',
+    model: defaults.model ?? '',
+  };
+
+  // Initialize on mount - use existing settings or defaults
+  // We need to wait for both sessionId and socket to be ready
+  useEffect(() => {
+    // Skip if no sessionId yet (it may be generated async)
+    if (!sessionId) return;
+
+    // Skip if socket is not ready yet
+    if (!isSocketReady) return;
+
+    // Skip if already connected to agent
+    if (isConnected) return;
+
+    // Resolve the agent URL if the host didn't supply one: an embedder typically
+    // only knows `backendUrl`, so the SDK discovers the orchestrator URL from
+    // `{backendUrl}/api/v1/config` (host `defaults.agentUrl` still wins if set).
+    const resolveSettings = async (): Promise<Settings> => {
+      const base = settings || DEFAULT_SETTINGS;
+      if (base.agentUrl) return base;
+      const resolved = await coreRef.current?.resolveAgentUrl(api.fetch);
+      return resolved ? { ...base, agentUrl: resolved } : base;
+    };
+
+    resolveSettings().then((effectiveSettings) => {
+      // If no settings exist, set the defaults (ephemeral, not persisted)
+      if (!settings) {
+        setSettings(effectiveSettings);
+      }
+
+      console.log('Auto-initializing chat with settings (ephemeral):', effectiveSettings);
+      initializeClient(effectiveSettings, sessionId).then((success) => {
+        console.log('Auto-initialization result:', success);
+        if (success) {
+          loadConversations();
+        }
+      });
+    });
+  }, [sessionId, isSocketReady, isConnected]); // Re-run when dependencies change
+
+  // Remember the session's active conversation (embedded only) so a reload in
+  // this tab resumes it — see the auto-select logic in loadConversations.
+  useEffect(() => {
+    const scope = coreRef.current?.config?.subAgentId;
+    if (scope === undefined || !activeConversationId) return;
+    writeSessionConversation(scope, activeConversationId);
+  }, [activeConversationId]);
+
+  // Host-injected prompts (e.g. a suggested query the app offers next to a form,
+  // via core.sendPrompt). Queue until the agent is connected, then send once.
+  useEffect(() => {
+    const c = coreRef.current;
+    if (!c) return;
+    return c.onPrompt((text, silent) => setPendingPrompt({ text, silent }));
+  }, []);
+
+  useEffect(() => {
+    if (pendingPrompt && isConnected) {
+      // silent = auto-instrumentation: goes through the normal path (manifest +
+      // conversation creation) but renders no user bubble; the agent replies.
+      sendMessageAction(pendingPrompt.text, undefined, { hidden: pendingPrompt.silent });
+      setPendingPrompt(null);
+    }
+  }, [pendingPrompt, isConnected, sendMessageAction]);
+
+  // Read-only when the active conversation belongs to an embedded widget and this
+  // host is not that widget (core.config.subAgentId differs or is absent — the
+  // console). Inside the owning widget, ids match and the conversation stays live.
+  const activeConversation = conversations.find((c) => c.id === activeConversationId);
+  const activeConversationReadOnly =
+    !!activeConversation?.embeddedSubAgentId &&
+    String(core?.config?.subAgentId ?? '') !== activeConversation.embeddedSubAgentId;
+
+  return (
+    <ChatContext.Provider
+      value={{
+        conversations,
+        activeConversationId,
+        messages,
+        tasks,
+        settings,
+        userSettings: userSettings || null,
+        isLoadingConversations,
+        isLoadingMessages,
+        activeConversationReadOnly,
+        isConnected,
+        isWaiting,
+        streamingMessage,
+        liveWorkingSteps,
+        liveSubagentThoughts,
+        liveStatusHistory,
+        liveTimeline,
+        pendingInterrupt,
+        pendingFeedbackRequest,
+        createConversation,
+        interruptTask,
+        dismissInterrupt,
+        dismissFeedbackRequest,
+        selectConversation,
+        sendMessage: sendMessageAction,
+        sendSilentMessage: sendSilentMessageAction,
+        updateSettings,
+        loadConversations,
+      }}
+    >
+      {children}
+    </ChatContext.Provider>
+  );
+}
+
+export function useChat(): ChatContextType {
+  const context = useContext(ChatContext);
+  if (context === undefined) {
+    throw new Error('useChat must be used within a ChatProvider');
+  }
+  return context;
+}

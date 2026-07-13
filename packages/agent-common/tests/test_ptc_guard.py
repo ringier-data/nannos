@@ -257,6 +257,37 @@ def test_resolve_server_slug_precedence():
     assert _resolve_server_slug("t", None, None) == "_self"
 
 
+def test_resolve_server_slug_falls_back_to_tool_metadata():
+    """When neither context map nor static map has the tool, resolve from the
+    tool's own metadata['server_name'] — mirrors ConditionalHITL so a tool scored
+    inside eval keys under the same slug as at the model boundary (not '_self')."""
+
+    class _T(BaseTool):
+        name: str = "alloy-riad_delete_campaign_by_id"
+        description: str = "x"
+
+        def _run(self, *a, **k):  # pragma: no cover - not executed
+            return None
+
+    tool = _T(metadata={"server_name": "alloy-riad"})
+    # No map anywhere → without the tool it would be _self; with it, the slug.
+    assert _resolve_server_slug(tool.name, None, None) == "_self"
+    assert _resolve_server_slug(tool.name, None, None, tool) == "alloy-riad"
+    # A populated map still wins over metadata (higher precedence).
+    ctx = types.SimpleNamespace(tool_server_map={tool.name: "from_ctx"})
+    assert _resolve_server_slug(tool.name, ctx, None, tool) == "from_ctx"
+
+
+def test_derive_mcp_server_slug():
+    from agent_common.agents.dynamic_agent import derive_mcp_server_slug as d
+
+    assert d("alloy-riad_delete_campaign_by_id") == "alloy-riad"
+    assert d("alloy-riad_get_data_service_customers") == "alloy-riad"
+    assert d("console_list_sub_agents") == "console"
+    assert d("scheduler_create_job") == "console"
+    assert d("read_file") is None  # in-process platform tool → left unstamped (_self)
+
+
 # ---------------------------------------------------------------------------
 # _inject_for_inner
 # ---------------------------------------------------------------------------

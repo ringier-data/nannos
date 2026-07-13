@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import socket
+import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ from console_backend.exceptions import ConversationOwnershipError
 from console_backend.middleware import OrchestratorAuth, ProxyHeadersMiddleware
 from console_backend.middleware import SessionMiddleware as CustomSessionMiddleware
 from console_backend.models.socket_session import SocketSession
+from console_backend.utils.a2a_extensions import X_A2A_EXTENSIONS_HEADER
 from console_backend.models.user import User
 from console_backend.routers.admin_audit_router import router as admin_audit_router
 from console_backend.routers.admin_budget_router import router as admin_budget_router
@@ -239,6 +241,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     connection_pool.start_cleanup_task()
     logger.info("Connection pool cleanup task started")
 
+    # Periodic sweep of expired StoredSessions. get_session refuses expired rows,
+    # but only this physically removes them — without it, token-minted embedded
+    # sessions (one per socket connect that misses a clean disconnect) accumulate.
+    async def _session_sweep_loop() -> None:
+        while True:
+            try:
+                await app.state.session_service.destroy_expired_sessions()
+            except Exception:  # noqa: BLE001 — the sweep must never die
+                logger.exception("Expired-session sweep failed")
+            await asyncio.sleep(3600)
+
+    app.state.session_sweep_task = asyncio.create_task(_session_sweep_loop())
+    logger.info("Expired-session sweep task started")
+
     # Start the MCP StreamableHTTP session manager (streaming SSE transport mounted
     # at /mcp). Its run() context owns the background task that services /mcp requests.
     # A fresh instance is created here each startup because run() can only be entered
@@ -258,6 +274,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Shutdown - called automatically when Uvicorn receives SIGTERM/SIGINT
     logger.info("Application shutting down...")
+    if hasattr(app.state, "session_sweep_task"):
+        app.state.session_sweep_task.cancel()
     if hasattr(app.state, "mcp_sm_stack"):
         await app.state.mcp_sm_stack.aclose()
         logger.info("MCP StreamableHTTP session manager stopped")
@@ -312,6 +330,9 @@ if config.is_local() or config.is_dev():
             "http://127.0.0.1:5173",
             "http://localhost:5001",
             "http://127.0.0.1:5001",
+            # Embedded Nannos: cockpit host (widget REST legs: feedback/settings).
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
         ],
         allow_credentials=True,
         allow_methods=["*"],
@@ -387,6 +408,10 @@ if config.is_local():
         "https://127.0.0.1:5001",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        # Embedded Nannos: the cockpit frontend (guinea-pig host) runs on :3000
+        # and mounts the chat widget cross-origin against this socket.
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
     ]
 else:
     # In production, use the configured base domain
@@ -428,11 +453,10 @@ async def _handle_list_tools() -> list:
             return all_tools
 
         token = auth_header.split(" ", 1)[1]
-        from ringier_a2a_sdk.auth import JWTValidator
-
         from console_backend.config import config as app_config
+        from console_backend.utils.jwt_validators import get_jwt_validator
 
-        validator = JWTValidator(issuer=app_config.oidc.issuer)
+        validator = get_jwt_validator(issuer=app_config.oidc.issuer)
         payload = await validator.validate(token)
         sub = payload.get("sub")
         if not sub:
@@ -1211,65 +1235,158 @@ async def get_agent_card(request: Request, user: User = Depends(require_auth)) -
 # ==============================================================================
 
 
-@sio.on(SocketEvents.CONNECT)  # type: ignore
-async def handle_connect(sid: str, environ: dict[str, Any]) -> bool:
-    """Handle the 'connect' socket.io event with authentication.
-
-    Authenticates the connection using the same signed session cookie as HTTP requests.
-    Returns False to reject unauthenticated connections.
-    """
-    # Extract cookies from ASGI environ
+async def _resolve_socket_user_via_cookie(environ: dict[str, Any]) -> str | None:
+    """Resolve the user from the signed session cookie (same as the HTTP session
+    middleware). Returns the StoredSession id to link the socket to, or None."""
     cookie_header = None
     headers = environ.get("asgi.scope", {}).get("headers", [])
     for header_name, header_value in headers:
         if header_name == b"cookie":
             cookie_header = header_value.decode("utf-8")
             break
-
     if not cookie_header:
-        logger.warning(f"Socket.IO connection rejected for {sid}: No cookies found")
-        return False
+        return None
 
-    # Parse cookies to extract session cookie
     cookies = SimpleCookie()
     cookies.load(cookie_header)
-
     session_cookie = cookies.get(config.cookie_name)
     if not session_cookie:
-        logger.warning(f"Socket.IO connection rejected for {sid}: No session cookie")
-        return False
+        return None
 
-    # Verify the signed session cookie (same as HTTP middleware does)
     session_id = verify_cookie(session_cookie.value)
     if not session_id:
-        logger.warning(f"Socket.IO connection rejected for {sid}: Invalid session signature")
-        return False
+        return None
 
-    # Load session and user (same as HTTP middleware does)
     stored_session = await sio.app_instance.state.session_service.get_session(session_id)  # type: ignore[attr-defined]
     if not stored_session:
-        logger.warning(f"Socket.IO connection rejected for {sid}: Session not found")
-        return False
+        return None
 
-    # Get database session for user lookup
     session_factory = get_async_session_factory()
     async with session_factory() as db:
         user = await sio.app_instance.state.user_service.get_user(db, stored_session.user_id)  # type: ignore[attr-defined]
     if not user:
-        logger.warning(f"Socket.IO connection rejected for {sid}: User not found")
+        return None
+    return session_id
+
+
+async def _resolve_socket_user_via_token(token: str) -> str | None:
+    """Embedded/cross-origin hosts (ADR-0002 Amendment 2 — browser leg): authenticate
+    a socket from a nannos bearer token in the socket.io ``auth`` payload instead of
+    the session cookie (which a different-origin host like the cockpit cannot carry).
+
+    Validates the token against the nannos issuer's JWKS (same JWTValidator the HTTP
+    bearer path uses), provisions/looks up the user by ``sub``, and creates a
+    StoredSession holding the token — so the downstream OrchestratorAuth on-behalf-of
+    exchange (StoredSession.access_token → orchestrator audience → Gatana) works
+    unchanged. Returns the new StoredSession id, or None on any failure.
+    """
+    from ringier_a2a_sdk.auth.jwt_validator import JWTValidationError
+
+    from console_backend.utils.jwt_validators import get_jwt_validator
+
+    validator = get_jwt_validator(issuer=config.oidc.issuer)
+    try:
+        claims = await validator.validate(token)
+    except JWTValidationError as e:
+        logger.warning(f"Socket token auth rejected: {e}")
+        return None
+    except Exception as e:  # noqa: BLE001 — never let a validator surprise reject-close into a 500
+        logger.warning(f"Socket token auth error: {e}")
+        return None
+
+    sub = claims.get("sub")
+    if not sub:
+        logger.warning("Socket token auth rejected: token has no 'sub' claim")
+        return None
+
+    session_factory = get_async_session_factory()
+    async with session_factory() as db:
+        user = await sio.app_instance.state.user_service.get_user_by_sub(db, sub)  # type: ignore[attr-defined]
+        if not user:
+            user = await sio.app_instance.state.user_service.upsert_user(  # type: ignore[attr-defined]
+                db,
+                sub=sub,
+                email=claims.get("email", ""),
+                first_name=claims.get("given_name", ""),
+                last_name=claims.get("family_name", ""),
+                company_name=claims.get("company_name"),
+            )
+            # upsert_user only executes the INSERT; without an explicit commit the
+            # session close rolls it back and the StoredSession created below would
+            # point at a user id that never landed (the HTTP paths get their commit
+            # from get_db_session).
+            await db.commit()
+
+    # Cache expiry from the token's own exp so OrchestratorAuth's refresh window is
+    # accurate. No refresh_token: an embedded token is short-lived and re-minted by
+    # the host's getToken()/federated-exchange endpoint, not refreshed server-side.
+    # The session TTL is bounded to the token too (plus a grace window for in-flight
+    # exchanges): the SDK reconnects with a fresh token before every expiry, minting
+    # a NEW session each time — a long default TTL would accumulate one token-bearing
+    # 30-day row per ~token-lifetime per open widget. Disconnect also destroys the
+    # session (handle_disconnect); this bound covers ungraceful drops.
+    exp = claims.get("exp")
+    expires_in = max(1, int(exp - time.time())) if isinstance(exp, (int, float)) else 3600
+    return await sio.app_instance.state.session_service.create_session(  # type: ignore[attr-defined]
+        user_id=user.id,
+        refresh_token="",
+        id_token="",
+        access_token=token,
+        access_token_expires_in=expires_in,
+        session_ttl_seconds=expires_in + 300,
+    )
+
+
+# StoredSession ids minted per-connection by the token path, keyed by socket id, so
+# handle_disconnect can delete them (the disconnect always lands on the replica that
+# holds the socket, so process-local state suffices).
+_socket_owned_sessions: dict[str, str] = {}
+
+
+@sio.on(SocketEvents.CONNECT)  # type: ignore
+async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any] | None = None) -> bool:
+    """Handle the 'connect' socket.io event with authentication.
+
+    Two accepted credentials:
+    - the signed session cookie (same-origin console — primary path), and
+    - a nannos bearer token in the socket.io ``auth`` payload (embedded/cross-origin
+      hosts; non-production only for now — see ADR-0002 Amendment 2).
+
+    Returns False to reject unauthenticated connections.
+    """
+    http_session_id = await _resolve_socket_user_via_cookie(environ)
+
+    if not http_session_id and not config.is_production():
+        token = auth.get("token") if isinstance(auth, dict) else None
+        if token:
+            http_session_id = await _resolve_socket_user_via_token(token)
+            if http_session_id:
+                # This StoredSession exists only for this socket connection (the
+                # cookie path's session is the user's browser login — never ours to
+                # delete). Remember it so handle_disconnect can destroy it; the SDK
+                # mints a fresh one on every reconnect.
+                _socket_owned_sessions[sid] = http_session_id
+
+    if not http_session_id:
+        logger.warning(f"Socket.IO connection rejected for {sid}: no valid session cookie or bearer token")
         return False
 
-    # Create socket session in DynamoDB (minimal data)
+    stored_session = await sio.app_instance.state.session_service.get_session(http_session_id)  # type: ignore[attr-defined]
+    if not stored_session:
+        logger.warning(f"Socket.IO connection rejected for {sid}: session vanished after auth")
+        return False
+
+    # Create socket session (links to the StoredSession that carries the access_token).
     await sio.app_instance.state.socket_session_service.create_session(  # type: ignore[attr-defined]
         socket_id=sid,
-        user_id=user.id,
-        http_session_id=session_id,
+        user_id=stored_session.user_id,
+        http_session_id=http_session_id,
     )
 
     # Register connection for scheduler notifications
-    socket_notification_manager.register_connection(user.id, sid)
+    socket_notification_manager.register_connection(stored_session.user_id, sid)
 
-    logger.debug(f"Socket.IO connection authenticated for {sid}: {user.email}")
+    logger.debug(f"Socket.IO connection authenticated for {sid}: user={stored_session.user_id}")
     return True  # Accept the connection
 
 
@@ -1303,6 +1420,12 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     # Clean up socket session from DynamoDB
     await sio.app_instance.state.socket_session_service.destroy_session(sid)  # type: ignore[attr-defined]
 
+    # A token-authenticated (embedded) connection owns its StoredSession — destroy it
+    # with the socket, or one token-bearing row leaks per reconnect cycle.
+    owned_session_id = _socket_owned_sessions.pop(sid, None)
+    if owned_session_id:
+        await sio.app_instance.state.session_service.destroy_session(owned_session_id)  # type: ignore[attr-defined]
+
     # Clean up cached connections — defer if tasks are still streaming
     if has_running_tasks:
         logger.info(f"Deferring connection cleanup for {sid} — tasks still running")
@@ -1329,12 +1452,10 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
     agent_card_url = data.get("url")
     custom_headers = data.get("customHeaders", {})
 
-    # Console UI supports all extensions — always request them from the orchestrator
-    custom_headers["X-A2A-Extensions"] = (
-        "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, "
-        "urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0, "
-        "urn:nannos:a2a:human-in-the-loop:1.0"
-    )
+    # Console UI supports all extensions — always request them from the orchestrator.
+    # The header is the on/off switch for extension emission; the list lives in one
+    # module pinned against the repo-root a2a-extensions.json registry.
+    custom_headers["X-A2A-Extensions"] = X_A2A_EXTENSIONS_HEADER
 
     if custom_headers:
         logger.info(f"Received custom headers for {sid}: {list(custom_headers.keys())}")
@@ -1801,6 +1922,10 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         # outage, timeouts) are NOT ownership violations and propagate to the generic error
         # handler below so they surface as retryable server errors, not "Conversation not found".
         sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
+        # The embedded widget marks its turns with executeOnlySubAgentId; stamp the
+        # conversation on creation so the console can label it and render it
+        # read-only (its turns assume a live host page with registered objects).
+        embedded_sub_agent_id = metadata.get("executeOnlySubAgentId") or metadata.get("subAgentId")
         try:
             await conversation_service.get_or_create_conversation(
                 conversation_id=context_id,
@@ -1808,6 +1933,7 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
                 agent_url=socket_session.agent_url or "",
                 message=message_text,
                 sub_agent_config_hash=sub_agent_config_hash,
+                embedded_sub_agent_id=str(embedded_sub_agent_id) if embedded_sub_agent_id is not None else None,
             )
         except (ConversationOwnershipError, IntegrityError):
             logger.warning(

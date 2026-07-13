@@ -153,6 +153,56 @@ class UserService:
             logger.error(f"Failed to get user by sub: {e}")
             return None
 
+    async def get_user_by_email(self, db: AsyncSession, email: str) -> User | None:
+        """Retrieve a user by email (case-insensitive).
+
+        Email carries a unique constraint (idx_users_email_unique), so this is a
+        1:1 lookup. Used by the cross-IdP federated-exchange path (ADR-0002
+        Amendment 2) to resolve a foreign identity to a *provisioned* nannos user
+        — a user existing here is the provisioned-link guardrail.
+
+        Args:
+            db: The database session
+            email: The user's email address
+
+        Returns:
+            The user or None if not found
+        """
+        try:
+            query = text("""
+                SELECT id, sub, email, first_name, last_name, company_name,
+                       is_administrator, role, status, phone_number_idp,
+                       scim_attributes, deleted_at, created_at, updated_at
+                FROM users
+                WHERE lower(email) = lower(:email) AND deleted_at IS NULL
+            """)
+            result = await db.execute(query, {"email": email})
+            row = result.mappings().first()
+
+            if row is None:
+                logger.debug("User not found by email")
+                return None
+
+            return User(
+                id=row["id"],
+                sub=row["sub"],
+                email=row["email"],
+                first_name=row["first_name"],
+                last_name=row["last_name"],
+                company_name=row["company_name"],
+                is_administrator=row["is_administrator"],
+                role=row["role"],
+                status=UserStatus(row["status"]),
+                phone_number_idp=row["phone_number_idp"],
+                scim_attributes=row["scim_attributes"],
+                deleted_at=row["deleted_at"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+        except Exception as e:
+            logger.error(f"Failed to get user by email: {e}")
+            return None
+
     async def get_user_by_phone_number(self, db: AsyncSession, phone_number: str) -> User | None:
         """Retrieve a user by phone number.
 

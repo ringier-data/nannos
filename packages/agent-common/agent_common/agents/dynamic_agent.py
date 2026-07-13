@@ -60,6 +60,7 @@ from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.a2a.stream_events import (
     ActivityLogMeta,
     ArtifactUpdate,
+    ClientActionMeta,
     ErrorEvent,
     IntermediateOutputMeta,
     StreamEvent,
@@ -122,6 +123,38 @@ CONSOLE_BACKEND_TOOL_PREFIXES = ("console_", "scheduler_")
 def is_console_backend_tool(name: str) -> bool:
     """Return True if ``name`` is served by the console-backend MCP, not the gateway."""
     return name.startswith(CONSOLE_BACKEND_TOOL_PREFIXES)
+
+
+# HTTP-method tokens the Gatana gateway embeds in tool names: ``<slug>_<method>_<path>``.
+_MCP_HTTP_METHOD_TOKENS = ("get", "post", "put", "delete", "patch", "head", "options")
+
+
+def derive_mcp_server_slug(tool_name: str) -> str | None:
+    """Best-effort MCP server slug for a gateway/console tool from its NAME.
+
+    The Gatana gateway names each tool ``<slug>_<method>_<path>`` — the slug may
+    itself contain hyphens, e.g. ``alloy-riad_delete_campaign_by_id`` → ``alloy-riad``.
+    Console-backend tools (``console_*``/``scheduler_*``) resolve to ``console``.
+    Returns None when the slug can't be determined (caller leaves it unstamped).
+
+    Why this exists: the orchestrator's ToolDiscoveryService creates one MCP
+    connection per server and stamps ``tool.metadata["server_name"]`` from the
+    gateway's slug (discovery.py). The sub-agent uses a single blended gateway
+    connection and cannot recover the per-tool server that way — so without this,
+    sub-agent MCP tools carry no ``server_name``, their ``tool_server_map`` is
+    empty, and the HITL/PTC risk resolvers fall back to ``_self``. That splits a
+    tool's risk score across ``_self`` (sub-agent path) and its real slug
+    (orchestrator path), and makes per-tool HITL overrides entered under the real
+    slug silently ineffective for the sub-agent path. Deriving from the name (the
+    same string the gateway prefixes) keys scores consistently across both paths.
+    """
+    if is_console_backend_tool(tool_name):
+        return "console"
+    for method in _MCP_HTTP_METHOD_TOKENS:
+        idx = tool_name.find(f"_{method}_")
+        if idx > 0:
+            return tool_name[:idx]
+    return None
 
 
 def _validate_tool_schema(tool: BaseTool) -> BaseTool:
@@ -292,6 +325,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         )
         self.sandbox_pool = sandbox_pool
         self.extra_middlewares = extra_middlewares
+        # Embedded Nannos: when this sub-agent is a scoped domain agent (the
+        # embedded entrypoint), it also carries the on-screen manifest renderer
+        # (<client_objects>) and the client_action tool. Off by default so
+        # ordinary/scheduled LOCAL sub-agents are unaffected. Safe getattr default
+        # until the config model carries the flag.
+        self.client_action_enabled = bool(getattr(config, "client_action_enabled", False))
         self.inject_all_tools = inject_all_tools
         self.tool_catalog = tool_catalog
         self._risk_scorer: RiskScorerFn | None = risk_scorer
@@ -679,6 +718,24 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
                 # Validate tool schemas to prevent OpenAI API errors
                 validated_tools = [_validate_tool_schema(tool) for tool in tools]
+
+                # Stamp server_name so risk-score resolution matches the orchestrator.
+                # This single blended-gateway connection can't recover the per-tool
+                # server the way the orchestrator's per-server connections do, so we
+                # derive the slug from the tool name (the gateway prefixes it there).
+                # Without this, sub-agent MCP tools resolve to "_self" and their risk
+                # scores split from the orchestrator's real-slug scores (see
+                # derive_mcp_server_slug). Only fill it in when absent — never clobber
+                # a server_name the adapter already provided.
+                for tool in validated_tools:
+                    md = getattr(tool, "metadata", None)
+                    if not isinstance(md, dict):
+                        md = {}
+                        tool.metadata = md
+                    if not md.get("server_name"):
+                        slug = derive_mcp_server_slug(tool.name)
+                        if slug:
+                            md["server_name"] = slug
 
                 if attempt > 0:
                     logger.info(f"Successfully discovered MCP tools for {self.name} on attempt {attempt + 1}")
@@ -1077,6 +1134,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     routes={"/skills/": _SSB(self._resolved_skills)},
                 )
 
+        # Embedded domain agent: add the on-screen client_action tool so it can
+        # drive registered forms (apply/highlight/navigate). Gated so ordinary
+        # sub-agents don't get an unused tool.
+        if self.client_action_enabled:
+            from agent_common.core.client_action_tool import create_client_action_tool
+
+            tools = [*tools, create_client_action_tool()]
+
         # Cache intermediate state for _build_graph() (used by both paths)
         self._cached_tools = tools
         self._cached_system_prompt = system_prompt
@@ -1122,6 +1187,13 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         """
         # Combine instance-level extra_middlewares with call-level ones
         combined_middlewares = list(self.extra_middlewares or []) + list(extra_middlewares or [])
+        # Embedded domain agent: render <client_objects> (manifest read from the
+        # RunnableConfig metadata) so it perceives on-screen objects + values.
+        if self.client_action_enabled:
+            from agent_common.middleware.client_objects_middleware import ClientObjectsMiddleware
+
+            combined_middlewares.append(ClientObjectsMiddleware())
+        combined_middlewares = combined_middlewares or None
 
         # Catalog mode without PTC: contribute the native discovery surface
         # (search_tools/describe_tool) and the call_tool dispatch. Inserted with the
@@ -1505,6 +1577,15 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                             if event_type == "todo_status" and "todos" in payload:
                                 yield TaskUpdate(
                                     event_metadata=WorkPlanMeta(todos=payload["todos"]),
+                                )
+                                continue
+                            # Embedded Nannos: the client_action tool emits an
+                            # apply/highlight/navigate directive on the custom stream.
+                            # Only present when client_action_enabled (embedded entrypoint);
+                            # forward it so the execute-only adapter can surface it.
+                            if event_type == "client_action" and payload.get("directive"):
+                                yield TaskUpdate(
+                                    event_metadata=ClientActionMeta(client_action=payload["directive"]),
                                 )
                                 continue
                             status = payload.get("status")
