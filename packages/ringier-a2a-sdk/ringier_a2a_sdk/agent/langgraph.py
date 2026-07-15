@@ -32,7 +32,11 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
-from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_errors import (
+    format_mcp_error,
+    guarded_streamable_http,
+    is_retryable_mcp_error,
+)
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
 from ..agent.base import BaseAgent
@@ -509,15 +513,18 @@ class LangGraphAgent(BaseAgent):
         last_error = None
         delay = initial_delay
 
+        connection_url = getattr(connection, "url", None)
+
         for attempt in range(max_retries):
             try:
-                tools = await load_mcp_tools(
-                    session=None,
-                    connection=connection,
-                    tool_interceptors=interceptors,
-                    server_name=server_name,
-                    callbacks=callbacks,
-                )
+                async with guarded_streamable_http(url=connection_url, server_slug=server_name):
+                    tools = await load_mcp_tools(
+                        session=None,
+                        connection=connection,
+                        tool_interceptors=interceptors,
+                        server_name=server_name,
+                        callbacks=callbacks,
+                    )
                 if attempt > 0:
                     logger.info(f"Successfully loaded MCP tools from {server_name} on attempt {attempt + 1}")
                 return tools
