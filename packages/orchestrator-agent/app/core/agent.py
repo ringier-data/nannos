@@ -1305,66 +1305,11 @@ class OrchestratorDeepAgent:
             # Check for general interrupt conditions (pending nodes without specific interrupts)
             # Note: Specific interrupt handling is done in agent_executor for proper A2A task state management
             if hasattr(final_state, "interrupts") and final_state.interrupts:
-                task_state = final_state.interrupts[-1].value.get("task_state", TaskState.TASK_STATE_INPUT_REQUIRED)
-                if task_state == TaskState.TASK_STATE_AUTH_REQUIRED:
-                    logger.debug(
-                        f"[ORCHESTRATOR] Found auth_required interrupt in final state: {final_state.interrupts[-1].value}"
-                    )
-                    value: dict = final_state.interrupts[-1].value.copy()
-                    yield AgentStreamResponse.auth_required(
-                        message=value.pop("message", "Authentication required"),
-                        auth_url=value.pop("auth_url", ""),
-                        error_code=value.pop("error_code", ""),
-                        **value,
-                    )
-                else:
-                    logger.debug(f"[ORCHESTRATOR] Found interrupt in final state: {final_state.interrupts[-1].value}")
-                    interrupt_value_dict = (
-                        final_state.interrupts[-1].value if isinstance(final_state.interrupts[-1].value, dict) else {}
-                    )
-
-                    # Detect HumanInTheLoopMiddleware interrupts (HITLRequest format)
-                    action_requests = interrupt_value_dict.get("action_requests")
-                    review_configs = interrupt_value_dict.get("review_configs")
-                    if action_requests and isinstance(action_requests, list):
-                        # HITL interrupt — extract tool name and args for metadata
-                        tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
-                        if "console_create_bug_report" in tool_names:
-                            # Bug report HITL interrupt
-                            bug_action = next(
-                                ar for ar in action_requests if ar.get("name") == "console_create_bug_report"
-                            )
-                            reason = bug_action.get("args", {}).get("description", "")
-                            description = bug_action.get("description", "")
-                            content = f"Reason: {reason}\n\n{description}" if reason else description
-                            yield AgentStreamResponse(
-                                state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                                content=content or "Bug report requires your confirmation.",
-                                interrupt_reason=reason,
-                                pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
-                                action_requests=action_requests,
-                                review_configs=review_configs,
-                            )
-                        else:
-                            # Generic HITL interrupt for other tools
-                            description = action_requests[0].get("description", "") if action_requests else ""
-                            yield AgentStreamResponse(
-                                state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                                content=description or "Tool execution requires approval.",
-                                pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
-                                action_requests=action_requests,
-                                review_configs=review_configs,
-                            )
-                    else:
-                        # Standard interrupt (file permissions, custom interrupts, etc.)
-                        yield AgentStreamResponse(
-                            state=task_state,
-                            content=interrupt_value_dict.get(
-                                "message", "Process interrupted. Human intervention required."
-                            ),
-                            interrupt_reason=interrupt_value_dict.get("reason", "graph_interrupted"),
-                            pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
-                        )
+                logger.debug(f"[ORCHESTRATOR] Found interrupt in final state: {final_state.interrupts[-1].value}")
+                yield AgentStreamResponse.from_interrupt(
+                    final_state.interrupts[-1].value,
+                    pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
+                )
                 return
             if hasattr(final_state, "next") and final_state.next:
                 logger.warning(f"graph in final state but no interrupt: {final_state}")
@@ -1584,31 +1529,14 @@ class OrchestratorDeepAgent:
                     )
 
         except GraphInterrupt as gi:
-            # HITL pause: the sub-agent's astream re-raises the suppressed interrupt.
-            # Surface it as input_required with the pending action requests so the
-            # executor emits the approval card; the next turn resumes via Command.
+            # Resumable pause: the sub-agent's astream re-raises the suppressed
+            # interrupt. from_interrupt maps it exactly like the orchestrator path —
+            # HITL → input_required approval card, auth → auth_required with the
+            # authorize URL in content + metadata; the next turn resumes via Command.
             interrupts = gi.args[0] if gi.args else ()
             last_intr = interrupts[-1] if interrupts else None
             value = getattr(last_intr, "value", {}) if last_intr is not None else {}
-            if not isinstance(value, dict):
-                value = {}
-            action_requests = value.get("action_requests")
-            review_configs = value.get("review_configs")
-            if action_requests and isinstance(action_requests, list):
-                description = action_requests[0].get("description", "") if action_requests else ""
-                yield AgentStreamResponse(
-                    state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                    content=description or "This action needs your approval.",
-                    action_requests=action_requests,
-                    review_configs=review_configs,
-                )
-            else:
-                task_state = value.get("task_state", TaskState.TASK_STATE_INPUT_REQUIRED)
-                yield AgentStreamResponse(
-                    state=task_state,
-                    content=value.get("message", "Process interrupted. Human intervention required."),
-                    interrupt_reason=value.get("reason", "graph_interrupted"),
-                )
+            yield AgentStreamResponse.from_interrupt(value)
 
     def get_agent_response(self, final_state) -> AgentStreamResponse:
         """Parse the agent response to extract structured information and check for auth requirements."""

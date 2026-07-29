@@ -135,6 +135,32 @@ async def test_graph_interrupt_maps_to_input_required_with_action_requests():
 
 
 @pytest.mark.asyncio
+async def test_graph_interrupt_maps_auth_required_with_authorize_url():
+    # Regression: AuthErrorDetectionMiddleware's interrupt payload carries the
+    # authorize URL separately from the tool's message (which only *references*
+    # "the authorizeUrl"). The embedded path must surface the URL in both the
+    # content and the metadata, like the orchestrator path does.
+    intr = types.SimpleNamespace(
+        value={
+            "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
+            "tool": "cockpit_get_campaign",
+            "message": "This tool requires secondary authorization. Please go to the authorizeUrl.",
+            "auth_url": "https://auth.example.com/oauth/begin",
+            "error_code": "need-credentials",
+        }
+    )
+    runnable = _FakeRunnable(events=[], raises=GraphInterrupt((intr,)))
+    items = await _collect(_agent(), runnable)
+    assert len(items) == 1
+    assert items[0].state == TaskState.TASK_STATE_AUTH_REQUIRED
+    assert items[0].interrupt_reason == "auth_required"
+    assert "https://auth.example.com/oauth/begin" in items[0].content
+    assert items[0].metadata["auth_url"] == "https://auth.example.com/oauth/begin"
+    assert items[0].metadata["requires_auth"] is True
+    assert items[0].metadata["tool"] == "cockpit_get_campaign"
+
+
+@pytest.mark.asyncio
 async def test_client_objects_injected_into_config_metadata():
     runnable = _FakeRunnable(events=[])
     cfg: dict = {"metadata": {}}
