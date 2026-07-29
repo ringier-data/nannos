@@ -171,7 +171,14 @@ export async function backendFetch(config: NannosConfig, path: string, init?: Re
   const base = config.backendUrl ?? window.location.origin;
   const url = new URL(path, base);
   const headers = new Headers(init?.headers);
-  if (config.getToken) headers.set('Authorization', `Bearer ${await config.getToken()}`);
+  // Only attach a Bearer when we actually have a token. The `auth`-path bridge
+  // (core: getToken → auth.getAccessToken() ?? '') yields '' when unauthenticated;
+  // sending `Bearer ` is worse than no header, so skip it and let the request go
+  // unauthenticated (→ 401 → the widget surfaces `unauthenticated`/needsLogin).
+  if (config.getToken) {
+    const token = await config.getToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+  }
   return fetch(url.toString(), { ...init, credentials: 'include', headers });
 }
 

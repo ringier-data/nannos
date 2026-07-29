@@ -51,22 +51,34 @@ export class NannosCore {
   private readonly statusListeners = new Set<(s: NannosStatus) => void>();
   private readonly errorListeners = new Set<(e: NannosErrorEvent) => void>();
 
-  constructor(readonly config: NannosConfig, ioFactory?: IoFactory) {
+  /** The RESOLVED connection config. For the `auth` (self-login) path this carries a
+   *  `getToken` bridged to `auth.getAccessToken()`, so the socket AND every REST call
+   *  (see `adapter.tsx` `backendFetch`, which reads `core.config.getToken`) share one
+   *  token source. */
+  readonly config: NannosConfig;
+
+  constructor(rawConfig: NannosConfig, ioFactory?: IoFactory) {
     // Auth resolution: `getToken` (host-token) and `auth` (self-login) are
     // mutually exclusive. If both are given, the host-token path wins (it's the
     // recommended zero-login path) and `auth` is ignored with a warning.
-    let effectiveConfig = config;
-    this.auth = config.auth ?? null;
-    if (config.getToken && config.auth) {
+    let effectiveConfig = rawConfig;
+    this.auth = rawConfig.auth ?? null;
+    if (rawConfig.getToken && rawConfig.auth) {
       console.warn('[nannos] both `getToken` and `auth` set — using `getToken` (host-token path); ignoring `auth`.');
       this.auth = null;
-    } else if (config.auth && !config.getToken) {
-      const auth = config.auth;
+    } else if (rawConfig.auth && !rawConfig.getToken) {
+      const auth = rawConfig.auth;
       // Silent token for connect-on-mount: cache/refresh/null — NEVER login().
       // Empty string when null so the socket connects into an `unauthenticated`
       // state (distinguishable) rather than throwing.
-      effectiveConfig = { ...config, getToken: async () => (await auth.getAccessToken()) ?? '' };
+      effectiveConfig = { ...rawConfig, getToken: async () => (await auth.getAccessToken()) ?? '' };
     }
+    // Expose the RESOLVED config (not the raw one). Previously only the transport
+    // received `effectiveConfig` while `this.config` kept the raw config, so on the
+    // PKCE `auth` path the REST adapter — which reads `core.config.getToken` — sent
+    // requests with NO Authorization header → 401 (e.g. GET /api/v1/sub-agents/{id}),
+    // leaving the widget stuck "Disconnected" despite a valid token.
+    this.config = effectiveConfig;
     this.transport = ioFactory
       ? new TransportClient(effectiveConfig, ioFactory)
       : new TransportClient(effectiveConfig);
