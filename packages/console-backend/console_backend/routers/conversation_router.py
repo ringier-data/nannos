@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..config import config
-from ..dependencies import require_auth
+from ..dependencies import require_auth_or_bearer_token
 from ..models.user import User
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,9 @@ async def get_conversations_by_user(
     exclude_playground: bool = False,
     embedded_sub_agent_id: str | None = None,
     search: str | None = None,
-    user: User = Depends(require_auth),
+    # Bearer accepted: the embed SDK (Embedded Nannos, ADR-0004) lists conversations
+    # cross-origin with the user's access token — no console session cookie exists.
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> dict:
     """Get all conversations for a user.
 
