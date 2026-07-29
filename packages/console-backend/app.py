@@ -326,23 +326,47 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 if not config.is_local():
     app.add_middleware(ProxyHeadersMiddleware)
 
-# Add CORS middleware for dev/local environments to allow localhost origins
-if config.is_local() or config.is_dev():
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:5001",
-            "http://127.0.0.1:5001",
-            # Embedded Nannos: cockpit host (widget REST legs: feedback/settings).
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS origins — ONE list shared by the REST API (CORSMiddleware, here) and
+# Socket.IO (cors_allowed_origins, below). The two used to be maintained
+# separately and disagreed: deployed Socket.IO only accepted the console's own
+# BASE_DOMAIN, so any embed-sdk host (Embedded Nannos, ADR-0004) was rejected
+# with "not an accepted origin" before auth even ran.
+#
+# Composition:
+#  - local: the localhost dev frontends (console 5001/5173, cockpit 3000)
+#  - deployed: the console's own domain (same-origin console-frontend needs no
+#    CORS, but Socket.IO checks the Origin header on every handshake)
+#  - ALL environments: + EMBED_ALLOWED_ORIGINS (exact origins, from env) for
+#    embed-sdk hosts, which connect cross-origin with bearer tokens (ADR-0002).
+if config.is_local():
+    cors_origins = [
+        "http://localhost:5001",
+        "http://127.0.0.1:5001",
+        "https://localhost:5001",
+        "https://127.0.0.1:5001",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        # Embedded Nannos: the cockpit frontend (guinea-pig host) runs on :3000
+        # and mounts the chat widget cross-origin against this backend.
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+else:
+    cors_origins = [f"https://{os.environ['BASE_DOMAIN']}"]
+cors_origins += [o for o in config.embed_allowed_origins if o not in cors_origins]
+
+# REST CORS: registered in EVERY environment — the embed widget's REST legs
+# (sub-agent lookup, conversations, feedback, uploads) are cross-origin wherever
+# the host page lives, production included. Explicit origins only: the browser
+# requires an exact Access-Control-Allow-Origin echo in credentials mode (the
+# ALB affinity cookie rides on these requests), so no wildcard.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Add Starlette's SessionMiddleware for OAuth state management
 # This is required by Authlib to store temporary OAuth state during login,
@@ -401,26 +425,9 @@ app.include_router(scim_router)
 app.include_router(outbound_scim_router)
 app.include_router(voice_agent_router)
 
-# Configure CORS origins for Socket.IO
-# In development, allow localhost. In production, use BASE_DOMAIN env var.
-if config.is_local():
-    # Allow both http and https for localhost development
-    # Include Vite dev server port (5173) for frontend development
-    cors_origins = [
-        "http://localhost:5001",
-        "http://127.0.0.1:5001",
-        "https://localhost:5001",
-        "https://127.0.0.1:5001",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        # Embedded Nannos: the cockpit frontend (guinea-pig host) runs on :3000
-        # and mounts the chat widget cross-origin against this socket.
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ]
-else:
-    # In production, use the configured base domain
-    cors_origins = [f"https://{os.environ['BASE_DOMAIN']}"]
+# Socket.IO reuses the SAME `cors_origins` list built next to the CORSMiddleware
+# registration above — keeping REST and socket origin policy in lockstep (they
+# drifted apart before, which broke embed-sdk hosts on deployed environments).
 
 # Create FastAPI-MCP server without auth_config
 # Authentication is handled by individual tool endpoints via require_auth_or_bearer_token
