@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from ..dependencies import require_auth
+from ..dependencies import require_auth_or_bearer_token
 from ..models.user import User
 from ..exceptions import UnknownCursorError
 
@@ -16,9 +16,11 @@ router: APIRouter = APIRouter(prefix="/api/v1/messages", tags=["messages"])
 
 @router.get("/{conversation_id}")
 async def get_messages_by_conversation(
+    # Bearer accepted: the embed SDK (ADR-0004) resumes conversations cross-origin
+    # with the user's access token — no console session cookie exists.
     request: Request,
     conversation_id: str,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
     limit: int = 100,
     before: str | None = None,
 ) -> dict:

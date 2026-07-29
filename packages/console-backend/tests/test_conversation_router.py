@@ -19,7 +19,7 @@ from console_backend.routers import conversation_router
 app = FastAPI()
 app.include_router(conversation_router.router)
 # Ensure tests run with an authenticated user by default
-app.dependency_overrides[conversation_router.require_auth] = lambda: MagicMock(
+app.dependency_overrides[conversation_router.require_auth_or_bearer_token] = lambda: MagicMock(
     id="test-user-id", email="test@example.com", is_administrator=False
 )
 
@@ -139,7 +139,7 @@ def test_get_conversations_permission(mock_config):
 
     # Override the dependency to inject a specific user
     test_user = MagicMock(id="user-1", email="user1@test.com")
-    app.dependency_overrides[conversation_router.require_auth] = lambda: test_user
+    app.dependency_overrides[conversation_router.require_auth_or_bearer_token] = lambda: test_user
 
     try:
         # Requesting different user's conversations should be forbidden
@@ -152,7 +152,7 @@ def test_get_conversations_permission(mock_config):
         assert resp.status_code == 200
     finally:
         # Restore default override
-        app.dependency_overrides[conversation_router.require_auth] = lambda: MagicMock(
+        app.dependency_overrides[conversation_router.require_auth_or_bearer_token] = lambda: MagicMock(
             id="test-user-id", email="test@example.com", is_administrator=False
         )
 

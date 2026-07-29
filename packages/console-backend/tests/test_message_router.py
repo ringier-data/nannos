@@ -17,7 +17,7 @@ app.include_router(message_router.router)
 client = TestClient(app)
 
 # Test app should treat requests as authenticated by default
-app.dependency_overrides[message_router.require_auth] = lambda: MagicMock(
+app.dependency_overrides[message_router.require_auth_or_bearer_token] = lambda: MagicMock(
     id="user-1", email="test@example.com", is_administrator=False
 )
 
