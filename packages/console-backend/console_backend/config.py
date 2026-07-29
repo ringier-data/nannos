@@ -381,6 +381,15 @@ class Config(BaseModel):
 
     environment: str = Field(default_factory=lambda: os.getenv("ENVIRONMENT", "local"))
     base_domain: str = Field(default_factory=lambda: os.getenv("BASE_DOMAIN", "localhost:5001"))
+    # Embedded Nannos (ADR-0004): extra origins allowed to reach the REST API and
+    # Socket.IO cross-origin — the embed-sdk host pages (e.g. the Alloy cockpit),
+    # which authenticate with bearer tokens, not cookies. Comma-separated EXACT
+    # origins (scheme + host [+ port], no paths, no wildcards — both CORS layers
+    # match exactly), e.g.:
+    #   EMBED_ALLOWED_ORIGINS=https://riad.alloy.ch,https://demo.alloy.ch
+    embed_allowed_origins: list[str] = Field(
+        default_factory=lambda: [o.strip() for o in os.getenv("EMBED_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    )
     secret_key: str = Field(default_factory=lambda: os.getenv("SECRET_KEY", "change-me-in-production"))
     session_ttl_seconds: int = Field(default=2592000)  # 30 days
     cookie_name: str = Field(default="a2a-chatui")
