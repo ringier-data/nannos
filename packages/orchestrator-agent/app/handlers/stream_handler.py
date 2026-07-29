@@ -294,26 +294,11 @@ class StreamHandler:
         Returns:
             AgentStreamResponse with auth_required state
         """
-        # TODO: Localize auth_content based on user config language
-        if auth_url:
-            auth_content = (
-                f"{auth_message}\n\n"
-                f"Please visit the following URL to complete authentication:\n"
-                f"{auth_url}\n\n"
-                f"After completing authentication, you can retry your request."
-            )
-        else:
-            # TODO: we should instruct the chat UI to show an auth widget instead
-            auth_content = (
-                f"{auth_message}\n\n"
-                f"Please complete the required authentication and try again. Just answer DONE when authorized."
-            )
-
-        return AgentStreamResponse(
-            state=TaskState.TASK_STATE_AUTH_REQUIRED,
-            content=auth_content,
-            interrupt_reason="auth_required",
-            metadata={"auth_url": auth_url, "error_code": error_code, "requires_auth": True, **metadata},
+        return AgentStreamResponse.auth_required(
+            message=auth_message,
+            auth_url=auth_url,
+            error_code=error_code,
+            **metadata,
         )
 
     @staticmethod
