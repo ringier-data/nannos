@@ -24,14 +24,36 @@ export {
 } from './zod-form';
 
 /**
+ * How a host-injected prompt (`open(prompt)` / `sendPrompt`) is presented in
+ * the chat. Pick by who authored the text:
+ * - no `displayText`: the full prompt renders verbatim as a normal user bubble
+ *   — right when the text is genuinely the user's (the host relays something
+ *   they typed or dictated).
+ * - `displayText`: the full prompt is SENT, but the chat shows only this short
+ *   human-readable label as a muted "context" entry, expandable to the raw
+ *   prompt — right for host-authored instrumentation prompts a user never
+ *   wrote (rendering those as user speech is confusing; hiding them entirely
+ *   makes the agent's reply appear out of nowhere).
+ * - `contextKey`: identifies the page context the prompt is about (e.g.
+ *   `campaign:123`). The widget continues the active conversation only if it
+ *   was started under the SAME key; otherwise it starts a fresh conversation —
+ *   so a prompt about campaign B never lands in (and gets polluted by) a chat
+ *   about campaign A. Omit it to always continue the active conversation.
+ */
+export interface InjectedPromptOptions {
+  displayText?: string;
+  contextKey?: string;
+}
+
+/**
  * The headless core. Framework-free: a host can use this alone and render its
  * own UI, or feed it to the React UI kit (`mount`, see package root entry).
  */
 export class NannosCore {
   readonly registry = new ObjectRegistry();
   readonly transport: TransportClient;
-  private readonly promptListeners = new Set<(text: string, silent?: boolean) => void>();
-  private bufferedPrompt: { text: string; silent?: boolean } | null = null;
+  private readonly promptListeners = new Set<(text: string, opts?: InjectedPromptOptions) => void>();
+  private bufferedPrompt: { text: string; opts?: InjectedPromptOptions } | null = null;
   private opened = false;
   private readonly openListeners = new Set<(open: boolean) => void>();
   private agentUrlPromise: Promise<string | null> | null = null;
@@ -203,8 +225,9 @@ export class NannosCore {
   }
 
   /** Open the panel. With `prompt`, also injects it (see `sendPrompt`) so a
-   *  custom trigger can "open with this question" in one call. */
-  open(prompt?: string, opts?: { silent?: boolean }) {
+   *  custom trigger can "open with this question" in one call. See
+   *  `InjectedPromptOptions` for how the prompt is presented in the chat. */
+  open(prompt?: string, opts?: InjectedPromptOptions) {
     this.setOpen(true);
     if (prompt !== undefined) this.sendPrompt(prompt, opts);
   }
@@ -265,29 +288,28 @@ export class NannosCore {
   }
 
   /**
-   * Inject a user prompt into the widget programmatically (e.g. a suggested
-   * query the host offers next to a form). The widget sends it once connected.
+   * Inject a prompt into the widget programmatically (e.g. a suggested query
+   * the host offers next to a form). The widget sends it once connected.
    * Buffers the prompt if the widget hasn't mounted/subscribed yet (first open),
-   * so a click that also opens the widget doesn't lose the prompt.
+   * so a click that also opens the widget doesn't lose the prompt. See
+   * `InjectedPromptOptions` for how the prompt is presented in the chat.
    */
-  sendPrompt(text: string, opts?: { silent?: boolean }) {
-    const silent = opts?.silent;
+  sendPrompt(text: string, opts?: InjectedPromptOptions) {
     if (this.promptListeners.size > 0) {
-      for (const l of this.promptListeners) l(text, silent);
+      for (const l of this.promptListeners) l(text, opts);
     } else {
-      this.bufferedPrompt = { text, silent };
+      this.bufferedPrompt = { text, opts };
     }
   }
 
-  /** Subscribe to injected prompts (the widget's ChatContext). Drains any buffered
-   *  prompt. `silent` = auto-instrumentation: send context for the agent to act on
-   *  without rendering a user bubble. */
-  onPrompt(cb: (text: string, silent?: boolean) => void): () => void {
+  /** Subscribe to injected prompts (the widget's ChatContext). Drains any
+   *  buffered prompt. */
+  onPrompt(cb: (text: string, opts?: InjectedPromptOptions) => void): () => void {
     this.promptListeners.add(cb);
     if (this.bufferedPrompt !== null) {
       const b = this.bufferedPrompt;
       this.bufferedPrompt = null;
-      cb(b.text, b.silent);
+      cb(b.text, b.opts);
     }
     return () => this.promptListeners.delete(cb);
   }

@@ -56,20 +56,36 @@ const ChatContext = createContext<ChatContextType | undefined>(undefined);
 // Embedded widgets resume only the conversation THIS browser session was on
 // (sessionStorage: survives reloads in the tab, not new tabs or later visits).
 // Keyed by subAgentId so two widgets on one host don't cross wires. Access is
-// guarded — sandboxed frames may deny storage.
+// guarded — sandboxed frames may deny storage. `contextKey` remembers which
+// page context (host-supplied, e.g. `campaign:123`) the conversation was
+// started under, so keyed injected prompts can tell "same page, continue" from
+// "different page, start fresh" across a reload.
 const sessionConversationKey = (scope: unknown) => `nannos-active-conversation:${String(scope)}`;
 
-function readSessionConversation(scope: unknown): string | null {
+interface SessionConversation {
+  id: string;
+  contextKey?: string;
+}
+
+function readSessionConversation(scope: unknown): SessionConversation | null {
   try {
-    return sessionStorage.getItem(sessionConversationKey(scope));
+    const raw = sessionStorage.getItem(sessionConversationKey(scope));
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as SessionConversation;
+      return typeof parsed?.id === 'string' ? parsed : null;
+    } catch {
+      // Pre-JSON value (a bare conversation id) from an older widget build.
+      return { id: raw };
+    }
   } catch {
     return null;
   }
 }
 
-function writeSessionConversation(scope: unknown, conversationId: string): void {
+function writeSessionConversation(scope: unknown, conversation: SessionConversation): void {
   try {
-    sessionStorage.setItem(sessionConversationKey(scope), conversationId);
+    sessionStorage.setItem(sessionConversationKey(scope), JSON.stringify(conversation));
   } catch {
     /* storage unavailable — resume simply won't survive a reload */
   }
@@ -282,7 +298,11 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
   const [statusHistoryMap, setStatusHistoryMap] = useState<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
   const [pendingInterruptMap, setPendingInterruptMap] = useState<Map<string, PendingInterrupt>>(new Map());
   const [pendingFeedbackRequest, setPendingFeedbackRequest] = useState<{ conversationId: string; subAgents: string[] } | null>(null);
-  const [pendingPrompt, setPendingPrompt] = useState<{ text: string; silent?: boolean } | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState<{
+    text: string;
+    displayText?: string;
+    contextKey?: string;
+  } | null>(null);
 
   const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
   const streamingMapRef = useRef<Map<string, string>>(new Map());
@@ -310,6 +330,9 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
   const playgroundModeRef = useRef(playgroundMode);
   const activeConversationIdRef = useRef(activeConversationId);
   const pendingMessagesRef = useRef<Map<string, string>>(new Map()); // messageId → conversationId
+  // conversationId → host contextKey it was started under (keyed injected
+  // prompts only). Used to decide continue-vs-fresh for the next keyed prompt.
+  const conversationContextKeysRef = useRef<Map<string, string>>(new Map());
   const persistedMessageIdRef = useRef<Map<string, string>>(new Map()); // conversationId → DB message_id
 
   // Keep ref in sync
@@ -1039,7 +1062,18 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
         };
       });
 
-      setConversations(mapped);
+      setConversations((prev) => {
+        // A conversation created locally this render-cycle (e.g. core.sendPrompt /
+        // open(prompt) racing this fetch) isn't persisted server-side yet —
+        // replacing the list wholesale would drop the very conversation on screen
+        // (blank title/header). Keep the active one if the server doesn't know it.
+        const activeId = activeConversationIdRef.current;
+        const activeLocal = activeId ? prev.find((c) => c.id === activeId) : undefined;
+        if (activeLocal && !mapped.some((c) => c.id === activeId)) {
+          return [activeLocal, ...mapped];
+        }
+        return mapped;
+      });
 
       // Cache context ids
       if (Array.isArray(data.items)) {
@@ -1057,13 +1091,22 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
       // browser session was already on (a reload restores it — including an
       // in-flight turn's pending HITL prompt — but a fresh visit starts clean,
       // with history one tap away).
-      if (!activeConversationId && mapped.length > 0) {
+      //
+      // Read the ref, not the closure: this runs when the fetch RESOLVES, and an
+      // injected prompt (open(prompt)) typically creates + selects a conversation
+      // while the fetch is in flight. The closure still sees the null from when
+      // the fetch STARTED, and auto-selecting here would yank the view away from
+      // the conversation whose user message was just rendered.
+      if (!activeConversationIdRef.current && mapped.length > 0) {
         if (autoSelectConversation) {
           setActiveConversationId(mapped[0].id);
         } else if (embeddedScopeId !== undefined) {
           const sessionConversation = readSessionConversation(embeddedScopeId);
-          if (sessionConversation && mapped.some((c) => c.id === sessionConversation)) {
-            setActiveConversationId(sessionConversation);
+          if (sessionConversation && mapped.some((c) => c.id === sessionConversation.id)) {
+            if (sessionConversation.contextKey) {
+              conversationContextKeysRef.current.set(sessionConversation.id, sessionConversation.contextKey);
+            }
+            setActiveConversationId(sessionConversation.id);
           }
         }
       }
@@ -1072,7 +1115,7 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
     } finally {
       setIsLoadingConversations(false);
     }
-  }, [settings?.agentUrl, activeConversationId, contextIdsMap, api, autoSelectConversation]);
+  }, [settings?.agentUrl, contextIdsMap, api, autoSelectConversation]);
 
   // Load messages for a conversation
   const loadMessages = useCallback(async (conversationId: string) => {
@@ -1150,7 +1193,23 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
             (!content || content.trim().length === 0);
           
           const showMessageCard = !isTimelineOnly;
-          
+
+          // A host-injected prompt persisted with a display label re-renders as
+          // the same context chip it was sent as, not as a raw user bubble.
+          const injectedDisplayText = (m.metadata as Record<string, unknown> | undefined)?.injectedDisplayText;
+          if (role === 'user' && typeof injectedDisplayText === 'string' && injectedDisplayText) {
+            return {
+              id,
+              conversationId,
+              type: 'context',
+              content: injectedDisplayText,
+              injectedPrompt: content,
+              timestamp,
+              parts: partArray,
+              showMessageCard,
+            } as Message;
+          }
+
           return {
             id,
             conversationId,
@@ -1409,26 +1468,32 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
     (
       content: string,
       files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>,
-      opts?: { hidden?: boolean },
+      opts?: { displayText?: string; newConversation?: boolean; contextKey?: string },
     ) => {
       // Allow messages with either text content or file attachments
       const hasContent = content.trim().length > 0;
       const hasFiles = files && files.length > 0;
+      // Host-injected prompt with a display label: the full `content` is sent,
+      // but the chat renders only this short label as a muted context chip
+      // (expandable to the raw prompt) — it isn't something the user typed.
+      const contextLabel = opts?.displayText;
 
       if (!isConnected || (!hasContent && !hasFiles)) return;
 
-      let conversationId = activeConversationId;
+      // newConversation: a keyed injected prompt whose contextKey doesn't match
+      // the active conversation's — start fresh instead of polluting it.
+      let conversationId = opts?.newConversation ? null : activeConversationId;
       const isFirstMessage = conversationId ? (messagesMap.get(conversationId)?.length || 0) === 0 : true;
 
       // Create new conversation if needed
       if (!conversationId) {
         conversationId = generateUUID();
-        // Use content for title if available, otherwise use file attachment info
-        const displayText = hasContent
+        // Use the context label / content for the title, else file attachment info
+        const displayText = contextLabel ?? (hasContent
           ? content
           : hasFiles
             ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}`
-            : 'New conversation';
+            : 'New conversation');
         const title = displayText.slice(0, 40) + (displayText.length > 40 ? '...' : '');
         const timestamp = new Date();
         const newConv: Conversation = {
@@ -1442,6 +1507,12 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
         };
         setConversations((prev) => [newConv, ...prev]);
         setActiveConversationId(conversationId);
+        // Sync the ref NOW, not on the next commit: an in-flight loadConversations
+        // response reads it to decide auto-select, and must see this conversation.
+        activeConversationIdRef.current = conversationId;
+        if (opts?.contextKey) {
+          conversationContextKeysRef.current.set(conversationId, opts.contextKey);
+        }
       }
 
       // Add user message
@@ -1478,24 +1549,34 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
           ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}: ${files!.map((f) => f.name).join(', ')}`
           : '';
 
-      const userMsg: Message = {
-        id: messageId,
-        conversationId,
-        type: 'user',
-        content: displayContent,
-        timestamp: new Date(),
-        parts,
-      };
-      // Hidden (auto-instrumentation) priming: send through the normal path so
-      // the manifest rides along and the agent replies, but render no user bubble.
-      if (!opts?.hidden) addMessage(conversationId, userMsg);
+      const userMsg: Message = contextLabel
+        ? {
+            id: messageId,
+            conversationId,
+            type: 'context',
+            content: contextLabel,
+            injectedPrompt: content,
+            timestamp: new Date(),
+            parts,
+          }
+        : {
+            id: messageId,
+            conversationId,
+            type: 'user',
+            content: displayContent,
+            timestamp: new Date(),
+            parts,
+          };
+      addMessage(conversationId, userMsg);
 
       // Update conversation with appropriate last message text
-      const lastMessageText = hasContent
-        ? content.slice(0, 50)
-        : hasFiles
-          ? `📎 ${files!.length} file${files!.length > 1 ? 's' : ''}`
-          : 'New message';
+      const lastMessageText = contextLabel
+        ? contextLabel.slice(0, 50)
+        : hasContent
+          ? content.slice(0, 50)
+          : hasFiles
+            ? `📎 ${files!.length} file${files!.length > 1 ? 's' : ''}`
+            : 'New message';
 
       updateConversation(conversationId, {
         lastMessage: lastMessageText,
@@ -1503,11 +1584,11 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
       });
 
       if (isFirstMessage) {
-        const displayText = hasContent
+        const displayText = contextLabel ?? (hasContent
           ? content
           : hasFiles
             ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}`
-            : 'New conversation';
+            : 'New conversation');
         const title = displayText.slice(0, 40) + (displayText.length > 40 ? '...' : '');
         updateConversation(conversationId, { title });
       }
@@ -1526,6 +1607,13 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
       }
       if (effectiveThinkingLevel) {
         metadata.thinkingLevel = effectiveThinkingLevel;
+      }
+
+      // Persisted with the message (the backend stores and echoes message
+      // metadata), so a reload re-renders the context chip instead of the raw
+      // injected prompt as a user bubble.
+      if (contextLabel) {
+        metadata.injectedDisplayText = contextLabel;
       }
 
       // In playground mode, tag every message with the sub-agent config hash and
@@ -1721,7 +1809,10 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
   useEffect(() => {
     const scope = coreRef.current?.config?.subAgentId;
     if (scope === undefined || !activeConversationId) return;
-    writeSessionConversation(scope, activeConversationId);
+    writeSessionConversation(scope, {
+      id: activeConversationId,
+      contextKey: conversationContextKeysRef.current.get(activeConversationId),
+    });
   }, [activeConversationId]);
 
   // Host-injected prompts (e.g. a suggested query the app offers next to a form,
@@ -1729,14 +1820,26 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
   useEffect(() => {
     const c = coreRef.current;
     if (!c) return;
-    return c.onPrompt((text, silent) => setPendingPrompt({ text, silent }));
+    return c.onPrompt((text, opts) =>
+      setPendingPrompt({ text, displayText: opts?.displayText, contextKey: opts?.contextKey }),
+    );
   }, []);
 
   useEffect(() => {
     if (pendingPrompt && isConnected) {
-      // silent = auto-instrumentation: goes through the normal path (manifest +
-      // conversation creation) but renders no user bubble; the agent replies.
-      sendMessageAction(pendingPrompt.text, undefined, { hidden: pendingPrompt.silent });
+      // displayText = render a short context-chip label instead of the raw prompt.
+      // contextKey = continue the active conversation only if it was started
+      // under the same key; otherwise start fresh so a prompt about one page
+      // context doesn't land in a conversation about another.
+      const key = pendingPrompt.contextKey;
+      const activeKey = activeConversationIdRef.current
+        ? conversationContextKeysRef.current.get(activeConversationIdRef.current)
+        : undefined;
+      sendMessageAction(pendingPrompt.text, undefined, {
+        displayText: pendingPrompt.displayText,
+        contextKey: key,
+        newConversation: key !== undefined && activeKey !== key,
+      });
       setPendingPrompt(null);
     }
   }, [pendingPrompt, isConnected, sendMessageAction]);
