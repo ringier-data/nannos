@@ -71,9 +71,13 @@ export interface Conversation {
 export interface Message {
   id: string;
   conversationId: string;
-  type: 'user' | 'agent' | 'task';
+  /** 'context' = a host-injected prompt shown as a muted context chip (its
+   *  `content` is the short display label, `injectedPrompt` the raw prompt). */
+  type: 'user' | 'agent' | 'task' | 'context';
   content: string;
   timestamp: Date;
+  /** For type 'context': the full prompt actually sent, expandable in the UI. */
+  injectedPrompt?: string;
   // Unified chronological timeline of all events
   timeline?: TimelineEvent[];
   // Control whether to show MessageCard (false for timeline-only messages)

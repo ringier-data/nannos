@@ -246,3 +246,27 @@ describe('NannosCore.bindClientActions', () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 });
+
+describe('NannosCore.sendPrompt', () => {
+  it('delivers presentation opts to live listeners', () => {
+    const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
+    const seen: Array<[string, unknown]> = [];
+    core.onPrompt((text, opts) => seen.push([text, opts]));
+    core.sendPrompt('full instrumentation prompt', { displayText: 'Suggest actions' });
+    expect(seen).toEqual([['full instrumentation prompt', { displayText: 'Suggest actions' }]]);
+  });
+
+  it('buffers the prompt WITH its opts until the widget subscribes (open-then-mount)', () => {
+    const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
+    core.open('full instrumentation prompt', { displayText: 'Suggest actions', contextKey: 'campaign:1' });
+    const seen: Array<[string, unknown]> = [];
+    core.onPrompt((text, opts) => seen.push([text, opts]));
+    expect(seen).toEqual([
+      ['full instrumentation prompt', { displayText: 'Suggest actions', contextKey: 'campaign:1' }],
+    ]);
+    // Drained once — a second subscriber must not replay it.
+    const second: unknown[] = [];
+    core.onPrompt((text) => second.push(text));
+    expect(second).toEqual([]);
+  });
+});
