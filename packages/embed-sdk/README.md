@@ -227,6 +227,34 @@ returns `{ applied, rejected }`. A value that fails the schema is skipped (it ca
 block the good fields) but reported — wire `bindClientActions({ onApplyResult })` to
 show "couldn't apply X"; absent a handler, rejections are `console.warn`'d.
 
+## Injected prompts (custom triggers)
+
+`useNannos().open(prompt)` / `core.sendPrompt(prompt)` open the panel and send a
+prompt from your own trigger (an "Ask AI" button, a page-load suggestion). How the
+prompt is *presented* in the chat is a separate choice — pick by who authored it:
+
+```ts
+core.open(text)                                    // full text as a user bubble
+core.open(text, { displayText: 'Suggest what I can do here' })   // context chip
+core.open(text, { displayText: '…', contextKey: `campaign:${id}` })  // + fresh-chat scoping
+```
+
+- **Default** — renders as a normal user bubble. Right when the text is genuinely
+  the user's (the host relays something they typed or dictated).
+- **`displayText`** — the full prompt is still sent, but the chat shows only this
+  short label as a muted, centered "context" entry, expandable to the raw prompt.
+  Use this for host-authored prompts (a suggestion menu, an instrumentation prompt
+  like "on open, proactively suggest actions for the on-screen campaign") —
+  rendering a page-authored meta-prompt as if the user typed it is confusing, and
+  hiding it entirely leaves the user wondering why the agent is talking. The label
+  persists with the message, so a reload re-renders the chip, not the raw prompt.
+- **`contextKey`** — identifies the page context the prompt is about (an entity
+  key like `campaign:123`, or the pathname). The widget continues the active
+  conversation only if it was started under the same key, and starts a fresh one
+  otherwise — so a prompt about campaign B never lands in (and gets polluted by)
+  a resumed chat about campaign A. Omit it to always continue the active
+  conversation. The key survives reloads alongside the session-resume record.
+
 ## Which sub-agent runs
 
 `subAgentId` in the config selects the scoped domain agent that handles the
