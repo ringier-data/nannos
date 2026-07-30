@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -177,6 +177,50 @@ function MessageCard({ message, feedbackMap, onFeedbackChanged }: MessageCardPro
   );
 }
 
+/**
+ * A host-injected prompt (`open(prompt, { displayText })`): the page, not the
+ * user, authored the request, so it must not read as user speech. Rendered as a
+ * muted centered chip with the host's short label; the raw prompt that was
+ * actually sent stays one tap away for transparency.
+ */
+function ContextChip({ message }: { message: Message }) {
+  const [expanded, setExpanded] = useState(false);
+  const expandable = !!message.injectedPrompt;
+  return (
+    <div
+      className="flex flex-col items-center gap-2 py-3"
+      data-testid={`message-${message.id}`}
+      data-message-id={message.id}
+    >
+      <button
+        type="button"
+        onClick={() => expandable && setExpanded((v) => !v)}
+        title={message.content}
+        aria-expanded={expandable ? expanded : undefined}
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/60 px-3 py-1',
+          'text-xs text-muted-foreground max-w-[90%]',
+          expandable && 'hover:bg-muted transition-colors cursor-pointer'
+        )}
+      >
+        <Sparkles className="w-3 h-3 shrink-0" />
+        <span className="truncate">{message.content}</span>
+        {expandable &&
+          (expanded ? (
+            <ChevronUp className="w-3 h-3 shrink-0" />
+          ) : (
+            <ChevronDown className="w-3 h-3 shrink-0" />
+          ))}
+      </button>
+      {expanded && message.injectedPrompt && (
+        <div className="max-w-[90%] rounded-md border border-border/50 bg-muted/40 px-3 py-2 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+          {message.injectedPrompt}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LoadingState() {
   return (
     <div className="space-y-4 p-4">
@@ -343,7 +387,12 @@ export function MessageList() {
             <UnifiedTimelineBlock timeline={msg.timeline} complete={true} />
           )}
           {/* Only render MessageCard if message has actual content */}
-          {msg.showMessageCard !== false && <MessageCard message={msg} feedbackMap={feedbackMap} onFeedbackChanged={refreshFeedback} />}
+          {msg.showMessageCard !== false &&
+            (msg.type === 'context' ? (
+              <ContextChip message={msg} />
+            ) : (
+              <MessageCard message={msg} feedbackMap={feedbackMap} onFeedbackChanged={refreshFeedback} />
+            ))}
         </div>
       ))}
       {/* Live streaming events - unified timeline maintains chronological order */}
