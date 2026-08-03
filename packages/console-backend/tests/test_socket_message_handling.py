@@ -672,3 +672,42 @@ async def test_send_message_surfaces_db_errors_instead_of_conversation_not_found
     mock_a2a_client.send_message.assert_not_called()
     assert result is not None
     assert result.get("details", {}).get("reason") != "Conversation not found"
+
+
+def test_user_facing_send_error_never_leaks_transport_internals():
+    """A2A client failures reach end users of the EMBEDDED widget, so the message
+    must be presentable: transport internals (gRPC StreamReset dumps, raw httpx
+    reprs, upstream 503s) map to a friendly retry-later message; the raw string
+    stays available in error_details only."""
+    import httpx
+    from a2a.client import A2AClientError, A2AClientTimeoutError
+
+    from app import _user_facing_send_error
+
+    # Orchestrator died mid-stream (e.g. OOMKilled): SDK wraps an httpx transport
+    # error — the classic "<StreamReset ...>" dump.
+    reset = A2AClientError("Network communication error: <StreamReset stream_id:11, error_code:2>")
+    reset.__cause__ = httpx.RemoteProtocolError("<StreamReset stream_id:11, error_code:2>")
+    msg, retryable = _user_facing_send_error(reset)
+    assert "StreamReset" not in msg
+    assert retryable is True
+
+    # Orchestrator down while restarting: upstream 503.
+    resp_503 = httpx.Response(503, request=httpx.Request("POST", "http://agent"))
+    http_503 = A2AClientError("HTTP Error 503: Service Unavailable")
+    http_503.__cause__ = httpx.HTTPStatusError("503", request=resp_503.request, response=resp_503)
+    msg, retryable = _user_facing_send_error(http_503)
+    assert "503" not in msg
+    assert retryable is True
+
+    # Timeout: retryable.
+    msg, retryable = _user_facing_send_error(A2AClientTimeoutError("Client Request timed out"))
+    assert retryable is True
+
+    # Auth failure: not retryable, tells the user to sign in again.
+    resp_401 = httpx.Response(401, request=httpx.Request("POST", "http://agent"))
+    auth_err = A2AClientError("HTTP Error 401: Unauthorized")
+    auth_err.__cause__ = httpx.HTTPStatusError("401", request=resp_401.request, response=resp_401)
+    msg, retryable = _user_facing_send_error(auth_err)
+    assert retryable is False
+    assert "sign in" in msg
