@@ -17,7 +17,7 @@ import bleach
 import httpx
 import socketio
 import yaml
-from a2a.client import A2ACardResolver, A2AClientError
+from a2a.client import A2ACardResolver, A2AClientError, A2AClientTimeoutError
 from a2a.client.client import Client
 from a2a.types import (
     CancelTaskRequest,
@@ -1693,6 +1693,36 @@ def _build_a2a_message_parts(
     return a2a_parts
 
 
+def _user_facing_send_error(err: A2AClientError) -> tuple[str, bool]:
+    """Map an A2A client failure to a (user-presentable message, retryable) pair.
+
+    The SDK's error strings embed transport internals (gRPC StreamReset dumps,
+    raw httpx reprs) that must never reach the chat UI — an embedded widget
+    shows them to end users, not operators. The full detail stays in the log
+    (callers log with exc_info) and in the response's `error_details.detail`.
+
+    Classification uses `__cause__`, which the SDK sets to the original httpx
+    error: an HTTPStatusError carries the upstream status; any TransportError
+    (connection reset mid-stream — e.g. the orchestrator being OOM-killed or
+    redeployed — refused connections, protocol errors) is a transient outage.
+    """
+    cause = err.__cause__
+    status = getattr(getattr(cause, "response", None), "status_code", None)
+    if status in (401, 403):
+        return ("You are no longer authorized. Please refresh the page and sign in again.", False)
+    if (
+        isinstance(err, A2AClientTimeoutError)
+        or isinstance(cause, (httpx.TransportError, httpx.TimeoutException))
+        or status in (502, 503, 504)
+    ):
+        return (
+            "The assistant is temporarily unavailable — it may be restarting. "
+            "Your conversation is saved; please try again in a moment.",
+            True,
+        )
+    return ("Something went wrong while contacting the assistant. Please try again.", True)
+
+
 async def _send_message_to_agent(
     a2a_client: Client | None,
     message: Message,
@@ -1752,9 +1782,11 @@ async def _send_message_to_agent(
         return create_success_response({"id": message_id})
     except A2AClientError as http_err:
         logger.error(f"Runtime error during message send: {http_err}", exc_info=True)
+        user_message, retryable = _user_facing_send_error(http_err)
         error_response = create_error_response(
             SocketError.MSG_SEND_FAILED,
-            details={"reason": f"HTTP error during message send: {http_err}"},
+            message_override=user_message,
+            details={"detail": str(http_err), "retryable": retryable},
         )
         error_response["id"] = message_id
         await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
@@ -1813,9 +1845,11 @@ async def _send_steering_message_to_agent(
 
     except A2AClientError as http_err:
         logger.error(f"[STEERING] Failed to send steering message: {http_err}", exc_info=True)
+        user_message, retryable = _user_facing_send_error(http_err)
         error_response = create_error_response(
             SocketError.MSG_SEND_FAILED,
-            details={"reason": f"Steering message failed: {http_err}"},
+            message_override=user_message,
+            details={"detail": str(http_err), "retryable": retryable, "steering": True},
         )
         error_response["id"] = message_id
         await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
