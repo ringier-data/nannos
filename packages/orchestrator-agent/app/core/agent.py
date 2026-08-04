@@ -661,6 +661,20 @@ class OrchestratorDeepAgent:
                             )
                         continue  # Process next event
 
+                    elif event_type == "client_action":
+                        # CLIENT-ACTION DIRECTIVE (Embedded Nannos): emitted by the
+                        # client_action tool via the custom stream; forwarded to the
+                        # client as an extension-tagged status update.
+                        directive = event_data.get("directive")
+                        if directive:
+                            logger.info(f"[ORCHESTRATOR] Client-action directive: {directive}")
+                            yield AgentStreamResponse(
+                                state=TaskState.TASK_STATE_WORKING,
+                                content="",
+                                metadata={"client_action": directive},
+                            )
+                        continue  # Process next event
+
                     elif event_type == "status_history":
                         # ACTIVITY LOG from tool calls (orchestrator or sub-agents via middleware)
                         status_msg = event_data.get("message", "")
@@ -753,66 +767,11 @@ class OrchestratorDeepAgent:
             # Check for general interrupt conditions (pending nodes without specific interrupts)
             # Note: Specific interrupt handling is done in agent_executor for proper A2A task state management
             if hasattr(final_state, "interrupts") and final_state.interrupts:
-                task_state = final_state.interrupts[-1].value.get("task_state", TaskState.TASK_STATE_INPUT_REQUIRED)
-                if task_state == TaskState.TASK_STATE_AUTH_REQUIRED:
-                    logger.debug(
-                        f"[ORCHESTRATOR] Found auth_required interrupt in final state: {final_state.interrupts[-1].value}"
-                    )
-                    value: dict = final_state.interrupts[-1].value.copy()
-                    yield AgentStreamResponse.auth_required(
-                        message=value.pop("message", "Authentication required"),
-                        auth_url=value.pop("auth_url", ""),
-                        error_code=value.pop("error_code", ""),
-                        **value,
-                    )
-                else:
-                    logger.debug(f"[ORCHESTRATOR] Found interrupt in final state: {final_state.interrupts[-1].value}")
-                    interrupt_value_dict = (
-                        final_state.interrupts[-1].value if isinstance(final_state.interrupts[-1].value, dict) else {}
-                    )
-
-                    # Detect HumanInTheLoopMiddleware interrupts (HITLRequest format)
-                    action_requests = interrupt_value_dict.get("action_requests")
-                    review_configs = interrupt_value_dict.get("review_configs")
-                    if action_requests and isinstance(action_requests, list):
-                        # HITL interrupt — extract tool name and args for metadata
-                        tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
-                        if "console_create_bug_report" in tool_names:
-                            # Bug report HITL interrupt
-                            bug_action = next(
-                                ar for ar in action_requests if ar.get("name") == "console_create_bug_report"
-                            )
-                            reason = bug_action.get("args", {}).get("description", "")
-                            description = bug_action.get("description", "")
-                            content = f"Reason: {reason}\n\n{description}" if reason else description
-                            yield AgentStreamResponse(
-                                state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                                content=content or "Bug report requires your confirmation.",
-                                interrupt_reason=reason,
-                                pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
-                                action_requests=action_requests,
-                                review_configs=review_configs,
-                            )
-                        else:
-                            # Generic HITL interrupt for other tools
-                            description = action_requests[0].get("description", "") if action_requests else ""
-                            yield AgentStreamResponse(
-                                state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                                content=description or "Tool execution requires approval.",
-                                pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
-                                action_requests=action_requests,
-                                review_configs=review_configs,
-                            )
-                    else:
-                        # Standard interrupt (file permissions, custom interrupts, etc.)
-                        yield AgentStreamResponse(
-                            state=task_state,
-                            content=interrupt_value_dict.get(
-                                "message", "Process interrupted. Human intervention required."
-                            ),
-                            interrupt_reason=interrupt_value_dict.get("reason", "graph_interrupted"),
-                            pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
-                        )
+                logger.debug(f"[ORCHESTRATOR] Found interrupt in final state: {final_state.interrupts[-1].value}")
+                yield AgentStreamResponse.from_interrupt(
+                    final_state.interrupts[-1].value,
+                    pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
+                )
                 return
             if hasattr(final_state, "next") and final_state.next:
                 logger.warning(f"graph in final state but no interrupt: {final_state}")
@@ -888,6 +847,158 @@ class OrchestratorDeepAgent:
             # Clear the per-turn attachments context registration.
             if _attachments_token is not None:
                 reset_current_attachments_backend(_attachments_token)
+
+    async def stream_subagent(
+        self,
+        runnable: Any,
+        message_parts: list[Part],
+        config: dict[str, Any],
+        context_id: str,
+        resume: Any = None,
+        turn_state: "TurnState | None" = None,
+        client_objects: list | None = None,
+    ) -> AsyncIterable[AgentStreamResponse]:
+        """Stream a scoped domain sub-agent as the top-level graph (Embedded Nannos, execute-only).
+
+        Mirrors ``stream()``'s contract — yields ``AgentStreamResponse`` items the
+        executor's streaming/extension loop already understands — but drives a
+        ``DynamicLocalAgentRunnable`` directly instead of the routing orchestrator
+        graph. This is the execute-only substrate (ADR-0004): the embedded
+        entrypoint sub-agent (``client_action_enabled=True``) runs in-process with
+        the orchestrator's interactive executor (streaming + A2A extensions + HITL),
+        skipping the routing main-graph turn.
+
+        Rather than re-implement token/structured-response parsing, this reuses the
+        sub-agent's own tested ``astream`` pipeline (attachments, sandbox, pregel
+        de-nesting, structured ``SubAgentResponseSchema`` streaming, interrupt
+        suppress+re-raise) and adapts its typed ``StreamEvent`` output into the
+        ``AgentStreamResponse`` shape ``_handle_stream_item`` consumes.
+
+        Args:
+            runnable: A built ``DynamicLocalAgentRunnable`` (from the runtime
+                context's ``subagent_registry``), already ``_ensure_agent()``-ed.
+            message_parts: User message parts (text; files via attachment blocks).
+            config: Sub-agent RunnableConfig — ``configurable.thread_id`` must be
+                the sub-agent thread (``{context_id}::dynamic-{name}``) and
+                ``metadata`` the per-turn context. ``client_objects`` is injected here.
+            context_id: Conversation id (orchestrator conversation id for the
+                sub-agent's tracking waterfall).
+            resume: Optional HITL resume value → fed as ``Command(resume=...)``.
+            turn_state: Per-turn carrier (populated best-effort for executor reuse).
+            client_objects: On-screen manifest for ``ClientObjectsMiddleware``.
+
+        Yields:
+            AgentStreamResponse: same shape as ``stream()`` (streaming chunks,
+            activity-log / work-plan / client-action status, terminal result, or a
+            HITL ``input_required`` pause).
+        """
+        from agent_common.a2a.base import SubAgentInput
+        from agent_common.a2a.stream_events import (
+            ActivityLogMeta,
+            ArtifactUpdate,
+            ClientActionMeta,
+            ErrorEvent,
+            IntermediateOutputMeta,
+            TaskUpdate,
+            WorkPlanMeta,
+        )
+        from langgraph.errors import GraphInterrupt
+
+        # Surface the on-screen manifest to ClientObjectsMiddleware, which reads it
+        # from the RunnableConfig metadata (keys "client_objects"/"clientObjects").
+        if client_objects:
+            config.setdefault("metadata", {})["client_objects"] = client_objects
+
+        # Build the stream input: a Command for HITL resume (bypasses message
+        # extraction inside the runnable), else a fresh SubAgentInput. Embedded is
+        # single-user (identity-bound), so there is no channel user prefix.
+        if resume is not None:
+            stream_input: Any = Command(resume=resume)
+            logger.info("[EMBEDDED] Resuming sub-agent '%s' from interrupt", getattr(runnable, "name", "?"))
+        else:
+            text_content, pending_file_blocks = await build_text_content(parts=message_parts, user_prefix=None)
+            serialized_blocks = [b if isinstance(b, dict) else b.model_dump() for b in pending_file_blocks]
+            human = HumanMessage(
+                content=text_content,
+                additional_kwargs={"file_blocks": serialized_blocks} if serialized_blocks else {},
+            )
+            stream_input = SubAgentInput(
+                messages=[human],
+                orchestrator_conversation_id=context_id,
+                a2a_tracking={},
+            )
+
+        try:
+            async for ev in runnable.astream(stream_input, config):
+                # --- Streaming content chunk ---
+                if isinstance(ev, ArtifactUpdate):
+                    if not ev.content:
+                        continue
+                    md: dict[str, Any] = {"streaming_chunk": True}
+                    if isinstance(ev.event_metadata, IntermediateOutputMeta):
+                        md["intermediate_output"] = True
+                        md["agent_name"] = getattr(runnable, "name", "assistant")
+                    yield AgentStreamResponse(
+                        state=TaskState.TASK_STATE_WORKING,
+                        content=ev.content,
+                        metadata=md,
+                    )
+                    continue
+
+                # --- Error signal ---
+                if isinstance(ev, ErrorEvent):
+                    yield AgentStreamResponse(
+                        state=TaskState.TASK_STATE_FAILED,
+                        content=ev.error or "The assistant hit an error. Please try again.",
+                    )
+                    continue
+
+                # --- Task updates: work-plan / client-action / activity-log / terminal ---
+                if isinstance(ev, TaskUpdate):
+                    meta = ev.event_metadata
+                    if isinstance(meta, WorkPlanMeta):
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content="",
+                            metadata={"work_plan": True, "todos": meta.todos},
+                        )
+                        continue
+                    if isinstance(meta, ClientActionMeta):
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content="",
+                            metadata={"client_action": meta.client_action},
+                        )
+                        continue
+                    if isinstance(meta, ActivityLogMeta) or ev.status_text:
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content=ev.status_text or "",
+                            metadata={"activity_log": True},
+                        )
+                        continue
+                    # Terminal result (no event_metadata, no status_text): the final answer.
+                    data = ev.data
+                    answer = ""
+                    if data is not None and data.messages:
+                        last = data.messages[-1]
+                        answer = last.content if isinstance(last.content, str) else str(last.content)
+                    if turn_state is not None:
+                        turn_state.captured = True
+                    yield AgentStreamResponse(
+                        state=data.state if data is not None else TaskState.TASK_STATE_COMPLETED,
+                        content=answer,
+                    )
+
+        except GraphInterrupt as gi:
+            # Resumable pause: the sub-agent's astream re-raises the suppressed
+            # interrupt. from_interrupt maps it exactly like the orchestrator path —
+            # HITL → input_required approval card, auth → auth_required with the
+            # authorize URL in content + metadata; the next turn resumes via Command.
+            interrupts = gi.args[0] if gi.args else ()
+            last_intr = interrupts[-1] if interrupts else None
+            value = getattr(last_intr, "value", {}) if last_intr is not None else {}
+            yield AgentStreamResponse.from_interrupt(value)
 
     def get_agent_response(self, final_state) -> AgentStreamResponse:
         """Parse the agent response to extract structured information and check for auth requirements."""

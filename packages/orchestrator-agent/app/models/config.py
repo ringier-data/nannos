@@ -100,10 +100,16 @@ class GraphRuntimeContext:
 
     custom_prompt: Optional[str] = None
     """User's custom prompt addendum.
-    
+
     If set, this text is appended to the system prompt as additional instructions.
     Allows users to customize agent behavior with personal preferences or guidelines.
     """
+
+    client_objects: Optional[list] = None
+    """Per-turn manifest of ontology objects registered on the user's screen
+    (Embedded Nannos). Entries: {type, id, scope, label?, fields?}. When present,
+    the `client_action` tool is registered and a <client_objects> section is
+    injected into the system prompt."""
 
     groups: list[str] = field(default_factory=list)
     """User's group memberships (Keycloak group paths).
@@ -245,6 +251,10 @@ class UserConfig(BaseModel):
         default=None,
         description="User's custom prompt addendum to append to system prompt",
     )
+    client_objects: Optional[list] = Field(
+        default=None,
+        description="Per-turn manifest of on-screen ontology objects from the embedding client (Embedded Nannos)",
+    )
     sub_agent_config_hash: Optional[str] = Field(
         default=None,
         description="Sub-agent config hash for console testing mode (single sub-agent isolation)",
@@ -354,6 +364,14 @@ class AgentSettings:
     # Console backend URL — used to subscribe to console's MCP endpoint
     CONSOLE_BACKEND_URL: str | None = os.getenv("CONSOLE_BACKEND_URL", None)
     CONSOLE_BACKEND_CLIENT_ID: str = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")
+
+    # Direct MCP servers (no gateway/token-exchange): JSON array of
+    # {"slug": str, "url": str, "headers": {str: str}?}. Intended for local dev
+    # and hosts not fronted by Gatana (e.g. an embedding application's MCP
+    # server, Embedded Nannos act-on-behalf tier). Headers typically carry a
+    # static bearer token; per-user token exchange remains the production path
+    # (ADR-0002).
+    MCP_DIRECT_SERVERS: str = os.getenv("MCP_DIRECT_SERVERS", "")
 
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))

@@ -30,6 +30,7 @@ class SessionService:
         id_token: str,
         access_token: str,
         access_token_expires_in: int = 3600,
+        session_ttl_seconds: int | None = None,
     ) -> str:
         """Create a new session for a user.
 
@@ -39,6 +40,10 @@ class SessionService:
             id_token: The ID token from OIDC (needed for logout)
             access_token: The access token from OIDC (for token exchange)
             access_token_expires_in: Access token lifetime in seconds (default: 3600)
+            session_ttl_seconds: Session lifetime override. Defaults to the configured
+                TTL (browser login sessions). Pass a short TTL for sessions minted
+                per-connection with no refresh token (the embedded socket path) —
+                they are useless past their access token's expiry.
 
         Returns:
             The session ID
@@ -46,7 +51,7 @@ class SessionService:
         session_id = str(uuid4())
         issued_at = datetime.now(tz=timezone.utc)
         access_token_expires_at = issued_at + timedelta(seconds=access_token_expires_in)
-        expires_at = issued_at + timedelta(seconds=self.session_ttl_seconds)
+        expires_at = issued_at + timedelta(seconds=session_ttl_seconds or self.session_ttl_seconds)
 
         try:
             async with self._session_factory() as db:
@@ -97,6 +102,12 @@ class SessionService:
                 logger.debug(f"Session not found: {session_id}")
                 return None
 
+            # Honor the session TTL: an expired row must not authenticate anyone
+            # (rows are physically removed by destroy_expired_sessions).
+            if row["expires_at"] is not None and row["expires_at"] <= datetime.now(tz=timezone.utc):
+                logger.debug(f"Session expired: {session_id}")
+                return None
+
             return StoredSession(
                 session_id=row["session_id"],
                 user_id=row["user_id"],
@@ -129,6 +140,28 @@ class SessionService:
             logger.info(f"Destroyed session: {session_id}")
         except Exception as e:
             logger.error(f"Failed to destroy session: {e}")
+
+    async def destroy_expired_sessions(self) -> int:
+        """Delete every session past its ``expires_at``. Returns the count removed.
+
+        Run periodically: ``get_session`` refuses expired rows, but nothing else
+        removes them — without a sweep, short-lived token-minted sessions (one per
+        embedded socket connect) accumulate token-bearing rows indefinitely.
+        """
+        try:
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    text("DELETE FROM sessions WHERE expires_at <= :now"),
+                    {"now": datetime.now(tz=timezone.utc)},
+                )
+                await db.commit()
+            removed = result.rowcount or 0
+            if removed:
+                logger.info(f"Swept {removed} expired session(s)")
+            return removed
+        except Exception as e:
+            logger.error(f"Failed to sweep expired sessions: {e}")
+            return 0
 
     async def update_session(
         self,

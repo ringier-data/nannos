@@ -380,7 +380,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession, test_
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, type, owner_user_id, current_version, default_version)
-            VALUES (6, 'Test Agent 6', 'remote', 'owner-123', 1, 1)
+            VALUES (9006, 'Test Agent 6', 'remote', 'owner-123', 1, 1)
         """)
     )
     await pg_session.commit()
@@ -392,7 +392,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession, test_
         db=pg_session,
         actor=test_user,
         user_ids=user_ids,
-        sub_agent_id=6,
+        sub_agent_id=9006,
         activated_by=ActivationSource.USER,
     )
     await pg_session.commit()
@@ -402,7 +402,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession, test_
         db=pg_session,
         actor=test_user,
         user_ids=user_ids,
-        sub_agent_id=6,
+        sub_agent_id=9006,
         group_id=None,  # Full delete
     )
     await pg_session.commit()
@@ -413,7 +413,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession, test_
     result = await pg_session.execute(
         text("""
             SELECT COUNT(*) FROM user_sub_agent_activations
-            WHERE sub_agent_id = 6
+            WHERE sub_agent_id = 9006
         """)
     )
     assert result.scalar() == 0
@@ -436,7 +436,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession, test_user:
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, type, owner_user_id, current_version, default_version)
-            VALUES (7, 'Test Agent 7', 'remote', 'owner-123', 1, 1)
+            VALUES (9007, 'Test Agent 7', 'remote', 'owner-123', 1, 1)
         """)
     )
     await pg_session.commit()
@@ -446,7 +446,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession, test_user:
         db=pg_session,
         actor=test_user,
         user_ids=[],
-        sub_agent_id=7,
+        sub_agent_id=9007,
         activated_by=ActivationSource.GROUP,
         group_id=1,
     )
@@ -457,7 +457,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession, test_user:
         db=pg_session,
         actor=test_user,
         user_ids=[],
-        sub_agent_id=7,
+        sub_agent_id=9007,
         group_id=1,
     )
     assert len(user_ids_deactivated) == 0

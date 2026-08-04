@@ -85,12 +85,15 @@ class TestBuildRuntimeContext:
         # Create 3 mock tools that will go into the registry
         mock_tool_a = Mock()
         mock_tool_a.name = "tool_a"
+        mock_tool_a.metadata = None
 
         mock_tool_b = Mock()
         mock_tool_b.name = "tool_b"
+        mock_tool_b.metadata = None
 
         mock_tool_c = Mock()
         mock_tool_c.name = "tool_c"
+        mock_tool_c.metadata = None
 
         # User has 3 tools discovered, but only 2 are whitelisted in DB
         user_config = UserConfig(

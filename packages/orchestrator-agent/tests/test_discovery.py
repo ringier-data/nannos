@@ -168,6 +168,7 @@ class TestToolDiscoveryService:
         config.get_oidc_issuer.return_value = "https://test.oidc.com"
         config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
         config.CONSOLE_BACKEND_URL = None
+        config.MCP_DIRECT_SERVERS = None
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
