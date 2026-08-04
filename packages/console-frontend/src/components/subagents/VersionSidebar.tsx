@@ -41,6 +41,7 @@ import {
   setDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPut,
   submitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPost,
 } from '@/api/generated/sdk.gen';
+import { ExpandableText } from './ExpandableText';
 import { VersionDiffViewer } from './VersionDiffViewer';
 import type { SubAgent, SubAgentConfigVersion, SubAgentStatus } from './types';
 
@@ -452,9 +453,10 @@ export function VersionSidebar({
 
                     {/* Change summary */}
                     {version.change_summary && (
-                      <p className="text-xs text-muted-foreground line-clamp-2 mb-1">
-                        {version.change_summary}
-                      </p>
+                      <ExpandableText
+                        text={version.change_summary}
+                        className="text-xs text-muted-foreground mb-1"
+                      />
                     )}
 
                     {/* Date */}
@@ -464,7 +466,7 @@ export function VersionSidebar({
 
                     {/* Rejection reason */}
                     {status === 'rejected' && version.rejection_reason && (
-                      <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                      <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive wrap-anywhere">
                         <strong>Rejected:</strong> {version.rejection_reason}
                       </div>
                     )}
