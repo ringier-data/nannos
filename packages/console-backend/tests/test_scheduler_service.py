@@ -470,3 +470,121 @@ class TestUpdateJobUnsetSentinel:
 
         result = await service.update_job(db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor)
         assert result is None
+
+
+class TestUpdateJobScheduleSwitch:
+    """Switching schedule_kind must clear the stale schedule columns and recompute next_run_at.
+
+    The DB check constraint scheduled_jobs_schedule_config requires exactly one
+    schedule config; leaving e.g. cron_expr set while switching to 'once' used to
+    surface as an IntegrityError 500 (prod incident 2026-08-03, job 4).
+    """
+
+    @pytest.mark.asyncio
+    async def test_cron_to_once_clears_cron_expr(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        existing_job = _make_job(
+            user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None
+        )
+        existing_job.cron_expr = "0 8 * * *"
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        run_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+        data = ScheduledJobUpdate(schedule_kind=ScheduleKind.ONCE, run_at=run_at)
+        await service.update_job(db=db, job_id=1, data=data, actor=actor)
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["schedule_kind"] == "once"
+        assert fields["run_at"] == run_at
+        assert fields["cron_expr"] is None
+        assert fields["interval_seconds"] is None
+        # once-jobs run at run_at itself
+        assert fields["next_run_at"] == run_at
+
+    @pytest.mark.asyncio
+    async def test_interval_to_cron_clears_interval(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id)  # interval job
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        data = ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 8 * * *")
+        await service.update_job(db=db, job_id=1, data=data, actor=actor)
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["schedule_kind"] == "cron"
+        assert fields["cron_expr"] == "0 8 * * *"
+        assert fields["interval_seconds"] is None
+        assert fields["run_at"] is None
+        assert fields["next_run_at"] > datetime.now(timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_switch_to_once_without_run_at_raises(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id)  # interval job, run_at unset
+        mock_repo.get_job.return_value = existing_job
+
+        with pytest.raises(ValueError, match="'once' requires run_at"):
+            await service.update_job(
+                db=db, job_id=1, data=ScheduledJobUpdate(schedule_kind=ScheduleKind.ONCE), actor=actor
+            )
+        mock_repo.update_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_switch_to_cron_without_expr_raises(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id)  # interval job, cron_expr unset
+        mock_repo.get_job.return_value = existing_job
+
+        with pytest.raises(ValueError, match="'cron' requires cron_expr"):
+            await service.update_job(
+                db=db, job_id=1, data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON), actor=actor
+            )
+        mock_repo.update_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_schedule_only_patch_recomputes_next_run_at(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        """Regression: the old code checked for schedule fields in the update payload
+        BEFORE adding them, so next_run_at was never recomputed on a schedule change."""
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id)  # interval 3600s
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        before = datetime.now(timezone.utc)
+        await service.update_job(
+            db=db, job_id=1, data=ScheduledJobUpdate(interval_seconds=120), actor=actor
+        )
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["interval_seconds"] == 120
+        assert "next_run_at" in fields
+        assert timedelta(seconds=100) < fields["next_run_at"] - before < timedelta(seconds=140)
+
+    @pytest.mark.asyncio
+    async def test_non_schedule_patch_leaves_schedule_untouched(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id)
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        await service.update_job(
+            db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, name="renamed"
+        )
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        for f in ("schedule_kind", "cron_expr", "interval_seconds", "run_at", "next_run_at"):
+            assert f not in fields

@@ -9,6 +9,7 @@ import logging
 import re
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from sqlalchemy.exc import IntegrityError
 
 from ..db.session import DbSession
 from ..dependencies import require_auth, require_auth_or_bearer_token
@@ -222,6 +223,16 @@ async def update_job(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except IntegrityError as e:
+        # Backstop: the service validates schedule combinations up front, but any
+        # constraint violation that still reaches the database must come back as an
+        # actionable client error, not an opaque 500 (MCP callers can self-correct
+        # on a message, not on "Internal Server Error").
+        detail = str(getattr(e, "orig", e)).splitlines()[0]
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Update rejected by a database constraint: {detail}",
+        ) from e
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job

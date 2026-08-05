@@ -14,6 +14,7 @@ from ..models.scheduled_job import (
     ScheduledJobCreate,
     ScheduledJobRun,
     ScheduledJobUpdate,
+    ScheduleKind,
 )
 from ..models.user import User
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
@@ -222,21 +223,40 @@ class SchedulerService:
             if not any(sa.id == fields["sub_agent_id"] for sa in accessible_agents):
                 raise ValueError(f"Access denied: You do not have permission to use sub-agent {fields['sub_agent_id']}")
 
-        # If schedule changed, recompute next_run_at
-        new_kind = data.schedule_kind or job.schedule_kind
-        new_cron = data.cron_expr if data.cron_expr is not None else job.cron_expr
-        new_interval = data.interval_seconds if data.interval_seconds is not None else job.interval_seconds
-        new_run_at = data.run_at if data.run_at is not None else job.run_at
+        # The DB enforces exactly one schedule config (scheduled_jobs_schedule_config):
+        # the column matching schedule_kind must be set and the other two NULL. A
+        # partial PATCH that switches kind must therefore clear the now-stale columns,
+        # and the effective combination must be validated here so callers get a clean
+        # 400 instead of a CheckViolationError surfacing as a 500.
+        if any(getattr(data, f) is not None for f in ("schedule_kind", "cron_expr", "interval_seconds", "run_at")):
+            new_kind = ScheduleKind(data.schedule_kind or job.schedule_kind)
+            new_cron = data.cron_expr if data.cron_expr is not None else job.cron_expr
+            new_interval = data.interval_seconds if data.interval_seconds is not None else job.interval_seconds
+            new_run_at = data.run_at if data.run_at is not None else job.run_at
 
-        if any(f in fields for f in ("schedule_kind", "cron_expr", "interval_seconds", "run_at")):
-            next_run_at = compute_next_run(new_kind, new_cron, new_interval, new_run_at)
-            if next_run_at is not None:
-                fields["next_run_at"] = next_run_at
+            if new_kind == ScheduleKind.CRON:
+                if not new_cron:
+                    raise ValueError("schedule_kind 'cron' requires cron_expr")
+                new_interval = None
+                new_run_at = None
+            elif new_kind == ScheduleKind.INTERVAL:
+                if new_interval is None:
+                    raise ValueError("schedule_kind 'interval' requires interval_seconds")
+                new_cron = None
+                new_run_at = None
+            else:  # ScheduleKind.ONCE
+                if new_run_at is None:
+                    raise ValueError("schedule_kind 'once' requires run_at")
+                new_cron = None
+                new_interval = None
 
-        for attr in ("schedule_kind", "cron_expr", "interval_seconds", "run_at"):
-            val = getattr(data, attr, None)
-            if val is not None:
-                fields[attr] = val.value if hasattr(val, "value") else val
+            fields["schedule_kind"] = new_kind.value
+            fields["cron_expr"] = new_cron
+            fields["interval_seconds"] = new_interval
+            fields["run_at"] = new_run_at
+            # compute_next_run returns None for 'once' (nothing to repeat after the
+            # run) — the single run happens at run_at itself, mirroring create_job.
+            fields["next_run_at"] = compute_next_run(new_kind, new_cron, new_interval, new_run_at) or new_run_at
 
         await self.repo.update_job(db=db, actor=actor, job_id=job_id, fields=fields)
         await db.commit()
