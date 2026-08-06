@@ -92,7 +92,14 @@ def thinking_levels_for(info: dict) -> list[str]:
     offered medium/high. Only when the model signals it reasons (``supports_reasoning`` or a
     bare none/max flag) but enumerates no usable per-effort detail do we fall back to the
     baseline tiers.
+
+    An explicitly-stored ``supports_reasoning: False`` is an admin override: the console writes
+    the capability booleans into the deployment's model_info, which shadows the cost map (the
+    proxy's /model/info merge only fills keys the deployment doesn't set). It turns thinking
+    off outright — even if the cost map enumerates per-effort flags for the underlying model.
     """
+    if info.get("supports_reasoning") is False:
+        return []
     declared = [e for e in _EFFORT_ORDER if info.get(f"supports_{e}_reasoning_effort")]
     if declared:
         return declared
@@ -379,6 +386,7 @@ class ModelGatewayService:
                         "max_input_tokens": info.get("max_input_tokens"),
                         "supports_vision": info.get("supports_vision", False),
                         "supports_reasoning": info.get("supports_reasoning", False),
+                        "supports_web_search": info.get("supports_web_search", False),
                         "supports_audio_input": info.get("supports_audio_input", False),
                         "supports_pdf_input": info.get("supports_pdf_input", False),
                     }

@@ -37,6 +37,16 @@ class TestThinkingLevelsFor:
         """A model that says it reasons but enumerates no efforts gets the baseline tiers."""
         assert thinking_levels_for({"supports_reasoning": True}) == ["low", "medium", "high"]
 
+    def test_explicit_false_overrides_declared_efforts(self):
+        """An admin-stored supports_reasoning=False (console capability toggle) shadows the
+        cost map entirely — thinking is off even if per-effort flags were merged in."""
+        info = {
+            "supports_reasoning": False,
+            "supports_low_reasoning_effort": True,
+            "supports_high_reasoning_effort": True,
+        }
+        assert thinking_levels_for(info) == []
+
     def test_bare_none_or_max_flag_still_counts_as_reasoning(self):
         """none/max aren't user-selectable tiers, but they still signal a reasoning model
         → baseline fallback rather than empty."""

@@ -140,6 +140,7 @@ class CatalogModel(BaseModel):
     max_input_tokens: int | None = None
     supports_vision: bool = False
     supports_reasoning: bool = False
+    supports_web_search: bool = False
     supports_audio_input: bool = False
     supports_pdf_input: bool = False
 

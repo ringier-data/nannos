@@ -121,13 +121,14 @@ const PRICING_UNITS: Array<{
   { unit: 'web_search', label: 'Web search ($/M searches)', flow: 'output', webSearchOnly: true },
 ];
 
-// The pricing fields shown/submitted for a given mode. web_search is gated on the prefill having
-// surfaced it (capable models only); everything else follows the input/embedding split.
-const visiblePricingUnits = (mode: string, prices: Record<string, string>) =>
+// The pricing fields shown/submitted for a given mode. web_search is gated on the model being
+// able to search — the capability toggle, or a prefill having surfaced a fee (capable models
+// only); everything else follows the input/embedding split.
+const visiblePricingUnits = (mode: string, prices: Record<string, string>, canSearch = false) =>
   (mode === 'embedding'
     ? PRICING_UNITS.filter((u) => u.flow === 'input')
     : PRICING_UNITS.filter((u) => !u.embeddingOnly)
-  ).filter((u) => !u.webSearchOnly || prices[u.unit] != null);
+  ).filter((u) => !u.webSearchOnly || canSearch || prices[u.unit] != null);
 
 interface FormState {
   model_name: string;
@@ -142,6 +143,11 @@ interface FormState {
   base_model: string; // Azure only: maps a deployment name to a known model for cost/metadata
   mode: 'chat' | 'embedding';
   input_modes: string[];
+  // Capability toggles, stored as EXPLICIT booleans in the deployment's model_info. Stored keys
+  // shadow LiteLLM's cost map (its /model/info merge only fills keys the deployment doesn't set),
+  // so these stay editable for models the catalog doesn't know yet — the reason they exist.
+  supports_reasoning: boolean;
+  supports_web_search: boolean;
   prices: Record<string, string>; // unit -> price string
 }
 
@@ -155,6 +161,8 @@ const EMPTY_FORM: FormState = {
   base_model: '',
   mode: 'chat',
   input_modes: ['text', 'image'],
+  supports_reasoning: false,
+  supports_web_search: false,
   prices: {},
 };
 
@@ -321,6 +329,10 @@ export function ModelGatewayPage() {
       provider: entry.family ?? f.provider,
       mode: isEmbedding ? 'embedding' : 'chat',
       input_modes: isEmbedding ? embeddingInputModes(entry) : modes,
+      // Capabilities from the catalog entry; a listed per-query search fee also counts as
+      // "can search" (some entries carry the fee without the boolean). Editable after.
+      supports_reasoning: !isEmbedding && !!entry.supports_reasoning,
+      supports_web_search: !isEmbedding && (!!entry.supports_web_search || !!perQuery),
       // Replace (not merge): selecting a different model must not leave a prior model's prices —
       // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
       prices,
@@ -429,6 +441,9 @@ export function ModelGatewayPage() {
       base_model: m.base_model ?? '',
       mode: m.mode === 'embedding' ? 'embedding' : 'chat',
       input_modes: m.input_modes && m.input_modes.length ? m.input_modes : ['text', 'image'],
+      // Current effective flags (stored or catalog-merged); saving writes them back explicitly.
+      supports_reasoning: !!m.supports_reasoning,
+      supports_web_search: !!m.supports_web_search,
       prices: {},
     });
     setDialogOpen(true);
@@ -479,6 +494,8 @@ export function ModelGatewayPage() {
         default_roles: [],
         db_model: true,
         supports_vision: (body.input_modes ?? []).includes('image'),
+        supports_reasoning: (body.model_info?.supports_reasoning as boolean | undefined) ?? false,
+        supports_web_search: (body.model_info?.supports_web_search as boolean | undefined) ?? false,
       };
       // First model to serve a role becomes the fleet default automatically, so a fresh
       // system always has a fallback without a separate "Make default" click. Only fill
@@ -608,7 +625,7 @@ export function ModelGatewayPage() {
     // the server resolves the route itself (id prefix, else its catalog entry) and keys billing on it.
     const provider = effectiveProvider;
     // Embeddings bill input only; chat bills input/output (+ optional cache / web search).
-    const units = visiblePricingUnits(form.mode, form.prices);
+    const units = visiblePricingUnits(form.mode, form.prices, form.supports_web_search);
     const pricing: Record<string, RateCardPricingEntry> = {};
     for (const { unit, flow } of units) {
       const raw = form.prices[unit];
@@ -630,6 +647,14 @@ export function ModelGatewayPage() {
     const model_info: Record<string, unknown> = {};
     if (isAzureProvider(provider) && form.base_model.trim()) {
       model_info.base_model = form.base_model.trim();
+    }
+    // Explicit capability booleans (chat only): stored model_info keys shadow the cost map, so
+    // this both grants capabilities the catalog doesn't know yet (off-catalog models) and lets
+    // an admin turn a catalog-claimed one off. Sent both ways — omitting a key would fall back
+    // to the catalog's answer and make the toggle a no-op.
+    if (form.mode === 'chat') {
+      model_info.supports_reasoning = form.supports_reasoning;
+      model_info.supports_web_search = form.supports_web_search;
     }
 
     const body: ModelRegistrationRequest = {
@@ -819,6 +844,9 @@ export function ModelGatewayPage() {
                           mode === 'embedding'
                             ? embeddingInputModes(catalog.find((c) => c.model_id === f.litellm_model))
                             : f.input_modes,
+                        // Chat-only capabilities — an embedding model neither thinks nor searches.
+                        supports_reasoning: mode === 'embedding' ? false : f.supports_reasoning,
+                        supports_web_search: mode === 'embedding' ? false : f.supports_web_search,
                       }))
                     }
                   >
@@ -1061,6 +1089,34 @@ export function ModelGatewayPage() {
               </div>
             )}
 
+            {form.mode === 'chat' && (
+              <div className="grid gap-1.5">
+                <Label>Capabilities</Label>
+                <div className="flex flex-wrap gap-2">
+                  <Badge
+                    variant={form.supports_reasoning ? 'default' : 'outline'}
+                    className="cursor-pointer"
+                    onClick={() => setForm((f) => ({ ...f, supports_reasoning: !f.supports_reasoning }))}
+                  >
+                    <Brain className="mr-1 h-3 w-3" /> thinking
+                  </Badge>
+                  <Badge
+                    variant={form.supports_web_search ? 'default' : 'outline'}
+                    className="cursor-pointer"
+                    onClick={() => setForm((f) => ({ ...f, supports_web_search: !f.supports_web_search }))}
+                  >
+                    <Globe className="mr-1 h-3 w-3" /> web search
+                  </Badge>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Pre-filled from the gateway&apos;s catalog; set manually for models it doesn&apos;t know
+                  yet. Thinking unlocks the reasoning-effort picker; web search makes the model eligible
+                  to back the <span className="font-mono">console_web_search</span> tool (set its
+                  per-search fee below).
+                </p>
+              </div>
+            )}
+
             <div className="grid gap-1.5">
               <div className="flex items-center justify-between">
                 <Label>Pricing ($ per million units)</Label>
@@ -1069,7 +1125,7 @@ export function ModelGatewayPage() {
                 </Button>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {visiblePricingUnits(form.mode, form.prices).map(({ unit, label }) => (
+                {visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map(({ unit, label }) => (
                   <div key={unit} className="grid gap-1">
                     <Label className="text-xs text-muted-foreground">{label}</Label>
                     <Input

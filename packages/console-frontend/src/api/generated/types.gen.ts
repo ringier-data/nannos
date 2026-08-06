@@ -994,6 +994,10 @@ export type CatalogModel = {
      */
     supports_reasoning?: boolean;
     /**
+     * Supports Web Search
+     */
+    supports_web_search?: boolean;
+    /**
      * Supports Audio Input
      */
     supports_audio_input?: boolean;
