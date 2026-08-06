@@ -130,6 +130,8 @@ from app.core.agent import OrchestratorDeepAgent
 from app.core.graph_factory import GraphFactory
 from app.models.config import AgentSettings, UserConfig
 
+from tests.support.mock_subagents import MockSubAgent, mock_subagents
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -303,6 +305,30 @@ def test_user_config() -> UserConfig:
         sub_agents=[],
         local_subagents=[],
     )
+
+
+@pytest.fixture()
+def user_config_with_subagents(test_user_config):
+    """Factory: a UserConfig with mock sub-agents registered and routable.
+
+    Without this the registry is empty, so the ``task`` tool offers the model no
+    ``subagent_type`` to choose and routing assertions cannot fail. Use it for
+    any test about delegation::
+
+        def test_routes_to_slack(user_config_with_subagents):
+            slack = MockSubAgent("slack-client", "Sends Slack messages.")
+            user_config = user_config_with_subagents(slack)
+
+    Assignment is post-construction on purpose — it mirrors executor.py:311 and
+    sidesteps the ``Runnable`` annotation on ``UserConfig.sub_agents`` that no
+    real A2A runnable satisfies either.
+    """
+
+    def _make(*agents: MockSubAgent) -> UserConfig:
+        test_user_config.sub_agents = mock_subagents(*agents)
+        return test_user_config
+
+    return _make
 
 
 @pytest.fixture(scope="session")
