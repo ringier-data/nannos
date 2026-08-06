@@ -205,6 +205,9 @@ function JobHeader({
             {job.schedule_kind}
           </Badge>
           <span className="font-mono">{scheduleLabel(job)}</span>
+          {job.schedule_kind === 'cron' && job.timezone && (
+            <span className="text-xs">({job.timezone})</span>
+          )}
           <span>·</span>
           {job.enabled ? (
             <span className="flex items-center gap-1 text-green-600">
@@ -518,6 +521,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
         <CronField
           value={cronExpr}
           onChange={(v) => { setCronExpr(v); touch(); }}
+          timezone={job.timezone}
         />
       )}
 
@@ -542,6 +546,11 @@ function EditForm({ job }: { job: ScheduledJob }) {
             value={runAt}
             onChange={(e) => { setRunAt(e.target.value); touch(); }}
           />
+          {job.timezone && (
+            <p className="text-xs text-muted-foreground">
+              Interpreted in {job.timezone}
+            </p>
+          )}
         </div>
       )}
 

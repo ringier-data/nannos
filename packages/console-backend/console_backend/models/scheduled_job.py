@@ -4,10 +4,22 @@ import json
 from datetime import datetime
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .sub_agent import ModelName, ModelTier, ThinkingLevel
+
+
+def _validate_timezone_name(v: str | None) -> str | None:
+    """Reject timezone names that zoneinfo cannot resolve."""
+    if v is None:
+        return None
+    try:
+        ZoneInfo(v)
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise ValueError(f"Unknown IANA timezone: {v!r}") from e
+    return v
 
 
 class JobType(str, Enum):
@@ -66,6 +78,7 @@ class ScheduledJob(BaseModel):
     job_type: JobType
     schedule_kind: ScheduleKind
     cron_expr: str | None = None
+    timezone: str = "Etc/UTC"
     interval_seconds: int | None = None
     run_at: datetime | None = None
     next_run_at: datetime
@@ -170,7 +183,20 @@ class ScheduledJobCreate(BaseModel):
 
     # Schedule — exactly one of these groups must be populated (validated below)
     schedule_kind: ScheduleKind
-    cron_expr: str | None = Field(default=None, description="Required when schedule_kind='cron'")
+    cron_expr: str | None = Field(
+        default=None,
+        description=(
+            "Required when schedule_kind='cron'. Wall-clock fields are interpreted in the job's "
+            "timezone, so '0 8 * * *' means 8am in the user's local time — do not convert to UTC."
+        ),
+    )
+    timezone: str | None = Field(
+        default=None,
+        description=(
+            "IANA timezone (e.g. 'Europe/Zurich') in which cron_expr and timezone-naive run_at "
+            "values are interpreted. Defaults to the timezone from the user's settings."
+        ),
+    )
     interval_seconds: int | None = Field(
         default=None, ge=60, description="Required when schedule_kind='interval'. Min 60s."
     )
@@ -220,6 +246,11 @@ class ScheduledJobCreate(BaseModel):
     )
 
     max_failures: int = Field(default=3, ge=1, le=20)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        return _validate_timezone_name(v)
 
     @field_validator("check_args", mode="before")
     @classmethod
@@ -296,6 +327,10 @@ class ScheduledJobUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     schedule_kind: ScheduleKind | None = None
     cron_expr: str | None = None
+    timezone: str | None = Field(
+        default=None,
+        description="IANA timezone in which cron_expr and timezone-naive run_at values are interpreted.",
+    )
     interval_seconds: int | None = Field(default=None, ge=60)
     run_at: datetime | None = None
     prompt: str | None = Field(default=None, max_length=4000)
@@ -311,3 +346,8 @@ class ScheduledJobUpdate(BaseModel):
     voice_call: bool | None = None
     enabled: bool | None = None
     max_failures: int | None = Field(default=None, ge=1, le=20)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        return _validate_timezone_name(v)

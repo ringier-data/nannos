@@ -101,6 +101,44 @@ class TestComputeNextRun:
         )
         assert result is None
 
+    def test_cron_respects_timezone_summer(self):
+        """'0 8 * * *' with tz=Europe/Zurich fires at 08:00 CEST (06:00 UTC) during DST."""
+        after = datetime(2026, 6, 10, 5, 0, 0, tzinfo=timezone.utc)  # 07:00 CEST
+        result = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="0 8 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after,
+            tz="Europe/Zurich",
+        )
+        assert result == datetime(2026, 6, 10, 6, 0, 0, tzinfo=timezone.utc)
+
+    def test_cron_respects_timezone_winter(self):
+        """'0 8 * * *' with tz=Europe/Zurich fires at 08:00 CET (07:00 UTC) outside DST."""
+        after = datetime(2026, 1, 10, 5, 0, 0, tzinfo=timezone.utc)  # 06:00 CET
+        result = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="0 8 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after,
+            tz="Europe/Zurich",
+        )
+        assert result == datetime(2026, 1, 10, 7, 0, 0, tzinfo=timezone.utc)
+
+    def test_cron_without_tz_keeps_utc_semantics(self):
+        """tz=None preserves the historical UTC interpretation."""
+        after = datetime(2026, 6, 10, 5, 0, 0, tzinfo=timezone.utc)
+        result = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="0 8 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after,
+        )
+        assert result == datetime(2026, 6, 10, 8, 0, 0, tzinfo=timezone.utc)
+
     def test_once_returns_none_regardless_of_run_at(self):
         """Once schedule always returns None even when run_at is in the past."""
         past = datetime(2020, 1, 1, tzinfo=timezone.utc)

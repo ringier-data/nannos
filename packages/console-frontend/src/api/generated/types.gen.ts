@@ -3708,6 +3708,10 @@ export type ScheduledJob = {
      */
     cron_expr?: string | null;
     /**
+     * Timezone
+     */
+    timezone?: string;
+    /**
      * Interval Seconds
      */
     interval_seconds?: number | null;
@@ -3826,9 +3830,15 @@ export type ScheduledJobCreate = {
     /**
      * Cron Expr
      *
-     * Required when schedule_kind='cron'
+     * Required when schedule_kind='cron'. Wall-clock fields are interpreted in the job's timezone, so '0 8 * * *' means 8am in the user's local time — do not convert to UTC.
      */
     cron_expr?: string | null;
+    /**
+     * Timezone
+     *
+     * IANA timezone (e.g. 'Europe/Zurich') in which cron_expr and timezone-naive run_at values are interpreted. Defaults to the timezone from the user's settings.
+     */
+    timezone?: string | null;
     /**
      * Interval Seconds
      *
@@ -3965,6 +3975,12 @@ export type ScheduledJobUpdate = {
      * Cron Expr
      */
     cron_expr?: string | null;
+    /**
+     * Timezone
+     *
+     * IANA timezone in which cron_expr and timezone-naive run_at values are interpreted.
+     */
+    timezone?: string | null;
     /**
      * Interval Seconds
      */

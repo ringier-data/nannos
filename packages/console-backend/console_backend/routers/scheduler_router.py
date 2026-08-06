@@ -125,7 +125,9 @@ async def generate_watch_params(
         "For `job_type='task'`, supply a `sub_agent_id` referencing an `automated` sub-agent. "
         "For `job_type='watch'`, supply `check_tool`, `check_args`, `condition_expr`, and `expected_value` "
         "(JSONPath + expected value for comparison) so the scheduler can poll a condition before optionally invoking an agent. "
-        "Supply a `delivery_channel_id` referencing a registered delivery channel."
+        "Supply a `delivery_channel_id` referencing a registered delivery channel. "
+        "Cron expressions are evaluated in the job's `timezone` (defaults to the user's settings timezone), "
+        "so write them as the user's local wall-clock time — never convert to UTC."
     ),
     operation_id="scheduler_create_job",
     tags=["MCP"],

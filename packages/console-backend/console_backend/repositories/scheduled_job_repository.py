@@ -4,6 +4,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from croniter import croniter
 from sqlalchemy import text
@@ -27,6 +28,7 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         job_type=JobType(row["job_type"]),
         schedule_kind=ScheduleKind(row["schedule_kind"]),
         cron_expr=row["cron_expr"],
+        timezone=row["timezone"],
         interval_seconds=row["interval_seconds"],
         run_at=row["run_at"],
         next_run_at=row["next_run_at"],
@@ -73,17 +75,22 @@ def compute_next_run(
     interval_seconds: int | None,
     run_at: datetime | None,
     after: datetime | None = None,
+    tz: str | None = None,
 ) -> datetime | None:
-    """Compute the next scheduled run datetime.
+    """Compute the next scheduled run datetime (always returned in UTC).
 
-    Returns None for schedule_kind='once' — the job is done after the first run.
+    Cron wall-clock fields are interpreted in *tz* (IANA name, UTC when None),
+    so "0 8 * * *" with tz='Europe/Zurich' fires at 08:00 Zurich time across
+    DST changes. Returns None for schedule_kind='once' — the job is done after
+    the first run.
     """
     base = after or datetime.now(timezone.utc)
 
     if schedule_kind == ScheduleKind.CRON:
         assert cron_expr, "cron_expr required for cron schedule"
-        cron = croniter(cron_expr, base)
-        return cron.get_next(datetime)
+        zone = ZoneInfo(tz) if tz else timezone.utc
+        cron = croniter(cron_expr, base.astimezone(zone))
+        return cron.get_next(datetime).astimezone(timezone.utc)
 
     if schedule_kind == ScheduleKind.INTERVAL:
         assert interval_seconds, "interval_seconds required for interval schedule"

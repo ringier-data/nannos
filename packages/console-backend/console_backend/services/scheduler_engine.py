@@ -392,6 +392,7 @@ class SchedulerEngine:
             interval_seconds=job.interval_seconds,
             run_at=job.run_at,
             after=datetime.now(timezone.utc),
+            tz=job.timezone,
         )
 
         async with self._db_session_factory() as db:

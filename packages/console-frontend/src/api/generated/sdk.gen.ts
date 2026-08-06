@@ -1784,7 +1784,7 @@ export const schedulerListJobs = <ThrowOnError extends boolean = false>(options?
 /**
  * Create a scheduled job with push notifications to slack, email or google chat.
  *
- * Create a new scheduled job that will run on behalf of the current user. For `job_type='task'`, supply a `sub_agent_id` referencing an `automated` sub-agent. For `job_type='watch'`, supply `check_tool`, `check_args`, `condition_expr`, and `expected_value` (JSONPath + expected value for comparison) so the scheduler can poll a condition before optionally invoking an agent. Supply a `delivery_channel_id` referencing a registered delivery channel.
+ * Create a new scheduled job that will run on behalf of the current user. For `job_type='task'`, supply a `sub_agent_id` referencing an `automated` sub-agent. For `job_type='watch'`, supply `check_tool`, `check_args`, `condition_expr`, and `expected_value` (JSONPath + expected value for comparison) so the scheduler can poll a condition before optionally invoking an agent. Supply a `delivery_channel_id` referencing a registered delivery channel. Cron expressions are evaluated in the job's `timezone` (defaults to the user's settings timezone), so write them as the user's local wall-clock time — never convert to UTC.
  */
 export const schedulerCreateJob = <ThrowOnError extends boolean = false>(options: Options<SchedulerCreateJobData, ThrowOnError>) => (options.client ?? client).post<SchedulerCreateJobResponses, SchedulerCreateJobErrors, ThrowOnError>({
     url: '/api/v1/scheduler/jobs',

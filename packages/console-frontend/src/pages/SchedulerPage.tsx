@@ -70,6 +70,7 @@ import {
 import {
   consoleListSubAgentsOptions,
   consoleListMcpToolsOptions,
+  getCurrentUserSettingsApiV1AuthMeSettingsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { config } from '@/config';
 import { CronField } from '@/components/CronField';
@@ -246,6 +247,10 @@ function CreateJobDialog({
 
   const { data: mcpToolsData } = useQuery(consoleListMcpToolsOptions());
   const mcpTools = mcpToolsData?.tools ?? [];
+
+  // New jobs snapshot the user's settings timezone on the backend; show it in the preview.
+  const { data: userSettings } = useQuery(getCurrentUserSettingsApiV1AuthMeSettingsGetOptions());
+  const userTimezone = userSettings?.data.timezone;
 
   const { data: channels = [] } = useQuery<DeliveryChannel[]>({
     queryKey: ['delivery-channels'],
@@ -461,6 +466,7 @@ function CreateJobDialog({
               id="cron"
               value={form.cron_expr}
               onChange={(v) => update('cron_expr', v)}
+              timezone={userTimezone}
             />
           )}
           {form.schedule_kind === 'interval' && (
@@ -486,6 +492,11 @@ function CreateJobDialog({
                 value={form.run_at}
                 onChange={(e) => update('run_at', e.target.value)}
               />
+              {userTimezone && (
+                <p className="text-xs text-muted-foreground">
+                  Interpreted in {userTimezone}
+                </p>
+              )}
             </div>
           )}
 

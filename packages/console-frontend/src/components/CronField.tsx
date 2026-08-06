@@ -9,13 +9,15 @@ interface CronFieldProps {
   id?: string;
   value: string;
   onChange: (value: string) => void;
+  /** IANA timezone the expression is evaluated in; shown next to the preview. */
+  timezone?: string;
 }
 
 /**
  * Cron expression input with preset quick-picks, live validation, and a
  * human-readable description of the schedule.
  */
-export function CronField({ id = 'cron', value, onChange }: CronFieldProps) {
+export function CronField({ id = 'cron', value, onChange, timezone }: CronFieldProps) {
   const result = useMemo(() => describeCron(value), [value]);
   const isBlank = value.trim() === '';
   const showError = !isBlank && !result.ok;
@@ -55,6 +57,7 @@ export function CronField({ id = 'cron', value, onChange }: CronFieldProps) {
         <p className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-500">
           <Clock className="h-3 w-3 shrink-0" />
           {result.text}
+          {timezone && <span className="text-muted-foreground">({timezone})</span>}
         </p>
       )}
       {showError && (
