@@ -330,7 +330,9 @@ def test_web_search_billed_one_unit_per_grounded_call():
             "prompt_tokens_details": {"text_tokens": 12, "web_search_requests": 2},
         }
     )
-    assert bd["web_search"] == 1  # NOT 2 — would over-bill the flat per-call grounding fee
+    assert (
+        bd["web_search"] == 1
+    )  # NOT 2 — would over-bill the flat per-call grounding fee
     assert bd["base_input_tokens"] == 12
     assert bd["base_output_tokens"] == 251
 
@@ -533,3 +535,121 @@ def test_pre_call_hook_passthrough_without_response_format():
         cl.proxy_handler_instance.async_pre_call_hook(None, None, data, "completion")
     )
     assert out == {"model": "claude-sonnet-4.6", "messages": []}
+
+
+# ---- cache_control stripping (gemini-format deployments) --------------------------------
+
+
+def _gemini_kwargs(**overrides):
+    """Deployment-hook kwargs as the router builds them: resolved deployment model id."""
+    kwargs = {
+        "model": "vertex_ai/gemini-3.5-flash",
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "sys",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            },
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _run_deployment_hook(kwargs):
+    return asyncio.run(
+        cl.proxy_handler_instance.async_pre_call_deployment_hook(kwargs, "acompletion")
+    )
+
+
+def test_strip_removes_part_level_marker_for_vertex_gemini():
+    kwargs = _gemini_kwargs()
+    out = _run_deployment_hook(kwargs)
+    assert out is kwargs
+    assert out["messages"][0]["content"][0] == {"type": "text", "text": "sys"}
+
+
+def test_strip_removes_message_and_tool_level_markers():
+    kwargs = _gemini_kwargs(
+        messages=[
+            {
+                "role": "system",
+                "content": "sys",
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "t", "parameters": {}},
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+    )
+    out = _run_deployment_hook(kwargs)
+    assert out["messages"][0] == {"role": "system", "content": "sys"}
+    assert out["tools"][0] == {
+        "type": "function",
+        "function": {"name": "t", "parameters": {}},
+    }
+
+
+def test_strip_is_copy_on_write():
+    """A fallback attempt to another provider must still see the original markers."""
+    original_messages = _gemini_kwargs()["messages"]
+    kwargs = {"model": "vertex_ai/gemini-3.5-flash", "messages": original_messages}
+    out = _run_deployment_hook(kwargs)
+    # the input list and its marked message dict are untouched
+    assert "cache_control" in original_messages[0]["content"][0]
+    # untouched entries are reused, not copied
+    assert out["messages"][1] is original_messages[1]
+
+
+def test_no_strip_for_bedrock_claude():
+    kwargs = _gemini_kwargs(model="bedrock/eu.anthropic.claude-sonnet-4-6")
+    out = _run_deployment_hook(kwargs)
+    assert out is None
+    assert "cache_control" in kwargs["messages"][0]["content"][0]
+
+
+def test_no_strip_for_claude_on_vertex():
+    """vertex_ai serves Claude too; its Anthropic transform honors cache_control natively."""
+    kwargs = _gemini_kwargs(model="vertex_ai/claude-sonnet-4-6")
+    assert _run_deployment_hook(kwargs) is None
+
+
+def test_strip_for_google_ai_studio_provider_any_model():
+    kwargs = _gemini_kwargs(model="gemini/gemini-3.5-flash")
+    out = _run_deployment_hook(kwargs)
+    assert out is not None
+    assert "cache_control" not in out["messages"][0]["content"][0]
+
+
+def test_explicit_custom_llm_provider_wins_over_prefix():
+    kwargs = _gemini_kwargs(model="gemini-3.5-flash", custom_llm_provider="vertex_ai")
+    out = _run_deployment_hook(kwargs)
+    assert out is not None
+
+
+def test_no_change_returns_none_for_gemini_without_markers():
+    kwargs = _gemini_kwargs(
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert _run_deployment_hook(kwargs) is None
+
+
+def test_strip_never_raises_on_odd_shapes():
+    for kwargs in (
+        {"model": "vertex_ai/gemini-3.5-flash", "messages": "not-a-list"},
+        {"model": "vertex_ai/gemini-3.5-flash", "messages": [None, "x", 42]},
+        {"model": "vertex_ai/gemini-3.5-flash"},
+        {"model": None},
+        {},
+    ):
+        assert _run_deployment_hook(kwargs) is None
