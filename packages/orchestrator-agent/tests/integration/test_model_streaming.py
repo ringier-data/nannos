@@ -160,8 +160,7 @@ async def test_thinking_model_streaming(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "vertexai"],
+    one_model_per_provider(),
 )
 async def test_static_tools_available(
     model_type: ModelType,
@@ -204,8 +203,7 @@ async def test_static_tools_available(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "vertexai"],
+    one_model_per_provider(),
 )
 async def test_multiturn_context_preservation(
     model_type: ModelType,

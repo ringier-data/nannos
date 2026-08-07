@@ -22,10 +22,12 @@ from tests.support.extraction import (
     a2a_tracking,
     delegated_agents,
     delegations,
-    final_response as read_final_response,
     final_text,
     task_state,
     tool_names,
+)
+from tests.support.extraction import (
+    final_response as read_final_response,
 )
 from tests.support.graph_harness import (
     final_response,
