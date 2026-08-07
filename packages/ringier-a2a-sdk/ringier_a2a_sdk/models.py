@@ -76,7 +76,7 @@ class UserConfig(BaseModel):
         default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"), description="User's preferred language"
     )
     timezone: str = Field(
-        default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"),
+        default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "UTC"),
         description="User's preferred timezone (IANA timezone name)",
     )
     sub_agent_id: Optional[int] = Field(

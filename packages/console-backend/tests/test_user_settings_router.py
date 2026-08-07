@@ -137,14 +137,15 @@ class TestUserSettingsEndpoints:
         assert data["data"]["language"] == "fr"
         assert data["data"]["custom_prompt"] == "Initial prompt"  # Preserved
 
-    async def test_get_settings_returns_default_timezone(self, client_with_db):
-        """Test GET /me/settings returns default timezone when no settings exist."""
+    async def test_get_settings_returns_default_timezone(self, client_with_db, monkeypatch: pytest.MonkeyPatch):
+        """Test GET /me/settings follows DEFAULT_TIMEZONE when no settings exist."""
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "Europe/Zurich")
         response = await client_with_db.get("/api/v1/auth/me/settings")
 
         assert response.status_code == 200
         data = response.json()
         assert "data" in data
-        assert data["data"]["timezone"] == "Europe/Zurich"  # Default timezone
+        assert data["data"]["timezone"] == "Europe/Zurich"  # From DEFAULT_TIMEZONE, never hardcoded
 
     async def test_patch_settings_update_timezone(self, client_with_db):
         """Test PATCH /me/settings updates timezone."""

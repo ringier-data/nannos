@@ -122,17 +122,41 @@ function scheduleLabel(job: ScheduledJob): string {
   return '—';
 }
 
-/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now". */
-function nowDatetimeLocal(): string {
-  const d = new Date();
-  d.setSeconds(0, 0);
+/** Format an instant as YYYY-MM-DDTHH:mm wall-clock in the given IANA timezone
+ * (browser-local when omitted or unresolvable). The backend interprets the naive
+ * string the form submits in the job's timezone, so prefilling in any other zone
+ * would silently shift the run instant on save. */
+function toDatetimeLocal(iso: string | Date, timeZone?: string | null): string {
+  const d = new Date(iso);
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+        .formatToParts(d)
+        .reduce<Record<string, string>>((acc, p) => {
+          acc[p.type] = p.value;
+          return acc;
+        }, {});
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    } catch {
+      // Unresolvable zone name — fall through to browser-local.
+    }
+  }
   return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
-/** Convert an ISO string from the backend into YYYY-MM-DDTHH:mm for datetime-local input. */
-function toDatetimeLocal(iso: string): string {
-  const d = new Date(iso);
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now". */
+function nowDatetimeLocal(timeZone?: string | null): string {
+  const d = new Date();
+  d.setSeconds(0, 0);
+  return toDatetimeLocal(d, timeZone);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,9 +322,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
   const [intervalSeconds, setIntervalSeconds] = useState(
     job.interval_seconds != null ? String(job.interval_seconds) : '',
   );
-  const [runAt, setRunAt] = useState(
-    job.run_at ? toDatetimeLocal(job.run_at) : '',
-  );
+  const initialRunAt = job.run_at ? toDatetimeLocal(job.run_at, job.timezone) : '';
+  const [runAt, setRunAt] = useState(initialRunAt);
   const [message, setMessage] = useState(
     job.job_type === 'task' ? (job.prompt ?? '') : (job.notification_message ?? '')
   );
@@ -359,7 +382,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setMaxFailures(job.max_failures ?? 3);
     setCronExpr(job.cron_expr ?? '');
     setIntervalSeconds(job.interval_seconds != null ? String(job.interval_seconds) : '');
-    setRunAt(job.run_at ? toDatetimeLocal(job.run_at) : '');
+    setRunAt(initialRunAt);
     setMessage(job.job_type === 'task' ? (job.prompt ?? '') : (job.notification_message ?? ''));
     setSubAgentId(job.sub_agent_id != null ? String(job.sub_agent_id) : '');
     setCheckTool(job.check_tool ?? '');
@@ -435,7 +458,11 @@ function EditForm({ job }: { job: ScheduledJob }) {
       ...(job.schedule_kind === 'interval' && {
         interval_seconds: intervalSeconds ? parseInt(intervalSeconds) : undefined,
       }),
-      ...(job.schedule_kind === 'once' && { run_at: runAt || undefined }),
+      // Only send run_at when the user actually changed it: the backend
+      // reinterprets any submitted naive value in the job's timezone, so
+      // resending the prefill on an unrelated edit would needlessly re-touch
+      // the schedule.
+      ...(job.schedule_kind === 'once' && runAt !== initialRunAt && { run_at: runAt || undefined }),
       ...(job.job_type === 'task' && {
         sub_agent_id: subAgentId ? parseInt(subAgentId) : undefined,
         prompt: message.trim() ? message.trim() : null, // Task jobs use prompt field
@@ -542,7 +569,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
           <Label>Run at</Label>
           <Input
             type="datetime-local"
-            min={nowDatetimeLocal()}
+            min={nowDatetimeLocal(job.timezone)}
             value={runAt}
             onChange={(e) => { setRunAt(e.target.value); touch(); }}
           />

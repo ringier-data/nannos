@@ -329,7 +329,12 @@ async def resume_job(
     current_user: User = Depends(require_auth_or_bearer_token),
 ) -> ScheduledJob:
     service = _get_scheduler_service(request)
-    ok = await service.resume_job(db=db, job_id=job_id, actor=current_user)
+    try:
+        ok = await service.resume_job(db=db, job_id=job_id, actor=current_user)
+    except ValueError as e:
+        # Completed once-jobs and unresolvable stored timezones must surface as
+        # an actionable 400, not an opaque 500.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     job = await service.get_job(db=db, job_id=job_id, user_id=current_user.id)

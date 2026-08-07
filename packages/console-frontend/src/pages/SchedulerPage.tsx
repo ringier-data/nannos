@@ -134,10 +134,33 @@ function StatusBadge({ job }: { job: ScheduledJob }) {
 // Create job form
 // ---------------------------------------------------------------------------
 
-/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now". */
-function nowDatetimeLocal(): string {
+/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now".
+ * The submitted naive value is interpreted in the job's timezone on the backend, so the
+ * clamp must be "now" as that timezone's wall-clock, not the browser's. */
+function nowDatetimeLocal(timeZone?: string | null): string {
   const d = new Date();
   d.setSeconds(0, 0);
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+        .formatToParts(d)
+        .reduce<Record<string, string>>((acc, p) => {
+          acc[p.type] = p.value;
+          return acc;
+        }, {});
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    } catch {
+      // Unresolvable zone name — fall through to browser-local.
+    }
+  }
   return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
@@ -488,7 +511,7 @@ function CreateJobDialog({
               <Input
                 id="run_at"
                 type="datetime-local"
-                min={nowDatetimeLocal()}
+                min={nowDatetimeLocal(userTimezone)}
                 value={form.run_at}
                 onChange={(e) => update('run_at', e.target.value)}
               />

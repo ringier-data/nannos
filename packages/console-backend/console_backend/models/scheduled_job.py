@@ -4,22 +4,11 @@ import json
 from datetime import datetime
 from enum import Enum
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ..utils.timezones import validate_timezone_name as _validate_timezone_name
 from .sub_agent import ModelName, ModelTier, ThinkingLevel
-
-
-def _validate_timezone_name(v: str | None) -> str | None:
-    """Reject timezone names that zoneinfo cannot resolve."""
-    if v is None:
-        return None
-    try:
-        ZoneInfo(v)
-    except (ZoneInfoNotFoundError, ValueError) as e:
-        raise ValueError(f"Unknown IANA timezone: {v!r}") from e
-    return v
 
 
 class JobType(str, Enum):
@@ -78,7 +67,9 @@ class ScheduledJob(BaseModel):
     job_type: JobType
     schedule_kind: ScheduleKind
     cron_expr: str | None = None
-    timezone: str = "Etc/UTC"
+    # None on rows migrated without a user-settings timezone — resolved to the
+    # deployment default (DEFAULT_TIMEZONE env var) at evaluation time.
+    timezone: str | None = None
     interval_seconds: int | None = None
     run_at: datetime | None = None
     next_run_at: datetime

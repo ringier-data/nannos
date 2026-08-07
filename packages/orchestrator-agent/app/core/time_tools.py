@@ -20,6 +20,7 @@ Examples:
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -89,11 +90,11 @@ class GetCurrentTimeInput(BaseModel):
         ),
     )
 
-    timezone: str = Field(
-        default="Europe/Zurich",
+    timezone: Optional[str] = Field(
+        default=None,
         description=(
             "IANA timezone name (e.g., 'America/New_York', 'Europe/Berlin', 'Asia/Tokyo'). "
-            "Defaults to 'Europe/Zurich' if not provided or invalid. "
+            "Defaults to the deployment's DEFAULT_TIMEZONE when not provided. "
             "Use user's configured timezone when available from context."
         ),
     )
@@ -202,7 +203,7 @@ def _create_get_current_time_tool() -> BaseTool:
         delta_value: Optional[int] = None,
         delta_unit: Optional[DeltaUnit] = None,
         format: OutputFormat = "iso8601",
-        timezone: str = "Europe/Zurich",
+        timezone: Optional[str] = None,
     ) -> str:
         """Get current time or calculate relative dates with timezone awareness.
 
@@ -243,6 +244,9 @@ def _create_get_current_time_tool() -> BaseTool:
             Formatted datetime string, or error message if timezone is invalid
         """
         try:
+            # No explicit timezone → the deployment default (env-controlled,
+            # never a hardcoded locale).
+            timezone = timezone or os.getenv("DEFAULT_TIMEZONE", "UTC")
             # Validate and load timezone
             try:
                 tz = ZoneInfo(timezone)

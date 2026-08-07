@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from ..utils.timezones import default_timezone_name, validate_timezone_name
 
 
 class OrchestratorThinkingLevel(str, Enum):
@@ -160,7 +162,7 @@ class UserSettings(BaseModel):
 
     user_id: str
     language: str = Field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))
-    timezone: str = Field(default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"))
+    timezone: str = Field(default_factory=default_timezone_name)
     custom_prompt: str | None = None
     mcp_tools: list[str] = Field(default_factory=list)
     preferred_model: str | None = None
@@ -197,6 +199,14 @@ class UserSettingsUpdate(BaseModel):
     thinking_level: OrchestratorThinkingLevel | None = None
     phone_number_override: str | None = None
     tool_bypass_rules: dict[str, Any] | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        # Scheduled jobs snapshot this value verbatim and evaluate cron
+        # expressions in it, so an unresolvable name must be rejected here at
+        # the source rather than surfacing later as a paused job.
+        return validate_timezone_name(v)
 
 
 class UserSettingsResponse(BaseModel):

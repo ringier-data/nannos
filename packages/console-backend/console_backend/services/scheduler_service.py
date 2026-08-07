@@ -4,7 +4,6 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from console_backend.models.sub_agent import SubAgentCreate, SubAgentType
 from console_backend.services.sub_agent_service import SubAgentService
@@ -20,6 +19,7 @@ from ..models.scheduled_job import (
 )
 from ..models.user import User
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
+from ..utils.timezones import default_timezone_name, resolve_timezone, validate_timezone_name
 
 # Sentinel value to distinguish "no change" from "set to None"
 _UNSET: Any = object()
@@ -83,26 +83,27 @@ class SchedulerService:
                 "UserSettingsService not injected. Call set_user_settings_service() during initialization."
             )
         settings = await self._user_settings_service.get_settings(db, user_id)
+        tz = settings.timezone or default_timezone_name()
         try:
-            ZoneInfo(settings.timezone)
-        except (ZoneInfoNotFoundError, ValueError) as e:
-            # Settings timezone is not schema-validated, so surface a clean 400
-            # instead of a 500 from deep inside croniter.
+            validate_timezone_name(tz)
+        except ValueError as e:
+            # Legacy settings rows predate schema validation, so surface a clean
+            # 400 instead of a 500 from deep inside croniter.
             raise ValueError(
                 f"Your settings timezone {settings.timezone!r} is not a valid IANA timezone; "
                 "fix it in Settings or pass an explicit job timezone."
             ) from e
-        return settings.timezone
+        return tz
 
     @staticmethod
-    def _normalize_run_at(run_at: datetime | None, tz: str) -> datetime | None:
+    def _normalize_run_at(run_at: datetime | None, tz: str | None) -> datetime | None:
         """Attach the job timezone to a naive run_at.
 
         The frontend's datetime-local input submits wall-clock strings without an
         offset; storing them unmodified makes Postgres read them as UTC.
         """
         if run_at is not None and run_at.tzinfo is None:
-            return run_at.replace(tzinfo=ZoneInfo(tz))
+            return run_at.replace(tzinfo=resolve_timezone(tz))
         return run_at
 
     async def create_job(
@@ -336,6 +337,15 @@ class SchedulerService:
         job = await self.repo.get_job(db, job_id)
         if job is None or job.user_id != actor.id:
             return False
+        # A once-job keeps its past run_at as next_run_at after completing, so
+        # re-enabling it would make the engine claim and re-execute it on the
+        # next tick — refuse instead of silently re-running a finished job.
+        if job.schedule_kind == ScheduleKind.ONCE:
+            ref = job.run_at or job.next_run_at
+            if ref is None or ref <= datetime.now(timezone.utc):
+                raise ValueError(
+                    "This one-time job has already run; create a new job instead of resuming it."
+                )
         # Reset failures and re-enable
         next_run_at = compute_next_run(
             job.schedule_kind, job.cron_expr, job.interval_seconds, job.run_at, tz=job.timezone

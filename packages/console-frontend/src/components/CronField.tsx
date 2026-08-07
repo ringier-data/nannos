@@ -10,7 +10,7 @@ interface CronFieldProps {
   value: string;
   onChange: (value: string) => void;
   /** IANA timezone the expression is evaluated in; shown next to the preview. */
-  timezone?: string;
+  timezone?: string | null;
 }
 
 /**

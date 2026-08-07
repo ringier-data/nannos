@@ -71,7 +71,7 @@ export function SettingsPage() {
   }, []);
 
   const [language, setLanguage] = useState<string>('en');
-  const [timezone, setTimezone] = useState<string>('Europe/Zurich');
+  const [timezone, setTimezone] = useState<string>('UTC');
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [mcpTools, setMcpTools] = useState<string[]>([]);
   const [preferredModel, setPreferredModel] = useState<string | null>(null);
@@ -97,7 +97,7 @@ export function SettingsPage() {
   useEffect(() => {
     if (settings) {
       setLanguage(settings.language ?? 'en');
-      setTimezone(settings.timezone ?? 'Europe/Zurich');
+      setTimezone(settings.timezone ?? 'UTC');
       setCustomPrompt(settings.custom_prompt ?? '');
       setMcpTools(settings.mcp_tools ?? []);
       setPreferredModel(settings.preferred_model ?? null);

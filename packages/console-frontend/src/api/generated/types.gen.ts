@@ -3710,7 +3710,7 @@ export type ScheduledJob = {
     /**
      * Timezone
      */
-    timezone?: string;
+    timezone?: string | null;
     /**
      * Interval Seconds
      */
