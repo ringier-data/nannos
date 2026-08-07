@@ -746,11 +746,23 @@ export LITELLM_DATABASE_URL="${LITELLM_DATABASE_URL:-postgresql://postgres:passw
   && ok "Gateway DB schema 'litellm' ready (console Postgres)" \
   || warn "Could not pre-create the litellm schema; the proxy will attempt it on boot"
 
+# Resolve a path to its physical location (symlinks expanded).
+#
+# On macOS /tmp is a symlink to /private/tmp. Docker Desktop shares the physical
+# path, so bind-mounting a /tmp/... path can silently create an empty DIRECTORY
+# inside the VM instead of mounting the file. The proxy then dies with
+# "IsADirectoryError: '/etc/litellm/config.yaml'", and the GCP service-account
+# mount below fails *silently* — GOOGLE_APPLICATION_CREDENTIALS ends up pointing
+# at a directory, so Vertex auth just doesn't work with nothing in the logs.
+#
+# `pwd -P` is POSIX and a no-op on Linux, where /tmp is a real directory.
+_physical_path() { cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")"; }
+
 # Generate the local gateway config on the fly (ephemeral, never committed —
 # config is deployment-specific). The settings block (callbacks, store_model_in_db,
 # db, master key) is always managed here; the model_list is stack-specific so it's
 # sourced from $LITELLM_LOCAL_MODELS_FILE when set, else a built-in dev default.
-_GW_CONFIG=$(mktemp /tmp/nannos-litellm-XXXXXX).yaml
+_GW_CONFIG=$(_physical_path "$(mktemp /tmp/nannos-litellm-XXXXXX).yaml")
 cat > "$_GW_CONFIG" <<'EOF'
 litellm_settings:
   callbacks: custom_logger.proxy_handler_instance
@@ -832,7 +844,7 @@ fi
 # env below stays for config-defined model_list entries that still reference os.environ/GCP_KEY.)
 _GW_GCP_ENV=()
 if [[ -n "${GCP_KEY:-}" ]]; then
-  _GW_GCP_SA=$(mktemp /tmp/nannos-litellm-gcp-XXXXXX).json
+  _GW_GCP_SA=$(_physical_path "$(mktemp /tmp/nannos-litellm-gcp-XXXXXX).json")
   printf '%s' "$GCP_KEY" > "$_GW_GCP_SA"
   _GW_GCP_ENV=(-v "$_GW_GCP_SA:/secrets/gcp/sa.json:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp/sa.json)
 fi
