@@ -77,7 +77,13 @@ addopts = [
     "--tb=short",
     "--strict-markers",
     "--disable-warnings",
-    "--ignore=tests/integration",
+    # Integration tests are collected (so breakage in them is visible) but
+    # deselected by default, since they need a reachable Model Gateway and make
+    # real, billable LLM calls. Run them with:  uv run pytest -m integration
+    # They previously used --ignore, which hid the whole directory from
+    # collection — an a2a-sdk migration broke an import there and nothing noticed.
+    "-m",
+    "not integration",
 ]
 markers = [
     "asyncio: marks tests as async (deselect with '-m \"not asyncio\"')",

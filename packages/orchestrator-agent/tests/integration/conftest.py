@@ -1,18 +1,36 @@
 """Fixtures for integration tests that make real LLM calls.
 
-These tests require actual cloud credentials to run:
-- Bedrock: AWS credentials (via boto3 default chain)
-- Azure OpenAI: AZURE_API_BASE + AZURE_OPENAI_API_KEY
-- Vertex AI: GCP_KEY (JSON service account) + GCP_PROJECT_ID
+All LLM traffic routes through the LiteLLM gateway — there is no per-provider
+fallback (``agent_common.core.model_factory`` raises when ``LLM_GATEWAY_URL`` is
+unset). So these tests need a reachable gateway and nothing else:
 
-Setup credentials (recommended):
-  1. Run `./start-dev.sh` from the repo root — this generates
-     app/orchestrator-agent/.env with real credentials fetched from AWS SSM.
-  2. Run: cd app/orchestrator-agent && uv run pytest tests/integration/ -m integration -v --timeout=120
+    LLM_GATEWAY_URL=http://localhost:<port>
+    LLM_GATEWAY_API_KEY=sk-...
 
-Alternative: create tests/integration/.env.integration with explicit overrides.
+Provider credentials (Bedrock / Azure / Vertex) belong to the *gateway*, not to
+the test process. Do not put them in a test env file.
 
-Skip by default: tests are marked @pytest.mark.integration
+Setup:
+  1. Start a local gateway: ``./scripts/start-local.sh`` from the repo root
+     (defaults: http://localhost:4000, key ``sk-nannos-local``). Or port-forward
+     the deployed litellm-proxy.
+  2. Put the two variables in packages/orchestrator-agent/.env or in
+     tests/integration/.env.integration — start-local.sh exports them only for
+     the services it launches, so a separate pytest process does not inherit them.
+  3. cd packages/orchestrator-agent && uv run pytest tests/integration/ -m integration
+
+Overrides go in tests/integration/.env.integration, which takes priority over
+the orchestrator .env. Both are gitignored — verify with ``git check-ignore``
+before putting a real key in either; this is a public repo.
+
+Selection: these tests are collected on every run but deselected by the
+``-m "not integration"`` default in pyproject addopts, so breakage here shows up
+immediately while normal runs stay fast. They previously used ``--ignore``,
+which hid the directory entirely — an a2a-sdk migration broke an import in
+``test_a2a_streaming.py`` and nothing noticed for months.
+
+When no gateway is reachable, ``pytest_collection_modifyitems`` below skips the
+directory with a reason that says so, rather than failing mid-call.
 """
 
 import logging
@@ -88,6 +106,15 @@ def _restore_real_credentials() -> None:
     if orchestrator_env:
         # Only inject credential-related vars, not all orchestrator config
         credential_keys = {
+            # All LLM traffic goes through the gateway, so these two are what
+            # integration tests actually need. Without them in this whitelist the
+            # values are silently dropped and the failure looks like missing
+            # provider credentials, which it is not.
+            "LLM_GATEWAY_URL",
+            "LLM_GATEWAY_API_KEY",
+            # Per-provider credentials belong to the gateway process, not to the
+            # tests. Kept only because the rest of this module still probes them
+            # (see the module docstring).
             "AZURE_OPENAI_API_KEY",
             "AZURE_API_BASE",
             "GCP_KEY",
@@ -112,15 +139,36 @@ def _restore_real_credentials() -> None:
     logging.getLogger(__name__).info("Removed pytest-env fake credentials to allow default credential chains")
 
 
-# Run at import time, BEFORE any credential detection code below
-_restore_real_credentials()
+# NOTE: _restore_real_credentials() is deliberately NOT called at import time.
+#
+# This directory is collected on every run (it is deselected by the `-m "not
+# integration"` default, not hidden), so anything this module does at import
+# reaches the whole session. Deleting pytest-env's fake AWS credentials and
+# forcing LANGSMITH_TRACING=true used to happen here, which broke unrelated unit
+# tests and spammed LangSmith 401s the moment the directory became visible.
+# Those mutations now live in the `integration_environment` autouse fixture
+# below, which only applies to tests under this directory.
 
-# Enable LangSmith tracing for integration tests (pytest-env sets it to false)
-# Must use direct assignment — setdefault won't override pytest-env's "false"
-os.environ["LANGSMITH_TRACING"] = "true"
-os.environ.setdefault("LANGSMITH_PROJECT", "integration-tests-orchestrator")
+_GATEWAY_KEYS = ("LLM_GATEWAY_URL", "LLM_GATEWAY_API_KEY")
+
+
+def _gateway_env_from_files() -> dict[str, str]:
+    """Gateway coordinates from .env.integration, falling back to the orchestrator .env."""
+    for path in (_ENV_INTEGRATION_FILE, _ORCHESTRATOR_ENV_FILE):
+        values = _load_env_file(path)
+        found = {k: v for k, v in values.items() if k in _GATEWAY_KEYS}
+        if found:
+            return found
+    return {}
+
 
 import pytest
+from agent_common.core.model_factory import (
+    _gateway_models,  # no public accessor for model_info; see _is_chat_model
+    assert_gateway_configured,
+    get_available_models,
+    get_model_provider,
+)
 from agent_common.models.base import ModelType, ThinkingLevel
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -129,117 +177,108 @@ from pydantic import SecretStr
 from app.core.agent import OrchestratorDeepAgent
 from app.core.graph_factory import GraphFactory
 from app.models.config import AgentSettings, UserConfig
+from tests.support.mock_subagents import MockSubAgent, mock_subagents
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Credential detection helpers
+# Model discovery — the gateway is the single source of truth
 # ---------------------------------------------------------------------------
-
-ALL_MODELS: list[ModelType] = [
-    "claude-sonnet-4.5",
-    "claude-sonnet-4.6",
-    "claude-haiku-4-5",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-]
-
-BEDROCK_MODELS: list[ModelType] = ["claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"]
-AZURE_MODELS: list[ModelType] = ["gpt-4o", "gpt-4o-mini"]
-VERTEXAI_MODELS: list[ModelType] = ["gemini-3.1-pro-preview", "gemini-3-flash-preview"]
-
-THINKING_MODELS: dict[ModelType, list[ThinkingLevel]] = {
-    "claude-sonnet-4.5": [ThinkingLevel.minimal, ThinkingLevel.low, ThinkingLevel.medium],
-    "claude-sonnet-4.6": [ThinkingLevel.minimal, ThinkingLevel.low, ThinkingLevel.medium],
-    "gemini-3.1-pro-preview": [ThinkingLevel.low],
-    "gemini-3-flash-preview": [ThinkingLevel.low],
-}
+# There is no per-provider credential detection any more. Which models exist is
+# decided by the gateway registry (/v1/model/info), and whether they can be
+# called is decided by the credentials the *gateway* holds. Probing for AWS/Azure/
+# GCP credentials in this process would answer a question nobody asks: the test
+# process never talks to a provider directly.
+#
+# Everything below is resolved once at import time, because parametrize needs the
+# model list at collection. When the gateway is unreachable the list is empty and
+# the parametrized tests report an empty parameter set rather than pretending a
+# credential is missing.
 
 
-def _has_bedrock_credentials() -> bool:
-    """Check if valid AWS Bedrock credentials are available."""
+def _is_chat_model(model_type: ModelType) -> bool:
+    """Whether the gateway serves this alias as a chat model.
+
+    ``get_available_models()`` returns the whole registry — embedding models
+    included — so parametrizing chat tests over it would send prompts to e.g.
+    ``titan-embed-text-v2``. The ``mode`` that distinguishes them lives in the
+    gateway's model_info, which no public helper exposes, hence the private
+    ``_gateway_models``. Unknown mode counts as chat so a registration that
+    omits the field is exercised rather than silently skipped.
+    """
+    info = _gateway_models().get(model_type) or {}
+    return info.get("mode", "chat") == "chat"
+
+
+def _discover_models() -> list[ModelType]:
+    """Chat model aliases the gateway currently serves; empty when unreachable.
+
+    Runs at import because parametrize needs the list at collection time, so the
+    gateway variables are applied and then rolled back — leaving them set would
+    change the environment for every other test in the session.
+
+    ``get_available_models`` swallows fetch failures and returns an empty registry,
+    so a down gateway costs one ~2s timeout at collection, not an error.
+    """
+    saved = {k: os.environ.get(k) for k in _GATEWAY_KEYS}
+    os.environ.update(_gateway_env_from_files())
     try:
-        import boto3
-
-        sts = boto3.client("sts", region_name=os.getenv("AWS_BEDROCK_REGION", os.getenv("AWS_REGION", "us-east-1")))
-        sts.get_caller_identity()
-        return True
-    except Exception:
-        return False
-
-
-def _has_azure_credentials() -> bool:
-    """Check if Azure OpenAI credentials are available."""
-    endpoint = os.getenv("AZURE_API_BASE", "")
-    api_key = os.getenv("AZURE_OPENAI_API_KEY", "")
-    return bool(endpoint) and "openai.azure.com" in endpoint and bool(api_key) and api_key != "test-key"
-
-
-def _has_vertexai_credentials() -> bool:
-    """Check if Vertex AI credentials are available."""
-    gcp_key = os.getenv("GCP_KEY", "")
-    gcp_project = os.getenv("GCP_PROJECT_ID", "")
-    # GCP_KEY must be a real service account JSON, not the empty default
-    return bool(gcp_key) and gcp_key not in ("{}", "'{}'") and bool(gcp_project)
+        assert_gateway_configured()
+    except Exception as exc:  # RuntimeError when LLM_GATEWAY_URL is unset
+        logger.warning("Model Gateway not configured, integration tests will skip: %s", exc)
+        return []
+    else:
+        try:
+            return [m for m in get_available_models() if _is_chat_model(m)]
+        except Exception as exc:
+            logger.warning("Could not reach the Model Gateway at %s: %s", os.getenv("LLM_GATEWAY_URL"), exc)
+            return []
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
-def _provider_for_model(model_type: ModelType) -> str:
-    if model_type in BEDROCK_MODELS:
-        return "bedrock"
-    if model_type in AZURE_MODELS:
-        return "azure"
-    return "vertexai"
+ALL_MODELS: list[ModelType] = _discover_models()
+
+GATEWAY_AVAILABLE: bool = bool(ALL_MODELS)
+
+# Thinking levels to exercise per model. Only the portable tier is used: low,
+# medium and high are accepted by every reasoning provider, while minimal/xhigh
+# are gated on per-model gateway capability flags that this process cannot read
+# (they live in model_info, which console-backend serves). The gateway drops the
+# parameter entirely for non-reasoning models, so one level per model is both
+# safe and enough — and it keeps a real-LLM parametrization from multiplying out.
+THINKING_MODELS: dict[ModelType, list[ThinkingLevel]] = {model: [ThinkingLevel.low] for model in ALL_MODELS}
 
 
-def _has_credentials_for(model_type: ModelType) -> bool:
-    provider = _provider_for_model(model_type)
-    if provider == "bedrock":
-        return _has_bedrock_credentials()
-    if provider == "azure":
-        return _has_azure_credentials()
-    return _has_vertexai_credentials()
+def model_available(model_type: ModelType) -> bool:
+    """Whether the gateway serves this alias."""
+    return model_type in ALL_MODELS
 
 
-# Cache credential checks (expensive - calls STS)
-_credential_cache: dict[str, bool] = {}
+# Legacy name kept so the older integration modules keep importing cleanly. It no
+# longer inspects credentials — see the note above.
+has_credentials = model_available
 
 
-def has_credentials(model_type: ModelType) -> bool:
-    provider = _provider_for_model(model_type)
-    if provider not in _credential_cache:
-        _credential_cache[provider] = _has_credentials_for(model_type)
-    return _credential_cache[provider]
-
-
-# ---------------------------------------------------------------------------
-# Skip markers
-# ---------------------------------------------------------------------------
-
-requires_bedrock = pytest.mark.skipif(
-    not _has_bedrock_credentials(),
-    reason="Bedrock credentials not available",
-)
-
-requires_azure = pytest.mark.skipif(
-    not _has_azure_credentials(),
-    reason="Azure OpenAI credentials not available",
-)
-
-requires_vertexai = pytest.mark.skipif(
-    not _has_vertexai_credentials(),
-    reason="Vertex AI credentials not available (need GCP_KEY + GCP_PROJECT_ID)",
+requires_gateway = pytest.mark.skipif(
+    not GATEWAY_AVAILABLE,
+    reason=(
+        "Model Gateway unreachable or serving no models. Start one with "
+        "./scripts/start-local.sh and set LLM_GATEWAY_URL / LLM_GATEWAY_API_KEY."
+    ),
 )
 
 
 def skip_marker_for(model_type: ModelType):
-    """Return the appropriate skip marker for a given model type."""
-    if model_type in BEDROCK_MODELS:
-        return requires_bedrock
-    if model_type in AZURE_MODELS:
-        return requires_azure
-    return requires_vertexai
+    """Skip marker for a model the gateway does not serve."""
+    return pytest.mark.skipif(
+        not model_available(model_type),
+        reason=f"Model Gateway does not serve '{model_type}'",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +286,78 @@ def skip_marker_for(model_type: ModelType):
 # ---------------------------------------------------------------------------
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
+
+
+# ---------------------------------------------------------------------------
+# Environment, scoped to this directory
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def integration_environment():
+    """Swap the fake test environment for the real one, for these tests only.
+
+    pytest-env sets AWS_ACCESS_KEY_ID=testing and LANGSMITH_TRACING=false for the
+    whole session. Integration tests need the opposite. Doing that at import time
+    leaked into every other test once this directory became collectable, so it is
+    a fixture — autouse and session-scoped, but resolved only when a test under
+    this directory actually runs — and it puts the environment back afterwards.
+    """
+    before = dict(os.environ)
+
+    _restore_real_credentials()
+
+    # Only trace when a real key is present. pytest-env seeds LANGSMITH_API_KEY
+    # with "test-key"; forcing tracing on with that makes the langsmith plugin
+    # 401 during setup, which surfaces as every test ERRORing for a reason that
+    # has nothing to do with the code under test.
+    langsmith_key = os.environ.get("LANGSMITH_API_KEY", "")
+    if langsmith_key and langsmith_key != "test-key":
+        os.environ["LANGSMITH_TRACING"] = "true"
+        os.environ.setdefault("LANGSMITH_PROJECT", "integration-tests-orchestrator")
+    else:
+        os.environ["LANGSMITH_TRACING"] = "false"
+        # LANGSMITH_TRACING alone is not enough: the `@pytest.mark.langsmith`
+        # marker drives the langsmith pytest plugin directly, and it reaches out
+        # to create a test suite during setup regardless of that flag. Without a
+        # valid key that is a 401 and every marked test FAILS for a reason that
+        # has nothing to do with the code. LANGSMITH_TEST_TRACKING is the
+        # plugin's own off-switch.
+        os.environ["LANGSMITH_TEST_TRACKING"] = "false"
+        logger.info("No real LANGSMITH_API_KEY — LangSmith tracing and test tracking disabled.")
+
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip this directory's tests when there is no gateway to talk to.
+
+    Done at collection rather than in a fixture so the skip lands before the
+    langsmith plugin's per-test setup, which otherwise runs (and can fail) first.
+    Only items under this directory are touched — the hook is handed the whole
+    session's items regardless of which conftest defines it.
+    """
+    if GATEWAY_AVAILABLE:
+        return
+
+    here = Path(__file__).parent
+    skip = pytest.mark.skip(
+        reason=(
+            "No Model Gateway. Start one with ./scripts/start-local.sh and set "
+            "LLM_GATEWAY_URL / LLM_GATEWAY_API_KEY in packages/orchestrator-agent/.env"
+        )
+    )
+    for item in items:
+        try:
+            item_path = Path(str(item.fspath))
+        except Exception:
+            continue
+        if here in item_path.parents:
+            item.add_marker(skip)
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +416,30 @@ def test_user_config() -> UserConfig:
     )
 
 
+@pytest.fixture()
+def user_config_with_subagents(test_user_config):
+    """Factory: a UserConfig with mock sub-agents registered and routable.
+
+    Without this the registry is empty, so the ``task`` tool offers the model no
+    ``subagent_type`` to choose and routing assertions cannot fail. Use it for
+    any test about delegation::
+
+        def test_routes_to_slack(user_config_with_subagents):
+            slack = MockSubAgent("slack-client", "Sends Slack messages.")
+            user_config = user_config_with_subagents(slack)
+
+    Assignment is post-construction on purpose — it mirrors executor.py:311 and
+    sidesteps the ``Runnable`` annotation on ``UserConfig.sub_agents`` that no
+    real A2A runnable satisfies either.
+    """
+
+    def _make(*agents: MockSubAgent) -> UserConfig:
+        test_user_config.sub_agents = mock_subagents(*agents)
+        return test_user_config
+
+    return _make
+
+
 @pytest.fixture(scope="session")
 def patched_graph_factory(memory_checkpointer, memory_store):
     """Create a GraphFactory with in-memory checkpointer and store.
@@ -334,10 +469,17 @@ def patched_agent(patched_graph_factory):
     """Create an OrchestratorDeepAgent with patched GraphFactory.
 
     Session-scoped so the agent (and its graphs) are reused across tests.
+
+    Built with ``__new__`` to skip the real ``__init__`` (which would construct an
+    OIDC client and live discovery services). The cost is that every attribute
+    ``__init__`` assigns must be set here too — miss one and it surfaces as an
+    ``AttributeError`` from deep inside ``stream()``. Keep this list in step with
+    ``OrchestratorDeepAgent.__init__``.
     """
     agent = OrchestratorDeepAgent.__new__(OrchestratorDeepAgent)
     agent.config = AgentSettings()
-    agent._default_model_type = "claude-sonnet-4.5"
+    # Any registered chat alias; individual tests override via config metadata.
+    agent._default_model_type = ALL_MODELS[0] if ALL_MODELS else None
     agent._default_thinking_level = None
     agent._graph_factory = patched_graph_factory
 
@@ -347,6 +489,9 @@ def patched_agent(patched_graph_factory):
 
     # Stub OAuth2 client (not needed for streaming tests)
     agent.oauth2_client = MagicMock()
+
+    # No sandbox in tests: build_runtime_context reads this on every stream().
+    agent.sandbox_pool = None
 
     return agent
 
@@ -376,15 +521,43 @@ def make_config(context_id, memory_checkpointer):
 
 
 def available_models() -> list[ModelType]:
-    """Return list of models for which credentials are available."""
-    return [m for m in ALL_MODELS if has_credentials(m)]
+    """Models the gateway currently serves."""
+    return list(ALL_MODELS)
+
+
+def models_sharing_a_provider() -> list[tuple[ModelType, ModelType]]:
+    """Pairs of distinct models on the same provider, for model-switch tests.
+
+    Derived from the registry rather than hardcoded, so it follows whatever the
+    gateway actually serves. Empty when no provider offers two models — callers
+    should skip rather than quietly pass on an empty loop.
+    """
+    by_provider: dict[str, list[ModelType]] = {}
+    for model in ALL_MODELS:
+        try:
+            provider = get_model_provider(model) or "unknown"
+        except Exception:
+            provider = "unknown"
+        by_provider.setdefault(provider, []).append(model)
+    return [(models[0], models[1]) for models in by_provider.values() if len(models) >= 2]
 
 
 def one_model_per_provider() -> list[ModelType]:
-    """Return one model per provider for which credentials are available."""
+    """One model per backing provider — a cheap smoke set across the fleet.
+
+    Provider comes from the gateway's model_info rather than the alias string:
+    Vertex also hosts Claude and Llama, so name-matching would mis-group them.
+    Models whose provider cannot be resolved are grouped under "unknown" so they
+    are still covered exactly once instead of silently dropped.
+    """
+    seen: set[str] = set()
     result: list[ModelType] = []
-    for models in [BEDROCK_MODELS[:1], AZURE_MODELS[:1], VERTEXAI_MODELS[:1]]:
-        for m in models:
-            if has_credentials(m):
-                result.append(m)
+    for model in ALL_MODELS:
+        try:
+            provider = get_model_provider(model) or "unknown"
+        except Exception:
+            provider = "unknown"
+        if provider not in seen:
+            seen.add(provider)
+            result.append(model)
     return result
