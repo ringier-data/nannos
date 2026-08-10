@@ -53,6 +53,11 @@ function makeA2A(response: any = { result: { id: 'task-abc-123', status: { state
   } as unknown as A2AClientService;
 }
 
+function respondedText(respond: jest.Mock): string {
+  const call = respond.mock.calls.at(-1);
+  return call ? (call[0] as { text: string }).text : '';
+}
+
 // ---------------------------------------------------------------------------
 // handleCancelSubcommand
 // ---------------------------------------------------------------------------
@@ -67,84 +72,78 @@ describe('handleCancelSubcommand', () => {
   test('responds with info when the user has no running tasks', async () => {
     const a2a = makeA2A();
 
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, makeStore([]), '');
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, makeStore([]));
 
-    expect(respond).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('no running tasks') }));
     expect(a2a.cancelTask).not.toHaveBeenCalled();
+    expect(respondedText(respond)).toContain('no running tasks in this channel');
   });
 
-  test('cancels the single running task and confirms', async () => {
+  test('cancels the running task in the current channel and confirms', async () => {
     const a2a = makeA2A();
     const store = makeStore([makeTask()]);
 
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store, '');
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store);
 
     expect(a2a.cancelTask).toHaveBeenCalledWith('task-abc-123', 'orch-token');
-    expect(respond).toHaveBeenCalledWith(
-      expect.objectContaining({ text: expect.stringContaining('Cancellation requested') })
-    );
+    expect(respondedText(respond)).toContain('Cancellation requested');
   });
 
-  test('lists tasks and does not cancel when multiple tasks and no task ID given', async () => {
+  test('only cancels tasks in the current channel', async () => {
+    const a2a = makeA2A();
+    const store = makeStore([makeTask(), makeTask({ taskId: 'task-other-channel', channelId: 'C2' })]);
+
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store);
+
+    expect(a2a.cancelTask).toHaveBeenCalledTimes(1);
+    expect(a2a.cancelTask).toHaveBeenCalledWith('task-abc-123', 'orch-token');
+  });
+
+  test('cancels multiple running tasks in the current channel', async () => {
     const a2a = makeA2A();
     const store = makeStore([makeTask(), makeTask({ taskId: 'task-def-456', threadTs: '1700000100.000200' })]);
 
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store, '');
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store);
 
-    expect(a2a.cancelTask).not.toHaveBeenCalled();
-    const text = (respond.mock.calls[0][0] as { text: string }).text;
-    expect(text).toContain('task-abc-123');
-    expect(text).toContain('task-def-456');
-    expect(text).toContain('cancel <task_id>');
+    expect(a2a.cancelTask).toHaveBeenCalledTimes(2);
+    expect(respondedText(respond)).toContain('2 running tasks');
   });
 
-  test('cancels the task matching a task ID prefix argument', async () => {
-    const a2a = makeA2A({ result: { id: 'task-def-456', status: { state: 'canceled' } } });
-    const store = makeStore([makeTask(), makeTask({ taskId: 'task-def-456' })]);
-
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store, 'task-def');
-
-    expect(a2a.cancelTask).toHaveBeenCalledWith('task-def-456', 'orch-token');
-  });
-
-  test('responds with not-found when the task ID argument matches nothing', async () => {
+  test('points the user at other channels when nothing runs here', async () => {
     const a2a = makeA2A();
-    const store = makeStore([makeTask()]);
+    const store = makeStore([makeTask({ channelId: 'C2' })]);
 
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store, 'nope');
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store);
 
     expect(a2a.cancelTask).not.toHaveBeenCalled();
-    expect(respond).toHaveBeenCalledWith(
-      expect.objectContaining({ text: expect.stringContaining('No running task matches') })
-    );
+    expect(respondedText(respond)).toContain('other channels');
   });
 
   test('prompts login when the user has no orchestrator token', async () => {
     const a2a = makeA2A();
 
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(null), a2a, makeStore([makeTask()]), '');
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(null), a2a, makeStore([makeTask()]));
 
     expect(a2a.cancelTask).not.toHaveBeenCalled();
-    expect(respond).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('log in') }));
+    expect(respondedText(respond)).toContain('log in');
   });
 
   test('deletes the stale record when the task is no longer cancelable', async () => {
     const a2a = makeA2A({ error: { code: -32002, message: 'Task cannot be canceled' } });
     const store = makeStore([makeTask()]);
 
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store, '');
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store);
 
     expect(store.delete).toHaveBeenCalledWith('task-abc-123');
-    expect(respond).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('already finished') }));
+    expect(respondedText(respond)).toContain('already finished');
   });
 
   test('reports other cancel errors without deleting the record', async () => {
     const a2a = makeA2A({ error: { code: -32603, message: 'Internal error' } });
     const store = makeStore([makeTask()]);
 
-    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store, '');
+    await handleCancelSubcommand(makeArgs(respond), makeAuth(), a2a, store);
 
     expect(store.delete).not.toHaveBeenCalled();
-    expect(respond).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('Failed to cancel') }));
+    expect(respondedText(respond)).toContain('Failed to cancel');
   });
 });

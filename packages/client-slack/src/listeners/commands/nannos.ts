@@ -252,65 +252,38 @@ async function handleDebugSubcommand(
 }
 
 /**
- * Handle /bot cancel subcommand — aborts a running task via the same A2A
+ * Handle /bot cancel subcommand — aborts running tasks via the same A2A
  * cancel protocol the web client's stop button uses.
  *
- * Slash commands don't carry thread context, so the task is resolved from the
- * user's in-flight tasks: a single task is cancelled directly, multiple tasks
- * require the task ID (shown in the list) as an argument.
+ * Task IDs are internal to the system, so the tasks to cancel are resolved
+ * from where the command is issued: the user's running tasks in the current
+ * channel (there is almost always exactly one). Slash command payloads carry
+ * no thread_ts, so channel scope is the finest granularity available.
  */
 export async function handleCancelSubcommand(
   { command, respond }: NannosCommand,
   userAuthService: UserAuthService,
   a2aClientService: A2AClientService,
-  inFlightTaskStore: IInFlightTaskStore,
-  args: string
+  inFlightTaskStore: IInFlightTaskStore
 ): Promise<void> {
   const logger = Logger.getLogger('handleCancelSubcommand');
   const userId = command.user_id;
   const teamId = command.team_id;
+  const channelId = command.channel_id;
 
-  logger.info(`${command.command} cancel from user ${userId} in team ${teamId}`);
+  logger.info(`${command.command} cancel from user ${userId} in channel ${channelId}`);
 
   const tasks = await inFlightTaskStore.getByUser(teamId, userId);
+  const targets: InFlightTask[] = tasks.filter((t) => t.channelId === channelId);
 
-  if (tasks.length === 0) {
+  if (targets.length === 0) {
+    const elsewhere =
+      tasks.length > 0
+        ? ` You have ${tasks.length} running task(s) in other channels — run \`${command.command} cancel\` there to cancel them.`
+        : '';
     await respond({
       response_type: 'ephemeral',
-      text: 'ℹ️ You have no running tasks to cancel.',
-    });
-    return;
-  }
-
-  const requestedTaskId = args.trim();
-  let task: InFlightTask | undefined;
-
-  if (requestedTaskId) {
-    task = tasks.find((t) => t.taskId === requestedTaskId || t.taskId.startsWith(requestedTaskId));
-    if (!task) {
-      await respond({
-        response_type: 'ephemeral',
-        text: [
-          `❓ No running task matches \`${requestedTaskId}\`.`,
-          '',
-          '*Your running tasks:*',
-          ...tasks.map((t) => `• \`${t.taskId}\` — started ${formatTimestamp(t.createdAt)} in <#${t.channelId}>`),
-        ].join('\n'),
-      });
-      return;
-    }
-  } else if (tasks.length === 1) {
-    task = tasks[0];
-  } else {
-    await respond({
-      response_type: 'ephemeral',
-      text: [
-        `You have ${tasks.length} running tasks. Specify which one to cancel:`,
-        '',
-        ...tasks.map((t) => `• \`${t.taskId}\` — started ${formatTimestamp(t.createdAt)} in <#${t.channelId}>`),
-        '',
-        `Run \`${command.command} cancel <task_id>\``,
-      ].join('\n'),
+      text: `ℹ️ You have no running tasks in this channel.${elsewhere}`,
     });
     return;
   }
@@ -324,28 +297,44 @@ export async function handleCancelSubcommand(
     return;
   }
 
-  const response = await a2aClientService.cancelTask(task.taskId, accessToken);
+  let cancelled = 0;
+  let alreadyFinished = 0;
+  const failures: string[] = [];
 
-  if ('error' in response && response.error) {
-    if (response.error.code === A2A_TASK_NOT_FOUND || response.error.code === A2A_TASK_NOT_CANCELABLE) {
-      // Stale record — the task already reached a terminal state.
-      await inFlightTaskStore.delete(task.taskId).catch(() => {});
-      await respond({
-        response_type: 'ephemeral',
-        text: `ℹ️ Task \`${task.taskId}\` has already finished — nothing to cancel.`,
-      });
+  for (const task of targets) {
+    const response = await a2aClientService.cancelTask(task.taskId, accessToken);
+
+    if ('error' in response && response.error) {
+      if (response.error.code === A2A_TASK_NOT_FOUND || response.error.code === A2A_TASK_NOT_CANCELABLE) {
+        // Stale record — the task already reached a terminal state.
+        await inFlightTaskStore.delete(task.taskId).catch(() => {});
+        alreadyFinished++;
+      } else {
+        failures.push(response.error.message);
+      }
     } else {
-      await respond({
-        response_type: 'ephemeral',
-        text: `❌ Failed to cancel task \`${task.taskId}\`: ${response.error.message}`,
-      });
+      cancelled++;
     }
-    return;
+  }
+
+  const lines: string[] = [];
+  if (cancelled > 0) {
+    lines.push(
+      cancelled === 1
+        ? '🛑 Cancellation requested — the task will stop shortly.'
+        : `🛑 Cancellation requested for ${cancelled} running tasks — they will stop shortly.`
+    );
+  }
+  if (alreadyFinished > 0) {
+    lines.push(`ℹ️ ${alreadyFinished} task(s) had already finished — nothing to cancel.`);
+  }
+  for (const failure of failures) {
+    lines.push(`❌ Failed to cancel a task: ${failure}`);
   }
 
   await respond({
     response_type: 'ephemeral',
-    text: `🛑 Cancellation requested for task \`${task.taskId}\`. The task will stop shortly.`,
+    text: lines.join('\n'),
   });
 }
 
@@ -357,7 +346,7 @@ async function handleHelpSubcommand({ command, respond }: NannosCommand, botName
   const helpText = [
     `🤖 *${botName} Commands*\n`,
     `\`${cmd} login\` - Log in to use ${botName} services`,
-    `\`${cmd} cancel [task_id]\` - Cancel a running task (alias: \`stop\`)`,
+    `\`${cmd} cancel\` - Cancel your running task in this channel (alias: \`stop\`)`,
     `\`${cmd} debug [thread_ts]\` - Show debug info about your session and threads`,
     `\`${cmd} help\` - Show this help message`,
   ].join('\n');
@@ -401,7 +390,7 @@ async function handleNannosCommand(
 
       case 'cancel':
       case 'stop':
-        await handleCancelSubcommand(args, userAuthService, a2aClientService, inFlightTaskStore, subArgsText);
+        await handleCancelSubcommand(args, userAuthService, a2aClientService, inFlightTaskStore);
         break;
 
       case 'debug':

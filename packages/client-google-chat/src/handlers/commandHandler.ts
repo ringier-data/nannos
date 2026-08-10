@@ -182,15 +182,15 @@ async function handleLoginCommand(
 }
 
 /**
- * Handle "cancel" command – aborts a running task via the same A2A cancel
+ * Handle "cancel" command – aborts running tasks via the same A2A cancel
  * protocol the web client's stop button uses.
  *
- * The task is resolved from the current thread when possible; otherwise from
- * the user's in-flight tasks (a task ID argument disambiguates).
+ * Task IDs are internal to the system, so the tasks to cancel are resolved
+ * from where the command is issued: the user's running tasks in the current
+ * thread (there is almost always exactly one).
  */
 export async function handleCancelCommand(
   appCommand: AppCommand,
-  args: string,
   chatService: GoogleChatService,
   inFlightTaskStore: IInFlightTaskStore,
   userAuthService: UserAuthService,
@@ -204,44 +204,14 @@ export async function handleCancelCommand(
   const reply = (text: string) => chatService.sendPrivateTextMessage(projectId, spaceId, userId, text, threadId);
 
   const tasks = await inFlightTaskStore.getByUser(projectId, userId);
+  const targets: InFlightTask[] = tasks.filter((t) => t.threadId === threadId);
 
-  if (tasks.length === 0) {
-    await reply('ℹ️ You have no running tasks to cancel.');
-    return;
-  }
-
-  const requestedTaskId = args.trim();
-  const threadTasks = tasks.filter((t) => t.threadId === threadId);
-  let task: InFlightTask | undefined;
-
-  if (requestedTaskId) {
-    task = tasks.find((t) => t.taskId === requestedTaskId || t.taskId.startsWith(requestedTaskId));
-    if (!task) {
-      await reply(
-        [
-          `❓ No running task matches \`${requestedTaskId}\`.`,
-          '',
-          '*Your running tasks:*',
-          ...tasks.map((t) => `• \`${t.taskId}\` — started ${formatTimestamp(t.createdAt)}`),
-        ].join('\n')
-      );
-      return;
-    }
-  } else if (threadTasks.length === 1) {
-    task = threadTasks[0];
-  } else if (threadTasks.length === 0 && tasks.length === 1) {
-    task = tasks[0];
-  } else {
-    const candidates = threadTasks.length > 0 ? threadTasks : tasks;
-    await reply(
-      [
-        `You have ${candidates.length} running tasks. Specify which one to cancel:`,
-        '',
-        ...candidates.map((t) => `• \`${t.taskId}\` — started ${formatTimestamp(t.createdAt)}`),
-        '',
-        'Use the *cancel* command followed by the task ID.',
-      ].join('\n')
-    );
+  if (targets.length === 0) {
+    const elsewhere =
+      tasks.length > 0
+        ? ` You have ${tasks.length} running task(s) in other threads — use the *cancel* command there to cancel them.`
+        : '';
+    await reply(`ℹ️ You have no running tasks in this thread.${elsewhere}`);
     return;
   }
 
@@ -251,20 +221,42 @@ export async function handleCancelCommand(
     return;
   }
 
-  const response = await a2aClientService.cancelTask(task.taskId, accessToken);
+  let cancelled = 0;
+  let alreadyFinished = 0;
+  const failures: string[] = [];
 
-  if ('error' in response && response.error) {
-    if (response.error.code === A2A_TASK_NOT_FOUND || response.error.code === A2A_TASK_NOT_CANCELABLE) {
-      // Stale record — the task already reached a terminal state.
-      await inFlightTaskStore.delete(task.taskId).catch(() => {});
-      await reply(`ℹ️ Task \`${task.taskId}\` has already finished — nothing to cancel.`);
+  for (const task of targets) {
+    const response = await a2aClientService.cancelTask(task.taskId, accessToken);
+
+    if ('error' in response && response.error) {
+      if (response.error.code === A2A_TASK_NOT_FOUND || response.error.code === A2A_TASK_NOT_CANCELABLE) {
+        // Stale record — the task already reached a terminal state.
+        await inFlightTaskStore.delete(task.taskId).catch(() => {});
+        alreadyFinished++;
+      } else {
+        failures.push(response.error.message);
+      }
     } else {
-      await reply(`❌ Failed to cancel task \`${task.taskId}\`: ${response.error.message}`);
+      cancelled++;
     }
-    return;
   }
 
-  await reply(`🛑 Cancellation requested for task \`${task.taskId}\`. The task will stop shortly.`);
+  const lines: string[] = [];
+  if (cancelled > 0) {
+    lines.push(
+      cancelled === 1
+        ? '🛑 Cancellation requested — the task will stop shortly.'
+        : `🛑 Cancellation requested for ${cancelled} running tasks — they will stop shortly.`
+    );
+  }
+  if (alreadyFinished > 0) {
+    lines.push(`ℹ️ ${alreadyFinished} task(s) had already finished — nothing to cancel.`);
+  }
+  for (const failure of failures) {
+    lines.push(`❌ Failed to cancel a task: ${failure}`);
+  }
+
+  await reply(lines.join('\n'));
 }
 
 /**
@@ -277,7 +269,7 @@ async function handleHelpCommand(
   const helpText = [
     '🤖 *Nannos Commands*\n',
     '• *login* - Log in to use Nannos services',
-    '• *cancel [task_id]* - Cancel a running task (alias: *stop*)',
+    '• *cancel* - Cancel your running task in this thread (alias: *stop*)',
     '• *debug* - Show debug info about your session and threads',
     '• *logout* - Log out from Nannos',
     '• *help* - Show this help message',
@@ -306,9 +298,8 @@ export async function handleAppCommand(
   const logger = Logger.getLogger('handleAppCommand');
   logger.info(`App command argument=${appCommand.commandArgument} from user ${appCommand.userId} in space ${appCommand.spaceId}`);
 
-  // Dispatch on the first token so commands can take arguments (e.g. "cancel <task_id>")
-  const [commandName, ...commandArgs] = appCommand.commandArgument.split(/\s+/);
-  const commandArgsText = commandArgs.join(' ');
+  // Dispatch on the first token so trailing text doesn't break command matching
+  const [commandName] = appCommand.commandArgument.split(/\s+/);
 
   switch (commandName) {
     case 'help':
@@ -319,14 +310,7 @@ export async function handleAppCommand(
 
     case 'cancel':
     case 'stop':
-      return handleCancelCommand(
-        appCommand,
-        commandArgsText,
-        chatService,
-        inFlightTaskStore,
-        userAuthService,
-        a2aClientService
-      );
+      return handleCancelCommand(appCommand, chatService, inFlightTaskStore, userAuthService, a2aClientService);
 
     case 'debug':
       return handleDebugCommand(

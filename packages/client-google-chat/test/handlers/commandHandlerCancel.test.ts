@@ -97,10 +97,10 @@ describe('handleAppCommand cancel', () => {
     await handleAppCommand(makeAppCommand('cancel'), deps);
 
     expect(cancelTask).not.toHaveBeenCalled();
-    expect(lastMessageText(sendPrivateTextMessage)).toContain('no running tasks');
+    expect(lastMessageText(sendPrivateTextMessage)).toContain('no running tasks in this thread');
   });
 
-  test('cancels the single task in the current thread and confirms', async () => {
+  test('cancels the running task in the current thread and confirms', async () => {
     const { deps, sendPrivateTextMessage, cancelTask } = makeDeps({ tasks: [makeTask()] });
 
     await handleAppCommand(makeAppCommand('cancel'), deps);
@@ -119,40 +119,24 @@ describe('handleAppCommand cancel', () => {
     expect(cancelTask).toHaveBeenCalledWith('task-abc-123', 'orch-token');
   });
 
-  test('falls back to the single task outside the thread', async () => {
-    const task = makeTask({ threadId: 'spaces/S1/threads/OTHER' });
-    const { deps, cancelTask } = makeDeps({ tasks: [task] });
+  test('only cancels tasks in the current thread', async () => {
+    const tasks = [makeTask(), makeTask({ taskId: 'task-other-thread', threadId: 'spaces/S1/threads/OTHER' })];
+    const { deps, cancelTask } = makeDeps({ tasks });
 
     await handleAppCommand(makeAppCommand('cancel'), deps);
 
+    expect(cancelTask).toHaveBeenCalledTimes(1);
     expect(cancelTask).toHaveBeenCalledWith('task-abc-123', 'orch-token');
   });
 
-  test('lists tasks when multiple candidates and no task ID given', async () => {
-    const tasks = [
-      makeTask({ threadId: 'spaces/S1/threads/A' }),
-      makeTask({ taskId: 'task-def-456', threadId: 'spaces/S1/threads/B' }),
-    ];
+  test('points the user at other threads when nothing runs here', async () => {
+    const tasks = [makeTask({ threadId: 'spaces/S1/threads/OTHER' })];
     const { deps, sendPrivateTextMessage, cancelTask } = makeDeps({ tasks });
 
     await handleAppCommand(makeAppCommand('cancel'), deps);
 
     expect(cancelTask).not.toHaveBeenCalled();
-    const text = lastMessageText(sendPrivateTextMessage);
-    expect(text).toContain('task-abc-123');
-    expect(text).toContain('task-def-456');
-  });
-
-  test('cancels the task matching a task ID argument', async () => {
-    const tasks = [makeTask(), makeTask({ taskId: 'task-def-456', threadId: 'spaces/S1/threads/B' })];
-    const { deps, cancelTask } = makeDeps({
-      tasks,
-      cancelResponse: { result: { id: 'task-def-456', status: { state: 'canceled' } } },
-    });
-
-    await handleAppCommand(makeAppCommand('cancel task-def-456'), deps);
-
-    expect(cancelTask).toHaveBeenCalledWith('task-def-456', 'orch-token');
+    expect(lastMessageText(sendPrivateTextMessage)).toContain('other threads');
   });
 
   test('prompts login when the user has no orchestrator token', async () => {
