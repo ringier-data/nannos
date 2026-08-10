@@ -1,7 +1,19 @@
 import { App, SlackCommandMiddlewareArgs, AllMiddlewareArgs } from '@slack/bolt';
 import { UserAuthService } from '../../services/userAuthService.js';
-import type { IContextStore, IInFlightTaskStore, IPendingRequestStore, IOAuthStateStore } from '../../storage/types.js';
+import { A2AClientService } from '../../services/a2aClientService.js';
+import type {
+  IContextStore,
+  IInFlightTaskStore,
+  IPendingRequestStore,
+  IOAuthStateStore,
+  InFlightTask,
+} from '../../storage/types.js';
 import { Logger } from '../../utils/logger.js';
+
+// A2A JSON-RPC error codes signalling the task is already terminal (or gone),
+// i.e. the stored in-flight record is stale and can be dropped.
+const A2A_TASK_NOT_FOUND = -32001;
+const A2A_TASK_NOT_CANCELABLE = -32002;
 
 type NannosCommand = SlackCommandMiddlewareArgs & AllMiddlewareArgs;
 
@@ -240,6 +252,104 @@ async function handleDebugSubcommand(
 }
 
 /**
+ * Handle /bot cancel subcommand — aborts a running task via the same A2A
+ * cancel protocol the web client's stop button uses.
+ *
+ * Slash commands don't carry thread context, so the task is resolved from the
+ * user's in-flight tasks: a single task is cancelled directly, multiple tasks
+ * require the task ID (shown in the list) as an argument.
+ */
+export async function handleCancelSubcommand(
+  { command, respond }: NannosCommand,
+  userAuthService: UserAuthService,
+  a2aClientService: A2AClientService,
+  inFlightTaskStore: IInFlightTaskStore,
+  args: string
+): Promise<void> {
+  const logger = Logger.getLogger('handleCancelSubcommand');
+  const userId = command.user_id;
+  const teamId = command.team_id;
+
+  logger.info(`${command.command} cancel from user ${userId} in team ${teamId}`);
+
+  const tasks = await inFlightTaskStore.getByUser(teamId, userId);
+
+  if (tasks.length === 0) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'ℹ️ You have no running tasks to cancel.',
+    });
+    return;
+  }
+
+  const requestedTaskId = args.trim();
+  let task: InFlightTask | undefined;
+
+  if (requestedTaskId) {
+    task = tasks.find((t) => t.taskId === requestedTaskId || t.taskId.startsWith(requestedTaskId));
+    if (!task) {
+      await respond({
+        response_type: 'ephemeral',
+        text: [
+          `❓ No running task matches \`${requestedTaskId}\`.`,
+          '',
+          '*Your running tasks:*',
+          ...tasks.map((t) => `• \`${t.taskId}\` — started ${formatTimestamp(t.createdAt)} in <#${t.channelId}>`),
+        ].join('\n'),
+      });
+      return;
+    }
+  } else if (tasks.length === 1) {
+    task = tasks[0];
+  } else {
+    await respond({
+      response_type: 'ephemeral',
+      text: [
+        `You have ${tasks.length} running tasks. Specify which one to cancel:`,
+        '',
+        ...tasks.map((t) => `• \`${t.taskId}\` — started ${formatTimestamp(t.createdAt)} in <#${t.channelId}>`),
+        '',
+        `Run \`${command.command} cancel <task_id>\``,
+      ].join('\n'),
+    });
+    return;
+  }
+
+  const accessToken = await userAuthService.getOrchestratorToken(userId, teamId);
+  if (!accessToken) {
+    await respond({
+      response_type: 'ephemeral',
+      text: `🔐 You need to log in first. Use \`${command.command} login\`.`,
+    });
+    return;
+  }
+
+  const response = await a2aClientService.cancelTask(task.taskId, accessToken);
+
+  if ('error' in response && response.error) {
+    if (response.error.code === A2A_TASK_NOT_FOUND || response.error.code === A2A_TASK_NOT_CANCELABLE) {
+      // Stale record — the task already reached a terminal state.
+      await inFlightTaskStore.delete(task.taskId).catch(() => {});
+      await respond({
+        response_type: 'ephemeral',
+        text: `ℹ️ Task \`${task.taskId}\` has already finished — nothing to cancel.`,
+      });
+    } else {
+      await respond({
+        response_type: 'ephemeral',
+        text: `❌ Failed to cancel task \`${task.taskId}\`: ${response.error.message}`,
+      });
+    }
+    return;
+  }
+
+  await respond({
+    response_type: 'ephemeral',
+    text: `🛑 Cancellation requested for task \`${task.taskId}\`. The task will stop shortly.`,
+  });
+}
+
+/**
  * Show help for the bot command
  */
 async function handleHelpSubcommand({ command, respond }: NannosCommand, botName: string): Promise<void> {
@@ -247,6 +357,7 @@ async function handleHelpSubcommand({ command, respond }: NannosCommand, botName
   const helpText = [
     `🤖 *${botName} Commands*\n`,
     `\`${cmd} login\` - Log in to use ${botName} services`,
+    `\`${cmd} cancel [task_id]\` - Cancel a running task (alias: \`stop\`)`,
     `\`${cmd} debug [thread_ts]\` - Show debug info about your session and threads`,
     `\`${cmd} help\` - Show this help message`,
   ].join('\n');
@@ -264,6 +375,7 @@ async function handleHelpSubcommand({ command, respond }: NannosCommand, botName
 async function handleNannosCommand(
   args: NannosCommand,
   userAuthService: UserAuthService,
+  a2aClientService: A2AClientService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
   pendingRequestStore: IPendingRequestStore,
@@ -285,6 +397,11 @@ async function handleNannosCommand(
     switch (subcommand.toLowerCase()) {
       case 'login':
         await handleLoginSubcommand(args, userAuthService, botName);
+        break;
+
+      case 'cancel':
+      case 'stop':
+        await handleCancelSubcommand(args, userAuthService, a2aClientService, inFlightTaskStore, subArgsText);
         break;
 
       case 'debug':
@@ -330,6 +447,7 @@ export function registerNannosCommand(
   app: App,
   slashCommand: string,
   userAuthService: UserAuthService,
+  a2aClientService: A2AClientService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
   pendingRequestStore: IPendingRequestStore,
@@ -340,6 +458,14 @@ export function registerNannosCommand(
 
   app.command(slashCommand, async (args) => {
     const botName = ((args.context as any).botName as string | undefined) ?? 'Bot';
-    await handleNannosCommand(args, userAuthService, contextStore, inFlightTaskStore, pendingRequestStore, botName);
+    await handleNannosCommand(
+      args,
+      userAuthService,
+      a2aClientService,
+      contextStore,
+      inFlightTaskStore,
+      pendingRequestStore,
+      botName
+    );
   });
 }
