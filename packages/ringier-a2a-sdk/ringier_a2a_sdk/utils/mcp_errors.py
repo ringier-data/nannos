@@ -47,6 +47,54 @@ def is_retryable_mcp_error(error: Exception) -> bool:
     return False
 
 
+def get_mcp_http_status_error(error: Exception) -> httpx.HTTPStatusError | None:
+    """Extract the underlying httpx.HTTPStatusError from an MCP connection error.
+
+    Unwraps ExceptionGroup (from anyio task groups used by the streamable HTTP
+    client) the same way is_retryable_mcp_error/format_mcp_error do, so callers
+    can log the server's actual response body instead of just the status code —
+    raise_for_status() alone discards it.
+
+    Args:
+        error: Exception raised during MCP connection
+
+    Returns:
+        The httpx.HTTPStatusError if one is found, else None
+    """
+    if hasattr(error, "__class__") and error.__class__.__name__ == "ExceptionGroup":
+        exceptions = getattr(error, "exceptions", [error])
+        for exc in exceptions:
+            if isinstance(exc, httpx.HTTPStatusError):
+                return exc
+
+    if isinstance(error, httpx.HTTPStatusError):
+        return error
+
+    return None
+
+
+def get_mcp_error_body(http_err: httpx.HTTPStatusError, max_len: int = 2000) -> str:
+    """Safely read the response body text off an HTTPStatusError for logging.
+
+    The MCP streamable HTTP client streams responses and never calls read()
+    before raise_for_status(), so response.text raises httpx.ResponseNotRead
+    for MCP gateway errors (though not for a plain, non-streaming request like
+    ToolDiscoveryService's httpx.AsyncClient.get()). Callers just want a string
+    to log either way, so this never raises.
+
+    Args:
+        http_err: The HTTPStatusError to read the body from
+        max_len: Truncate the body to this many characters
+
+    Returns:
+        The response body text (truncated), or a placeholder if it can't be read
+    """
+    try:
+        return http_err.response.text[:max_len]
+    except Exception as e:
+        return f"<body unavailable: {type(e).__name__}: {e}>"
+
+
 def format_mcp_error(error: Exception) -> str:
     """Format MCP connection errors into user-friendly messages.
 

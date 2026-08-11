@@ -47,7 +47,12 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
-from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_errors import (
+    format_mcp_error,
+    get_mcp_error_body,
+    get_mcp_http_status_error,
+    is_retryable_mcp_error,
+)
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 from ringier_a2a_sdk.utils.streaming import (
     StreamBuffer,
@@ -580,12 +585,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         The discovered tools override orchestrator tools entirely when whitelist is specified.
 
         Implements retry logic with exponential backoff for transient errors (502, 503, 504).
+        Non-retryable errors (4xx, exhausted retries) degrade gracefully to an empty
+        tool list rather than failing the turn — a dead/misconfigured gateway (e.g.
+        Gatana) shouldn't crash embedded execute-only sub-agents that depend on this
+        as their only tool source, mirroring ToolDiscoveryService.fetch_available_servers.
 
         Returns:
-            List of discovered BaseTool instances (filtered by whitelist if specified)
-
-        Raises:
-            Exception: If MCP discovery fails (will result in failed state)
+            List of discovered BaseTool instances (filtered by whitelist if specified),
+            or an empty list if discovery fails after retries.
         """
         import asyncio
 
@@ -691,7 +698,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 is_retryable = is_retryable_mcp_error(e)
 
                 if not is_retryable or attempt >= max_retries - 1:
-                    # Non-retryable error or exhausted retries
+                    # Non-retryable error or exhausted retries — degrade gracefully
+                    # instead of crashing the whole turn (see docstring).
                     if is_retryable:
                         error_msg = format_mcp_error(e)
                         logger.error(
@@ -699,7 +707,13 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                         )
                     else:
                         logger.error(f"Non-retryable error discovering MCP tools for {self.name}: {e}")
-                    raise
+                    http_err = get_mcp_http_status_error(e)
+                    if http_err is not None:
+                        logger.error(
+                            f"MCP gateway response for {self.name} ({http_err.request.url}): "
+                            f"{http_err.response.status_code} body={get_mcp_error_body(http_err)!r}"
+                        )
+                    return []
 
                 # Retryable error - wait and retry
                 logger.warning(
@@ -710,7 +724,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 delay *= 2  # Exponential backoff
 
         # Should never reach here, but just in case
-        raise last_error or Exception(f"Failed to discover MCP tools for {self.name}")
+        logger.error(f"Failed to discover MCP tools for {self.name}: {last_error}")
+        return []
 
     # Tools that sub-agents always get from console-backend MCP for self-improvement
     _CONSOLE_SELF_IMPROVEMENT_TOOLS = frozenset(

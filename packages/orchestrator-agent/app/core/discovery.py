@@ -20,7 +20,12 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.cost_tracking.attribution import context_header
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
-from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_errors import (
+    format_mcp_error,
+    get_mcp_error_body,
+    get_mcp_http_status_error,
+    is_retryable_mcp_error,
+)
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
 from ..models.config import AgentSettings
@@ -242,6 +247,12 @@ class ToolDiscoveryService:
 
         except Exception as e:
             logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
+            http_err = get_mcp_http_status_error(e)
+            if http_err is not None:
+                logger.error(
+                    f"MCP gateway response for {http_err.request.url}: "
+                    f"{http_err.response.status_code} body={get_mcp_error_body(http_err)!r}"
+                )
             return []
 
     async def _get_tools_with_retry(
