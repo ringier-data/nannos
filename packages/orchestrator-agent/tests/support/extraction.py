@@ -244,19 +244,39 @@ def final_response(values: Any) -> dict[str, Any] | None:
 def final_text(values: Any) -> str:
     """The user-visible answer for this turn.
 
-    Prefers the ``FinalResponseSchema`` ``message`` field, which is the only
-    channel the model is supposed to speak through, and falls back to the last
-    AIMessage text for paths that bypass structured output.
+    Normally the ``FinalResponseSchema`` ``message`` field, the only channel the
+    model is supposed to speak through.
+
+    The exception is ``include_subagent_output``: the schema instructs the model
+    to leave ``message`` EMPTY and let the sub-agent's output be appended, so
+    reading ``message`` alone reports an empty answer for a turn that actually
+    answered the user at length. The executor does that append downstream of the
+    graph, so it is reproduced here — otherwise any assertion about response
+    content silently fails whenever the model chooses to pass a sub-agent's work
+    through verbatim.
     """
     structured = final_response(values)
-    if structured and structured.get("message"):
-        return str(structured["message"])
+    if structured:
+        message = str(structured.get("message") or "")
+        if structured.get("include_subagent_output"):
+            appended = last_subagent_output(values)
+            return f"{message}\n\n{appended}".strip() if appended else message
+        if message:
+            return message
 
     for msg in reversed(_messages(values)):
         if isinstance(msg, AIMessage):
             text = message_text(msg)
             if text.strip():
                 return text
+    return ""
+
+
+def last_subagent_output(values: Any, *, all_turns: bool = False) -> str:
+    """Content returned by the most recent completed delegation, or ""."""
+    for delegation in reversed(delegations(values, all_turns=all_turns)):
+        if delegation.result:
+            return delegation.result
     return ""
 
 

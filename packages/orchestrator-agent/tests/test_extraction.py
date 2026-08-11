@@ -189,6 +189,36 @@ def test_structured_response_may_be_a_pydantic_instance_not_a_dict():
     assert task_state(state) == "input_required"
 
 
+def test_include_subagent_output_appends_the_delegation_result():
+    """When the model passes a sub-agent's work through verbatim, the schema tells
+    it to leave `message` EMPTY and the output is appended downstream. Reading
+    `message` alone reports an empty answer for a turn that answered at length —
+    a real gemini run did exactly this and the assertion failed on ''."""
+    state = {
+        "messages": [
+            HumanMessage("what was Q3 revenue?"),
+            _task_call("agent-runner", "c1"),
+            ToolMessage(content="Q3 revenue was 8.2 million EUR.", tool_call_id="c1", name="task"),
+            _final_call(message="", include_subagent_output=True),
+        ]
+    }
+
+    assert final_text(state) == "Q3 revenue was 8.2 million EUR."
+
+
+def test_include_subagent_output_keeps_a_nonempty_message_as_a_preamble():
+    state = {
+        "messages": [
+            HumanMessage("what was Q3 revenue?"),
+            _task_call("agent-runner", "c1"),
+            ToolMessage(content="8.2 million EUR.", tool_call_id="c1", name="task"),
+            _final_call(message="Here you go:", include_subagent_output=True),
+        ]
+    }
+
+    assert final_text(state) == "Here you go:\n\n8.2 million EUR."
+
+
 def test_final_text_falls_back_to_last_nonempty_ai_message():
     state = {
         "messages": [

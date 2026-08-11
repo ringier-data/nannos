@@ -1,0 +1,118 @@
+# Core orchestrator routing scenarios.
+#
+# Run by both tiers (see tests/support/scenarios.py):
+#   uv run pytest tests/test_scenarios_mock.py        # scripted model, every PR
+#   uv run pytest -m integration -k scenarios_real    # live model, needs a gateway
+#
+# Writing a scenario:
+#
+# - `subagents` are registered for this scenario only. Their `description` is
+#   what the model routes on, so keep it close to the real agent's wording —
+#   in the real tier that text is doing the actual work.
+# - `expect.delegations` names `task(subagent_type=...)` targets. There is no
+#   primary/secondary distinction in graph state; use `ordered: true` when
+#   sequence genuinely matters.
+# - `expect.tools` may only name ORCHESTRATOR-VISIBLE tools: task, write_todos,
+#   get_current_time, FinalResponseSchema, docstore and MCP tools. A sub-agent's
+#   own tools run behind A2A in another process and never reach this state, so
+#   expecting e.g. send_slack_message can only fail.
+# - `expect.instructions` substring-matches what a sub-agent was handed. Keep
+#   needles to stable specifics (a name, an identifier) — never whole phrases,
+#   which the model rewords freely.
+# - `expect.response_contains` matches the user-visible final message.
+#
+# Keep expectations to what the orchestrator genuinely controls. Asserting on
+# wording the model chooses makes a flaky test, not a strict one.
+
+- id: routes_to_slack_client
+  description: A request to send something on Slack should reach the Slack agent.
+  input:
+    query: "Send a message to @john.doe on Slack saying the deployment is done."
+  subagents:
+    - name: slack-client
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      reply: "Message delivered to @john.doe."
+    - name: agent-runner
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      reply: "No data job required."
+  expect:
+    delegations:
+      required: [slack-client]
+      forbidden: [agent-runner]
+    instructions:
+      slack-client: ["john"]
+    task_state: completed
+
+- id: routes_to_agent_runner_for_data
+  description: A data question should reach the runner, not the Slack agent.
+  input:
+    query: "What was our Q3 revenue? Look it up and tell me the number."
+  subagents:
+    - name: slack-client
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      reply: "Nothing to send."
+    - name: agent-runner
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      reply: "Q3 revenue was 8.2 million EUR."
+  expect:
+    delegations:
+      required: [agent-runner]
+      forbidden: [slack-client]
+    instructions:
+      agent-runner: ["Q3"]
+    task_state: completed
+    response_contains: ["8.2"]
+
+- id: chains_runner_then_slack
+  description: Fetch-then-send should hit both agents, data first.
+  input:
+    query: "Look up the Q3 revenue and then post it to @john.doe on Slack."
+  subagents:
+    - name: agent-runner
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      reply: "Q3 revenue was 8.2 million EUR."
+    - name: slack-client
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      reply: "Message delivered to @john.doe."
+  expect:
+    delegations:
+      required: [agent-runner, slack-client]
+      ordered: true
+    instructions:
+      slack-client: ["john"]
+    task_state: completed
+
+- id: answers_directly_without_delegating
+  description: A question the orchestrator can answer itself must not be delegated.
+  input:
+    query: "In one sentence, what is 2 + 2?"
+  subagents:
+    - name: slack-client
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      reply: "Nothing to send."
+    - name: agent-runner
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      reply: "No data job required."
+  expect:
+    delegations:
+      forbidden: [slack-client, agent-runner]
+    task_state: completed
+    # Deliberately no response_contains. An earlier version asserted "4" and
+    # gemini answered "Two plus two is four." — a correct answer failing on
+    # representation. This scenario is about NOT delegating; the wording of a
+    # correct arithmetic answer is not something the orchestrator controls.
+
+- id: uses_time_tool_for_current_time
+  description: Asking the time should use the orchestrator's own tool, not a sub-agent.
+  input:
+    query: "What time is it right now?"
+  subagents:
+    - name: agent-runner
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      reply: "No data job required."
+  expect:
+    delegations:
+      forbidden: [agent-runner]
+    tools:
+      required: [get_current_time]
+    task_state: completed
