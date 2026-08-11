@@ -177,7 +177,9 @@ from pydantic import SecretStr
 from app.core.agent import OrchestratorDeepAgent
 from app.core.graph_factory import GraphFactory
 from app.models.config import AgentSettings, UserConfig
+from tests.support.eval_report import EvalSession, min_pass_ratio
 from tests.support.mock_subagents import MockSubAgent, mock_subagents
+from tests.support.usage import UsageRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -497,8 +499,13 @@ def patched_agent(patched_graph_factory):
 
 
 @pytest.fixture()
-def make_config(context_id, memory_checkpointer):
-    """Factory fixture that creates a graph config dict for a given model type."""
+def make_config(context_id, memory_checkpointer, usage_recorder):
+    """Factory fixture that creates a graph config dict for a given model type.
+
+    Carries the test's ``UsageRecorder`` in ``callbacks``: LangChain propagates
+    those down to the model call, so token accounting needs no hook in
+    production code.
+    """
 
     def _make(model_type: ModelType, thinking_level: ThinkingLevel | None = None) -> dict[str, Any]:
         return {
@@ -515,9 +522,90 @@ def make_config(context_id, memory_checkpointer):
                 "thinking_level": thinking_level,
             },
             "tags": ["integration-test"],
+            "callbacks": [usage_recorder],
         }
 
     return _make
+
+
+# ---------------------------------------------------------------------------
+# Pass-ratio gating and cost reporting
+# ---------------------------------------------------------------------------
+# These hooks are defined in this conftest but pytest calls them for the whole
+# session, so every one filters to this directory. Unit tests are deterministic
+# and must not be judged on a ratio.
+
+_EVAL = EvalSession()
+
+
+def _is_integration(nodeid: str) -> bool:
+    return "tests/integration/" in nodeid.replace("\\", "/")
+
+
+@pytest.fixture()
+def usage_recorder(request):
+    """Per-test token accounting, reachable from the terminal summary."""
+    recorder = UsageRecorder()
+    request.node.stash_usage_recorder = recorder  # type: ignore[attr-defined]
+    yield recorder
+    record = _EVAL.record_for(request.node.nodeid)
+    record.input_tokens += recorder.input_tokens
+    record.output_tokens += recorder.output_tokens
+
+
+def pytest_runtest_logreport(report):
+    """Collect outcome and duration for the tests under gating."""
+    if report.when != "call" or not _is_integration(report.nodeid):
+        return
+    record = _EVAL.record_for(report.nodeid)
+    record.outcome = report.outcome
+    record.duration = report.duration
+    record.strict = "strict" in getattr(report, "keywords", {})
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Print the per-test cost table and the aggregate ratio."""
+    lines = _EVAL.summary_lines()
+    if not lines:
+        return
+
+    terminalreporter.write_sep("=", "integration test report")
+    for line in lines:
+        terminalreporter.write_line(line)
+
+    artifact = _EVAL.write_artifact()
+    if artifact:
+        terminalreporter.write_line(f"report written to {artifact}")
+
+    reason = _EVAL.gate_failure_reason()
+    if reason:
+        terminalreporter.write_line(f"GATE FAILED: {reason}")
+    elif _EVAL.failed:
+        # Say this loudly. A green run that contains failures is surprising, and
+        # silence here would look like the failures were never noticed.
+        terminalreporter.write_line(
+            f"GATE PASSED with {len(_EVAL.failed)} failure(s) — "
+            f"ratio {_EVAL.pass_ratio:.0%} met the {min_pass_ratio():.0%} threshold. "
+            "Individual failures above are still real; investigate before assuming flakiness."
+        )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Decide the exit status from the aggregate ratio, not individual failures.
+
+    Only takes over when the run was actually judging integration tests, so a
+    normal unit-test run keeps pytest's own exit status untouched.
+    """
+    if not _EVAL.judged:
+        return
+
+    if _EVAL.gate_failure_reason():
+        session.exitstatus = 1
+    elif exitstatus == 1:
+        # Ratio met: the failures present are tolerated sampling noise. Only
+        # override a plain test-failure status — leave collection errors,
+        # interrupts and internal errors alone.
+        session.exitstatus = 0
 
 
 def available_models() -> list[ModelType]:
