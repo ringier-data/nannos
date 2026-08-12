@@ -73,6 +73,9 @@ logger = logging.getLogger(__name__)
 _AUTHORIZE_URL_RE = re.compile(r'"authorizeUrl"\s*:\s*"([^"]+)"')
 _AUTH_MESSAGE_RE = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
+# The actual JSON field, not a bare substring — a business payload merely
+# mentioning the word "need-credentials" in prose must not match this.
+_NEED_CREDENTIALS_FIELD_RE = re.compile(r'"errorCode"\s*:\s*"need-credentials"')
 
 
 class AuthErrorState(AgentState):
@@ -365,7 +368,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                         "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                         "message": auth_metadata.get("auth_message", "Authentication required"),
                         "auth_url": auth_metadata.get("auth_url", ""),
-                        "error_code": auth_metadata.get("error_code", "auth-required"),
+                        "error_code": auth_metadata.get("error_code", "need-credentials"),
                         "timestamp": time.time(),
                     }
 
@@ -413,7 +416,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                                 "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                                 "message": auth_metadata.get("auth_message", "Authentication required"),
                                 "auth_url": auth_metadata.get("auth_url", ""),
-                                "error_code": auth_metadata.get("error_code", "auth-required"),
+                                "error_code": auth_metadata.get("error_code", "need-credentials"),
                                 "timestamp": time.time(),
                             }
 
@@ -437,7 +440,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                     "tool": tool_name,
                     "message": auth_metadata.get("auth_message", "Authentication required"),
                     "auth_url": auth_metadata.get("auth_url", ""),
-                    "error_code": auth_metadata.get("error_code", "auth-required"),
+                    "error_code": auth_metadata.get("error_code", "need-credentials"),
                     "timestamp": time.time(),
                 }
 
@@ -582,8 +585,11 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
         # 2. Embedded structured error (e.g. wrapped by ToolRetryMiddleware).
         #    Detect the marker and extract the fields directly from the text so
-        #    we don't depend on the whole payload being parseable JSON.
-        if "need-credentials" in content:
+        #    we don't depend on the whole payload being parseable JSON. Match the
+        #    actual `"errorCode":"need-credentials"` field, not a bare substring —
+        #    business data merely mentioning "need-credentials" in prose must not
+        #    match here.
+        if _NEED_CREDENTIALS_FIELD_RE.search(content):
             url_match = _AUTHORIZE_URL_RE.search(content)
             msg_match = _AUTH_MESSAGE_RE.search(content)
             authorize_url = url_match.group(1) if url_match else ""

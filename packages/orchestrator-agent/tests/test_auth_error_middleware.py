@@ -171,14 +171,29 @@ async def test_detect_auth_error_list_content_blocks(middleware):
 
 @pytest.mark.asyncio
 async def test_detect_auth_error_need_credentials_marker_text(middleware):
-    """The literal 'need-credentials' marker is matched even without valid JSON around it.
+    """The `"errorCode":"need-credentials"` field is matched even without a full,
+    parseable JSON envelope around it (e.g. wrapped by ToolRetryMiddleware).
 
-    Plain "secondary authorization" wording alone, without the marker, is NOT
+    Plain "secondary authorization" wording alone, without the field, is NOT
     matched — that's free text, left for the LLM (see
     test_detect_auth_error_free_text_alone_not_detected).
     """
     assert middleware._detect_auth_error("This tool requires secondary authorization.") is None
-    assert middleware._detect_auth_error("errorCode need-credentials returned") is not None
+    assert middleware._detect_auth_error('prefix "errorCode":"need-credentials" suffix') is not None
+
+
+@pytest.mark.asyncio
+async def test_detect_auth_error_bare_need_credentials_word_not_detected(middleware):
+    """The bare word "need-credentials" outside of the `errorCode` field is NOT detected.
+
+    Regression: step 2 used to be a bare substring check for "need-credentials"
+    anywhere in the content, so ordinary business data merely mentioning that
+    word in prose (e.g. a support ticket referencing an unrelated API's error)
+    would false-positive an interrupt — the same class of bug issue #130 was
+    filed for, just triggered by a different token.
+    """
+    content = '{"ticket_notes": "customer support case mentions a need-credentials error from a partner API"}'
+    assert middleware._detect_auth_error(content) is None
 
 
 @pytest.mark.asyncio
