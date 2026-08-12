@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
-import { Settings, PanelRightOpen, ExternalLink } from 'lucide-react';
+import { Settings, PanelRightOpen, ExternalLink, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { config } from '@/config';
 import { useAuth } from '@/contexts/AuthContext';
@@ -17,16 +17,24 @@ import {
 } from './components';
 import { WorkingBlock } from './components/WorkingBlock';
 import { InterruptConfirmCard } from './components/InterruptConfirmCard';
+import { downloadTextFile, formatConversationAsText, slugifyFilename } from './utils';
 
 export function ChatApp() {
   const { isAdmin } = useAuth();
   const { agentInfo } = useSocket();
-  const { messages, activeConversationId, liveWorkingSteps, isWaiting } = useChat();
+  const { messages, conversations, activeConversationId, liveWorkingSteps, isWaiting } = useChat();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(true);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   const agentName = agentInfo?.name || agentInfo?.title || 'A2A Assistant';
+
+  const handleExportConversation = () => {
+    const activeConversation = conversations.find((c) => c.id === activeConversationId);
+    const title = activeConversation?.title || agentName;
+    const text = formatConversationAsText(title, messages);
+    downloadTextFile(`${slugifyFilename(title)}.txt`, text);
+  };
 
   // Auto-scroll to bottom when messages change or new content is generated
   useEffect(() => {
@@ -81,6 +89,25 @@ export function ChatApp() {
             <ConnectionStatus />
             {activeConversationId && (
               <>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={handleExportConversation}
+                        data-testid="button-export-conversation"
+                        aria-label="Export conversation"
+                      >
+                        <Download className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Export conversation</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>

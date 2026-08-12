@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown, Copy, Check } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -10,12 +10,43 @@ import {
   getConversationFeedbackApiV1ConversationsConversationIdFeedbackGetQueryKey,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { FeedbackRating } from '@/api/generated';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChat } from '../contexts';
-import { formatTime, getFileInfo } from '../utils';
+import { copyToClipboard, formatTime, getFileInfo } from '../utils';
 import type { Message } from '../types';
 import { UnifiedTimelineBlock } from './UnifiedTimelineBlock';
 import { MessageFeedback } from './MessageFeedback';
 import { ReportIssueDialog } from './ReportIssueDialog';
+
+function CopyMessageButton({ content, label }: { content: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    const success = await copyToClipboard(content);
+    if (success) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors"
+          aria-label={label}
+        >
+          {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" sideOffset={4}>
+        {copied ? 'Copied!' : label}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 interface MessageCardProps {
   message: Message;
@@ -146,23 +177,39 @@ function MessageCard({ message, feedbackMap }: MessageCardProps) {
         </div>
         <div className="flex items-center gap-2 px-1">
           <span className="text-xs text-muted-foreground">{formattedTime}</span>
-          {!isUser && activeConversationId && (
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-              <MessageFeedback
-                conversationId={activeConversationId}
-                messageId={message.id}
-                currentRating={currentRating}
-              />
-              <button
-                type="button"
-                onClick={() => setReportOpen(true)}
-                className="p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors"
-                aria-label="Report issue"
-              >
-                <Flag className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
+          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+            {isUser ? (
+              <CopyMessageButton content={message.content} label="Copy prompt" />
+            ) : (
+              <>
+                <CopyMessageButton content={message.content} label="Copy response" />
+                {activeConversationId && (
+                  <>
+                    <MessageFeedback
+                      conversationId={activeConversationId}
+                      messageId={message.id}
+                      currentRating={currentRating}
+                    />
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => setReportOpen(true)}
+                          className="p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors"
+                          aria-label="Report issue"
+                        >
+                          <Flag className="w-3.5 h-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" sideOffset={4}>
+                        Report issue
+                      </TooltipContent>
+                    </Tooltip>
+                  </>
+                )}
+              </>
+            )}
+          </div>
         </div>
         {reportOpen && activeConversationId && (
           <ReportIssueDialog
