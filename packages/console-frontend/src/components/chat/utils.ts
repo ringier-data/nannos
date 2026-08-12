@@ -414,10 +414,20 @@ export function downloadTextFile(filename: string, content: string, mimeType = '
 }
 
 /**
- * Render a conversation's messages as a plain-text transcript for export
+ * Render a conversation's messages as a plain-text transcript for export.
+ *
+ * `truncated` should be set when `messages` may not be the full history (the
+ * console only ever loads the most recent MESSAGE_FETCH_LIMIT messages, with
+ * no pagination) so the export doesn't silently look complete when it isn't.
  */
-export function formatConversationAsText(title: string, messages: Message[]): string {
+export function formatConversationAsText(title: string, messages: Message[], truncated = false): string {
   const lines = [title, '='.repeat(title.length), ''];
+  if (truncated) {
+    lines.push(
+      '⚠ This export may be incomplete: only the most recently loaded messages are included; earlier history was not fetched.',
+      ''
+    );
+  }
   for (const message of messages) {
     if (message.showMessageCard === false) continue;
     const speaker = message.type === 'user' ? 'User' : 'Assistant';

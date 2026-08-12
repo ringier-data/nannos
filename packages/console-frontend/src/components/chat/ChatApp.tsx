@@ -19,6 +19,10 @@ import { WorkingBlock } from './components/WorkingBlock';
 import { InterruptConfirmCard } from './components/InterruptConfirmCard';
 import { downloadTextFile, formatConversationAsText, slugifyFilename } from './utils';
 
+// Matches the backend's hard cap in message_router.py (limit is validated to <= 100,
+// no offset/cursor pagination) — the console never loads more than this per conversation.
+const MESSAGE_FETCH_LIMIT = 100;
+
 export function ChatApp() {
   const { isAdmin } = useAuth();
   const { agentInfo } = useSocket();
@@ -32,7 +36,7 @@ export function ChatApp() {
   const handleExportConversation = () => {
     const activeConversation = conversations.find((c) => c.id === activeConversationId);
     const title = activeConversation?.title || agentName;
-    const text = formatConversationAsText(title, messages);
+    const text = formatConversationAsText(title, messages, messages.length >= MESSAGE_FETCH_LIMIT);
     downloadTextFile(`${slugifyFilename(title)}.txt`, text);
   };
 

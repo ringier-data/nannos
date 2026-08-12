@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ThumbsUp, ThumbsDown } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { TooltipIconButton } from './TooltipIconButton';
 import {
   submitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostMutation,
   deleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteMutation,
@@ -60,44 +59,20 @@ export function MessageFeedback({ conversationId, messageId, currentRating }: Me
 
   return (
     <div className="flex items-center gap-1">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onClick={() => handleFeedback('positive')}
-            disabled={isLoading}
-            className={cn(
-              'p-1 rounded hover:bg-accent transition-colors',
-              rating === 'positive' ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground/50 hover:text-muted-foreground',
-            )}
-            aria-label="Thumbs up"
-          >
-            <ThumbsUp className="w-3.5 h-3.5" fill={rating === 'positive' ? 'currentColor' : 'none'} />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" sideOffset={4}>
-          Helpful
-        </TooltipContent>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onClick={() => handleFeedback('negative')}
-            disabled={isLoading}
-            className={cn(
-              'p-1 rounded hover:bg-accent transition-colors',
-              rating === 'negative' ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground/50 hover:text-muted-foreground',
-            )}
-            aria-label="Thumbs down"
-          >
-            <ThumbsDown className="w-3.5 h-3.5" fill={rating === 'negative' ? 'currentColor' : 'none'} />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" sideOffset={4}>
-          Not helpful
-        </TooltipContent>
-      </Tooltip>
+      <TooltipIconButton
+        icon={<ThumbsUp className="w-3.5 h-3.5" fill={rating === 'positive' ? 'currentColor' : 'none'} />}
+        label="Helpful"
+        onClick={() => handleFeedback('positive')}
+        disabled={isLoading}
+        className={rating === 'positive' ? 'text-green-600 dark:text-green-400' : undefined}
+      />
+      <TooltipIconButton
+        icon={<ThumbsDown className="w-3.5 h-3.5" fill={rating === 'negative' ? 'currentColor' : 'none'} />}
+        label="Not helpful"
+        onClick={() => handleFeedback('negative')}
+        disabled={isLoading}
+        className={rating === 'negative' ? 'text-red-600 dark:text-red-400' : undefined}
+      />
     </div>
   );
 }
