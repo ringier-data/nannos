@@ -83,6 +83,12 @@ _AUTH_TEXT_PATTERNS = (
     "access denied",
 )
 
+# Keywords that mark a *successful* tool result as plausibly error-shaped anyway
+# (e.g. a tool that reports failure via content without setting status="error").
+# Gates `_detect_auth_error` so it never scans arbitrary successful payload data
+# (a CRM note mentioning "access denied" in passing must not trigger an interrupt).
+_ERROR_LOOKING_KEYWORDS = ("error", "exception", "failed", "failure", "traceback", "unauthorized", "forbidden")
+
 
 class AuthErrorState(AgentState):
     """Extended agent state with authentication error tracking.
@@ -359,8 +365,12 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 a2a_metadata = additional_kwargs.get("a2a_metadata")
                 auth_metadata = self._check_a2a_auth_metadata(a2a_metadata, subagent_type or tool_name)
 
-                # If no A2A auth requirement, fall back to content-based detection
-                if not auth_metadata:
+                # If no A2A auth requirement, fall back to content-based detection —
+                # but only for results that plausibly represent a failure, so a
+                # successful tool's payload is never scanned for auth-flavored text.
+                if not auth_metadata and self._looks_like_tool_error(
+                    getattr(result, "status", None), result.content
+                ):
                     auth_metadata = self._detect_auth_error(result.content)
 
                 if auth_metadata:
@@ -407,8 +417,11 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                         a2a_metadata = additional_kwargs.get("a2a_metadata")
                         auth_metadata = self._check_a2a_auth_metadata(a2a_metadata, subagent_type or tool_name)
 
-                        # If no A2A auth requirement, fall back to content-based detection
-                        if not auth_metadata:
+                        # If no A2A auth requirement, fall back to content-based detection —
+                        # gated the same way as the ToolMessage branch above.
+                        if not auth_metadata and self._looks_like_tool_error(
+                            getattr(last_msg, "status", None), last_msg.content
+                        ):
                             auth_metadata = self._detect_auth_error(last_msg.content)
 
                         if auth_metadata:
@@ -516,6 +529,21 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
             }
 
         return None
+
+    @classmethod
+    def _looks_like_tool_error(cls, status: str | None, content: Any) -> bool:
+        """Whether a tool result plausibly represents a failure worth auth-scanning.
+
+        A successful ToolMessage (``status="success"``, the default) can carry
+        arbitrary business data — e.g. a CRM note mentioning "access denied" in
+        passing — that must never be run through ``_detect_auth_error``'s loose
+        free-text fallback. Only scan when the result is explicitly flagged as
+        an error, or its content itself reads like one.
+        """
+        if status == "error":
+            return True
+        text = cls._content_to_text(content).lower()
+        return any(kw in text for kw in _ERROR_LOOKING_KEYWORDS)
 
     @staticmethod
     def _content_to_text(content: Any) -> str:

@@ -169,6 +169,29 @@ async def test_detect_auth_error_secondary_authorization_text(middleware):
 
 
 @pytest.mark.asyncio
+async def test_successful_result_with_auth_flavored_text_not_intercepted(middleware):
+    """A successful tool result whose payload happens to contain auth-flavored
+    free text (e.g. a CRM note saying a customer's "access denied" a request)
+    must NOT trigger an interrupt.
+
+    Regression: `_detect_auth_error`'s loose free-text fallback previously ran
+    on every successful ToolMessage unconditionally, so business data merely
+    containing one of the hardcoded phrases falsely triggered auth-required.
+    """
+    request = _make_request("eval")
+    content = (
+        '{"Note": [{"Body": "Kunde hat schriftlich bestätigt: access denied für weitere Angebote."}]}'
+    )
+    result_msg = ToolMessage(content=content, tool_call_id="tc-6")  # status defaults to "success"
+    handler = AsyncMock(return_value=result_msg)
+
+    result = await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+    assert result is result_msg  # Passed through without interrupt
+
+
+@pytest.mark.asyncio
 async def test_retry_wrapped_tool_message_triggers_interrupt(middleware):
     """A tool result carrying the retry-wrapped need-credentials error interrupts.
 
