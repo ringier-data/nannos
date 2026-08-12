@@ -4,8 +4,11 @@ This middleware detects authentication errors from tool responses and uses
 LangGraph's interrupt mechanism to pause execution in a resumable state.
 
 Key Features:
-- Detects structured JSON auth errors (errorCode: "need-credentials")
-- Detects text-based auth error patterns ("401 unauthorized", etc.)
+- Detects structured JSON auth errors (errorCode: "need-credentials") — the
+  format the gatana MCP tool gateway emits when secondary authorization is
+  required. Deliberately does NOT scan for free-text auth phrasing ("401
+  unauthorized", "access denied", etc.): that's ambiguous against arbitrary
+  tool payload data and is left for the LLM to interpret, same as A2A 401s.
 - Uses interrupt() to pause graph execution when auth is required
 - Supports resumable execution after authentication completion
 
@@ -70,24 +73,6 @@ logger = logging.getLogger(__name__)
 _AUTHORIZE_URL_RE = re.compile(r'"authorizeUrl"\s*:\s*"([^"]+)"')
 _AUTH_MESSAGE_RE = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
-# Looser free-text markers checked as a last resort when no structured payload matches.
-_AUTH_TEXT_PATTERNS = (
-    "authentication required",
-    "authorization required",
-    "secondary authorization",
-    "need credentials",
-    "need-credentials",
-    "please authorize",
-    "login required",
-    "401 unauthorized",
-    "access denied",
-)
-
-# Keywords that mark a *successful* tool result as plausibly error-shaped anyway
-# (e.g. a tool that reports failure via content without setting status="error").
-# Gates `_detect_auth_error` so it never scans arbitrary successful payload data
-# (a CRM note mentioning "access denied" in passing must not trigger an interrupt).
-_ERROR_LOOKING_KEYWORDS = ("error", "exception", "failed", "failure", "traceback", "unauthorized", "forbidden")
 
 
 class AuthErrorState(AgentState):
@@ -142,7 +127,10 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
     Supported Auth Error Formats:
     - JSON: {"errorCode": "need-credentials", "authorizeUrl": "...", "message": "..."}
-    - Text patterns: "authentication required", "401 unauthorized", etc.
+      (whole-content or embedded in ToolRetryMiddleware's wrapped exception text).
+      This is the only format detected here — deliberately structured-only, since
+      free-text auth phrasing is ambiguous against arbitrary tool payload data and
+      is left for the LLM to interpret (see "Key Features" above).
 
     Interrupt Value Format::
 
@@ -365,12 +353,8 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 a2a_metadata = additional_kwargs.get("a2a_metadata")
                 auth_metadata = self._check_a2a_auth_metadata(a2a_metadata, subagent_type or tool_name)
 
-                # If no A2A auth requirement, fall back to content-based detection —
-                # but only for results that plausibly represent a failure, so a
-                # successful tool's payload is never scanned for auth-flavored text.
-                if not auth_metadata and self._looks_like_tool_error(
-                    getattr(result, "status", None), result.content
-                ):
+                # If no A2A auth requirement, fall back to content-based detection.
+                if not auth_metadata:
                     auth_metadata = self._detect_auth_error(result.content)
 
                 if auth_metadata:
@@ -417,11 +401,8 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                         a2a_metadata = additional_kwargs.get("a2a_metadata")
                         auth_metadata = self._check_a2a_auth_metadata(a2a_metadata, subagent_type or tool_name)
 
-                        # If no A2A auth requirement, fall back to content-based detection —
-                        # gated the same way as the ToolMessage branch above.
-                        if not auth_metadata and self._looks_like_tool_error(
-                            getattr(last_msg, "status", None), last_msg.content
-                        ):
+                        # If no A2A auth requirement, fall back to content-based detection.
+                        if not auth_metadata:
                             auth_metadata = self._detect_auth_error(last_msg.content)
 
                         if auth_metadata:
@@ -530,21 +511,6 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
         return None
 
-    @classmethod
-    def _looks_like_tool_error(cls, status: str | None, content: Any) -> bool:
-        """Whether a tool result plausibly represents a failure worth auth-scanning.
-
-        A successful ToolMessage (``status="success"``, the default) can carry
-        arbitrary business data — e.g. a CRM note mentioning "access denied" in
-        passing — that must never be run through ``_detect_auth_error``'s loose
-        free-text fallback. Only scan when the result is explicitly flagged as
-        an error, or its content itself reads like one.
-        """
-        if status == "error":
-            return True
-        text = cls._content_to_text(content).lower()
-        return any(kw in text for kw in _ERROR_LOOKING_KEYWORDS)
-
     @staticmethod
     def _content_to_text(content: Any) -> str:
         """Normalise tool-message content to a single string.
@@ -578,7 +544,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
           "message": "This tool requires secondary authorization..."
         }
 
-        The structured payload is detected in three positions, in order:
+        The structured payload is detected in two positions, in order:
         1. The *entire* content is that JSON object (tool returned it verbatim).
         2. The JSON is *embedded* in a larger string.  ``ToolRetryMiddleware``
            wraps the original ``ToolException`` as
@@ -586,7 +552,15 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
            so by the time this (outer) middleware sees the result the JSON is no
            longer the whole payload — we locate the ``need-credentials`` marker
            and pull ``authorizeUrl`` / ``message`` out of the surrounding text.
-        3. Looser free-text patterns as a last resort.
+
+        Deliberately deterministic and structured-only: this is the format the
+        gatana MCP tool gateway actually emits when a tool needs secondary
+        authorization, and detecting it doesn't require guessing. Free-text
+        auth phrasing ("access denied", "please authorize", …) is NOT scanned
+        here — it's ambiguous (ordinary business data can legitimately contain
+        those words) and, per this middleware's class docstring, is already
+        left for the LLM to interpret from the raw tool content, the same way
+        A2A 401s and LLM-reported errors are handled.
 
         Returns auth error metadata dict if auth error detected, None otherwise.
         """
@@ -622,12 +596,5 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 error_message = "This tool requires secondary authorization."
             logger.info(f"[AUTH MIDDLEWARE] Detected embedded auth error. Auth URL: {authorize_url}")
             return {"auth_url": authorize_url, "auth_message": error_message, "error_code": "need-credentials"}
-
-        # 3. Looser free-text patterns.
-        content_lower = content.lower()
-        for pattern in _AUTH_TEXT_PATTERNS:
-            if pattern in content_lower:
-                logger.info(f"[AUTH MIDDLEWARE] Detected text auth error pattern: {pattern}")
-                return {"auth_url": "", "auth_message": content, "error_code": "auth-required"}
 
         return None
