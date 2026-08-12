@@ -307,6 +307,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         )
         self._agent: CompiledStateGraph | None = None
         self._discovered_tools: Optional[List[BaseTool]] = None
+        self._mcp_discovery_error: Optional[str] = None
         self._resolved_skills: dict = {}
         # Cached intermediate state for per-invocation sandbox graph rebuild
         self._cached_tools: list[BaseTool] | None = None
@@ -700,8 +701,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 if not is_retryable or attempt >= max_retries - 1:
                     # Non-retryable error or exhausted retries — degrade gracefully
                     # instead of crashing the whole turn (see docstring).
+                    error_msg = format_mcp_error(e)
                     if is_retryable:
-                        error_msg = format_mcp_error(e)
                         logger.error(
                             f"Failed to discover MCP tools for {self.name} after {attempt + 1} attempts: {error_msg}"
                         )
@@ -713,6 +714,10 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                             f"MCP gateway response for {self.name} ({http_err.request.url}): "
                             f"{http_err.response.status_code} body={get_mcp_error_body(http_err)!r}"
                         )
+                    # Recorded so _ensure_agent can warn the LLM (and, through it,
+                    # the user) that some tools are missing — otherwise the agent
+                    # just looks silently less capable with no way to explain why.
+                    self._mcp_discovery_error = error_msg
                     return []
 
                 # Retryable error - wait and retry
@@ -725,6 +730,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         # Should never reach here, but just in case
         logger.error(f"Failed to discover MCP tools for {self.name}: {last_error}")
+        self._mcp_discovery_error = format_mcp_error(last_error) if last_error else "unknown error"
         return []
 
     # Tools that sub-agents always get from console-backend MCP for self-improvement
@@ -1053,6 +1059,21 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if self.tool_catalog is not None and not code_interpreter_ptc_enabled():
             system_prompt += TOOL_CATALOG_PROMPT_ADDENDUM
             logger.debug(f"Added tool-catalog addendum to {self.name} system prompt")
+
+        # MCP gateway discovery degraded to zero tools rather than failing the turn
+        # (see _discover_mcp_tools) — without this, the agent just looks silently
+        # less capable, and the user/operator has no way to tell a broken gateway
+        # apart from the agent simply refusing to help.
+        if self._mcp_discovery_error:
+            system_prompt += (
+                "\n\n<tool_availability_warning>\n"
+                f"Some of your integration tools failed to load: {self._mcp_discovery_error}\n"
+                "If the user asks for something that would need those tools, tell them the "
+                "integration is temporarily unavailable due to a backend error (don't guess, "
+                "improvise, or silently refuse as if the capability never existed).\n"
+                "</tool_availability_warning>"
+            )
+            logger.debug(f"Added MCP tool-availability warning to {self.name} system prompt")
 
         # Get provider-specific response_format strategy (may mutate tools list for Bedrock/Anthropic+thinking)
         response_format = get_response_format(

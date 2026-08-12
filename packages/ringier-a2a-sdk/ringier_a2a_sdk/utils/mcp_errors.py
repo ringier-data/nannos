@@ -76,21 +76,27 @@ def get_mcp_http_status_error(error: Exception) -> httpx.HTTPStatusError | None:
 def get_mcp_error_body(http_err: httpx.HTTPStatusError, max_len: int = 2000) -> str:
     """Safely read the response body text off an HTTPStatusError for logging.
 
-    The MCP streamable HTTP client streams responses and never calls read()
-    before raise_for_status(), so response.text raises httpx.ResponseNotRead
-    for MCP gateway errors (though not for a plain, non-streaming request like
-    ToolDiscoveryService's httpx.AsyncClient.get()). Callers just want a string
-    to log either way, so this never raises.
+    The MCP streamable HTTP client (mcp.client.streamable_http) calls
+    raise_for_status() from inside its `async with client.stream(...)` block;
+    by the time the error reaches us here, several `__aexit__` frames up, the
+    stream has already been torn down and the body can never be read. This is
+    expected for that transport (not for a plain, non-streaming request like
+    ToolDiscoveryService's httpx.AsyncClient.get(), where the body is already
+    buffered) — so it's reported as a known limitation rather than a second
+    error. Callers just want a string to log either way, so this never raises.
 
     Args:
         http_err: The HTTPStatusError to read the body from
         max_len: Truncate the body to this many characters
 
     Returns:
-        The response body text (truncated), or a placeholder if it can't be read
+        The response body text (truncated), or an explanatory placeholder if
+        it can't be read
     """
     try:
         return http_err.response.text[:max_len]
+    except httpx.ResponseNotRead:
+        return "<not captured: MCP streaming transport closes the response before it can be read>"
     except Exception as e:
         return f"<body unavailable: {type(e).__name__}: {e}>"
 
