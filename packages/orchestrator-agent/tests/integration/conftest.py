@@ -505,6 +505,14 @@ def make_config(context_id, memory_checkpointer, usage_recorder):
     Carries the test's ``UsageRecorder`` in ``callbacks``: LangChain propagates
     those down to the model call, so token accounting needs no hook in
     production code.
+
+    KNOWN GAP: three tests build their config inline instead of calling this, so
+    their tokens are not counted and show as "-" in the report —
+    test_concurrent_streams_isolated, test_model_switching_within_conversation
+    and test_multiturn_context_preservation. They do it because they need
+    thread_ids this factory does not offer: two *different* ones for concurrent
+    streams, and one *shared* across invocations for the model switch. Adding an
+    optional ``thread_id`` argument here would let them use it and close the gap.
     """
 
     def _make(model_type: ModelType, thinking_level: ThinkingLevel | None = None) -> dict[str, Any]:
