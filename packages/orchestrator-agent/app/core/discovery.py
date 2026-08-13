@@ -226,8 +226,9 @@ class ToolDiscoveryService:
         logger.debug("Fetching available MCP servers from gateway")
         try:
             # Call the MCP gateway API to get server list
-            # Extract base URL from MCP_GATEWAY_URL (remove /mcp path)
-            base_url = self.config.MCP_GATEWAY_URL.removesuffix("/mcp").rstrip("/")
+            # Extract base URL from MCP_GATEWAY_URL (remove /mcp path). Strip the
+            # trailing slash first: removesuffix("/mcp") is a no-op on ".../mcp/".
+            base_url = self.config.MCP_GATEWAY_URL.rstrip("/").removesuffix("/mcp")
             servers_url = f"{base_url}/api/v1/mcp-servers"
 
             logger.debug(f"Fetching servers from: {servers_url}")

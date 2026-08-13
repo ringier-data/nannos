@@ -51,6 +51,16 @@ class TestIsRetryableMcpError:
         err = BaseExceptionGroup("mixed", [_http_error(502)])
         assert is_retryable_mcp_error(err) is True
 
+    def test_retryable_leaf_not_masked_by_earlier_non_retryable_leaf(self):
+        # Plausible when a gateway + console connection fail together: the
+        # non-retryable leaf must not mask the genuinely transient one.
+        err = ExceptionGroup("boom", [_http_error(400), httpx.ConnectTimeout("boom")])
+        assert is_retryable_mcp_error(err) is True
+
+    def test_all_non_retryable_leaves_stay_non_retryable(self):
+        err = ExceptionGroup("boom", [_http_error(400), _http_error(404)])
+        assert is_retryable_mcp_error(err) is False
+
     def test_unrelated_error_is_not_retryable(self):
         assert is_retryable_mcp_error(RuntimeError("boom")) is False
 

@@ -5,18 +5,19 @@ import logging
 import httpx
 
 
-def _flatten_exceptions(error: BaseException) -> list[BaseException]:
+def flatten_exceptions(error: BaseException) -> list[BaseException]:
     """Recursively flatten ExceptionGroups into their leaf exceptions.
 
     anyio's task groups (used by the MCP streamable-HTTP client) commonly nest
     ExceptionGroups, and mixed-cancellation groups surface as BaseExceptionGroup
-    — a single-level unwrap misses both. Mirrors the existing helper in
-    packages/voice-agent/voice_agent/agent.py.
+    — a single-level unwrap misses both. Public so other packages needing the
+    same unwrap (e.g. voice-agent's MCP gateway warm-up) share one copy instead
+    of drifting independently.
     """
     if isinstance(error, BaseExceptionGroup):
         leaves: list[BaseException] = []
         for sub in error.exceptions:
-            leaves.extend(_flatten_exceptions(sub))
+            leaves.extend(flatten_exceptions(sub))
         return leaves
     return [error]
 
@@ -39,11 +40,15 @@ def is_retryable_mcp_error(error: Exception) -> bool:
         error: Exception raised during MCP connection
 
     Returns:
-        True if the error is transient and should be retried
+        True if the error is transient and should be retried. A group counts
+        as retryable if *any* leaf is — e.g. a gateway + console connection
+        failing together as [HTTPStatusError(400), ConnectTimeout()] must not
+        let the non-retryable leaf mask the genuinely transient one.
     """
-    for leaf in _flatten_exceptions(error):
+    for leaf in flatten_exceptions(error):
         if isinstance(leaf, httpx.HTTPStatusError):
-            return leaf.response.status_code in (502, 503, 504)
+            if leaf.response.status_code in (502, 503, 504):
+                return True
         elif isinstance(leaf, httpx.TimeoutException):
             return True
 
@@ -65,7 +70,7 @@ def get_mcp_http_status_error(error: Exception) -> httpx.HTTPStatusError | None:
     Returns:
         The httpx.HTTPStatusError if one is found, else None
     """
-    for leaf in _flatten_exceptions(error):
+    for leaf in flatten_exceptions(error):
         if isinstance(leaf, httpx.HTTPStatusError):
             return leaf
     return None
@@ -131,7 +136,7 @@ def format_mcp_error(error: Exception) -> str:
     Returns:
         User-friendly error message
     """
-    for leaf in _flatten_exceptions(error):
+    for leaf in flatten_exceptions(error):
         if isinstance(leaf, httpx.HTTPStatusError):
             status_code = leaf.response.status_code
             url = leaf.request.url

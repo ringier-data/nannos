@@ -128,17 +128,6 @@ def is_console_backend_tool(name: str) -> bool:
     return name.startswith(CONSOLE_BACKEND_TOOL_PREFIXES)
 
 
-class _McpTokenExchangeError(Exception):
-    """Marks a failure from exchange_token(), not from the MCP server itself.
-
-    _discover_mcp_tools degrades gracefully on MCP transport/gateway errors —
-    but a failure exchanging the user's own token is a different failure class
-    (their credentials, not the gateway being down) and must not be caught by
-    that same degrade path silently. Raised with the original exception as
-    __cause__ and unwrapped back to it before propagating past this module.
-    """
-
-
 def _validate_tool_schema(tool: BaseTool) -> BaseTool:
     """Validate and fix MCP tool schema for OpenAI API compatibility.
 
@@ -625,15 +614,18 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         If config.mcp_tools is set, only those tools are returned (whitelist filtering).
         The discovered tools override orchestrator tools entirely when whitelist is specified.
 
-        Implements retry logic with exponential backoff for transient errors (502, 503, 504).
-        Non-retryable MCP transport/gateway errors (4xx, exhausted retries) degrade
-        gracefully to an empty tool list rather than failing the turn — a dead/
-        misconfigured gateway (e.g. Gatana) shouldn't crash embedded execute-only
-        sub-agents that depend on this as their only tool source, mirroring
-        ToolDiscoveryService.fetch_available_servers. Failures exchanging the
-        user's own token are a different failure class (their credentials, not
-        the gateway being down) and are NOT degraded — they propagate so the turn
-        fails loudly, same as before this degrade path existed.
+        Implements retry logic with exponential backoff for transient errors (502, 503, 504),
+        applied uniformly to MCP transport/gateway errors and to exchange_token()
+        failures alike (a transient OIDC hiccup gets retried the same as a transient
+        gateway one). Once non-retryable or retries are exhausted, the two failure
+        classes diverge: a dead/misconfigured MCP transport/gateway (4xx, e.g. a
+        disabled Gatana account) degrades gracefully to an empty tool list rather
+        than failing the turn — it shouldn't crash embedded execute-only sub-agents
+        that depend on this as their only tool source, mirroring
+        ToolDiscoveryService.fetch_available_servers. A failure exchanging the
+        user's own token is a different failure class (their credentials, not the
+        gateway being down) and is NOT degraded — it propagates so the turn fails
+        loudly, same as before this degrade path existed.
 
         Returns:
             List of discovered BaseTool instances (filtered by whitelist if specified),
@@ -664,6 +656,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         delay = 1.0
 
         for attempt in range(max_retries):
+            # Set when a failure below came from exchange_token() rather than
+            # the MCP gateway/transport itself — a different failure class
+            # (the user's own credentials, not the gateway being down) that
+            # must not be degraded to []. Reused as-is by is_retryable_mcp_error
+            # for the retry decision, so a transient OIDC hiccup still gets
+            # retried the same as a transient gateway one; only a non-retryable
+            # or exhausted-retries auth failure skips the degrade and raises.
+            is_auth_exchange_error = False
             try:
                 # Build connections dict for MultiServerMCPClient
                 connections: dict[str, StreamableHttpConnection] = {}
@@ -680,8 +680,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                                 target_client_id=mcp_gateway_client_id,
                                 requested_scopes=["openid", "profile", "offline_access"],
                             )
-                        except Exception as auth_exc:
-                            raise _McpTokenExchangeError(str(auth_exc)) from auth_exc
+                        except Exception:
+                            is_auth_exchange_error = True
+                            raise
                         headers["Authorization"] = f"Bearer {mcp_gateway_token}"
                         logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
                     else:
@@ -707,8 +708,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                                 target_client_id=self.console_backend_client_id,
                                 requested_scopes=["openid", "profile", "offline_access"],
                             )
-                        except Exception as auth_exc:
-                            raise _McpTokenExchangeError(str(auth_exc)) from auth_exc
+                        except Exception:
+                            is_auth_exchange_error = True
+                            raise
                         console_headers["Authorization"] = f"Bearer {console_token}"
                         logger.info(f"Successfully exchanged token for console backend ({self.name})")
                     elif self.user_token:
@@ -745,18 +747,21 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     logger.info(f"Successfully discovered MCP tools for {self.name} on attempt {attempt + 1}")
                 return validated_tools
 
-            except _McpTokenExchangeError as auth_exc:
-                # A different failure class from the gateway/transport errors below
-                # (the user's own credentials, not the gateway being down) — don't
-                # degrade, propagate the original exception as before this path existed.
-                logger.error(f"Token exchange failed while discovering MCP tools for {self.name}: {auth_exc}")
-                raise auth_exc.__cause__ from None
-
             except Exception as e:
                 # Check if this is a retryable error
                 is_retryable = is_retryable_mcp_error(e)
 
                 if not is_retryable or attempt >= max_retries - 1:
+                    if is_auth_exchange_error:
+                        # Don't degrade — propagate so the turn fails loudly,
+                        # same as before this degrade path existed for
+                        # gateway/transport errors (see docstring).
+                        logger.error(
+                            f"Token exchange failed while discovering MCP tools for {self.name} "
+                            f"(attempt {attempt + 1}): {e}"
+                        )
+                        raise
+
                     # Non-retryable error or exhausted retries — degrade gracefully
                     # instead of crashing the whole turn (see docstring). This is
                     # always the loop's last possible outcome: every path either
@@ -1002,10 +1007,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         6. Build self._agent ONLY if sandbox is not active (sandbox agents build
            a fresh graph per invocation in _astream_impl)
 
-        After first call, this is a no-op (guarded by _cached_tools sentinel).
+        After a call that resolved cleanly, this is a no-op (guarded by
+        _cached_tools). A call that degraded (_mcp_discovery_error set) is
+        NOT treated as resolved — the guard lets the next call retry
+        discovery instead of permanently pinning this instance at zero MCP
+        tools because of one transient gateway blip.
         """
-        # Already resolved — skip
-        if self._cached_tools is not None:
+        # Already resolved — skip, unless the last attempt degraded.
+        if self._cached_tools is not None and self._mcp_discovery_error is None:
             return
 
         # Discover MCP tools if whitelist is configured AND no injected tools
@@ -1013,6 +1022,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if self.inject_all_tools is None:
             if self.config.mcp_tools and len(self.config.mcp_tools) > 0 and self._discovered_tools is None:
                 self._discovered_tools = await self._discover_mcp_tools()
+                if self._mcp_discovery_error:
+                    # Degraded, not resolved — leave _discovered_tools unset (not
+                    # cached as "[]", the same as a real empty whitelist match)
+                    # so the next call's guard above re-triggers discovery instead
+                    # of treating this instance as permanently tool-less.
+                    # _get_effective_tools() below still sees `[]` for *this*
+                    # call via `self._discovered_tools or []`.
+                    self._discovered_tools = None
 
         tools = self._get_effective_tools()
 

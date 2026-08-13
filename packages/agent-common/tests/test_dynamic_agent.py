@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from a2a.types import TaskState
 from langchain_core.messages import HumanMessage
@@ -456,8 +457,6 @@ class TestAttachmentMounting:
 
 
 def _http_error(status: int) -> Exception:
-    import httpx
-
     request = httpx.Request("POST", "https://gateway.example/mcp")
     response = httpx.Response(status, request=request, text="boom")
     return httpx.HTTPStatusError(f"{status} error", request=request, response=response)
@@ -532,6 +531,25 @@ class TestDiscoverMcpTools:
         assert runnable._mcp_discovery_error is None
 
     @pytest.mark.asyncio
+    async def test_retryable_token_exchange_error_is_retried_then_raised(self, runnable):
+        """A transient OIDC hiccup exchanging the user's token gets the same
+        retry-with-backoff treatment as a transient gateway error — it must
+        not raise on attempt 1 just because it's an auth failure. Once
+        retries are exhausted it still raises (not degrades): this is a
+        different failure class from the gateway being down."""
+        transient_error = _http_error(503)
+        runnable.oauth2_client.exchange_token = AsyncMock(side_effect=transient_error)
+
+        with patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            with pytest.raises(httpx.HTTPStatusError):
+                await runnable._discover_mcp_tools()
+
+        assert runnable.oauth2_client.exchange_token.await_count == 3  # max_retries
+        assert mock_sleep.await_count == 2  # slept between attempts, not after the last
+        # Never reached the degrade path, so no warning was recorded.
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
     async def test_stale_discovery_error_cleared_on_next_call(self, runnable):
         with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
             mock_client_cls.return_value.get_tools = AsyncMock(
@@ -544,6 +562,36 @@ class TestDiscoverMcpTools:
             mock_client_cls.return_value.get_tools = AsyncMock(return_value=[])
             await runnable._discover_mcp_tools()
         assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
+    async def test_ensure_agent_retries_discovery_after_degraded_call(self, runnable):
+        """A degraded _ensure_agent() call must not permanently pin the instance
+        at zero MCP tools: the next call should retry discovery, not treat the
+        degraded state as resolved."""
+        mock_graph = MagicMock()
+
+        def fake_tool(name):
+            return Tool(name=name, description="A fake gateway tool", func=lambda x: x)
+
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls,
+        ):
+            mock_client_cls.return_value.get_tools = AsyncMock(
+                side_effect=ExceptionGroup("boom", [_http_error(400)])
+            )
+            await runnable._ensure_agent()
+            assert runnable._mcp_discovery_error is not None
+            assert runnable._discovered_tools is None  # not cached as "[]"
+
+            # Second call must retry discovery (not short-circuit on the
+            # _cached_tools guard) and, on success, actually resolve.
+            mock_client_cls.return_value.get_tools = AsyncMock(return_value=[fake_tool("some_gateway_tool")])
+            await runnable._ensure_agent()
+
+        assert runnable._mcp_discovery_error is None
+        assert [t.name for t in runnable._discovered_tools] == ["some_gateway_tool"]
+        assert "tool_availability_warning" not in runnable._cached_system_prompt
 
     def test_tool_availability_addendum_empty_when_no_error(self, runnable):
         assert runnable._build_tool_availability_addendum() == ""
