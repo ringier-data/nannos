@@ -1326,7 +1326,6 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             from agent_common.middleware.client_objects_middleware import ClientObjectsMiddleware
 
             combined_middlewares.append(ClientObjectsMiddleware())
-        combined_middlewares = combined_middlewares or None
 
         # Catalog mode without PTC: contribute the native discovery surface
         # (search_tools/describe_tool) and the call_tool dispatch. Inserted with the
