@@ -22,6 +22,25 @@ def flatten_exceptions(error: BaseException) -> list[BaseException]:
     return [error]
 
 
+def is_mcp_transport_error(error: Exception) -> bool:
+    """True if `error` is (or wraps) an httpx-raised HTTP/network error.
+
+    Distinguishes a genuine gateway/transport failure — worth retrying or
+    degrading gracefully — from an unrelated programming error (e.g. a bug in
+    our own tool-schema validation code) that happens to be raised from the
+    same try block. The latter must never be silently reported to the user as
+    "temporarily unavailable" forever; it should crash loudly like any other bug.
+
+    Args:
+        error: Exception raised during MCP connection/discovery
+
+    Returns:
+        True if any leaf is an httpx.HTTPError (covers HTTPStatusError and the
+        RequestError family: timeouts, connect errors, etc.)
+    """
+    return any(isinstance(leaf, httpx.HTTPError) for leaf in flatten_exceptions(error))
+
+
 def is_retryable_mcp_error(error: Exception) -> bool:
     """Determine if an MCP error is retryable (transient).
 
@@ -112,6 +131,13 @@ def log_mcp_gateway_error(logger: logging.Logger, error: Exception, context: str
     an auth-rejection body can echo back token/session details that shouldn't
     land in log storage (unlike other 4xx/5xx bodies, which are safe to log —
     see get_mcp_error_body).
+
+    Deliberately does NOT also redact 400: this module's whole motivating case
+    — a disabled Gatana account — arrives as a plain 400 with a genuinely safe,
+    actionable body ("Your account has been disabled..."). Blanket-redacting
+    400 would hide the exact diagnostic this was built to surface, to guard
+    against a more speculative case (some other 400 that happens to echo
+    credentials) with no way to distinguish the two by status code alone.
 
     Args:
         logger: The caller's module logger

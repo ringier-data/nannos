@@ -49,6 +49,7 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import (
     format_mcp_error,
+    is_mcp_transport_error,
     is_retryable_mcp_error,
     log_mcp_gateway_error,
 )
@@ -759,6 +760,17 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                         logger.error(
                             f"Token exchange failed while discovering MCP tools for {self.name} "
                             f"(attempt {attempt + 1}): {e}"
+                        )
+                        raise
+
+                    if not is_mcp_transport_error(e):
+                        # Not a gateway/network failure at all — a bug in our own
+                        # code (e.g. a tool-schema validation error) raised from
+                        # inside this try block. Must not be silently reported to
+                        # the user as "temporarily unavailable" forever; crash
+                        # loudly like any other programming error.
+                        logger.error(
+                            f"Unexpected (non-MCP-transport) error discovering MCP tools for {self.name}: {e}"
                         )
                         raise
 

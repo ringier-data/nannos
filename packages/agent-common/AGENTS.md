@@ -36,7 +36,7 @@ The primary agent implementation for all user-configured sub-agents. Wraps a Lan
 
 **Key design decisions:**
 
-1. **Lazy initialization via `_ensure_agent()`**: Tools, skills, prompt, and graph are resolved only on first invocation (guarded by `_cached_tools` sentinel). After first call, it's a no-op.
+1. **Lazy initialization via `_ensure_agent()`**: Tools, skills, prompt, and graph are resolved only on first invocation (guarded by `_cached_tools` sentinel). A call that resolves cleanly makes every later call a no-op; a call that degrades due to an MCP gateway/transport failure (`_mcp_discovery_error` set) does not — the next call retries discovery instead of permanently pinning the instance at zero MCP tools.
 
 2. **Console self-improvement tools are always injected** — independent of the agent's `mcp_tools` whitelist. Every sub-agent can create/update/remove skills and update playbooks via console-backend MCP. These are discovered via a separate `_discover_console_self_improvement_tools()` call.
 

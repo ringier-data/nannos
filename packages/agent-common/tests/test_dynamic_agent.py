@@ -495,6 +495,19 @@ class TestDiscoverMcpTools:
         )
 
     @pytest.mark.asyncio
+    async def test_non_mcp_error_is_not_degraded(self, runnable):
+        """A bug in our own code (not an httpx/gateway error) raised from
+        inside the discovery try block must propagate, not be silently
+        reported to the user as "temporarily unavailable" forever."""
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            mock_client_cls.return_value.get_tools = AsyncMock(side_effect=ValueError("schema bug"))
+
+            with pytest.raises(ValueError, match="schema bug"):
+                await runnable._discover_mcp_tools()
+
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
     async def test_non_retryable_gateway_error_degrades_to_empty_list(self, runnable):
         with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
             mock_client_cls.return_value.get_tools = AsyncMock(

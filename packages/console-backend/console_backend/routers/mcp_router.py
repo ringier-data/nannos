@@ -466,8 +466,11 @@ async def list_mcp_servers(
 
     try:
         # Call the Gatana gateway's /api/v1/mcp-servers endpoint to get the server list
-        # Extract base URL from mcp_gateway.url (remove /mcp suffix if present)
-        base_url = config.mcp_gateway.url.rstrip("/mcp").rstrip("/")
+        # Extract base URL from mcp_gateway.url (remove /mcp suffix if present). Strip
+        # the trailing slash first: rstrip("/mcp") strips a character *set* (/,m,c,p),
+        # not the literal suffix, so a host ending in one of those letters gets
+        # corrupted, and removesuffix("/mcp") alone is a no-op on ".../mcp/".
+        base_url = config.mcp_gateway.url.rstrip("/").removesuffix("/mcp")
         servers_url = f"{base_url}/api/v1/mcp-servers"
 
         async with httpx.AsyncClient(timeout=30.0) as client:

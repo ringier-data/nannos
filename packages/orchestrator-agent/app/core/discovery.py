@@ -22,6 +22,7 @@ from ringier_a2a_sdk.cost_tracking.attribution import context_header
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import (
     format_mcp_error,
+    get_mcp_http_status_error,
     is_retryable_mcp_error,
     log_mcp_gateway_error,
 )
@@ -246,8 +247,14 @@ class ToolDiscoveryService:
                 return servers
 
         except Exception as e:
-            logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
-            log_mcp_gateway_error(logger, e)
+            # A traceback (exc_info) and the gateway response body are both
+            # only logged once between them: the body line already restates
+            # the status/URL that exc_info's own str(e) would repeat, so pick
+            # whichever one actually adds information for this error.
+            if get_mcp_http_status_error(e) is not None:
+                log_mcp_gateway_error(logger, e, context="Failed to fetch MCP servers ")
+            else:
+                logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
             return []
 
     async def _get_tools_with_retry(
