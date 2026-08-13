@@ -11,8 +11,8 @@ from typing import Any
 
 from a2a.types import TaskState
 
+from ..exceptions import UnknownCursorError
 from ..models.message import Message, MessagePage
-from .messages_service import UnknownCursorError
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,12 @@ class InMemoryMessagesService:
             user_msgs = user_msgs[:cursor_idx]
 
         page = user_msgs[-limit:] if limit else []
-        return MessagePage(messages=page, has_more=len(user_msgs) > len(page))
+        has_more = len(user_msgs) > len(page)
+        return MessagePage(
+            messages=page,
+            has_more=has_more,
+            next_cursor=page[0].message_id if has_more and page else None,
+        )
 
     async def insert_message(
         self,

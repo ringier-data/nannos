@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..dependencies import require_auth
 from ..models.user import User
-from ..services.messages_service import UnknownCursorError
+from ..exceptions import UnknownCursorError
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +76,7 @@ async def get_messages_by_conversation(
             ],
             "count": len(messages),
             "has_more": page.has_more,
-            # The oldest message on this page is where the next (older) page starts.
-            "next_cursor": messages[0].message_id if page.has_more and messages else None,
+            "next_cursor": page.next_cursor,
         }
 
     except HTTPException:

@@ -7,8 +7,8 @@ import pytest
 from a2a.types import TaskState
 
 from console_backend.models.message import Message
+from console_backend.exceptions import UnknownCursorError
 from console_backend.services.messages_service import (
-    UnknownCursorError,
     _parse_agent_response,
     _parse_status_update,
     _parse_task,
@@ -540,6 +540,7 @@ async def test_get_messages_returns_newest_page_chronologically():
 
     assert [m.message_id for m in page.messages] == ["m2", "m3"]
     assert page.has_more is True
+    assert page.next_cursor == "m2"  # oldest message ON the page
     sql, params = executed[0]
     assert "ORDER BY created_at DESC, id DESC" in sql
     assert params["limit"] == 3  # limit + 1 probe row
@@ -557,6 +558,7 @@ async def test_get_messages_with_cursor_applies_keyset_filter():
 
     assert [m.message_id for m in page.messages] == ["m1"]
     assert page.has_more is False  # fewer rows than limit -> start of conversation
+    assert page.next_cursor is None
     page_sql, page_params = executed[1]
     assert "(created_at, id) < (:cursor_created_at, :cursor_id)" in page_sql
     assert page_params["cursor_id"] == 42
@@ -569,3 +571,36 @@ async def test_get_messages_rejects_unknown_cursor():
 
     with pytest.raises(UnknownCursorError):
         await ms.get_messages_by_conversation("conv-1", "user-1", before="ghost")
+
+
+@pytest.mark.asyncio
+async def test_get_messages_cursor_survives_unparseable_rows():
+    """A dropped row must not cost the client its way further back."""
+    ms = _make_messages_service()
+    broken = _db_row("m2", "2025-01-01T00:02:00+00:00")
+    del broken["role"]  # makes Message construction raise -> row is skipped
+    rows = [
+        _db_row("m3", "2025-01-01T00:03:00+00:00"),
+        broken,
+        _db_row("m1", "2025-01-01T00:01:00+00:00"),
+    ]
+    ms._session_factory, _ = _stub_db(rows)
+
+    page = await ms.get_messages_by_conversation("conv-1", "user-1", limit=2)
+
+    assert [m.message_id for m in page.messages] == ["m3"]  # the broken row is dropped
+    assert page.has_more is True
+    assert page.next_cursor == "m2"  # ...but it still marks where the next page starts
+
+
+@pytest.mark.asyncio
+async def test_get_messages_propagates_db_failure():
+    """A failed read must not look like the start of the conversation."""
+    ms = _make_messages_service()
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(side_effect=RuntimeError("connection reset"))
+    session.__aexit__ = AsyncMock(return_value=False)
+    ms._session_factory = MagicMock(return_value=session)
+
+    with pytest.raises(RuntimeError):
+        await ms.get_messages_by_conversation("conv-1", "user-1")

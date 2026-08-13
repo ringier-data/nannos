@@ -15,7 +15,7 @@ from console_backend.services.in_memory_conversation_service import InMemoryConv
 from console_backend.services.in_memory_messages_service import InMemoryMessagesService
 from console_backend.services.in_memory_session_service import InMemorySessionService
 from console_backend.services.in_memory_socket_session_service import InMemorySocketSessionService
-from console_backend.services.messages_service import UnknownCursorError
+from console_backend.exceptions import UnknownCursorError
 from console_backend.services.local_file_storage_service import LocalFileStorageService
 
 # -- InMemorySessionService --------------------------------------------------
@@ -179,20 +179,18 @@ async def test_messages_pagination():
     newest = await svc.get_messages_by_conversation("c1", "u4", limit=2)
     assert [p.parts[0]["text"] for p in newest.messages] == ["m3", "m4"]
     assert newest.has_more is True
+    assert newest.next_cursor == newest.messages[0].message_id
 
-    # Paging back from the page's oldest message yields the preceding page
-    older = await svc.get_messages_by_conversation(
-        "c1", "u4", limit=2, before=newest.messages[0].message_id
-    )
+    # Paging back from the advertised cursor yields the preceding page
+    older = await svc.get_messages_by_conversation("c1", "u4", limit=2, before=newest.next_cursor)
     assert [p.parts[0]["text"] for p in older.messages] == ["m1", "m2"]
     assert older.has_more is True
 
     # Last page reaches the start of the conversation
-    oldest = await svc.get_messages_by_conversation(
-        "c1", "u4", limit=2, before=older.messages[0].message_id
-    )
+    oldest = await svc.get_messages_by_conversation("c1", "u4", limit=2, before=older.next_cursor)
     assert [p.parts[0]["text"] for p in oldest.messages] == ["m0"]
     assert oldest.has_more is False
+    assert oldest.next_cursor is None
 
 
 @pytest.mark.asyncio

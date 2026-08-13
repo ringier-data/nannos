@@ -11,14 +11,11 @@ from sqlalchemy import text
 from uuid6 import uuid7
 
 from ..db.connection import get_async_session_factory
+from ..exceptions import UnknownCursorError
 from ..models.message import Message, MessagePage
 from .file_storage_service import FileStorageService
 
 logger = logging.getLogger(__name__)
-
-
-class UnknownCursorError(ValueError):
-    """Raised when a pagination cursor does not name a message in the conversation."""
 
 
 EXPIRY_BUFFER_SECONDS = (
@@ -254,11 +251,14 @@ class MessagesService:
             before: Cursor — the `message_id` to page back from (exclusive)
 
         Returns:
-            A MessagePage whose messages are ordered chronologically (oldest first)
-            and whose `has_more` says whether older messages remain.
+            A MessagePage whose messages are ordered chronologically (oldest first),
+            whose `has_more` says whether older messages remain and whose
+            `next_cursor` is the `before` value that reaches them.
 
         Raises:
             UnknownCursorError: `before` does not name a message in this conversation.
+            Exception: the read failed — callers must not mistake a failure for the
+                start of the conversation.
         """
         try:
             async with self._session_factory() as db:
@@ -346,13 +346,24 @@ class MessagesService:
                     continue
 
             logger.debug(f"Retrieved {len(results)} messages for conversation: {conversation_id}")
-            return MessagePage(messages=results, has_more=has_more)
+            # Take the cursor from the RAW rows, not from `results`: a row that failed
+            # to parse is dropped from the page but still occupies its place in the
+            # history, and a cursor derived from a fully-dropped page would be null
+            # while has_more stayed true — leaving the client unable to page further.
+            return MessagePage(
+                messages=results,
+                has_more=has_more,
+                next_cursor=rows[0]["message_id"] if has_more and rows else None,
+            )
 
         except UnknownCursorError:
             raise
         except Exception as e:
+            # Surfacing the failure (the router turns it into a 500) matters more than
+            # a graceful empty page: an empty page is indistinguishable from "start of
+            # the conversation" and would end the client's pagination for good.
             logger.exception(f"Failed to get messages for conversation {conversation_id}: {e}")
-            return MessagePage(messages=[], has_more=False)
+            raise
 
     async def insert_message(
         self,

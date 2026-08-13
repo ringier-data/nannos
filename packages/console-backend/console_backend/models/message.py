@@ -40,3 +40,4 @@ class MessagePage(BaseModel):
 
     messages: list[Message] = Field(default_factory=list)  # Chronological (oldest first)
     has_more: bool = False  # Whether older messages exist before this page
+    next_cursor: str | None = None  # `before` value that reaches the next (older) page

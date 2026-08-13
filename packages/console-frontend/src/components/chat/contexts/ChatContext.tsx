@@ -253,6 +253,9 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messagesMap, setMessagesMap] = useState<Map<string, Message[]>>(new Map());
+  // Mirror for synchronous reads inside loadMessages (which is deliberately kept
+  // dependency-free so effects don't resubscribe on every message).
+  const messagesMapRef = useRef<Map<string, Message[]>>(new Map());
   const [tasksMap, setTasksMap] = useState<Map<string, Task[]>>(new Map());
   const [contextIdsMap, setContextIdsMap] = useState<Map<string, string>>(new Map());
   const [waitingMap, setWaitingMap] = useState<Map<string, boolean>>(new Map());
@@ -303,6 +306,10 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
+
+  useEffect(() => {
+    messagesMapRef.current = messagesMap;
+  }, [messagesMap]);
 
   // Keep playground-mode ref in sync so config-hash filtering and message
   // tagging pick up changes (e.g. when the user views a different sub-agent
@@ -1060,21 +1067,36 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         if (resp.status === 404) {
           return;
         }
+        // The cursor no longer names a message (history pruned, or the message was
+        // removed). Retrying it would fail forever, so retire it rather than leaving
+        // every scroll-to-top firing a doomed request.
+        if (resp.status === 400 && isOlderPage) {
+          setMessagePageMap((prev) => new Map(prev).set(conversationId, { cursor: null, hasMore: false }));
+          return;
+        }
         throw new Error(`Failed to load messages (status=${resp.status})`);
       }
       const data = await resp.json();
 
       const raw = Array.isArray(data.items) ? data.items : Array.isArray(data.messages) ? data.messages : [];
 
-      // Remember where the next (older) page starts. The newest page only seeds this
-      // when nothing is known yet: a refetch of the newest page (e.g. after a socket
-      // snapshot) must not rewind a cursor that has already been paged backwards.
+      // Remember where the next (older) page starts. A refetch of the NEWEST page
+      // (e.g. after a socket snapshot) must not rewind a cursor that has already been
+      // paged backwards — unless the page doesn't even reach what we hold, which means
+      // more than a page arrived while we were away and there is now a gap in between.
+      // Adopting the fresh cursor then lets the reader page back across that gap.
       const pageState = {
         cursor: (data.next_cursor as string | null) ?? null,
         hasMore: !!data.has_more,
       };
+      const held = messagesMapRef.current.get(conversationId) || [];
+      const oldestInPage = raw.length > 0 ? (raw[0].created_at || raw[0].timestamp) : null;
+      const gapAboveHeld =
+        held.length > 0 &&
+        oldestInPage !== null &&
+        new Date(oldestInPage as string).getTime() > held[held.length - 1].timestamp.getTime();
       setMessagePageMap((prev) => {
-        if (!isOlderPage && prev.has(conversationId)) return prev;
+        if (!isOlderPage && prev.has(conversationId) && !gapAboveHeld) return prev;
         const next = new Map(prev);
         next.set(conversationId, pageState);
         return next;

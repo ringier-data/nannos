@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 from console_backend.routers import message_router
-from console_backend.services.messages_service import UnknownCursorError
+from console_backend.exceptions import UnknownCursorError
 
 app = FastAPI()
 app.include_router(message_router.router)
@@ -39,10 +39,11 @@ def _make_mock_message(**kwargs):
     return MagicMock(**default)
 
 
-def _page(messages, has_more=False):
+def _page(messages, has_more=False, next_cursor=None):
     page = MagicMock()
     page.messages = messages
     page.has_more = has_more
+    page.next_cursor = next_cursor
     return page
 
 
@@ -120,7 +121,7 @@ def test_pagination_cursor_forwarded_and_returned():
         _make_mock_message(message_id="m2", sort_key=2),
     ]
     mock_service = MagicMock()
-    mock_service.get_messages_by_conversation = AsyncMock(return_value=_page(msgs, has_more=True))
+    mock_service.get_messages_by_conversation = AsyncMock(return_value=_page(msgs, has_more=True, next_cursor="m1"))
     mock_service.hydrate_messages_files = AsyncMock(return_value=msgs)
     app.state.messages_service = mock_service
 
@@ -128,7 +129,7 @@ def test_pagination_cursor_forwarded_and_returned():
     assert resp.status_code == 200
     data = resp.json()
     assert data["has_more"] is True
-    # The oldest message on the page is where the next (older) page starts
+    # The service decides the cursor — the router must forward it untouched
     assert data["next_cursor"] == "m1"
     mock_service.get_messages_by_conversation.assert_awaited_once_with(
         "conv-123", "user-1", limit=2, before="m3"
