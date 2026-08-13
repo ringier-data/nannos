@@ -723,8 +723,10 @@ class GraphFactory:
             hitl_middleware,
             # After hitl_middleware in the list so its aafter_model runs BEFORE
             # the risk-HITL one (after_model hooks run in reverse list order):
-            # a consent-rejected identity-scoped call is dropped before it can
-            # be risk-prompted. Gate 3, ADR 0006.
+            # a consent-blocked identity-scoped call is kept paired with its
+            # artificial auth_required ToolMessage, and the risk-HITL then
+            # skips already-answered calls instead of re-prompting for a call
+            # that can never execute. Gate 3, ADR 0006.
             IdentityConsentMiddleware(),
             self._retry_middleware,
             self._a2a_middleware,

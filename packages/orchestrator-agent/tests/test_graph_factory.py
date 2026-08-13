@@ -143,7 +143,9 @@ class TestMiddlewareStack:
         assert stack[13].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
         # stack[14] = IdentityConsentMiddleware — after the risk HITL in the list so its
         # aafter_model runs FIRST (after_model hooks run in reverse list order): a
-        # consent-rejected identity-scoped call is dropped before it can be risk-prompted.
+        # consent-blocked identity-scoped call is answered with an artificial
+        # auth_required ToolMessage before the risk HITL runs, and the risk HITL
+        # skips already-answered calls instead of re-prompting for them.
         assert stack[14].__class__.__name__ == "IdentityConsentMiddleware"
         assert isinstance(stack[15], ToolRetryMiddleware)
         assert isinstance(stack[16], A2ATaskTrackingMiddleware)

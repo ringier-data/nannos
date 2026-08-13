@@ -47,7 +47,9 @@ class TestOrchestratorDeepAgentExecutor:
         executor.agent.stream.return_value = iter([])
 
         # Mock get_or_create_graph
-        with patch.object(executor.agent, "get_or_create_graph", new=AsyncMock()) as mock_graph:
+        with patch.object(
+            executor.agent, "get_or_create_graph", new=AsyncMock()
+        ) as mock_graph:
             mock_compiled_graph = Mock()
             mock_compiled_graph.get_state = Mock()
             mock_compiled_graph.get_state.return_value = Mock(interrupts=[], next=[])
@@ -59,7 +61,11 @@ class TestOrchestratorDeepAgentExecutor:
             try:
                 await executor.execute(context, event_queue)
             except Exception as e:
-                assert type(e).__name__ in ("InternalError", "InvalidParamsError", "ServerError")
+                assert type(e).__name__ in (
+                    "InternalError",
+                    "InvalidParamsError",
+                    "ServerError",
+                )
 
     def test_validate_request_returns_false(self, dynamodb_table):
         """Test that _validate_request always returns False."""
@@ -113,7 +119,11 @@ class TestAgentExecutorStreamHandling:
         )
 
         await executor._handle_stream_item(
-            item, updater, task, is_final=False, streaming_artifact_id="test-artifact-id"
+            item,
+            updater,
+            task,
+            is_final=False,
+            streaming_artifact_id="test-artifact-id",
         )
 
         # Verify update_status was called
@@ -144,7 +154,9 @@ class TestAgentExecutorStreamHandling:
             content="Task completed successfully",
         )
 
-        await executor._handle_stream_item(item, updater, task, is_final=True, streaming_artifact_id="test-artifact-id")
+        await executor._handle_stream_item(
+            item, updater, task, is_final=True, streaming_artifact_id="test-artifact-id"
+        )
 
         # Non-streaming completion: update_status with completed state and content
         updater.update_status.assert_called_once()
@@ -210,7 +222,9 @@ class TestAgentExecutorStreamHandling:
         # _handle_stream_item now returns (first_chunk_sent, first_intermediate_chunk_sent)
         assert result == (True, False)
 
-    async def test_handle_stream_item_streaming_completion_empty_content_fallback(self, dynamodb_table):
+    async def test_handle_stream_item_streaming_completion_empty_content_fallback(
+        self, dynamodb_table
+    ):
         """If the agent yields an empty final content (edge case), the terminal status
         still carries a non-empty message body so the client never gets a blank reply.
         """
@@ -240,10 +254,14 @@ class TestAgentExecutorStreamHandling:
         status_call = updater.update_status.call_args
         assert status_call[0][0] == TaskState.TASK_STATE_COMPLETED
         final_msg = status_call[0][1]
-        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
+        text_parts = [
+            p.text for p in final_msg.parts if p.WhichOneof("content") == "text"
+        ]
         assert "".join(text_parts).strip() != ""
 
-    async def test_handle_stream_item_streaming_first_chunk_creates_artifact(self, dynamodb_table):
+    async def test_handle_stream_item_streaming_first_chunk_creates_artifact(
+        self, dynamodb_table
+    ):
         """Regression: the FIRST streaming chunk for an artifact_id must be a create (append=False).
 
         Production bug: the orchestrator always passed append=True, which made the A2A SDK
@@ -278,7 +296,9 @@ class TestAgentExecutorStreamHandling:
             first_intermediate_chunk_sent=False,
         )
         first_call = updater.add_artifact.call_args
-        assert first_call[1]["append"] is False, "First chunk must create the artifact (append=False)"
+        assert first_call[1]["append"] is False, (
+            "First chunk must create the artifact (append=False)"
+        )
         assert first_call[1]["artifact_id"] == "artifact-X"
         assert result == (True, False)
 
@@ -301,7 +321,9 @@ class TestAgentExecutorStreamHandling:
         assert second_call[1]["append"] is True, "Subsequent chunks must append=True"
         assert result == (True, False)
 
-    async def test_handle_stream_item_intermediate_artifact_tracked_separately(self, dynamodb_table):
+    async def test_handle_stream_item_intermediate_artifact_tracked_separately(
+        self, dynamodb_table
+    ):
         """Intermediate (sub-agent thought) artifact creation is tracked independently
         from the main artifact, since they use distinct artifact IDs.
         """
@@ -338,7 +360,9 @@ class TestAgentExecutorStreamHandling:
             active_extensions=active,
         )
         call = updater.add_artifact.call_args
-        assert call[1]["append"] is False, "First intermediate chunk must create the thought artifact"
+        assert call[1]["append"] is False, (
+            "First intermediate chunk must create the thought artifact"
+        )
         assert call[1]["artifact_id"] == "artifact-X-thought"
         # Main flag stays False so include_subagent_output / final answer still works
         assert result == (False, True)
@@ -360,7 +384,9 @@ class TestAgentExecutorStreamHandling:
             active_extensions=active,
         )
         call = updater.add_artifact.call_args
-        assert call[1]["append"] is False, "First main chunk must create the main artifact"
+        assert call[1]["append"] is False, (
+            "First main chunk must create the main artifact"
+        )
         assert call[1]["artifact_id"] == "artifact-X"
         assert result == (True, True)
 
@@ -385,7 +411,9 @@ class TestAgentExecutorStreamHandling:
             content="An error occurred during execution",
         )
 
-        await executor._handle_stream_item(item, updater, task, is_final=True, streaming_artifact_id="test-artifact-id")
+        await executor._handle_stream_item(
+            item, updater, task, is_final=True, streaming_artifact_id="test-artifact-id"
+        )
 
         # Verify update_status was called
         updater.update_status.assert_called_once()
@@ -413,7 +441,11 @@ class TestAgentExecutorStreamHandling:
         )
 
         await executor._handle_stream_item(
-            item, updater, task, is_final=False, streaming_artifact_id="test-artifact-id"
+            item,
+            updater,
+            task,
+            is_final=False,
+            streaming_artifact_id="test-artifact-id",
         )
 
         # Verify update_status was called
@@ -421,7 +453,9 @@ class TestAgentExecutorStreamHandling:
         call_args = updater.update_status.call_args
         assert call_args[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
 
-    async def test_handle_stream_item_input_required_carries_final_message(self, dynamodb_table):
+    async def test_handle_stream_item_input_required_carries_final_message(
+        self, dynamodb_table
+    ):
         """Generic (non-HITL) input_required terminal status MUST carry the
         FinalResponseSchema.message text in its message body so clients receive
         the orchestrator's reply even if intermediate SSE artifact frames were
@@ -458,14 +492,18 @@ class TestAgentExecutorStreamHandling:
         status_call = updater.update_status.call_args
         assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
+        text_parts = [
+            p.text for p in final_msg.parts if p.WhichOneof("content") == "text"
+        ]
         assert "Hi — I'm here. What would you like to do?" in "".join(text_parts)
         # Terminal frame must be flushed deterministically.
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
         # stream termination is inferred from the terminal task state, not an explicit flag.
         assert status_call[1].get("final") is not True
 
-    async def test_handle_stream_item_streaming_input_required_closes_artifact_with_fallback(self, dynamodb_table):
+    async def test_handle_stream_item_streaming_input_required_closes_artifact_with_fallback(
+        self, dynamodb_table
+    ):
         """When orchestrator streamed token chunks this turn and then resolves to
         input_required, the streaming artifact is closed cleanly and the terminal
         status carries the authoritative final answer tagged
@@ -512,14 +550,18 @@ class TestAgentExecutorStreamHandling:
         status_call = updater.update_status.call_args
         assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
+        text_parts = [
+            p.text for p in final_msg.parts if p.WhichOneof("content") == "text"
+        ]
         assert "Which project should I file the ticket under?" in "".join(text_parts)
         assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
         # stream termination is inferred from the terminal task state, not an explicit flag.
         assert status_call[1].get("final") is not True
 
-    async def test_handle_stream_item_auth_required_carries_final_message(self, dynamodb_table):
+    async def test_handle_stream_item_auth_required_carries_final_message(
+        self, dynamodb_table
+    ):
         """auth_required terminal status MUST carry the FinalResponseSchema.message
         text in its message body so clients receive the orchestrator's reply even
         if intermediate SSE artifact frames were dropped. Mirrors `completed`.
@@ -554,13 +596,17 @@ class TestAgentExecutorStreamHandling:
         status_call = updater.update_status.call_args
         assert status_call[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
+        text_parts = [
+            p.text for p in final_msg.parts if p.WhichOneof("content") == "text"
+        ]
         assert "Please sign in to Jira to continue." in "".join(text_parts)
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
         # stream termination is inferred from the terminal task state, not an explicit flag.
         assert status_call[1].get("final") is not True
 
-    async def test_handle_stream_item_streaming_auth_required_closes_artifact_with_fallback(self, dynamodb_table):
+    async def test_handle_stream_item_streaming_auth_required_closes_artifact_with_fallback(
+        self, dynamodb_table
+    ):
         """When orchestrator streamed token chunks and then resolves to
         auth_required, the streaming artifact is closed cleanly and the terminal
         status carries the authoritative final answer tagged
@@ -605,14 +651,18 @@ class TestAgentExecutorStreamHandling:
         status_call = updater.update_status.call_args
         assert status_call[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
+        text_parts = [
+            p.text for p in final_msg.parts if p.WhichOneof("content") == "text"
+        ]
         assert "Please re-authenticate with Google to continue." in "".join(text_parts)
         assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
         # stream termination is inferred from the terminal task state, not an explicit flag.
         assert status_call[1].get("final") is not True
 
-    async def test_handle_stream_item_input_required_hitl_path_unchanged(self, dynamodb_table):
+    async def test_handle_stream_item_input_required_hitl_path_unchanged(
+        self, dynamodb_table
+    ):
         """HITL action_requests interrupts still emit the structured HITL message
         via new_hitl_interrupt_message (no artifact-fallback, no final_answer_source).
         """
@@ -650,7 +700,9 @@ class TestAgentExecutorStreamHandling:
         status_call = updater.update_status.call_args
         assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
         # HITL branch passes only (state, msg) positionally and no metadata kwarg
-        assert "metadata" not in status_call[1] or status_call[1].get("metadata") is None
+        assert (
+            "metadata" not in status_call[1] or status_call[1].get("metadata") is None
+        )
         assert "final" not in status_call[1] or status_call[1].get("final") is not True
 
 
@@ -722,7 +774,11 @@ class TestExtractHitlDecisions:
         context = Mock(spec=RequestContext)
         context.message = Mock(spec=Message)
         context.message.parts = [
-            Part(data=ParseDict({"decisions": [{"type": "reject", "message": "No"}]}, Value()))
+            Part(
+                data=ParseDict(
+                    {"decisions": [{"type": "reject", "message": "No"}]}, Value()
+                )
+            )
         ]
 
         result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
@@ -740,7 +796,12 @@ class TestExtractHitlDecisions:
     @staticmethod
     def _interrupt(intr_id, action_requests=None, value=None):
         """Build a fake Interrupt-like object (has .id and .value)."""
-        return Mock(id=intr_id, value=value if value is not None else {"action_requests": action_requests or []})
+        return Mock(
+            id=intr_id,
+            value=value
+            if value is not None
+            else {"action_requests": action_requests or []},
+        )
 
     @staticmethod
     def _ar(name, call_id=None):
@@ -758,21 +819,32 @@ class TestExtractHitlDecisions:
         middleware raises ValueError('Number of human decisions (1) does not match
         number of hanging tool calls (N)').
         """
-        intr = self._interrupt("a" * 32, action_requests=[{"name": "s1"}, {"name": "s2"}, {"name": "s3"}])
+        intr = self._interrupt(
+            "a" * 32, action_requests=[{"name": "s1"}, {"name": "s2"}, {"name": "s3"}]
+        )
         decisions = [{"type": "reject", "message": "User declined"}]
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], decisions, query="q"
+        )
 
         assert set(resume_map) == {"a" * 32}
         replicated = resume_map["a" * 32]["decisions"]
         assert len(replicated) == 3
-        assert all(d["type"] == "reject" and d["message"] == "User declined" for d in replicated)
+        assert all(
+            d["type"] == "reject" and d["message"] == "User declined"
+            for d in replicated
+        )
 
     def test_single_approve_replicated_for_parallel_tool_calls(self, dynamodb_table):
         """A single approve is replicated for N action_requests."""
-        intr = self._interrupt("b" * 32, action_requests=[{"name": "tool_a"}, {"name": "tool_b"}])
+        intr = self._interrupt(
+            "b" * 32, action_requests=[{"name": "tool_a"}, {"name": "tool_b"}]
+        )
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], [{"type": "approve"}], query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], [{"type": "approve"}], query="q"
+        )
 
         replicated = resume_map["b" * 32]["decisions"]
         assert len(replicated) == 2
@@ -782,21 +854,29 @@ class TestExtractHitlDecisions:
         """A single decision for a single action_request is not replicated."""
         intr = self._interrupt("c" * 32, action_requests=[{"name": "tool_a"}])
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], [{"type": "reject"}], query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], [{"type": "reject"}], query="q"
+        )
 
         assert len(resume_map["c" * 32]["decisions"]) == 1
 
     def test_no_replication_when_multiple_decisions_sent(self, dynamodb_table):
         """Multiple decisions are passed through unchanged (future per-call UI)."""
-        intr = self._interrupt("d" * 32, action_requests=[{"name": "tool_a"}, {"name": "tool_b"}])
+        intr = self._interrupt(
+            "d" * 32, action_requests=[{"name": "tool_a"}, {"name": "tool_b"}]
+        )
         decisions = [{"type": "approve"}, {"type": "reject"}]
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], decisions, query="q"
+        )
 
         passed = resume_map["d" * 32]["decisions"]
         assert [d["type"] for d in passed] == ["approve", "reject"]
 
-    def test_multiple_pending_interrupts_each_keyed_and_replicated(self, dynamodb_table):
+    def test_multiple_pending_interrupts_each_keyed_and_replicated(
+        self, dynamodb_table
+    ):
         """The migration's core case: >1 co-pending interrupt → id-keyed map.
 
         Two parallel ``task`` dispatches each surfaced a sub-agent HITL with a
@@ -804,7 +884,9 @@ class TestExtractHitlDecisions:
         per interrupt and keyed by interrupt id, so LangGraph >=1.2 does not raise
         'you must specify the interrupt id when resuming'.
         """
-        intr_a = self._interrupt("a" * 32, action_requests=[{"name": "x"}, {"name": "y"}])
+        intr_a = self._interrupt(
+            "a" * 32, action_requests=[{"name": "x"}, {"name": "y"}]
+        )
         intr_b = self._interrupt("b" * 32, action_requests=[{"name": "z"}])
 
         resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
@@ -812,14 +894,20 @@ class TestExtractHitlDecisions:
         )
 
         assert set(resume_map) == {"a" * 32, "b" * 32}
-        assert len(resume_map["a" * 32]["decisions"]) == 2  # replicated to its own count
+        assert (
+            len(resume_map["a" * 32]["decisions"]) == 2
+        )  # replicated to its own count
         assert len(resume_map["b" * 32]["decisions"]) == 1
 
     def test_non_hitl_interrupt_resumes_with_query(self, dynamodb_table):
         """A non-HITL interrupt (no action_requests, e.g. auth) resumes with the raw query."""
-        auth_intr = self._interrupt("e" * 32, value={"auth_url": "https://example/oauth"})
+        auth_intr = self._interrupt(
+            "e" * 32, value={"auth_url": "https://example/oauth"}
+        )
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([auth_intr], [{"type": "approve"}], query="auth-token")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [auth_intr], [{"type": "approve"}], query="auth-token"
+        )
 
         assert resume_map["e" * 32] == "auth-token"
 
@@ -827,7 +915,10 @@ class TestExtractHitlDecisions:
         """New client: one decision per action_request, matched by call_id (not position)."""
         intr = self._interrupt(
             "a" * 32,
-            action_requests=[self._ar("safe_read", "call-1"), self._ar("safe_read", "call-2")],
+            action_requests=[
+                self._ar("safe_read", "call-1"),
+                self._ar("safe_read", "call-2"),
+            ],
         )
         # Client sends per-call decisions, deliberately OUT OF ORDER vs action_requests.
         decisions = [
@@ -835,7 +926,9 @@ class TestExtractHitlDecisions:
             {"id": "call-1", "type": "approve"},
         ]
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], decisions, query="q"
+        )
 
         per = resume_map["a" * 32]["decisions"]
         # Aligned to action_request order (call-1 first, call-2 second), not client order.
@@ -843,9 +936,13 @@ class TestExtractHitlDecisions:
         assert per[0]["id"] == "call-1"
         assert per[1]["id"] == "call-2"
 
-    def test_flat_by_id_decisions_route_across_multiple_interrupts(self, dynamodb_table):
+    def test_flat_by_id_decisions_route_across_multiple_interrupts(
+        self, dynamodb_table
+    ):
         """A flat by-id decision list self-routes to the right interrupt and orders within."""
-        intr_a = self._interrupt("a" * 32, action_requests=[self._ar("t1", "ca-1"), self._ar("t2", "ca-2")])
+        intr_a = self._interrupt(
+            "a" * 32, action_requests=[self._ar("t1", "ca-1"), self._ar("t2", "ca-2")]
+        )
         intr_b = self._interrupt("b" * 32, action_requests=[self._ar("t3", "cb-1")])
         decisions = [
             {"id": "cb-1", "type": "reject"},
@@ -853,19 +950,49 @@ class TestExtractHitlDecisions:
             {"id": "ca-2", "type": "reject"},
         ]
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr_a, intr_b], decisions, query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr_a, intr_b], decisions, query="q"
+        )
 
-        assert [d["type"] for d in resume_map["a" * 32]["decisions"]] == ["approve", "reject"]
+        assert [d["type"] for d in resume_map["a" * 32]["decisions"]] == [
+            "approve",
+            "reject",
+        ]
         assert [d["type"] for d in resume_map["b" * 32]["decisions"]] == ["reject"]
+
+    def test_missing_call_id_defaults_to_tagged_safe_reject(self, dynamodb_table):
+        """A call whose decision is missing gets a reject TAGGED as `_defaulted`.
+
+        Consumers that persist decisions (the identity-consent gate remembers
+        explicit rejections durably) must be able to tell the synthesized safe
+        reject apart from a rejection the user actually gave.
+        """
+        intr = self._interrupt(
+            "a" * 32, action_requests=[self._ar("t1", "ca-1"), self._ar("t2", "ca-2")]
+        )
+        decisions = [{"id": "ca-1", "type": "approve"}]
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], decisions, query="q"
+        )
+
+        per = resume_map["a" * 32]["decisions"]
+        assert per[0] == {"id": "ca-1", "type": "approve"}
+        assert per[1] == {"type": "reject", "_defaulted": True}
 
     def test_falls_back_to_blanket_when_decisions_lack_ids(self, dynamodb_table):
         """Legacy client: action_requests carry ids but the single decision has none → replicate."""
         intr = self._interrupt(
             "a" * 32,
-            action_requests=[self._ar("safe_read", "call-1"), self._ar("safe_read", "call-2")],
+            action_requests=[
+                self._ar("safe_read", "call-1"),
+                self._ar("safe_read", "call-2"),
+            ],
         )
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], [{"type": "approve"}], query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], [{"type": "approve"}], query="q"
+        )
 
         per = resume_map["a" * 32]["decisions"]
         assert len(per) == 2
@@ -873,10 +1000,14 @@ class TestExtractHitlDecisions:
 
     def test_falls_back_to_blanket_when_action_requests_lack_ids(self, dynamodb_table):
         """Mixed/absent ids on action_requests → no by-id alignment; blanket replication."""
-        intr = self._interrupt("a" * 32, action_requests=[self._ar("t1"), self._ar("t2", "call-2")])
+        intr = self._interrupt(
+            "a" * 32, action_requests=[self._ar("t1"), self._ar("t2", "call-2")]
+        )
         decisions = [{"id": "call-2", "type": "approve"}]
 
-        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], decisions, query="q"
+        )
 
         # Not all action_requests have ids → fall back. Single decision, n>1 → replicate.
         per = resume_map["a" * 32]["decisions"]

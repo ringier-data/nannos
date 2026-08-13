@@ -195,9 +195,13 @@ class IdentityConsentMiddleware(AgentMiddleware):
                     record_consent(context, tool_name, granted=True)
                     continue
                 # Remember only explicit rejections; a malformed/unknown
-                # decision blocks this turn without recording a denial —
-                # and the payload must not claim a denial exists.
-                explicit_reject = decision_type == "reject"
+                # decision — or the executor's synthesized `_defaulted` safe
+                # reject for a missing/stale call_id — blocks this turn
+                # without recording a denial, and the payload must not claim
+                # a denial exists.
+                explicit_reject = decision_type == "reject" and not decision.get(
+                    "_defaulted"
+                )
                 if explicit_reject:
                     record_consent(context, tool_name, granted=False)
                 artificial_tool_messages.extend(

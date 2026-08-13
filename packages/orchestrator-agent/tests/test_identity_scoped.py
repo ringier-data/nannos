@@ -425,6 +425,24 @@ class TestIdentityConsentMiddleware:
         assert payload["error_code"] == "auth_required"
         assert "declined" not in payload["message"]  # no durable denial was recorded
 
+    async def test_defaulted_reject_blocks_without_remembering(self, monkeypatch):
+        """The executor's synthesized safe reject (missing/stale call_id) must not
+        record a durable denial — the user never actually answered."""
+        state, runtime, ai_msg, context = _make_state_and_runtime({}, [IDENTITY_CALL])
+        interrupt_mock = MagicMock(
+            return_value={"decisions": [{"type": "reject", "_defaulted": True}]}
+        )
+        monkeypatch.setattr("app.middleware.identity_scoped.interrupt", interrupt_mock)
+
+        result = await IdentityConsentMiddleware().aafter_model(state, runtime)
+
+        assert context.identity_consent_grants == {}
+        assert context._pending_identity_consents == []
+        tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        payload = json.loads(tool_messages[0].content)
+        assert payload["error_code"] == "auth_required"
+        assert "declined" not in payload["message"]  # no durable denial was recorded
+
     async def test_decision_count_mismatch_raises(self, monkeypatch):
         state, runtime, _, _ = _make_state_and_runtime({}, [IDENTITY_CALL])
         interrupt_mock = MagicMock(return_value={"decisions": []})

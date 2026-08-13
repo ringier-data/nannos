@@ -2,7 +2,7 @@
 
 import types
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
@@ -63,7 +63,14 @@ class TestApplyBypassRule:
         assert rule["bypass_patterns"] == {"command": ["*python*"]}
 
     def test_bypass_pattern_merges_into_existing(self):
-        ctx = self._make_context({"execute::_self": {"bypass_all": False, "bypass_patterns": {"command": ["*bash*"]}}})
+        ctx = self._make_context(
+            {
+                "execute::_self": {
+                    "bypass_all": False,
+                    "bypass_patterns": {"command": ["*bash*"]},
+                }
+            }
+        )
         ConditionalHumanInTheLoopMiddleware._apply_bypass_rule(
             tool_name="execute",
             server_slug="_self",
@@ -139,7 +146,12 @@ class TestIsBypassed:
         )
 
     def test_matching_glob_pattern_returns_true(self):
-        rules = {"execute::_self": {"bypass_all": False, "bypass_patterns": {"command": ["*python*"]}}}
+        rules = {
+            "execute::_self": {
+                "bypass_all": False,
+                "bypass_patterns": {"command": ["*python*"]},
+            }
+        }
         assert (
             ConditionalHumanInTheLoopMiddleware._is_bypassed(
                 tool_name="execute",
@@ -151,7 +163,12 @@ class TestIsBypassed:
         )
 
     def test_non_matching_glob_pattern_returns_false(self):
-        rules = {"execute::_self": {"bypass_all": False, "bypass_patterns": {"command": ["*python*"]}}}
+        rules = {
+            "execute::_self": {
+                "bypass_all": False,
+                "bypass_patterns": {"command": ["*python*"]},
+            }
+        }
         assert (
             ConditionalHumanInTheLoopMiddleware._is_bypassed(
                 tool_name="execute",
@@ -175,7 +192,12 @@ class TestIsBypassed:
         )
 
     def test_missing_arg_value_returns_false(self):
-        rules = {"execute::_self": {"bypass_all": False, "bypass_patterns": {"command": ["*python*"]}}}
+        rules = {
+            "execute::_self": {
+                "bypass_all": False,
+                "bypass_patterns": {"command": ["*python*"]},
+            }
+        }
         assert (
             ConditionalHumanInTheLoopMiddleware._is_bypassed(
                 tool_name="execute",
@@ -200,7 +222,9 @@ class TestIsBypassed:
             ConditionalHumanInTheLoopMiddleware._is_bypassed(
                 tool_name="execute",
                 server_slug="_self",
-                args={"command": "python3 /home/ubuntu/skills/printing/scripts/print.py"},
+                args={
+                    "command": "python3 /home/ubuntu/skills/printing/scripts/print.py"
+                },
                 bypass_rules=ctx.tool_bypass_rules,
             )
             is True
@@ -233,11 +257,20 @@ class TestRiskScoringExclusions:
         )
         ai = AIMessage(
             content="",
-            tool_calls=[{"name": tool_name, "args": {"code": "x"}, "id": "1", "type": "tool_call"}],
+            tool_calls=[
+                {
+                    "name": tool_name,
+                    "args": {"code": "x"},
+                    "id": "1",
+                    "type": "tool_call",
+                }
+            ],
         )
         state = {"messages": [ai]}
         runtime = types.SimpleNamespace(
-            context=types.SimpleNamespace(tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[])
+            context=types.SimpleNamespace(
+                tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[]
+            )
         )
         # Returns None (no interrupt) and never scores the excluded tool.
         result = await mw.aafter_model(state, runtime)
@@ -254,6 +287,90 @@ class TestRiskScoringExclusions:
         assert "task" not in scored
 
 
+class TestAnsweredCallsSkipped:
+    """Tool calls already answered by an artificial ToolMessage (e.g. the
+    identity-consent gate blocking a call) must never be risk-prompted: they
+    can't execute, and a reject would emit a second ToolMessage for the same
+    tool_call_id (two tool_results for one tool_use → provider 400).
+    """
+
+    @staticmethod
+    def _middleware(scored: list):
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            scored.append(name)
+            return 0.99, None  # always high-risk
+
+        return ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={},
+            risk_scorer=scorer,
+            default_risk_threshold=0.8,
+        )
+
+    @staticmethod
+    def _runtime():
+        return types.SimpleNamespace(
+            context=types.SimpleNamespace(
+                tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[]
+            )
+        )
+
+    async def test_answered_call_never_scored_or_interrupted(self):
+        scored: list[str] = []
+        mw = self._middleware(scored)
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "risky_write", "args": {}, "id": "call-1", "type": "tool_call"}
+            ],
+        )
+        answered = ToolMessage(
+            content="blocked", tool_call_id="call-1", name="risky_write", status="error"
+        )
+
+        result = await mw.aafter_model({"messages": [ai, answered]}, self._runtime())
+
+        assert result is None
+        assert scored == []
+
+    async def test_unanswered_sibling_still_scored(self, monkeypatch):
+        """The filter is per-call: an unanswered call in the same message still guards."""
+        scored: list[str] = []
+        mw = self._middleware(scored)
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "blocked_tool",
+                    "args": {},
+                    "id": "call-1",
+                    "type": "tool_call",
+                },
+                {
+                    "name": "risky_write",
+                    "args": {},
+                    "id": "call-2",
+                    "type": "tool_call",
+                },
+            ],
+        )
+        answered = ToolMessage(
+            content="blocked",
+            tool_call_id="call-1",
+            name="blocked_tool",
+            status="error",
+        )
+        monkeypatch.setattr(
+            "agent_common.middleware.conditional_hitl.interrupt",
+            lambda req: {
+                "decisions": [{"type": "approve"}] * len(req["action_requests"])
+            },
+        )
+
+        await mw.aafter_model({"messages": [ai, answered]}, self._runtime())
+
+        assert scored == ["risky_write"]
+
+
 class TestPerCallIdStamping:
     """Every interrupted call must carry a top-level ``args._call_id`` — static guards
     and risk-scored alike — so the resume path aligns decisions by id (not position).
@@ -266,17 +383,30 @@ class TestPerCallIdStamping:
 
         def fake_interrupt(request):
             captured["request"] = request
-            return {"decisions": [{"type": "approve"} for _ in request["action_requests"]]}
+            return {
+                "decisions": [{"type": "approve"} for _ in request["action_requests"]]
+            }
 
-        monkeypatch.setattr("agent_common.middleware.conditional_hitl.interrupt", fake_interrupt)
+        monkeypatch.setattr(
+            "agent_common.middleware.conditional_hitl.interrupt", fake_interrupt
+        )
         return captured
 
     async def test_static_guard_stamps_top_level_call_id(self, monkeypatch):
         captured = self._capture_interrupt(monkeypatch)
-        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={"danger": {"allowed_decisions": ["approve", "reject"]}})
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={"danger": {"allowed_decisions": ["approve", "reject"]}}
+        )
         ai = AIMessage(
             content="",
-            tool_calls=[{"name": "danger", "args": {"x": 1}, "id": "tc-static", "type": "tool_call"}],
+            tool_calls=[
+                {
+                    "name": "danger",
+                    "args": {"x": 1},
+                    "id": "tc-static",
+                    "type": "tool_call",
+                }
+            ],
         )
         runtime = types.SimpleNamespace(context=None)
 
@@ -287,19 +417,32 @@ class TestPerCallIdStamping:
         # Static guards carry no risk metadata.
         assert "_risk_metadata" not in ar["args"]
 
-    async def test_risk_scored_stamps_top_level_call_id_not_in_risk_metadata(self, monkeypatch):
+    async def test_risk_scored_stamps_top_level_call_id_not_in_risk_metadata(
+        self, monkeypatch
+    ):
         captured = self._capture_interrupt(monkeypatch)
 
         async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
             return 0.99, None
 
-        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8
+        )
         ai = AIMessage(
             content="",
-            tool_calls=[{"name": "wipe", "args": {"path": "/"}, "id": "tc-risk", "type": "tool_call"}],
+            tool_calls=[
+                {
+                    "name": "wipe",
+                    "args": {"path": "/"},
+                    "id": "tc-risk",
+                    "type": "tool_call",
+                }
+            ],
         )
         runtime = types.SimpleNamespace(
-            context=types.SimpleNamespace(tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[])
+            context=types.SimpleNamespace(
+                tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[]
+            )
         )
 
         await mw.aafter_model({"messages": [ai]}, runtime)
@@ -311,12 +454,23 @@ class TestPerCallIdStamping:
 
     async def test_sync_static_guard_stamps_top_level_call_id(self, monkeypatch):
         captured = self._capture_interrupt(monkeypatch)
-        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={"danger": {"allowed_decisions": ["approve", "reject"]}})
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={"danger": {"allowed_decisions": ["approve", "reject"]}}
+        )
         ai = AIMessage(
             content="",
-            tool_calls=[{"name": "danger", "args": {"x": 1}, "id": "tc-sync", "type": "tool_call"}],
+            tool_calls=[
+                {
+                    "name": "danger",
+                    "args": {"x": 1},
+                    "id": "tc-sync",
+                    "type": "tool_call",
+                }
+            ],
         )
 
         mw.after_model({"messages": [ai]}, types.SimpleNamespace(context=None))
 
-        assert captured["request"]["action_requests"][0]["args"]["_call_id"] == "tc-sync"
+        assert (
+            captured["request"]["action_requests"][0]["args"]["_call_id"] == "tc-sync"
+        )

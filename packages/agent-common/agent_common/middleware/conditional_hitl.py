@@ -80,7 +80,9 @@ class _RiskMetadata(TypedDict, total=False):
     allowed_actions: list[str]
 
 
-class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, ContextT, ResponseT]):
+class ConditionalHumanInTheLoopMiddleware(
+    HumanInTheLoopMiddleware[StateT, ContextT, ResponseT]
+):
     """HumanInTheLoopMiddleware with conditional guarding and dynamic risk scoring.
 
     Supports two complementary guard modes:
@@ -127,7 +129,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         self._platform_tools: dict[str, BaseTool] = platform_tools or {}
 
         # Pass through to parent (it safely ignores unknown keys in the dict)
-        super().__init__(interrupt_on=interrupt_on, description_prefix=description_prefix)
+        super().__init__(
+            interrupt_on=interrupt_on, description_prefix=description_prefix
+        )
 
     def _should_interrupt(self, tool_call: ToolCall) -> bool:
         """Check whether a tool call should be statically interrupted.
@@ -146,7 +150,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         return bool(condition(tool_call.get("args", {})))
 
-    def after_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
+    def after_model(
+        self, state: AgentState[Any], runtime: Runtime[ContextT]
+    ) -> dict[str, Any] | None:
         """Sync handler: only processes static interrupt_on guards.
 
         Does NOT invoke risk scoring (which requires async). If you need
@@ -157,7 +163,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         if not messages:
             return None
 
-        last_ai_msg = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
+        last_ai_msg = next(
+            (msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None
+        )
         if not last_ai_msg or not last_ai_msg.tool_calls:
             return None
 
@@ -169,10 +177,15 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
             if self._should_interrupt(tool_call):
                 config = self.interrupt_on[tool_call["name"]]
-                action_request, review_config = self._create_action_and_config(tool_call, config, state, runtime)
+                action_request, review_config = self._create_action_and_config(
+                    tool_call, config, state, runtime
+                )
                 # Stamp the per-call id (see aafter_model) so multi-action interrupts
                 # raised on the sync path align decisions by id too.
-                action_request["args"] = {**action_request.get("args", {}), "_call_id": tool_call["id"]}
+                action_request["args"] = {
+                    **action_request.get("args", {}),
+                    "_call_id": tool_call["id"],
+                }
                 action_requests.append(action_request)
                 review_configs.append(review_config)
                 interrupt_indices.append(idx)
@@ -191,7 +204,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         decisions = interrupt(hitl_request)["decisions"]
 
         # Validate that the number of decisions matches the number of interrupt tool calls
-        if (decisions_len := len(decisions)) != (interrupt_count := len(interrupt_indices)):
+        if (decisions_len := len(decisions)) != (
+            interrupt_count := len(interrupt_indices)
+        ):
             msg = (
                 f"Number of human decisions ({decisions_len}) does not match "
                 f"number of hanging tool calls ({interrupt_count})."
@@ -210,7 +225,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 decision = decisions[decision_idx]
                 decision_idx += 1
 
-                revised_tool_call, tool_message = self._process_decision(decision, tool_call, config)
+                revised_tool_call, tool_message = self._process_decision(
+                    decision, tool_call, config
+                )
                 if revised_tool_call is not None:
                     revised_tool_calls.append(revised_tool_call)
                 if tool_message:
@@ -224,7 +241,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         return {"messages": [last_ai_msg, *artificial_tool_messages]}
 
-    async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
+    async def aafter_model(
+        self, state: AgentState[Any], runtime: Runtime[ContextT]
+    ) -> dict[str, Any] | None:
         """Async handler: combines static guards + dynamic risk scoring.
 
         Flow for each tool call:
@@ -241,9 +260,24 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         if not messages:
             return None
 
-        last_ai_msg = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
+        last_ai_msg = next(
+            (msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None
+        )
         if not last_ai_msg or not last_ai_msg.tool_calls:
             return None
+
+        # Tool calls already answered by an artificial ToolMessage (e.g. the
+        # identity-consent gate blocking a call) can never execute — the agent
+        # loop's model_to_tools edge filters answered ids — so prompting for
+        # them is spurious, and a reject here would emit a SECOND ToolMessage
+        # for the same tool_call_id (two tool_results for one tool_use →
+        # provider 400). Mirror the loop's own filter and skip them.
+        last_ai_idx = messages.index(last_ai_msg)
+        answered_ids = {
+            msg.tool_call_id
+            for msg in messages[last_ai_idx + 1 :]
+            if isinstance(msg, ToolMessage)
+        }
 
         action_requests: list[ActionRequest] = []
         review_configs: list[ReviewConfig] = []
@@ -254,6 +288,10 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
             tool_name: str = tool_call["name"]
             args: dict[str, Any] = tool_call.get("args", {})
+
+            # 0. Already answered — see answered_ids above.
+            if tool_call["id"] in answered_ids:
+                continue
 
             # 1. Sub-agent dispatch and the PTC code interpreter are never
             #    interrupted here. ``task`` is a dispatch primitive; ``eval`` (the
@@ -267,12 +305,17 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             # 2. Static guards take priority
             if self._should_interrupt(tool_call):
                 config = self.interrupt_on[tool_name]
-                action_request, review_config = self._create_action_and_config(tool_call, config, state, runtime)
+                action_request, review_config = self._create_action_and_config(
+                    tool_call, config, state, runtime
+                )
                 # Stamp the stable per-call id on EVERY interrupted call (here a static
                 # guard, no risk metadata) so the client can return one decision per
                 # action_request and the resume path aligns them by id. Display-only:
                 # ``args`` is never passed to the tool (approve replays the original call).
-                action_request["args"] = {**action_request.get("args", {}), "_call_id": tool_call["id"]}
+                action_request["args"] = {
+                    **action_request.get("args", {}),
+                    "_call_id": tool_call["id"],
+                }
                 action_requests.append(action_request)
                 review_configs.append(review_config)
                 interrupt_indices.append(idx)
@@ -290,7 +333,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             )
             server_slug: str = self._get_server_slug(tool_name, context)
 
-            if bypass_rules and self._is_bypassed(tool_name, server_slug, args, bypass_rules):
+            if bypass_rules and self._is_bypassed(
+                tool_name, server_slug, args, bypass_rules
+            ):
                 continue
 
             # Get tool instance and cache from context
@@ -311,7 +356,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                     server_slug=server_slug,
                 )
             except Exception:
-                logger.exception("Risk scoring failed for tool '%s', skipping guard", tool_name)
+                logger.exception(
+                    "Risk scoring failed for tool '%s', skipping guard", tool_name
+                )
                 continue
 
             # Compare against threshold
@@ -320,8 +367,12 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 continue
 
             # Score exceeds threshold — interrupt
-            allowed_actions: list[str] = entry.allowed_actions if entry else ["approve", "edit", "reject"]
-            matched_pattern: str | None = entry.get_matched_pattern(args) if entry else None
+            allowed_actions: list[str] = (
+                entry.allowed_actions if entry else ["approve", "edit", "reject"]
+            )
+            matched_pattern: str | None = (
+                entry.get_matched_pattern(args) if entry else None
+            )
 
             # Build action request for this tool call
             description = f"Tool '{tool_name}' has risk score {score:.2f} (threshold: {threshold:.2f})"
@@ -357,7 +408,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             # Include args_schema if "edit" is allowed
             if "edit" in allowed_actions and tool_instance is not None:
                 try:
-                    review_config["args_schema"] = tool_instance.get_input_schema().model_json_schema()
+                    review_config["args_schema"] = (
+                        tool_instance.get_input_schema().model_json_schema()
+                    )
                 except Exception:
                     pass
 
@@ -389,7 +442,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         decisions = interrupt(hitl_request)["decisions"]
 
         # Validate decisions count
-        if (decisions_len := len(decisions)) != (interrupt_count := len(interrupt_indices)):
+        if (decisions_len := len(decisions)) != (
+            interrupt_count := len(interrupt_indices)
+        ):
             msg = (
                 f"Number of human decisions ({decisions_len}) does not match "
                 f"number of hanging tool calls ({interrupt_count})."
@@ -413,10 +468,16 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                     config = self.interrupt_on[tool_name]
                 else:
                     # Dynamic guard — build a synthetic config
-                    entry_actions = metadata.get("allowed_actions") or ["approve", "edit", "reject"]
+                    entry_actions = metadata.get("allowed_actions") or [
+                        "approve",
+                        "edit",
+                        "reject",
+                    ]
                     config = {"allowed_decisions": entry_actions}
 
-                revised_tool_call, tool_message = self._process_decision(decision, tool_call, config)
+                revised_tool_call, tool_message = self._process_decision(
+                    decision, tool_call, config
+                )
                 if revised_tool_call is not None:
                     revised_tool_calls.append(revised_tool_call)
                 if tool_message:
@@ -463,7 +524,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         """
         # Check tool_server_map on context (orchestrator path)
         if context is not None:
-            tool_server_map: dict[str, str] | None = getattr(context, "tool_server_map", None)
+            tool_server_map: dict[str, str] | None = getattr(
+                context, "tool_server_map", None
+            )
             if tool_server_map and tool_name in tool_server_map:
                 return tool_server_map[tool_name]
 
@@ -473,7 +536,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         # Fall back to tool metadata on context's tool_registry
         if context is not None:
-            tool_registry: dict[str, Any] | None = getattr(context, "tool_registry", None)
+            tool_registry: dict[str, Any] | None = getattr(
+                context, "tool_registry", None
+            )
             if tool_registry and tool_name in tool_registry:
                 tool = tool_registry[tool_name]
                 metadata = getattr(tool, "metadata", None)
@@ -489,7 +554,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         """Get a BaseTool instance from the runtime context's tool registry or platform tools."""
         # Check runtime context's tool_registry first
         if context is not None:
-            tool_registry: dict[str, BaseTool] | None = getattr(context, "tool_registry", None)
+            tool_registry: dict[str, BaseTool] | None = getattr(
+                context, "tool_registry", None
+            )
             if tool_registry and tool_name in tool_registry:
                 return tool_registry[tool_name]
 
@@ -576,7 +643,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         session are automatically bypassed. The orchestrator is responsible
         for persisting the rule to the backend API after the turn completes.
         """
-        bypass_rules: dict[str, BypassRule] | None = getattr(context, "tool_bypass_rules", None)
+        bypass_rules: dict[str, BypassRule] | None = getattr(
+            context, "tool_bypass_rules", None
+        )
         if bypass_rules is None:
             return
 
@@ -611,7 +680,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         # Store pending bypass for persistence by the orchestrator
         if key in bypass_rules:
-            pending: list[dict[str, Any]] = getattr(context, "_pending_bypass_rules", [])
+            pending: list[dict[str, Any]] = getattr(
+                context, "_pending_bypass_rules", []
+            )
             pending.append({"key": key, "rule": bypass_rules[key]})
             if not hasattr(context, "_pending_bypass_rules"):
                 context._pending_bypass_rules = pending

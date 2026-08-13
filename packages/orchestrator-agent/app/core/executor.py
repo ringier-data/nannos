@@ -87,7 +87,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         self.registry_service = RegistryService()
 
     async def _get_user_from_registry(
-        self, sub: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
+        self,
+        sub: str,
+        access_token: str | None = None,
+        sub_agent_config_hash: str | None = None,
     ) -> User:
         """Fetch user from registry using the provided sub.
 
@@ -145,7 +148,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         return (action_request.get("args") or {}).get("_call_id")
 
     @classmethod
-    def _decisions_for_interrupt(cls, action_requests: list, hitl_decisions: list, decisions_by_id: dict) -> list:
+    def _decisions_for_interrupt(
+        cls, action_requests: list, hitl_decisions: list, decisions_by_id: dict
+    ) -> list:
         """Resolve the decision list for ONE interrupt, aligned to its action_requests.
 
         - By id (new clients): when the client sent id-keyed decisions, align each
@@ -161,13 +166,22 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         n = len(action_requests)
         if n > 0 and decisions_by_id:
             call_ids = [cls._action_request_call_id(ar) for ar in action_requests]
-            return [decisions_by_id.get(cid, {"type": "reject"}) for cid in call_ids]
+            # `_defaulted` marks a safe reject the user never actually gave
+            # (stale/absent call_id) so consumers that persist decisions — the
+            # identity-consent gate remembers rejections durably — can tell it
+            # apart from an explicit rejection and skip recording it.
+            return [
+                decisions_by_id.get(cid, {"type": "reject", "_defaulted": True})
+                for cid in call_ids
+            ]
         if len(hitl_decisions) == 1 and n > 1:
             return hitl_decisions * n
         return hitl_decisions
 
     @classmethod
-    def _build_interrupt_resume_map(cls, interrupts: Any, hitl_decisions: list, query: Any) -> dict[str, Any]:
+    def _build_interrupt_resume_map(
+        cls, interrupts: Any, hitl_decisions: list, query: Any
+    ) -> dict[str, Any]:
         """Build an interrupt-id-keyed resume map for ``Command(resume=...)``.
 
         LangGraph >=1.2 requires an id-keyed map whenever more than one interrupt is
@@ -184,16 +198,24 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         an interrupt (by ``call_id``). Non-HITL interrupts (auth, etc.) resume with the
         raw ``query``.
         """
-        decisions_by_id = {d["id"]: d for d in hitl_decisions if isinstance(d, dict) and "id" in d}
+        decisions_by_id = {
+            d["id"]: d for d in hitl_decisions if isinstance(d, dict) and "id" in d
+        }
         resume_map: dict[str, Any] = {}
         for intr in interrupts:
             intr_value = getattr(intr, "value", intr)
             if isinstance(intr_value, dict) and "action_requests" in intr_value:
                 action_requests = intr_value.get("action_requests", [])
-                per = cls._decisions_for_interrupt(action_requests, hitl_decisions, decisions_by_id)
+                per = cls._decisions_for_interrupt(
+                    action_requests, hitl_decisions, decisions_by_id
+                )
                 resume_map[intr.id] = {"decisions": per}
-                tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
-                logger.info(f"Resuming HITL interrupt {intr.id} for tools {tool_names} with {len(per)} decision(s)")
+                tool_names = [
+                    ar.get("name") for ar in action_requests if isinstance(ar, dict)
+                ]
+                logger.info(
+                    f"Resuming HITL interrupt {intr.id} for tools {tool_names} with {len(per)} decision(s)"
+                )
             else:
                 resume_map[intr.id] = query
                 logger.info(f"Resuming non-HITL interrupt {intr.id}")
@@ -280,7 +302,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 len(sub_agents),
             )
         else:
-            logger.debug(f"[DISCOVERY-CACHE] miss; discovering capabilities for user_sub: {user_config.user_sub}")
+            logger.debug(
+                f"[DISCOVERY-CACHE] miss; discovering capabilities for user_sub: {user_config.user_sub}"
+            )
             sub_agents = await self.agent.agent_discovery_service.register_agents(
                 agent_metadata=user_config.agent_metadata or {},
                 token=user_config.access_token.get_secret_value(),
@@ -304,14 +328,18 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 len(sub_agents),
                 user_config.user_sub,
             )
-        logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
+        logger.debug(
+            f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}"
+        )
         logger.debug(f"Discovered {len(tools)} total tools (cached or fresh)")
 
         # Update user_config with discovered data
         user_config.tools = tools
         user_config.sub_agents = sub_agents
 
-        logger.debug(f"Built complete UserConfig with {len(user_config.sub_agents)} sub-agents")
+        logger.debug(
+            f"Built complete UserConfig with {len(user_config.sub_agents)} sub-agents"
+        )
 
         return user_config
 
@@ -376,7 +404,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # the botName the bot registered its delivery channels under. Threaded into attribution so
         # console MCP tools (console_list_delivery_channels) can scope channels to this caller.
         caller_installation: str | None = None
-        if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
+        if (
+            context.message
+            and context.message.metadata
+            and isinstance(context.message.metadata, dict)
+        ):
             installation = context.message.metadata.get("installation")
             if isinstance(installation, str) and installation:
                 caller_installation = installation
@@ -385,14 +417,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             from ringier_a2a_sdk.cost_tracking.attribution import set_attribution
 
             set_attribution(
-                user_sub=caller_sub, conversation_id=context_id, installation=caller_installation
+                user_sub=caller_sub,
+                conversation_id=context_id,
+                installation=caller_installation,
             )
         # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
-        if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
-            caller_channel_id = context.message.metadata.get("slackChannelId") or context.message.metadata.get(
-                "googleChatSpaceId"
-            )
+        if (
+            context.message
+            and context.message.metadata
+            and isinstance(context.message.metadata, dict)
+        ):
+            caller_channel_id = context.message.metadata.get(
+                "slackChannelId"
+            ) or context.message.metadata.get("googleChatSpaceId")
 
         # --- Continuous Interaction Turn: register this turn, or route to the active one ---
         # try_register atomically claims the turn for this context_id, or returns the
@@ -401,7 +439,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # executor covered when a cross-replica coordinator is installed via
         # set_stream_coordinator, and closes the old check-then-register gap between two
         # separate lock acquisitions.
-        stream_info = ActiveStreamInfo(context_id=context_id, task_id=task.id, owner_sub=caller_sub)
+        stream_info = ActiveStreamInfo(
+            context_id=context_id, task_id=task.id, owner_sub=caller_sub
+        )
         active = await get_stream_coordinator().try_register(stream_info)
         if active is not None:
             # Verify the caller belongs to this conversation.
@@ -461,25 +501,35 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # ZERO-TRUST: Extract verified user_sub and token from call_context (set by RequestContextBuilder)
         if context.call_context and hasattr(context.call_context, "state"):
             try:
-                user_sub = context.call_context.state["user_sub"]  # OIDC subject from JWT
+                user_sub = context.call_context.state[
+                    "user_sub"
+                ]  # OIDC subject from JWT
                 user_token = context.call_context.state["user_token"]
                 user_name = context.call_context.state["user_name"]
                 user_email = context.call_context.state["user_email"]
                 user_groups = context.call_context.state.get("user_groups", [])
                 # Optional: console mode sub-agent config hash for isolated testing
-                sub_agent_config_hash = context.call_context.state.get("sub_agent_config_hash")
+                sub_agent_config_hash = context.call_context.state.get(
+                    "sub_agent_config_hash"
+                )
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
                 raise InvalidParamsError() from e
         else:
-            logger.error("[ZERO-TRUST] No user_token found in call_context - authentication may have failed")
+            logger.error(
+                "[ZERO-TRUST] No user_token found in call_context - authentication may have failed"
+            )
             raise InvalidParamsError()
 
         # Set the access token for cost tracking (ContextVar)
         set_request_access_token(user_token)
-        logger.info(f"[ZERO-TRUST] Using verified user_sub for graph retrieval: {user_sub}")
+        logger.info(
+            f"[ZERO-TRUST] Using verified user_sub for graph retrieval: {user_sub}"
+        )
         if sub_agent_config_hash:
-            logger.info(f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}")
+            logger.info(
+                f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}"
+            )
 
         # Fetch user from registry to get stable database ID (user.id). Memoized per-user
         # (keyed incl. groups + policy_version) to avoid the ~1s of console-backend calls
@@ -493,7 +543,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         )
         user = ucache.get(ukey)
         if user is not None:
-            logger.info(f"[USER-CACHE] hit for user_sub={user_sub}, database_id={user.id}")
+            logger.info(
+                f"[USER-CACHE] hit for user_sub={user_sub}, database_id={user.id}"
+            )
         else:
             user = await self._get_user_from_registry(
                 user_sub,
@@ -501,20 +553,34 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 sub_agent_config_hash=sub_agent_config_hash,
             )
             ucache.put(ukey, user, user_token, owner=user_sub)
-            logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
+            logger.info(
+                f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}"
+            )
 
         # Extract metadata from both message-level and params-level (message takes priority)
         logger.info(f"[EXECUTOR] Params-level metadata: {context.metadata}")
-        logger.info(f"[EXECUTOR] Message-level metadata: {context.message.metadata if context.message else None}")
-        message_metadata = context.message.metadata if context.message and context.message.metadata else {}
+        logger.info(
+            f"[EXECUTOR] Message-level metadata: {context.message.metadata if context.message else None}"
+        )
+        message_metadata = (
+            context.message.metadata
+            if context.message and context.message.metadata
+            else {}
+        )
         params_metadata = context.metadata or {}
 
         # Merge metadata with message-level taking priority
         request_metadata = {**params_metadata, **message_metadata}
 
         model_choice = user.preferred_model or request_metadata.get("model")
-        enable_thinking = user.enable_thinking or request_metadata.get("enableThinking") in ("true", "1", "yes")
-        thinking_level = user.thinking_level or request_metadata.get("thinkingLevel") if enable_thinking else None
+        enable_thinking = user.enable_thinking or request_metadata.get(
+            "enableThinking"
+        ) in ("true", "1", "yes")
+        thinking_level = (
+            user.thinking_level or request_metadata.get("thinkingLevel")
+            if enable_thinking
+            else None
+        )
         logger.debug(
             f"[THINKING CONFIG] model_choice={model_choice}, enable_thinking={enable_thinking}, thinking_level={thinking_level}"
         )
@@ -569,7 +635,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 )
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
-                new_text_message(budget_message, context_id=task.context_id, task_id=task.id),
+                new_text_message(
+                    budget_message, context_id=task.context_id, task_id=task.id
+                ),
             )
             return
 
@@ -578,7 +646,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Extract client user handle - support both Slack and Google Chat
             # Client may send 'slackUserId' (camelCase) or 'slack_user_id' (snake_case)
             slack_user_id = request_metadata.get("slackUserId")
-            slack_channel_id = request_metadata.get("slackChannelId")  # for filesystem namespace isolation
+            slack_channel_id = request_metadata.get(
+                "slackChannelId"
+            )  # for filesystem namespace isolation
 
             # Google Chat metadata
             google_chat_user_id = request_metadata.get("googleChatUserId")
@@ -590,7 +660,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Update stream info with scope and assistant_id now that we have them
             # Slack: Public channels (which start with C) or private channels/group DMs (which start with G), a 1:1 direct message channel ID always starts with a D (e.g., D12345678).
             # Google-chat: in the google-chat client we set a spaceId just whenever source != direct_message.
-            if (slack_channel_id and not slack_channel_id.startswith("D")) or google_chat_space_id:
+            if (
+                slack_channel_id and not slack_channel_id.startswith("D")
+            ) or google_chat_space_id:
                 stream_info.scope = "channel"
                 stream_info.assistant_id = channel_id
             else:
@@ -607,7 +679,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
             # Extract message formatting - support both naming conventions
             message_formatting = (
-                request_metadata.get("messageFormatting") or request_metadata.get("message_formatting") or "markdown"
+                request_metadata.get("messageFormatting")
+                or request_metadata.get("message_formatting")
+                or "markdown"
             )
 
             # Build complete UserConfig with all data and discovered capabilities
@@ -651,7 +725,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             if isinstance(thinking_level, ThinkingLevel):
                 thinking_level = thinking_level.value
 
-            model_type = user_config.model if user_config.model else self.agent._default_model_type
+            model_type = (
+                user_config.model
+                if user_config.model
+                else self.agent._default_model_type
+            )
             graph = await self.agent.get_or_create_graph(
                 model_type=model_type,
                 thinking_level=thinking_level,
@@ -671,8 +749,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "assistant_id": stream_info.assistant_id,
                     "user_id": user.id,  # Stable database ID (not OIDC sub)
                     "conversation_id": task.context_id,  # For conversation-scoped tool result storage
-                    "group_id": user_groups[0] if user_groups else None,  # Primary group for filesystem namespace
-                    "group_ids": user_groups or None,  # All groups for playbook aggregation
+                    "group_id": user_groups[0]
+                    if user_groups
+                    else None,  # Primary group for filesystem namespace
+                    "group_ids": user_groups
+                    or None,  # All groups for playbook aggregation
                     "user_name": user_name,
                     "slack_thread_ts": request_metadata.get("slackThreadTs"),
                     "google_chat_thread_id": request_metadata.get("googleChatThreadId"),
@@ -705,8 +786,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # interrupt (matching today's single approve/reject UI). Per-interrupt
                 # decisions would require the client to key decisions by interrupt id.
                 # Clients send decisions as a DataPart (structured JSON, no XML).
-                hitl_decisions = self._extract_hitl_decisions(context).get("decisions", [])
-                resume_value = self._build_interrupt_resume_map(current_state.interrupts, hitl_decisions, query)
+                hitl_decisions = self._extract_hitl_decisions(context).get(
+                    "decisions", []
+                )
+                resume_value = self._build_interrupt_resume_map(
+                    current_state.interrupts, hitl_decisions, query
+                )
 
             if resume_value is None:
                 logger.info("Normal execution (not resuming from interrupt)")
@@ -714,16 +799,25 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Extension activation: client must send X-A2A-Extensions header to enable
             # extensions. No header = extensions disabled (per A2A spec).
             requested_extensions: set[str] | None = None
-            if context.call_context and hasattr(context.call_context, "requested_extensions"):
+            if context.call_context and hasattr(
+                context.call_context, "requested_extensions"
+            ):
                 requested_extensions = context.call_context.requested_extensions
             if requested_extensions is not None:
-                logger.info(f"[EXTENSIONS] Client requested extensions: {requested_extensions}")
+                logger.info(
+                    f"[EXTENSIONS] Client requested extensions: {requested_extensions}"
+                )
             else:
                 logger.info("[EXTENSIONS] No extensions requested (header absent)")
 
             # emit a started status update as part of activity log
-            if requested_extensions is not None and ACTIVITY_LOG_EXTENSION in requested_extensions:
-                logger.debug("Agent execution started. Emitting initial activity log message.")
+            if (
+                requested_extensions is not None
+                and ACTIVITY_LOG_EXTENSION in requested_extensions
+            ):
+                logger.debug(
+                    "Agent execution started. Emitting initial activity log message."
+                )
                 await updater.update_status(
                     TaskState.TASK_STATE_WORKING,
                     new_activity_log_message(
@@ -740,8 +834,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
             while True:
                 streaming_artifact_id = str(uuid.uuid4())
-                first_chunk_sent = False  # Track if we've sent the initial MAIN artifact chunk
-                first_intermediate_chunk_sent = False  # Track if we've sent the initial INTERMEDIATE artifact chunk
+                first_chunk_sent = (
+                    False  # Track if we've sent the initial MAIN artifact chunk
+                )
+                first_intermediate_chunk_sent = (
+                    False  # Track if we've sent the initial INTERMEDIATE artifact chunk
+                )
                 streamed_chars = 0  # Total chars streamed via the MAIN artifact (code points, not wire bytes; for completion diagnostics)
                 deferred_terminal_item = None
                 # Per-round carrier: the agent populates this from its single
@@ -752,7 +850,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 turn_state = TurnState()
 
                 async for item in self.agent.stream(
-                    message_parts, user_config, config=config, resume=resume_value, turn_state=turn_state
+                    message_parts,
+                    user_config,
+                    config=config,
+                    resume=resume_value,
+                    turn_state=turn_state,
                 ):
                     # Buffer the terminal completed item so we can check for unconsumed
                     # steering messages before emitting it to the SSE stream.
@@ -777,7 +879,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             streamed_chars += len(item.content)
 
                     # Pass per-artifact first_chunk_sent flags and update after each chunk
-                    first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
+                    (
+                        first_chunk_sent,
+                        first_intermediate_chunk_sent,
+                    ) = await self._handle_stream_item(
                         item,
                         updater,
                         task,
@@ -841,22 +946,37 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # Emit feedback request for complex tasks before terminal event
                 if (
                     deferred_terminal_item is not None
-                    and deferred_terminal_item.state in (TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED)
+                    and deferred_terminal_item.state
+                    in (
+                        TaskState.TASK_STATE_COMPLETED,
+                        TaskState.TASK_STATE_FAILED,
+                        TaskState.TASK_STATE_CANCELED,
+                    )
                     and requested_extensions is not None
                     and FEEDBACK_REQUEST_EXTENSION in requested_extensions
                 ):
-                    force_feedback = request_metadata.get("forceFeedbackRequest") in (True, "true", "1")
-                    feedback_threshold = int(os.environ.get("FEEDBACK_RECURSION_THRESHOLD", "40"))
+                    force_feedback = request_metadata.get("forceFeedbackRequest") in (
+                        True,
+                        "true",
+                        "1",
+                    )
+                    feedback_threshold = int(
+                        os.environ.get("FEEDBACK_RECURSION_THRESHOLD", "40")
+                    )
                     try:
                         # Reuse the agent's end-of-stream state (carrier) instead of re-reading.
                         msgs = (turn_state.final_values or {}).get("messages", [])
-                        tool_msg_count = count_tool_messages(turn_state.final_values or {})
+                        tool_msg_count = count_tool_messages(
+                            turn_state.final_values or {}
+                        )
                         if force_feedback or tool_msg_count > feedback_threshold:
                             # Extract sub-agent IDs from activity-log metadata
                             # Prefer integer sub_agent_id; fall back to agent_name for built-in agents
                             sub_agents_set: set[str] = set()
                             for m in msgs:
-                                meta = getattr(m, "additional_kwargs", {}).get("a2a_metadata", {})
+                                meta = getattr(m, "additional_kwargs", {}).get(
+                                    "a2a_metadata", {}
+                                )
                                 if meta.get("sub_agent_id") is not None:
                                     sub_agents_set.add(str(meta["sub_agent_id"]))
                                 elif meta.get("agent_name"):
@@ -875,7 +995,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                                 f"threshold={feedback_threshold}, sub_agents={sub_agents})"
                             )
                     except Exception:
-                        logger.debug("[FEEDBACK] Could not emit feedback request", exc_info=True)
+                        logger.debug(
+                            "[FEEDBACK] Could not emit feedback request", exc_info=True
+                        )
 
                 # Emit the deferred terminal event
                 if deferred_terminal_item is not None:
@@ -888,7 +1010,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         # guard (1099): a COMPLETED item is treated as final unless the
                         # captured state shows pending interrupts.
                         is_final = not turn_state.has_interrupts
-                    first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
+                    (
+                        first_chunk_sent,
+                        first_intermediate_chunk_sent,
+                    ) = await self._handle_stream_item(
                         deferred_terminal_item,
                         updater,
                         task,
@@ -906,14 +1031,21 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 await asyncio.shield(
                     updater.update_status(
                         TaskState.TASK_STATE_CANCELED,
-                        new_text_message("Agent execution was cancelled.", context_id=task.context_id, task_id=task.id),
+                        new_text_message(
+                            "Agent execution was cancelled.",
+                            context_id=task.context_id,
+                            task_id=task.id,
+                        ),
                     )
                 )
             except (asyncio.CancelledError, Exception):
                 pass  # Best-effort: queue may already be closed
             raise
         except Exception as e:
-            logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}", exc_info=True)
+            logger.error(
+                f"An error occurred while streaming the response: {e.__class__.__name__}: {e}",
+                exc_info=True,
+            )
             raise InternalError() from e
         finally:
             # Persist any bypass rules that were approved during this turn.
@@ -930,7 +1062,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         logger.warning("Failed to persist bypass rules", exc_info=True)
 
                 # Persist identity-scoped tool consent answers given this turn (Gate 3).
-                pending_consents = getattr(user_config, "_pending_identity_consents", None)
+                pending_consents = getattr(
+                    user_config, "_pending_identity_consents", None
+                )
                 if pending_consents:
                     try:
                         await self.registry_service.persist_identity_consents(
@@ -938,7 +1072,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             pending_consents=pending_consents,
                         )
                     except Exception:
-                        logger.warning("Failed to persist identity consents", exc_info=True)
+                        logger.warning(
+                            "Failed to persist identity consents", exc_info=True
+                        )
 
             # Log unconsumed steering messages before cleanup. Count via qsize() —
             # get_orchestrator_pending_messages would DRAIN the queue just to count it.
@@ -946,7 +1082,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # replays them once the queue is removed below, so this is a message drop
             # and must be logged as one.
             remaining_queue = get_steering_queue(context_id)
-            unconsumed_count = remaining_queue.qsize() if remaining_queue is not None else 0
+            unconsumed_count = (
+                remaining_queue.qsize() if remaining_queue is not None else 0
+            )
             if unconsumed_count:
                 logger.error(
                     f"[STEERING] Dropping {unconsumed_count} unconsumed steering message(s) "
@@ -1006,9 +1144,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # Must be handled BEFORE streaming_chunk check.
         if metadata.get("activity_log"):
             if not _ext_active(ACTIVITY_LOG_EXTENSION):
-                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
+                return (
+                    first_chunk_sent,
+                    first_intermediate_chunk_sent,
+                )  # Client didn't request this extension
             source = metadata.get("source")
-            logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, content: {content[:50]}")
+            logger.info(
+                f"[ACTIVITY_LOG] Emitting status update: source={source}, content: {content[:50]}"
+            )
             await updater.update_status(
                 TaskState.TASK_STATE_WORKING,
                 new_activity_log_message(
@@ -1023,7 +1166,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # --- Work plan items (todo snapshots) → status-update with DataPart extension ---
         if metadata.get("work_plan"):
             if not _ext_active(WORK_PLAN_EXTENSION):
-                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
+                return (
+                    first_chunk_sent,
+                    first_intermediate_chunk_sent,
+                )  # Client didn't request this extension
             todos = metadata.get("todos", [])
             logger.info(f"[WORK_PLAN] Emitting work plan with {len(todos)} todos")
             await updater.update_status(
@@ -1067,7 +1213,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 append = first_chunk_sent
 
             # Determine artifact extensions for intermediate output (sub-agent thoughts)
-            artifact_extensions = [INTERMEDIATE_OUTPUT_EXTENSION] if is_intermediate else None
+            artifact_extensions = (
+                [INTERMEDIATE_OUTPUT_EXTENSION] if is_intermediate else None
+            )
             # If intermediate output extension isn't active, suppress entirely (don't leak reasoning to clients)
             if artifact_extensions and not _ext_active(INTERMEDIATE_OUTPUT_EXTENSION):
                 return first_chunk_sent, first_intermediate_chunk_sent
@@ -1129,7 +1277,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # Structured HITL interrupt via extension — any A2A client can respond
                 # review_configs are provided by the ConditionalHumanInTheLoopMiddleware
                 review_configs = item.review_configs or [
-                    {"action_name": ar.get("name", ""), "allowed_decisions": ["approve", "reject"]}
+                    {
+                        "action_name": ar.get("name", ""),
+                        "allowed_decisions": ["approve", "reject"],
+                    }
                     for ar in action_requests
                 ]
                 msg = new_hitl_interrupt_message(
@@ -1170,8 +1321,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # artifact frames were dropped or the client only renders status
                 # messages. The `final_answer_source: "fallback"` metadata flag
                 # signals well-behaved clients to dedupe against the artifact.
-                final_answer = content if content else "Additional input is required to continue."
-                msg = new_text_message(final_answer, context_id=task.context_id, task_id=task.id)
+                final_answer = (
+                    content if content else "Additional input is required to continue."
+                )
+                msg = new_text_message(
+                    final_answer, context_id=task.context_id, task_id=task.id
+                )
                 if item.interrupt_reason:
                     msg.metadata = {"interrupt_reason": item.interrupt_reason}
                 await self._close_streaming_artifact_and_respond(
@@ -1195,11 +1350,15 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # streaming artifact cleanly first. The `final_answer_source:
             # "fallback"` metadata flag signals well-behaved clients to dedupe
             # against the artifact text they already rendered.
-            final_answer = content if content else "Authentication is required to continue."
+            final_answer = (
+                content if content else "Authentication is required to continue."
+            )
             await self._close_streaming_artifact_and_respond(
                 updater,
                 TaskState.TASK_STATE_AUTH_REQUIRED,
-                new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
+                new_text_message(
+                    final_answer, context_id=task.context_id, task_id=task.id
+                ),
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
                 streamed_chars=streamed_chars,
@@ -1229,7 +1388,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             await self._close_streaming_artifact_and_respond(
                 updater,
                 TaskState.TASK_STATE_COMPLETED,
-                new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
+                new_text_message(
+                    final_answer, context_id=task.context_id, task_id=task.id
+                ),
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
                 streamed_chars=streamed_chars,
@@ -1238,7 +1399,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             )
 
         elif state == TaskState.TASK_STATE_COMPLETED and not is_final:
-            logger.info(f"Contradictory completed non-final state, treating as input_required: {content}")
+            logger.info(
+                f"Contradictory completed non-final state, treating as input_required: {content}"
+            )
             # User input required - leave task in input_required state
             await updater.update_status(
                 TaskState.TASK_STATE_INPUT_REQUIRED,
@@ -1335,20 +1498,28 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         """
         task_id = context.task_id or ""
         context_id = context.context_id or ""
-        logger.info("Cancel requested for orchestrator task_id=%s context_id=%s", task_id, context_id)
+        logger.info(
+            "Cancel requested for orchestrator task_id=%s context_id=%s",
+            task_id,
+            context_id,
+        )
 
         # Propagate cancel to all active sub-agents (best-effort, in parallel)
         dispatches = get_all_active_subagent_dispatches(context_id)
         if dispatches:
             cancel_coros = []
             for dispatch in dispatches:
-                if dispatch.subagent_task_id and isinstance(dispatch.runnable, A2AClientRunnable):
+                if dispatch.subagent_task_id and isinstance(
+                    dispatch.runnable, A2AClientRunnable
+                ):
                     logger.info(
                         "Propagating cancel to sub-agent %s (task_id=%s)",
                         dispatch.subagent_name,
                         dispatch.subagent_task_id,
                     )
-                    cancel_coros.append(dispatch.runnable.cancel_task(dispatch.subagent_task_id))
+                    cancel_coros.append(
+                        dispatch.runnable.cancel_task(dispatch.subagent_task_id)
+                    )
             if cancel_coros:
                 results = await asyncio.gather(*cancel_coros, return_exceptions=True)
                 for i, result in enumerate(results):
@@ -1364,7 +1535,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 context_id=context_id,
                 status=TaskStatus(
                     state=TaskState.TASK_STATE_CANCELED,
-                    message=new_text_message("Agent execution was cancelled.", context_id=context_id, task_id=task_id),
+                    message=new_text_message(
+                        "Agent execution was cancelled.",
+                        context_id=context_id,
+                        task_id=task_id,
+                    ),
                 ),
             )
         )
