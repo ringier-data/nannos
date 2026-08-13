@@ -1,16 +1,37 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
+import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown, Sparkles, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Markdown } from '@/components/ui/markdown';
 import { useHostAdapter, type FeedbackRating } from '../../adapter';
 import { useChat } from '../contexts';
-import { formatTime, getFileInfo } from '../utils';
+import { copyToClipboard, formatTime, getFileInfo } from '../utils';
 import type { Message } from '../types';
 import { UnifiedTimelineBlock } from './UnifiedTimelineBlock';
 import { MessageFeedback } from './MessageFeedback';
 import { ReportIssueDialog } from './ReportIssueDialog';
+import { TooltipIconButton } from './TooltipIconButton';
+
+function CopyMessageButton({ content, label }: { content: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    const success = await copyToClipboard(content);
+    if (success) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
+
+  return (
+    <TooltipIconButton
+      icon={copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+      label={copied ? 'Copied!' : label}
+      onClick={() => void handleCopy()}
+    />
+  );
+}
 
 interface MessageCardProps {
   message: Message;
@@ -143,26 +164,32 @@ function MessageCard({ message, feedbackMap, onFeedbackChanged }: MessageCardPro
         </div>
         <div className="flex items-center gap-2 px-1">
           <span className="text-xs text-muted-foreground">{formattedTime}</span>
-          {!isUser && activeConversationId && (
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-              <MessageFeedback
-                conversationId={activeConversationId}
-                messageId={message.id}
-                currentRating={currentRating}
-                onChanged={onFeedbackChanged}
-              />
-              {api.reportIssue && (
-                <button
-                  type="button"
-                  onClick={() => setReportOpen(true)}
-                  className="p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors"
-                  aria-label="Report issue"
-                >
-                  <Flag className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          )}
+          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+            {isUser ? (
+              <CopyMessageButton content={message.content} label="Copy prompt" />
+            ) : (
+              <>
+                <CopyMessageButton content={message.content} label="Copy response" />
+                {activeConversationId && (
+                  <>
+                    <MessageFeedback
+                      conversationId={activeConversationId}
+                      messageId={message.id}
+                      currentRating={currentRating}
+                      onChanged={onFeedbackChanged}
+                    />
+                    {api.reportIssue && (
+                      <TooltipIconButton
+                        icon={<Flag className="w-3.5 h-3.5" />}
+                        label="Report issue"
+                        onClick={() => setReportOpen(true)}
+                      />
+                    )}
+                  </>
+                )}
+              </>
+            )}
+          </div>
         </div>
         {reportOpen && activeConversationId && (
           <ReportIssueDialog

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ThumbsUp, ThumbsDown } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { useHostAdapter, type FeedbackRating } from '../../adapter';
+import { TooltipIconButton } from './TooltipIconButton';
 
 interface MessageFeedbackProps {
   conversationId: string;
@@ -39,30 +39,20 @@ export function MessageFeedback({ conversationId, messageId, currentRating, onCh
 
   return (
     <div className="flex items-center gap-1">
-      <button
-        type="button"
+      <TooltipIconButton
+        icon={<ThumbsUp className="w-3.5 h-3.5" fill={rating === 'positive' ? 'currentColor' : 'none'} />}
+        label="Helpful"
         onClick={() => void handleFeedback('positive')}
         disabled={isLoading}
-        className={cn(
-          'p-1 rounded hover:bg-accent transition-colors',
-          rating === 'positive' ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground/50 hover:text-muted-foreground',
-        )}
-        aria-label="Thumbs up"
-      >
-        <ThumbsUp className="w-3.5 h-3.5" fill={rating === 'positive' ? 'currentColor' : 'none'} />
-      </button>
-      <button
-        type="button"
+        className={rating === 'positive' ? 'text-green-600 dark:text-green-400' : undefined}
+      />
+      <TooltipIconButton
+        icon={<ThumbsDown className="w-3.5 h-3.5" fill={rating === 'negative' ? 'currentColor' : 'none'} />}
+        label="Not helpful"
         onClick={() => void handleFeedback('negative')}
         disabled={isLoading}
-        className={cn(
-          'p-1 rounded hover:bg-accent transition-colors',
-          rating === 'negative' ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground/50 hover:text-muted-foreground',
-        )}
-        aria-label="Thumbs down"
-      >
-        <ThumbsDown className="w-3.5 h-3.5" fill={rating === 'negative' ? 'currentColor' : 'none'} />
-      </button>
+        className={rating === 'negative' ? 'text-red-600 dark:text-red-400' : undefined}
+      />
     </div>
   );
 }
