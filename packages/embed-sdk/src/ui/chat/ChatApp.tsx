@@ -1,5 +1,15 @@
 import { useRef, useState, useEffect } from 'react';
-import { Settings, PanelRightOpen, ExternalLink, History, X, Plus } from 'lucide-react';
+import {
+  ArrowLeft,
+  ExternalLink,
+  History,
+  Maximize2,
+  Minimize2,
+  PanelRightOpen,
+  Plus,
+  Settings,
+  X,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useHostAdapter, useNannosCoreOptional } from '../adapter';
 import { Button } from '@/components/ui/button';
@@ -14,7 +24,7 @@ import {
   TaskPanel,
   SettingsModal,
 } from './components';
-import { WorkingBlock } from './components/WorkingBlock';
+import { WorkingStrip } from './components/WorkingBlock';
 import { InterruptConfirmCard } from './components/InterruptConfirmCard';
 
 export interface ChatAppProps {
@@ -34,12 +44,20 @@ export function ChatApp({ compact = false }: ChatAppProps) {
   // Compact mode has no sidebar; the header's History button swaps the chat body
   // for the (application-scoped) conversation list instead.
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  // Panel size lives on the core (see core.onExpandChange): the panel element is
+  // owned by the host-side widget, outside this Shadow DOM.
+  const [isExpanded, setIsExpanded] = useState(core?.isExpanded ?? false);
   const [subAgentName, setSubAgentName] = useState<string | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   // Whether the view is pinned to the bottom. Starts true; flips false when the
   // user scrolls up to read history so we don't yank them back down mid-stream.
   const stickToBottomRef = useRef(true);
   const prevMessageCountRef = useRef(0);
+
+  useEffect(() => {
+    if (!core) return;
+    return core.onExpandChange(setIsExpanded);
+  }, [core]);
 
   // Auto-resolve the scoped sub-agent's name (execute-only embeds run a sub-agent,
   // but the A2A handshake returns the orchestrator's card — "Orchestrator Agent").
@@ -111,22 +129,22 @@ export function ChatApp({ compact = false }: ChatAppProps) {
   }, [messages, isWaiting, liveWorkingSteps]);
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-background text-foreground">
+    <div className="flex h-full w-full overflow-hidden bg-nannos-surface text-foreground">
       {/* Left Sidebar: Conversation List (hidden in compact/embedded mode) */}
       {!compact && (
         <>
           <ConversationPanel />
           {/* Resize Handle (left) */}
-          <div className="w-1 cursor-col-resize hover:bg-primary/30 transition-colors" aria-hidden="true" />
+          <div className="w-1 cursor-col-resize transition-colors hover:bg-nannos-accent/30" aria-hidden="true" />
         </>
       )}
 
       {/* Center: Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex min-w-0 flex-1 flex-col">
         {/* Chat Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-          <h2 className="text-sm font-semibold">{agentName}</h2>
-          <div className="flex items-center gap-1">
+        <div className="flex items-center justify-between gap-2 border-b border-border bg-nannos-surface-raised px-4 py-2.5">
+          <h2 className="truncate text-sm font-semibold">{agentName}</h2>
+          <div className="flex shrink-0 items-center gap-0.5">
             <ConnectionStatus />
             {compact && (
               <>
@@ -154,7 +172,7 @@ export function ChatApp({ compact = false }: ChatAppProps) {
                   data-testid="button-history"
                   aria-label={isHistoryOpen ? 'Back to chat' : 'Conversation history'}
                 >
-                  {isHistoryOpen ? <X className="h-4 w-4" /> : <History className="h-4 w-4" />}
+                  {isHistoryOpen ? <ArrowLeft className="h-4 w-4" /> : <History className="h-4 w-4" />}
                 </Button>
               </>
             )}
@@ -233,6 +251,32 @@ export function ChatApp({ compact = false }: ChatAppProps) {
                 <PanelRightOpen className="h-4 w-4" />
               </Button>
             )}
+            {/* Panel chrome — only meaningful when the core owns a floating panel
+                (the embedded widget). The console renders the chat full-page. */}
+            {compact && core && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={() => core.toggleExpanded()}
+                  data-testid="button-expand"
+                  aria-label={isExpanded ? 'Shrink panel' : 'Expand panel'}
+                >
+                  {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={() => core.close()}
+                  data-testid="button-close-panel"
+                  aria-label="Close assistant"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </>
+            )}
           </div>
         </div>
 
@@ -241,21 +285,19 @@ export function ChatApp({ compact = false }: ChatAppProps) {
              full-width. The list is server-scoped to this application's conversations
              (embedded_sub_agent_id), so no foreign titles ever render in a host page. */
           <ConversationPanel
-            className="w-full flex-1 h-auto border-r-0"
+            className="h-auto w-full flex-1 border-r-0"
             onConversationSelected={() => setIsHistoryOpen(false)}
           />
         ) : (
           <>
             {/* Chat Messages */}
-            <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
+            <ScrollArea className="min-h-0 flex-1" ref={scrollAreaRef}>
               <MessageList />
             </ScrollArea>
 
-            {/* Sticky live todos — shown above the input only while a response is in-flight */}
+            {/* Sticky live progress — shown above the input only while a response is in-flight */}
             {liveWorkingSteps.length > 0 && (
-              <div className="px-4 py-2 border-t border-border bg-muted/20">
-                <WorkingBlock steps={liveWorkingSteps} complete={!isWaiting} />
-              </div>
+              <WorkingStrip steps={liveWorkingSteps} complete={!isWaiting} />
             )}
 
             {/* HITL Interrupt Confirmation Card — the single approval surface for all
@@ -273,7 +315,7 @@ export function ChatApp({ compact = false }: ChatAppProps) {
         <>
           {/* Resize Handle (right) */}
           <div
-            className={cn('w-1 cursor-col-resize hover:bg-primary/30 transition-colors', isTaskPanelCollapsed && 'hidden')}
+            className={cn('w-1 cursor-col-resize transition-colors hover:bg-nannos-accent/30', isTaskPanelCollapsed && 'hidden')}
             aria-hidden="true"
           />
           <TaskPanel isCollapsed={isTaskPanelCollapsed} onToggle={() => setIsTaskPanelCollapsed(!isTaskPanelCollapsed)} />

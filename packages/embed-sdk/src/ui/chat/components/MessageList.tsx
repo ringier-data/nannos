@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
+import { AlertTriangle, Sparkles, FileText, Download, Flag, ThumbsUp, ThumbsDown, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Markdown } from '@/components/ui/markdown';
 import { useHostAdapter, type FeedbackRating } from '../../adapter';
@@ -20,7 +19,11 @@ interface MessageCardProps {
 
 /**
  * MessageCard renders individual chat messages with support for file attachments.
- * 
+ *
+ * Agent replies are full-width cards rather than avatar + bubble rows: the embedded
+ * panel is ~400px wide and the replies are markdown documents (headings, metric
+ * tables) that need every pixel. User messages stay short accent bubbles.
+ *
  * File attachments include presigned S3 URLs that are hydrated by the backend
  * whenever messages are loaded, so they're always fresh.
  */
@@ -42,137 +45,122 @@ function MessageCard({ message, feedbackMap, onFeedbackChanged }: MessageCardPro
 
   return (
     <div
-      className={cn(
-        'group flex gap-3 py-4',
-        isUser && 'flex-row-reverse'
-      )}
+      // min-w-0 is load-bearing: markdown tables set a min width per column, and
+      // without it a wide table pushes this flex item past the panel edge instead
+      // of scrolling inside its own container.
+      className={cn('group flex w-full min-w-0 flex-col', isUser && 'items-end')}
       data-testid={`message-${message.id}`}
       data-message-id={message.id}
     >
-      <Avatar
+      <div
         className={cn(
-          'shrink-0 h-8 w-8',
-          isError && 'bg-destructive/20 text-destructive',
-          isUser && 'bg-primary text-primary-foreground',
-          !isError && !isUser && 'bg-muted text-muted-foreground'
+          'space-y-2 overflow-hidden',
+          isUser && 'max-w-[85%] rounded-nannos-card bg-nannos-accent px-3.5 py-2 text-nannos-accent-foreground',
+          isError && 'w-full rounded-nannos-card border border-nannos-danger/30 bg-nannos-danger-soft px-3.5 py-3',
+          !isUser && !isError && 'w-full rounded-nannos-card border border-border bg-nannos-surface-raised px-3.5 py-3',
         )}
       >
-        <AvatarFallback
-          className={cn(
-            isError && 'bg-destructive/20 text-destructive',
-            isUser && 'bg-primary text-primary-foreground',
-            !isError && !isUser && 'bg-muted text-muted-foreground'
-          )}
-        >
-          {isError ? (
-            <AlertTriangle className="w-4 h-4" />
-          ) : isUser ? (
-            <User className="w-4 h-4" />
-          ) : (
-            <Bot className="w-4 h-4" />
-          )}
-        </AvatarFallback>
-      </Avatar>
-      
-      <div className={cn(
-        'flex-1 min-w-0 w-0 space-y-1',
-        isUser && 'flex flex-col items-end'
-      )}>
-        <div
-          className={cn(
-            'rounded-lg px-4 py-2 max-w-[85%] overflow-hidden space-y-2',
-            isError && 'bg-destructive/10 text-destructive border border-destructive/20',
-            isUser && 'bg-primary text-primary-foreground',
-            !isError && !isUser && 'bg-muted'
-          )}
-        >
-          <Markdown inverted={isUser} className="text-sm">
+        <div className={cn(isError && 'flex gap-2')}>
+          {isError && <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-nannos-danger" />}
+          <Markdown inverted={isUser} className={cn('text-sm', isError && 'text-nannos-danger')}>
             {message.content}
           </Markdown>
-          
-          {/* Render file attachments */}
-          {fileParts.length > 0 && (
-            <div className="space-y-2 mt-2">
-              {fileParts.map((file, index) => {
-                const isAudio = file.mimeType?.startsWith('audio/');
-                const isImage = file.mimeType?.startsWith('image/');
-                
-                return (
-                  <div key={index} className="border border-border/50 rounded p-2 bg-background/50">
-                    {isAudio && (
-                      <div className="space-y-1">
-                        <p className="text-xs text-muted-foreground">{file.name || 'Audio recording'}</p>
-                        <audio
-                          controls
-                          src={file.uri}
-                          className="w-full max-w-md"
-                          preload="metadata"
-                        >
-                          Your browser does not support the audio element.
-                        </audio>
-                      </div>
-                    )}
-                    {isImage && (
-                      <div className="space-y-1">
-                        <p className="text-xs text-muted-foreground">{file.name || 'Image'}</p>
-                        <img
-                          src={file.uri}
-                          alt={file.name || 'Attachment'}
-                          className="max-w-md rounded"
-                        />
-                      </div>
-                    )}
-                    {!isAudio && !isImage && (
-                      <a
-                        href={file.uri}
-                        download={file.name}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-2 text-sm hover:underline"
-                      >
-                        <FileText className="w-4 h-4" />
-                        <span className="flex-1 truncate">{file.name || 'Download file'}</span>
-                        <Download className="w-4 h-4 shrink-0" />
-                      </a>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </div>
-        <div className="flex items-center gap-2 px-1">
-          <span className="text-xs text-muted-foreground">{formattedTime}</span>
-          {!isUser && activeConversationId && (
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-              <MessageFeedback
-                conversationId={activeConversationId}
-                messageId={message.id}
-                currentRating={currentRating}
-                onChanged={onFeedbackChanged}
-              />
-              {api.reportIssue && (
-                <button
-                  type="button"
-                  onClick={() => setReportOpen(true)}
-                  className="p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors"
-                  aria-label="Report issue"
+
+        {/* Render file attachments */}
+        {fileParts.length > 0 && (
+          <div className="space-y-2">
+            {fileParts.map((file, index) => {
+              const isAudio = file.mimeType?.startsWith('audio/');
+              const isImage = file.mimeType?.startsWith('image/');
+
+              return (
+                <div
+                  key={index}
+                  className={cn(
+                    'rounded-nannos-control border p-2',
+                    isUser ? 'border-white/25 bg-white/10' : 'border-border bg-nannos-surface',
+                  )}
                 >
-                  <Flag className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-        {reportOpen && activeConversationId && (
-          <ReportIssueDialog
-            open={reportOpen}
-            onOpenChange={setReportOpen}
-            conversationId={activeConversationId}
-            messageId={message.id}
-          />
+                  {isAudio && (
+                    <div className="space-y-1">
+                      <p className={cn('text-xs', isUser ? 'opacity-80' : 'text-muted-foreground')}>
+                        {file.name || 'Audio recording'}
+                      </p>
+                      <audio
+                        controls
+                        src={file.uri}
+                        className="w-full max-w-md"
+                        preload="metadata"
+                      >
+                        Your browser does not support the audio element.
+                      </audio>
+                    </div>
+                  )}
+                  {isImage && (
+                    <div className="space-y-1">
+                      <p className={cn('text-xs', isUser ? 'opacity-80' : 'text-muted-foreground')}>
+                        {file.name || 'Image'}
+                      </p>
+                      <img
+                        src={file.uri}
+                        alt={file.name || 'Attachment'}
+                        className="max-w-full rounded-nannos-control"
+                      />
+                    </div>
+                  )}
+                  {!isAudio && !isImage && (
+                    <a
+                      href={file.uri}
+                      download={file.name}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 text-sm hover:underline"
+                    >
+                      <FileText className="h-4 w-4 shrink-0" />
+                      <span className="flex-1 truncate">{file.name || 'Download file'}</span>
+                      <Download className="h-4 w-4 shrink-0" />
+                    </a>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
+
+      <div className="mt-1 flex items-center gap-2 px-1">
+        <span className="text-[11px] text-muted-foreground">{formattedTime}</span>
+        {!isUser && activeConversationId && (
+          <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+            <MessageFeedback
+              conversationId={activeConversationId}
+              messageId={message.id}
+              currentRating={currentRating}
+              onChanged={onFeedbackChanged}
+            />
+            {api.reportIssue && (
+              <button
+                type="button"
+                onClick={() => setReportOpen(true)}
+                className="rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-muted-foreground"
+                aria-label="Report issue"
+              >
+                <Flag className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {reportOpen && activeConversationId && (
+        <ReportIssueDialog
+          open={reportOpen}
+          onOpenChange={setReportOpen}
+          conversationId={activeConversationId}
+          messageId={message.id}
+        />
+      )}
     </div>
   );
 }
@@ -188,7 +176,7 @@ function ContextChip({ message }: { message: Message }) {
   const expandable = !!message.injectedPrompt;
   return (
     <div
-      className="flex flex-col items-center gap-2 py-3"
+      className="flex flex-col items-center gap-2"
       data-testid={`message-${message.id}`}
       data-message-id={message.id}
     >
@@ -198,22 +186,22 @@ function ContextChip({ message }: { message: Message }) {
         title={message.content}
         aria-expanded={expandable ? expanded : undefined}
         className={cn(
-          'inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/60 px-3 py-1',
-          'text-xs text-muted-foreground max-w-[90%]',
-          expandable && 'hover:bg-muted transition-colors cursor-pointer'
+          'inline-flex max-w-[90%] items-center gap-1.5 rounded-full border border-border bg-nannos-surface-raised px-3 py-1',
+          'text-xs text-muted-foreground',
+          expandable && 'cursor-pointer transition-colors hover:bg-nannos-accent-subtle',
         )}
       >
-        <Sparkles className="w-3 h-3 shrink-0" />
+        <Sparkles className="h-3 w-3 shrink-0 text-nannos-accent" />
         <span className="truncate">{message.content}</span>
         {expandable &&
           (expanded ? (
-            <ChevronUp className="w-3 h-3 shrink-0" />
+            <ChevronUp className="h-3 w-3 shrink-0" />
           ) : (
-            <ChevronDown className="w-3 h-3 shrink-0" />
+            <ChevronDown className="h-3 w-3 shrink-0" />
           ))}
       </button>
       {expanded && message.injectedPrompt && (
-        <div className="max-w-[90%] rounded-md border border-border/50 bg-muted/40 px-3 py-2 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+        <div className="max-w-[90%] rounded-nannos-control border border-border bg-nannos-surface px-3 py-2 text-xs break-words whitespace-pre-wrap text-muted-foreground">
           {message.injectedPrompt}
         </div>
       )}
@@ -223,14 +211,12 @@ function ContextChip({ message }: { message: Message }) {
 
 function LoadingState() {
   return (
-    <div className="space-y-4 p-4">
+    <div className="space-y-3 p-4">
       {[1, 2, 3].map((i) => (
-        <div key={i} className="flex gap-3">
-          <Skeleton className="h-8 w-8 rounded-full shrink-0" />
-          <div className="flex-1 space-y-2">
-            <Skeleton className="h-16 w-3/4 rounded-lg" />
-            <Skeleton className="h-3 w-16" />
-          </div>
+        <div key={i} className="space-y-2 rounded-nannos-card border border-border bg-nannos-surface-raised p-3">
+          <Skeleton className="h-3.5 w-2/5" />
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-4/5" />
         </div>
       ))}
     </div>
@@ -239,9 +225,9 @@ function LoadingState() {
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 py-16 px-4 text-center">
-      <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
-        <Bot className="w-6 h-6 text-muted-foreground" />
+    <div className="flex flex-col items-center justify-center gap-3 px-4 py-16 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-nannos-accent-subtle">
+        <Sparkles className="h-6 w-6 text-nannos-accent" />
       </div>
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">Start a conversation</p>
@@ -284,38 +270,38 @@ function FeedbackRequestBanner({
 
   if (submitted) {
     return (
-      <div className="flex items-center justify-center gap-2 py-3 px-4 bg-green-50 dark:bg-green-950/30 rounded-lg mx-4 my-2">
-        <span className="text-sm text-green-700 dark:text-green-400">Thanks for your feedback!</span>
+      <div className="flex items-center justify-center gap-2 rounded-nannos-card bg-nannos-ok/10 px-4 py-3">
+        <span className="text-sm text-nannos-ok">Thanks for your feedback!</span>
       </div>
     );
   }
 
   return (
-    <div className="flex items-center justify-between gap-3 py-3 px-4 bg-muted/50 border border-border rounded-lg mx-4 my-2">
+    <div className="flex items-center justify-between gap-3 rounded-nannos-card border border-border bg-nannos-surface-raised px-4 py-3">
       <span className="text-sm text-muted-foreground">Was this response helpful?</span>
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => handleFeedback('positive')}
           disabled={submitting}
-          className="p-1.5 rounded hover:bg-green-100 dark:hover:bg-green-900/30 text-muted-foreground hover:text-green-600 dark:hover:text-green-400 transition-colors"
+          className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-nannos-ok/10 hover:text-nannos-ok"
           aria-label="Thumbs up"
         >
-          <ThumbsUp className="w-4 h-4" />
+          <ThumbsUp className="h-4 w-4" />
         </button>
         <button
           type="button"
           onClick={() => handleFeedback('negative')}
           disabled={submitting}
-          className="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-muted-foreground hover:text-red-600 dark:hover:text-red-400 transition-colors"
+          className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-nannos-danger/10 hover:text-nannos-danger"
           aria-label="Thumbs down"
         >
-          <ThumbsDown className="w-4 h-4" />
+          <ThumbsDown className="h-4 w-4" />
         </button>
         <button
           type="button"
           onClick={onDismiss}
-          className="text-xs text-muted-foreground/70 hover:text-muted-foreground ml-2"
+          className="ml-2 text-xs text-muted-foreground/70 hover:text-muted-foreground"
         >
           Dismiss
         </button>
@@ -379,9 +365,9 @@ export function MessageList() {
   }
 
   return (
-    <div className="flex flex-col px-4 divide-y divide-border/50">
+    <div className="flex min-w-0 flex-col gap-3 px-4 py-3">
       {mainMessages.map((msg) => (
-        <div key={msg.id}>
+        <div key={msg.id} className="flex min-w-0 flex-col gap-2">
           {/* Render unified timeline for chronological display of all events */}
           {msg.timeline && msg.timeline.length > 0 && (
             <UnifiedTimelineBlock timeline={msg.timeline} complete={true} />
@@ -401,23 +387,12 @@ export function MessageList() {
       )}
       {/* Steering messages sent while agent is streaming render after the timeline */}
       {trailingUserMessages.map((msg) => (
-        <div key={msg.id}>
-          <MessageCard message={msg} feedbackMap={feedbackMap} onFeedbackChanged={refreshFeedback} />
-        </div>
+        <MessageCard key={msg.id} message={msg} feedbackMap={feedbackMap} onFeedbackChanged={refreshFeedback} />
       ))}
       {streamingMessage && (
-        <div className="flex gap-3 py-4">
-          <Avatar className="shrink-0 h-8 w-8 bg-muted text-muted-foreground">
-            <AvatarFallback className="bg-muted text-muted-foreground">
-              <Bot className="w-4 h-4" />
-            </AvatarFallback>
-          </Avatar>
-          <div className="flex-1 min-w-0 w-0 space-y-1">
-            <div className="rounded-lg px-4 py-2 max-w-[85%] overflow-hidden bg-muted">
-              <Markdown className="text-sm">{streamingMessage}</Markdown>
-              <span className="inline-block w-1.5 h-4 bg-foreground/70 animate-pulse ml-0.5 align-text-bottom rounded-sm" />
-            </div>
-          </div>
+        <div className="w-full min-w-0 rounded-nannos-card border border-border bg-nannos-surface-raised px-3.5 py-3">
+          <Markdown className="text-sm">{streamingMessage}</Markdown>
+          <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-nannos-accent align-text-bottom" />
         </div>
       )}
       {pendingFeedbackRequest?.conversationId === activeConversationId && activeConversationId && (

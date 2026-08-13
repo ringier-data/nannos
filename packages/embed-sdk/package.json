@@ -20,14 +20,17 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --config vite.dev.config.ts",
     "build": "rm -rf dist && vite build && tsc",
     "build:watch": "vite build --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "typecheck:dev": "tsc -p tsconfig.dev.json"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
@@ -60,13 +63,14 @@
   },
   "devDependencies": {
     "@r2wc/react-to-web-component": "^2.0.4",
+    "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.1.17",
-    "tailwindcss": "^4.1.17",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "tailwindcss": "^4.1.17",
     "typescript": "~5.9.3",
     "vite": "^7.2.4",
     "vitest": "^3.0.0",

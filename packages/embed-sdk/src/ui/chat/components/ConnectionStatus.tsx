@@ -102,9 +102,16 @@ export function ConnectionStatus({ className }: ConnectionStatusProps) {
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="sm" className={cn('gap-2', className)}>
-          <div className={cn('w-2 h-2 rounded-full transition-colors', isConnected ? 'bg-green-500' : 'bg-red-500')} />
-          <span className="text-sm">{isConnected ? 'Connected' : 'Disconnected'}</span>
+        <Button variant="ghost" size="sm" className={cn('h-7 gap-1.5 px-2', className)}>
+          <div
+            className={cn(
+              'h-1.5 w-1.5 rounded-full transition-colors',
+              isConnected ? 'bg-nannos-ok' : 'bg-nannos-danger',
+            )}
+          />
+          <span className={cn('text-xs', isConnected ? 'text-nannos-ok' : 'text-nannos-danger')}>
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </span>
         </Button>
       </PopoverTrigger>
       {isConnected && agentInfo && (

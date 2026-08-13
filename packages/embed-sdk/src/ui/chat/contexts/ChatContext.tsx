@@ -51,7 +51,9 @@ interface ChatContextType {
   loadConversations: (search?: string) => Promise<void>;
 }
 
-const ChatContext = createContext<ChatContextType | undefined>(undefined);
+// Exported so a harness or test can render the chat with fixture state instead of a
+// live socket (see dev/main.tsx). Production code should use ChatProvider.
+export const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 // Embedded widgets resume only the conversation THIS browser session was on
 // (sessionStorage: survives reloads in the tab, not new tabs or later visits).

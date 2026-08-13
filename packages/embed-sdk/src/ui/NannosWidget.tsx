@@ -34,6 +34,15 @@ const panelStyle: React.CSSProperties = {
   overflow: 'hidden',
   boxShadow: '0 12px 48px rgba(0,0,0,0.22)',
   background: 'transparent',
+  transition: 'width 180ms ease, height 180ms ease',
+};
+/** Expanded size, driven by the chat header's expand button (core.isExpanded).
+ *  Still anchored bottom-right — the panel grows in place rather than becoming a
+ *  modal, so the host page stays visible and usable behind it. */
+const expandedPanelStyle: React.CSSProperties = {
+  ...panelStyle,
+  width: 'min(720px, calc(100vw - 48px))',
+  height: 'min(900px, calc(100vh - 112px))',
 };
 const launcherStyle: React.CSSProperties = {
   position: 'fixed',
@@ -63,7 +72,15 @@ export function NannosWidget({ core, adapter, defaultOpen = false, launcherLabel
   // or `useNannos().open(prompt)` from anywhere in the tree — drives the same
   // panel. This component just mirrors it and toggles via the core.
   const [open, setOpen] = useState(core?.isOpen ?? defaultOpen);
+  // Same pattern for the expanded size: the header button inside the Shadow DOM
+  // can't resize this panel directly, so it flips core state and we mirror it.
+  const [expanded, setExpanded] = useState(core?.isExpanded ?? false);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!core) return;
+    return core.onExpandChange(setExpanded);
+  }, [core]);
 
   useEffect(() => {
     if (!core) return;
@@ -103,7 +120,7 @@ export function NannosWidget({ core, adapter, defaultOpen = false, launcherLabel
 
   return (
     <>
-      {open && <div ref={panelRef} style={panelStyle} />}
+      {open && <div ref={panelRef} style={expanded ? expandedPanelStyle : panelStyle} />}
       <button
         type="button"
         onClick={onLauncherClick}

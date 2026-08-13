@@ -51,15 +51,19 @@ export function UnifiedTimelineBlock({ timeline, complete }: UnifiedTimelineBloc
         
       case 'status':
         renderedEvents.push(
-          <div key={`status-${idx}`} className="flex items-center gap-2 text-xs text-muted-foreground py-1">
-            <Clock className="w-3 h-3 shrink-0" />
-            <span className="flex-1">
+          <div key={`status-${idx}`} className="flex items-start gap-2 py-0.5 text-xs text-muted-foreground">
+            <Clock className="mt-0.5 h-3 w-3 shrink-0 opacity-70" />
+            <span className="min-w-0 flex-1">
               {event.source && (
-                <span className="font-medium text-foreground/70">{event.source}{'  \u203A  '}</span>
+                <span className="font-nannos-mono text-[11px] font-medium text-foreground/70">
+                  {event.source}{'  \u203A  '}
+                </span>
               )}
               {event.message}
             </span>
-            <span className="text-[10px] opacity-60">{formatTimeAgo(event.timestamp)}</span>
+            <span className="mt-0.5 shrink-0 text-[10px] tabular-nums opacity-60">
+              {formatTimeAgo(event.timestamp)}
+            </span>
           </div>
         );
         break;

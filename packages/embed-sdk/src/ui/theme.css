@@ -1,5 +1,11 @@
 @import 'tailwindcss';
 
+/* Agent output is LLM markdown, so the prose styles in components/ui/markdown.tsx
+   are load-bearing here — without this plugin every `prose-*` class silently
+   compiles to nothing inside the Shadow DOM and tables/lists render as bare HTML.
+   (The console loads the same plugin from its own index.css.) */
+@plugin "@tailwindcss/typography";
+
 @custom-variant dark (&:is(.dark *));
 
 /* Map the shadcn design tokens to Tailwind v4 color utilities. Without this the
@@ -36,14 +42,55 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+
+  /* --- Nannos chat skin -------------------------------------------------------
+     The chat's own visual language. Every value falls back to a shadcn token, so
+     these utilities are safe in surfaces that never load this file (the console
+     compiles its own Tailwind entry and keeps its own palette — an unresolved
+     token would paint TRANSPARENT, not a default). Hosts restyle the widget by
+     redefining the `--nannos-*` custom properties on the embed element. */
+  --color-nannos-accent: var(--nannos-accent, var(--primary));
+  --color-nannos-accent-foreground: var(--nannos-accent-foreground, var(--primary-foreground));
+  --color-nannos-accent-strong: var(--nannos-accent-strong, var(--nannos-accent, var(--primary)));
+  --color-nannos-accent-subtle: var(--nannos-accent-subtle, var(--muted));
+  --color-nannos-surface: var(--nannos-surface, var(--background));
+  --color-nannos-surface-raised: var(--nannos-surface-raised, var(--card));
+  --color-nannos-stripe: var(--nannos-table-stripe, var(--muted));
+  --color-nannos-danger: var(--nannos-danger, var(--destructive));
+  --color-nannos-danger-soft: var(--nannos-danger-soft, var(--muted));
+  --color-nannos-ok: var(--nannos-ok, oklch(0.596 0.145 152));
+  --color-nannos-warn: var(--nannos-warn, oklch(0.769 0.163 70));
+  --radius-nannos-card: var(--nannos-radius-card, 0.75rem);
+  --radius-nannos-control: var(--nannos-radius-control, 0.5rem);
+  --font-nannos-mono: var(--nannos-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 /* Design tokens are declared on :host so they cross the Shadow DOM boundary and
-   so a host can override --nannos-* (or any token) on the embed element. */
-:host {
+   so a host can override --nannos-* (or any token) on the embed element.
+   `.nannos-tokens` carries the same block for light-DOM mounts, where :host never
+   matches — without it every token resolves to transparent (see the note above). */
+:host,
+.nannos-tokens {
   --nannos-radius: 0.5rem;
-  --nannos-accent: oklch(0.6 0.18 250);
   color-scheme: light dark;
+
+  /* Chat skin defaults — the opinionated look. Override any of these from the
+     host page to re-skin the widget without touching the components. */
+  --nannos-accent: oklch(0.541 0.237 293);
+  --nannos-accent-foreground: oklch(1 0 0);
+  --nannos-accent-strong: oklch(0.482 0.239 293);
+  --nannos-accent-subtle: oklch(0.972 0.016 293);
+  --nannos-surface: oklch(0.985 0.002 247.858);
+  --nannos-surface-raised: oklch(1 0 0);
+  --nannos-table-stripe: oklch(0.968 0.007 247.896);
+  --nannos-danger: oklch(0.577 0.245 27.325);
+  --nannos-danger-soft: oklch(0.936 0.033 17.7);
+  --nannos-ok: oklch(0.596 0.145 152);
+  --nannos-warn: oklch(0.769 0.163 70);
+  --nannos-radius-card: 0.75rem;
+  --nannos-radius-control: 0.5rem;
+  --nannos-font-sans: system-ui, sans-serif;
+  --nannos-font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --radius: 0.625rem;
   --background: oklch(1 0 0);
@@ -73,7 +120,20 @@
 
 /* Dark theme when a host stamps `.dark` on the embed element (console convention).
    The chat's `dark:` utilities key off the same `.dark` ancestor. */
-:host(.dark) {
+:host(.dark),
+.nannos-tokens.dark {
+  --nannos-accent: oklch(0.72 0.16 293);
+  --nannos-accent-foreground: oklch(0.208 0.042 265.755);
+  --nannos-accent-strong: oklch(0.78 0.14 293);
+  --nannos-accent-subtle: oklch(0.541 0.237 293 / 22%);
+  --nannos-surface: oklch(0.129 0.042 264.695);
+  --nannos-surface-raised: oklch(0.208 0.042 265.755);
+  --nannos-table-stripe: oklch(1 0 0 / 5%);
+  --nannos-danger: oklch(0.704 0.191 22.216);
+  --nannos-danger-soft: oklch(0.704 0.191 22.216 / 22%);
+  --nannos-ok: oklch(0.72 0.15 152);
+  --nannos-warn: oklch(0.82 0.15 70);
+
   --background: oklch(0.129 0.042 264.695);
   --foreground: oklch(0.984 0.003 247.858);
   --card: oklch(0.208 0.042 265.755);
@@ -101,6 +161,6 @@
 }
 
 .nannos-chat {
-  font-family: system-ui, sans-serif;
+  font-family: var(--nannos-font-sans, system-ui, sans-serif);
   border-radius: var(--nannos-radius);
 }

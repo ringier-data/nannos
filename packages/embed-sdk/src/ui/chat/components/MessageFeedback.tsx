@@ -45,7 +45,7 @@ export function MessageFeedback({ conversationId, messageId, currentRating, onCh
         disabled={isLoading}
         className={cn(
           'p-1 rounded hover:bg-accent transition-colors',
-          rating === 'positive' ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground/50 hover:text-muted-foreground',
+          rating === 'positive' ? 'text-nannos-ok' : 'text-muted-foreground/50 hover:text-muted-foreground',
         )}
         aria-label="Thumbs up"
       >
@@ -57,7 +57,7 @@ export function MessageFeedback({ conversationId, messageId, currentRating, onCh
         disabled={isLoading}
         className={cn(
           'p-1 rounded hover:bg-accent transition-colors',
-          rating === 'negative' ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground/50 hover:text-muted-foreground',
+          rating === 'negative' ? 'text-nannos-danger' : 'text-muted-foreground/50 hover:text-muted-foreground',
         )}
         aria-label="Thumbs down"
       >

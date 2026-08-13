@@ -22,20 +22,19 @@ function ConversationItem({ conversation, isActive, onClick }: ConversationItemP
   return (
     <button
       className={cn(
-        'w-full text-left px-3 py-2.5 rounded-md',
+        'w-full rounded-nannos-control px-3 py-2.5 text-left',
         'transition-colors duration-150',
-        'hover:bg-accent/50',
         'flex items-start gap-3',
-        isActive 
-          ? 'bg-accent text-accent-foreground' 
-          : 'text-foreground/80 hover:text-foreground'
+        isActive
+          ? 'bg-nannos-accent-subtle text-foreground'
+          : 'text-foreground/80 hover:bg-nannos-stripe hover:text-foreground'
       )}
       onClick={onClick}
       data-testid={`conversation-${conversation.id}`}
     >
       <MessageSquare className={cn(
-        'w-4 h-4 mt-0.5 shrink-0',
-        isActive ? 'text-primary' : 'text-muted-foreground'
+        'mt-0.5 h-4 w-4 shrink-0',
+        isActive ? 'text-nannos-accent' : 'text-muted-foreground'
       )} />
       
       <div className="flex-1 min-w-0 space-y-0.5">
@@ -56,7 +55,7 @@ function ConversationItem({ conversation, isActive, onClick }: ConversationItemP
           )}
           {conversation.hasActiveTasks && (
             <Loader2
-              className="w-3.5 h-3.5 text-green-500 animate-spin shrink-0"
+              className="h-3.5 w-3.5 shrink-0 animate-spin text-nannos-ok"
               role="status"
               aria-label="Task running"
             />
@@ -95,11 +94,11 @@ function LoadingState() {
 function EmptyState({ isSearching }: { isSearching?: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-12 px-4 text-center">
-      <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-nannos-accent-subtle">
         {isSearching ? (
-          <Search className="w-6 h-6 text-muted-foreground" />
+          <Search className="h-6 w-6 text-nannos-accent" />
         ) : (
-          <MessageSquare className="w-6 h-6 text-muted-foreground" />
+          <MessageSquare className="h-6 w-6 text-nannos-accent" />
         )}
       </div>
       <div className="space-y-1">
@@ -155,7 +154,7 @@ export function ConversationPanel({ className, onConversationSelected }: Convers
   }, [searchQuery]);
 
   return (
-    <div className={cn('w-64 h-full flex flex-col bg-muted/30 border-r border-border flex-shrink-0 overflow-hidden', className)}>
+    <div className={cn('w-64 h-full flex flex-col bg-nannos-surface border-r border-border flex-shrink-0 overflow-hidden', className)}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <h2 className="text-sm font-semibold text-foreground">Conversations</h2>

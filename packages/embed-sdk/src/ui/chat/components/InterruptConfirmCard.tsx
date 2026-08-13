@@ -47,10 +47,10 @@ interface Decision {
 
 /** Get risk level label and color based on score. */
 function getRiskLevel(score: number): { label: string; color: string; icon: typeof ShieldAlert } {
-  if (score >= 0.9) return { label: 'Critical', color: 'text-red-600 dark:text-red-400', icon: ShieldAlert };
-  if (score >= 0.8) return { label: 'High', color: 'text-orange-600 dark:text-orange-400', icon: ShieldAlert };
-  if (score >= 0.6) return { label: 'Medium', color: 'text-amber-600 dark:text-amber-400', icon: ShieldAlert };
-  return { label: 'Low', color: 'text-yellow-600 dark:text-yellow-400', icon: ShieldCheck };
+  if (score >= 0.9) return { label: 'Critical', color: 'text-nannos-danger', icon: ShieldAlert };
+  if (score >= 0.8) return { label: 'High', color: 'text-nannos-danger', icon: ShieldAlert };
+  if (score >= 0.6) return { label: 'Medium', color: 'text-nannos-warn', icon: ShieldAlert };
+  return { label: 'Low', color: 'text-muted-foreground', icon: ShieldCheck };
 }
 
 function riskMetaOf(action: ActionRequest | undefined): RiskMetadata | undefined {
@@ -78,9 +78,8 @@ function RiskBadge({ riskMeta }: { riskMeta: RiskMetadata }) {
         Risk: {riskLevel.label} ({Math.round(riskMeta.score * 100)}%)
       </span>
       {riskMeta.matched_pattern && (
-        <span className="text-amber-700 dark:text-amber-300">
-          — matched:{' '}
-          <code className="bg-amber-100 dark:bg-amber-900/40 px-1 rounded">{riskMeta.matched_pattern}</code>
+        <span className="text-foreground/60">
+          — matched: <code className="rounded bg-nannos-warn/15 px-1">{riskMeta.matched_pattern}</code>
         </span>
       )}
     </div>
@@ -107,14 +106,14 @@ function ClientActionDetails({ action }: { action: ActionRequest }) {
 
   return (
     <div className="space-y-1 min-w-0">
-      <p className="text-sm font-medium text-amber-900 dark:text-amber-100">{heading}</p>
+      <p className="text-sm font-medium text-foreground">{heading}</p>
       {riskMeta && <RiskBadge riskMeta={riskMeta} />}
       {kind === 'apply' && Object.keys(values).length > 0 && (
-        <div className="rounded border border-amber-500/20 bg-white/60 dark:bg-gray-900/40 divide-y divide-amber-500/10">
+        <div className="rounded border border-nannos-warn/25 bg-nannos-surface-raised divide-y divide-nannos-warn/15">
           {Object.entries(values).map(([k, v]) => (
             <div key={k} className="flex items-baseline justify-between gap-3 px-2 py-1 text-xs">
-              <span className="text-amber-700 dark:text-amber-300 font-mono">{k}</span>
-              <strong className="text-amber-900 dark:text-amber-100 text-right break-all">{String(v)}</strong>
+              <span className="font-nannos-mono text-foreground/60">{k}</span>
+              <strong className="text-foreground text-right break-all">{String(v)}</strong>
             </div>
           ))}
         </div>
@@ -139,9 +138,9 @@ function ActionDetails({ action }: { action: ActionRequest }) {
 
   return (
     <div className="space-y-1 min-w-0">
-      <p className="text-sm font-medium text-amber-900 dark:text-amber-100">{toolLabel}</p>
+      <p className="text-sm font-medium text-foreground">{toolLabel}</p>
       {action.description && (
-        <p className="text-sm text-amber-800 dark:text-amber-200">{action.description}</p>
+        <p className="text-sm text-foreground/80">{action.description}</p>
       )}
       {riskMeta && riskLevel && (
         <div className="flex items-center gap-2 text-xs">
@@ -149,15 +148,14 @@ function ActionDetails({ action }: { action: ActionRequest }) {
             Risk: {riskLevel.label} ({Math.round(riskMeta.score * 100)}%)
           </span>
           {riskMeta.matched_pattern && (
-            <span className="text-amber-700 dark:text-amber-300">
-              — matched:{' '}
-              <code className="bg-amber-100 dark:bg-amber-900/40 px-1 rounded">{riskMeta.matched_pattern}</code>
+            <span className="text-foreground/60">              — matched:{' '}
+              <code className="bg-nannos-warn/15 px-1 rounded">{riskMeta.matched_pattern}</code>
             </span>
           )}
         </div>
       )}
       {metaEntries.length > 0 && (
-        <div className="flex flex-wrap gap-2 text-xs text-amber-700 dark:text-amber-300">
+        <div className="flex flex-wrap gap-2 text-xs text-foreground/70">
           {metaEntries.map(([k, v]) => (
             <span key={k}>
               {k}: <strong>{String(v)}</strong>
@@ -166,8 +164,8 @@ function ActionDetails({ action }: { action: ActionRequest }) {
         </div>
       )}
       {contentValue && (
-        <div className="rounded border bg-white dark:bg-gray-900 p-2 max-h-48 overflow-y-auto">
-          <pre className="text-xs whitespace-pre-wrap font-mono text-gray-700 dark:text-gray-300">
+        <div className="rounded border bg-nannos-surface p-2 max-h-48 overflow-y-auto">
+          <pre className="text-xs whitespace-pre-wrap font-nannos-mono text-foreground/80">
             {contentValue}
           </pre>
         </div>
@@ -204,12 +202,12 @@ function SingleActionCard() {
   const RiskIcon = riskLevel?.icon ?? AlertTriangle;
 
   return (
-    <div className="mx-4 mb-3 rounded-lg border border-amber-500/30 bg-amber-50 dark:bg-amber-950/20 p-4 space-y-3">
+    <div className="mx-4 mb-3 space-y-3 rounded-nannos-card border border-nannos-warn/40 bg-nannos-warn/10 p-4">
       <div className="flex items-start gap-3">
-        <RiskIcon className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+        <RiskIcon className="w-5 h-5 text-nannos-warn shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
           {pendingInterrupt!.reason && (
-            <p className="text-sm text-amber-800 dark:text-amber-200 mb-1">{pendingInterrupt!.reason}</p>
+            <p className="text-sm text-foreground/80 mb-1">{pendingInterrupt!.reason}</p>
           )}
           {action && <ActionDetails action={action} />}
         </div>
@@ -325,13 +323,13 @@ function MultiActionCard() {
   };
 
   return (
-    <div className="mx-4 mb-3 rounded-lg border border-amber-500/30 bg-amber-50 dark:bg-amber-950/20 p-4 space-y-3">
+    <div className="mx-4 mb-3 space-y-3 rounded-nannos-card border border-nannos-warn/40 bg-nannos-warn/10 p-4">
       <div className="flex items-center gap-3">
-        <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
-        <p className="text-sm font-medium text-amber-900 dark:text-amber-100">
+        <AlertTriangle className="w-5 h-5 text-nannos-warn shrink-0" />
+        <p className="text-sm font-medium text-foreground">
           {actions.length} actions need your approval
         </p>
-        <span className="text-xs text-amber-700 dark:text-amber-300 ml-auto">
+        <span className="text-xs text-nannos-warn ml-auto">
           {decidedCount}/{actions.length} decided
         </span>
       </div>
@@ -342,7 +340,7 @@ function MultiActionCard() {
           return (
             <div
               key={callIdOf(action) ?? idx}
-              className="rounded border border-amber-500/20 bg-white/50 dark:bg-gray-900/30 p-3 space-y-2"
+              className="rounded border border-nannos-warn/25 bg-nannos-surface-raised p-3 space-y-2"
             >
               <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">

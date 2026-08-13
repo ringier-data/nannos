@@ -1,0 +1,11 @@
+{
+  // Typechecks the dev harness too. Separate from tsconfig.json because the build
+  // runs `tsc` against that one to emit dist/*.d.ts — pulling dev/ into it would
+  // ship harness typings.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "emitDeclarationOnly": false
+  },
+  "include": ["src", "dev"]
+}

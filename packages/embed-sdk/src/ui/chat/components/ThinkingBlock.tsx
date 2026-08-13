@@ -26,9 +26,9 @@ export function ThinkingBlock({ thoughts, complete = false }: ThinkingBlockProps
           )}
         />
         {complete ? (
-          <Brain className="w-3 h-3" />
+          <Brain className="h-3 w-3" />
         ) : (
-          <Loader2 className="w-3 h-3 animate-spin" />
+          <Loader2 className="h-3 w-3 animate-spin text-nannos-accent" />
         )}
         <span>{complete ? 'Thinking' : 'Thinking…'} {thoughts.length} {thoughts.length === 1 ? 'sub-agent' : 'sub-agents'}</span>
       </CollapsibleTrigger>
@@ -39,7 +39,7 @@ export function ThinkingBlock({ thoughts, complete = false }: ThinkingBlockProps
               <div className="text-xs font-medium text-muted-foreground/80">
                 {thought.agent_name}
               </div>
-              <div className="text-xs text-muted-foreground bg-muted/50 rounded p-2 font-mono whitespace-pre-wrap overflow-x-auto">
+              <div className="overflow-x-auto rounded-nannos-control border border-border bg-nannos-surface p-2 font-nannos-mono text-xs whitespace-pre-wrap text-muted-foreground">
                 {thought.content}
               </div>
             </div>

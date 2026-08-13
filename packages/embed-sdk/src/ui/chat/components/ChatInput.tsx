@@ -1,23 +1,14 @@
 import { useState, useRef, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
-import { Send, AlertTriangle, Mic, X, Paperclip, Square, ChevronUp, ArrowRight, Plus } from 'lucide-react';
+import { Send, AlertTriangle, Mic, X, Paperclip, Square } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { useChat } from '../contexts';
 import { useHostAdapter } from '../../adapter';
 import { AudioRecorder } from './AudioRecorder';
 import { toast } from 'sonner';
-
-/** The three ways to send a message while the agent is processing. */
-type SendMode = 'steer' | 'queue' | 'stop-and-send';
 
 interface PendingFile {
   id: string;
@@ -40,7 +31,6 @@ export function ChatInput() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounterRef = useRef(0);
-  const [sendMode, setSendMode] = useState<SendMode>('steer');
 
   const canSend = isConnected && (value.trim().length > 0 || pendingFiles.length > 0) && !isUploading;
 
@@ -219,42 +209,13 @@ export function ChatInput() {
     return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
   };
 
-  const handleStopAndSend = async () => {
-    if (!canSend) return;
-    interruptTask();
-    // Small delay so the cancellation propagates before the new message
-    await new Promise((r) => setTimeout(r, 50));
-    await handleSend();
-  };
-
-  /** Dispatch based on the current send mode while the agent is processing. */
-  const handleWaitingSend = async () => {
-    switch (sendMode) {
-      case 'stop-and-send':
-        return handleStopAndSend();
-      case 'queue':
-      case 'steer':
-      default:
-        // Both steer and queue use the same send path — the backend
-        // detects the active task and routes as a steering message.
-        return handleSend();
-    }
-  };
-
+  // One send action, in every state. While the agent is working the same send is
+  // routed by the backend as a steering message for the active task; cancelling
+  // is the separate stop button rather than a mode hidden behind a menu.
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (isWaiting) {
-        if (e.altKey) {
-          // ⌥Enter always steers regardless of current mode
-          handleSend();
-        } else {
-          // Enter uses the selected send mode
-          handleWaitingSend();
-        }
-      } else {
-        handleSend();
-      }
+      handleSend();
     }
   };
 
@@ -276,10 +237,10 @@ export function ChatInput() {
   // Show warning when impersonating
   if (isImpersonating) {
     return (
-      <div className="p-4 border-t border-border bg-card">
-        <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
-          <AlertTriangle className="h-4 w-4 text-amber-600" />
-          <AlertDescription className="text-amber-600">
+      <div className="border-t border-border bg-nannos-surface-raised p-4">
+        <Alert variant="default" className="border-nannos-warn/50 bg-nannos-warn/10">
+          <AlertTriangle className="h-4 w-4 text-nannos-warn" />
+          <AlertDescription className="text-nannos-warn">
             Chat is unavailable while impersonating. Chat requires the user's access token which is not available during
             impersonation.
           </AlertDescription>
@@ -292,10 +253,10 @@ export function ChatInput() {
   // their turns act on that page's registered forms/objects, which don't exist here.
   if (activeConversationReadOnly) {
     return (
-      <div className="p-4 border-t border-border bg-card" data-testid="embedded-readonly-notice">
-        <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
-          <AlertTriangle className="h-4 w-4 text-amber-600" />
-          <AlertDescription className="text-amber-600">
+      <div className="border-t border-border bg-nannos-surface-raised p-4" data-testid="embedded-readonly-notice">
+        <Alert variant="default" className="border-nannos-warn/50 bg-nannos-warn/10">
+          <AlertTriangle className="h-4 w-4 text-nannos-warn" />
+          <AlertDescription className="text-nannos-warn">
             This conversation was created by an embedded assistant in another application and is read-only here.
             Continue it from that application.
           </AlertDescription>
@@ -307,10 +268,7 @@ export function ChatInput() {
   return (
     <>
       <div
-        className={cn(
-          'flex flex-col gap-2 p-4 border-t border-border bg-card relative',
-          isDragging && 'ring-2 ring-primary ring-offset-2'
-        )}
+        className="relative flex flex-col gap-2 border-t border-border bg-nannos-surface-raised p-3"
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
@@ -318,44 +276,56 @@ export function ChatInput() {
       >
         {/* Drag overlay */}
         {isDragging && (
-          <div className="absolute inset-0 bg-primary/10 backdrop-blur-sm flex items-center justify-center z-10 rounded-lg">
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-nannos-card bg-nannos-accent-subtle/90 backdrop-blur-sm">
             <div className="text-center">
-              <Paperclip className="w-12 h-12 mx-auto mb-2 text-primary" />
+              <Paperclip className="mx-auto mb-2 h-8 w-8 text-nannos-accent" />
               <p className="text-sm font-medium">Drop files here</p>
             </div>
           </div>
         )}
+
         {/* Pending files preview */}
         {pendingFiles.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {pendingFiles.map((file) => (
-              <div key={file.id} className="flex items-center gap-2 px-3 py-2 bg-muted rounded-md text-sm">
+              <div
+                key={file.id}
+                className="flex items-center gap-2 rounded-nannos-control border border-border bg-nannos-surface px-2 py-1.5 text-sm"
+              >
                 {file.previewUrl ? (
-                  <img src={file.previewUrl} alt={file.name} className="w-8 h-8 object-cover rounded" />
+                  <img src={file.previewUrl} alt={file.name} className="h-8 w-8 rounded object-cover" />
                 ) : file.type.startsWith('audio/') ? (
-                  <Mic className="w-4 h-4 text-muted-foreground" />
+                  <Mic className="h-4 w-4 text-muted-foreground" />
                 ) : (
-                  <Paperclip className="w-4 h-4 text-muted-foreground" />
+                  <Paperclip className="h-4 w-4 text-muted-foreground" />
                 )}
-                <div className="flex flex-col min-w-0">
-                  <span className="truncate max-w-[200px]">{file.name}</span>
-                  <span className="text-xs text-muted-foreground">{formatFileSize(file.size)}</span>
+                <div className="flex min-w-0 flex-col">
+                  <span className="max-w-[180px] truncate text-xs">{file.name}</span>
+                  <span className="text-[11px] text-muted-foreground">{formatFileSize(file.size)}</span>
                 </div>
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-6 w-6 flex-shrink-0"
+                  className="h-6 w-6 shrink-0"
                   onClick={() => removeFile(file.id)}
+                  aria-label={`Remove ${file.name}`}
                 >
-                  <X className="w-4 h-4" />
+                  <X className="h-3.5 w-3.5" />
                 </Button>
               </div>
             ))}
           </div>
         )}
 
-        <div className="flex gap-2">
-          {/* File attachment button */}
+        {/* Single composer shell: attachments and mic sit inside the field, so the
+            only thing competing with the text is the send action itself. */}
+        <div
+          className={cn(
+            'flex items-end gap-1 rounded-nannos-card border border-border bg-nannos-surface-raised px-1.5 py-1.5',
+            'transition-colors focus-within:border-nannos-accent',
+            isDragging && 'border-nannos-accent',
+          )}
+        >
           <input
             ref={fileInputRef}
             type="file"
@@ -366,25 +336,23 @@ export function ChatInput() {
           />
           <Button
             size="icon"
-            variant="outline"
+            variant="ghost"
             onClick={() => fileInputRef.current?.click()}
             disabled={!isConnected || isUploading}
-            className="flex-shrink-0"
+            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Attach file"
           >
-            <Paperclip className="w-5 h-5" />
+            <Paperclip className="h-4 w-4" />
           </Button>
-
-          {/* Microphone button */}
           <Button
             size="icon"
-            variant="outline"
+            variant="ghost"
             onClick={() => setIsRecording(true)}
             disabled={!isConnected || isUploading}
-            className="flex-shrink-0"
+            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Record audio"
           >
-            <Mic className="w-5 h-5" />
+            <Mic className="h-4 w-4" />
           </Button>
 
           <Textarea
@@ -400,88 +368,37 @@ export function ChatInput() {
                   ? 'Connect to an agent to start chatting...'
                   : isWaiting
                     ? 'Send a follow-up message to steer the agent...'
-                    : 'Type your message... (paste images or drag & drop files)'
+                    : 'Type your message...'
             }
             disabled={!isConnected || isUploading}
-            rows={2}
-            className={cn('flex-1 resize-none', 'transition-all duration-200')}
+            rows={1}
+            className={cn(
+              'min-h-8 flex-1 resize-none border-0 bg-transparent px-1 py-1.5 text-sm shadow-none',
+              'focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent',
+            )}
             data-testid="input-message"
           />
-          {isWaiting ? (
-            <div className="flex flex-shrink-0">
-              {/* Primary action button (current send mode) */}
-              <Button
-                onClick={handleWaitingSend}
-                disabled={!canSend}
-                className="rounded-r-none h-auto p-3"
-                data-testid="button-send"
-                aria-label={
-                  sendMode === 'steer'
-                    ? 'Steer with message'
-                    : sendMode === 'queue'
-                      ? 'Add to queue'
-                      : 'Stop and send'
-                }
-              >
-                {sendMode === 'steer' && <Send className="w-4 h-4" />}
-                {sendMode === 'queue' && <Plus className="w-4 h-4" />}
-                {sendMode === 'stop-and-send' && <ArrowRight className="w-4 h-4" />}
-              </Button>
 
-              {/* Mode selector dropdown */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    className="rounded-l-none border-l border-primary-foreground/20 h-auto px-1.5"
-                    aria-label="Choose send mode"
-                    data-testid="button-send-mode"
-                  >
-                    <ChevronUp className="w-3 h-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" side="top" className="w-56">
-                  <DropdownMenuItem onClick={() => setSendMode('stop-and-send')}>
-                    <ArrowRight className="w-4 h-4" />
-                    <span className="flex-1">Stop and Send</span>
-                    {sendMode === 'stop-and-send' && <span className="text-xs text-primary">●</span>}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setSendMode('steer')}>
-                    <Send className="w-4 h-4" />
-                    <span className="flex-1">Steer with Message</span>
-                    <kbd className="ml-auto text-xs text-muted-foreground">⌥↵</kbd>
-                    {sendMode === 'steer' && <span className="text-xs text-primary ml-1">●</span>}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setSendMode('queue')}>
-                    <Plus className="w-4 h-4" />
-                    <span className="flex-1">Add to Queue</span>
-                    <kbd className="ml-auto text-xs text-muted-foreground">↵</kbd>
-                    {sendMode === 'queue' && <span className="text-xs text-primary ml-1">●</span>}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+          <Button
+            onClick={handleSend}
+            disabled={!canSend}
+            size="icon"
+            className="h-8 w-8 shrink-0 rounded-nannos-control bg-nannos-accent text-nannos-accent-foreground hover:bg-nannos-accent-strong"
+            data-testid="button-send"
+            aria-label={isWaiting ? 'Send follow-up message' : 'Send message'}
+          >
+            <Send className="h-4 w-4" />
+          </Button>
 
-              {/* Stop button — always available during processing */}
-              <Button
-                onClick={interruptTask}
-                size="icon"
-                variant="destructive"
-                className="flex-shrink-0 h-auto p-3 ml-1"
-                data-testid="button-stop"
-                aria-label="Stop generation"
-              >
-                <Square className="w-4 h-4 fill-current" />
-              </Button>
-            </div>
-          ) : (
+          {isWaiting && (
             <Button
-              onClick={handleSend}
-              disabled={!canSend}
+              onClick={interruptTask}
               size="icon"
-              className="flex-shrink-0 h-auto p-3"
-              data-testid="button-send"
-              aria-label="Send message"
+              className="h-8 w-8 shrink-0 rounded-nannos-control bg-nannos-danger-soft text-nannos-danger hover:bg-nannos-danger/20"
+              data-testid="button-stop"
+              aria-label="Stop generation"
             >
-              <Send className="w-5 h-5" />
+              <Square className="h-3.5 w-3.5 fill-current" />
             </Button>
           )}
         </div>

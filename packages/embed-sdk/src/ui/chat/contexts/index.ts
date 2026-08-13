@@ -1,2 +1,2 @@
-export { SocketProvider, useSocket } from './SocketContext';
-export { ChatProvider, useChat, type PlaygroundMode } from './ChatContext';
+export { SocketProvider, useSocket, SocketContext } from './SocketContext';
+export { ChatProvider, useChat, ChatContext, type PlaygroundMode } from './ChatContext';

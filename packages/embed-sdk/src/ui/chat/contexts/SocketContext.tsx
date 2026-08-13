@@ -37,7 +37,8 @@ interface SocketContextType {
   onEvent: (event: string, callback: (data: unknown) => void) => () => void;
 }
 
-const SocketContext = createContext<SocketContextType | undefined>(undefined);
+// Exported for the same reason as ChatContext — fixture rendering without a socket.
+export const SocketContext = createContext<SocketContextType | undefined>(undefined);
 
 interface SocketProviderProps {
   children: ReactNode;

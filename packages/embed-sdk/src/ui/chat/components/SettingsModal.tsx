@@ -140,7 +140,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   </SelectContent>
                 </Select>
                 {userSettings?.preferred_model_retired && model === userSettings.preferred_model ? (
-                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                  <p className="text-xs text-nannos-warn">
                     This model was retired — the orchestrator now uses{' '}
                     {userSettings.effective_preferred_model ? getModelLabel(userSettings.effective_preferred_model, availableModels) : 'the default'}. Pick a replacement to update it.
                   </p>

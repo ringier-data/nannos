@@ -64,8 +64,8 @@ function CopyableId({ label, value }: { label: string; value: string }) {
           onClick={handleCopy}
         >
           <span>{label}:</span>
-          <span className="font-mono">{shortenIdentifier(value)}</span>
-          {copied && <span className="text-green-500">✓</span>}
+          <span className="font-nannos-mono">{shortenIdentifier(value)}</span>
+          {copied && <span className="text-nannos-ok">✓</span>}
         </button>
       </TooltipTrigger>
       <TooltipContent>{`Click to copy: ${value}`}</TooltipContent>
@@ -112,14 +112,14 @@ function TaskCard({ task }: TaskCardProps) {
     switch (normalizedStatus) {
       case 'completed':
       case 'succeeded':
-        return 'bg-green-500/10 text-green-600 dark:text-green-400';
+        return 'bg-nannos-ok/10 text-nannos-ok';
       case 'failed':
-        return 'bg-red-500/10 text-red-600 dark:text-red-400';
+        return 'bg-nannos-danger/10 text-nannos-danger';
       case 'running':
       case 'in_progress':
-        return 'bg-blue-500/10 text-blue-600 dark:text-blue-400';
+        return 'bg-nannos-accent/10 text-nannos-accent';
       case 'cancelled':
-        return 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400';
+        return 'bg-nannos-warn/10 text-nannos-warn';
       default:
         return 'bg-muted text-muted-foreground';
     }
@@ -155,7 +155,7 @@ function TaskCard({ task }: TaskCardProps) {
       <div className="pt-1 space-y-0.5">
         {validationErrors.length > 0 && (
           <CollapsibleSection title={`Errors (${validationErrors.length})`}>
-            <ul className="space-y-0.5 text-xs text-red-600 dark:text-red-400">
+            <ul className="space-y-0.5 text-xs text-nannos-danger">
               {validationErrors.map((error, i) => (
                 <li key={i}>• {error}</li>
               ))}
@@ -171,7 +171,7 @@ function TaskCard({ task }: TaskCardProps) {
 
         {task.result && (
           <CollapsibleSection title="Result">
-            <pre className="text-xs bg-muted rounded p-2 overflow-x-auto max-h-32 overflow-y-auto font-mono">
+            <pre className="text-xs bg-muted rounded p-2 overflow-x-auto max-h-32 overflow-y-auto font-nannos-mono">
               {task.result}
             </pre>
           </CollapsibleSection>
@@ -206,7 +206,7 @@ export function TaskPanel({ isCollapsed, onToggle }: TaskPanelProps) {
   return (
     <div
       className={cn(
-        'h-full flex flex-col bg-muted/30 border-l border-border transition-all duration-200 overflow-hidden',
+        'h-full flex flex-col bg-nannos-surface border-l border-border transition-all duration-200 overflow-hidden',
         isCollapsed ? 'w-0' : 'w-72'
       )}
     >

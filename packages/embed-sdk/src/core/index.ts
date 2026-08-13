@@ -56,6 +56,8 @@ export class NannosCore {
   private bufferedPrompt: { text: string; opts?: InjectedPromptOptions } | null = null;
   private opened = false;
   private readonly openListeners = new Set<(open: boolean) => void>();
+  private expanded = false;
+  private readonly expandListeners = new Set<(expanded: boolean) => void>();
   private agentUrlPromise: Promise<string | null> | null = null;
   private subAgentNamePromise: Promise<string | null> | null = null;
 
@@ -248,6 +250,43 @@ export class NannosCore {
     this.openListeners.add(cb);
     cb(this.opened);
     return () => this.openListeners.delete(cb);
+  }
+
+  /** Is the panel in its expanded (large) size. Lives on the core for the same
+   *  reason open-state does: the panel element is owned by the host-side widget,
+   *  OUTSIDE the Shadow DOM, while the button that toggles it is the chat header
+   *  INSIDE it. Neither can reach the other except through here. */
+  get isExpanded(): boolean {
+    return this.expanded;
+  }
+
+  private setExpanded(next: boolean) {
+    if (this.expanded === next) return;
+    this.expanded = next;
+    for (const l of this.expandListeners) l(next);
+  }
+
+  /** Grow the panel to its expanded size. */
+  expand() {
+    this.setExpanded(true);
+  }
+
+  /** Return the panel to its default size. */
+  collapse() {
+    this.setExpanded(false);
+  }
+
+  /** Flip expanded/default size (what the chat header's expand button calls). */
+  toggleExpanded() {
+    this.setExpanded(!this.expanded);
+  }
+
+  /** Subscribe to expanded-size changes; fires immediately with the current state.
+   *  Returns an unsubscribe fn. */
+  onExpandChange(cb: (expanded: boolean) => void): () => void {
+    this.expandListeners.add(cb);
+    cb(this.expanded);
+    return () => this.expandListeners.delete(cb);
   }
 
   /**
