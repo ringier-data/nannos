@@ -11,6 +11,7 @@ from ringier_a2a_sdk.utils.mcp_errors import (
     format_mcp_error,
     get_mcp_error_body,
     get_mcp_http_status_error,
+    is_mcp_transport_error,
     is_retryable_mcp_error,
     log_mcp_gateway_error,
 )
@@ -30,6 +31,35 @@ def _nested_group(leaf: BaseException, depth: int = 2) -> BaseException:
     for _ in range(depth):
         exc = ExceptionGroup("nested", [exc])
     return exc
+
+
+class TestIsMcpTransportError:
+    def test_httpx_error_is_transport_error(self):
+        assert is_mcp_transport_error(_http_error(400)) is True
+        assert is_mcp_transport_error(httpx.ConnectTimeout("boom")) is True
+
+    def test_mcp_sdk_error_is_transport_error(self):
+        # The MCP SDK's own error for JSON-RPC-level failures (e.g. a
+        # synthesized "Session terminated" on a 404, or any JSON-RPC error
+        # during initialize/tools/list) — never an httpx exception, but
+        # unambiguously a remote-side gateway failure.
+        from mcp.shared.exceptions import McpError
+        from mcp.types import ErrorData
+
+        err = McpError(ErrorData(code=-32000, message="Session terminated"))
+        assert is_mcp_transport_error(err) is True
+
+    def test_nested_mcp_sdk_error_is_transport_error(self):
+        from mcp.shared.exceptions import McpError
+        from mcp.types import ErrorData
+
+        err = McpError(ErrorData(code=-32000, message="Session terminated"))
+        assert is_mcp_transport_error(_nested_group(err)) is True
+
+    def test_unrelated_error_is_not_transport_error(self):
+        # A bug in our own code (e.g. a schema-validation ValueError) raised
+        # from the same try block must not be classified as a gateway failure.
+        assert is_mcp_transport_error(ValueError("schema bug")) is False
 
 
 class TestIsRetryableMcpError:

@@ -4,6 +4,11 @@ import logging
 
 import httpx
 
+try:
+    from mcp.shared.exceptions import McpError
+except ImportError:  # pragma: no cover - mcp SDK not installed in this environment
+    McpError = ()  # isinstance() against an empty tuple never matches; nested tuples flatten fine
+
 
 def flatten_exceptions(error: BaseException) -> list[BaseException]:
     """Recursively flatten ExceptionGroups into their leaf exceptions.
@@ -23,22 +28,30 @@ def flatten_exceptions(error: BaseException) -> list[BaseException]:
 
 
 def is_mcp_transport_error(error: Exception) -> bool:
-    """True if `error` is (or wraps) an httpx-raised HTTP/network error.
+    """True if `error` is (or wraps) a genuine MCP gateway/transport failure.
 
-    Distinguishes a genuine gateway/transport failure — worth retrying or
-    degrading gracefully — from an unrelated programming error (e.g. a bug in
-    our own tool-schema validation code) that happens to be raised from the
-    same try block. The latter must never be silently reported to the user as
+    Distinguishes that from an unrelated programming error (e.g. a bug in our
+    own tool-schema validation code) that happens to be raised from the same
+    try block. The latter must never be silently reported to the user as
     "temporarily unavailable" forever; it should crash loudly like any other bug.
+
+    Covers two shapes a gateway failure actually arrives as:
+    - httpx.HTTPError (HTTPStatusError, or the RequestError family: timeouts,
+      connect errors) — raised for a plain failed HTTP request.
+    - mcp.shared.exceptions.McpError — the MCP SDK's own error, raised for a
+      JSON-RPC-level failure the gateway returns *without* an HTTP error status
+      (e.g. streamable_http.py synthesizes one for a 404 rather than raising
+      HTTPStatusError, and any JSON-RPC error during initialize/tools/list —
+      gateway up, downstream MCP server down, the canonical way an MCP
+      *gateway* specifically degrades — surfaces this way too).
 
     Args:
         error: Exception raised during MCP connection/discovery
 
     Returns:
-        True if any leaf is an httpx.HTTPError (covers HTTPStatusError and the
-        RequestError family: timeouts, connect errors, etc.)
+        True if any leaf is one of the above
     """
-    return any(isinstance(leaf, httpx.HTTPError) for leaf in flatten_exceptions(error))
+    return any(isinstance(leaf, (httpx.HTTPError, McpError)) for leaf in flatten_exceptions(error))
 
 
 def is_retryable_mcp_error(error: Exception) -> bool:

@@ -577,6 +577,29 @@ class TestDiscoverMcpTools:
         assert runnable._mcp_discovery_error is None
 
     @pytest.mark.asyncio
+    async def test_discovery_error_survives_a_later_raising_call(self, runnable):
+        """A degraded call followed by a *raising* call (auth failure, or any
+        non-transport error) must NOT clear the error — only an actual
+        successful resolution should. Otherwise _ensure_agent's guard would
+        see a cleared error next to still-cached degraded tools and wrongly
+        treat the instance as resolved, permanently skipping the retry it's
+        meant to allow (this is the within-turn "stale pin" the reset-at-entry
+        version of this method was vulnerable to)."""
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            mock_client_cls.return_value.get_tools = AsyncMock(
+                side_effect=ExceptionGroup("boom", [_http_error(400)])
+            )
+            await runnable._discover_mcp_tools()
+        assert runnable._mcp_discovery_error is not None
+
+        runnable.oauth2_client.exchange_token = AsyncMock(side_effect=RuntimeError("token exchange failed"))
+        with pytest.raises(RuntimeError, match="token exchange failed"):
+            await runnable._discover_mcp_tools()
+
+        # The raise must not have cleared the still-outstanding degrade.
+        assert runnable._mcp_discovery_error is not None
+
+    @pytest.mark.asyncio
     async def test_ensure_agent_retries_discovery_after_degraded_call(self, runnable):
         """A degraded _ensure_agent() call must not permanently pin the instance
         at zero MCP tools: the next call should retry discovery, not treat the
