@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
-import { Settings, PanelRightOpen, ExternalLink, History, X, Plus } from 'lucide-react';
+import { Settings, PanelRightOpen, ExternalLink, History, X, Plus, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useHostAdapter, useNannosCoreOptional } from '../adapter';
 import { Button } from '@/components/ui/button';
@@ -16,6 +16,11 @@ import {
 } from './components';
 import { WorkingBlock } from './components/WorkingBlock';
 import { InterruptConfirmCard } from './components/InterruptConfirmCard';
+import { downloadTextFile, formatConversationAsText, slugifyFilename } from './utils';
+
+// Matches the backend's hard cap in message_router.py (limit is validated to <= 100,
+// no offset/cursor pagination) — the console never loads more than this per conversation.
+const MESSAGE_FETCH_LIMIT = 100;
 
 export interface ChatAppProps {
   /** Compact single-pane layout for embedded/narrow surfaces: hides the
@@ -28,7 +33,7 @@ export function ChatApp({ compact = false }: ChatAppProps) {
   const { isAdmin, links, api, agentName: agentNameOverride } = useHostAdapter();
   const core = useNannosCoreOptional();
   const { agentInfo } = useSocket();
-  const { messages, activeConversationId, liveWorkingSteps, isWaiting, createConversation } = useChat();
+  const { messages, conversations, activeConversationId, liveWorkingSteps, isWaiting, createConversation } = useChat();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(true);
   // Compact mode has no sidebar; the header's History button swaps the chat body
@@ -58,6 +63,13 @@ export function ChatApp({ compact = false }: ChatAppProps) {
   // handshake's agent name → generic fallback.
   const agentName =
     agentNameOverride || subAgentName || agentInfo?.name || agentInfo?.title || 'A2A Assistant';
+
+  const handleExportConversation = () => {
+    const activeConversation = conversations.find((c) => c.id === activeConversationId);
+    const title = activeConversation?.title || agentName;
+    const text = formatConversationAsText(title, messages, messages.length >= MESSAGE_FETCH_LIMIT);
+    downloadTextFile(`${slugifyFilename(title)}.txt`, text);
+  };
 
   // Auto-scroll to bottom on new messages / streaming content. The shadcn
   // ScrollArea marks its scrollable viewport with data-slot="scroll-area-viewport"
@@ -160,6 +172,25 @@ export function ChatApp({ compact = false }: ChatAppProps) {
             )}
             {activeConversationId && (
               <>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={handleExportConversation}
+                        data-testid="button-export-conversation"
+                        aria-label="Export conversation"
+                      >
+                        <Download className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Export conversation</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 {links.usage && (
                   <TooltipProvider>
                     <Tooltip>

@@ -15,6 +15,7 @@ export {
 } from '../../core';
 
 import { getTaskState } from '../../core';
+import type { Message } from './types';
 
 /**
  * Escape HTML special characters
@@ -283,4 +284,56 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Trigger a browser download of text content as a file
+ */
+export function downloadTextFile(filename: string, content: string, mimeType = 'text/plain'): void {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Render a conversation's messages as a plain-text transcript for export.
+ *
+ * `truncated` should be set when `messages` may not be the full history (the
+ * console only ever loads the most recent MESSAGE_FETCH_LIMIT messages, with
+ * no pagination) so the export doesn't silently look complete when it isn't.
+ */
+export function formatConversationAsText(title: string, messages: Message[], truncated = false): string {
+  const lines = [title, '='.repeat(title.length), ''];
+  if (truncated) {
+    lines.push(
+      '⚠ This export may be incomplete: only the most recently loaded messages are included; earlier history was not fetched.',
+      ''
+    );
+  }
+  for (const message of messages) {
+    if (message.showMessageCard === false) continue;
+    const speaker = message.type === 'user' ? 'User' : 'Assistant';
+    lines.push(`[${formatTimestamp(message.timestamp)}] ${speaker}:`);
+    lines.push(message.content);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build a filesystem-safe filename from a conversation title
+ */
+export function slugifyFilename(title: string): string {
+  const slug = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'conversation';
 }
