@@ -167,6 +167,14 @@ class GraphRuntimeContext:
     Loaded from user_settings.tool_bypass_rules at context build time.
     """
 
+    identity_consent_grants: dict[str, Any] = field(default_factory=dict)
+    """Remembered per-(user, tool) consent answers for identity-scoped tools.
+
+    Format: {"tool_name::server_slug": {"granted": true|false}}
+    Loaded from user_settings.identity_consent_grants at context build time.
+    Deliberately separate from tool_bypass_rules (different axis — see ADR 0006).
+    """
+
     tool_server_map: dict[str, str] = field(default_factory=dict)
     """Mapping of tool_name -> server_slug for MCP tools.
 
@@ -286,9 +294,15 @@ class UserConfig(BaseModel):
         default_factory=dict,
         description="User's per-tool HITL bypass rules from settings",
     )
+    identity_consent_grants: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Remembered per-(user, tool) consent answers for identity-scoped tools",
+    )
 
     # Private attribute for pending bypass rules accumulated during a turn
     _pending_bypass_rules: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    # Private attribute for consent answers given during a turn, pending persistence
+    _pending_identity_consents: list[dict[str, Any]] = PrivateAttr(default_factory=list)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

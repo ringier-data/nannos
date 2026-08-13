@@ -73,6 +73,7 @@ class TestOrchestratorThinkingConfig:
         mock_user.thinking_level = "high"
         mock_user.system_role = "member"
         mock_user.tool_bypass_rules = {}
+        mock_user.identity_consent_grants = {}
 
         with patch.object(executor.registry_service, "get_user", return_value=mock_user):
             # Build user config - updated signature requires user object
@@ -122,6 +123,7 @@ class TestOrchestratorThinkingConfig:
         mock_user.thinking_level = "low"  # User preference is "low"
         mock_user.system_role = "member"
         mock_user.tool_bypass_rules = {}
+        mock_user.identity_consent_grants = {}
 
         with patch.object(executor.registry_service, "get_user", return_value=mock_user):
             # Build user config with metadata override - updated signature
@@ -248,6 +250,7 @@ class TestExecutorThinkingFlow:
         mock_user.preferred_model = "claude-sonnet-4.5"
         mock_user.system_role = "member"
         mock_user.tool_bypass_rules = {}
+        mock_user.identity_consent_grants = {}
 
         with patch.object(executor.registry_service, "get_user", return_value=mock_user):
             with patch.object(executor.agent, "get_or_create_graph") as mock_get_graph:

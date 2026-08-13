@@ -30,6 +30,7 @@ from .a2a_tracking import A2ATaskTrackingMiddleware, A2ATrackingState
 from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState
 from .dynamic_tool_dispatch import DynamicToolDispatchMiddleware
 from .error_classification_middleware import ErrorClassificationMiddleware
+from .identity_scoped import IdentityConsentMiddleware
 from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
 from .toolset_selector import ToolsetSelectorMiddleware
 from .user_preferences_middleware import UserPreferencesMiddleware
@@ -41,6 +42,7 @@ __all__ = [
     "AuthErrorDetectionMiddleware",
     "AuthErrorState",
     "ErrorClassificationMiddleware",
+    "IdentityConsentMiddleware",
     "TodoStatusMiddleware",
     "TodoStatusState",
     "ToolSchemaCleaningMiddleware",

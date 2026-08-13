@@ -256,6 +256,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             thinking_level=thinking_level,
             user_system_role=user.system_role,
             tool_bypass_rules=user.tool_bypass_rules,
+            identity_consent_grants=user.identity_consent_grants,
         )
 
         # Discover capabilities (tools and sub-agents), memoized per-user to avoid
@@ -927,6 +928,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         )
                     except Exception:
                         logger.warning("Failed to persist bypass rules", exc_info=True)
+
+                # Persist identity-scoped tool consent answers given this turn (Gate 3).
+                pending_consents = getattr(user_config, "_pending_identity_consents", None)
+                if pending_consents:
+                    try:
+                        await self.registry_service.persist_identity_consents(
+                            access_token=user_token,
+                            pending_consents=pending_consents,
+                        )
+                    except Exception:
+                        logger.warning("Failed to persist identity consents", exc_info=True)
 
             # Log unconsumed steering messages before cleanup. Count via qsize() —
             # get_orchestrator_pending_messages would DRAIN the queue just to count it.

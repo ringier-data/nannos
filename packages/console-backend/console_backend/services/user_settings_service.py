@@ -32,9 +32,9 @@ class UserSettingsService:
             The user settings (defaults if not found)
         """
         query = text("""
-            SELECT user_id, language, timezone, custom_prompt, mcp_tools, 
+            SELECT user_id, language, timezone, custom_prompt, mcp_tools,
                    preferred_model, enable_thinking, thinking_level,
-                   phone_number_override, tool_bypass_rules,
+                   phone_number_override, tool_bypass_rules, identity_consent_grants,
                    created_at, updated_at
             FROM user_settings
             WHERE user_id = :user_id
@@ -59,6 +59,9 @@ class UserSettingsService:
                 thinking_level=row["thinking_level"],
                 phone_number_override=row["phone_number_override"],
                 tool_bypass_rules=row["tool_bypass_rules"] if row["tool_bypass_rules"] is not None else {},
+                identity_consent_grants=row["identity_consent_grants"]
+                if row["identity_consent_grants"] is not None
+                else {},
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
@@ -79,6 +82,7 @@ class UserSettingsService:
         thinking_level: OrchestratorThinkingLevel | None = _UNSET,
         phone_number_override: str | None = _UNSET,
         tool_bypass_rules: dict[str, Any] | None = _UNSET,
+        identity_consent_grants: dict[str, Any] | None = _UNSET,
     ) -> UserSettings:
         """Create or update user settings.
 
@@ -117,15 +121,19 @@ class UserSettingsService:
             phone_number_override if phone_number_override is not _UNSET else current.phone_number_override
         )
         new_tool_bypass_rules = tool_bypass_rules if tool_bypass_rules is not _UNSET else current.tool_bypass_rules
+        new_identity_consent_grants = (
+            identity_consent_grants if identity_consent_grants is not _UNSET else current.identity_consent_grants
+        )
 
         query = text("""
-            INSERT INTO user_settings (user_id, language, timezone, custom_prompt, mcp_tools, 
+            INSERT INTO user_settings (user_id, language, timezone, custom_prompt, mcp_tools,
                                       preferred_model, enable_thinking, thinking_level,
-                                      phone_number_override, tool_bypass_rules,
+                                      phone_number_override, tool_bypass_rules, identity_consent_grants,
                                       created_at, updated_at)
-            VALUES (:user_id, :language, :timezone, :custom_prompt, CAST(:mcp_tools AS jsonb), 
+            VALUES (:user_id, :language, :timezone, :custom_prompt, CAST(:mcp_tools AS jsonb),
                     :preferred_model, :enable_thinking, :thinking_level,
                     :phone_number_override, CAST(:tool_bypass_rules AS jsonb),
+                    CAST(:identity_consent_grants AS jsonb),
                     :now, :now)
             ON CONFLICT (user_id) DO UPDATE SET
                 language = EXCLUDED.language,
@@ -137,10 +145,11 @@ class UserSettingsService:
                 thinking_level = EXCLUDED.thinking_level,
                 phone_number_override = EXCLUDED.phone_number_override,
                 tool_bypass_rules = EXCLUDED.tool_bypass_rules,
+                identity_consent_grants = EXCLUDED.identity_consent_grants,
                 updated_at = EXCLUDED.updated_at
-            RETURNING user_id, language, timezone, custom_prompt, mcp_tools, 
+            RETURNING user_id, language, timezone, custom_prompt, mcp_tools,
                       preferred_model, enable_thinking, thinking_level,
-                      phone_number_override, tool_bypass_rules,
+                      phone_number_override, tool_bypass_rules, identity_consent_grants,
                       created_at, updated_at
         """)
 
@@ -158,6 +167,7 @@ class UserSettingsService:
                     "thinking_level": new_thinking_level,
                     "phone_number_override": new_phone_number_override,
                     "tool_bypass_rules": json.dumps(new_tool_bypass_rules or {}),
+                    "identity_consent_grants": json.dumps(new_identity_consent_grants or {}),
                     "now": now,
                 },
             )
@@ -178,6 +188,9 @@ class UserSettingsService:
                 thinking_level=row["thinking_level"],
                 phone_number_override=row["phone_number_override"],
                 tool_bypass_rules=row["tool_bypass_rules"] if row["tool_bypass_rules"] is not None else {},
+                identity_consent_grants=row["identity_consent_grants"]
+                if row["identity_consent_grants"] is not None
+                else {},
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )

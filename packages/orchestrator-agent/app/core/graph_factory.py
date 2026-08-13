@@ -65,6 +65,7 @@ from ..middleware import (
 )
 from ..middleware.error_classification_middleware import ErrorClassificationMiddleware
 from ..middleware.final_response_strip_middleware import FinalResponseTextStripMiddleware
+from ..middleware.identity_scoped import IdentityConsentMiddleware
 from ..middleware.playbook_middleware import PlaybookInjectionMiddleware
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
@@ -720,6 +721,11 @@ class GraphFactory:
             self._auth_middleware,
             ErrorClassificationMiddleware(),
             hitl_middleware,
+            # After hitl_middleware in the list so its aafter_model runs BEFORE
+            # the risk-HITL one (after_model hooks run in reverse list order):
+            # a consent-rejected identity-scoped call is dropped before it can
+            # be risk-prompted. Gate 3, ADR 0006.
+            IdentityConsentMiddleware(),
             self._retry_middleware,
             self._a2a_middleware,
             self._todo_middleware,

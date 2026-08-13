@@ -44,6 +44,7 @@ class UserSettings(BaseModel):
     enable_thinking: bool | None = None
     thinking_level: ThinkingLevel | None = None
     tool_bypass_rules: dict[str, Any] = Field(default_factory=dict)
+    identity_consent_grants: dict[str, Any] = Field(default_factory=dict)
 
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}
@@ -141,6 +142,7 @@ class User(BaseModel):
     thinking_level: ThinkingLevel | None = None  # User-level thinking level override
     system_role: str = "member"  # System role (member, approver, admin)
     tool_bypass_rules: dict[str, Any] = Field(default_factory=dict)  # HITL bypass rules
+    identity_consent_grants: dict[str, Any] = Field(default_factory=dict)  # Identity-scoped tool consent answers
 
 
 class RegistryService:
@@ -475,6 +477,7 @@ class RegistryService:
             enable_thinking=settings.enable_thinking,
             thinking_level=settings.thinking_level,
             tool_bypass_rules=settings.tool_bypass_rules,
+            identity_consent_grants=settings.identity_consent_grants,
         )
 
     async def persist_bypass_rules(
@@ -528,3 +531,45 @@ class RegistryService:
                     logger.warning(f"Failed to persist bypass rule for '{key}': status={response.status_code}")
             except Exception:
                 logger.exception(f"Error persisting bypass rule for '{key}'")
+
+    async def persist_identity_consents(
+        self,
+        access_token: str,
+        pending_consents: list[dict[str, Any]],
+    ) -> None:
+        """Persist identity-scoped tool consent answers to the console backend.
+
+        Called after a turn completes when the identity consent middleware
+        recorded first-use consent decisions in _pending_identity_consents.
+
+        Args:
+            access_token: User's access token for authenticated API call
+            pending_consents: List of {"key": "tool::server", "grant": {"granted": bool}} dicts
+        """
+        if not pending_consents:
+            return
+
+        client = await self._get_client()
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        for entry in pending_consents:
+            key: str = entry["key"]
+            grant: dict[str, Any] = entry["grant"]
+
+            parts = key.split("::", 1)
+            body: dict[str, Any] = {
+                "tool_name": parts[0],
+                "server_slug": parts[1] if len(parts) > 1 else "_self",
+                "granted": bool(grant.get("granted")),
+            }
+
+            try:
+                response = await client.put(
+                    "/api/v1/auth/me/settings/identity-consent",
+                    json=body,
+                    headers=headers,
+                )
+                if response.status_code != 200:
+                    logger.warning(f"Failed to persist identity consent for '{key}': status={response.status_code}")
+            except Exception:
+                logger.exception(f"Error persisting identity consent for '{key}'")

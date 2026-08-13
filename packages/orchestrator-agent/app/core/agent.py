@@ -730,6 +730,11 @@ class OrchestratorDeepAgent:
             if pending_bypass:
                 user_config._pending_bypass_rules = pending_bypass
 
+            # Same for identity-scoped tool consent answers (Gate 3, ADR 0006).
+            pending_consents = getattr(runtime_context, "_pending_identity_consents", None)
+            if pending_consents:
+                user_config._pending_identity_consents = pending_consents
+
             logger.debug("===== STREAM PROCESSING COMPLETE =====")
             logger.debug(f"Total chunks processed: {chunk_count}")
 

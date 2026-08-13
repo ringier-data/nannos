@@ -148,6 +148,14 @@ def build_runtime_context(
         elif isinstance(tool, dict):
             tool_registry[tool.get("name", str(tool))] = tool
 
+    # Wrap identity-scoped tools (reserved nannos__user_identity field) BEFORE
+    # anything captures the registry (sub-agents, GP agent, PTC), so no
+    # model-facing schema ever shows the reserved field and every execution
+    # path goes through the consent-gated, email-injecting wrapper (ADR 0006).
+    from .middleware.identity_scoped import wrap_identity_scoped_tools
+
+    wrap_identity_scoped_tools(tool_registry)
+
     # Add document store tools if dependencies are provided
     if document_store is not None and storage is not None and document_store_bucket:
         logger.info(f"Adding document store tools for user_id: {user_config.user_id}")
@@ -539,6 +547,7 @@ def build_runtime_context(
         whitelisted_tool_names=whitelisted_tool_names,
         tool_risk_cache=tool_risk_cache,
         tool_bypass_rules=user_config.tool_bypass_rules,
+        identity_consent_grants=user_config.identity_consent_grants,
         tool_server_map=tool_server_map,
         user_system_role=user_config.user_system_role,
     )

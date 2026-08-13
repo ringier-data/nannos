@@ -356,6 +356,60 @@ async def upsert_tool_bypass_rule(
     return ToolBypassRuleResponse(tool_bypass_rules=rules)
 
 
+class IdentityConsentRequest(BaseModel):
+    """Request to set or remove an identity-scoped tool consent answer."""
+
+    tool_name: str
+    server_slug: str = "_self"
+    granted: bool = False
+    remove: bool = False
+
+
+class IdentityConsentResponse(BaseModel):
+    """Response after modifying identity consent grants."""
+
+    identity_consent_grants: dict
+
+
+@router.put("/me/settings/identity-consent", response_model=IdentityConsentResponse)
+async def upsert_identity_consent(
+    body: IdentityConsentRequest,
+    request: Request,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> IdentityConsentResponse:
+    """Set or remove a per-(user, tool) consent answer for an identity-scoped tool.
+
+    Used by the orchestrator after the first-use consent gate (ADR 0006 Gate 3)
+    records the user's decision. `remove` resets a remembered answer so the
+    gate prompts again on next use. Deliberately separate from tool bypass
+    rules — identity disclosure is a different axis from action-risk tolerance.
+    """
+    user_settings_service = get_user_settings_service(request)
+    settings = await user_settings_service.get_settings(db, user.id)
+
+    grants: dict = dict(settings.identity_consent_grants)
+    key = f"{body.tool_name}::{body.server_slug}"
+
+    if body.remove:
+        grants.pop(key, None)
+    else:
+        grants[key] = {"granted": body.granted}
+
+    await user_settings_service.upsert_settings(db, user.id, identity_consent_grants=grants)
+    await db.commit()
+
+    # Consent grants ride on the orchestrator's cached User (not part of its cache key), so
+    # flush this user's cache to apply the change on their next turn instead of after the TTL.
+    if user.sub:
+        schedule_orchestrator_discovery_cache_invalidation(
+            background_tasks, request, f"identity consent change for user sub={user.sub}", [user.sub]
+        )
+
+    return IdentityConsentResponse(identity_consent_grants=grants)
+
+
 @router.post("/me/phone/verify")
 async def send_phone_verification(
     request_body: PhoneVerificationRequest,

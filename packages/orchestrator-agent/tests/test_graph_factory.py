@@ -114,7 +114,7 @@ class TestMiddlewareStack:
         # cache, user prefs after steering, playbook after prefs, then the code
         # interpreter (_PTCToleranceCodeInterpreterMiddleware, which exposes the
         # eval REPL + PTC bridge and hides PTC-exposed tools from the model itself).
-        assert len(stack) == 18
+        assert len(stack) == 19
         # stack[0] = ContinueOnTruncationMiddleware — outermost model-call wrapper; re-runs a
         # turn cut off mid-generation with a nudge + raised max_tokens. Only implements
         # wrap_model_call, so the context gate remains the outermost *tool-shaping* middleware.
@@ -141,12 +141,16 @@ class TestMiddlewareStack:
         assert stack[12].__class__.__name__ == "ErrorClassificationMiddleware"
         # stack[13] = ConditionalHumanInTheLoopMiddleware
         assert stack[13].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
-        assert isinstance(stack[14], ToolRetryMiddleware)
-        assert isinstance(stack[15], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[16], TodoStatusMiddleware)
+        # stack[14] = IdentityConsentMiddleware — after the risk HITL in the list so its
+        # aafter_model runs FIRST (after_model hooks run in reverse list order): a
+        # consent-rejected identity-scoped call is dropped before it can be risk-prompted.
+        assert stack[14].__class__.__name__ == "IdentityConsentMiddleware"
+        assert isinstance(stack[15], ToolRetryMiddleware)
+        assert isinstance(stack[16], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[17], TodoStatusMiddleware)
         # Innermost: strips duplicate plain-text content from AIMessages that
         # carry a FinalResponseSchema tool call.
-        assert stack[17].__class__.__name__ == "FinalResponseTextStripMiddleware"
+        assert stack[18].__class__.__name__ == "FinalResponseTextStripMiddleware"
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
@@ -192,7 +196,7 @@ class TestMiddlewareStack:
         # LiteLLM caching is present even for non-Bedrock models...
         assert any(isinstance(m, LiteLLMPromptCachingMiddleware) for m in stack)
         # ...and the stack matches the Bedrock case (no provider-conditional branch).
-        assert len(stack) == 18
+        assert len(stack) == 19
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
