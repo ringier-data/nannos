@@ -369,7 +369,11 @@ export function MessageList() {
         </div>
       )}
       {mainMessages.map((msg) => (
-        <div key={msg.id}>
+        /* data-message-anchor marks every entry — bubbles AND timeline-only ones —
+           so useChatScroll can always find something to re-anchor on after an older
+           page is prepended (MessageCard's own data-message-id is absent on entries
+           that render as a timeline block only). */
+        <div key={msg.id} data-message-anchor={msg.id}>
           {/* Render unified timeline for chronological display of all events */}
           {msg.timeline && msg.timeline.length > 0 && (
             <UnifiedTimelineBlock timeline={msg.timeline} complete={true} />

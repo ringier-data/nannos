@@ -11,7 +11,7 @@ const LOAD_OLDER_THRESHOLD_PX = 200;
  * A conversation opens on its newest page scrolled to the bottom, so "load more"
  * lives at the TOP of the viewport. Prepending a page makes the content above the
  * reader taller, so the position is re-anchored on a specific message element
- * (`data-message-id`, rendered by MessageCard) rather than on a scrollHeight
+ * (`data-message-anchor`, rendered by MessageList) rather than on a scrollHeight
  * delta: the loading indicator and any streaming content below also change the
  * height, and a delta-based anchor silently spends itself on those instead.
  *
@@ -22,18 +22,19 @@ export function useChatScroll(scrollAreaRef: RefObject<HTMLDivElement | null>) {
     useChat();
 
   // Set while an older page is being paged in: the message the reader was looking
-  // at and where it sat on screen, so it can be put back exactly there.
-  const prependAnchorRef = useRef<{ messageId: string; top: number } | null>(null);
+  // at and where it sat on screen, so it can be put back exactly there. `messageId`
+  // is null when the list rendered nothing to anchor on — the request still goes
+  // ahead, it just has no position to preserve.
+  const prependAnchorRef = useRef<{ messageId: string | null; top: number } | null>(null);
 
   const getViewport = () =>
     (scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null) ?? null;
 
   const anchorTopmostMessage = (viewport: HTMLElement) => {
-    const first = viewport.querySelector('[data-message-id]') as HTMLElement | null;
-    const messageId = first?.dataset.messageId;
-    if (!messageId) return false;
-    prependAnchorRef.current = { messageId, top: first!.getBoundingClientRect().top };
-    return true;
+    const first = viewport.querySelector('[data-message-anchor]') as HTMLElement | null;
+    prependAnchorRef.current = first
+      ? { messageId: first.dataset.messageAnchor ?? null, top: first.getBoundingClientRect().top }
+      : { messageId: null, top: 0 };
   };
 
   // Scrolling to the top pages in older history (infinite scroll upwards).
@@ -43,7 +44,7 @@ export function useChatScroll(scrollAreaRef: RefObject<HTMLDivElement | null>) {
 
     const requestOlderPage = () => {
       if (!hasMoreMessages || isLoadingOlderMessages || prependAnchorRef.current) return;
-      if (!anchorTopmostMessage(viewport)) return;
+      anchorTopmostMessage(viewport);
       void loadOlderMessages();
     };
 
@@ -83,9 +84,11 @@ export function useChatScroll(scrollAreaRef: RefObject<HTMLDivElement | null>) {
     const anchor = prependAnchorRef.current;
     const viewport = getViewport();
     if (anchor && viewport) {
-      const anchored = viewport.querySelector(
-        `[data-message-id="${CSS.escape(anchor.messageId)}"]`
-      ) as HTMLElement | null;
+      const anchored = anchor.messageId
+        ? (viewport.querySelector(
+            `[data-message-anchor="${CSS.escape(anchor.messageId)}"]`
+          ) as HTMLElement | null)
+        : null;
       if (anchored) {
         // Put the anchored message back where it was; re-measured on every commit,
         // so the indicator appearing and disappearing can't leave the view drifted.
