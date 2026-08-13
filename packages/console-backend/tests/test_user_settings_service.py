@@ -170,9 +170,14 @@ class TestUserSettingsService:
         assert settings.custom_prompt == "New prompt"
 
     async def test_get_settings_returns_default_timezone(
-        self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession
+        self,
+        user_settings_service: UserSettingsService,
+        user_service: UserService,
+        pg_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ):
-        """Test that get_settings returns default timezone when not set."""
+        """Test that get_settings follows the DEFAULT_TIMEZONE env var when not set."""
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "Europe/Zurich")
         # Create a user first
         user = await user_service.upsert_user(
             db=pg_session,
@@ -187,7 +192,7 @@ class TestUserSettingsService:
         settings = await user_settings_service.get_settings(pg_session, user.id)
 
         assert settings is not None
-        assert settings.timezone == "Europe/Zurich"  # Default timezone
+        assert settings.timezone == "Europe/Zurich"  # From DEFAULT_TIMEZONE, never hardcoded
 
     async def test_upsert_settings_creates_with_timezone(
         self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession

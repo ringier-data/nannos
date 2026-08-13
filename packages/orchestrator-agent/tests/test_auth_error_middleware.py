@@ -57,8 +57,13 @@ async def test_subagent_response_schema_with_401_not_intercepted(middleware):
 
 
 @pytest.mark.asyncio
-async def test_regular_tool_with_401_triggers_interrupt(middleware):
-    """A regular tool returning a 401 error should trigger an interrupt."""
+async def test_regular_tool_with_free_text_401_passes_through(middleware):
+    """A regular tool returning a plain-text 401 (no structured payload) passes through.
+
+    Detection is deliberately structured-only (see module docstring): free-text
+    auth phrasing is ambiguous against arbitrary tool payload data, so it is left
+    for the LLM to interpret rather than deterministically intercepted here.
+    """
     request = _make_request("some_api_tool")
     result_msg = ToolMessage(
         content="Error: HTTP Error 401: Client error '401 Unauthorized' for url 'http://example.com'",
@@ -66,13 +71,10 @@ async def test_regular_tool_with_401_triggers_interrupt(middleware):
     )
     handler = AsyncMock(return_value=result_msg)
 
-    with pytest.raises(Exception) as exc_info:
-        # interrupt() raises GraphInterrupt which propagates out
-        await middleware.awrap_tool_call(request, handler)
+    result = await middleware.awrap_tool_call(request, handler)
 
-    # The interrupt should have been called — LangGraph raises GraphInterrupt
-    # (or a similar exception) when interrupt() is invoked outside a graph context.
     handler.assert_awaited_once_with(request)
+    assert result is result_msg  # Passed through without interrupt
 
 
 @pytest.mark.asyncio
@@ -101,11 +103,17 @@ async def test_detect_auth_error_json_format(middleware):
 
 
 @pytest.mark.asyncio
-async def test_detect_auth_error_text_patterns(middleware):
-    """Text-based auth error patterns are detected."""
+async def test_detect_auth_error_free_text_alone_not_detected(middleware):
+    """Free-text auth phrasing alone (no structured payload) is NOT detected.
+
+    Detection is deliberately structured-only. These phrases are ambiguous
+    against arbitrary tool payload data (see
+    test_successful_result_with_auth_flavored_text_not_intercepted), so they're
+    intentionally left for the LLM to interpret rather than pattern-matched here.
+    """
     for pattern in ["authentication required", "401 unauthorized", "access denied"]:
         result = middleware._detect_auth_error(f"Error: {pattern}")
-        assert result is not None, f"Failed to detect pattern: {pattern}"
+        assert result is None, f"Free-text pattern should not be detected: {pattern}"
 
 
 @pytest.mark.asyncio
@@ -162,10 +170,82 @@ async def test_detect_auth_error_list_content_blocks(middleware):
 
 
 @pytest.mark.asyncio
-async def test_detect_auth_error_secondary_authorization_text(middleware):
-    """The 'secondary authorization' / 'need-credentials' wording is matched as text."""
-    assert middleware._detect_auth_error("This tool requires secondary authorization.") is not None
-    assert middleware._detect_auth_error("errorCode need-credentials returned") is not None
+async def test_detect_auth_error_need_credentials_marker_text(middleware):
+    """The `"errorCode":"need-credentials"` field is matched even without a full,
+    parseable JSON envelope around it (e.g. wrapped by ToolRetryMiddleware).
+
+    Plain "secondary authorization" wording alone, without the field, is NOT
+    matched — that's free text, left for the LLM (see
+    test_detect_auth_error_free_text_alone_not_detected).
+    """
+    assert middleware._detect_auth_error("This tool requires secondary authorization.") is None
+    assert middleware._detect_auth_error('prefix "errorCode":"need-credentials" suffix') is not None
+
+
+@pytest.mark.asyncio
+async def test_detect_auth_error_bare_need_credentials_word_not_detected(middleware):
+    """The bare word "need-credentials" outside of the `errorCode` field is NOT detected.
+
+    Regression: step 2 used to be a bare substring check for "need-credentials"
+    anywhere in the content, so ordinary business data merely mentioning that
+    word in prose (e.g. a support ticket referencing an unrelated API's error)
+    would false-positive an interrupt — the same class of bug issue #130 was
+    filed for, just triggered by a different token.
+    """
+    content = '{"ticket_notes": "customer support case mentions a need-credentials error from a partner API"}'
+    assert middleware._detect_auth_error(content) is None
+
+
+@pytest.mark.asyncio
+async def test_successful_result_with_auth_flavored_text_not_intercepted(middleware):
+    """A successful tool result whose payload happens to contain auth-flavored
+    free text (e.g. a CRM note saying a customer's "access denied" a request)
+    must NOT trigger an interrupt.
+
+    Regression: `_detect_auth_error` previously had a loose free-text fallback
+    that ran on every successful ToolMessage unconditionally, so business data
+    merely containing one of the hardcoded phrases falsely triggered
+    auth-required. Detection is now structured-only (see module docstring),
+    so this is no longer possible regardless of status.
+    """
+    request = _make_request("eval")
+    content = (
+        '{"Note": [{"Body": "Kunde hat schriftlich bestätigt: access denied für weitere Angebote."}]}'
+    )
+    result_msg = ToolMessage(content=content, tool_call_id="tc-6")  # status defaults to "success"
+    handler = AsyncMock(return_value=result_msg)
+
+    result = await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+    assert result is result_msg  # Passed through without interrupt
+
+
+@pytest.mark.asyncio
+async def test_gatana_gateway_need_credentials_triggers_interrupt_regardless_of_status(middleware):
+    """The real-world gatana MCP gateway response format reliably interrupts.
+
+    This is the actual shape an MCP tool call returns when the gatana gateway
+    requires secondary authorization — the structured JSON, verbatim, as the
+    tool's content. It must be detected even when the ToolMessage carries the
+    default status="success" (some MCP adapters don't mark these as errors),
+    since this is the one deterministic signal this middleware still acts on.
+    """
+    request = _make_request("github_search_issues")
+    content = (
+        '{"errorCode":"need-credentials",'
+        '"authorizeUrl":"https://gatana.ai/api/v1/mcp-servers/oauth/gt_ADsagJ9hdU/begin",'
+        '"message":"This tool requires secondary authorization. You must tell the end-user '
+        'to please go to the authorizeUrl. After this is done, you can retry the tool call and it will work."}'
+    )
+    result_msg = ToolMessage(content=content, tool_call_id="tc-7")  # status defaults to "success"
+    handler = AsyncMock(return_value=result_msg)
+
+    with pytest.raises(Exception):
+        # interrupt() raises GraphInterrupt out of the (non-graph) test context.
+        await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
 
 
 @pytest.mark.asyncio

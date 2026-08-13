@@ -583,3 +583,33 @@ class TestDispatchErrorHandling:
         kwargs = repo.complete_run.await_args.kwargs
         assert kwargs["status"] == JobRunStatus.FAILED
         assert "assessor exploded" in (kwargs["error_message"] or "")
+
+
+class TestFinalizeInvalidTimezone:
+    """An unresolvable stored timezone must pause the job, not crash _finalize.
+
+    If _finalize raised instead, next_run_at would stay in the past and
+    claim_due_jobs would re-claim and re-execute the job on every tick.
+    """
+
+    @pytest.mark.asyncio
+    async def test_invalid_timezone_pauses_job(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.complete_run = AsyncMock()
+        repo.complete_job = AsyncMock()
+
+        engine = _make_engine(repo=repo)
+        job = _make_job(schedule_kind=ScheduleKind.CRON, interval_seconds=None)
+        job.cron_expr = "0 8 * * *"
+        job.timezone = "Zurich"  # migrated verbatim from unvalidated user settings
+
+        await engine._finalize(run_id=1, job=job, status=JobRunStatus.SUCCESS)
+
+        repo.complete_run.assert_awaited_once()
+        repo.complete_job.assert_awaited_once()
+        kwargs = repo.complete_job.call_args[1]
+        # next_run_at=None disables the job; the reason tells the user how to recover.
+        assert kwargs["next_run_at"] is None
+        assert "Invalid timezone" in kwargs["paused_reason"]
+        assert "Zurich" in kwargs["paused_reason"]
+

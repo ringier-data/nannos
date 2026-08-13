@@ -39,6 +39,31 @@ def _provider_error_detail(resp: httpx.Response) -> str:
 _COSTMAP_REF = os.getenv("LITELLM_COSTMAP_REF", "main")
 _COSTMAP_URL = f"https://raw.githubusercontent.com/BerriAI/litellm/{_COSTMAP_REF}/model_prices_and_context_window.json"
 _CATALOG_TTL = 6 * 3600.0
+# A real cost map has thousands of provider-tagged entries. Requiring a floor of recognizable ones is
+# how we notice that the payload's SHAPE changed (a wrapper object, a renamed key, an error page that
+# happens to be valid JSON) rather than parsing it into a near-empty catalog and reporting that as
+# fact — an empty catalog reads as "unreadable" downstream and blocks registrations. Counted on the
+# RAW map, before our integrated-provider filter, so a deployment that integrates one provider isn't
+# mistaken for a broken payload.
+_MIN_COST_MAP_ENTRIES = 50
+
+
+def _looks_like_cost_map(raw: object) -> bool:
+    """Is this payload a LiteLLM cost map we can parse (id → {litellm_provider, …})?
+
+    Reads every entry defensively: this runs on data fetched from upstream, so a single hostile or
+    surprising value must not turn the shape CHECK into the failure it exists to detect.
+    """
+    if not isinstance(raw, dict) or len(raw) < _MIN_COST_MAP_ENTRIES:
+        return False
+    tagged = 0
+    for info in raw.values():
+        try:
+            if isinstance(info, dict) and info.get("litellm_provider"):
+                tagged += 1
+        except Exception:  # noqa: S112 - an unreadable entry simply doesn't count as evidence
+            continue
+    return tagged >= _MIN_COST_MAP_ENTRIES
 # Short TTL for the /model/info deployment list. Long enough to collapse the 2-3 repeated
 # fetches a single request fans out (System Status page; get_model/get_model_by_id lookups),
 # short enough that a write by another replica self-heals quickly. Our own writes invalidate
@@ -67,7 +92,14 @@ def thinking_levels_for(info: dict) -> list[str]:
     offered medium/high. Only when the model signals it reasons (``supports_reasoning`` or a
     bare none/max flag) but enumerates no usable per-effort detail do we fall back to the
     baseline tiers.
+
+    An explicitly-stored ``supports_reasoning: False`` is an admin override: the console writes
+    the capability booleans into the deployment's model_info, which shadows the cost map (the
+    proxy's /model/info merge only fills keys the deployment doesn't set). It turns thinking
+    off outright — even if the cost map enumerates per-effort flags for the underlying model.
     """
+    if info.get("supports_reasoning") is False:
+        return []
     declared = [e for e in _EFFORT_ORDER if info.get(f"supports_{e}_reasoning_effort")]
     if declared:
         return declared
@@ -255,63 +287,126 @@ class ModelGatewayService:
     async def get_catalog(self) -> list[dict]:
         """LiteLLM's known-model catalog (cost + capabilities), normalized for the picker.
 
-        Source: the proxy's bundled cost map if exposed, else the pinned public JSON.
-        Cached; returns [] on failure (admin can still enter a model id manually).
+        Source: the public cost map at LITELLM_COSTMAP_REF (freshest — new models land there before
+        the proxy image is upgraded), falling back to the proxy's own bundled map when egress is
+        unavailable. Cached; returns [] only when neither answers — and "[]" is load-bearing
+        elsewhere: registration reads it to tell "unknown model id" (422) from "catalog unreadable"
+        (502), and the provider config check suppresses its unresolved-route findings when it is empty.
         """
         now = time.monotonic()
         if self._catalog_cache and now - self._catalog_cache[0] < _CATALOG_TTL:
             return self._catalog_cache[1]
 
-        raw: dict | None = None
-        try:  # version-accurate + internal IF this proxy version exposes it (older route);
-            # newer LiteLLM moved/removed it, so a 404 here is expected → fall back to the
-            # pinned public cost map below. optional=True keeps that 404 out of the error log.
-            raw = await self._request("GET", "/get/litellm_model_cost_map", optional=True)
-        except ModelGatewayError:
-            raw = None
-        if not isinstance(raw, dict) or not raw:
+        # Two sources, and the order is a deliberate trade, not a preference:
+        #  1. the public JSON (LITELLM_COSTMAP_REF, default `main`) — the FRESHEST view of what
+        #     providers offer. This is what the picker is for: a model released today appears here
+        #     while the proxy image is still on an older litellm. Registering it is safe even then,
+        #     because an id we prefix with its route (`bedrock/…`) is routed generically — the proxy
+        #     doesn't need the entry to serve the call. Unknown TAGS can't leak into billing either:
+        #     `route_family` maps anything it doesn't recognize to None → registration 422s.
+        #  2. the proxy's OWN bundled map — same data as of its image version, no egress needed.
+        # Each source is tried END TO END (fetch + shape check + normalize) and any failure moves on
+        # to the next: `main` is an upstream file nobody here controls, so it can also change shape
+        # under us, and a parse error must not be a worse outcome than being offline. The fallback
+        # matters more than it looks: `[]` is load-bearing (registration's 422-vs-502 split, the
+        # provider check's unresolved-route suppression, unprefixed-id resolution), so a bad payload
+        # or lost egress must degrade to the proxy's slightly older catalog, never to "no catalog".
+        for source, load in (
+            ("public cost map", self._fetch_public_cost_map),
+            ("gateway cost map", self._fetch_proxy_cost_map),
+        ):
             try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.get(_COSTMAP_URL)
-                    resp.raise_for_status()
-                    raw = resp.json()
-            except httpx.HTTPError as e:
-                logger.warning("Could not load model catalog: %s", e)
-                return self._catalog_cache[1] if self._catalog_cache else []
+                raw = await load()
+                if not _looks_like_cost_map(raw):
+                    logger.warning("%s: not a usable cost map (unexpected shape) — trying the next source", source)
+                    continue
+                catalog = self._normalize_catalog(raw)
+            except Exception as e:  # unreachable, undecodable, or a shape our parser can't handle
+                logger.warning("%s unusable (%s: %s) — trying the next source", source, type(e).__name__, e)
+                continue
+            self._catalog_cache = (now, catalog)
+            return catalog
 
-        # Pre-filter to the providers this deployment has integrated (creds on the proxy).
+        logger.warning("Could not load a model catalog from any source")
+        return self._catalog_cache[1] if self._catalog_cache else []
+
+    async def _fetch_public_cost_map(self) -> object:
+        """The upstream cost map JSON at LITELLM_COSTMAP_REF (raises on HTTP or decode failure)."""
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(_COSTMAP_URL)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def _fetch_proxy_cost_map(self) -> object:
+        """The proxy's own bundled cost map, from whichever route this LiteLLM version exposes.
+
+        Renamed upstream (1.90.0 serves /public/…, older builds /get/…), so try both; a 404 on either
+        is expected and ``optional=True`` keeps it out of the error log.
+        """
+        for route in ("/public/litellm_model_cost_map", "/get/litellm_model_cost_map"):
+            try:
+                raw = await self._request("GET", route, optional=True)
+            except ModelGatewayError:
+                continue
+            if isinstance(raw, dict) and raw:
+                return raw
+        return None
+
+    def _normalize_catalog(self, raw: dict) -> list[dict]:
+        """Cost-map entries → picker entries, pre-filtered to the providers this deployment integrated.
+
+        Per-entry failures are skipped rather than fatal: upstream adds fields and occasionally changes
+        a type, and one odd entry must not cost us the other three thousand.
+        """
         allowed = set(config.model_gateway.integrated_providers)
         catalog: list[dict] = []
+        skipped = 0
         for key, info in raw.items():
             if key == "sample_spec" or not isinstance(info, dict):
                 continue
-            mode = info.get("mode", "chat")
-            if mode not in ("chat", "embedding"):
-                continue  # focus on what we register (chat + embeddings)
-            if allowed and info.get("litellm_provider") not in allowed:
-                continue
-            catalog.append(
-                {
-                    "model_id": key,
-                    "provider": info.get("litellm_provider"),
-                    "mode": mode,
-                    "input_cost_per_token": info.get("input_cost_per_token"),
-                    "input_cost_per_image": info.get("input_cost_per_image"),
-                    "output_cost_per_token": info.get("output_cost_per_token"),
-                    "cache_read_input_token_cost": info.get("cache_read_input_token_cost"),
-                    "cache_creation_input_token_cost": info.get("cache_creation_input_token_cost"),
-                    # Per-query web-search (grounding) fee, keyed by context size — lets the
-                    # registration picker pre-fill the `web_search` rate-card unit on selection.
-                    "search_context_cost_per_query": info.get("search_context_cost_per_query"),
-                    "max_input_tokens": info.get("max_input_tokens"),
-                    "supports_vision": info.get("supports_vision", False),
-                    "supports_reasoning": info.get("supports_reasoning", False),
-                    "supports_audio_input": info.get("supports_audio_input", False),
-                    "supports_pdf_input": info.get("supports_pdf_input", False),
-                }
-            )
-        self._catalog_cache = (now, catalog)
+            try:
+                mode = info.get("mode", "chat")
+                if mode not in ("chat", "embedding"):
+                    continue  # focus on what we register (chat + embeddings)
+                if allowed and info.get("litellm_provider") not in allowed:
+                    continue
+                catalog.append(
+                    {
+                        "model_id": key,
+                        "provider": info.get("litellm_provider"),
+                        "mode": mode,
+                        "input_cost_per_token": info.get("input_cost_per_token"),
+                        "input_cost_per_image": info.get("input_cost_per_image"),
+                        "output_cost_per_token": info.get("output_cost_per_token"),
+                        "cache_read_input_token_cost": info.get("cache_read_input_token_cost"),
+                        "cache_creation_input_token_cost": info.get("cache_creation_input_token_cost"),
+                        # Per-query web-search (grounding) fee, keyed by context size — lets the
+                        # registration picker pre-fill the `web_search` rate-card unit on selection.
+                        "search_context_cost_per_query": info.get("search_context_cost_per_query"),
+                        "max_input_tokens": info.get("max_input_tokens"),
+                        "supports_vision": info.get("supports_vision", False),
+                        "supports_reasoning": info.get("supports_reasoning", False),
+                        "supports_web_search": info.get("supports_web_search", False),
+                        "supports_audio_input": info.get("supports_audio_input", False),
+                        "supports_pdf_input": info.get("supports_pdf_input", False),
+                    }
+                )
+            except Exception as e:
+                skipped += 1
+                logger.debug("Skipping catalog entry %r: %s: %s", key, type(e).__name__, e)
+        if skipped:
+            logger.warning("Skipped %d unparseable catalog entr%s", skipped, "y" if skipped == 1 else "ies")
         return catalog
+
+    async def catalog_model(self, model_id: str) -> dict | None:
+        """The catalog entry for this exact cost-map id, or None (unknown / filtered / unreadable).
+
+        Registration uses it to resolve the provider family of an *unprefixed* catalog id — the norm
+        for Bedrock, whose cost-map keys are bare (`eu.amazon.nova-2-lite-v1:0`) — so the client
+        never has to send a provider value at all. ``get_catalog`` keys on the cost-map key, so this
+        is an exact match, and its cache is normally already warm from the picker's own fetch.
+        """
+        return next((c for c in await self.get_catalog() if c.get("model_id") == model_id), None)
 
     async def test_model(self, model_name: str) -> dict:
         """Cheap call to validate a freshly-registered model end to end.

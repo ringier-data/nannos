@@ -31,6 +31,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { CardListSkeleton } from '@/components/skeletons';
 import { Badge } from '@/components/ui/badge';
+import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
+import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
 
 interface GroupedModel {
   provider: string;
@@ -83,16 +85,27 @@ export function RateCardsPage() {
     queryFn: fetchAllActiveEntries,
   });
 
+  // Both writes change what the billing banner sees (a new card can resolve a flagged $0 deployment;
+  // expiring one can create it), so its cached result has to go too — otherwise the banner keeps
+  // rendering pre-fix state while the page stays mounted.
+  const invalidateAfterWrite = () => {
+    queryClient.invalidateQueries({ queryKey: ['rate-card-entries-all'] });
+    queryClient.invalidateQueries({ queryKey: PROVIDER_CONFIG_QUERY_KEY });
+  };
+
   const createEntryMutation = useMutation({
     ...createRateCardEntryApiV1AdminRateCardsEntryPostMutation(),
     onSuccess: () => {
       toast.success('Rate card created successfully');
-      queryClient.invalidateQueries({ queryKey: ['rate-card-entries-all'] });
+      invalidateAfterWrite();
       setAddModelOpen(false);
       setEditModel(null);
     },
-    onError: () => {
-      toast.error('Failed to create rate card entry');
+    onError: (error) => {
+      // A 422 carries the reason (e.g. a provider the runtime never reports, which would bill $0) —
+      // show it instead of a generic failure the admin can't act on.
+      const detail = (error as { detail?: unknown })?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Failed to create rate card entry');
     },
   });
 
@@ -100,7 +113,7 @@ export function RateCardsPage() {
     ...expireRateCardEntryApiV1AdminRateCardsExpireRateIdPostMutation(),
     onSuccess: () => {
       toast.success('Rate card entries expired');
-      queryClient.invalidateQueries({ queryKey: ['rate-card-entries-all'] });
+      invalidateAfterWrite();
     },
     onError: () => {
       toast.error('Failed to expire rate cards');
@@ -212,6 +225,9 @@ export function RateCardsPage() {
         </Button>
       </div>
 
+      {/* Live billing-configuration check (async — never blocks the list) */}
+      <ProviderMismatchBanner />
+
       {/* Info Banner */}
       <Card className="bg-blue-50/50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800">
         <CardContent className="pt-0">
@@ -316,22 +332,35 @@ export function RateCardsPage() {
           if (!open) setEditModel(null);
         }}
         onSubmit={async (entries) => {
-          // If editing, expire old entries first
+          // Create BEFORE expiring, never the other way round. The create can fail — most sharply on
+          // a card keyed to a provider the runtime never reports (422), which is exactly the kind of
+          // card the banner tells admins to come and fix — and expiring first would then leave the
+          // model with zero active pricing, i.e. billing $0, with the provider field disabled so it
+          // couldn't even be corrected here. In this order a failed create leaves the old rates in
+          // place; the new entry simply wins while both are open (get_active_rate takes the latest
+          // effective_from), and the expiry below is cleanup rather than a prerequisite.
+          const createdIds = new Set<number>();
+          for (const entry of entries) {
+            const created = await createEntryMutation.mutateAsync({ body: entry });
+            const id = (created as { id?: number } | undefined)?.id;
+            if (typeof id === 'number') createdIds.add(id);
+          }
+
           if (editModel) {
             const effectiveUntil = new Date().toISOString();
             await Promise.all(
-              editModel.entries.map(entry =>
-                expireMutation.mutateAsync({
-                  path: { rate_id: entry.id },
-                  query: { effective_until: effectiveUntil },
-                })
-              )
+              editModel.entries
+                // An unchanged price is a no-op server-side: create_entry returns the EXISTING entry
+                // id instead of inserting a row. Expiring that id would close the very entry we just
+                // "created" and leave the unit unpriced — so skip anything a create just claimed.
+                .filter((entry) => !createdIds.has(entry.id))
+                .map(entry =>
+                  expireMutation.mutateAsync({
+                    path: { rate_id: entry.id },
+                    query: { effective_until: effectiveUntil },
+                  })
+                )
             );
-          }
-          
-          // Create all new entries
-          for (const entry of entries) {
-            await createEntryMutation.mutateAsync({ body: entry });
           }
         }}
         existingModel={editModel}
@@ -627,7 +656,14 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
       return;
     }
 
-    await onSubmit(entries);
+    // Keep the dialog open when a write fails, so the entered prices aren't lost and the toast's
+    // reason (e.g. a provider the runtime never reports) can be acted on. The mutations report the
+    // failure themselves; swallowing it here only stops the unhandled rejection.
+    try {
+      await onSubmit(entries);
+    } catch {
+      return;
+    }
     onOpenChange(false);
   };
 
@@ -647,12 +683,21 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
           {/* Provider and Model Name */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="provider">Provider</Label>
+              <Label htmlFor="provider">
+                Provider
+                {/* The card only bills when this equals the provider FAMILY the gateway reports at
+                    runtime (bedrock, vertex_ai, …). A LiteLLM catalog tag (bedrock_converse) or a
+                    Vertex location (eu) never matches usage — the server rejects those with a 422,
+                    but the hint keeps admins from hitting it. */}
+                <span className="text-xs text-muted-foreground ml-2">
+                  Runtime provider family, not a catalog tag or region
+                </span>
+              </Label>
               <Input
                 id="provider"
                 value={formData.provider}
                 onChange={(e) => setFormData({ ...formData, provider: e.target.value })}
-                placeholder="e.g., bedrock-anthropic"
+                placeholder="e.g., bedrock, vertex_ai, azure"
                 disabled={isEdit}
               />
             </div>

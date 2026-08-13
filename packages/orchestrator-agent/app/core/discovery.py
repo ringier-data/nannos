@@ -21,7 +21,12 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.cost_tracking.attribution import context_header
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
-from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_errors import (
+    format_mcp_error,
+    get_mcp_http_status_error,
+    is_retryable_mcp_error,
+    log_mcp_gateway_error,
+)
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
 from ..models.config import AgentSettings
@@ -223,8 +228,9 @@ class ToolDiscoveryService:
         logger.debug("Fetching available MCP servers from gateway")
         try:
             # Call the MCP gateway API to get server list
-            # Extract base URL from MCP_GATEWAY_URL (remove /mcp path)
-            base_url = self.config.MCP_GATEWAY_URL.rstrip("/mcp").rstrip("/")
+            # Extract base URL from MCP_GATEWAY_URL (remove /mcp path). Strip the
+            # trailing slash first: removesuffix("/mcp") is a no-op on ".../mcp/".
+            base_url = self.config.MCP_GATEWAY_URL.rstrip("/").removesuffix("/mcp")
             servers_url = f"{base_url}/api/v1/mcp-servers"
 
             logger.debug(f"Fetching servers from: {servers_url}")
@@ -242,7 +248,14 @@ class ToolDiscoveryService:
                 return servers
 
         except Exception as e:
-            logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
+            # A traceback (exc_info) and the gateway response body are both
+            # only logged once between them: the body line already restates
+            # the status/URL that exc_info's own str(e) would repeat, so pick
+            # whichever one actually adds information for this error.
+            if get_mcp_http_status_error(e) is not None:
+                log_mcp_gateway_error(logger, e, context="Failed to fetch MCP servers ")
+            else:
+                logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
             return []
 
     async def _get_tools_with_retry(

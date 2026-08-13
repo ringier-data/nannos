@@ -145,6 +145,79 @@ def _sanitize_response_format(data: dict) -> None:
         _force_additional_properties_false(schema)
 
 
+# --- Gemini cache_control stripping ------------------------------------------------------
+# The app attaches Anthropic-style `cache_control: {"type": "ephemeral"}` markers to every
+# model's messages (ADR-0001: one ChatOpenAI client for all providers). On gemini-format
+# models LiteLLM turns those markers into EXPLICIT Vertex context caching: it creates a
+# `cachedContents` object before generateContent, so even a conversation's first call reports
+# its whole prefix as cache-read. The cachedContents.create call bills full-price input tokens
+# plus per-token-hour storage (default TTL ~1h) and emits no success event — that cost is
+# invisible to this logger, so gemini conversations get under-billed. Gemini 2.5+ implicit
+# caching already gives the read discount for free, and LiteLLM documents no way to disable
+# the explicit path (docs/providers/gemini), so we strip the markers at the provider boundary.
+# Implicit caching is best-effort, not guaranteed: measured ~50-60% hit rate across turns of a
+# growing conversation prefix (2026-08-06) — partial cache-read coverage is expected, and at
+# ~$1/M-tok/hour cachedContents storage the guaranteed explicit hits still cost more than they
+# save for short conversations. Explicit caches are also immutable (no incremental write): any
+# turn that changes the marked block re-writes the ENTIRE prefix at full price into a new cache
+# object — unlike Anthropic, where a moved breakpoint writes only the delta. Trade-off details:
+# README "Gemini cache_control stripping".
+#
+# Keyed on (provider, model prefix), not provider alone: Claude models served via vertex_ai
+# support cache_control natively and must keep their markers. Runs in the post-routing
+# deployment hook — provider identity doesn't exist pre-routing — and copies-on-write so a
+# retry/fallback of the same request to another provider still sees the original markers.
+_CACHE_CONTROL_STRIP_RULES: dict[str, tuple[str, ...]] = {
+    # provider -> model-name prefixes to strip (empty tuple = every model of that provider)
+    "vertex_ai": ("gemini",),
+    "gemini": (),  # Google AI Studio serves only gemini-format models
+}
+
+
+def _should_strip_cache_control(provider: str | None, model: str) -> bool:
+    prefixes = _CACHE_CONTROL_STRIP_RULES.get(provider or "")
+    if prefixes is None:
+        return False
+    return not prefixes or model.startswith(prefixes)
+
+
+def _strip_cache_control_entries(items: list) -> list | None:
+    """Return a copy of ``items`` (messages or tools) with every ``cache_control`` removed,
+    or None if no marker was found.
+
+    Markers appear at the entry level (messages and tool definitions) and on structured
+    content parts (``content: [{"type": "text", ..., "cache_control": ...}]``). Copy-on-write:
+    untouched entries are reused and the input is never mutated — the router hands each
+    deployment attempt a shallow copy of the request, so mutating shared message dicts would
+    leak the strip into a fallback attempt on a provider that wants its markers.
+    """
+    changed = False
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        new_item = item
+        if "cache_control" in item:
+            new_item = {k: v for k, v in item.items() if k != "cache_control"}
+        content = new_item.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and "cache_control" in part for part in content
+        ):
+            if new_item is item:
+                new_item = dict(item)
+            new_item["content"] = [
+                {k: v for k, v in part.items() if k != "cache_control"}
+                if isinstance(part, dict) and "cache_control" in part
+                else part
+                for part in content
+            ]
+        if new_item is not item:
+            changed = True
+        out.append(new_item)
+    return out if changed else None
+
+
 def _as_dict(obj) -> dict:
     if obj is None:
         return {}
@@ -448,6 +521,40 @@ class NannosCostLogger(CustomLogger):
                 "[schema] response_format sanitization failed: %s", e, exc_info=True
             )
         return data
+
+    async def async_pre_call_deployment_hook(self, kwargs, call_type):
+        """Strip cache_control markers from requests routed to gemini-format deployments.
+
+        Runs after the router picked a deployment (unlike ``async_pre_call_hook``), so the
+        provider/model are known. See ``_CACHE_CONTROL_STRIP_RULES`` for the why. Returning
+        the (mutated) kwargs replaces the request for this attempt only; returning None
+        leaves it unchanged. Never raise — stripping is an optimization, not a gate.
+        """
+        try:
+            model = kwargs.get("model") or ""
+            provider = kwargs.get("custom_llm_provider")
+            if not provider and "/" in model:
+                provider = model.split("/", 1)[0]
+            bare_model = model.split("/", 1)[1] if "/" in model else model
+            if not _should_strip_cache_control(provider, bare_model):
+                return None
+            changed = False
+            for key in ("messages", "tools"):
+                items = kwargs.get(key)
+                if isinstance(items, list):
+                    stripped = _strip_cache_control_entries(items)
+                    if stripped is not None:
+                        kwargs[key] = stripped
+                        changed = True
+            return kwargs if changed else None
+        except Exception as e:  # never break the call on a stripping failure
+            logger.warning(
+                "[cache-control] strip failed for model=%s: %s",
+                kwargs.get("model"),
+                e,
+                exc_info=True,
+            )
+            return None
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         try:

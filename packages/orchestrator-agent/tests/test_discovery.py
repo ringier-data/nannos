@@ -133,6 +133,44 @@ class TestToolDiscoveryService:
         assert service.oauth2_client == oauth2_client
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("gateway_url", "expected_servers_url"),
+        [
+            # A host ending in one of the stripped characters (m/c/p) is exactly
+            # the case the old rstrip("/mcp") corrupted — most commonly any
+            # ".com" host (verified against the old code: it produces
+            # "https://gateway.example.co", dropping the "m"). This is the one
+            # case that actually fails without the fix; the others below don't
+            # (alloych.gatana.ai ends in "i", not m/c/p — accidentally correct
+            # either way — and are kept for the trailing-slash-only regression).
+            ("https://gateway.example.com/mcp", "https://gateway.example.com/api/v1/mcp-servers"),
+            ("https://alloych.gatana.ai/mcp", "https://alloych.gatana.ai/api/v1/mcp-servers"),
+            # A trailing slash is a no-op for removesuffix("/mcp") unless the
+            # slash is stripped first — regression coverage for that fix.
+            ("https://gw.example/mcp/", "https://gw.example/api/v1/mcp-servers"),
+            ("https://gw.example/mcp", "https://gw.example/api/v1/mcp-servers"),
+        ],
+    )
+    async def test_fetch_available_servers_builds_correct_url(self, gateway_url, expected_servers_url):
+        config = Mock(spec=AgentSettings)
+        config.MCP_GATEWAY_URL = gateway_url
+        service = ToolDiscoveryService(config, oauth2_client=Mock())
+
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"servers": []}
+
+        mock_http_client = AsyncMock()
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value = mock_http_client
+            await service.fetch_available_servers("test_token")
+
+        called_url = mock_http_client.get.call_args[0][0]
+        assert called_url == expected_servers_url
+
+    @pytest.mark.asyncio
     async def test_discover_tools_basic(self):
         """Test basic tool discovery functionality."""
         config = Mock(spec=AgentSettings)

@@ -9,13 +9,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from ..db.session import DbSession
 from ..dependencies import require_admin
 from ..models.usage import (
+    ProviderConfigCheck,
     RateCardEntriesList,
     RateCardEntry,
     RateCardEntryCreate,
     RateCardModelCreate,
+    RateCardRekeyRequest,
 )
 from ..models.user import User
-from ..services.rate_card_service import RateCardService
+from ..services.provider_config_check import check_provider_config
+from ..services.rate_card_service import RateCardService, assert_billable_provider
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,67 @@ async def list_models_with_rates(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list models: {str(e)}",
         )
+
+
+@router.get("/provider-config", response_model=ProviderConfigCheck)
+async def provider_config_check(
+    request: Request,
+    db: DbSession,
+    _: User = Depends(require_admin),
+):
+    """Is billing configured correctly right now: every deployment billable, no dead pricing.
+
+    Configuration only — no usage window, no cache (the answer is a gateway list already cached
+    upstream plus two point queries, and it must be correct the instant a fix lands). Every finding
+    is actionable, so a healthy system returns two empty lists. The fix is /rekey when a card exists
+    under the wrong key, otherwise a new rate card. Semantics live in
+    services/provider_config_check.py, which the System Status row shares so the two can't disagree.
+    """
+    return await check_provider_config(request, db)
+
+
+@router.post("/rekey", response_model=dict)
+async def rekey_rate_card(
+    request: Request,
+    body: RateCardRekeyRequest,
+    db: DbSession,
+    user: User = Depends(require_admin),
+):
+    """Re-key a rate card to the provider billing actually reports (from /provider-config).
+
+    Moves the card header so its whole pricing history follows — no price re-entry. 422 when the
+    target key isn't a runtime billing provider (a re-key onto a catalog tag or a typo would move a
+    working card onto a key usage never matches — silent $0, the very state these surfaces exist to
+    find); 404 when no card exists at the source key; 409 when the target key already has a card
+    (merging two histories is a manual decision) — including when a concurrent write claims it first.
+    """
+    rate_card_service = get_rate_card_service(request)
+    # Validated here, not only in the service, because the ValueError below is the 409 "already
+    # exists" case: a non-billable target is a bad request, not a conflict.
+    try:
+        assert_billable_provider(body.to_provider)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    try:
+        rate_card_id = await rate_card_service.rekey_model_provider(
+            db=db,
+            actor=user,
+            model_name=body.model_name,
+            from_provider=body.from_provider,
+            to_provider=body.to_provider,
+        )
+        await db.commit()
+    except LookupError as e:
+        await db.rollback()  # release the source-row lock before answering
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {
+        "rate_card_id": rate_card_id,
+        "model_name": body.model_name,
+        "provider": body.to_provider,
+    }
 
 
 @router.get("", response_model=RateCardEntriesList)
@@ -123,11 +187,15 @@ async def create_rate_card_entry(
     """
     Create a single rate card entry.
 
+    The provider must be one the runtime actually reports (``assert_billable_provider``), or the
+    card would never match usage and the model would silently bill $0 — the same invariant
+    register/edit enforce by deriving the key from the deployment's routing params.
+
     Requires admin role with admin mode enabled.
     """
     rate_card_service = get_rate_card_service(request)
     try:
-        entry_id = await rate_card_service.repository.create_entry(
+        entry_id = await rate_card_service.create_entry(
             db=db,
             actor=current_user,
             provider=entry_data.provider,
@@ -139,10 +207,10 @@ async def create_rate_card_entry(
         )
         await db.commit()
 
-        # Invalidate cache
-        rate_card_service._invalidate_model_cache(entry_data.provider, entry_data.model_name)
-
         return {"id": entry_id, "status": "created"}
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to create rate card entry: {e}", exc_info=True)
         await db.rollback()
@@ -188,6 +256,10 @@ async def create_model_rate_card(
             "model_name": model_data.model_name,
         }
 
+    except ValueError as e:
+        # Non-billable provider key, or incomplete pricing — a client error, not a server fault.
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to create model rate card: {e}", exc_info=True)
         await db.rollback()
@@ -218,6 +290,13 @@ async def copy_model_rates(
     """
 
     rate_card_service = get_rate_card_service(request)
+
+    # Checked up front (the service re-checks) so a non-billable target provider reads as a 422 and
+    # not as the 404 this endpoint uses for "source has no rates".
+    try:
+        assert_billable_provider(target_provider)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
     try:
         entry_ids = await rate_card_service.copy_model_rates(

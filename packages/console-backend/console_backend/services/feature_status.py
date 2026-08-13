@@ -172,6 +172,9 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
     # Catalog — embedding default registered + Google OAuth for source connection.
     features.append(await _catalog_feature(request, db))
 
+    # Billing — is billing configured to work (deterministic, and every finding fixable).
+    features.append(await _billing_config_feature(request, db))
+
     # Optional integrations gated purely on config presence.
     features.append(
         _config_feature(
@@ -235,6 +238,85 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
         )
     )
     return features
+
+
+async def _billing_config_feature(request: "Request", db: "AsyncSession") -> FeatureStatus:
+    """Is billing CONFIGURED to work: every gateway deployment billable, no dead pricing.
+
+    Shares services/provider_config_check.py with the Rate Cards / Model Gateway banner, so this row
+    and the banner can never disagree. Deterministic and cheap — a gateway list that is already
+    cached upstream plus two point queries — so it needs no result cache and reflects a fix on the
+    very next load.
+
+    Degraded = at least one deployment's runtime provider has no active rate card (it is billing $0
+    from its first call). Limited = only orphan cards, which bill nothing today but can never match.
+    """
+    from .provider_config_check import check_provider_config
+
+    key, name = "billing_rate_cards", "Billing (rate-card coverage)"
+    try:
+        check = await check_provider_config(request, db)
+    except Exception as e:  # a broken check must not take down the whole status page
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="degraded",
+            detail=f"Rate-card provider check failed: {e}",
+        )
+
+    orphan_caveat = (
+        (
+            f"Additionally, {len(check.orphan_cards)} rate card(s) are keyed on a provider the "
+            "runtime never reports (a LiteLLM catalog tag, a Vertex location, a hand-typed vendor) — "
+            "that pricing can never match usage. Re-key or expire them on the Rate Cards page."
+        )
+        if check.orphan_cards
+        else None
+    )
+    gateway_caveat = (
+        None
+        if check.gateway_checked
+        else "Gateway unreachable — deployments were not verified; only rate cards were checked."
+    )
+
+    if check.unbillable_deployments:
+        models = sorted({d.model_name for d in check.unbillable_deployments})
+        shown = ", ".join(models[:5]) + ("…" if len(models) > 5 else "")
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="degraded",
+            detail=(
+                f"{len(models)} model(s) will bill $0 — no active rate card matches the provider "
+                f"the gateway routes them under: {shown}"
+            ),
+            remediation=(
+                "Open the Rate Cards page — the banner offers a one-click re-key where a card exists "
+                "under the wrong key, and names the provider to price otherwise."
+            ),
+            caveat=orphan_caveat,
+        )
+    if check.orphan_cards:
+        cards = sorted({f"{c.provider}/{c.model_name}" for c in check.orphan_cards})
+        shown = ", ".join(cards[:5]) + ("…" if len(cards) > 5 else "")
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="limited",
+            detail=(
+                f"Every gateway model is billable. {len(cards)} rate card(s) are keyed on a provider "
+                f"the runtime never reports, so that pricing can never match usage: {shown}"
+            ),
+            remediation="Re-key those cards to the provider family the cost logger reports, or expire them.",
+            caveat=gateway_caveat,
+        )
+    return FeatureStatus(
+        key=key,
+        name=name,
+        status="ready",
+        detail="Every gateway model has an active rate card keyed on the provider it routes under.",
+        caveat=gateway_caveat,
+    )
 
 
 def _config_feature(

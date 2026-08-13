@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
@@ -13,6 +14,28 @@ from ..models.user import User
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
+
+
+# ONE definition of "this rate card prices this model name" and "this entry is in force", shared by
+# every query that answers it: the billing lookups (get_active_rate / get_all_active_rates) and the
+# coverage check (find_card_providers_for_models). Keeping them apart is how the provider check ended
+# up reporting a model as uncovered while billing priced it from a pattern card — or the reverse.
+# Only identifiers/binds already in the surrounding query are interpolated; never user input.
+def _model_match(model_expr: str, rc: str = "rc") -> str:
+    """Exact name when the card has no pattern, POSIX regex when it does."""
+    return (
+        f"(({rc}.model_name_pattern IS NULL AND {rc}.model_name = {model_expr})"
+        f" OR ({rc}.model_name_pattern IS NOT NULL AND {model_expr} ~ {rc}.model_name_pattern))"
+    )
+
+
+def _entry_in_force(as_of_expr: str = "NOW()", rce: str = "rce") -> str:
+    """The entry is effective at ``as_of``: started, and not yet expired.
+
+    Note this is NOT ``effective_until IS NULL``: a scheduled price change closes the current entry
+    with a FUTURE ``effective_until``, and that entry is still what bills today.
+    """
+    return f"({rce}.effective_from <= {as_of_expr} AND ({rce}.effective_until IS NULL OR {rce}.effective_until > {as_of_expr}))"
 
 
 class RateCardRepository(AuditedRepository):
@@ -23,6 +46,26 @@ class RateCardRepository(AuditedRepository):
             entity_type=AuditEntityType.RATE_CARD,
             table_name="rate_cards",  # Parent table for audit logging
         )
+
+    async def _find_rate_card_id(
+        self,
+        db: AsyncSession,
+        provider: str,
+        model_name: str,
+        *,
+        for_update: bool = False,
+    ) -> int | None:
+        """The card id at the (provider, model_name) key — uq_rate_card makes it unique — or None.
+
+        ``for_update`` row-locks it, for read-then-write flows (re-key) that must not interleave.
+        """
+        query = text(
+            "SELECT id FROM rate_cards WHERE provider = :provider AND model_name = :model_name"
+            + (" FOR UPDATE" if for_update else "")
+        )
+        result = await db.execute(query, {"provider": provider, "model_name": model_name})
+        row = result.mappings().first()
+        return row["id"] if row else None
 
     async def _get_or_create_rate_card_id(
         self,
@@ -43,15 +86,9 @@ class RateCardRepository(AuditedRepository):
         Returns:
             rate_card_id
         """
-        # Try to get existing
-        query = text("""
-            SELECT id FROM rate_cards
-            WHERE provider = :provider AND model_name = :model_name
-        """)
-        result = await db.execute(query, {"provider": provider, "model_name": model_name})
-        row = result.mappings().first()
+        existing_id = await self._find_rate_card_id(db, provider, model_name)
 
-        if row:
+        if existing_id is not None:
             # Update pattern if provided and different
             if model_name_pattern is not None:
                 update_query = text("""
@@ -59,8 +96,8 @@ class RateCardRepository(AuditedRepository):
                     SET model_name_pattern = :pattern
                     WHERE id = :id AND (model_name_pattern IS NULL OR model_name_pattern != :pattern)
                 """)
-                await db.execute(update_query, {"id": row["id"], "pattern": model_name_pattern})
-            return row["id"]
+                await db.execute(update_query, {"id": existing_id, "pattern": model_name_pattern})
+            return existing_id
 
         # Create new
         insert = text("""
@@ -244,6 +281,139 @@ class RateCardRepository(AuditedRepository):
 
         return entry_ids
 
+    async def find_card_providers_for_models(
+        self,
+        db: AsyncSession,
+        models: list[str],
+    ) -> dict[str, dict[str, bool]]:
+        """Per model name, the providers whose active rate card prices it → and is that card safe to
+        re-key for this name (``True``) or not (``False``)?
+
+        ONE query for the whole gateway fleet instead of a ``get_all_active_rates`` round-trip per
+        deployment (the config check runs on every admin page mount), and it answers every question
+        the check has: is this deployment's runtime provider covered (is it in the mapping), which
+        other keys price this model (the rest), and which of those a re-key may actually move.
+
+        Pattern cards and scheduled (closed-ended) entries must count for "is it priced" — they are
+        exactly what billing resolves (``_model_match``/``_entry_in_force`` are shared with
+        ``get_active_rate``). They are NOT movable, which is a different question: ``rekey`` moves a
+        card HEADER identified by ``(provider, model_name)``, so a pattern card matching this name
+        while keyed on another one would 404, and even one keyed on this very name prices every other
+        model its regex covers — moving it would silently un-bill those. Only a plain, exact-name card
+        is offered; a pattern is an explicit decision on the Rate Cards page.
+
+        Names with no active card at all are absent from the result (not an empty dict).
+        """
+        if not models:
+            return {}
+        query = text(f"""
+            SELECT c.model_name,
+                   rc.provider,
+                   bool_or(rc.model_name_pattern IS NULL AND rc.model_name = c.model_name) AS movable
+            FROM unnest(CAST(:models AS text[])) AS c(model_name)
+            JOIN rate_cards rc ON {_model_match("c.model_name")}
+            WHERE EXISTS (
+                SELECT 1 FROM rate_card_entries rce
+                WHERE rce.rate_card_id = rc.id AND {_entry_in_force()}
+            )
+            GROUP BY c.model_name, rc.provider
+        """)
+        result = await db.execute(query, {"models": list(dict.fromkeys(models))})
+        providers: dict[str, dict[str, bool]] = {}
+        for row in result.mappings():
+            providers.setdefault(row["model_name"], {})[row["provider"]] = bool(row["movable"])
+        return providers
+
+    async def find_orphan_card_providers(
+        self,
+        db: AsyncSession,
+        families: list[str],
+    ) -> list[dict]:
+        """Active rate cards keyed on a provider outside ``families`` — pricing nothing can match.
+
+        The runtime only ever stamps a provider family on usage, so a card under any other
+        vocabulary (a LiteLLM catalog tag like ``bedrock_converse``, a Vertex location like ``eu``, a
+        hand-typed ``bedrock-anthropic``) is dead pricing: whatever it was meant to bill is billing
+        $0. Unlike the usage audit this needs no traffic to find them, and unlike the deployment
+        check it needs no gateway. The vocabulary is passed in — the repository holds no opinion on
+        which providers exist (see ``runtime_provider_families``).
+        """
+        query = text(f"""
+            SELECT rc.provider, rc.model_name, rc.model_name_pattern
+            FROM rate_cards rc
+            WHERE rc.provider <> ALL(CAST(:families AS text[]))
+              AND EXISTS (
+                  SELECT 1 FROM rate_card_entries rce
+                  WHERE rce.rate_card_id = rc.id AND {_entry_in_force()}
+              )
+            ORDER BY rc.provider, rc.model_name
+        """)
+        result = await db.execute(query, {"families": families})
+        return [dict(row) for row in result.mappings()]
+
+    async def rekey_model_provider(
+        self,
+        db: AsyncSession,
+        actor: User,
+        model_name: str,
+        from_provider: str,
+        to_provider: str,
+    ) -> int:
+        """Re-key a rate card to the provider billing actually reports (audited).
+
+        Moves the card header, so its whole pricing history follows — no price re-entry.
+        Raises LookupError when no card exists at (from_provider, model_name) and ValueError
+        when one already exists at the target key (uq_rate_card would be violated; merging
+        two histories is a manual decision, not something to do implicitly).
+        """
+        # Lock the source card so two admins clicking the same banner button serialize instead of
+        # both moving it.
+        rate_card_id = await self._find_rate_card_id(db, from_provider, model_name, for_update=True)
+        if rate_card_id is None:
+            raise LookupError(f"No rate card for {from_provider}/{model_name}")
+
+        conflict = (
+            f"A rate card for {to_provider}/{model_name} already exists; "
+            "merge or remove one of the two manually."
+        )
+        if await self._find_rate_card_id(db, to_provider, model_name) is not None:
+            raise ValueError(conflict)
+
+        # The check above is check-then-act: a concurrent create/re-key (or a registration of the
+        # same model) can claim the target key between the SELECT and this UPDATE. uq_rate_card is
+        # the real guard, so run the UPDATE in a savepoint and translate its violation into the
+        # same 409 ValueError — otherwise the race surfaces as an unhandled 500 with a raw DB error.
+        try:
+            async with db.begin_nested():
+                await db.execute(
+                    text("UPDATE rate_cards SET provider = :to_provider, updated_at = NOW() WHERE id = :id"),
+                    {"to_provider": to_provider, "id": rate_card_id},
+                )
+        except IntegrityError as e:
+            raise ValueError(conflict) from e
+
+        await self.audit_service.log_action(
+            db=db,
+            actor=actor,
+            action=AuditAction.UPDATE,
+            entity_type=AuditEntityType.RATE_CARD,
+            entity_id=str(rate_card_id),
+            changes={
+                "before": {"provider": from_provider, "model_name": model_name},
+                "after": {"provider": to_provider, "model_name": model_name},
+            },
+        )
+
+        logger.info(
+            "Re-keyed rate card %s for %s: %s -> %s by %s",
+            rate_card_id,
+            model_name,
+            from_provider,
+            to_provider,
+            actor.sub,
+        )
+        return rate_card_id
+
     async def get_active_rate(
         self,
         db: AsyncSession,
@@ -270,21 +440,16 @@ class RateCardRepository(AuditedRepository):
             as_of = datetime.now(timezone.utc)
 
         # Single query that handles both exact and pattern matching
-        query = text("""
+        query = text(f"""
             SELECT rce.price_per_million
             FROM rate_card_entries rce
             JOIN rate_cards rc ON rc.id = rce.rate_card_id
             WHERE rc.provider = :provider
-              AND (
-                (rc.model_name_pattern IS NULL AND rc.model_name = :model_name)
-                OR
-                (rc.model_name_pattern IS NOT NULL AND :model_name ~ rc.model_name_pattern)
-              )
+              AND {_model_match(":model_name")}
               AND rce.billing_unit = :billing_unit
-              AND rce.effective_from <= :as_of
-              AND (rce.effective_until IS NULL OR rce.effective_until > :as_of)
-            ORDER BY 
-              CASE WHEN rc.model_name_pattern IS NULL THEN 0 ELSE 1 END,  -- Prefer exact matches
+              AND {_entry_in_force(":as_of")}
+            ORDER BY
+              CASE WHEN rc.model_name_pattern IS NULL THEN 0 ELSE 1 END,  -- exact beats pattern
               rce.effective_from DESC
             LIMIT 1
         """)
@@ -326,22 +491,17 @@ class RateCardRepository(AuditedRepository):
             as_of = datetime.now(timezone.utc)
 
         # Single query that handles both exact and pattern matching
-        query = text("""
-            SELECT DISTINCT ON (rce.billing_unit) 
+        query = text(f"""
+            SELECT DISTINCT ON (rce.billing_unit)
                 rce.billing_unit,
                 rce.price_per_million
             FROM rate_card_entries rce
             JOIN rate_cards rc ON rc.id = rce.rate_card_id
             WHERE rc.provider = :provider
-              AND (
-                (rc.model_name_pattern IS NULL AND rc.model_name = :model_name)
-                OR
-                (rc.model_name_pattern IS NOT NULL AND :model_name ~ rc.model_name_pattern)
-              )
-              AND rce.effective_from <= :as_of
-              AND (rce.effective_until IS NULL OR rce.effective_until > :as_of)
-            ORDER BY rce.billing_unit, 
-              CASE WHEN rc.model_name_pattern IS NULL THEN 0 ELSE 1 END,  -- Prefer exact matches
+              AND {_model_match(":model_name")}
+              AND {_entry_in_force(":as_of")}
+            ORDER BY rce.billing_unit,
+              CASE WHEN rc.model_name_pattern IS NULL THEN 0 ELSE 1 END,  -- exact beats pattern
               rce.effective_from DESC
         """)
 

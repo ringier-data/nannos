@@ -77,7 +77,7 @@ class GraphRuntimeContext:
     language: str = field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))
     """User's preferred language for responses (ISO 639-1 code)."""
 
-    timezone: str = field(default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"))
+    timezone: str = field(default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "UTC"))
     """User's preferred timezone (IANA timezone name like 'America/New_York', 'Europe/Berlin')."""
 
     message_formatting: str = "markdown"
@@ -232,7 +232,7 @@ class UserConfig(BaseModel):
         default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"), description="User's preferred language"
     )
     timezone: str = Field(
-        default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"),
+        default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "UTC"),
         description="User's preferred timezone (IANA timezone name)",
     )
     model: Optional[str] = Field(

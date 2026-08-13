@@ -418,6 +418,19 @@ has_access = await user_group_service.check_resource_permission(
 
 When sending a steering message via `_send_steering_message_to_agent()`, the code uses `break` after the first event from `a2a_client.send_message()` — NOT `pass` to drain. The agent-console shares the same A2A SDK `Client` instance between the primary stream (`_send_message_to_agent`) and steering. The A2A SDK's `EventQueue.tap()` creates a child queue that receives all parent events. If leaked parent events containing raw `Task` objects were consumed through the shared `Client`, its `ClientTaskManager` would raise "Task is already set" errors. The `break` takes only the ack event and lets SSE teardown close the child queue. Note: consuming from the child never removes events from the parent queue (they're independent `asyncio.Queue` instances). See the root copilot instructions "Continuous Interaction Turns" section for the full mechanism.
 
+### One Alias = One Deployment (admin_model_gateway_router)
+
+`register_model` 409s when the alias is already registered on the gateway (checked BEFORE the
+rate-card write, so a refused registration leaves nothing behind; fails open when the gateway can't
+be listed). LiteLLM itself allows many deployments under one `model_name` and load-balances across
+them — this console cannot express that: the rate card, the provider check and the role defaults are
+all keyed on the alias, edit/delete address a single gateway id, and `edit_model` already reports a
+surviving second deployment as a fault (`updated_with_stale_duplicate`). A duplicate alias silently
+doubles routing for a model the admin can only manage half of. If replica/failover routing is ever
+wanted, it needs an explicit flow, not a re-registration. The guard is registration-only: an edit
+re-registers its own alias by design. `ModelGatewayPage` mirrors it (`aliasTaken`) — picking the
+same catalog entry twice auto-fills the same alias, which is how duplicates happened.
+
 ### Rate-Card Provider Must Equal the litellm Provider Family (cost tracking ↔ rate cards)
 
 Rate cards key on `(provider, model_name=alias)`. Billing resolves provider in the cost logger
@@ -427,11 +440,120 @@ model-id prefix (`deployment_id.split("/")[0]`). The rate-card provider MUST equ
 **$0**. Usage logging only *reads* rate cards (`calculate_cost`) — it never creates them; only
 explicit register/edit (`admin_model_gateway_router`) and the Rate Cards page do.
 
-Footgun: a Vertex **location** (`vertex_location` `eu`/`global`) is not a provider. The console
-registration form's Provider field was free-text and a location was typed there, creating orphan
-`eu`/`global` rate cards. The frontend (`ModelGatewayPage.tsx` `deriveProvider`) now derives the
-provider from the model-id prefix and enforces it at submit, but any backend code that creates or
-looks up rate cards must preserve this provider==prefix invariant.
+ONE value carries all of it: the provider route on the deployment. It is what LiteLLM routes on,
+what the cost logger stamps on usage, what provider-specific rules branch on
+(`_with_default_vertex_location`, which credential params a deployment takes, the embedding request
+profile) and what the rate card is keyed on — so those can never disagree. Registration requests
+carry **no** provider field; `ModelRegistrationRequest` deliberately has none.
+
+Enforcement lives entirely in `services/rate_card_service.py`, on BOTH write paths:
+- register/edit resolve the route server-side (`_resolve_billing_provider`): the model id's prefix
+  or `custom_llm_provider` (`runtime_billing_provider` — the cost logger's own rule), else an exact
+  lookup of that id in the server's own catalog → `route_family(entry tag)` → prefixed onto the
+  model id. The catalog path is the common one, not a fallback: LiteLLM's cost map keys Bedrock
+  models by bare id (`eu.amazon.nova-2-lite-v1:0`). Nothing resolves → 422 asking for a prefixed
+  id, EXCEPT when the catalog itself is unreadable (`get_catalog` degrades to a stale cache, then to
+  `[]`): that is a 502, because reporting an outage as "not a known model" sends the admin off to
+  debug an id that was never wrong. Never guess, since the route decides what bills. `GET /catalog`
+  annotates every entry with its resolved `family`, so the picker displays the route (`bedrock`)
+  instead of the cost-map tag (`bedrock_converse`) and no client re-implements the normalization.
+- the Rate Cards page passes an admin-typed provider, so every service write path
+  (`create_entry`, `create_model_rate_card`, `copy_model_rates`, `rekey_model_provider`) runs
+  `assert_billable_provider` → 422 (`create_model_rate_card` uses `assert_routable_provider` instead
+  when register/edit derived the value). Any NEW rate-card write must go through the service, never
+  straight to the repository, or this invariant is bypassed and the card bills $0.
+
+Which check applies depends on WHERE the provider came from. The two share no logic, so they are two
+functions — do not fold them back into one with a mode flag:
+- admin-typed → `assert_billable_provider`: the `runtime_provider_families()` allowlist (verified
+  built-ins plus whatever `LLM_GATEWAY_PROVIDERS` adds, so integrating `mistral` needs no code change
+  — for those tag == family, which is how litellm routes `mistral/…`). A typo and an un-integrated
+  vendor are indistinguishable here, so the allowlist is the only guard available.
+- derived from the deployment (register/edit only) → `assert_routable_provider`: only the TAG
+  vocabulary is refused (`is_catalog_tag_vocabulary`). The value is the deployment's own route, which
+  is by construction what `get_llm_provider` routes on and what the cost logger stamps, so any
+  routable vendor is billable — applying the allowlist here 422'd `anthropic/…`, `groq/…`,
+  `deepseek/…` with "not a runtime billing provider" immediately after the sibling error asked for
+  that very prefix. An unroutable prefix is caught by the mandatory post-registration test call,
+  which rolls it back.
+
+Do NOT key or "correct" a card from the gateway's
+`model_info.litellm_provider`: that is LiteLLM's cost-map *implementation tag*
+(`bedrock_converse`, `vertex_ai-language-models`, `vertex_ai-anthropic_models`) — a different
+vocabulary from the runtime family (`bedrock`, `vertex_ai`) the logger emits at call time
+(`get_llm_provider` normalizes tags to families; verified on litellm 1.90.0). A card keyed on the
+tag matches no usage → silent $0 billing; `assert_billable_provider` rejects it now, and
+`route_family` is the ONLY sanctioned tag→family conversion. Reading the tag is legitimate in
+exactly three places, none of which decide a billing key: catalog filtering against
+`integrated_providers` (those are tags), the provider shown in the admin/app model lists when
+nothing is derivable, and `cost-prefill`'s second lookup candidate so cards written before this
+derivation existed still prefill their stored rates. Anywhere else, a tag compared against family
+names is a bug — it silently takes the "unknown provider" branch. Also: `bedrock_converse/` is NOT
+a routable model-id prefix in litellm 1.90.0 — never pin catalog tags as `custom_llm_provider`.
+
+Safety net: `GET /api/v1/admin/rate-cards/provider-config` →
+`services/provider_config_check.py`, rendered as the banner on the Rate Cards and Model Gateway pages
+plus the `billing_rate_cards` System Status row. Configuration only, in both directions: every gateway
+deployment's derived runtime provider must have an active card pricing its alias
+(`unbillable_deployments`, so a mis-keyed model is caught before its first call), and no active card
+may be keyed outside `runtime_provider_families()` (`orphan_cards` — the dead pricing migration 076
+cleaned up by hand, findable with no traffic and no gateway). Deterministic and cheap: the gateway
+list is already cached in `model_gateway_service`, the rest is two point queries. **No result cache
+and no `days`** — the answer must be right the instant a fix lands, and the frontend only needs to
+invalidate `PROVIDER_CONFIG_QUERY_KEY`. A healthy system returns two empty lists.
+
+Deliberately NOT here: "what already billed $0" over a past window. Cost is computed at ingest, so
+those rows cannot be retroactively priced, and most of them aren't even fixable — usage_logs is
+written by two pipelines and the in-app SDK callback
+(`ringier-a2a-sdk/cost_tracking/callback.py` `_detect_provider`) infers the provider from response
+metadata, so post-ADR-0001 (every client is ChatOpenAI) it labels gateway calls **`openai`** and logs
+a response's model id rather than the alias. Reporting that as a rate-card fault gives a check that
+can never reach zero, and a re-key suggestion keyed on a provider the cost logger never emits for
+that model would bill it $0. Root fix (open): SDK-based agents should attribute via the proxy
+(spend_logs_metadata) instead of client-side detection. If a historical view is ever wanted, it
+belongs in usage reporting, not in this check.
+
+The check and billing share ONE SQL definition of "a card prices this model name" — `_model_match` /
+`_entry_in_force` in `rate_card_repository.py`, used by `get_active_rate`, `get_all_active_rates` and
+`find_card_providers_for_models`. Never hand-roll that predicate again: matching exact names only
+hides pattern cards (how model families are priced here), and reading "active" as
+`effective_until IS NULL` gets scheduled price changes backwards — a closed-ended entry with a future
+`effective_until` is what bills today.
+
+`POST /rekey` is the one-click fix: it moves a flagged card (pricing history included) to the runtime
+key; 409 when the target key already has a card — including when a concurrent write claims it first
+(uq_rate_card violation is translated inside a savepoint, never a 500).
+
+A re-key is only ever offered for `rekey_candidates`, never for every card the alias has: a card that
+prices another deployment of the same alias, or that matches only through a pattern on another model
+name, is reported but not movable — re-keying it would un-bill traffic it correctly prices, or drag a
+whole family's pricing along (add a card under the flagged provider instead).
+
+Historical footgun: a Vertex **location** (`vertex_location` `eu`/`global`) is not a provider. The
+registration form's Provider field was free-text, a location was typed there, and orphan
+`eu`/`global` rate cards were created. That field no longer exists: `ModelGatewayPage.tsx` shows the
+route READ-ONLY (`effectiveProvider` — model-id prefix, else the catalog entry's `family`), mirroring
+the server's resolution instead of competing with it, and sends nothing. Register/edit return the
+provider they actually keyed (`ModelRegistrationResponse.provider`) so the UI never badges a model
+with a key that doesn't bill. Do not reintroduce an editable provider input: an admin-typed value in
+the keying path is the whole class of bug this removes.
+
+Related but NOT a keying problem — Bedrock availability is per-REGION, and AWS rejects a model that
+isn't offered in the caller's region with "The provided model identifier is invalid": the same message
+a genuinely wrong model id gets. Registration then rolls the deployment back, so it reads as "this
+model can't be registered" (verified 2026-08-05: `amazon.nova-2-multimodal-embeddings-v1:0` exists in
+us-east-1 only — sync `/v1/embeddings` works there — while `amazon.titan-embed-image-v1` is also in
+eu-central-1). Nothing pins a default region for Bedrock (unlike `_with_default_vertex_location`): a
+blank `aws_region_name` means the proxy pod's own region, surfaced to the UI as
+`GatewayUiConfig.default_bedrock_region` (`AWS_BEDROCK_REGION`, else `AWS_REGION`). The registration
+dialog states availability up front from `GET /bedrock-regions` →
+`services/bedrock_availability_service.py` (ListFoundationModels + ListInferenceProfiles per probed
+region, long-cached), and turns that AWS message into a region verdict on failure. That service is
+ADVISORY: it needs `bedrock:ListFoundationModels`/`ListInferenceProfiles` (granted to the console pod
+role in rcplus-alloy-infrastructure-agents `cf-iam-roles.yml`, catalog reads only — never `Invoke*`,
+which stays with the gateway per ADR-0001), and when the probe can't run it returns `regions: null`
+so the UI says nothing. `null` (can't tell) must never collapse into `[]` (AWS doesn't have it) —
+that would accuse a working model id.
 
 ### Repository Pattern with Automatic Audit Logging (repositories/base.py)
 

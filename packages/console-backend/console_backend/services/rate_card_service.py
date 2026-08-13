@@ -7,10 +7,154 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import config
 from ..models.user import User
 from ..repositories.rate_card_repository import RateCardRepository
 
 logger = logging.getLogger(__name__)
+
+
+def runtime_billing_provider(litellm_params: dict) -> str | None:
+    """The provider key the cost logger will stamp on a deployment's usage rows.
+
+    Mirrors litellm-proxy/custom_logger.py::_build_record — ``custom_llm_provider`` else the
+    provider-route prefix of the model id — because rate cards MUST be keyed on that runtime
+    value or every call bills $0 (see AGENTS.md "Rate-Card Provider Must Equal the litellm
+    Provider Family"). The gateway's ``model_info.litellm_provider`` is NOT usable for this: it
+    is LiteLLM's cost-map *implementation tag* (``bedrock_converse``,
+    ``vertex_ai-language-models``), a different vocabulary from the runtime family (``bedrock``,
+    ``vertex_ai``) the logger emits. None when underivable (unprefixed model id and no
+    custom_llm_provider) — callers must reject or skip, not guess.
+    """
+    provider = litellm_params.get("custom_llm_provider")
+    if provider:
+        return str(provider)
+    model = str(litellm_params.get("model") or "")
+    if "/" in model:
+        return model.split("/", 1)[0]
+    return None
+
+
+# LiteLLM tags catalog models by *implementation* (`bedrock_converse`, `vertex_ai-anthropic_models`)
+# but routes and cost-logs by *family* (`bedrock`, `vertex_ai`) — get_llm_provider normalizes
+# tag→family internally, as a hardcoded if/elif chain in litellm source, not data we can fetch
+# (verified on litellm 1.90.0; the router does NOT store the resolved provider on deployments
+# either). The two constants below are the minimal mirror of that normalization: tags whose family
+# differs from the tag itself, and the families verified to route under their own name.
+_TAG_TO_FAMILY = {"bedrock_converse": "bedrock"}
+_VERTEX_TAG_PREFIX = "vertex_ai"  # vertex_ai-anthropic_models, vertex_ai-language-models, …
+_BUILTIN_FAMILIES = {"bedrock", "vertex_ai", "azure", "azure_ai", "gemini", "openai"}
+
+
+def runtime_provider_families() -> set[str]:
+    """Every provider family this deployment can legitimately key a rate card on.
+
+    The verified built-ins plus whatever LLM_GATEWAY_PROVIDERS adds
+    (``config.model_gateway.integrated_providers``), so a deployment that integrates another vendor
+    (say `mistral`) can register and bill it without a code change — for those, tag == family,
+    which is exactly how litellm routes `mistral/…`. Tags carrying an implementation suffix are
+    excluded: ``route_family`` normalizes those, they are never families themselves.
+    """
+    configured = {
+        p
+        for p in config.model_gateway.integrated_providers
+        if p not in _TAG_TO_FAMILY and not p.startswith(_VERTEX_TAG_PREFIX)
+    }
+    return _BUILTIN_FAMILIES | configured
+
+
+def route_family(catalog_tag: str | None) -> str | None:
+    """Runtime provider family of a LiteLLM catalog tag, or None when it isn't one.
+
+    Used ONLY to auto-prefix unprefixed catalog model ids at registration, so the deployment id,
+    the runtime ``custom_llm_provider`` and the rate-card key agree by construction. Unknown tags
+    resolve to None → registration 422s instead of guessing. Drift (a tag this misses, a litellm
+    change) is caught by the rate-cards billing banner (provider_config_check), never billed silently.
+    """
+    if not catalog_tag:
+        return None
+    if catalog_tag in _TAG_TO_FAMILY:
+        return _TAG_TO_FAMILY[catalog_tag]
+    if catalog_tag.startswith(_VERTEX_TAG_PREFIX):
+        return "vertex_ai"
+    return catalog_tag if catalog_tag in runtime_provider_families() else None
+
+
+async def resolve_deployment_provider(gateway_service: Any, litellm_params: dict) -> str | None:
+    """The provider family a deployment bills under — the FULL rule, catalog step included.
+
+    ``runtime_billing_provider`` alone is not that answer for a deployment: it reads the stored config,
+    and an *unprefixed* model id is the norm for Bedrock (LiteLLM's cost map keys those bare, e.g.
+    ``eu.anthropic.claude-haiku-4-5-20251001-v1:0``). At call time litellm resolves such an id through
+    the same cost map and the logger stamps the family, so those deployments bill perfectly well —
+    treating them as underivable would report working models as "will bill $0". The resolution is
+    therefore: explicit prefix / ``custom_llm_provider``, else the server's own catalog entry for that
+    exact id → ``route_family``. None only when neither knows it (a hand-typed id, a custom endpoint,
+    or an unreadable catalog) — then nothing can bill it and callers must say so, not guess.
+
+    ``gateway_service`` is passed in (not imported) to keep this next to the derivation rules it
+    composes; it only needs ``catalog_model``, whose catalog is cached for hours.
+    """
+    provider = runtime_billing_provider(litellm_params)
+    if provider:
+        return provider
+    model_id = str(litellm_params.get("model") or "")
+    if not model_id:
+        return None
+    entry = await gateway_service.catalog_model(model_id)
+    return route_family((entry or {}).get("provider"))
+
+
+def is_catalog_tag_vocabulary(provider: str) -> bool:
+    """True for values that are LiteLLM cost-map *tags*, never runtime providers.
+
+    These are the vocabulary that provably cannot bill: `get_llm_provider` normalizes them away, and
+    `bedrock_converse/…` isn't even a routable model-id prefix. Unlike "is it in our family list",
+    this is a statement about LiteLLM, not about what this deployment happens to have integrated.
+    """
+    return provider in _TAG_TO_FAMILY or provider.startswith(f"{_VERTEX_TAG_PREFIX}-")
+
+
+# Every rate-card write must satisfy one invariant: the card is keyed on the value the cost logger
+# emits at call time. How much can be VERIFIED depends on where the value came from, and the two
+# cases share no logic — hence two functions rather than one with a mode flag.
+
+
+def assert_billable_provider(provider: str) -> None:
+    """Reject an admin-typed rate-card provider key (raises ValueError).
+
+    Checked against ``runtime_provider_families()``, because a typo and a wrong vocabulary
+    (`bedrock-anthropic`, `eu`, `bedrock_converse`) are indistinguishable from a vendor we simply
+    haven't integrated — the allowlist is the only guard available on a hand-entered value.
+    """
+    families = runtime_provider_families()
+    if provider not in families:
+        raise ValueError(
+            f"'{provider}' is not a runtime billing provider. Rate cards must be keyed on the "
+            f"provider family the cost logger reports ({', '.join(sorted(families))}) — LiteLLM "
+            "catalog tags (e.g. 'bedrock_converse') and Vertex locations (e.g. 'eu') never match "
+            "usage, so the model would silently bill $0. To bill another vendor, add its route to "
+            "LLM_GATEWAY_PROVIDERS, or register the model so the route is derived from it."
+        )
+
+
+def assert_routable_provider(provider: str) -> None:
+    """Reject a deployment-derived rate-card provider key (raises ValueError).
+
+    Only the tag vocabulary is refused here. The value IS the deployment's own route — its model-id
+    prefix or explicit ``custom_llm_provider`` — which is by construction what ``get_llm_provider``
+    routes on and what the cost logger stamps, so any routable vendor is billable. Applying the
+    family allowlist instead rejected legitimate `anthropic/…`, `groq/…`, `deepseek/…` with "not a
+    runtime billing provider" immediately after the sibling error told the admin to add that very
+    prefix. An unroutable prefix is caught by the mandatory post-registration test call, which rolls
+    the registration back.
+    """
+    if is_catalog_tag_vocabulary(provider):
+        raise ValueError(
+            f"'{provider}' is a LiteLLM cost-map tag, not a provider route: it is not a routable "
+            "model-id prefix and the cost logger never reports it, so the model would bill $0. "
+            f"Use the route family it normalizes to ('{route_family(provider)}')."
+        )
 
 
 class RateCardService:
@@ -271,6 +415,42 @@ class RateCardService:
         # If no specific requirements, just check we have some rates
         return True, []
 
+    async def create_entry(
+        self,
+        db: AsyncSession,
+        actor: User,
+        provider: str,
+        model_name: str,
+        billing_unit: str,
+        flow_direction: str,
+        price_per_million: Decimal,
+        effective_from: datetime | None = None,
+        model_name_pattern: str | None = None,
+    ) -> int:
+        """Create one rate card entry (the Rate Cards page's single-unit write).
+
+        Goes through the service — not straight to the repository — so the provider-keying
+        invariant is enforced on this path too, exactly like the bulk/copy writes.
+        """
+        if effective_from is None:
+            effective_from = datetime.now(timezone.utc)
+
+        assert_billable_provider(provider)
+
+        entry_id = await self.repository.create_entry(
+            db=db,
+            actor=actor,
+            provider=provider,
+            model_name=model_name,
+            billing_unit=billing_unit,
+            flow_direction=flow_direction,
+            price_per_million=price_per_million,
+            effective_from=effective_from,
+            model_name_pattern=model_name_pattern,
+        )
+        self._invalidate_model_cache(provider, model_name)
+        return entry_id
+
     async def create_model_rate_card(
         self,
         db: AsyncSession,
@@ -280,6 +460,7 @@ class RateCardService:
         pricing: dict[str, Any],  # Can be dict[str, Decimal] (old) or dict[str, RateCardPricingEntry] (new)
         effective_from: datetime | None = None,
         model_name_pattern: str | None = None,
+        derived_from_deployment: bool = False,
     ) -> list[int]:
         """
         Create all rate card entries for a model.
@@ -292,12 +473,20 @@ class RateCardService:
             pricing: Dict of billing_unit -> price details (Decimal for old format, RateCardPricingEntry for new)
             effective_from: When rates become effective (defaults to now)
             model_name_pattern: Optional regex pattern for matching model variants
+            derived_from_deployment: True when the provider is the deployment's own route (register /
+                edit resolved it from litellm_params) — validated by assert_routable_provider rather
+                than the family allowlist. False for admin-typed values.
 
         Returns:
             List of created rate card entry IDs
         """
         if effective_from is None:
             effective_from = datetime.now(timezone.utc)
+
+        if derived_from_deployment:
+            assert_routable_provider(provider)
+        else:
+            assert_billable_provider(provider)
 
         entry_ids = await self.repository.create_model_rate_card(
             db=db,
@@ -347,6 +536,8 @@ class RateCardService:
         if effective_from is None:
             effective_from = datetime.now(timezone.utc)
 
+        assert_billable_provider(target_provider)
+
         entry_ids = await self.repository.copy_model_rates(
             db=db,
             actor=actor,
@@ -367,6 +558,56 @@ class RateCardService:
         )
 
         return entry_ids
+
+    async def find_card_providers_for_models(
+        self,
+        db: AsyncSession,
+        models: list[str],
+    ) -> dict[str, dict[str, bool]]:
+        """Per model name, provider → is its card movable (billing's own match rules).
+
+        ``False`` marks a pattern card: it prices the name but is keyed elsewhere, so a re-key
+        cannot move it. See ``RateCardRepository.find_card_providers_for_models``.
+        """
+        return await self.repository.find_card_providers_for_models(db, models)
+
+    async def find_orphan_cards(self, db: AsyncSession) -> list[dict]:
+        """Active rate cards keyed outside the runtime vocabulary — dead pricing, billing $0.
+
+        The vocabulary lives here, not in the repository: it is the same
+        ``runtime_provider_families()`` set every write path validates against, so a card this
+        reports is exactly a card ``assert_billable_provider`` would refuse today.
+        """
+        return await self.repository.find_orphan_card_providers(db, sorted(runtime_provider_families()))
+
+    async def rekey_model_provider(
+        self,
+        db: AsyncSession,
+        actor: User,
+        model_name: str,
+        from_provider: str,
+        to_provider: str,
+    ) -> int:
+        """Re-key a rate card to the runtime provider; the pricing history moves with it.
+
+        The target key is validated like every other rate-card write: a re-key onto a non-runtime
+        vocabulary would move a working card onto a key usage never matches — the exact $0-billing
+        state the whole provider check exists to find, reachable in one API call.
+        """
+        assert_billable_provider(to_provider)
+
+        rate_card_id = await self.repository.rekey_model_provider(
+            db=db,
+            actor=actor,
+            model_name=model_name,
+            from_provider=from_provider,
+            to_provider=to_provider,
+        )
+        # Old-key hits linger in the rate cache up to its TTL; drop both keys so billing
+        # switches to the corrected card immediately.
+        self._invalidate_model_cache(from_provider, model_name)
+        self._invalidate_model_cache(to_provider, model_name)
+        return rate_card_id
 
     async def list_models_with_rates(
         self,

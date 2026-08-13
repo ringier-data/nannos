@@ -13,10 +13,12 @@ import {
   Loader2,
   Lock,
   ChevronDown,
+  AlertTriangle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import {
+  getBedrockRegions,
   getGatewayConfig,
   listGatewayModels,
   listModelCatalog,
@@ -45,6 +47,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
+import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
 import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
@@ -74,6 +78,29 @@ function errMsg(e: unknown): string {
   return String(e);
 }
 
+// Bedrock rejects a model that isn't offered in the region it was called in with this message, and
+// says nothing about the region — which reads as "this model can't be registered" when it is really
+// "wrong region". Recognizing it lets the dialog name the region and point at the region field.
+// (Verified 2026-08-05: amazon.nova-2-multimodal-embeddings-v1:0 is absent from eu-central-1 and
+// works in us-east-1, sync embeddings included.)
+const BEDROCK_WRONG_REGION = /provided model identifier is invalid/i;
+
+function bedrockRegionHint(
+  message: string,
+  modelId: string,
+  region: string,
+  availableIn: string[] | null,
+): string | null {
+  if (!BEDROCK_WRONG_REGION.test(message)) return null;
+  const where = region ? `region ${region}` : "the region it was called in";
+  const remedy = availableIn?.length
+    ? `AWS offers it in ${availableIn.join(', ')} — set one of those as the AWS region under ` +
+      '“Advanced — region & credentials” and register again.'
+    : 'This is a region problem, not a bad model id: set the AWS region under “Advanced — region & ' +
+      'credentials” (e.g. us-east-1 for the Nova multimodal embedding models) and register again.';
+  return `AWS doesn't offer ${modelId || 'this model'} in ${where}. ${remedy}`;
+}
+
 // billing_unit -> flow_direction. These match the units the proxy CustomLogger emits.
 // `embeddingOnly` units only apply to embedding models (e.g. multimodal image inputs).
 const PRICING_UNITS: Array<{
@@ -94,17 +121,21 @@ const PRICING_UNITS: Array<{
   { unit: 'web_search', label: 'Web search ($/M searches)', flow: 'output', webSearchOnly: true },
 ];
 
-// The pricing fields shown/submitted for a given mode. web_search is gated on the prefill having
-// surfaced it (capable models only); everything else follows the input/embedding split.
-const visiblePricingUnits = (mode: string, prices: Record<string, string>) =>
+// The pricing fields shown/submitted for a given mode. web_search is gated on the model being
+// able to search — the capability toggle, or a prefill having surfaced a fee (capable models
+// only); everything else follows the input/embedding split.
+const visiblePricingUnits = (mode: string, prices: Record<string, string>, canSearch = false) =>
   (mode === 'embedding'
     ? PRICING_UNITS.filter((u) => u.flow === 'input')
     : PRICING_UNITS.filter((u) => !u.embeddingOnly)
-  ).filter((u) => !u.webSearchOnly || prices[u.unit] != null);
+  ).filter((u) => !u.webSearchOnly || canSearch || prices[u.unit] != null);
 
 interface FormState {
   model_name: string;
   litellm_model: string;
+  // Provider ROUTE, never authored here and never sent: seeded from the picked catalog entry's
+  // server-resolved `family` (or, on edit, from the gateway) purely so the UI knows which
+  // credential inputs this route takes. `effectiveProvider` prefers the model id / catalog.
   provider: string;
   aws_region_name: string;
   vertex_location: string;
@@ -112,6 +143,11 @@ interface FormState {
   base_model: string; // Azure only: maps a deployment name to a known model for cost/metadata
   mode: 'chat' | 'embedding';
   input_modes: string[];
+  // Capability toggles, stored as EXPLICIT booleans in the deployment's model_info. Stored keys
+  // shadow LiteLLM's cost map (its /model/info merge only fills keys the deployment doesn't set),
+  // so these stay editable for models the catalog doesn't know yet — the reason they exist.
+  supports_reasoning: boolean;
+  supports_web_search: boolean;
   prices: Record<string, string>; // unit -> price string
 }
 
@@ -125,6 +161,8 @@ const EMPTY_FORM: FormState = {
   base_model: '',
   mode: 'chat',
   input_modes: ['text', 'image'],
+  supports_reasoning: false,
+  supports_web_search: false,
   prices: {},
 };
 
@@ -149,13 +187,13 @@ function deriveAlias(modelId: string): string {
   return parts.join('.');
 }
 
-// The litellm provider family is the gateway model id prefix (the part before the first "/"),
-// e.g. "vertex_ai/gemini-embedding-2" → "vertex_ai", "bedrock/eu.anthropic.claude-…" → "bedrock".
-// This is exactly how the cost logger resolves provider for billing (custom_llm_provider, else
-// the deployment-id prefix), so deriving it here keeps the rate card keyed on the same provider
-// usage is logged under. Critically, it prevents a region/location (Vertex "eu"/"global") from
-// being typed into the free-text provider field and silently mis-keying billing to $0.
-// Empty when the id has no prefix (e.g. a bare Azure deployment name) — admin sets it then.
+// The provider route is the gateway model id prefix (the part before the first "/"), e.g.
+// "vertex_ai/gemini-embedding-2" → "vertex_ai". That prefix is how LiteLLM routes the call AND how
+// the cost logger keys billing (custom_llm_provider, else the deployment-id prefix), which is why a
+// single value covers routing, provider-specific params and the rate card. Read-only mirror of the
+// server's own resolution — the display only, never a submitted value.
+// Empty when the id has no prefix (the norm for Bedrock cost-map ids): the catalog entry's
+// server-resolved `family` answers those, and the server re-derives it the same way on save.
 function deriveProvider(modelId: string): string {
   return modelId.includes('/') ? modelId.slice(0, modelId.indexOf('/')) : '';
 }
@@ -208,6 +246,10 @@ export function ModelGatewayPage() {
   // Provider credential overrides (region/project) are hidden by default — the gateway's
   // env defaults are the norm; only collapse-open them when overriding per model.
   const [credsOpen, setCredsOpen] = useState(false);
+  // Sticky, in-dialog explanation for the one failure a toast handles badly: AWS rejecting a model
+  // that simply isn't in the region. The dialog stays open on failure, so the fix (the region field
+  // right above) and the reason must both be on screen — a toast is gone before the admin reads it.
+  const [regionError, setRegionError] = useState<string | null>(null);
   // Once the alias is hand-edited, stop auto-filling it from the picked model.
   const [aliasEdited, setAliasEdited] = useState(false);
   // null = registering a new model; a gateway id = editing that model.
@@ -241,6 +283,9 @@ export function ModelGatewayPage() {
   const defaultVertexLocation = gatewayConfig?.default_vertex_location || 'eu';
   // Deployment project id (env-driven) as a placeholder hint — never a hardcoded project.
   const defaultVertexProject = gatewayConfig?.default_vertex_project || 'my-gcp-project';
+  // The region a Bedrock model with a blank region is actually called in. Named in the UI because
+  // Bedrock availability is regional and AWS's rejection doesn't say which region it checked.
+  const defaultBedrockRegion = gatewayConfig?.default_bedrock_region || '';
 
   // Picker matches: scoped to the chosen mode, substring-filtered on what's typed, capped.
   const q = form.litellm_model.trim().toLowerCase();
@@ -279,24 +324,94 @@ export function ModelGatewayPage() {
       litellm_model: entry.model_id,
       // Pre-fill the alias from the model unless the user has already typed their own.
       model_name: !editingId && !aliasEdited ? deriveAlias(entry.model_id) : f.model_name,
-      provider: entry.provider ?? f.provider,
+      // The server-resolved route, not LiteLLM's cost-map tag — this only drives which
+      // credential inputs show; the request carries no provider (see effectiveProvider).
+      provider: entry.family ?? f.provider,
       mode: isEmbedding ? 'embedding' : 'chat',
       input_modes: isEmbedding ? embeddingInputModes(entry) : modes,
+      // Capabilities from the catalog entry; a listed per-query search fee also counts as
+      // "can search" (some entries carry the fee without the boolean). Editable after.
+      supports_reasoning: !isEmbedding && !!entry.supports_reasoning,
+      supports_web_search: !isEmbedding && (!!entry.supports_web_search || !!perQuery),
       // Replace (not merge): selecting a different model must not leave a prior model's prices —
       // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
       prices,
     }));
   };
 
+  // The provider route this deployment will be served and billed under. ONE value answers all of it,
+  // and the form never authors it — it mirrors the server's resolution so what you see is what will
+  // be written: the model id's own route prefix, else the route of that id's catalog entry
+  // (`family`, derived server-side — the norm for Bedrock, whose cost-map ids are bare). The trailing
+  // form.provider is only a fallback for an already-registered model whose id is unprefixed and
+  // absent from the catalog; it is seeded from the gateway, never typed. Nothing here is sent —
+  // registration carries no provider field at all.
+  const derivedProvider = deriveProvider(form.litellm_model);
+  // A route the SERVER would also resolve — the id's prefix or the catalog entry's server-derived
+  // family. Everything the UI promises about saving must be based on this, never on the wider
+  // `effectiveProvider` below, whose form.provider tail can be a cost-map TAG (`bedrock_converse`,
+  // seeded from the gateway on edit) that nothing routes and registration 422s.
+  const routableProvider =
+    derivedProvider || (catalog.find((c) => c.model_id === form.litellm_model)?.family ?? '');
+  // Adds that tag tail: still useful for deciding WHICH credential fields a provider takes (a
+  // `bedrock_converse` model is a Bedrock model), but never for what will be written.
+  const effectiveProvider = routableProvider || form.provider;
+
+  // The region THIS deployment will be called in: its own pin, else the gateway's.
+  const effectiveBedrockRegion = form.aws_region_name.trim() || defaultBedrockRegion;
+
+  // Which regions offer the chosen Bedrock id. Only asked once the id is a real catalog entry (the
+  // picker's normal path): probing per keystroke would be a pointless AWS call per character, and a
+  // half-typed id has no answer. Long-cached server-side; advisory, so failures stay invisible.
+  const bedrockModelId = form.litellm_model.trim().replace(/^bedrock\//, '');
+  const isKnownCatalogId = catalog.some((c) => c.model_id === bedrockModelId);
+  const { data: bedrockRegions } = useQuery({
+    queryKey: ['bedrock-regions', bedrockModelId],
+    queryFn: () => getBedrockRegions(bedrockModelId),
+    enabled: dialogOpen && isBedrockProvider(effectiveProvider) && isKnownCatalogId,
+    staleTime: 60 * 60_000,
+    retry: false,
+  });
+  // Four distinct states, and they must stay distinct: the model is in the region we'll call
+  // ('here'), it exists but not there ('elsewhere' — the actionable one), no probed region has it
+  // ('nowhere' — most likely a bad id), or we know the regions but not which one this deployment
+  // will use ('unknown-region'), where saying "not offered here" would be a fabrication.
+  const bedrockAvailability = !bedrockRegions?.regions
+    ? null
+    : bedrockRegions.regions.length === 0
+      ? 'nowhere'
+      : !effectiveBedrockRegion
+        ? 'unknown-region'
+        : bedrockRegions.regions.includes(effectiveBedrockRegion)
+          ? 'here'
+          : 'elsewhere';
+
+  // An alias addresses exactly one deployment here (the server 409s on a duplicate): the rate card,
+  // the role defaults and the provider check are all keyed on it, and Edit/Remove act on one gateway
+  // id. Flag the collision while typing — picking the same catalog entry twice auto-fills the same
+  // alias, which is the easy way to end up with two cards for one name.
+  const aliasTaken = !editingId && models.some((m) => m.model_name === form.model_name.trim());
+
+  // Registering, editing and deleting a model all change what the billing check sees (a register/edit
+  // writes the correctly-keyed rate card; a delete removes the deployment it flags), so its cached
+  // result must go — otherwise the banner keeps showing the mismatch the admin just fixed and its
+  // Re-key button 409s. Kept callable on its own because the register path deliberately does NOT
+  // refetch the model list (see saveMutation.onSuccess).
+  const invalidateProviderCheck = () => {
+    queryClient.invalidateQueries({ queryKey: PROVIDER_CONFIG_QUERY_KEY });
+  };
+
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['gateway-models'] });
     queryClient.invalidateQueries({ queryKey: ['available-models'] }); // refresh every picker
+    invalidateProviderCheck();
   };
 
   const closeDialog = () => {
     setDialogOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setRegionError(null);
   };
 
   const openCreate = () => {
@@ -326,6 +441,9 @@ export function ModelGatewayPage() {
       base_model: m.base_model ?? '',
       mode: m.mode === 'embedding' ? 'embedding' : 'chat',
       input_modes: m.input_modes && m.input_modes.length ? m.input_modes : ['text', 'image'],
+      // Current effective flags (stored or catalog-merged); saving writes them back explicitly.
+      supports_reasoning: !!m.supports_reasoning,
+      supports_web_search: !!m.supports_web_search,
       prices: {},
     });
     setDialogOpen(true);
@@ -366,13 +484,18 @@ export function ModelGatewayPage() {
       const created: GatewayModel = {
         model_name: res.model_name,
         model_id: res.gateway_model_id ?? null,
-        provider: body.provider,
+        // The key the server actually wrote the card under: the request carries no provider at all
+        // (the server derives it), and an unprefixed catalog id submitted with its catalog tag
+        // (`bedrock_converse`) is stored as the family (`bedrock`) — only the response knows.
+        provider: res.provider,
         litellm_model: (body.litellm_params.model as string | undefined) ?? null,
         mode: body.mode ?? 'chat',
         input_modes: body.input_modes,
         default_roles: [],
         db_model: true,
         supports_vision: (body.input_modes ?? []).includes('image'),
+        supports_reasoning: (body.model_info?.supports_reasoning as boolean | undefined) ?? false,
+        supports_web_search: (body.model_info?.supports_web_search as boolean | undefined) ?? false,
       };
       // First model to serve a role becomes the fleet default automatically, so a fresh
       // system always has a fallback without a separate "Make default" click. Only fill
@@ -413,15 +536,31 @@ export function ModelGatewayPage() {
           old.some((m) => m.model_name === created.model_name) ? old : [...old, created],
         );
         queryClient.invalidateQueries({ queryKey: ['available-models'] }); // refresh every picker
+        invalidateProviderCheck(); // the new model's rate card just landed — re-run the banner check
       } else {
         invalidate(); // edit landed in place — reflect the gateway's real state
       }
     },
     onError: (e: unknown) => {
+      const message = errMsg(e);
+      // Bedrock's "invalid model identifier" is a region verdict in disguise. Keep it in the dialog,
+      // next to the field that fixes it, and open that section so it's visible without a click.
+      const hint = bedrockRegionHint(
+        message,
+        form.litellm_model,
+        effectiveBedrockRegion,
+        // If the availability probe answered, name the regions that DO have it instead of leaving
+        // the admin to guess which one to type.
+        bedrockRegions?.regions ?? null,
+      );
+      if (hint) {
+        setRegionError(hint);
+        setCredsOpen(true);
+      }
       toast.error(
         editingId
-          ? `Update applied but its test failed — please verify: ${errMsg(e)}`
-          : `Test failed — registration rolled back: ${errMsg(e)}`,
+          ? `Update applied but its test failed — please verify: ${hint ?? message}`
+          : `Test failed — registration rolled back: ${hint ?? message}`,
       );
       invalidate(); // an edit may have landed; reflect the gateway's real state
     },
@@ -466,18 +605,27 @@ export function ModelGatewayPage() {
   };
 
   const submit = () => {
-    if (!form.model_name || !form.litellm_model || !form.provider) {
-      toast.error('Alias, gateway model id, and provider are required');
+    setRegionError(null); // a retry re-answers the question; don't leave the last verdict up
+    if (!form.model_name || !form.litellm_model) {
+      toast.error('Alias and gateway model id are required');
       return;
     }
-    // The rate card MUST be keyed on the same provider usage is billed under. The cost logger
-    // resolves provider from the model-id prefix, so when the id has one we take it as
-    // authoritative — overriding whatever is in the free-text field. This is what stops a Vertex
-    // location ("eu"/"global") in the provider field from creating an orphan rate card that never
-    // matches usage (→ silent $0 billing).
-    const provider = deriveProvider(form.litellm_model) || form.provider;
+    // The server refuses an id it can't resolve a route for (it would have to guess what bills);
+    // mirror that here so the failure is visible before saving, not as a 422. Gated on the ROUTABLE
+    // provider: a cost-map tag inherited from the gateway is not a route the server would accept.
+    if (!routableProvider) {
+      toast.error('Prefix the gateway model id with its provider route (e.g. bedrock/…)');
+      return;
+    }
+    if (aliasTaken) {
+      toast.error(`'${form.model_name}' is already registered — pick a different alias`);
+      return;
+    }
+    // Local use only — which credential params this route takes. The request carries no provider:
+    // the server resolves the route itself (id prefix, else its catalog entry) and keys billing on it.
+    const provider = effectiveProvider;
     // Embeddings bill input only; chat bills input/output (+ optional cache / web search).
-    const units = visiblePricingUnits(form.mode, form.prices);
+    const units = visiblePricingUnits(form.mode, form.prices, form.supports_web_search);
     const pricing: Record<string, RateCardPricingEntry> = {};
     for (const { unit, flow } of units) {
       const raw = form.prices[unit];
@@ -500,6 +648,14 @@ export function ModelGatewayPage() {
     if (isAzureProvider(provider) && form.base_model.trim()) {
       model_info.base_model = form.base_model.trim();
     }
+    // Explicit capability booleans (chat only): stored model_info keys shadow the cost map, so
+    // this both grants capabilities the catalog doesn't know yet (off-catalog models) and lets
+    // an admin turn a catalog-claimed one off. Sent both ways — omitting a key would fall back
+    // to the catalog's answer and make the toggle a no-op.
+    if (form.mode === 'chat') {
+      model_info.supports_reasoning = form.supports_reasoning;
+      model_info.supports_web_search = form.supports_web_search;
+    }
 
     const body: ModelRegistrationRequest = {
       model_name: form.model_name,
@@ -507,7 +663,6 @@ export function ModelGatewayPage() {
       ...(Object.keys(model_info).length ? { model_info } : {}),
       mode: form.mode,
       input_modes: form.input_modes,
-      provider,
       pricing,
     };
     saveMutation.mutate(body);
@@ -541,6 +696,9 @@ export function ModelGatewayPage() {
       </div>
 
       <WebSearchSettings />
+
+      {/* Billing-provider consistency check (async — never blocks the model list) */}
+      <ProviderMismatchBanner />
 
       {isLoading ? (
         <p className="text-muted-foreground">Loading…</p>
@@ -686,6 +844,9 @@ export function ModelGatewayPage() {
                           mode === 'embedding'
                             ? embeddingInputModes(catalog.find((c) => c.model_id === f.litellm_model))
                             : f.input_modes,
+                        // Chat-only capabilities — an embedding model neither thinks nor searches.
+                        supports_reasoning: mode === 'embedding' ? false : f.supports_reasoning,
+                        supports_web_search: mode === 'embedding' ? false : f.supports_web_search,
                       }))
                     }
                   >
@@ -728,7 +889,9 @@ export function ModelGatewayPage() {
                       >
                         <span className="font-mono text-xs">{c.model_id}</span>
                         <span className="text-muted-foreground text-[11px]">
-                          {c.provider} · {c.mode}
+                          {/* The route it resolves to, not LiteLLM's cost-map tag: the tag
+                              (`bedrock_converse`) is a vocabulary nothing here uses. */}
+                          {c.family ?? c.provider} · {c.mode}
                           {c.supports_vision ? ' · vision' : ''}
                           {c.supports_reasoning ? ' · thinking' : ''}
                         </span>
@@ -742,6 +905,49 @@ export function ModelGatewayPage() {
                   </div>
                 )}
               </div>
+              {/* Bedrock availability is per-region and AWS's rejection never says which region it
+                  checked, so state it here — before the admin submits and gets an "invalid model
+                  identifier" they'd otherwise read as a bad id. Silent when unknowable. */}
+              {bedrockRegions?.regions && (
+                <p
+                  className={`text-[11px] ${
+                    bedrockAvailability === 'elsewhere' || bedrockAvailability === 'nowhere'
+                      ? 'text-amber-700 dark:text-amber-500'
+                      : 'text-muted-foreground'
+                  }`}
+                >
+                  {bedrockAvailability === 'nowhere' ? (
+                    <>
+                      AWS doesn&apos;t offer this id in any checked region (
+                      {(bedrockRegions.probed_regions ?? []).join(', ')}) — check the model id.
+                    </>
+                  ) : bedrockAvailability === 'here' ? (
+                    <>
+                      Available in <span className="font-mono">{effectiveBedrockRegion}</span>
+                      {bedrockRegions.regions.length > 1 && (
+                        <>
+                          {' '}
+                          (also {bedrockRegions.regions.filter((r) => r !== effectiveBedrockRegion).join(', ')})
+                        </>
+                      )}
+                    </>
+                  ) : bedrockAvailability === 'elsewhere' ? (
+                    <>
+                      Not offered in <span className="font-mono">{effectiveBedrockRegion}</span>
+                      {form.aws_region_name.trim() ? '' : " (the gateway's region)"} — available in{' '}
+                      <span className="font-mono">{bedrockRegions.regions.join(', ')}</span>. Set the AWS
+                      region under “Advanced — region &amp; credentials”.
+                    </>
+                  ) : (
+                    // Region unknown (the deployment pins none and the gateway's isn't readable):
+                    // state where the model exists and stop there — claiming "not offered here" when
+                    // "here" is unknown is how this line first read for a model that was available.
+                    <>
+                      Available in <span className="font-mono">{bedrockRegions.regions.join(', ')}</span>
+                    </>
+                  )}
+                </p>
+              )}
             </div>
             <div className="grid gap-1.5">
               <Label>Alias (what apps request)</Label>
@@ -749,28 +955,45 @@ export function ModelGatewayPage() {
                 placeholder="claude-sonnet-4.6"
                 value={form.model_name}
                 disabled={!!editingId}
+                aria-invalid={aliasTaken}
+                className={aliasTaken ? 'border-destructive' : undefined}
                 onChange={(e) => {
                   setAliasEdited(true);
                   setForm({ ...form, model_name: e.target.value });
                 }}
               />
               {!editingId && (
-                <p className="text-[11px] text-muted-foreground">
-                  Auto-filled from the model id — edit to set a custom alias.
+                <p className={`text-[11px] ${aliasTaken ? 'text-destructive' : 'text-muted-foreground'}`}>
+                  {aliasTaken
+                    ? `'${form.model_name}' is already registered — an alias maps to exactly one deployment. Edit or remove that model, or pick a different alias.`
+                    : 'Auto-filled from the model id — edit to set a custom alias.'}
                 </p>
               )}
             </div>
 
             <div className="grid gap-1.5">
-              <Label>Provider (rate-card key)</Label>
+              <Label>Provider route</Label>
               <Input
-                placeholder="bedrock"
-                value={form.provider}
-                onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                value={effectiveProvider}
+                readOnly
+                disabled
+                placeholder="resolved from the model id"
               />
+              <p className={`text-[11px] ${routableProvider ? 'text-muted-foreground' : 'text-destructive'}`}>
+                {routableProvider
+                  ? derivedProvider
+                    ? 'From the model id’s route prefix. This is how the gateway routes the call and how billing is keyed — change the prefix above to change it.'
+                    : `This model id resolves to the ${routableProvider} route, which will be prefixed onto it on save. It’s how the gateway routes the call and how billing is keyed.`
+                  : effectiveProvider
+                    ? // effectiveProvider without a routable one means the value came from the gateway's
+                      // cost-map TAG (litellm_provider), a vocabulary nothing routes or bills under — so
+                      // it must never be promised as "will be prefixed on save": the server 422s it.
+                      `“${effectiveProvider}” is this model’s cost-map tag, not a route — the gateway can’t route it and billing can’t key on it. Prefix the model id above with its provider route (e.g. bedrock/…, vertex_ai/…).`
+                    : 'This model id has no route and isn’t a known catalog model — prefix it above with its provider route (e.g. bedrock/…, vertex_ai/…) so it can be routed and billed.'}
+              </p>
             </div>
 
-            {isAzureProvider(form.provider) && (
+            {isAzureProvider(effectiveProvider) && (
               <div className="grid gap-1.5">
                 <Label>Base model (Azure)</Label>
                 <Input
@@ -786,24 +1009,37 @@ export function ModelGatewayPage() {
               </div>
             )}
 
-            {(isVertexProvider(form.provider) || isBedrockProvider(form.provider)) && (
+            {(isVertexProvider(effectiveProvider) || isBedrockProvider(effectiveProvider)) && (
               <Collapsible open={credsOpen} onOpenChange={setCredsOpen}>
                 <CollapsibleTrigger className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors [&[data-state=open]>svg]:rotate-180">
                   <ChevronDown className="h-4 w-4 transition-transform" />
                   Advanced — region & credentials
                 </CollapsibleTrigger>
                 <CollapsibleContent className="grid gap-3 pt-3">
-                  {isBedrockProvider(form.provider) && (
+                  {isBedrockProvider(effectiveProvider) && (
                     <div className="grid gap-1.5">
                       <Label>AWS region (optional)</Label>
                       <Input
-                        placeholder="eu-central-1"
+                        placeholder={defaultBedrockRegion || 'eu-central-1'}
                         value={form.aws_region_name}
                         onChange={(e) => setForm({ ...form, aws_region_name: e.target.value })}
                       />
+                      <p className="text-[11px] text-muted-foreground">
+                        Leave blank to call the model in the gateway&apos;s own region
+                        {defaultBedrockRegion ? (
+                          <>
+                            {' '}
+                            (<span className="font-mono">{defaultBedrockRegion}</span>)
+                          </>
+                        ) : null}
+                        . Bedrock model availability is per-region, so a model that isn&apos;t offered there
+                        fails registration with &ldquo;The provided model identifier is invalid&rdquo; — e.g.{' '}
+                        <span className="font-mono">amazon.nova-2-multimodal-embeddings-v1:0</span> is
+                        us-east-1 only.
+                      </p>
                     </div>
                   )}
-                  {isVertexProvider(form.provider) && (
+                  {isVertexProvider(effectiveProvider) && (
                     <div className="grid grid-cols-2 gap-3">
                       <div className="grid gap-1.5">
                         <Label>Vertex location (optional)</Label>
@@ -853,6 +1089,34 @@ export function ModelGatewayPage() {
               </div>
             )}
 
+            {form.mode === 'chat' && (
+              <div className="grid gap-1.5">
+                <Label>Capabilities</Label>
+                <div className="flex flex-wrap gap-2">
+                  <Badge
+                    variant={form.supports_reasoning ? 'default' : 'outline'}
+                    className="cursor-pointer"
+                    onClick={() => setForm((f) => ({ ...f, supports_reasoning: !f.supports_reasoning }))}
+                  >
+                    <Brain className="mr-1 h-3 w-3" /> thinking
+                  </Badge>
+                  <Badge
+                    variant={form.supports_web_search ? 'default' : 'outline'}
+                    className="cursor-pointer"
+                    onClick={() => setForm((f) => ({ ...f, supports_web_search: !f.supports_web_search }))}
+                  >
+                    <Globe className="mr-1 h-3 w-3" /> web search
+                  </Badge>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Pre-filled from the gateway&apos;s catalog; set manually for models it doesn&apos;t know
+                  yet. Thinking unlocks the reasoning-effort picker; web search makes the model eligible
+                  to back the <span className="font-mono">console_web_search</span> tool (set its
+                  per-search fee below).
+                </p>
+              </div>
+            )}
+
             <div className="grid gap-1.5">
               <div className="flex items-center justify-between">
                 <Label>Pricing ($ per million units)</Label>
@@ -861,7 +1125,7 @@ export function ModelGatewayPage() {
                 </Button>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {visiblePricingUnits(form.mode, form.prices).map(({ unit, label }) => (
+                {visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map(({ unit, label }) => (
                   <div key={unit} className="grid gap-1">
                     <Label className="text-xs text-muted-foreground">{label}</Label>
                     <Input
@@ -876,11 +1140,20 @@ export function ModelGatewayPage() {
             </div>
           </div>
 
+          {regionError && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm">
+              <div className="flex gap-2">
+                <AlertTriangle className="w-4 h-4 text-destructive mt-0.5 flex-shrink-0" />
+                <p className="text-muted-foreground">{regionError}</p>
+              </div>
+            </div>
+          )}
+
           <DialogFooter>
             <Button variant="outline" onClick={closeDialog}>
               Cancel
             </Button>
-            <Button onClick={submit} disabled={saving}>
+            <Button onClick={submit} disabled={saving || aliasTaken}>
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {editingId
                 ? saving

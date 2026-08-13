@@ -101,6 +101,83 @@ class RateCardEntriesList(BaseModel):
     limit: int
 
 
+class UnbillableDeployment(BaseModel):
+    """A gateway deployment whose runtime billing provider no active rate card prices.
+
+    Config evidence, not usage: derived from the deployment's own routing params the way the cost
+    logger derives it, so it flags a model BEFORE its first call. Always actionable — either a card
+    exists under the wrong key (``rekey_candidates``) or none exists at all.
+    """
+
+    model_name: str = Field(..., description="The gateway alias — what callers request and what rate cards key on")
+    runtime_provider: str | None = Field(
+        None,
+        description=(
+            "Provider family the cost logger will stamp on this deployment's usage. None when the "
+            "deployment id carries no route prefix and no custom_llm_provider — nothing can bill it."
+        ),
+    )
+    other_providers: list[str] = Field(
+        default_factory=list,
+        description="Providers that DO have an active card pricing this model name (pattern cards included)",
+    )
+    rekey_candidates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Subset of other_providers a one-click re-key may be offered for: a card keyed on THIS "
+            "model name that this alias is not ALSO routed as. Excluded are cards pricing another "
+            "deployment of the same alias (moving one un-bills live traffic) and pattern cards (see "
+            "pattern_providers)."
+        ),
+    )
+    pattern_providers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Providers whose card only prices this model through a regex on ANOTHER model name. They "
+            "explain why the model has pricing, but a re-key can't move them: the card header is "
+            "keyed elsewhere, and moving it would take the rest of that family's pricing along."
+        ),
+    )
+    reason: Literal["no_card", "card_under_other_provider", "provider_underivable"]
+
+
+class OrphanCard(BaseModel):
+    """An active rate card keyed on a provider the runtime never emits — dead pricing."""
+
+    provider: str
+    model_name: str
+    model_name_pattern: str | None = None
+    reason: Literal["not_a_runtime_family"] = "not_a_runtime_family"
+
+
+class ProviderConfigCheck(BaseModel):
+    """Is billing configured correctly *right now* — no usage window involved.
+
+    Deterministic and always reachable-to-zero: every finding here is a live misconfiguration an
+    admin can fix. Historical "what already billed $0" is deliberately NOT reported here: those rows
+    are computed at ingest and largely unfixable, so they belong in usage reporting, not in a check
+    whose contract is "act on this".
+    """
+
+    unbillable_deployments: list[UnbillableDeployment]
+    orphan_cards: list[OrphanCard]
+    gateway_checked: bool = Field(
+        ...,
+        description=(
+            "False when the gateway was unreachable: unbillable_deployments is then empty and "
+            "unverified (orphan_cards is still authoritative — it needs no gateway)."
+        ),
+    )
+
+
+class RateCardRekeyRequest(BaseModel):
+    """Re-key a rate card to the provider billing actually reports."""
+
+    model_name: str
+    from_provider: str
+    to_provider: str
+
+
 # Usage Models
 
 

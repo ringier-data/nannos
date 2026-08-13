@@ -14,6 +14,7 @@
  *     dicts (no schema in the OpenAPI doc), so there is nothing to re-export.
  */
 import {
+  bedrockModelRegionsApiV1AdminModelGatewayBedrockRegionsGet,
   consoleListModels,
   costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGet,
   deleteModelApiV1AdminModelGatewayModelsModelIdDelete,
@@ -30,6 +31,7 @@ import {
 } from './generated/sdk.gen';
 import type {
   AvailableModel,
+  BedrockModelRegions,
   CatalogModel,
   CostPrefill,
   GatewayModel,
@@ -43,6 +45,7 @@ import type {
 
 export type {
   AvailableModel,
+  BedrockModelRegions,
   CatalogModel,
   CostPrefill,
   GatewayModel,
@@ -112,6 +115,15 @@ export async function listModelCatalog(): Promise<CatalogModel[]> {
   const { data, error } = await modelCatalogApiV1AdminModelGatewayCatalogGet();
   if (error) throw error;
   return (data ?? []) as CatalogModel[];
+}
+
+/** Which AWS regions offer a Bedrock model id. Advisory: `regions` is null when unknowable. */
+export async function getBedrockRegions(modelId: string): Promise<BedrockModelRegions> {
+  const { data, error } = await bedrockModelRegionsApiV1AdminModelGatewayBedrockRegionsGet({
+    query: { model_id: modelId },
+  });
+  if (error) throw error;
+  return data as BedrockModelRegions;
 }
 
 /** Deployment defaults the registration form needs (env-driven). */

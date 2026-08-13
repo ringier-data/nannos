@@ -4,8 +4,11 @@ This middleware detects authentication errors from tool responses and uses
 LangGraph's interrupt mechanism to pause execution in a resumable state.
 
 Key Features:
-- Detects structured JSON auth errors (errorCode: "need-credentials")
-- Detects text-based auth error patterns ("401 unauthorized", etc.)
+- Detects structured JSON auth errors (errorCode: "need-credentials") — the
+  format the gatana MCP tool gateway emits when secondary authorization is
+  required. Deliberately does NOT scan for free-text auth phrasing ("401
+  unauthorized", "access denied", etc.): that's ambiguous against arbitrary
+  tool payload data and is left for the LLM to interpret, same as A2A 401s.
 - Uses interrupt() to pause graph execution when auth is required
 - Supports resumable execution after authentication completion
 
@@ -70,18 +73,9 @@ logger = logging.getLogger(__name__)
 _AUTHORIZE_URL_RE = re.compile(r'"authorizeUrl"\s*:\s*"([^"]+)"')
 _AUTH_MESSAGE_RE = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
-# Looser free-text markers checked as a last resort when no structured payload matches.
-_AUTH_TEXT_PATTERNS = (
-    "authentication required",
-    "authorization required",
-    "secondary authorization",
-    "need credentials",
-    "need-credentials",
-    "please authorize",
-    "login required",
-    "401 unauthorized",
-    "access denied",
-)
+# The actual JSON field, not a bare substring — a business payload merely
+# mentioning the word "need-credentials" in prose must not match this.
+_NEED_CREDENTIALS_FIELD_RE = re.compile(r'"errorCode"\s*:\s*"need-credentials"')
 
 
 class AuthErrorState(AgentState):
@@ -136,7 +130,10 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
     Supported Auth Error Formats:
     - JSON: {"errorCode": "need-credentials", "authorizeUrl": "...", "message": "..."}
-    - Text patterns: "authentication required", "401 unauthorized", etc.
+      (whole-content or embedded in ToolRetryMiddleware's wrapped exception text).
+      This is the only format detected here — deliberately structured-only, since
+      free-text auth phrasing is ambiguous against arbitrary tool payload data and
+      is left for the LLM to interpret (see "Key Features" above).
 
     Interrupt Value Format::
 
@@ -157,154 +154,6 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
     def __init__(self):
         """Initialize the authentication error detection middleware."""
         super().__init__()
-
-    # def before_model(
-    #     self,
-    #     state: AuthErrorState,
-    #     runtime: Runtime[ContextT]
-    # ) -> Dict[str, Any] | None:
-    #     """Extract authentication error metadata from tool responses.
-
-    #     This hook runs at the START of each iteration, AFTER tool results have been
-    #     added to messages. We examine ToolMessage results from the previous iteration
-    #     to extract and persist authentication error metadata in state.
-
-    #     Returns a dict with "auth_errors" key to be merged into state by LangGraph.
-    #     """
-    #     logger.info(f"[AUTH MIDDLEWARE before_model] Called with state keys: {list(state.keys())}")
-    #     messages = state.get("messages", [])
-    #     if not messages:
-    #         logger.debug("[AUTH MIDDLEWARE before_model] No messages found")
-    #         return None
-
-    #     # Look for ToolMessage in the most recent message
-    #     last_message = messages[-1]
-    #     logger.info(f"[AUTH MIDDLEWARE before_model] Last message type: {type(last_message).__name__}")
-
-    #     # # Check if the last message is a HumanMessage indicating authorization completion
-    #     # from langchain_core.messages import HumanMessage
-    #     # if isinstance(last_message, HumanMessage):
-    #     #     content = last_message.content.lower() if isinstance(last_message.content, str) else ""
-    #     #     auth_completion_patterns = [
-    #     #         "authorized", "authentication complete", "logged in",
-    #     #         "auth complete", "authorization complete", "signed in",
-    #     #         "i've authorized", "authorization done", "auth done"
-    #     #     ]
-
-    #     #     if any(pattern in content for pattern in auth_completion_patterns):
-    #     #         # User indicates they've completed authorization - clear all auth errors
-    #     #         current_auth_errors = state.get("auth_errors", {})
-    #     #         if current_auth_errors:
-    #     #             logger.info("[AUTH MIDDLEWARE before_model] User indicated auth completion - clearing all auth errors")
-    #     #             return {"auth_errors": {}}
-    #     #     return None
-
-    #     if not isinstance(last_message, ToolMessage):
-    #         logger.debug("[AUTH MIDDLEWARE before_model] Last message is not ToolMessage")
-    #         return None
-
-    #     logger.debug("[AUTH MIDDLEWARE before_model] *** FOUND TOOLMESSAGE - CHECKING FOR AUTH ***")
-    #     logger.debug(f"[AUTH MIDDLEWARE before_model] *** ToolMessage content: {last_message.content} ***")
-    #     logger.debug(f"[AUTH MIDDLEWARE before_model] *** ToolMessage additional_kwargs: {getattr(last_message, 'additional_kwargs', {})} ***")
-
-    #     # Check if ToolMessage has auth error metadata in additional_kwargs
-    #     # This is placed here by _process_tool_message() after detecting auth errors
-    #     additional_kwargs = getattr(last_message, 'additional_kwargs', {})
-    #     auth_metadata = additional_kwargs.get('auth_error_metadata')
-    #     auth_success = additional_kwargs.get('auth_success')
-
-    #     # Find the corresponding tool call to determine which tool this message is for
-    #     tool_name = None
-    #     for msg in reversed(messages[:-1]):
-    #         if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
-    #             for tool_call in msg.tool_calls:
-    #                 if tool_call.get('id') == last_message.tool_call_id:
-    #                     tool_name = tool_call.get('name')
-    #                     break
-    #             if tool_name:
-    #                 break
-
-    #     if not tool_name:
-    #         logger.debug("[AUTH MIDDLEWARE before_model] Could not determine tool name")
-    #         return None
-
-    #     # Get current auth errors state
-    #     current_auth_errors = dict(state.get("auth_errors", {}))
-
-    #     # Check if this is a successful tool execution after auth (clear auth errors)
-    #     if auth_success and tool_name in current_auth_errors:
-    #         logger.info(f"[AUTH MIDDLEWARE before_model] Clearing auth error for successful tool: {tool_name}")
-    #         # TODO: the tools are grouped in MCP servers, so we may want to clear all tools for the same server
-
-    #         del current_auth_errors[tool_name]
-    #         return {"auth_errors": current_auth_errors}
-    #     # if auth_success:
-    #     #     return {"auth_errors": {}}
-
-    #     # Check if this is an auth error
-    #     if not auth_metadata:
-    #         # If no metadata in additional_kwargs, try to detect auth error from content directly
-    #         # This handles cases where ToolRetryMiddleware created the ToolMessage from an exception
-    #         content = last_message.content if isinstance(last_message.content, str) else ""
-    #         logger.error(f"[AUTH MIDDLEWARE before_model] *** Attempting direct detection on content: {content[:100]}... ***")
-    #         auth_metadata = self._detect_auth_error(content)
-    #         if auth_metadata:
-    #             logger.error(f"[AUTH MIDDLEWARE before_model] *** SUCCESS! Detected auth error: {auth_metadata} ***")
-    #         else:
-    #             logger.error("[AUTH MIDDLEWARE before_model] *** FAILED - No auth error detected in ToolMessage content ***")
-    #             return None
-
-    #     logger.info(f"[AUTH MIDDLEWARE before_model] Authentication required for tool: {tool_name}")
-
-    #     # Build state update for auth requirement
-    #     current_auth_errors[tool_name] = {
-    #         "requires_auth": True,
-    #         "auth_url": auth_metadata.get("auth_url", ""),
-    #         "auth_message": auth_metadata.get("auth_message", "Authentication required"),
-    #         "error_code": auth_metadata.get("error_code", "auth-required"),
-    #         "timestamp": auth_metadata.get("timestamp", 0.0)
-    #     }
-
-    #     logger.info(f"[AUTH MIDDLEWARE before_model] Stored auth requirement for {tool_name}")
-    #     return {"auth_errors": current_auth_errors}
-
-    # async def abefore_model(
-    #     self,
-    #     state: AuthErrorState,
-    #     runtime: Runtime[ContextT]
-    # ) -> Dict[str, Any] | None:
-    #     """Async version of before_model.
-
-    #     Reuses the sync implementation since auth error extraction is purely computational.
-    #     """
-    #     return self.before_model(state, runtime)
-
-    # def wrap_tool_call(
-    #     self,
-    #     request: ToolCallRequest,
-    #     handler: Callable[[ToolCallRequest], ToolMessage | Command],
-    # ) -> ToolMessage | Command:
-    #     """Detect authentication errors in tool responses (sync version).
-
-    #     This wrap-style hook intercepts ALL tool calls to check for auth errors:
-    #     1. Execute the tool via handler
-    #     2. Check response for authentication error patterns
-    #     3. If auth error detected: Mark ToolMessage with auth metadata
-    #     4. Return processed ToolMessage for before_model to extract
-    #     """
-    #     tool_name = request.tool_call.get("name", "")
-    #     logger.info(f"[AUTH MIDDLEWARE wrap_tool_call] Intercepting {tool_name} tool for auth error detection")
-
-    #     # Execute the tool
-    #     result = handler(request)
-
-    #     # Check for auth errors in the response
-    #     if isinstance(result, ToolMessage):
-    #         return self._process_tool_message(result)
-    #     elif isinstance(result, Command):
-    #         return self._process_command(result)
-
-    #     return result
 
     async def awrap_tool_call(
         self,
@@ -359,7 +208,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 a2a_metadata = additional_kwargs.get("a2a_metadata")
                 auth_metadata = self._check_a2a_auth_metadata(a2a_metadata, subagent_type or tool_name)
 
-                # If no A2A auth requirement, fall back to content-based detection
+                # If no A2A auth requirement, fall back to content-based detection.
                 if not auth_metadata:
                     auth_metadata = self._detect_auth_error(result.content)
 
@@ -371,7 +220,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                         "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                         "message": auth_metadata.get("auth_message", "Authentication required"),
                         "auth_url": auth_metadata.get("auth_url", ""),
-                        "error_code": auth_metadata.get("error_code", "auth-required"),
+                        "error_code": auth_metadata.get("error_code", "need-credentials"),
                         "timestamp": time.time(),
                     }
 
@@ -407,7 +256,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                         a2a_metadata = additional_kwargs.get("a2a_metadata")
                         auth_metadata = self._check_a2a_auth_metadata(a2a_metadata, subagent_type or tool_name)
 
-                        # If no A2A auth requirement, fall back to content-based detection
+                        # If no A2A auth requirement, fall back to content-based detection.
                         if not auth_metadata:
                             auth_metadata = self._detect_auth_error(last_msg.content)
 
@@ -419,7 +268,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                                 "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                                 "message": auth_metadata.get("auth_message", "Authentication required"),
                                 "auth_url": auth_metadata.get("auth_url", ""),
-                                "error_code": auth_metadata.get("error_code", "auth-required"),
+                                "error_code": auth_metadata.get("error_code", "need-credentials"),
                                 "timestamp": time.time(),
                             }
 
@@ -443,7 +292,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                     "tool": tool_name,
                     "message": auth_metadata.get("auth_message", "Authentication required"),
                     "auth_url": auth_metadata.get("auth_url", ""),
-                    "error_code": auth_metadata.get("error_code", "auth-required"),
+                    "error_code": auth_metadata.get("error_code", "need-credentials"),
                     "timestamp": time.time(),
                 }
 
@@ -550,7 +399,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
           "message": "This tool requires secondary authorization..."
         }
 
-        The structured payload is detected in three positions, in order:
+        The structured payload is detected in two positions, in order:
         1. The *entire* content is that JSON object (tool returned it verbatim).
         2. The JSON is *embedded* in a larger string.  ``ToolRetryMiddleware``
            wraps the original ``ToolException`` as
@@ -558,7 +407,15 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
            so by the time this (outer) middleware sees the result the JSON is no
            longer the whole payload — we locate the ``need-credentials`` marker
            and pull ``authorizeUrl`` / ``message`` out of the surrounding text.
-        3. Looser free-text patterns as a last resort.
+
+        Deliberately deterministic and structured-only: this is the format the
+        gatana MCP tool gateway actually emits when a tool needs secondary
+        authorization, and detecting it doesn't require guessing. Free-text
+        auth phrasing ("access denied", "please authorize", …) is NOT scanned
+        here — it's ambiguous (ordinary business data can legitimately contain
+        those words) and, per this middleware's class docstring, is already
+        left for the LLM to interpret from the raw tool content, the same way
+        A2A 401s and LLM-reported errors are handled.
 
         Returns auth error metadata dict if auth error detected, None otherwise.
         """
@@ -580,8 +437,11 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
         # 2. Embedded structured error (e.g. wrapped by ToolRetryMiddleware).
         #    Detect the marker and extract the fields directly from the text so
-        #    we don't depend on the whole payload being parseable JSON.
-        if "need-credentials" in content:
+        #    we don't depend on the whole payload being parseable JSON. Match the
+        #    actual `"errorCode":"need-credentials"` field, not a bare substring —
+        #    business data merely mentioning "need-credentials" in prose must not
+        #    match here.
+        if _NEED_CREDENTIALS_FIELD_RE.search(content):
             url_match = _AUTHORIZE_URL_RE.search(content)
             msg_match = _AUTH_MESSAGE_RE.search(content)
             authorize_url = url_match.group(1) if url_match else ""
@@ -594,12 +454,5 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 error_message = "This tool requires secondary authorization."
             logger.info(f"[AUTH MIDDLEWARE] Detected embedded auth error. Auth URL: {authorize_url}")
             return {"auth_url": authorize_url, "auth_message": error_message, "error_code": "need-credentials"}
-
-        # 3. Looser free-text patterns.
-        content_lower = content.lower()
-        for pattern in _AUTH_TEXT_PATTERNS:
-            if pattern in content_lower:
-                logger.info(f"[AUTH MIDDLEWARE] Detected text auth error pattern: {pattern}")
-                return {"auth_url": "", "auth_message": content, "error_code": "auth-required"}
 
         return None

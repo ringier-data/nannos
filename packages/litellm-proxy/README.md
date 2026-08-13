@@ -17,6 +17,36 @@ model registration, and proxy-side cost capture. Apps talk to it via
     ("`additionalProperties: object` is not supported. Please set to false"); LangChain's
     native `ProviderStrategy`/`AutoStrategy` path emits non-strict schemas that omit it.
     Fixing it here covers every structured-output path uniformly and is safe across providers.
+  - **Gemini cache_control stripping** (`async_pre_call_deployment_hook`): removes
+    Anthropic-style `cache_control` markers from requests routed to gemini-format models
+    (`_CACHE_CONTROL_STRIP_RULES`, keyed provider + model prefix — Claude-on-Vertex keeps its
+    markers). The app attaches the markers to every provider's messages (ADR-0001, one client);
+    on Gemini, LiteLLM silently reinterprets them as *explicit* Vertex context caching: a
+    `cachedContents` object is created before the first generate call, so the first call of a
+    conversation reports its whole prefix as cache-read. The create call bills full-price input
+    plus per-token-hour storage (default TTL ~1h) and emits no success event, so that cost was
+    invisible to cost capture. LiteLLM documents no off-switch. At ~$1/M-tokens/hour storage, a
+    15k-token conversation prefix costs more to store for the default hour than one cache-read
+    saves — a net loss for short conversations even before the unbilled create.
+
+    Worse for multi-turn traffic: **explicit caches are immutable — there is no incremental
+    write.** A `cachedContents` object cannot be appended to or updated; LiteLLM reuses one only
+    on an exact content-hash match of the marked block. The moment the marked block changes or
+    grows (and the app's Anthropic-oriented markers move with the conversation on some turns),
+    that turn silently creates a **new cache of the entire grown prefix**: full input tokens
+    billed again at the standard rate plus a fresh storage object, with the superseded cache
+    still accruing storage until its TTL expires — unlike Anthropic, where a moved breakpoint
+    writes only the delta. Explicit caching fits static assets (a large fixed system prompt, a
+    reference document), not growing chat logs.
+
+    With markers stripped, Gemini's built-in **implicit** caching applies instead: free (no
+    storage, no create), but **best-effort** — measured 2026-08-06 through the gateway
+    (`gemini-3.5-flash-lite`, growing ~31k-token conversation prefix): hits on ~50–60% of
+    turns, with misses interleaved; a burst of calls within seconds can see zero hits before
+    the prefix propagates. Partial cache-read coverage on the usage page is therefore expected
+    behavior, not a bug. Genuine implicit hits also never cover 100% of the prompt (a few
+    hundred tokens past the last chunk boundary stay uncached) — a first call reporting its
+    *entire* prompt as cache-read is the signature of the explicit-caching path leaking back.
 - `Dockerfile` — `FROM ghcr.io/berriai/litellm` + the callback only.
 
 The `config.yaml` (model_list, regions, `model_info` cost seeds, `store_model_in_db`)

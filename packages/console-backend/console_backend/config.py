@@ -168,6 +168,33 @@ class ModelGatewayConfig(BaseModel):
     # pod credentials (ADC), so this is normally left blank. Empty when unset; never hardcode a
     # project id in code (it is deployment-specific).
     default_vertex_project: str = Field(default_factory=lambda: os.getenv("GCP_PROJECT_ID", ""))
+    # Bedrock region a deployment falls back to when it pins no aws_region_name of its own: the
+    # proxy pod's AWS_REGION, the same env this service reads for its own AWS clients. Nothing is
+    # injected into the deployment (unlike vertex_location) — it is the UI's honest answer to "which
+    # region will this model be called in", because Bedrock model availability is REGIONAL and a
+    # model missing from that region fails registration with AWS's opaque "The provided model
+    # identifier is invalid" (e.g. amazon.nova-2-multimodal-embeddings-v1:0 exists only in
+    # us-east-1, verified 2026-08-05, while amazon.titan-embed-image-v1 is also in eu-central-1).
+    # AWS_BEDROCK_REGION is the deployment's explicit Bedrock region (what the proxy's model configs
+    # interpolate and what scripts/start-local.sh exports); AWS_REGION is the generic fallback this
+    # service already uses for its own AWS clients. `or` rather than a getenv default because an env
+    # var set to "" must fall through, not win — that produced a UI hint with a blank region.
+    default_bedrock_region: str = Field(
+        default_factory=lambda: os.getenv("AWS_BEDROCK_REGION") or os.getenv("AWS_REGION") or "eu-central-1"
+    )
+    # Regions the registration UI probes for Bedrock model availability (on top of the gateway's own,
+    # which is always probed first). Each is one ListFoundationModels call, cached for hours, so keep
+    # this to the regions this org would actually serve from. Requires bedrock:ListFoundationModels;
+    # without it the UI just doesn't show availability (see bedrock_availability_service).
+    bedrock_availability_regions: list[str] = Field(
+        default_factory=lambda: [
+            r.strip()
+            for r in (
+                os.getenv("BEDROCK_AVAILABILITY_REGIONS") or "eu-central-1,eu-west-1,us-east-1,us-west-2"
+            ).split(",")
+            if r.strip()
+        ]
+    )
     # Providers this deployment has integrated (has credentials for on the proxy).
     # The model-catalog picker is pre-filtered to these litellm_provider values.
     # NOTE: LiteLLM tags a model by its *implementation*, so the same vendor spans

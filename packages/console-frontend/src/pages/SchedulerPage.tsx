@@ -70,6 +70,7 @@ import {
 import {
   consoleListSubAgentsOptions,
   consoleListMcpToolsOptions,
+  getCurrentUserSettingsApiV1AuthMeSettingsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { config } from '@/config';
 import { CronField } from '@/components/CronField';
@@ -133,10 +134,33 @@ function StatusBadge({ job }: { job: ScheduledJob }) {
 // Create job form
 // ---------------------------------------------------------------------------
 
-/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now". */
-function nowDatetimeLocal(): string {
+/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now".
+ * The submitted naive value is interpreted in the job's timezone on the backend, so the
+ * clamp must be "now" as that timezone's wall-clock, not the browser's. */
+function nowDatetimeLocal(timeZone?: string | null): string {
   const d = new Date();
   d.setSeconds(0, 0);
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+        .formatToParts(d)
+        .reduce<Record<string, string>>((acc, p) => {
+          acc[p.type] = p.value;
+          return acc;
+        }, {});
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    } catch {
+      // Unresolvable zone name — fall through to browser-local.
+    }
+  }
   return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
@@ -246,6 +270,10 @@ function CreateJobDialog({
 
   const { data: mcpToolsData } = useQuery(consoleListMcpToolsOptions());
   const mcpTools = mcpToolsData?.tools ?? [];
+
+  // New jobs snapshot the user's settings timezone on the backend; show it in the preview.
+  const { data: userSettings } = useQuery(getCurrentUserSettingsApiV1AuthMeSettingsGetOptions());
+  const userTimezone = userSettings?.data.timezone;
 
   const { data: channels = [] } = useQuery<DeliveryChannel[]>({
     queryKey: ['delivery-channels'],
@@ -461,6 +489,7 @@ function CreateJobDialog({
               id="cron"
               value={form.cron_expr}
               onChange={(v) => update('cron_expr', v)}
+              timezone={userTimezone}
             />
           )}
           {form.schedule_kind === 'interval' && (
@@ -482,10 +511,15 @@ function CreateJobDialog({
               <Input
                 id="run_at"
                 type="datetime-local"
-                min={nowDatetimeLocal()}
+                min={nowDatetimeLocal(userTimezone)}
                 value={form.run_at}
                 onChange={(e) => update('run_at', e.target.value)}
               />
+              {userTimezone && (
+                <p className="text-xs text-muted-foreground">
+                  Interpreted in {userTimezone}
+                </p>
+              )}
             </div>
           )}
 

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.audit import AuditEntityType
 from ..models.scheduled_job import JobRunStatus, JobType, ScheduledJob, ScheduledJobRun, ScheduleKind
 from ..models.user import User
+from ..utils.timezones import resolve_timezone
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         job_type=JobType(row["job_type"]),
         schedule_kind=ScheduleKind(row["schedule_kind"]),
         cron_expr=row["cron_expr"],
+        timezone=row["timezone"],
         interval_seconds=row["interval_seconds"],
         run_at=row["run_at"],
         next_run_at=row["next_run_at"],
@@ -73,17 +75,29 @@ def compute_next_run(
     interval_seconds: int | None,
     run_at: datetime | None,
     after: datetime | None = None,
+    tz: str | None = None,
 ) -> datetime | None:
-    """Compute the next scheduled run datetime.
+    """Compute the next scheduled run datetime (always returned in UTC).
 
-    Returns None for schedule_kind='once' — the job is done after the first run.
+    Cron wall-clock fields are interpreted in *tz* (IANA name; None/empty falls
+    back to the DEFAULT_TIMEZONE deployment default), so "0 8 * * *" fires at
+    08:00 local time across DST changes. Raises ValueError if *tz* cannot be
+    resolved. Returns None for schedule_kind='once' — the job is done after
+    the first run.
     """
     base = after or datetime.now(timezone.utc)
 
     if schedule_kind == ScheduleKind.CRON:
         assert cron_expr, "cron_expr required for cron schedule"
-        cron = croniter(cron_expr, base)
-        return cron.get_next(datetime)
+        zone = resolve_timezone(tz)
+        cron = croniter(cron_expr, base.astimezone(zone))
+        next_dt = cron.get_next(datetime)
+        # During a DST fall-back the same wall-clock time exists twice and
+        # croniter yields both folds. A wall-clock schedule must fire once, so
+        # skip a fold-1 repeat whose first occurrence has already passed.
+        while next_dt.fold and next_dt.replace(fold=0).astimezone(timezone.utc) <= base:
+            next_dt = cron.get_next(datetime)
+        return next_dt.astimezone(timezone.utc)
 
     if schedule_kind == ScheduleKind.INTERVAL:
         assert interval_seconds, "interval_seconds required for interval schedule"

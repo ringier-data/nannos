@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from console_backend.models.sub_agent import SubAgentCreate, SubAgentType
 from console_backend.services.sub_agent_service import SubAgentService
+from console_backend.services.user_settings_service import UserSettingsService
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.scheduled_job import (
@@ -14,9 +15,11 @@ from ..models.scheduled_job import (
     ScheduledJobCreate,
     ScheduledJobRun,
     ScheduledJobUpdate,
+    ScheduleKind,
 )
 from ..models.user import User
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
+from ..utils.timezones import default_timezone_name, resolve_timezone, validate_timezone_name
 
 # Sentinel value to distinguish "no change" from "set to None"
 _UNSET: Any = object()
@@ -36,12 +39,16 @@ class SchedulerService:
         self._repo = repository
         self._sub_agent_service = sub_agent_service
         self._delivery_channel_repo: "DeliveryChannelRepository | None" = None
+        self._user_settings_service: UserSettingsService | None = None
 
     def set_repository(self, repository: ScheduledJobRepository) -> None:
         self._repo = repository
 
     def set_sub_agent_service(self, sub_agent_service: SubAgentService) -> None:
         self._sub_agent_service = sub_agent_service
+
+    def set_user_settings_service(self, user_settings_service: UserSettingsService) -> None:
+        self._user_settings_service = user_settings_service
 
     def set_delivery_channel_repository(self, repository: "DeliveryChannelRepository") -> None:
         self._delivery_channel_repo = repository
@@ -66,6 +73,38 @@ class SchedulerService:
         if self._repo is None:
             raise RuntimeError("ScheduledJobRepository not injected. Call set_repository() during initialization.")
         return self._repo
+
+    async def _resolve_timezone(self, db: AsyncSession, requested: str | None, user_id: str) -> str:
+        """Return the job timezone: explicit request wins, else the user's settings timezone."""
+        if requested:
+            return requested
+        if self._user_settings_service is None:
+            raise RuntimeError(
+                "UserSettingsService not injected. Call set_user_settings_service() during initialization."
+            )
+        settings = await self._user_settings_service.get_settings(db, user_id)
+        tz = settings.timezone or default_timezone_name()
+        try:
+            validate_timezone_name(tz)
+        except ValueError as e:
+            # Legacy settings rows predate schema validation, so surface a clean
+            # 400 instead of a 500 from deep inside croniter.
+            raise ValueError(
+                f"Your settings timezone {settings.timezone!r} is not a valid IANA timezone; "
+                "fix it in Settings or pass an explicit job timezone."
+            ) from e
+        return tz
+
+    @staticmethod
+    def _normalize_run_at(run_at: datetime | None, tz: str | None) -> datetime | None:
+        """Attach the job timezone to a naive run_at.
+
+        The frontend's datetime-local input submits wall-clock strings without an
+        offset; storing them unmodified makes Postgres read them as UTC.
+        """
+        if run_at is not None and run_at.tzinfo is None:
+            return run_at.replace(tzinfo=resolve_timezone(tz))
+        return run_at
 
     async def create_job(
         self,
@@ -107,17 +146,21 @@ class SchedulerService:
 
         now = datetime.now(timezone.utc)
 
+        tz = await self._resolve_timezone(db, data.timezone, actor.id)
+        run_at = self._normalize_run_at(data.run_at, tz)
+
         # Compute initial next_run_at
         next_run_at = compute_next_run(
             schedule_kind=data.schedule_kind,
             cron_expr=data.cron_expr,
             interval_seconds=data.interval_seconds,
-            run_at=data.run_at,
+            run_at=run_at,
             after=now,
+            tz=tz,
         )
         if next_run_at is None:
             # once-only job — run_at is the first and only run
-            next_run_at = data.run_at  # type: ignore[assignment]
+            next_run_at = run_at  # type: ignore[assignment]
 
         fields: dict = {
             "user_id": actor.id,
@@ -126,8 +169,9 @@ class SchedulerService:
             "job_type": data.job_type.value,
             "schedule_kind": data.schedule_kind.value,
             "cron_expr": data.cron_expr,
+            "timezone": tz,
             "interval_seconds": data.interval_seconds,
-            "run_at": data.run_at,
+            "run_at": run_at,
             "next_run_at": next_run_at,
             "prompt": data.prompt,
             "notification_message": data.notification_message,
@@ -222,21 +266,47 @@ class SchedulerService:
             if not any(sa.id == fields["sub_agent_id"] for sa in accessible_agents):
                 raise ValueError(f"Access denied: You do not have permission to use sub-agent {fields['sub_agent_id']}")
 
-        # If schedule changed, recompute next_run_at
-        new_kind = data.schedule_kind or job.schedule_kind
-        new_cron = data.cron_expr if data.cron_expr is not None else job.cron_expr
-        new_interval = data.interval_seconds if data.interval_seconds is not None else job.interval_seconds
-        new_run_at = data.run_at if data.run_at is not None else job.run_at
+        # The DB enforces exactly one schedule config (scheduled_jobs_schedule_config):
+        # the column matching schedule_kind must be set and the other two NULL. A
+        # partial PATCH that switches kind must therefore clear the now-stale columns,
+        # and the effective combination must be validated here so callers get a clean
+        # 400 instead of a CheckViolationError surfacing as a 500.
+        if any(
+            getattr(data, f) is not None
+            for f in ("schedule_kind", "cron_expr", "interval_seconds", "run_at", "timezone")
+        ):
+            new_kind = ScheduleKind(data.schedule_kind or job.schedule_kind)
+            new_cron = data.cron_expr if data.cron_expr is not None else job.cron_expr
+            new_interval = data.interval_seconds if data.interval_seconds is not None else job.interval_seconds
+            new_tz = data.timezone if data.timezone is not None else job.timezone
+            new_run_at = self._normalize_run_at(data.run_at if data.run_at is not None else job.run_at, new_tz)
 
-        if any(f in fields for f in ("schedule_kind", "cron_expr", "interval_seconds", "run_at")):
-            next_run_at = compute_next_run(new_kind, new_cron, new_interval, new_run_at)
-            if next_run_at is not None:
-                fields["next_run_at"] = next_run_at
+            if new_kind == ScheduleKind.CRON:
+                if not new_cron:
+                    raise ValueError("schedule_kind 'cron' requires cron_expr")
+                new_interval = None
+                new_run_at = None
+            elif new_kind == ScheduleKind.INTERVAL:
+                if new_interval is None:
+                    raise ValueError("schedule_kind 'interval' requires interval_seconds")
+                new_cron = None
+                new_run_at = None
+            else:  # ScheduleKind.ONCE
+                if new_run_at is None:
+                    raise ValueError("schedule_kind 'once' requires run_at")
+                new_cron = None
+                new_interval = None
 
-        for attr in ("schedule_kind", "cron_expr", "interval_seconds", "run_at"):
-            val = getattr(data, attr, None)
-            if val is not None:
-                fields[attr] = val.value if hasattr(val, "value") else val
+            fields["schedule_kind"] = new_kind.value
+            fields["cron_expr"] = new_cron
+            fields["timezone"] = new_tz
+            fields["interval_seconds"] = new_interval
+            fields["run_at"] = new_run_at
+            # compute_next_run returns None for 'once' (nothing to repeat after the
+            # run) — the single run happens at run_at itself, mirroring create_job.
+            fields["next_run_at"] = (
+                compute_next_run(new_kind, new_cron, new_interval, new_run_at, tz=new_tz) or new_run_at
+            )
 
         await self.repo.update_job(db=db, actor=actor, job_id=job_id, fields=fields)
         await db.commit()
@@ -267,8 +337,19 @@ class SchedulerService:
         job = await self.repo.get_job(db, job_id)
         if job is None or job.user_id != actor.id:
             return False
+        # A once-job keeps its past run_at as next_run_at after completing, so
+        # re-enabling it would make the engine claim and re-execute it on the
+        # next tick — refuse instead of silently re-running a finished job.
+        if job.schedule_kind == ScheduleKind.ONCE:
+            ref = job.run_at or job.next_run_at
+            if ref is None or ref <= datetime.now(timezone.utc):
+                raise ValueError(
+                    "This one-time job has already run; create a new job instead of resuming it."
+                )
         # Reset failures and re-enable
-        next_run_at = compute_next_run(job.schedule_kind, job.cron_expr, job.interval_seconds, job.run_at)
+        next_run_at = compute_next_run(
+            job.schedule_kind, job.cron_expr, job.interval_seconds, job.run_at, tz=job.timezone
+        )
         fields: dict = {
             "enabled": True,
             "consecutive_failures": 0,

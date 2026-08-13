@@ -386,13 +386,23 @@ class SchedulerEngine:
         """Persist run outcome and advance job state."""
         success = status in (JobRunStatus.SUCCESS, JobRunStatus.CONDITION_NOT_MET)
 
-        next_run_at = compute_next_run(
-            schedule_kind=job.schedule_kind,
-            cron_expr=job.cron_expr,
-            interval_seconds=job.interval_seconds,
-            run_at=job.run_at,
-            after=datetime.now(timezone.utc),
-        )
+        try:
+            next_run_at = compute_next_run(
+                schedule_kind=job.schedule_kind,
+                cron_expr=job.cron_expr,
+                interval_seconds=job.interval_seconds,
+                run_at=job.run_at,
+                after=datetime.now(timezone.utc),
+                tz=job.timezone,
+            )
+        except ValueError as e:
+            # An unresolvable stored timezone must pause the job: raising here
+            # would leave next_run_at in the past, so claim_due_jobs would
+            # re-claim and re-execute the job on every tick, forever.
+            logger.error("Job %d has an unresolvable timezone %r; pausing it: %s", job.id, job.timezone, e)
+            next_run_at = None
+            if paused_reason is None:
+                paused_reason = f"Invalid timezone {job.timezone!r} — fix the job's timezone and resume it."
 
         async with self._db_session_factory() as db:
             await self._repo.complete_run(

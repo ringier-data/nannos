@@ -108,7 +108,23 @@ class CatalogModel(BaseModel):
     """An entry from LiteLLM's known-model catalog (for the registration picker)."""
 
     model_id: str
-    provider: str | None = None
+    provider: str | None = Field(
+        None,
+        description=(
+            "`litellm_provider` verbatim from LiteLLM's upstream cost map — an *implementation* tag "
+            "(`bedrock_converse`), the vocabulary a price list needs. NOT the route: LiteLLM's router "
+            "resolves calls to a runtime family (`bedrock`) at call time, and that is what our proxy "
+            "cost logger records on usage. Use `family` for anything behavioural."
+        ),
+    )
+    family: str | None = Field(
+        None,
+        description=(
+            "The provider route/family this entry resolves to (`bedrock`, `vertex_ai`, …), or null when "
+            "the tag maps to none. Server-derived (`route_family`) so clients never re-implement the "
+            "tag→family normalization: show THIS, and drive provider-specific UI off it."
+        ),
+    )
     mode: str = "chat"
     input_cost_per_token: float | None = None
     # Per-image input cost — the cross-provider signal that an embedding model accepts images
@@ -124,6 +140,7 @@ class CatalogModel(BaseModel):
     max_input_tokens: int | None = None
     supports_vision: bool = False
     supports_reasoning: bool = False
+    supports_web_search: bool = False
     supports_audio_input: bool = False
     supports_pdf_input: bool = False
 
@@ -137,6 +154,31 @@ class GatewayUiConfig(BaseModel):
     default_vertex_project: str = Field(
         "", description="Suggested GCP project id for new Vertex models; '' when unset (no hardcoded default)"
     )
+    default_bedrock_region: str = Field(
+        "",
+        description=(
+            "AWS region a Bedrock deployment is called in when it pins no aws_region_name (the "
+            "proxy's AWS_REGION). Shown in the UI because Bedrock model availability is regional: a "
+            "model absent from this region fails registration with AWS's 'provided model identifier "
+            "is invalid'."
+        ),
+    )
+
+
+class BedrockModelRegions(BaseModel):
+    """Where a Bedrock model id can actually be called — availability is per-region.
+
+    ``regions=None`` means the probe itself failed (no permission, no credentials): the UI must stay
+    silent, not claim the model is unavailable. An empty list IS an answer: none of the probed
+    regions offer it (a wrong id looks like this too, which is the same ambiguity AWS gives us).
+    """
+
+    model_id: str
+    regions: list[str] | None = Field(
+        None, description="Probed regions that offer this model; null when availability is unknown"
+    )
+    probed_regions: list[str] = Field(default_factory=list, description="Regions that were checked")
+    gateway_region: str = Field("", description="Region a deployment with no aws_region_name is called in")
 
 
 class CostPrefill(BaseModel):
@@ -168,7 +210,10 @@ class ModelRegistrationRequest(BaseModel):
         description="Content types the model accepts (text/image/audio/video/file)",
     )
     # Billing — written to console-backend's Rate Card (the authoritative billed rate).
-    provider: str = Field(..., description="Rate-card provider key (matches what the proxy reports at runtime)")
+    # NOTE: there is deliberately no `provider` field. The provider route is resolved server-side
+    # from litellm_params (prefix / custom_llm_provider), else from the server's own model catalog —
+    # one value for routing, provider-specific rules and billing, with nothing client-supplied in
+    # the keying path. See AGENTS.md "Rate-Card Provider Must Equal the litellm Provider Family".
     pricing: dict[str, RateCardPricingEntry] = Field(..., description="billing_unit → price; the billed rate")
     model_name_pattern: str | None = None
 
@@ -178,3 +223,11 @@ class ModelRegistrationResponse(BaseModel):
     rate_card_entry_ids: list[int]
     gateway_model_id: str | None = None
     status: str = "registered"
+    provider: str | None = Field(
+        None,
+        description=(
+            "The provider the rate card was actually keyed on — derived server-side from the routing "
+            "params, so it may differ from the request's `provider` (a catalog tag). Clients should "
+            "display THIS value, never what they sent, or the UI shows a key that doesn't bill."
+        ),
+    )
