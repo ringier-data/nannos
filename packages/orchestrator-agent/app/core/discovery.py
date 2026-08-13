@@ -22,9 +22,8 @@ from ringier_a2a_sdk.cost_tracking.attribution import context_header
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import (
     format_mcp_error,
-    get_mcp_error_body,
-    get_mcp_http_status_error,
     is_retryable_mcp_error,
+    log_mcp_gateway_error,
 )
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
@@ -228,7 +227,7 @@ class ToolDiscoveryService:
         try:
             # Call the MCP gateway API to get server list
             # Extract base URL from MCP_GATEWAY_URL (remove /mcp path)
-            base_url = self.config.MCP_GATEWAY_URL.rstrip("/mcp").rstrip("/")
+            base_url = self.config.MCP_GATEWAY_URL.removesuffix("/mcp").rstrip("/")
             servers_url = f"{base_url}/api/v1/mcp-servers"
 
             logger.debug(f"Fetching servers from: {servers_url}")
@@ -247,12 +246,7 @@ class ToolDiscoveryService:
 
         except Exception as e:
             logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
-            http_err = get_mcp_http_status_error(e)
-            if http_err is not None:
-                logger.error(
-                    f"MCP gateway response for {http_err.request.url}: "
-                    f"{http_err.response.status_code} body={get_mcp_error_body(http_err)!r}"
-                )
+            log_mcp_gateway_error(logger, e)
             return []
 
     async def _get_tools_with_retry(

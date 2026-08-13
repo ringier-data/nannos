@@ -49,9 +49,8 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import (
     format_mcp_error,
-    get_mcp_error_body,
-    get_mcp_http_status_error,
     is_retryable_mcp_error,
+    log_mcp_gateway_error,
 )
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 from ringier_a2a_sdk.utils.streaming import (
@@ -127,6 +126,17 @@ CONSOLE_BACKEND_TOOL_PREFIXES = ("console_", "scheduler_")
 def is_console_backend_tool(name: str) -> bool:
     """Return True if ``name`` is served by the console-backend MCP, not the gateway."""
     return name.startswith(CONSOLE_BACKEND_TOOL_PREFIXES)
+
+
+class _McpTokenExchangeError(Exception):
+    """Marks a failure from exchange_token(), not from the MCP server itself.
+
+    _discover_mcp_tools degrades gracefully on MCP transport/gateway errors —
+    but a failure exchanging the user's own token is a different failure class
+    (their credentials, not the gateway being down) and must not be caught by
+    that same degrade path silently. Raised with the original exception as
+    __cause__ and unwrapped back to it before propagating past this module.
+    """
 
 
 def _validate_tool_schema(tool: BaseTool) -> BaseTool:
@@ -494,6 +504,36 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         return "\n\n" + "\n".join(parts)
 
+    def _build_tool_availability_addendum(self) -> str:
+        """Build the tool-availability warning for the system prompt.
+
+        Set when _discover_mcp_tools degraded to zero tools rather than failing
+        the turn (see its docstring) — without this, the agent just looks
+        silently less capable, with no way to tell the user a gateway is down
+        instead of the capability never having existed.
+
+        Deliberately a fixed, parameter-free sentence rather than interpolating
+        self._mcp_discovery_error: that text is gateway/exception-controlled
+        (a prompt-injection surface at system-prompt privilege), can embed
+        internal URLs the model would otherwise be told to relay to the user,
+        and varies turn to turn during a flapping gateway — which would
+        invalidate the prompt-cache prefix on every degraded turn. The detailed
+        message is already logged server-side, in _discover_mcp_tools.
+
+        Returns:
+            Formatted string to append to the system prompt, or empty string
+        """
+        if not self._mcp_discovery_error:
+            return ""
+        return (
+            "\n\n<tool_availability_warning>\n"
+            "Some of your integration tools failed to load. "
+            "If the user asks for something that would need those tools, tell them the "
+            "integration is temporarily unavailable due to a backend error (don't guess, "
+            "improvise, or silently refuse as if the capability never existed).\n"
+            "</tool_availability_warning>"
+        )
+
     def _build_self_improvement_addendum(self) -> str:
         """Build the self-improvement decision tree for the system prompt.
 
@@ -586,17 +626,26 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         The discovered tools override orchestrator tools entirely when whitelist is specified.
 
         Implements retry logic with exponential backoff for transient errors (502, 503, 504).
-        Non-retryable errors (4xx, exhausted retries) degrade gracefully to an empty
-        tool list rather than failing the turn — a dead/misconfigured gateway (e.g.
-        Gatana) shouldn't crash embedded execute-only sub-agents that depend on this
-        as their only tool source, mirroring ToolDiscoveryService.fetch_available_servers.
+        Non-retryable MCP transport/gateway errors (4xx, exhausted retries) degrade
+        gracefully to an empty tool list rather than failing the turn — a dead/
+        misconfigured gateway (e.g. Gatana) shouldn't crash embedded execute-only
+        sub-agents that depend on this as their only tool source, mirroring
+        ToolDiscoveryService.fetch_available_servers. Failures exchanging the
+        user's own token are a different failure class (their credentials, not
+        the gateway being down) and are NOT degraded — they propagate so the turn
+        fails loudly, same as before this degrade path existed.
 
         Returns:
             List of discovered BaseTool instances (filtered by whitelist if specified),
-            or an empty list if discovery fails after retries.
+            or an empty list if MCP transport/gateway discovery fails after retries.
+
+        Raises:
+            Exception: If exchanging the user's token fails (the original
+                exception, not wrapped) — this is not a gateway/transport error.
         """
         import asyncio
 
+        self._mcp_discovery_error = None
         mcp_gateway_url = self.mcp_gateway_url
         mcp_gateway_client_id = self.mcp_gateway_client_id
         mcp_tool_names = set(self.config.mcp_tools or [])
@@ -612,9 +661,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         # Retry parameters
         max_retries = 3
-        initial_delay = 1.0
-        last_error = None
-        delay = initial_delay
+        delay = 1.0
 
         for attempt in range(max_retries):
             try:
@@ -627,11 +674,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     headers: dict[str, str] = {}
                     if self.oauth2_client and self.user_token:
                         logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
-                        mcp_gateway_token = await self.oauth2_client.exchange_token(
-                            subject_token=self.user_token,
-                            target_client_id=mcp_gateway_client_id,
-                            requested_scopes=["openid", "profile", "offline_access"],
-                        )
+                        try:
+                            mcp_gateway_token = await self.oauth2_client.exchange_token(
+                                subject_token=self.user_token,
+                                target_client_id=mcp_gateway_client_id,
+                                requested_scopes=["openid", "profile", "offline_access"],
+                            )
+                        except Exception as auth_exc:
+                            raise _McpTokenExchangeError(str(auth_exc)) from auth_exc
                         headers["Authorization"] = f"Bearer {mcp_gateway_token}"
                         logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
                     else:
@@ -651,11 +701,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     console_headers: dict[str, str] = {}
                     if self.oauth2_client and self.user_token:
                         logger.debug(f"Exchanging token for console backend access for {self.name}")
-                        console_token = await self.oauth2_client.exchange_token(
-                            subject_token=self.user_token,
-                            target_client_id=self.console_backend_client_id,
-                            requested_scopes=["openid", "profile", "offline_access"],
-                        )
+                        try:
+                            console_token = await self.oauth2_client.exchange_token(
+                                subject_token=self.user_token,
+                                target_client_id=self.console_backend_client_id,
+                                requested_scopes=["openid", "profile", "offline_access"],
+                            )
+                        except Exception as auth_exc:
+                            raise _McpTokenExchangeError(str(auth_exc)) from auth_exc
                         console_headers["Authorization"] = f"Bearer {console_token}"
                         logger.info(f"Successfully exchanged token for console backend ({self.name})")
                     elif self.user_token:
@@ -692,15 +745,22 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     logger.info(f"Successfully discovered MCP tools for {self.name} on attempt {attempt + 1}")
                 return validated_tools
 
-            except Exception as e:
-                last_error = e
+            except _McpTokenExchangeError as auth_exc:
+                # A different failure class from the gateway/transport errors below
+                # (the user's own credentials, not the gateway being down) — don't
+                # degrade, propagate the original exception as before this path existed.
+                logger.error(f"Token exchange failed while discovering MCP tools for {self.name}: {auth_exc}")
+                raise auth_exc.__cause__ from None
 
+            except Exception as e:
                 # Check if this is a retryable error
                 is_retryable = is_retryable_mcp_error(e)
 
                 if not is_retryable or attempt >= max_retries - 1:
                     # Non-retryable error or exhausted retries — degrade gracefully
-                    # instead of crashing the whole turn (see docstring).
+                    # instead of crashing the whole turn (see docstring). This is
+                    # always the loop's last possible outcome: every path either
+                    # returns here or above, so there is no unreachable tail after it.
                     error_msg = format_mcp_error(e)
                     if is_retryable:
                         logger.error(
@@ -708,12 +768,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                         )
                     else:
                         logger.error(f"Non-retryable error discovering MCP tools for {self.name}: {e}")
-                    http_err = get_mcp_http_status_error(e)
-                    if http_err is not None:
-                        logger.error(
-                            f"MCP gateway response for {self.name} ({http_err.request.url}): "
-                            f"{http_err.response.status_code} body={get_mcp_error_body(http_err)!r}"
-                        )
+                    log_mcp_gateway_error(logger, e, context=f"for {self.name} ")
                     # Recorded so _ensure_agent can warn the LLM (and, through it,
                     # the user) that some tools are missing — otherwise the agent
                     # just looks silently less capable with no way to explain why.
@@ -727,11 +782,6 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 )
                 await asyncio.sleep(delay)
                 delay *= 2  # Exponential backoff
-
-        # Should never reach here, but just in case
-        logger.error(f"Failed to discover MCP tools for {self.name}: {last_error}")
-        self._mcp_discovery_error = format_mcp_error(last_error) if last_error else "unknown error"
-        return []
 
     # Tools that sub-agents always get from console-backend MCP for self-improvement
     _CONSOLE_SELF_IMPROVEMENT_TOOLS = frozenset(
@@ -1060,19 +1110,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             system_prompt += TOOL_CATALOG_PROMPT_ADDENDUM
             logger.debug(f"Added tool-catalog addendum to {self.name} system prompt")
 
-        # MCP gateway discovery degraded to zero tools rather than failing the turn
-        # (see _discover_mcp_tools) — without this, the agent just looks silently
-        # less capable, and the user/operator has no way to tell a broken gateway
-        # apart from the agent simply refusing to help.
-        if self._mcp_discovery_error:
-            system_prompt += (
-                "\n\n<tool_availability_warning>\n"
-                f"Some of your integration tools failed to load: {self._mcp_discovery_error}\n"
-                "If the user asks for something that would need those tools, tell them the "
-                "integration is temporarily unavailable due to a backend error (don't guess, "
-                "improvise, or silently refuse as if the capability never existed).\n"
-                "</tool_availability_warning>"
-            )
+        tool_availability_addendum = self._build_tool_availability_addendum()
+        if tool_availability_addendum:
+            system_prompt += tool_availability_addendum
             logger.debug(f"Added MCP tool-availability warning to {self.name} system prompt")
 
         # Get provider-specific response_format strategy (may mutate tools list for Bedrock/Anthropic+thinking)
