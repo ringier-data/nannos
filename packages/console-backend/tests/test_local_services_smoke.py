@@ -15,6 +15,7 @@ from console_backend.services.in_memory_conversation_service import InMemoryConv
 from console_backend.services.in_memory_messages_service import InMemoryMessagesService
 from console_backend.services.in_memory_session_service import InMemorySessionService
 from console_backend.services.in_memory_socket_session_service import InMemorySocketSessionService
+from console_backend.services.messages_service import UnknownCursorError
 from console_backend.services.local_file_storage_service import LocalFileStorageService
 
 # -- InMemorySessionService --------------------------------------------------
@@ -152,8 +153,9 @@ async def test_messages_insert_and_list():
     msg = await svc.insert_message("c1", "u4", "user", [{"type": "text", "text": "Hello"}])
     assert msg.role == "user"
     assert len(msg.parts) == 1
-    msgs = await svc.get_messages_by_conversation("c1", "u4")
-    assert len(msgs) == 1
+    page = await svc.get_messages_by_conversation("c1", "u4")
+    assert len(page.messages) == 1
+    assert page.has_more is False
 
 
 @pytest.mark.asyncio
@@ -161,10 +163,44 @@ async def test_messages_ordering():
     svc = InMemoryMessagesService()
     await svc.insert_message("c1", "u4", "user", [{"type": "text", "text": "First"}])
     await svc.insert_message("c1", "u4", "assistant", [{"type": "text", "text": "Second"}])
-    msgs = await svc.get_messages_by_conversation("c1", "u4")
-    assert len(msgs) == 2
-    assert msgs[0].role == "user"
-    assert msgs[1].role == "assistant"
+    page = await svc.get_messages_by_conversation("c1", "u4")
+    assert len(page.messages) == 2
+    assert page.messages[0].role == "user"
+    assert page.messages[1].role == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_messages_pagination():
+    svc = InMemoryMessagesService()
+    for i in range(5):
+        await svc.insert_message("c1", "u4", "user", [{"type": "text", "text": f"m{i}"}])
+
+    # Default page holds the NEWEST messages, chronologically ordered
+    newest = await svc.get_messages_by_conversation("c1", "u4", limit=2)
+    assert [p.parts[0]["text"] for p in newest.messages] == ["m3", "m4"]
+    assert newest.has_more is True
+
+    # Paging back from the page's oldest message yields the preceding page
+    older = await svc.get_messages_by_conversation(
+        "c1", "u4", limit=2, before=newest.messages[0].message_id
+    )
+    assert [p.parts[0]["text"] for p in older.messages] == ["m1", "m2"]
+    assert older.has_more is True
+
+    # Last page reaches the start of the conversation
+    oldest = await svc.get_messages_by_conversation(
+        "c1", "u4", limit=2, before=older.messages[0].message_id
+    )
+    assert [p.parts[0]["text"] for p in oldest.messages] == ["m0"]
+    assert oldest.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_messages_unknown_cursor():
+    svc = InMemoryMessagesService()
+    await svc.insert_message("c1", "u4", "user", [{"type": "text", "text": "Hello"}])
+    with pytest.raises(UnknownCursorError):
+        await svc.get_messages_by_conversation("c1", "u4", before="nope")
 
 
 # -- LocalFileStorageService -------------------------------------------------

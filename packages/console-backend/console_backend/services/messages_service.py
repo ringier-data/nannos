@@ -11,10 +11,14 @@ from sqlalchemy import text
 from uuid6 import uuid7
 
 from ..db.connection import get_async_session_factory
-from ..models.message import Message
+from ..models.message import Message, MessagePage
 from .file_storage_service import FileStorageService
 
 logger = logging.getLogger(__name__)
+
+
+class UnknownCursorError(ValueError):
+    """Raised when a pagination cursor does not name a message in the conversation."""
 
 
 EXPIRY_BUFFER_SECONDS = (
@@ -228,29 +232,84 @@ class MessagesService:
         self._session_factory = get_async_session_factory()
         logger.info("MessagesService initialized (PostgreSQL)")
 
-    async def get_messages_by_conversation(self, conversation_id: str, user_id: str, limit: int = 100) -> list[Message]:
-        """Retrieve messages for a conversation.
+    async def get_messages_by_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+        limit: int = 100,
+        before: str | None = None,
+    ) -> MessagePage:
+        """Retrieve one page of a conversation's messages, newest page first.
+
+        Pagination is keyset-based on `(created_at, id)`: a page holds the newest
+        `limit` messages older than the `before` cursor (or the newest `limit`
+        messages overall when no cursor is given). Paging backwards through the
+        history means passing the `message_id` of the page's oldest message as the
+        next `before`.
 
         Args:
             conversation_id: The conversation ID (partition key)
             user_id: The user ID (for access control)
             limit: Maximum number of messages to return (default: 100)
+            before: Cursor — the `message_id` to page back from (exclusive)
 
         Returns:
-            List of messages ordered by created_at (chronological order)
+            A MessagePage whose messages are ordered chronologically (oldest first)
+            and whose `has_more` says whether older messages remain.
+
+        Raises:
+            UnknownCursorError: `before` does not name a message in this conversation.
         """
         try:
             async with self._session_factory() as db:
+                cursor_created_at = None
+                cursor_id = None
+                if before is not None:
+                    cursor_row = (
+                        (
+                            await db.execute(
+                                text(
+                                    "SELECT created_at, id FROM messages "
+                                    "WHERE message_id = :before "
+                                    "AND conversation_id = :conversation_id AND user_id = :user_id"
+                                ),
+                                {"before": before, "conversation_id": conversation_id, "user_id": user_id},
+                            )
+                        )
+                        .mappings()
+                        .first()
+                    )
+                    if cursor_row is None:
+                        raise UnknownCursorError(f"Unknown cursor for conversation {conversation_id}")
+                    cursor_created_at = cursor_row["created_at"]
+                    cursor_id = cursor_row["id"]
+
+                # Fetch one extra row to detect whether older messages remain.
                 result = await db.execute(
                     text(
                         "SELECT * FROM messages "
                         "WHERE conversation_id = :conversation_id AND user_id = :user_id "
-                        "ORDER BY created_at ASC "
+                        + (
+                            "AND (created_at, id) < (:cursor_created_at, :cursor_id) "
+                            if before is not None
+                            else ""
+                        )
+                        + "ORDER BY created_at DESC, id DESC "
                         "LIMIT :limit"
                     ),
-                    {"conversation_id": conversation_id, "user_id": user_id, "limit": limit},
+                    {
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                        "cursor_created_at": cursor_created_at,
+                        "cursor_id": cursor_id,
+                        "limit": limit + 1,
+                    },
                 )
                 rows = result.mappings().all()
+
+            has_more = len(rows) > limit
+            # Rows come newest-first; drop the probe row, then flip to chronological order.
+            rows = list(reversed(rows[:limit]))
 
             results = []
             for row in rows:
@@ -287,11 +346,13 @@ class MessagesService:
                     continue
 
             logger.debug(f"Retrieved {len(results)} messages for conversation: {conversation_id}")
-            return results
+            return MessagePage(messages=results, has_more=has_more)
 
+        except UnknownCursorError:
+            raise
         except Exception as e:
             logger.exception(f"Failed to get messages for conversation {conversation_id}: {e}")
-            return []
+            return MessagePage(messages=[], has_more=False)
 
     async def insert_message(
         self,

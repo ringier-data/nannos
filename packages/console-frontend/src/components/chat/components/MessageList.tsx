@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown, Copy, Check } from 'lucide-react';
+import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown, Copy, Check, Loader2 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -313,7 +313,7 @@ function FeedbackRequestBanner({ conversationId, subAgents, onDismiss }: { conve
 }
 
 export function MessageList() {
-  const { messages, isLoadingMessages, streamingMessage, liveTimeline, activeConversationId, pendingFeedbackRequest, dismissFeedbackRequest } = useChat();
+  const { messages, isLoadingMessages, isLoadingOlderMessages, streamingMessage, liveTimeline, activeConversationId, pendingFeedbackRequest, dismissFeedbackRequest } = useChat();
 
   // Fetch feedback for the active conversation
   const { data: feedbackData } = useQuery({
@@ -361,6 +361,13 @@ export function MessageList() {
 
   return (
     <div className="flex flex-col px-4 divide-y divide-border/50">
+      {/* Older history is paged in when the reader scrolls to the top (see useChatScroll) */}
+      {isLoadingOlderMessages && (
+        <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading earlier messages…
+        </div>
+      )}
       {mainMessages.map((msg) => (
         <div key={msg.id}>
           {/* Render unified timeline for chronological display of all events */}

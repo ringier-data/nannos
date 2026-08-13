@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 from console_backend.routers import message_router
+from console_backend.services.messages_service import UnknownCursorError
 
 app = FastAPI()
 app.include_router(message_router.router)
@@ -38,13 +39,20 @@ def _make_mock_message(**kwargs):
     return MagicMock(**default)
 
 
+def _page(messages, has_more=False):
+    page = MagicMock()
+    page.messages = messages
+    page.has_more = has_more
+    return page
+
+
 def test_get_messages_success():
     msgs = [
         _make_mock_message(message_id="m1", sort_key=1),
         _make_mock_message(message_id="m2", sort_key=2, role="assistant", parts=["reply"]),
     ]
     mock_service = MagicMock()
-    mock_service.get_messages_by_conversation = AsyncMock(return_value=msgs)
+    mock_service.get_messages_by_conversation = AsyncMock(return_value=_page(msgs))
     mock_service.hydrate_messages_files = AsyncMock(return_value=msgs)
     app.state.messages_service = mock_service
 
@@ -55,7 +63,11 @@ def test_get_messages_success():
     assert data["count"] == 2
     assert data["messages"][0]["message_id"] == "m1"
     assert data["messages"][1]["role"] == "assistant"
-    mock_service.get_messages_by_conversation.assert_awaited_once_with("conv-123", "user-1", limit=100)
+    assert data["has_more"] is False
+    assert data["next_cursor"] is None
+    mock_service.get_messages_by_conversation.assert_awaited_once_with(
+        "conv-123", "user-1", limit=100, before=None
+    )
 
 
 def test_limit_validation_low():
@@ -71,7 +83,7 @@ def test_limit_validation_high():
 
 def test_empty_result():
     mock_service = MagicMock()
-    mock_service.get_messages_by_conversation = AsyncMock(return_value=[])
+    mock_service.get_messages_by_conversation = AsyncMock(return_value=_page([]))
     mock_service.hydrate_messages_files = AsyncMock(return_value=[])
     app.state.messages_service = mock_service
     resp = client.get("/api/v1/messages/conv-123")
@@ -93,10 +105,53 @@ def test_service_error():
 def test_created_at_serialization():
     mock_msg = _make_mock_message(created_at="2025-11-19T12:00:00+00:00")
     mock_service = MagicMock()
-    mock_service.get_messages_by_conversation = AsyncMock(return_value=[mock_msg])
+    mock_service.get_messages_by_conversation = AsyncMock(return_value=_page([mock_msg]))
     mock_service.hydrate_messages_files = AsyncMock(return_value=[mock_msg])
     app.state.messages_service = mock_service
     resp = client.get("/api/v1/messages/conv-123")
     assert resp.status_code == 200
     conv = resp.json()["messages"][0]
     assert conv["created_at"].endswith("+00:00")
+
+
+def test_pagination_cursor_forwarded_and_returned():
+    msgs = [
+        _make_mock_message(message_id="m1", sort_key=1),
+        _make_mock_message(message_id="m2", sort_key=2),
+    ]
+    mock_service = MagicMock()
+    mock_service.get_messages_by_conversation = AsyncMock(return_value=_page(msgs, has_more=True))
+    mock_service.hydrate_messages_files = AsyncMock(return_value=msgs)
+    app.state.messages_service = mock_service
+
+    resp = client.get("/api/v1/messages/conv-123?limit=2&before=m3")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_more"] is True
+    # The oldest message on the page is where the next (older) page starts
+    assert data["next_cursor"] == "m1"
+    mock_service.get_messages_by_conversation.assert_awaited_once_with(
+        "conv-123", "user-1", limit=2, before="m3"
+    )
+
+
+def test_unknown_cursor_rejected():
+    mock_service = MagicMock()
+    mock_service.get_messages_by_conversation = AsyncMock(side_effect=UnknownCursorError("nope"))
+    mock_service.hydrate_messages_files = AsyncMock()
+    app.state.messages_service = mock_service
+
+    resp = client.get("/api/v1/messages/conv-123?before=does-not-exist")
+    assert resp.status_code == 400
+    assert "Unknown pagination cursor" in resp.json()["detail"]
+
+
+def test_no_cursor_when_page_is_complete():
+    msgs = [_make_mock_message(message_id="m1", sort_key=1)]
+    mock_service = MagicMock()
+    mock_service.get_messages_by_conversation = AsyncMock(return_value=_page(msgs, has_more=False))
+    mock_service.hydrate_messages_files = AsyncMock(return_value=msgs)
+    app.state.messages_service = mock_service
+
+    resp = client.get("/api/v1/messages/conv-123")
+    assert resp.json()["next_cursor"] is None

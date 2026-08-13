@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..dependencies import require_auth
 from ..models.user import User
+from ..services.messages_service import UnknownCursorError
 
 logger = logging.getLogger(__name__)
 
@@ -15,19 +16,28 @@ router: APIRouter = APIRouter(prefix="/api/v1/messages", tags=["messages"])
 
 @router.get("/{conversation_id}")
 async def get_messages_by_conversation(
-    request: Request, conversation_id: str, user: User = Depends(require_auth), limit: int = 100
+    request: Request,
+    conversation_id: str,
+    user: User = Depends(require_auth),
+    limit: int = 100,
+    before: str | None = None,
 ) -> dict:
-    """Get all messages for a conversation.
+    """Get one page of a conversation's messages, newest page first.
 
     Args:
         conversation_id: The conversation ID
         limit: Maximum number of messages to return (default: 100, max: 100)
+        before: Cursor — the `message_id` to page back from (exclusive). Omit to
+            get the newest page; pass the previous response's `next_cursor` to
+            walk further back through the history.
 
     Returns:
         Dictionary containing:
         - conversation_id: The conversation ID
         - messages: List of messages ordered chronologically
         - count: Number of messages returned
+        - has_more: Whether older messages exist before this page
+        - next_cursor: Cursor to pass as `before` for the next (older) page, or None
     """
     try:
         # Validate limit
@@ -35,10 +45,15 @@ async def get_messages_by_conversation(
             raise HTTPException(status_code=400, detail="Limit must be between 1 and 100")
 
         messages_service = request.app.state.messages_service
-        messages = await messages_service.get_messages_by_conversation(conversation_id, user.id, limit=limit)
+        try:
+            page = await messages_service.get_messages_by_conversation(
+                conversation_id, user.id, limit=limit, before=before
+            )
+        except UnknownCursorError:
+            raise HTTPException(status_code=400, detail="Unknown pagination cursor") from None
 
         # Hydrate file parts with presigned URLs
-        messages = await messages_service.hydrate_messages_files(messages)
+        messages = await messages_service.hydrate_messages_files(page.messages)
 
         return {
             "conversation_id": conversation_id,
@@ -60,6 +75,9 @@ async def get_messages_by_conversation(
                 for msg in messages
             ],
             "count": len(messages),
+            "has_more": page.has_more,
+            # The oldest message on this page is where the next (older) page starts.
+            "next_cursor": messages[0].message_id if page.has_more and messages else None,
         }
 
     except HTTPException:

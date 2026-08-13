@@ -31,3 +31,12 @@ class Message(BaseModel):
     raw_payload: str = ""  # Original JSON payload
     metadata: dict[str, Any] = Field(default_factory=dict)  # Optional metadata
     kind: str = ""  # Message kind: 'message', 'status-update', etc.
+
+
+class MessagePage(BaseModel):
+    """One keyset-paginated page of a conversation's messages."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    messages: list[Message] = Field(default_factory=list)  # Chronological (oldest first)
+    has_more: bool = False  # Whether older messages exist before this page

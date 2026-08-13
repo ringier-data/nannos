@@ -1,10 +1,11 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { MessageSquare, Plus, PanelRightOpen, FlaskConical, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChat, ConnectionStatus, MessageList, ChatInput } from '@/components/chat';
+import { useChatScroll } from '@/components/chat/hooks/useChatScroll';
 import { WorkingBlock } from '@/components/chat/components/WorkingBlock';
 import { InterruptConfirmCard } from '@/components/chat/components/InterruptConfirmCard';
 import { formatTimestamp } from '@/components/chat/utils';
@@ -60,22 +61,8 @@ export function PlaygroundChatPanel({
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
 
-  // Auto-scroll to the bottom as messages arrive or stream in (mirrors ChatApp).
-  useEffect(() => {
-    const scrollToBottom = () => {
-      const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-      if (viewport) viewport.scrollTop = viewport.scrollHeight;
-    };
-    scrollToBottom();
-
-    const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    if (!viewport) return;
-    const observer = new MutationObserver(() => {
-      if (isWaiting) scrollToBottom();
-    });
-    observer.observe(viewport, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
-  }, [messages, isWaiting, liveWorkingSteps]);
+  // Bottom-pinned auto-scroll plus paging older history in at the top (shared with ChatApp).
+  useChatScroll(scrollAreaRef);
 
   return (
     <>

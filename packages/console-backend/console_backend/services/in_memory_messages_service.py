@@ -11,7 +11,8 @@ from typing import Any
 
 from a2a.types import TaskState
 
-from ..models.message import Message
+from ..models.message import Message, MessagePage
+from .messages_service import UnknownCursorError
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +31,24 @@ class InMemoryMessagesService:
         conversation_id: str,
         user_id: str,
         limit: int = 100,
-    ) -> list[Message]:
+        before: str | None = None,
+    ) -> MessagePage:
+        """Return the newest `limit` messages older than the `before` cursor.
+
+        Mirrors MessagesService's keyset pagination; insertion order stands in for
+        the `(created_at, id)` ordering the PostgreSQL implementation uses.
+        """
         messages = self._messages.get(conversation_id, [])
-        # Filter by user_id and return last `limit` messages
         user_msgs = [m for m in messages if m.user_id == user_id]
-        return user_msgs[-limit:]
+
+        if before is not None:
+            cursor_idx = next((i for i, m in enumerate(user_msgs) if m.message_id == before), None)
+            if cursor_idx is None:
+                raise UnknownCursorError(f"Unknown cursor for conversation {conversation_id}")
+            user_msgs = user_msgs[:cursor_idx]
+
+        page = user_msgs[-limit:] if limit else []
+        return MessagePage(messages=page, has_more=len(user_msgs) > len(page))
 
     async def insert_message(
         self,

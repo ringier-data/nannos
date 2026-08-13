@@ -8,6 +8,7 @@ from a2a.types import TaskState
 
 from console_backend.models.message import Message
 from console_backend.services.messages_service import (
+    UnknownCursorError,
     _parse_agent_response,
     _parse_status_update,
     _parse_task,
@@ -479,3 +480,92 @@ async def test_hydrate_multiple_messages():
         assert hydrated[1].parts[0].get("url") is not None
         assert hydrated[0].parts[0]["url"] == "https://bucket.s3.amazonaws.com/msg1.txt?fresh=true"
         assert hydrated[1].parts[0]["url"] == "https://bucket.s3.amazonaws.com/msg2.txt?fresh=true"
+
+
+# -- Keyset pagination -------------------------------------------------------
+
+
+def _db_row(message_id: str, created_at: str):
+    return {
+        "conversation_id": "conv-1",
+        "sort_key": f"MSG#0#{message_id}",
+        "user_id": "user-1",
+        "message_id": message_id,
+        "role": "user",
+        "parts": [{"kind": "text", "text": message_id}],
+        "task_id": "",
+        "created_at": created_at,
+        "state": "completed",
+        "raw_payload": "",
+        "metadata": {},
+        "kind": "message",
+    }
+
+
+def _stub_db(page_rows, cursor_row=None):
+    """Fake async session whose execute() returns the cursor lookup then the page."""
+    executed = []
+
+    async def execute(statement, params):
+        executed.append((str(statement), params))
+        result = MagicMock()
+        # The cursor lookup is the only query selecting created_at/id explicitly.
+        if "SELECT created_at, id FROM messages" in str(statement):
+            result.mappings.return_value.first.return_value = cursor_row
+        else:
+            result.mappings.return_value.all.return_value = page_rows
+        return result
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=execute)
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=db)
+    session.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=session)
+    return factory, executed
+
+
+@pytest.mark.asyncio
+async def test_get_messages_returns_newest_page_chronologically():
+    ms = _make_messages_service()
+    # Rows come back newest-first, with one extra probe row beyond the limit.
+    rows = [
+        _db_row("m3", "2025-01-01T00:03:00+00:00"),
+        _db_row("m2", "2025-01-01T00:02:00+00:00"),
+        _db_row("m1", "2025-01-01T00:01:00+00:00"),
+    ]
+    ms._session_factory, executed = _stub_db(rows)
+
+    page = await ms.get_messages_by_conversation("conv-1", "user-1", limit=2)
+
+    assert [m.message_id for m in page.messages] == ["m2", "m3"]
+    assert page.has_more is True
+    sql, params = executed[0]
+    assert "ORDER BY created_at DESC, id DESC" in sql
+    assert params["limit"] == 3  # limit + 1 probe row
+    assert "(created_at, id) <" not in sql  # no cursor on the first page
+
+
+@pytest.mark.asyncio
+async def test_get_messages_with_cursor_applies_keyset_filter():
+    ms = _make_messages_service()
+    rows = [_db_row("m1", "2025-01-01T00:01:00+00:00")]
+    cursor_row = {"created_at": datetime(2025, 1, 1, 0, 2, tzinfo=timezone.utc), "id": 42}
+    ms._session_factory, executed = _stub_db(rows, cursor_row=cursor_row)
+
+    page = await ms.get_messages_by_conversation("conv-1", "user-1", limit=2, before="m2")
+
+    assert [m.message_id for m in page.messages] == ["m1"]
+    assert page.has_more is False  # fewer rows than limit -> start of conversation
+    page_sql, page_params = executed[1]
+    assert "(created_at, id) < (:cursor_created_at, :cursor_id)" in page_sql
+    assert page_params["cursor_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_get_messages_rejects_unknown_cursor():
+    ms = _make_messages_service()
+    ms._session_factory, _ = _stub_db([], cursor_row=None)
+
+    with pytest.raises(UnknownCursorError):
+        await ms.get_messages_by_conversation("conv-1", "user-1", before="ghost")

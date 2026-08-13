@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState } from 'react';
 import { Settings, PanelRightOpen, ExternalLink, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { config } from '@/config';
@@ -18,15 +18,19 @@ import {
 import { WorkingBlock } from './components/WorkingBlock';
 import { InterruptConfirmCard } from './components/InterruptConfirmCard';
 import { downloadTextFile, formatConversationAsText, slugifyFilename } from './utils';
-
-// Matches the backend's hard cap in message_router.py (limit is validated to <= 100,
-// no offset/cursor pagination) — the console never loads more than this per conversation.
-const MESSAGE_FETCH_LIMIT = 100;
+import { useChatScroll } from './hooks/useChatScroll';
 
 export function ChatApp() {
   const { isAdmin } = useAuth();
   const { agentInfo } = useSocket();
-  const { messages, conversations, activeConversationId, liveWorkingSteps, isWaiting } = useChat();
+  const {
+    messages,
+    conversations,
+    activeConversationId,
+    liveWorkingSteps,
+    isWaiting,
+    hasMoreMessages,
+  } = useChat();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(true);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -36,45 +40,12 @@ export function ChatApp() {
   const handleExportConversation = () => {
     const activeConversation = conversations.find((c) => c.id === activeConversationId);
     const title = activeConversation?.title || agentName;
-    const text = formatConversationAsText(title, messages, messages.length >= MESSAGE_FETCH_LIMIT);
+    // Older messages the user never scrolled back to are genuinely missing from the export.
+    const text = formatConversationAsText(title, messages, hasMoreMessages);
     downloadTextFile(`${slugifyFilename(title)}.txt`, text);
   };
 
-  // Auto-scroll to bottom when messages change or new content is generated
-  useEffect(() => {
-    const scrollToBottom = () => {
-      if (scrollAreaRef.current) {
-        // ScrollArea's viewport is the first child with data-radix-scroll-area-viewport
-        const viewport = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
-        if (viewport) {
-          viewport.scrollTop = viewport.scrollHeight;
-        }
-      }
-    };
-
-    // Scroll immediately when dependencies change
-    scrollToBottom();
-
-    // Also observe DOM mutations to catch streaming updates
-    const messageList = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    if (!messageList) return;
-
-    const observer = new MutationObserver(() => {
-      // Scroll when content is added/modified
-      if (isWaiting) {
-        scrollToBottom();
-      }
-    });
-
-    observer.observe(messageList, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      characterDataOldValue: false,
-    });
-
-    return () => observer.disconnect();
-  }, [messages, isWaiting, liveWorkingSteps]);
+  useChatScroll(scrollAreaRef);
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-background text-foreground">
