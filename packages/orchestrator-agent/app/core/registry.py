@@ -544,7 +544,7 @@ class RegistryService:
 
         Args:
             access_token: User's access token for authenticated API call
-            pending_consents: List of {"key": "tool::server", "grant": {"granted": bool}} dicts
+            pending_consents: List of {"tool_name": str, "granted": bool} dicts
         """
         if not pending_consents:
             return
@@ -553,14 +553,10 @@ class RegistryService:
         headers = {"Authorization": f"Bearer {access_token}"}
 
         for entry in pending_consents:
-            key: str = entry["key"]
-            grant: dict[str, Any] = entry["grant"]
-
-            parts = key.split("::", 1)
+            tool_name: str = entry["tool_name"]
             body: dict[str, Any] = {
-                "tool_name": parts[0],
-                "server_slug": parts[1] if len(parts) > 1 else "_self",
-                "granted": bool(grant.get("granted")),
+                "tool_name": tool_name,
+                "granted": bool(entry.get("granted")),
             }
 
             try:
@@ -570,6 +566,8 @@ class RegistryService:
                     headers=headers,
                 )
                 if response.status_code != 200:
-                    logger.warning(f"Failed to persist identity consent for '{key}': status={response.status_code}")
+                    logger.warning(
+                        f"Failed to persist identity consent for '{tool_name}': status={response.status_code}"
+                    )
             except Exception:
-                logger.exception(f"Error persisting identity consent for '{key}'")
+                logger.exception(f"Error persisting identity consent for '{tool_name}'")

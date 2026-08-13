@@ -13,6 +13,7 @@ from a2a.types import AgentCard
 from google.protobuf.json_format import ParseDict
 from agent_common.a2a.config import A2AClientConfig
 from agent_common.a2a.factory import make_a2a_async_runnable
+from agent_common.core.identity_scoped import wrap_identity_scoped_tools
 from deepagents import CompiledSubAgent
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.callbacks import Callbacks
@@ -292,6 +293,12 @@ class ToolDiscoveryService:
                     if tool.metadata is None:
                         tool.metadata = {}
                     tool.metadata["server_name"] = server_name
+
+                # Wrap identity-scoped tools (reserved nannos__user_identity
+                # field) at the point where MCP tools materialize, so wrapped
+                # instances land in the per-user discovery cache and every
+                # consumer gets them by construction (ADR 0006).
+                server_tools = wrap_identity_scoped_tools(server_tools)
 
                 if attempt > 0:
                     logger.info(f"Successfully loaded MCP tools from {server_name} on attempt {attempt + 1}")

@@ -170,9 +170,11 @@ class GraphRuntimeContext:
     identity_consent_grants: dict[str, Any] = field(default_factory=dict)
     """Remembered per-(user, tool) consent answers for identity-scoped tools.
 
-    Format: {"tool_name::server_slug": {"granted": true|false}}
-    Loaded from user_settings.identity_consent_grants at context build time.
-    Deliberately separate from tool_bypass_rules (different axis — see ADR 0006).
+    Format: {"tool_name": {"granted": true|false}} — keyed by tool name alone
+    (server-slug resolution differs across execution paths; consent is a
+    per-(user, tool) decision). Loaded from
+    user_settings.identity_consent_grants at context build time. Deliberately
+    separate from tool_bypass_rules (different axis — see ADR 0006).
     """
 
     tool_server_map: dict[str, str] = field(default_factory=dict)

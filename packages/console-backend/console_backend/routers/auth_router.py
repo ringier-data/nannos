@@ -357,10 +357,14 @@ async def upsert_tool_bypass_rule(
 
 
 class IdentityConsentRequest(BaseModel):
-    """Request to set or remove an identity-scoped tool consent answer."""
+    """Request to set or remove an identity-scoped tool consent answer.
+
+    Keyed by tool name alone (not tool::server like bypass rules): server-slug
+    resolution differs across execution paths, and consent is a per-(user, tool)
+    decision — see ADR 0006.
+    """
 
     tool_name: str
-    server_slug: str = "_self"
     granted: bool = False
     remove: bool = False
 
@@ -390,7 +394,7 @@ async def upsert_identity_consent(
     settings = await user_settings_service.get_settings(db, user.id)
 
     grants: dict = dict(settings.identity_consent_grants)
-    key = f"{body.tool_name}::{body.server_slug}"
+    key = body.tool_name
 
     if body.remove:
         grants.pop(key, None)

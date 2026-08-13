@@ -88,6 +88,7 @@ from agent_common.core.graph_utils import (
     denest_parent_pregel_context,
     isolate_parent_stream_context,
 )
+from agent_common.core.identity_scoped import wrap_identity_scoped_tools
 from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.core.tool_catalog import TOOL_CATALOG_PROMPT_ADDENDUM, ToolCatalogMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ContextGatedTool
@@ -245,6 +246,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         tool_risk_cache: ToolRiskCache | None = None,
         tool_bypass_rules: dict[str, Any] | None = None,
         pending_bypass_rules: list[dict[str, Any]] | None = None,
+        identity_consent_grants: dict[str, Any] | None = None,
+        user_email: str | None = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -321,6 +324,10 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self._pending_bypass_rules: list[dict[str, Any]] = (
             pending_bypass_rules if pending_bypass_rules is not None else []
         )
+        self._identity_consent_grants: dict[str, Any] = (
+            identity_consent_grants if identity_consent_grants is not None else {}
+        )
+        self.user_email = user_email
         self._agent: CompiledStateGraph | None = None
         self._discovered_tools: Optional[List[BaseTool]] = None
         self._mcp_discovery_error: Optional[str] = None
@@ -749,6 +756,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
                 # Validate tool schemas to prevent OpenAI API errors
                 validated_tools = [_validate_tool_schema(tool) for tool in tools]
+
+                # Wrap identity-scoped tools (reserved nannos__user_identity field):
+                # this rediscovery path bypasses the orchestrator's registry, so the
+                # wrap must happen here too or the reserved field stays
+                # model-writable inside sub-agents (ADR 0006).
+                validated_tools = wrap_identity_scoped_tools(validated_tools)
 
                 if attempt > 0:
                     logger.info(f"Successfully discovered MCP tools for {self.name} on attempt {attempt + 1}")
@@ -1551,6 +1564,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 tool_bypass_rules=self._tool_bypass_rules,
                 tool_risk_cache=self._tool_risk_cache,
                 _pending_bypass_rules=self._pending_bypass_rules,
+                # Identity-scoped tool wrappers read these at execution time:
+                # remembered grants pass through here too (the consent *prompt*
+                # only exists on the orchestrator graph; unasked tools fail
+                # closed in sub-agents by design — ADR 0006).
+                identity_consent_grants=self._identity_consent_grants,
+                email=self.user_email,
             )
             # Catalog mode: expose the catalog through the runtime context so the
             # PTC middleware (expose_context_registry=True) can route it into
@@ -1765,6 +1784,8 @@ def create_dynamic_local_subagent(
     tool_risk_cache: ToolRiskCache | None = None,
     tool_bypass_rules: dict[str, Any] | None = None,
     pending_bypass_rules: list[dict[str, Any]] | None = None,
+    identity_consent_grants: dict[str, Any] | None = None,
+    user_email: str | None = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
@@ -1837,6 +1858,8 @@ def create_dynamic_local_subagent(
         tool_risk_cache=tool_risk_cache,
         tool_bypass_rules=tool_bypass_rules,
         pending_bypass_rules=pending_bypass_rules,
+        identity_consent_grants=identity_consent_grants,
+        user_email=user_email,
     )
 
     return CompiledSubAgent(

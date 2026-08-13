@@ -148,13 +148,15 @@ def build_runtime_context(
         elif isinstance(tool, dict):
             tool_registry[tool.get("name", str(tool))] = tool
 
-    # Wrap identity-scoped tools (reserved nannos__user_identity field) BEFORE
-    # anything captures the registry (sub-agents, GP agent, PTC), so no
-    # model-facing schema ever shows the reserved field and every execution
-    # path goes through the consent-gated, email-injecting wrapper (ADR 0006).
-    from .middleware.identity_scoped import wrap_identity_scoped_tools
+    # Identity-scoped tools (reserved nannos__user_identity field) are wrapped
+    # at discovery time (ToolDiscoveryService and the sub-agent's own MCP
+    # rediscovery), so wrapped instances land in the per-user discovery cache.
+    # This is an idempotent backstop for registries assembled from mixed
+    # sources, run BEFORE anything captures the registry (sub-agents, GP
+    # agent, PTC) — see ADR 0006.
+    from agent_common.core.identity_scoped import wrap_identity_scoped_tools_in_registry
 
-    wrap_identity_scoped_tools(tool_registry)
+    wrap_identity_scoped_tools_in_registry(tool_registry)
 
     # Add document store tools if dependencies are provided
     if document_store is not None and storage is not None and document_store_bucket:
@@ -496,6 +498,8 @@ def build_runtime_context(
                         tool_risk_cache=tool_risk_cache,
                         tool_bypass_rules=user_config.tool_bypass_rules,
                         pending_bypass_rules=user_config._pending_bypass_rules,  # will be updated during execution if user approves any bypasses
+                        identity_consent_grants=user_config.identity_consent_grants,
+                        user_email=user_config.email,
                     )
                     # Log if sandbox_enabled but no pool configured
                     if getattr(config, "sandbox_enabled", False) and not sandbox_pool:
