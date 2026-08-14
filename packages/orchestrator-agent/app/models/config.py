@@ -304,7 +304,22 @@ class AgentSettings:
     BACKOFF_FACTOR = 3.0
 
     # Recursion limit configuration (overrides deepagents default of 1000)
-    MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
+    #
+    # STOPGAP (raised 50 -> 200): the budget is counted in LangGraph super-steps,
+    # not model calls, and every middleware hook is its own graph node — so one
+    # model call costs ~8 super-steps (measured: 2 + 8 * model_calls, see
+    # tests/test_step_budget.py). At 50 a turn was capped at SIX model calls, and
+    # the orchestrator spends calls on write_todos bookkeeping and filesystem
+    # exploration between delegations. An ordinary two-delegation request
+    # ("look up X and post it to Slack") therefore exhausted the budget and the
+    # user was asked to continue a task that had already completed correctly.
+    #
+    # 200 allows ~25 model calls, still far below deepagents' 1000 default, so a
+    # runaway loop is still bounded. This is a stopgap because the unit is wrong:
+    # a super-step budget silently tightens for everyone whenever a middleware is
+    # added. The proper fix is to bound model calls (or price middleware into the
+    # limit) — tracked separately.
+    MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "200"))
 
     # Toolset selection configuration (used by ToolsetSelectorMiddleware in custom GP graph)
     TOOLSET_SELECTION_THRESHOLD = int(os.getenv("TOOLSET_SELECTION_THRESHOLD", "50"))
