@@ -160,7 +160,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting' | 'voice_session';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting' | 'voice_session' | 'mcp_server';
 
 /**
  * AuditLog
@@ -1973,6 +1973,45 @@ export type HttpValidationError = {
      * Detail
      */
     detail?: Array<ValidationError>;
+};
+
+/**
+ * IdentityConsentRequest
+ *
+ * Request to set or remove an identity-scoped consent answer.
+ *
+ * Keyed by MCP server slug: identity disclosure is something users decide per
+ * integration ("may Salesforce know who I am"), and one answer covers all of
+ * that server's identity-scoped tools. The bare slug, not the tool::server
+ * compound bypass rules use — that table is a different axis (see ADR 0006).
+ */
+export type IdentityConsentRequest = {
+    /**
+     * Server Slug
+     */
+    server_slug: string;
+    /**
+     * Granted
+     */
+    granted?: boolean;
+    /**
+     * Remove
+     */
+    remove?: boolean;
+};
+
+/**
+ * IdentityConsentResponse
+ *
+ * Response after modifying identity consent grants.
+ */
+export type IdentityConsentResponse = {
+    /**
+     * Identity Consent Grants
+     */
+    identity_consent_grants: {
+        [key: string]: unknown;
+    };
 };
 
 /**
@@ -6959,6 +6998,12 @@ export type UserSettings = {
         [key: string]: unknown;
     };
     /**
+     * Identity Consent Grants
+     */
+    identity_consent_grants?: {
+        [key: string]: unknown;
+    };
+    /**
      * Created At
      */
     created_at?: string;
@@ -7604,6 +7649,31 @@ export type UpsertToolBypassRuleApiV1AuthMeSettingsToolBypassPutResponses = {
 
 export type UpsertToolBypassRuleApiV1AuthMeSettingsToolBypassPutResponse = UpsertToolBypassRuleApiV1AuthMeSettingsToolBypassPutResponses[keyof UpsertToolBypassRuleApiV1AuthMeSettingsToolBypassPutResponses];
 
+export type UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutData = {
+    body: IdentityConsentRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/me/settings/identity-consent';
+};
+
+export type UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutError = UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutErrors[keyof UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutErrors];
+
+export type UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: IdentityConsentResponse;
+};
+
+export type UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutResponse = UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutResponses[keyof UpsertIdentityConsentApiV1AuthMeSettingsIdentityConsentPutResponses];
+
 export type SendPhoneVerificationApiV1AuthMePhoneVerifyPostData = {
     body: PhoneVerificationRequest;
     path?: never;
@@ -7831,6 +7901,10 @@ export type GetMessagesByConversationApiV1MessagesConversationIdGetData = {
          * Limit
          */
         limit?: number;
+        /**
+         * Before
+         */
+        before?: string | null;
     };
     url: '/api/v1/messages/{conversation_id}';
 };

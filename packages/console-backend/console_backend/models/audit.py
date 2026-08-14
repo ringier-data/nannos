@@ -29,6 +29,7 @@ class AuditEntityType(str, Enum):
     MODEL_DEFAULT = "model_default"  # For fleet default model (role → alias) changes
     BUDGET_SETTING = "budget_setting"  # For Budget Guard configuration changes
     VOICE_SESSION = "voice_session"  # For voice call session lifecycle
+    MCP_SERVER = "mcp_server"  # For per-server identity-disclosure consent (ADR 0006)
 
 
 class AuditAction(str, Enum):

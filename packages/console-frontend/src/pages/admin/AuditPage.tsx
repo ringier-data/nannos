@@ -63,6 +63,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   model_default: 'Model Default',
   budget_setting: 'Budget Setting',
   voice_session: 'Voice Session',
+  mcp_server: 'MCP Server',
 };
 
 export function AuditPage() {
@@ -117,6 +118,7 @@ export function AuditPage() {
             <SelectItem value="sub_agent">Sub-Agent</SelectItem>
             <SelectItem value="session">Session</SelectItem>
             <SelectItem value="secret">Secret</SelectItem>
+            <SelectItem value="mcp_server">MCP Server</SelectItem>
           </SelectContent>
         </Select>
 

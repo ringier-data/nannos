@@ -397,6 +397,7 @@ async def upsert_identity_consent(
 
     grants: dict = dict(settings.identity_consent_grants)
     key = body.server_slug
+    previous = grants.get(key)
 
     if body.remove:
         grants.pop(key, None)
@@ -404,6 +405,27 @@ async def upsert_identity_consent(
         grants[key] = {"granted": body.granted}
 
     await user_settings_service.upsert_settings(db, user.id, identity_consent_grants=grants)
+
+    # Audit every answer: approving hands this integration the user's verified email
+    # for all of its identity-scoped tools, so who whitelisted which server — and when
+    # — must stay reconstructable. Same transaction as the write, so the trail cannot
+    # disagree with the stored grant. REVOKE covers `remove` (the answer is forgotten,
+    # which re-opens the disclosure question), APPROVE/REJECT the two real answers.
+    audit_service = get_audit_service(request)
+    action = (
+        AuditAction.REVOKE
+        if body.remove
+        else (AuditAction.APPROVE if body.granted else AuditAction.REJECT)
+    )
+    await audit_service.log_action(
+        db=db,
+        actor=user,
+        entity_type=AuditEntityType.MCP_SERVER,
+        entity_id=key,
+        action=action,
+        changes={"identity_consent": {"before": previous, "after": grants.get(key)}},
+    )
+
     await db.commit()
 
     # Consent grants ride on the orchestrator's cached User (not part of its cache key), so

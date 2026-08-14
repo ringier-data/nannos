@@ -82,3 +82,58 @@ class TestIdentityConsentEndpoint:
 
         data = response.json()["data"]
         assert not any("gatana-salesforce" in key for key in data["tool_bypass_rules"])
+
+    async def test_grant_is_audited(self, client_with_db, pg_session):
+        """Whitelisting an integration must be reconstructable from the audit trail."""
+        from sqlalchemy import text
+
+        await client_with_db.put(
+            "/api/v1/auth/me/settings/identity-consent",
+            json={"server_slug": "gatana-salesforce", "granted": True},
+        )
+
+        row = (
+            await pg_session.execute(
+                text(
+                    "SELECT * FROM audit_logs WHERE entity_type = 'mcp_server' "
+                    "AND entity_id = :slug ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"slug": "gatana-salesforce"},
+            )
+        ).mappings().first()
+
+        assert row is not None
+        assert row["action"] == "approve"
+        assert row["changes"]["identity_consent"] == {
+            "before": None,
+            "after": {"granted": True},
+        }
+
+    async def test_denial_and_removal_are_audited_with_previous_state(self, client_with_db, pg_session):
+        """A denial logs `reject`; forgetting the answer logs `revoke` with what it was."""
+        from sqlalchemy import text
+
+        await client_with_db.put(
+            "/api/v1/auth/me/settings/identity-consent",
+            json={"server_slug": "gatana-github", "granted": False},
+        )
+        await client_with_db.put(
+            "/api/v1/auth/me/settings/identity-consent",
+            json={"server_slug": "gatana-github", "remove": True},
+        )
+
+        rows = (
+            await pg_session.execute(
+                text(
+                    "SELECT * FROM audit_logs WHERE entity_type = 'mcp_server' "
+                    "AND entity_id = :slug ORDER BY created_at"
+                ),
+                {"slug": "gatana-github"},
+            )
+        ).mappings().all()
+
+        assert [r["action"] for r in rows] == ["reject", "revoke"]
+        assert rows[1]["changes"]["identity_consent"] == {
+            "before": {"granted": False},
+            "after": None,
+        }
