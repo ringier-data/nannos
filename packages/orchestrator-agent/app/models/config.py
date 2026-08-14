@@ -319,8 +319,18 @@ class AgentSettings:
     MAX_RETRIES = 3
     BACKOFF_FACTOR = 3.0
 
-    # Recursion limit configuration (overrides deepagents default of 1000)
-    MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
+    # Recursion limit configuration (overrides deepagents default of 1000).
+    #
+    # LangGraph counts SUPERSTEPS, not model turns: every middleware that
+    # implements before_model/after_model compiles to its own graph node, so one
+    # tool-using turn costs ~9 supersteps in this stack (before_model: a2a +
+    # summarization; model; after_model: PTC, loop detection, HITL, identity
+    # consent, todo; tools). The old value of 50 therefore allowed only ~5 tool
+    # rounds per user message before GraphRecursionError, and every added
+    # middleware silently ate
+    # another round. Loop protection is the loop-detection middleware's job
+    # (identical-args repeats), not this ceiling's.
+    MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "250"))
 
     # Toolset selection configuration (used by ToolsetSelectorMiddleware in custom GP graph)
     TOOLSET_SELECTION_THRESHOLD = int(os.getenv("TOOLSET_SELECTION_THRESHOLD", "50"))
