@@ -7,10 +7,12 @@ from .conversation_context_tools_middleware import (
     ContextGatedTool,
     ConversationContextToolsMiddleware,
 )
+from .identity_consent import IdentityConsentMiddleware
 from .loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware
 
 __all__ = [
     "ConditionalHumanInTheLoopMiddleware",
+    "IdentityConsentMiddleware",
     "ContextGatedTool",
     "ConversationContextToolsMiddleware",
     "RepeatedToolCallMiddleware",

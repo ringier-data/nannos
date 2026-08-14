@@ -198,6 +198,20 @@ def build_runtime_context(
         else:
             logger.warning("CATALOG_VECTOR_BUCKET_NAME not set, skipping catalog_search tool")
 
+    # Build tool_server_map from tool metadata (tool_name -> server_slug).
+    # Built before sub-agent creation: this discovery-time mapping is the only
+    # slug source that agrees across execution paths, and sub-agents are handed
+    # it so their server-keyed identity-consent grants (ADR 0006) and
+    # tool::server bypass rules match the orchestrator's.
+    tool_server_map: dict[str, str] = {}
+    for tool_name, tool in tool_registry.items():
+        metadata = getattr(tool, "metadata", None)
+        if metadata and isinstance(metadata, dict):
+            server_name = metadata.get("server_name")
+            if server_name:
+                tool_server_map[tool_name] = server_name
+        # In-process tools without server_name fall back to "_self" in middleware
+
     # Start with built-in local sub-agents (like file-analyzer)
     # These run in-process but use the same registry as remote A2A agents.
     # NOTE: task-scheduler is no longer special-cased here. It is a pre-seeded
@@ -499,6 +513,10 @@ def build_runtime_context(
                         tool_bypass_rules=user_config.tool_bypass_rules,
                         pending_bypass_rules=user_config._pending_bypass_rules,  # will be updated during execution if user approves any bypasses
                         identity_consent_grants=user_config.identity_consent_grants,
+                        # In-place-updated reference, like pending_bypass_rules: consent
+                        # answers given inside a sub-agent are persisted after the turn.
+                        pending_identity_consents=user_config._pending_identity_consents,
+                        tool_server_map=tool_server_map,
                         user_email=user_config.email,
                     )
                     # Log if sandbox_enabled but no pool configured
@@ -524,16 +542,6 @@ def build_runtime_context(
         )
 
     logger.debug(f"Tool registry contains {len(tool_registry)} total tools")
-
-    # Build tool_server_map from tool metadata (tool_name -> server_slug)
-    tool_server_map: dict[str, str] = {}
-    for tool_name, tool in tool_registry.items():
-        metadata = getattr(tool, "metadata", None)
-        if metadata and isinstance(metadata, dict):
-            server_name = metadata.get("server_name")
-            if server_name:
-                tool_server_map[tool_name] = server_name
-        # In-process tools without server_name fall back to "_self" in middleware
 
     context = GraphRuntimeContext(
         user_id=user_config.user_id,  # Database ID (stable)

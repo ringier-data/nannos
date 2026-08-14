@@ -357,14 +357,15 @@ async def upsert_tool_bypass_rule(
 
 
 class IdentityConsentRequest(BaseModel):
-    """Request to set or remove an identity-scoped tool consent answer.
+    """Request to set or remove an identity-scoped consent answer.
 
-    Keyed by tool name alone (not tool::server like bypass rules): server-slug
-    resolution differs across execution paths, and consent is a per-(user, tool)
-    decision — see ADR 0006.
+    Keyed by MCP server slug: identity disclosure is something users decide per
+    integration ("may Salesforce know who I am"), and one answer covers all of
+    that server's identity-scoped tools. The bare slug, not the tool::server
+    compound bypass rules use — that table is a different axis (see ADR 0006).
     """
 
-    tool_name: str
+    server_slug: str
     granted: bool = False
     remove: bool = False
 
@@ -383,18 +384,19 @@ async def upsert_identity_consent(
     background_tasks: BackgroundTasks,
     user: User = Depends(require_auth_or_bearer_token),
 ) -> IdentityConsentResponse:
-    """Set or remove a per-(user, tool) consent answer for an identity-scoped tool.
+    """Set or remove a per-(user, MCP server) identity-disclosure consent answer.
 
     Used by the orchestrator after the first-use consent gate (ADR 0006 Gate 3)
-    records the user's decision. `remove` resets a remembered answer so the
-    gate prompts again on next use. Deliberately separate from tool bypass
-    rules — identity disclosure is a different axis from action-risk tolerance.
+    records the user's decision. The answer covers every identity-scoped tool of
+    that server. `remove` resets it so the gate prompts again on next use.
+    Deliberately separate from tool bypass rules — identity disclosure is a
+    different axis from action-risk tolerance.
     """
     user_settings_service = get_user_settings_service(request)
     settings = await user_settings_service.get_settings(db, user.id)
 
     grants: dict = dict(settings.identity_consent_grants)
-    key = body.tool_name
+    key = body.server_slug
 
     if body.remove:
         grants.pop(key, None)

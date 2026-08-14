@@ -4,9 +4,16 @@ The wrapper that hides and force-populates the reserved
 ``nannos__user_identity`` field lives in
 ``agent_common.core.identity_scoped`` (it must wrap tools at every discovery
 point, including the dynamic sub-agent's own MCP rediscovery). This module
-holds the orchestrator-only interactive piece: the HITL-shaped consent
-interrupt raised before the first dispatch of an identity-scoped tool per
-``(user, tool)`` pair.
+holds the interactive piece: the HITL-shaped consent interrupt raised before
+the first dispatch of an identity-scoped tool per ``(user, tool)`` pair.
+
+It runs on the orchestrator graph *and* on every dynamic sub-agent graph.
+Sub-agents dispatch identity-scoped tools on their own (a `task(...)`
+delegation is where most of them actually get called), and their interrupts
+propagate to the executor exactly like the risk-HITL ones do — without the
+gate there, the wrapper's fail-closed path is the only thing left and the
+sub-agent just tells the user "permission is required" with no way to grant
+it.
 
 Deliberately *not* gated via the per-user ``tool_bypass_rules`` HITL config:
 that table encodes a user's own risk tolerance for action approval, a
@@ -20,11 +27,14 @@ from typing import Any
 
 from agent_common.core.identity_scoped import (
     NANNOS_USER_IDENTITY_FIELD,  # noqa: F401  (re-exported convenience)
+    SELF_SERVER_SLUG,
     consent_state,
+    identity_server_slug,
     identity_auth_required_payload,
     is_wrapped_identity_scoped_tool,
     record_consent,
 )
+from agent_common.core.tool_catalog import CATALOG_CALL_TOOL_NAME
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.human_in_the_loop import (
     ActionRequest,
@@ -39,19 +49,19 @@ from langgraph.types import interrupt
 logger = logging.getLogger(__name__)
 
 
-def _display_server(tool: Any) -> str | None:
-    """Server name for prompt wording only (never part of the consent key)."""
-    metadata = getattr(tool, "metadata", None)
-    if metadata and isinstance(metadata, dict):
-        server_name = metadata.get("server_name")
-        if server_name:
-            return str(server_name)
-    return None
+def _blocked_tool_message(
+    tool_call: dict[str, Any], tool_name: str, server_slug: str, *, rejected: bool
+) -> ToolMessage:
+    """Artificial answer for a blocked call.
 
-
-def _blocked_tool_message(tool_call: dict[str, Any], *, rejected: bool) -> ToolMessage:
+    ``tool_name`` is the *gated* tool (which differs from the call's own name
+    when the catalog's ``call_tool`` dispatches it), while the ToolMessage keeps
+    the call's name/id so the provider's tool_use/tool_result pairing holds.
+    """
     return ToolMessage(
-        content=identity_auth_required_payload(tool_call["name"], rejected=rejected),
+        content=identity_auth_required_payload(
+            tool_name, rejected=rejected, server_slug=server_slug
+        ),
         tool_call_id=tool_call["id"],
         name=tool_call["name"],
         status="error",
@@ -69,8 +79,9 @@ class IdentityConsentMiddleware(AgentMiddleware):
     - with a remembered **denial** → answer it with an artificial
       ``auth_required`` ToolMessage, no re-prompt;
     - with **no remembered answer** → raise a single HITL-shaped
-      ``interrupt()`` asking once per *tool* (calls to the same tool share one
-      consent question — consent is per ``(user, tool)``, not per call), then
+      ``interrupt()`` asking once per *MCP server* (every call to any tool of
+      that integration shares one consent question — consent is per
+      ``(user, server)``, not per tool and not per call), then
       record the decision on the runtime context
       (``identity_consent_grants``) and queue it for durable persistence
       (``_pending_identity_consents``).
@@ -85,6 +96,38 @@ class IdentityConsentMiddleware(AgentMiddleware):
     blocks the call for this turn *without* remembering a denial.
     """
 
+    def __init__(self, tool_registry: dict[str, Any] | None = None) -> None:
+        """Args:
+        tool_registry: Optional ``{tool_name: BaseTool}`` map used to decide
+            whether a called tool is identity-scoped. The orchestrator leaves
+            this unset — its runtime context carries the whole registry. Sub-agent
+            graphs bind their tools directly and their runtime context has no
+            registry (except GP's catalog), so they pass their resolved tools
+            here; a tool absent from both lookups is simply not gated, which is
+            safe: the wrapper still fails closed at execution time.
+        """
+        super().__init__()
+        self._tool_registry = tool_registry or {}
+
+    def _resolve_tool(self, context: Any, tool_name: str) -> Any:
+        """Find the tool object for ``tool_name`` (runtime context first, then the injected map)."""
+        registry: dict[str, Any] = getattr(context, "tool_registry", None) or {}
+        return registry.get(tool_name) or self._tool_registry.get(tool_name)
+
+    def _gated_tool_name(self, tool_call: dict[str, Any]) -> str:
+        """The tool this call actually dispatches.
+
+        In catalog mode (PTC off) the model reaches most tools through
+        ``call_tool({name, args})``; ToolCatalogMiddleware only rewrites the call
+        to the real tool at ``wrap_tool_call`` time, i.e. after this hook. Reading
+        the inner name here keeps identity-scoped tools gated on that path instead
+        of leaving them to the wrapper's dead-end fail-closed.
+        """
+        if tool_call["name"] != CATALOG_CALL_TOOL_NAME:
+            return tool_call["name"]
+        inner = (tool_call.get("args") or {}).get("name")
+        return inner if isinstance(inner, str) and inner else tool_call["name"]
+
     async def aafter_model(
         self, state: AgentState, runtime: Runtime
     ) -> dict[str, Any] | None:  # type: ignore[override]
@@ -98,18 +141,25 @@ class IdentityConsentMiddleware(AgentMiddleware):
             return None
 
         context: Any = getattr(runtime, "context", None)
-        tool_registry: dict[str, Any] = getattr(context, "tool_registry", None) or {}
         email = getattr(context, "email", None) if context else None
 
         # Partition identity-scoped calls by remembered consent state. Calls to
-        # the same tool share one consent question (consent is per tool).
+        # any tool of the same MCP server share one consent question (consent is
+        # per (user, server) — one answer covers the whole integration).
         denied_calls: list[dict[str, Any]] = []
-        ask_calls_by_tool: dict[str, list[dict[str, Any]]] = {}
+        ask_calls_by_server: dict[str, list[dict[str, Any]]] = {}
         for tool_call in last_ai_msg.tool_calls:
-            tool = tool_registry.get(tool_call["name"])
+            gated_name = self._gated_tool_name(tool_call)
+            tool = self._resolve_tool(context, gated_name)
             if tool is None or not is_wrapped_identity_scoped_tool(tool):
                 continue
-            consent = consent_state(context, tool_call["name"])
+            server_slug = identity_server_slug(gated_name, context, tool)
+            tool_call = dict(
+                tool_call,
+                _identity_tool_name=gated_name,
+                _identity_server_slug=server_slug,
+            )
+            consent = consent_state(context, server_slug)
             if consent is True:
                 continue
             if consent is False:
@@ -122,38 +172,50 @@ class IdentityConsentMiddleware(AgentMiddleware):
                 logger.warning(
                     "Identity-scoped tool '%s' called without a verified email on the "
                     "runtime context — blocking without consent prompt",
-                    tool_call["name"],
+                    gated_name,
                 )
                 denied_calls.append(dict(tool_call, _identity_unasked=True))
             else:
-                ask_calls_by_tool.setdefault(tool_call["name"], []).append(tool_call)
+                ask_calls_by_server.setdefault(server_slug, []).append(tool_call)
 
-        if not denied_calls and not ask_calls_by_tool:
+        if not denied_calls and not ask_calls_by_server:
             return None
 
         artificial_tool_messages: list[ToolMessage] = [
-            _blocked_tool_message(tc, rejected=not tc.get("_identity_unasked"))
+            _blocked_tool_message(
+                tc,
+                tc["_identity_tool_name"],
+                tc["_identity_server_slug"],
+                rejected=not tc.get("_identity_unasked"),
+            )
             for tc in denied_calls
         ]
 
-        if ask_calls_by_tool:
-            ask_tools = list(ask_calls_by_tool)
+        if ask_calls_by_server:
+            ask_servers = list(ask_calls_by_server)
             action_requests: list[ActionRequest] = []
             review_configs: list[ReviewConfig] = []
-            for tool_name in ask_tools:
-                first_call = ask_calls_by_tool[tool_name][0]
-                tool = tool_registry.get(tool_name)
-                server = _display_server(tool)
-                origin = f" ({server})" if server else ""
+            for server_slug in ask_servers:
+                calls = ask_calls_by_server[server_slug]
+                first_call = calls[0]
+                triggering_tool = first_call["_identity_tool_name"]
+                integration = (
+                    f"the '{server_slug}' integration"
+                    if server_slug != SELF_SERVER_SLUG
+                    else f"the integration behind '{triggering_tool}'"
+                )
                 description = (
-                    f"First use of '{tool_name}'{origin}: this tool will receive your "
-                    f"verified email address ({email}) to scope its access to your own records "
-                    "on the target system. Your answer is remembered for this tool. "
-                    "Declining blocks only this tool, not the whole integration."
+                    f"First use of {integration} (via '{triggering_tool}'): its "
+                    f"identity-scoped tools will receive your verified email address "
+                    f"({email}) to scope their access to your own records on the target "
+                    "system. Your answer is remembered for this integration. Declining "
+                    "blocks only its identity-scoped tools, not other integrations."
                 )
                 action_requests.append(
                     ActionRequest(
-                        name=tool_name,
+                        # The consent subject is the integration, not one call, so the
+                        # action is named after the server; ReviewConfig matches on it.
+                        name=server_slug,
                         # Display-only; the reserved field is injected at execution
                         # time and is never part of the model-visible args. The
                         # metadata rides in the `_risk_metadata` envelope all HITL
@@ -163,8 +225,8 @@ class IdentityConsentMiddleware(AgentMiddleware):
                             "_call_id": first_call["id"],
                             "_risk_metadata": {
                                 "source": "identity_consent",
-                                "tool_name": tool_name,
-                                "server_slug": server or "_self",
+                                "tool_name": triggering_tool,
+                                "server_slug": server_slug,
                             },
                         },
                         description=description,
@@ -172,7 +234,7 @@ class IdentityConsentMiddleware(AgentMiddleware):
                 )
                 review_configs.append(
                     ReviewConfig(
-                        action_name=tool_name, allowed_decisions=["approve", "reject"]
+                        action_name=server_slug, allowed_decisions=["approve", "reject"]
                     )
                 )
 
@@ -180,19 +242,19 @@ class IdentityConsentMiddleware(AgentMiddleware):
                 action_requests=action_requests, review_configs=review_configs
             )
             decisions = interrupt(hitl_request)["decisions"]
-            if len(decisions) != len(ask_tools):
+            if len(decisions) != len(ask_servers):
                 msg = (
                     f"Number of consent decisions ({len(decisions)}) does not match "
-                    f"number of identity-scoped tools awaiting consent ({len(ask_tools)})."
+                    f"number of integrations awaiting identity consent ({len(ask_servers)})."
                 )
                 raise ValueError(msg)
 
-            for tool_name, decision in zip(ask_tools, decisions):
+            for server_slug, decision in zip(ask_servers, decisions):
                 decision_type = (
                     decision.get("type") if isinstance(decision, dict) else None
                 )
                 if decision_type == "approve":
-                    record_consent(context, tool_name, granted=True)
+                    record_consent(context, server_slug, granted=True)
                     continue
                 # Remember only explicit rejections; a malformed/unknown
                 # decision — or the executor's synthesized `_defaulted` safe
@@ -203,10 +265,15 @@ class IdentityConsentMiddleware(AgentMiddleware):
                     "_defaulted"
                 )
                 if explicit_reject:
-                    record_consent(context, tool_name, granted=False)
+                    record_consent(context, server_slug, granted=False)
                 artificial_tool_messages.extend(
-                    _blocked_tool_message(tc, rejected=explicit_reject)
-                    for tc in ask_calls_by_tool[tool_name]
+                    _blocked_tool_message(
+                        tc,
+                        tc["_identity_tool_name"],
+                        server_slug,
+                        rejected=explicit_reject,
+                    )
+                    for tc in ask_calls_by_server[server_slug]
                 )
 
         if not artificial_tool_messages:

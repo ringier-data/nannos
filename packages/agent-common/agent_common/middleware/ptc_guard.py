@@ -144,7 +144,14 @@ def rejection_payload(tool_name: str) -> dict[str, str]:
 
 @dataclass
 class _PendingApproval:
-    """A single high-risk PTC call awaiting human approval."""
+    """A single PTC call awaiting human approval.
+
+    Two kinds share the collector: risk-score approvals recorded by the guard
+    below, and identity-disclosure consent recorded by the identity-scoped tool
+    wrapper (``identity_consent=True``, ADR 0006). Both need the same
+    record → batched ``interrupt()`` → re-run treatment, because neither can
+    interrupt from inside ``eval``.
+    """
 
     call_key: str
     tool_name: str
@@ -154,6 +161,7 @@ class _PendingApproval:
     score: float
     threshold: float
     matched_pattern: str | None
+    identity_consent: bool = False
 
 
 @dataclass

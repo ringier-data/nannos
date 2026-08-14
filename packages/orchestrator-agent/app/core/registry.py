@@ -537,14 +537,16 @@ class RegistryService:
         access_token: str,
         pending_consents: list[dict[str, Any]],
     ) -> None:
-        """Persist identity-scoped tool consent answers to the console backend.
+        """Persist identity-scoped consent answers to the console backend.
 
-        Called after a turn completes when the identity consent middleware
-        recorded first-use consent decisions in _pending_identity_consents.
+        Called after a turn completes when the identity consent gate recorded
+        first-use decisions in _pending_identity_consents. Answers are keyed by
+        MCP server slug — one answer covers every identity-scoped tool of that
+        integration (ADR 0006).
 
         Args:
             access_token: User's access token for authenticated API call
-            pending_consents: List of {"tool_name": str, "granted": bool} dicts
+            pending_consents: List of {"server_slug": str, "granted": bool} dicts
         """
         if not pending_consents:
             return
@@ -553,9 +555,9 @@ class RegistryService:
         headers = {"Authorization": f"Bearer {access_token}"}
 
         for entry in pending_consents:
-            tool_name: str = entry["tool_name"]
+            server_slug: str = entry["server_slug"]
             body: dict[str, Any] = {
-                "tool_name": tool_name,
+                "server_slug": server_slug,
                 "granted": bool(entry.get("granted")),
             }
 
@@ -567,7 +569,7 @@ class RegistryService:
                 )
                 if response.status_code != 200:
                     logger.warning(
-                        f"Failed to persist identity consent for '{tool_name}': status={response.status_code}"
+                        f"Failed to persist identity consent for '{server_slug}': status={response.status_code}"
                     )
             except Exception:
-                logger.exception(f"Error persisting identity consent for '{tool_name}'")
+                logger.exception(f"Error persisting identity consent for '{server_slug}'")

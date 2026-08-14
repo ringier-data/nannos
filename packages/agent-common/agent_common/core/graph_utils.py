@@ -80,6 +80,8 @@ from agent_common.middleware.conversation_context_tools_middleware import (
     ConversationContextToolsMiddleware,
 )
 from agent_common.middleware.gateway_attribution_middleware import GatewayAttributionMiddleware
+from agent_common.core.identity_scoped import SELF_SERVER_SLUG
+from agent_common.middleware.identity_consent import IdentityConsentMiddleware
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import (
@@ -857,11 +859,13 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         ``mode="call"`` (fresh REPL per call) so each re-run is deterministic and
         pod-independent — see ``ptc_guard`` for the full rationale.
 
-        Only engages for the ``eval`` tool when risk scoring is active; all other
-        tool calls (and the unguarded configuration) pass straight through.
+        Only engages for the ``eval`` tool; all other tool calls pass straight
+        through. It is NOT gated on a configured risk scorer: identity-scoped
+        tools record first-use consent questions on the same collector (ADR
+        0006), and those must be drained even where risk scoring is off.
         """
         tool_call = getattr(request, "tool_call", None) or {}
-        if not self._ptc_enabled or self._ptc_risk_scorer is None or tool_call.get("name") != self._tool_name:
+        if not self._ptc_enabled or tool_call.get("name") != self._tool_name:
             return await handler(request)
 
         runtime = getattr(request, "runtime", None)
@@ -930,7 +934,11 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 # deterministic on tool+args.
                 "_call_id": p.call_key,
                 "_risk_metadata": {
-                    "source": "risk_score",
+                    # Identity-disclosure consent is a different question from a
+                    # risk score (ADR 0006); it rides the same envelope under its
+                    # own source so clients render it like the middleware's
+                    # non-PTC consent prompt.
+                    "source": ("identity_consent" if getattr(p, "identity_consent", False) else "risk_score"),
                     "score": p.score,
                     "threshold": p.threshold,
                     "matched_pattern": p.matched_pattern,
@@ -938,19 +946,38 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                     "tool_name": p.tool_name,
                 },
             }
-            description = f"Tool '{p.tool_name}' has risk score {p.score:.2f} (threshold: {p.threshold:.2f})"
-            if p.matched_pattern:
-                description += f" — {p.matched_pattern}"
+            if getattr(p, "identity_consent", False):
+                integration = (
+                    f"the '{p.server_slug}' integration"
+                    if p.server_slug and p.server_slug != SELF_SERVER_SLUG
+                    else f"the integration behind '{p.tool_name}'"
+                )
+                description = (
+                    f"First use of {integration} (via '{p.tool_name}'): its identity-scoped "
+                    "tools will receive your verified email address to scope their access to "
+                    "your own records on the target system. Your answer is remembered for this "
+                    "integration. Declining blocks only its identity-scoped tools, not other "
+                    "integrations."
+                )
+            else:
+                description = f"Tool '{p.tool_name}' has risk score {p.score:.2f} (threshold: {p.threshold:.2f})"
+                if p.matched_pattern:
+                    description += f" — {p.matched_pattern}"
+            # Identity consent is answered for the integration, not the call, so
+            # the action is named after the server — same card as the non-PTC gate.
+            action_name = (
+                p.server_slug if getattr(p, "identity_consent", False) else p.tool_name
+            )
             action_requests.append(
                 ActionRequest(
-                    name=p.tool_name,
+                    name=action_name,
                     args=enriched_args,
                     description=description,
                 )
             )
             review_configs.append(
                 ReviewConfig(
-                    action_name=p.tool_name,
+                    action_name=action_name,
                     allowed_decisions=p.allowed_actions,
                 )
             )
@@ -966,9 +993,11 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         """Record human decisions for the re-run and apply any bypass rules.
 
         Re-applied on every interrupt replay (decisions arrive via the resume
-        value), so it must be idempotent. Bypass rules are written into the
-        per-user context so the orchestrator persists them after the turn.
+        value), so it must be idempotent. Bypass rules — and identity-disclosure
+        consent answers (ADR 0006) — are written into the per-user context so
+        the orchestrator persists them after the turn.
         """
+        from agent_common.core.identity_scoped import record_consent
         from agent_common.middleware.conditional_hitl import (
             ConditionalHumanInTheLoopMiddleware,
         )
@@ -986,6 +1015,17 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         for i, p in enumerate(pending):
             decision = by_id[p.call_key] if use_by_id else decisions[i]
             dtype = decision.get("type")
+            if getattr(p, "identity_consent", False):
+                # Consent is answered on the runtime context, not via turn.decisions:
+                # the re-run's wrapper reads back the grant through consent_state.
+                # A `_defaulted` reject is the executor's safe fallback for a
+                # stale/absent call_id, never a real answer, so it must not be
+                # remembered (mirrors IdentityConsentMiddleware).
+                if dtype == "approve":
+                    record_consent(context, p.server_slug, granted=True)
+                elif dtype == "reject" and not decision.get("_defaulted"):
+                    record_consent(context, p.server_slug, granted=False)
+                continue
             if dtype == "approve":
                 turn.decisions[p.call_key] = "approve"
                 if decision.get("bypass"):
@@ -1229,6 +1269,7 @@ def build_common_middleware_stack(
     tool_server_map: dict[str, str] | None = None,
     context_gated_tools: list[ContextGatedTool] | None = None,
     broaden_baseline_tools: list[BaseTool] | None = None,
+    identity_consent_tool_registry: dict[str, Any] | None = None,
     expose_context_registry: bool = False,
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
@@ -1404,6 +1445,17 @@ def build_common_middleware_stack(
                 platform_tools=platform_tools,
             )
         )
+
+    # First-use identity-disclosure consent for identity-scoped tools (ADR 0006).
+    # Always present — it is a no-op for agents that have no identity-scoped tools —
+    # so a sub-agent dispatching one raises the same HITL-shaped interrupt the
+    # orchestrator does instead of hitting the wrapper's fail-closed path and
+    # telling the user "permission is required" with no way to grant it.
+    # Appended AFTER the risk-HITL entry so its aafter_model runs BEFORE it
+    # (after_model hooks run in reverse list order): a consent-blocked call is
+    # already answered with an artificial auth_required ToolMessage, and the risk
+    # HITL skips answered calls instead of prompting for a call that cannot run.
+    middleware.append(IdentityConsentMiddleware(tool_registry=identity_consent_tool_registry))
 
     # Conversation-context tool gate: additively injects tools (e.g.
     # read_personal_file) only in the conversation contexts where they apply.
@@ -1687,6 +1739,7 @@ def build_sub_agent_graph(
     tool_risk_cache: ToolRiskCache | None = None,
     tool_server_map: dict[str, str] | None = None,
     context_gated_tools: list[ContextGatedTool] | None = None,
+    identity_consent_tool_registry: dict[str, Any] | None = None,
     expose_context_registry: bool = False,
     **kwargs: Any,
 ) -> CompiledStateGraph:
@@ -1756,6 +1809,7 @@ def build_sub_agent_graph(
         tool_server_map=tool_server_map,
         context_gated_tools=context_gated_tools,
         broaden_baseline_tools=all_tools,
+        identity_consent_tool_registry=identity_consent_tool_registry,
         expose_context_registry=expose_context_registry,
     )
     if extra_middlewares:

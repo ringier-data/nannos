@@ -175,8 +175,9 @@ class UserSettings(BaseModel):
     thinking_level: OrchestratorThinkingLevel | None = None
     phone_number_override: str | None = None
     tool_bypass_rules: dict[str, Any] = Field(default_factory=dict)
-    # Remembered per-(user, tool) consent answers for identity-scoped tools (ADR 0006 Gate 3).
-    # Format: {"tool_name::server_slug": {"granted": true|false}}. Managed via the dedicated
+    # Remembered per-(user, MCP server) consent answers for identity-scoped tools (ADR 0006
+    # Gate 3). Format: {"server_slug": {"granted": true|false}} — one answer covers every
+    # identity-scoped tool of that integration. Managed via the dedicated
     # /me/settings/identity-consent endpoint, not the general settings update.
     identity_consent_grants: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

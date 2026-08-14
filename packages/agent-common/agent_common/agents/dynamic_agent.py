@@ -247,6 +247,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         tool_bypass_rules: dict[str, Any] | None = None,
         pending_bypass_rules: list[dict[str, Any]] | None = None,
         identity_consent_grants: dict[str, Any] | None = None,
+        pending_identity_consents: list[dict[str, Any]] | None = None,
+        tool_server_map: dict[str, str] | None = None,
         user_email: str | None = None,
     ):
         """Initialize the dynamic local agent runnable.
@@ -327,6 +329,18 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self._identity_consent_grants: dict[str, Any] = (
             identity_consent_grants if identity_consent_grants is not None else {}
         )
+        # Reference to UserConfig._pending_identity_consents, same in-place-update
+        # contract as _pending_bypass_rules: consent answers given inside this
+        # sub-agent must reach the orchestrator's post-turn persistence.
+        self._pending_identity_consents: list[dict[str, Any]] = (
+            pending_identity_consents if pending_identity_consents is not None else []
+        )
+        # The orchestrator's discovery-time tool -> server-slug mapping. This
+        # path's own MCP rediscovery connects through the gateway and tags every
+        # tool with the gateway name instead of the server slug, so without this
+        # a server-keyed identity-consent grant (ADR 0006) — and a tool::server
+        # HITL bypass rule — recorded on one path would not match on the other.
+        self._orchestrator_tool_server_map: dict[str, str] = tool_server_map or {}
         self.user_email = user_email
         self._agent: CompiledStateGraph | None = None
         self._discovered_tools: Optional[List[BaseTool]] = None
@@ -1278,6 +1292,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if exposed_catalog is not None and not code_interpreter_ptc_enabled():
             combined_middlewares.append(ToolCatalogMiddleware(exposed_catalog))
 
+        # Registry for this graph's identity-consent gate (ADR 0006): a sub-agent's
+        # runtime context carries no tool_registry outside catalog mode, so the
+        # middleware is told explicitly which of its tools are identity-scoped.
+        identity_tool_registry: dict[str, Any] = {
+            tool.name: tool for tool in list(self._cached_tools or []) if isinstance(tool, BaseTool)
+        }
+        identity_tool_registry.update(exposed_catalog or {})
+
         # Build tool_server_map from tool metadata for server slug resolution.
         # Include catalog tools: the PTC guard and HITL bypass rules resolve
         # per-server rules through this map, and catalog tools are no longer in
@@ -1289,6 +1311,15 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 server_name = metadata.get("server_name")
                 if server_name:
                     tool_server_map[tool.name] = server_name
+        # Orchestrator-discovered slugs win: rediscovered tools carry the gateway
+        # name in their metadata, which is not the server slug (see __init__).
+        tool_server_map.update(
+            {
+                name: slug
+                for name, slug in self._orchestrator_tool_server_map.items()
+                if name in identity_tool_registry
+            }
+        )
 
         return build_sub_agent_graph(
             model=self.model,
@@ -1307,6 +1338,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             tool_risk_cache=self._tool_risk_cache,
             tool_server_map=tool_server_map or None,
             context_gated_tools=self._cached_context_gated_tools or None,
+            identity_consent_tool_registry=identity_tool_registry,
             expose_context_registry=exposed_catalog is not None,
         ).with_config({"recursion_limit": _SUB_AGENT_RECURSION_LIMIT})
 
@@ -1564,12 +1596,18 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 tool_bypass_rules=self._tool_bypass_rules,
                 tool_risk_cache=self._tool_risk_cache,
                 _pending_bypass_rules=self._pending_bypass_rules,
-                # Identity-scoped tool wrappers read these at execution time:
-                # remembered grants pass through here too (the consent *prompt*
-                # only exists on the orchestrator graph; unasked tools fail
-                # closed in sub-agents by design — ADR 0006).
+                # Identity-scoped tools (ADR 0006): the wrapper reads the grants
+                # and the email at execution time, and this graph's own
+                # IdentityConsentMiddleware (see _build_graph) records first-use
+                # answers here — the grants dict and the pending list are the
+                # orchestrator's objects, so both the in-session state and the
+                # post-turn persistence work from inside a sub-agent.
                 identity_consent_grants=self._identity_consent_grants,
+                _pending_identity_consents=self._pending_identity_consents,
                 email=self.user_email,
+                # Consent is keyed by MCP server, and slug resolution reads this
+                # first on every path (wrapper, middleware, PTC guard).
+                tool_server_map=self._orchestrator_tool_server_map,
             )
             # Catalog mode: expose the catalog through the runtime context so the
             # PTC middleware (expose_context_registry=True) can route it into
@@ -1785,6 +1823,8 @@ def create_dynamic_local_subagent(
     tool_bypass_rules: dict[str, Any] | None = None,
     pending_bypass_rules: list[dict[str, Any]] | None = None,
     identity_consent_grants: dict[str, Any] | None = None,
+    pending_identity_consents: list[dict[str, Any]] | None = None,
+    tool_server_map: dict[str, str] | None = None,
     user_email: str | None = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
@@ -1859,6 +1899,8 @@ def create_dynamic_local_subagent(
         tool_bypass_rules=tool_bypass_rules,
         pending_bypass_rules=pending_bypass_rules,
         identity_consent_grants=identity_consent_grants,
+        pending_identity_consents=pending_identity_consents,
+        tool_server_map=tool_server_map,
         user_email=user_email,
     )
 

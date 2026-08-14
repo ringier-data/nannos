@@ -168,13 +168,13 @@ class GraphRuntimeContext:
     """
 
     identity_consent_grants: dict[str, Any] = field(default_factory=dict)
-    """Remembered per-(user, tool) consent answers for identity-scoped tools.
+    """Remembered per-(user, MCP server) consent answers for identity-scoped tools.
 
-    Format: {"tool_name": {"granted": true|false}} — keyed by tool name alone
-    (server-slug resolution differs across execution paths; consent is a
-    per-(user, tool) decision). Loaded from
-    user_settings.identity_consent_grants at context build time. Deliberately
-    separate from tool_bypass_rules (different axis — see ADR 0006).
+    Format: {"server_slug": {"granted": true|false}} — one answer covers every
+    identity-scoped tool of that integration, which is the grain users reason
+    about. The bare slug, not the tool::server compound of tool_bypass_rules:
+    that table encodes action-risk tolerance, a different axis (ADR 0006).
+    Loaded from user_settings.identity_consent_grants at context build time.
     """
 
     tool_server_map: dict[str, str] = field(default_factory=dict)
@@ -298,7 +298,7 @@ class UserConfig(BaseModel):
     )
     identity_consent_grants: dict[str, Any] = Field(
         default_factory=dict,
-        description="Remembered per-(user, tool) consent answers for identity-scoped tools",
+        description="Remembered per-(user, MCP server) consent answers for identity-scoped tools",
     )
 
     # Private attribute for pending bypass rules accumulated during a turn

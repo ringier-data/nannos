@@ -38,6 +38,7 @@ from agent_common.core.model_factory import (
 )
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
+from agent_common.middleware.identity_consent import IdentityConsentMiddleware
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
@@ -65,7 +66,6 @@ from ..middleware import (
 )
 from ..middleware.error_classification_middleware import ErrorClassificationMiddleware
 from ..middleware.final_response_strip_middleware import FinalResponseTextStripMiddleware
-from ..middleware.identity_scoped import IdentityConsentMiddleware
 from ..middleware.playbook_middleware import PlaybookInjectionMiddleware
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema

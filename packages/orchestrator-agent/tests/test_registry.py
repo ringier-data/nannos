@@ -719,3 +719,55 @@ class TestPersistBypassRules:
             },
             headers={"Authorization": "Bearer test-token"},
         )
+
+
+class TestPersistIdentityConsents:
+    """Tests for RegistryService.persist_identity_consents (ADR 0006 Gate 3)."""
+
+    @pytest.mark.asyncio
+    async def test_persists_grant_keyed_by_server_slug(self, registry_service):
+        """Consent is a per-(user, MCP server) answer, so the body carries the slug."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_client.put = AsyncMock(return_value=mock_response)
+
+        with patch.object(registry_service, "_get_client", return_value=mock_client):
+            await registry_service.persist_identity_consents(
+                access_token="test-token",
+                pending_consents=[{"server_slug": "gatana-salesforce", "granted": True}],
+            )
+
+        mock_client.put.assert_called_once_with(
+            "/api/v1/auth/me/settings/identity-consent",
+            json={"server_slug": "gatana-salesforce", "granted": True},
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_persists_each_answer_and_survives_failures(self, registry_service):
+        """A failed write is logged, never raised — it must not kill the turn."""
+        mock_client = AsyncMock()
+        failure = MagicMock(status_code=500)
+        success = MagicMock(status_code=200)
+        mock_client.put = AsyncMock(side_effect=[failure, success])
+
+        with patch.object(registry_service, "_get_client", return_value=mock_client):
+            await registry_service.persist_identity_consents(
+                access_token="test-token",
+                pending_consents=[
+                    {"server_slug": "gatana-salesforce", "granted": False},
+                    {"server_slug": "gatana-github", "granted": True},
+                ],
+            )
+
+        assert mock_client.put.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_consents_makes_no_call(self, registry_service):
+        mock_client = AsyncMock()
+        with patch.object(registry_service, "_get_client", return_value=mock_client):
+            await registry_service.persist_identity_consents(
+                access_token="test-token", pending_consents=[]
+            )
+        mock_client.put.assert_not_called()
