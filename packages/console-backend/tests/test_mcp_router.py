@@ -451,3 +451,62 @@ class TestListMcpTools:
                 result = await list_mcp_tools(mock_request, mock_user)
 
                 assert len(result.tools) == 0
+
+    @pytest.mark.asyncio
+    async def test_reserved_identity_field_stripped_from_schemas(self, mock_request, mock_user):
+        """Identity-scoped tools must not expose nannos__user_identity to the agent (ADR 0006).
+
+        Discovery is a model-facing schema render: leaving the reserved field visible
+        makes the model ask the user for their email instead of letting the middleware
+        force-populate it.
+        """
+        identity_response = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {
+                        "name": "salesforce_list_my_notes",
+                        "description": "List the acting user's own Salesforce Notes.",
+                        "inputSchema": {
+                            "type": "object",
+                            "required": ["nannos__user_identity"],
+                            "properties": {
+                                "limit": {"type": "integer"},
+                                "nannos__user_identity": {"type": "string", "format": "email"},
+                            },
+                        },
+                    },
+                    {
+                        "name": "salesforce_whoami",
+                        "description": "Service-account identity.",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
+                ]
+            },
+        }
+
+        with patch("console_backend.utils.gatana_auth.OidcOAuth2Client") as mock_oauth_class:
+            mock_oauth = AsyncMock()
+            mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
+            mock_oauth_class.return_value = mock_oauth
+
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+                mock_response = MagicMock()
+                mock_response.headers = {"content-type": "application/json"}
+                mock_response.json.return_value = identity_response
+                mock_response.raise_for_status = MagicMock()
+
+                mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
+                mock_client.post = AsyncMock(return_value=mock_response)
+                mock_client_class.return_value = mock_client
+
+                result = await list_mcp_tools(mock_request, mock_user)
+
+                scoped = result.tools[0]
+                assert "nannos__user_identity" not in scoped.input_schema["properties"]
+                assert scoped.input_schema["required"] == []
+                assert "limit" in scoped.input_schema["properties"]
+                # Non-identity-scoped schemas pass through untouched
+                assert result.tools[1].input_schema == {"type": "object", "properties": {}}

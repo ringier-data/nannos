@@ -17,6 +17,31 @@ logger = logging.getLogger(__name__)
 # Create router
 router: APIRouter = APIRouter(prefix="/api/v1/mcp", tags=["mcp"])
 
+# Reserved identity-scoped input field (ADR 0006). The orchestrator wraps
+# identity-scoped tools so the field never reaches the model on the dispatch
+# path, but tool *discovery* schemas travel through this router straight from
+# the gateway — leaving the field visible here tells the model a mandatory
+# email argument exists and makes it ask the user for their address instead of
+# letting the middleware force-populate it. Duplicated (not imported) because
+# console-backend does not depend on agent-common; keep in sync with
+# ``agent_common.core.identity_scoped.NANNOS_USER_IDENTITY_FIELD``.
+NANNOS_USER_IDENTITY_FIELD = "nannos__user_identity"
+
+
+def _strip_reserved_identity_field(schema: dict | None) -> dict | None:
+    """Remove the reserved identity field from a tool input schema (properties + required)."""
+    if not isinstance(schema, dict):
+        return schema
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or NANNOS_USER_IDENTITY_FIELD not in properties:
+        return schema
+    cleaned = dict(schema)
+    cleaned["properties"] = {k: v for k, v in properties.items() if k != NANNOS_USER_IDENTITY_FIELD}
+    required = cleaned.get("required")
+    if isinstance(required, list):
+        cleaned["required"] = [r for r in required if r != NANNOS_USER_IDENTITY_FIELD]
+    return cleaned
+
 
 class MCPTool(BaseModel):
     """MCP tool information."""
@@ -334,7 +359,9 @@ async def _list_mcp_tools(
             MCPTool(
                 name=tool.get("name", ""),
                 description=tool.get("description"),
-                input_schema=clean_gemini_schema(tool.get("inputSchema")),  # MCP standard field
+                # Reserved identity field stripped before the schema is echoed to the agent:
+                # discovery is a model-facing schema render like any other (ADR 0006).
+                input_schema=_strip_reserved_identity_field(clean_gemini_schema(tool.get("inputSchema"))),
                 output_schema=clean_gemini_schema(tool.get("outputSchema")),  # MCP standard field for output validation
                 server=tool.get("server") or tool.get("serverName"),  # Check both possible fields
             )
