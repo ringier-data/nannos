@@ -17,7 +17,7 @@ const TOOL_LABELS: Record<string, string> = {
 const CONTENT_KEYS = new Set(['content', 'body', 'description']);
 
 /** Keys that are internal / not useful for display. */
-const HIDDEN_KEYS = new Set(['reason', '_risk_metadata']);
+const HIDDEN_KEYS = new Set(['reason', '_risk_metadata', '_call_id']);
 
 /** Risk metadata attached by the dynamic risk scoring middleware. */
 interface RiskMetadata {
@@ -149,7 +149,11 @@ function SingleActionCard() {
       <div className="flex items-start gap-3">
         <RiskIcon className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
-          {pendingInterrupt!.reason && (
+          {/* The interrupt's envelope text is the action's own description for
+              single-action interrupts (the server sends it both ways so clients
+              that ignore action_requests still get the prompt). Render it only
+              when it adds something ActionDetails doesn't already show. */}
+          {pendingInterrupt!.reason && pendingInterrupt!.reason.trim() !== action?.description?.trim() && (
             <p className="text-sm text-amber-800 dark:text-amber-200 mb-1">{pendingInterrupt!.reason}</p>
           )}
           {action && <ActionDetails action={action} />}

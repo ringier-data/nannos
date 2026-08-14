@@ -23,6 +23,7 @@ import { SecretsVaultList } from '@/components/settings/SecretsVaultList';
 import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PhoneVerificationDialog } from '@/components/settings/PhoneVerificationDialog';
 import { ToolBypassRulesList } from '@/components/settings/ToolBypassRulesList';
+import { IdentityConsentList } from '@/components/settings/IdentityConsentList';
 import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, getModelLabel } from '@/config/models';
 
 const LANGUAGE_OPTIONS = [
@@ -488,15 +489,26 @@ export function SettingsPage() {
       )}
 
       {activeTab === 'approvals' && (
-        <div className="flex flex-col gap-6 max-h-[calc(100vh-16rem)] overflow-hidden">
-          <div>
-            <h2 className="text-lg font-semibold">Tool Approval Bypass Rules</h2>
-            <p className="text-sm text-muted-foreground mt-1">
-              Tools you&apos;ve chosen to always allow without approval prompts. Remove a rule to re-enable the confirmation dialog.
-            </p>
-          </div>
-          <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="flex flex-col gap-8 max-h-[calc(100vh-16rem)] overflow-y-auto">
+          <div className="flex flex-col gap-6">
+            <div>
+              <h2 className="text-lg font-semibold">Tool Approval Bypass Rules</h2>
+              <p className="text-sm text-muted-foreground mt-1">
+                Tools you&apos;ve chosen to always allow without approval prompts. Remove a rule to re-enable the confirmation dialog.
+              </p>
+            </div>
             <ToolBypassRulesList />
+          </div>
+          <div className="flex flex-col gap-6">
+            <div>
+              <h2 className="text-lg font-semibold">Identity Sharing</h2>
+              <p className="text-sm text-muted-foreground mt-1">
+                Integrations you&apos;ve answered about sharing your verified email address with. Tools of an
+                allowed integration receive it so they can act on your own records; blocked integrations
+                cannot run their identity-scoped tools. A separate decision from bypass rules above.
+              </p>
+            </div>
+            <IdentityConsentList />
           </div>
         </div>
       )}
