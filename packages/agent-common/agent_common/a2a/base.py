@@ -21,7 +21,10 @@ from langchain_core.messages import AIMessage, ContentBlock, HumanMessage
 from langgraph.errors import GraphInterrupt
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent.cost_tracking_mixin import CostTrackingMixin
-from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
+from ringier_a2a_sdk.utils.bedrock_image_processor import (
+    preprocess_content_blocks_for_bedrock,
+    preprocess_file_blocks_for_chat_completions,
+)
 
 
 from .stream_events import ErrorEvent, StreamEvent, TaskResponseData, TaskUpdate
@@ -580,26 +583,28 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         return None
 
     async def _apply_provider_transforms(self, content_blocks: List) -> List:
-        """Apply provider-specific content block transformations.
+        """Normalize content blocks the LLM client cannot serialize.
 
-        Applies transformations based on get_model_type():
-        - **Bedrock** (Claude): Converts URL-based images to inline base64
-          (Bedrock Converse API rejects image URLs)
-        - **Gemini** (Google): Infers missing MIME types from URL extensions
-          (Gemini requires MIME types on file blocks)
+        The app no longer knows the target provider — every model is reached through the
+        LiteLLM gateway, which normalizes content for it (image fetch/encode for Bedrock,
+        MIME inference for Gemini). So provider-specific handling is the gateway's job and
+        this is a passthrough, with one exception the gateway cannot cover:
+
+        A ``file`` block carrying a ``url`` never reaches the gateway. Because the gateway
+        speaks the OpenAI protocol, every call is built by ``langchain_openai`` against the
+        Chat Completions spec, and ``langchain_core``'s block translator *raises*
+        ``ValueError: OpenAI Chat Completions does not support file URLs`` while assembling
+        the payload — client-side, before a request exists. The spec has no URL source for
+        files (only inline ``file_data`` or an uploaded ``file_id``), so the bytes have to
+        be inlined here. Image URLs are unaffected: they map to ``image_url``.
 
         Args:
             content_blocks: Validated content blocks (text + file blocks)
 
         Returns:
-            Transformed content blocks ready for the provider's API
+            Content blocks the OpenAI-compatible client can serialize
         """
-        # Gateway-only: the app no longer knows the provider, and the
-        # LiteLLM gateway normalizes content for the target provider (image
-        # fetch/encode for Bedrock, MIME inference for Gemini). So this is a
-        # passthrough. (Provider-specific content handling is now the gateway's
-        # responsibility — verify multimodal round-trips during rollout.)
-        return content_blocks
+        return await preprocess_file_blocks_for_chat_completions(content_blocks)
 
     @staticmethod
     async def _transform_blocks_for_bedrock(content_blocks: List) -> List:
@@ -818,9 +823,8 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         2. Rejecting S3 URIs (require presigned HTTPS URLs)
         3. Validating block types against the agent's supported input modes
         4. Converting unsupported block types to informational text
-        5. Provider-specific content transformations:
-           - Bedrock: converts URL-based images to inline base64
-           - Gemini: infers missing MIME types from URL extensions
+        5. Normalizing blocks the LLM client cannot serialize (URL-sourced file blocks
+           are inlined as base64 — see _apply_provider_transforms)
         6. Building a HumanMessage ready for consumption by local LLMs
 
         For LocalA2ARunnable subclasses, this uses get_supported_input_modes() to determine
