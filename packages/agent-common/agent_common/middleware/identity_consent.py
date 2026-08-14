@@ -30,6 +30,7 @@ from agent_common.core.identity_scoped import (
     SELF_SERVER_SLUG,
     consent_state,
     identity_server_slug,
+    may_ask_consent_for_slug,
     identity_auth_required_payload,
     is_wrapped_identity_scoped_tool,
     record_consent,
@@ -164,15 +165,19 @@ class IdentityConsentMiddleware(AgentMiddleware):
                 continue
             if consent is False:
                 denied_calls.append(tool_call)
-            elif not email:
-                # Without a verified email the wrapper fails closed regardless;
-                # prompting (and recording a grant) would only create a
-                # remembered grant for a permanently broken tool. Block for
-                # this turn without remembering anything.
+            elif not email or not may_ask_consent_for_slug(server_slug):
+                # Two no-prompt cases, both blocked without remembering anything:
+                # - no verified email: the wrapper fails closed regardless, and a
+                #   grant would be remembered for a permanently broken tool;
+                # - '_self' slug: a grant recorded under it would lump every
+                #   server-less tool into one answer, wider than the
+                #   per-server intent.
                 logger.warning(
-                    "Identity-scoped tool '%s' called without a verified email on the "
-                    "runtime context — blocking without consent prompt",
+                    "Identity-scoped tool '%s' blocked without consent prompt "
+                    "(email present: %s, slug: %s)",
                     gated_name,
+                    bool(email),
+                    server_slug,
                 )
                 denied_calls.append(dict(tool_call, _identity_unasked=True))
             else:

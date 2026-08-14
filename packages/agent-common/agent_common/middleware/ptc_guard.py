@@ -292,7 +292,9 @@ def _inject_for_inner(
         for arg_name, state_field in injected.state.items():
             if state_field:
                 enriched[arg_name] = (
-                    state.get(state_field) if isinstance(state, dict) else getattr(state, state_field, None)
+                    state.get(state_field)
+                    if isinstance(state, dict)
+                    else getattr(state, state_field, None)
                 )
             else:
                 enriched[arg_name] = state
@@ -339,7 +341,20 @@ def wrap_tool_for_ptc(
 
     async def _guarded(runtime: ToolRuntime = None, **kwargs: Any) -> Any:  # type: ignore[assignment]
         if risk_scorer is None:
-            return await _execute(runtime, kwargs)
+            # No risk guard — but keep the turn-level result cache: an
+            # identity-consent interrupt (queued by an identity-scoped tool
+            # inside this eval) replays the whole code block after resume, and
+            # without this bookkeeping every side-effecting call would
+            # re-execute on each replay.
+            thread_id_unscored = resolve_ptc_thread_id(runtime)
+            turn_unscored = get_ptc_turn(thread_id_unscored)
+            call_key_unscored = _call_key(tool_name, kwargs)
+            if turn_unscored is not None and call_key_unscored in turn_unscored.results:
+                return turn_unscored.results[call_key_unscored]
+            result = await _execute(runtime, kwargs)
+            if turn_unscored is not None:
+                turn_unscored.results[call_key_unscored] = result
+            return result
 
         from agent_common.middleware.conditional_hitl import (
             ConditionalHumanInTheLoopMiddleware,

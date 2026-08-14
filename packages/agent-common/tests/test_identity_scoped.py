@@ -221,9 +221,7 @@ class TestWrapperExecution:
     async def test_fails_closed_without_email(self):
         captured: dict = {}
         wrapper = wrap_identity_scoped_tool(_make_inner_tool(captured))
-        context = _make_context(
-            grants={SERVER_SLUG: {"granted": True}}, email=None
-        )
+        context = _make_context(grants={SERVER_SLUG: {"granted": True}}, email=None)
 
         result = await wrapper.coroutine(runtime=_make_runtime(context), note="hello")
 
@@ -261,9 +259,13 @@ class TestWrapperExecution:
 # ---------------------------------------------------------------------------
 
 
-def _make_state_and_runtime(grants, tool_calls, email="user@example.com"):
+def _make_state_and_runtime(
+    grants, tool_calls, email="user@example.com", server_name=SERVER_SLUG
+):
     registry = {
-        "salesforce_create_note": wrap_identity_scoped_tool(_make_inner_tool({}))
+        "salesforce_create_note": wrap_identity_scoped_tool(
+            _make_inner_tool({}, server_name=server_name)
+        )
     }
     context = _make_context(grants=grants, tool_registry=registry, email=email)
     ai_msg = AIMessage(content="", tool_calls=tool_calls)
@@ -312,7 +314,9 @@ class TestIdentityConsentMiddleware:
             [IDENTITY_CALL, PLAIN_CALL],
         )
         interrupt_mock = MagicMock(side_effect=AssertionError("must not prompt again"))
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -329,7 +333,9 @@ class TestIdentityConsentMiddleware:
     async def test_first_use_approve_records_grant_and_keeps_call(self, monkeypatch):
         state, runtime, ai_msg, context = _make_state_and_runtime({}, [IDENTITY_CALL])
         interrupt_mock = MagicMock(return_value={"decisions": [{"type": "approve"}]})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -346,9 +352,7 @@ class TestIdentityConsentMiddleware:
             "reject",
         ]
         # Grant remembered in-session and queued for persistence (keyed by server slug)
-        assert context.identity_consent_grants[SERVER_SLUG] == {
-            "granted": True
-        }
+        assert context.identity_consent_grants[SERVER_SLUG] == {"granted": True}
         assert context._pending_identity_consents == [
             {"server_slug": SERVER_SLUG, "granted": True}
         ]
@@ -359,13 +363,13 @@ class TestIdentityConsentMiddleware:
     async def test_first_use_reject_records_denial_and_blocks(self, monkeypatch):
         state, runtime, ai_msg, context = _make_state_and_runtime({}, [IDENTITY_CALL])
         interrupt_mock = MagicMock(return_value={"decisions": [{"type": "reject"}]})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
-        assert context.identity_consent_grants[SERVER_SLUG] == {
-            "granted": False
-        }
+        assert context.identity_consent_grants[SERVER_SLUG] == {"granted": False}
         assert context._pending_identity_consents == [
             {"server_slug": SERVER_SLUG, "granted": False}
         ]
@@ -380,7 +384,9 @@ class TestIdentityConsentMiddleware:
             {}, [IDENTITY_CALL, IDENTITY_CALL_2]
         )
         interrupt_mock = MagicMock(return_value={"decisions": [{"type": "reject"}]})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -401,7 +407,9 @@ class TestIdentityConsentMiddleware:
         interrupt_mock = MagicMock(
             side_effect=AssertionError("must not prompt without email")
         )
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -412,11 +420,36 @@ class TestIdentityConsentMiddleware:
         assert payload["error_code"] == "auth_required"
         assert "declined" not in payload["message"]  # must not claim a denial exists
 
+    async def test_self_slug_blocks_without_prompt_or_grant(self, monkeypatch):
+        """Tool with no resolvable server → slug '_self': a grant under it would
+        lump every server-less tool into one answer. Block without prompting
+        or remembering."""
+        state, runtime, ai_msg, context = _make_state_and_runtime(
+            {}, [IDENTITY_CALL], server_name=None
+        )
+        interrupt_mock = MagicMock(
+            side_effect=AssertionError("must not prompt under the _self slug")
+        )
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
+
+        result = await IdentityConsentMiddleware().aafter_model(state, runtime)
+
+        assert context.identity_consent_grants == {}
+        assert context._pending_identity_consents == []
+        tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        payload = json.loads(tool_messages[0].content)
+        assert payload["error_code"] == "auth_required"
+        assert "declined" not in payload["message"]
+
     async def test_unknown_decision_blocks_without_remembering(self, monkeypatch):
         """A malformed decision blocks this call but records no denial — and says so."""
         state, runtime, ai_msg, context = _make_state_and_runtime({}, [IDENTITY_CALL])
         interrupt_mock = MagicMock(return_value={"decisions": [{"type": "unknown"}]})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -434,7 +467,9 @@ class TestIdentityConsentMiddleware:
         interrupt_mock = MagicMock(
             return_value={"decisions": [{"type": "reject", "_defaulted": True}]}
         )
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -448,7 +483,9 @@ class TestIdentityConsentMiddleware:
     async def test_decision_count_mismatch_raises(self, monkeypatch):
         state, runtime, _, _ = _make_state_and_runtime({}, [IDENTITY_CALL])
         interrupt_mock = MagicMock(return_value={"decisions": []})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         with pytest.raises(ValueError, match="does not match"):
             await IdentityConsentMiddleware().aafter_model(state, runtime)
@@ -474,13 +511,19 @@ class TestSubAgentConsentGate:
         return {"messages": [ai_msg]}, _make_runtime(context), context
 
     def _registry(self):
-        return {"salesforce_create_note": wrap_identity_scoped_tool(_make_inner_tool({}))}
+        return {
+            "salesforce_create_note": wrap_identity_scoped_tool(_make_inner_tool({}))
+        }
 
-    async def test_prompts_with_injected_registry_when_context_has_none(self, monkeypatch):
+    async def test_prompts_with_injected_registry_when_context_has_none(
+        self, monkeypatch
+    ):
         grants, pending = {}, []
         state, runtime, context = self._subagent_state_and_runtime(grants, pending)
         interrupt_mock = MagicMock(return_value={"decisions": [{"type": "approve"}]})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         middleware = IdentityConsentMiddleware(tool_registry=self._registry())
         result = await middleware.aafter_model(state, runtime)
@@ -496,7 +539,9 @@ class TestSubAgentConsentGate:
         """Unknown tool → not gated here; the wrapper still fails closed at execution."""
         state, runtime, _ = self._subagent_state_and_runtime({}, [])
         interrupt_mock = MagicMock()
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -527,13 +572,18 @@ def test_common_middleware_stack_gates_identity_after_hitl():
         hitl_guarded_tools={"salesforce_create_note": {}},
     )
     names = [m.__class__.__name__ for m in stack]
-    assert names.index("IdentityConsentMiddleware") == names.index("ConditionalHumanInTheLoopMiddleware") + 1
+    assert (
+        names.index("IdentityConsentMiddleware")
+        == names.index("ConditionalHumanInTheLoopMiddleware") + 1
+    )
 
 
 def test_common_middleware_stack_gates_identity_without_hitl():
     from agent_common.core.graph_utils import build_common_middleware_stack
 
-    stack = build_common_middleware_stack(MagicMock(), MagicMock(), exclude_deep_agents_middlewares=True)
+    stack = build_common_middleware_stack(
+        MagicMock(), MagicMock(), exclude_deep_agents_middlewares=True
+    )
     assert "IdentityConsentMiddleware" in [m.__class__.__name__ for m in stack]
 
 
@@ -576,6 +626,27 @@ class TestPtcConsentRequest:
         finally:
             ptc_guard.end_ptc_turn("ptc-t1")
 
+    async def test_self_slug_never_queues_consent(self):
+        """Tool with no resolvable server → slug '_self': the wrapper fails
+        closed without queueing a consent question (a grant under '_self'
+        would lump every server-less tool into one answer)."""
+        from agent_common.middleware import ptc_guard
+
+        captured: dict = {}
+        wrapped = wrap_identity_scoped_tool(
+            _make_inner_tool(captured, server_name=None)
+        )
+        runtime, _ = self._runtime({}, thread_id="ptc-t-noauth")
+        runtime.context.tool_server_map = {}
+        ptc_guard.begin_ptc_turn("ptc-t-noauth")
+        try:
+            out = await wrapped.coroutine(runtime=runtime, note="hi")
+            assert json.loads(out)["error_code"] == "auth_required"
+            assert captured == {}
+            assert ptc_guard.take_ptc_pending("ptc-t-noauth") == []
+        finally:
+            ptc_guard.end_ptc_turn("ptc-t-noauth")
+
     async def test_repeated_calls_ask_once(self):
         from agent_common.middleware import ptc_guard
 
@@ -602,7 +673,9 @@ class TestPtcConsentRequest:
         from agent_common.middleware import ptc_guard
 
         wrapped = wrap_identity_scoped_tool(_make_inner_tool({}))
-        runtime, _ = self._runtime({SERVER_SLUG: {"granted": False}}, thread_id="ptc-t3")
+        runtime, _ = self._runtime(
+            {SERVER_SLUG: {"granted": False}}, thread_id="ptc-t3"
+        )
         ptc_guard.begin_ptc_turn("ptc-t3")
         try:
             out = await wrapped.coroutine(runtime=runtime, note="hi")
@@ -711,19 +784,27 @@ class TestCatalogCallToolGating:
     """
 
     def _state_and_runtime(self, grants, inner_name="salesforce_create_note"):
-        registry = {"salesforce_create_note": wrap_identity_scoped_tool(_make_inner_tool({}))}
+        registry = {
+            "salesforce_create_note": wrap_identity_scoped_tool(_make_inner_tool({}))
+        }
         context = _make_context(grants=grants, tool_registry=registry)
         call = {
             "name": "call_tool",
             "args": {"name": inner_name, "args": {"note": "hi"}},
             "id": "call-ct",
         }
-        return {"messages": [AIMessage(content="", tool_calls=[call])]}, _make_runtime(context), context
+        return (
+            {"messages": [AIMessage(content="", tool_calls=[call])]},
+            _make_runtime(context),
+            context,
+        )
 
     async def test_prompts_for_inner_identity_tool(self, monkeypatch):
         state, runtime, context = self._state_and_runtime({})
         interrupt_mock = MagicMock(return_value={"decisions": [{"type": "approve"}]})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -733,9 +814,7 @@ class TestCatalogCallToolGating:
         assert context.identity_consent_grants == {SERVER_SLUG: {"granted": True}}
 
     async def test_denied_inner_tool_blocks_with_paired_message(self):
-        state, runtime, _ = self._state_and_runtime(
-            {SERVER_SLUG: {"granted": False}}
-        )
+        state, runtime, _ = self._state_and_runtime({SERVER_SLUG: {"granted": False}})
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
         message = result["messages"][0]
@@ -759,7 +838,9 @@ class TestPerServerConsent:
         }
 
     def _state(self, grants, tool_calls, registry=None):
-        context = _make_context(grants=grants, tool_registry=registry or self._registry())
+        context = _make_context(
+            grants=grants, tool_registry=registry or self._registry()
+        )
         ai_msg = AIMessage(content="", tool_calls=tool_calls)
         return {"messages": [ai_msg]}, _make_runtime(context), context
 
@@ -775,7 +856,9 @@ class TestPerServerConsent:
             ],
         )
         interrupt_mock = MagicMock(return_value={"decisions": [{"type": "approve"}]})
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -797,7 +880,9 @@ class TestPerServerConsent:
         registry = {
             "salesforce_create_note": wrap_identity_scoped_tool(_make_inner_tool({})),
             "github_list_my_issues": wrap_identity_scoped_tool(
-                _make_inner_tool({}, server_name="gatana-github", name="github_list_my_issues")
+                _make_inner_tool(
+                    {}, server_name="gatana-github", name="github_list_my_issues"
+                )
             ),
         }
         state, runtime, context = self._state(
@@ -811,7 +896,9 @@ class TestPerServerConsent:
         interrupt_mock = MagicMock(
             return_value={"decisions": [{"type": "approve"}, {"type": "reject"}]}
         )
-        monkeypatch.setattr("agent_common.middleware.identity_consent.interrupt", interrupt_mock)
+        monkeypatch.setattr(
+            "agent_common.middleware.identity_consent.interrupt", interrupt_mock
+        )
 
         result = await IdentityConsentMiddleware().aafter_model(state, runtime)
 
@@ -839,17 +926,26 @@ class TestPerServerConsent:
         context.tool_server_map = {"salesforce_create_note": SERVER_SLUG}
         state = {
             "messages": [
-                AIMessage(content="", tool_calls=[self._call("salesforce_create_note", "call-a")])
+                AIMessage(
+                    content="",
+                    tool_calls=[self._call("salesforce_create_note", "call-a")],
+                )
             ]
         }
-        result = await IdentityConsentMiddleware().aafter_model(state, _make_runtime(context))
+        result = await IdentityConsentMiddleware().aafter_model(
+            state, _make_runtime(context)
+        )
         assert result is None  # grant matched despite the gateway-name metadata
 
     async def test_wrapper_resolves_slug_from_context_map(self):
         """Same resolution at execution time: the wrapper honours the context map."""
         captured: dict = {}
-        wrapped = wrap_identity_scoped_tool(_make_inner_tool(captured, server_name="gatana"))
+        wrapped = wrap_identity_scoped_tool(
+            _make_inner_tool(captured, server_name="gatana")
+        )
         context = _make_context(grants={SERVER_SLUG: {"granted": True}})
         context.tool_server_map = {"salesforce_create_note": SERVER_SLUG}
-        assert await wrapped.coroutine(runtime=_make_runtime(context), note="hi") == "ok"
+        assert (
+            await wrapped.coroutine(runtime=_make_runtime(context), note="hi") == "ok"
+        )
         assert captured[NANNOS_USER_IDENTITY_FIELD] == "user@example.com"

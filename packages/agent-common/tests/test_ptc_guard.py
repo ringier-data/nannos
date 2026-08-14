@@ -141,7 +141,9 @@ async def test_arun_delivers_injected_runtime_to_guard(monkeypatch):
 async def test_high_score_returns_payload_and_does_not_execute():
     record: list[dict] = []
     inner = _make_inner(record)
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8)
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8
+    )
     rt = _make_runtime()
     out = await wrapped.coroutine(runtime=rt, path="/etc/passwd")
     assert out["error"] == "human_approval_required"
@@ -153,7 +155,9 @@ async def test_low_score_executes_inner():
     record: list[dict] = []
     inner = _make_inner(record)
     seen: dict = {}
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.2, recorder=seen), default_risk_threshold=0.8)
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.2, recorder=seen), default_risk_threshold=0.8
+    )
     rt = _make_runtime()
     out = await wrapped.coroutine(runtime=rt, path="/tmp/x")
     assert out == "read:/tmp/x"
@@ -210,7 +214,9 @@ async def test_bypass_pattern_match_skips_scoring():
     inner = _make_inner(record)
     seen: dict = {}
     wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.99, recorder=seen))
-    rt = _make_runtime(bypass_rules={"read_file::_self": {"bypass_patterns": {"path": ["/tmp/*"]}}})
+    rt = _make_runtime(
+        bypass_rules={"read_file::_self": {"bypass_patterns": {"path": ["/tmp/*"]}}}
+    )
     out = await wrapped.coroutine(runtime=rt, path="/tmp/ok")
     assert out == "read:/tmp/ok"
     assert seen == {}
@@ -219,8 +225,12 @@ async def test_bypass_pattern_match_skips_scoring():
 async def test_bypass_pattern_non_match_still_guards():
     record: list[dict] = []
     inner = _make_inner(record)
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.99), default_risk_threshold=0.8)
-    rt = _make_runtime(bypass_rules={"read_file::_self": {"bypass_patterns": {"path": ["/tmp/*"]}}})
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.99), default_risk_threshold=0.8
+    )
+    rt = _make_runtime(
+        bypass_rules={"read_file::_self": {"bypass_patterns": {"path": ["/tmp/*"]}}}
+    )
     out = await wrapped.coroutine(runtime=rt, path="/etc/passwd")
     assert out["error"] == "human_approval_required"
     assert record == []
@@ -234,7 +244,9 @@ async def test_bypass_pattern_non_match_still_guards():
 async def test_per_request_threshold_override_allows_call():
     record: list[dict] = []
     inner = _make_inner(record)
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8)
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8
+    )
     rt = _make_runtime(risk_threshold=0.95)  # raise bar above the 0.9 score
     out = await wrapped.coroutine(runtime=rt, path="/x")
     assert out == "read:/x"
@@ -273,7 +285,9 @@ def test_inject_for_inner_forwards_runtime_when_declared():
     async def _needs_rt(runtime: ToolRuntime, path: str) -> str:
         return path
 
-    inner = StructuredTool.from_function(coroutine=_needs_rt, name="rt_tool", description="d", args_schema=_Args)
+    inner = StructuredTool.from_function(
+        coroutine=_needs_rt, name="rt_tool", description="d", args_schema=_Args
+    )
     rt = _make_runtime()
     enriched = _inject_for_inner(inner, {"path": "/a"}, rt)  # type: ignore[arg-type]
     assert enriched["path"] == "/a"
@@ -298,7 +312,9 @@ class _FakeRequest:
 
 def test_hidden_middleware_strips_hidden_tools():
     a = _make_inner([])  # name read_file
-    b = StructuredTool.from_function(coroutine=a.coroutine, name="write_file", description="d", args_schema=_Args)
+    b = StructuredTool.from_function(
+        coroutine=a.coroutine, name="write_file", description="d", args_schema=_Args
+    )
     req = _FakeRequest([a, b])
     mw = HiddenToolsFromModelMiddleware({"read_file"})
     filtered = mw._filter(req)
@@ -341,10 +357,40 @@ def test_call_key_is_stable_and_arg_sensitive():
     assert k1 != k3
 
 
+async def test_scorer_none_caches_results_on_active_turn():
+    """With risk scoring off, the turn-level result cache must still dedup:
+    an identity-consent interrupt replays the whole eval code block, and
+    without caching every side-effecting call would re-execute per replay."""
+    record: list[dict] = []
+    inner = _make_inner(record)
+    wrapped = wrap_tool_for_ptc(inner, risk_scorer=None)
+    rt = _runtime_with_thread("t-unscored")
+    ptc_guard.begin_ptc_turn("t-unscored")
+    try:
+        out1 = await wrapped.coroutine(runtime=rt, path="/data")
+        out2 = await wrapped.coroutine(runtime=rt, path="/data")  # replay
+        assert out1 == out2 == "read:/data"
+        assert len(record) == 1  # inner executed once, replay served from cache
+    finally:
+        ptc_guard.end_ptc_turn("t-unscored")
+
+
+async def test_scorer_none_executes_directly_without_turn():
+    """No PTC turn (plain wrapped call outside eval) → straight execution."""
+    record: list[dict] = []
+    inner = _make_inner(record)
+    wrapped = wrap_tool_for_ptc(inner, risk_scorer=None)
+    out = await wrapped.coroutine(runtime=_make_runtime(), path="/data")
+    assert out == "read:/data"
+    assert len(record) == 1
+
+
 async def test_high_score_records_pending_when_turn_active():
     record: list[dict] = []
     inner = _make_inner(record)
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8)
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8
+    )
     rt = _runtime_with_thread("t1")
     ptc_guard.begin_ptc_turn("t1")
     try:
@@ -363,7 +409,9 @@ async def test_high_score_records_pending_when_turn_active():
 async def test_recorded_reject_decision_returns_rejection_payload():
     record: list[dict] = []
     inner = _make_inner(record)
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8)
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.9), default_risk_threshold=0.8
+    )
     rt = _runtime_with_thread("t2")
     turn = ptc_guard.begin_ptc_turn("t2")
     try:
@@ -379,7 +427,9 @@ async def test_recorded_reject_decision_returns_rejection_payload():
 async def test_recorded_approve_decision_executes_and_caches():
     record: list[dict] = []
     inner = _make_inner(record)
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.99), default_risk_threshold=0.8)
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.99), default_risk_threshold=0.8
+    )
     rt = _runtime_with_thread("t3")
     turn = ptc_guard.begin_ptc_turn("t3")
     try:
@@ -401,7 +451,9 @@ async def test_recorded_approve_decision_executes_and_caches():
 async def test_low_score_caches_result_when_turn_active():
     record: list[dict] = []
     inner = _make_inner(record)
-    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.1), default_risk_threshold=0.8)
+    wrapped = wrap_tool_for_ptc(
+        inner, risk_scorer=_scorer(0.1), default_risk_threshold=0.8
+    )
     rt = _runtime_with_thread("t4")
     turn = ptc_guard.begin_ptc_turn("t4")
     try:
@@ -440,7 +492,9 @@ def test_apply_ptc_decisions_matches_by_id_not_position():
     ]
     turn = types.SimpleNamespace(decisions={})
 
-    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(turn, pending, decisions, context=None)
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(
+        turn, pending, decisions, context=None
+    )
 
     assert turn.decisions[mem] == "approve"
     assert turn.decisions[root] == "reject"
@@ -459,7 +513,9 @@ def test_apply_ptc_decisions_positional_fallback_without_ids():
     decisions = [{"type": "approve"}, {"type": "reject"}]
     turn = types.SimpleNamespace(decisions={})
 
-    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(turn, pending, decisions, context=None)
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(
+        turn, pending, decisions, context=None
+    )
 
     assert turn.decisions[a] == "approve"
     assert turn.decisions[b] == "reject"

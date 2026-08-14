@@ -731,9 +731,16 @@ class OrchestratorDeepAgent:
                 user_config._pending_bypass_rules = pending_bypass
 
             # Same for identity-scoped tool consent answers (Gate 3, ADR 0006).
+            # MERGE rather than assign: sub-agent graphs append to
+            # user_config._pending_identity_consents by reference, while the
+            # orchestrator graph's middleware setattrs a fresh list onto the
+            # runtime context — assignment would discard sub-agent entries
+            # when both graphs record in one turn.
             pending_consents = getattr(runtime_context, "_pending_identity_consents", None)
-            if pending_consents:
-                user_config._pending_identity_consents = pending_consents
+            if pending_consents and pending_consents is not user_config._pending_identity_consents:
+                user_config._pending_identity_consents.extend(
+                    entry for entry in pending_consents if entry not in user_config._pending_identity_consents
+                )
 
             logger.debug("===== STREAM PROCESSING COMPLETE =====")
             logger.debug(f"Total chunks processed: {chunk_count}")

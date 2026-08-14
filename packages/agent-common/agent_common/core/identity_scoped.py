@@ -160,6 +160,24 @@ def identity_server_slug(tool_name: str, context: Any, tool: Any = None) -> str:
     return SELF_SERVER_SLUG
 
 
+def may_ask_consent_for_slug(server_slug: str) -> bool:
+    """Whether a consent question may be asked (and a grant recorded) for this slug.
+
+    ``_self`` is refused: it is the fallback for every tool with no resolvable
+    server, so a grant under it would lump unrelated server-less tools into one
+    answer. Enforcement lookups still use the slug as resolved — an unaskable
+    slug simply never has a grant, so the tool fails closed.
+
+    Known accepted breadth: an identity tool visible ONLY to a sub-agent's own
+    rediscovery (absent from the orchestrator's discovery map, whose slugs
+    overwrite the sub-agent map for identity tools) resolves to the shared
+    gateway name, so its grant covers every rediscovery-only identity tool
+    behind that gateway. Real per-server slugs require the tool to be visible
+    to orchestrator discovery.
+    """
+    return server_slug != SELF_SERVER_SLUG
+
+
 def consent_state(context: Any, server_slug: str) -> bool | None:
     """The remembered consent answer for (user, server): True/False, or None if unasked."""
     grants: dict[str, Any] | None = (
@@ -212,6 +230,16 @@ def record_ptc_consent_request(runtime: Any, tool_name: str, server_slug: str) -
     if not (getattr(context, "email", None) if context else None):
         # No verified email: the tool can never succeed, so asking for consent
         # would only produce a grant for a permanently broken tool.
+        return False
+    if not may_ask_consent_for_slug(server_slug):
+        # A grant under '_self' would lump unrelated server-less tools
+        # into one answer. Fail closed instead.
+        logger.warning(
+            "Identity-scoped tool '%s' resolves to slug '%s' — not asking "
+            "for consent, failing closed",
+            tool_name,
+            server_slug,
+        )
         return False
     try:
         from agent_common.middleware.ptc_guard import (
