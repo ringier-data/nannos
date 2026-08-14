@@ -10,13 +10,13 @@ be inline. While a model may *advertise* a content category as supported (e.g.
 Claude on Bedrock supports ``["text", "image", "file"]``), Bedrock only accepts
 that content through inline base64 — never a URL.
 
-**OpenAI Chat Completions** (``preprocess_file_blocks_for_chat_completions``) —
-``file`` blocks only. ``langchain_core``'s OpenAI block translator maps an image
-block's URL to ``image_url`` happily, but *raises* on a ``file`` block carrying a
-``url`` ("OpenAI Chat Completions does not support file URLs"): the spec only has
-``file_data`` (inline base64) and ``file_id``. That raise happens client-side, so
-no amount of downstream normalization (our LiteLLM gateway included) can rescue
-it — the block must be inlined before the request payload is built.
+**OpenAI Chat Completions** (``preprocess_blocks_for_chat_completions``) — ``file``
+and ``audio`` blocks. ``langchain_core``'s OpenAI block translator maps an image
+block's URL to ``image_url`` happily, but *raises* on a ``file`` or ``audio`` block
+carrying a ``url``: the spec has no URL source for either. That raise happens
+client-side, so no amount of downstream normalization (our LiteLLM gateway included)
+can rescue it — the block must be inlined before the request payload is built.
+``video`` has no representation at all there and degrades to a text description.
 
 This utility is used by:
 - LangGraphBedrockAgent._preprocess_input_messages() in langgraph_bedrock.py
@@ -32,6 +32,7 @@ from typing import Any
 
 import httpx
 from langchain_core.messages import (
+    AudioContentBlock,
     ContentBlock,
     FileContentBlock,
     HumanMessage,
@@ -40,18 +41,29 @@ from langchain_core.messages import (
     VideoContentBlock,
 )
 
+from ringier_a2a_sdk.utils.url_fetch import PayloadTooLarge, SSRFError, assert_public_url, fetch_bytes_capped
+
 logger = logging.getLogger(__name__)
 
-# Block types that carry binary data Bedrock can only ingest as inline base64,
-# mapped to the typed ContentBlock constructor used to build the inlined block.
-# Audio is intentionally excluded: Bedrock Converse does not accept audio, so
-# audio blocks are filtered/converted to text upstream by input-mode validation.
+# Block types that carry binary data, mapped to the typed ContentBlock constructor
+# used to build the inlined block.
 _BINARY_BLOCK_CONSTRUCTORS = {
     "image": ImageContentBlock,
     "file": FileContentBlock,
+    "audio": AudioContentBlock,
     "video": VideoContentBlock,
 }
-_BINARY_BLOCK_TYPES = tuple(_BINARY_BLOCK_CONSTRUCTORS)
+
+# Bedrock Converse ingests images, documents and videos as inline base64 only.
+# Audio is intentionally excluded: Converse does not accept audio at all, so audio
+# blocks are filtered/converted to text upstream by input-mode validation.
+_BEDROCK_BINARY_TYPES = ("image", "file", "video")
+
+# Chat Completions takes files as `file_data` and audio as `input_audio`, both
+# base64-only. Images are left alone (their URL maps to `image_url`), and video has
+# no representation at all — the translator raises "Block of type video is not
+# supported" whatever the source — so video degrades to a text description.
+_CHAT_COMPLETIONS_INLINE_TYPES = ("file", "audio")
 
 # Default MIME types per block type when a block omits one. Documents have no
 # safe default (the format is required and unguessable), so they are left out.
@@ -74,7 +86,21 @@ _MAX_INLINE_BYTES = 20 * 1024 * 1024
 
 def _filename_from_url(url: str) -> str:
     """Extract a human-readable filename from a (possibly pre-signed) URL."""
-    return url.split("/")[-1].split("?")[0] if url else "unknown"
+    return (url.split("/")[-1].split("?")[0] if url else "") or "unknown"
+
+
+def _ensure_typed_filename(name: str, mime_type: str) -> str:
+    """Give *name* an extension matching *mime_type* when it lacks a usable one.
+
+    OpenAI infers a file's type from its filename extension, so a URL whose last
+    segment is opaque (an object key, a trailing slash) would otherwise arrive
+    untyped. The MIME type is the authority we already resolved, so borrow the
+    extension from it; a name that already ends in one is left alone.
+    """
+    if "." in name.rsplit("/", 1)[-1][1:]:
+        return name
+    suffix = mimetypes.guess_extension(mime_type) or ""
+    return f"{name}{suffix}"
 
 
 def _resolve_mime_type(block: dict, block_type: str, url: str, filename: str) -> str | None:
@@ -116,12 +142,14 @@ def _is_convertible(block: Any, block_types: tuple[str, ...]) -> bool:
     )
 
 
-def _needs_conversion(content: list[Any], block_types: tuple[str, ...] = _BINARY_BLOCK_TYPES) -> bool:
+def _needs_conversion(content: list[Any], block_types: tuple[str, ...] = _BEDROCK_BINARY_TYPES) -> bool:
     """True if any block carries binary data via URL that must be inlined."""
     return any(_is_convertible(b, block_types) for b in content)
 
 
-async def _convert_block(block: dict, *, sanitize_document_name: bool = True) -> list[ContentBlock]:
+async def _convert_block(
+    block: dict, *, sanitize_document_name: bool = True, surface_url: bool = True
+) -> list[ContentBlock]:
     """Convert a single URL-based binary block to inline base64 block(s).
 
     Args:
@@ -130,17 +158,23 @@ async def _convert_block(block: dict, *, sanitize_document_name: bool = True) ->
             forwarded filename, as Bedrock's document names require. OpenAI Chat
             Completions wants the opposite — it infers the file type from the
             filename's extension — so that path passes ``False``.
+        surface_url: Include the (pre-signed) URL in the accompanying text block, so
+            the LLM can echo it into a tool call. The orchestrator's own convention is
+            the opposite — ``content_builder._describe_file`` deliberately omits raw
+            URIs, because the model tries to reproduce them and mangles the signature —
+            so paths that follow that convention pass ``False``, keeping the signed URL
+            out of the message (and out of the checkpoint and traces with it).
 
     Returns a list of replacement blocks:
-    - On success: a text block surfacing the URL (so the LLM can still
-      reference it in tool calls) followed by the base64 block.
-    - On unresolved MIME type, oversized payload or download failure: a single
-      text block describing the file so the turn degrades gracefully instead of
-      crashing.
+    - On success: a text block naming the attachment, followed by the base64 block.
+    - On unresolved MIME type, a refused URL, an oversized payload or a download
+      failure: a single text block describing the file so the turn degrades gracefully
+      instead of crashing.
     """
     block_type = block["type"]
     url = block["url"]
     filename = _filename_from_url(url)
+    url_suffix = f", URL: {url}" if surface_url else ""
 
     mime_type = _resolve_mime_type(block, block_type, url, filename)
     if not mime_type:
@@ -151,34 +185,46 @@ async def _convert_block(block: dict, *, sanitize_document_name: bool = True) ->
         )
         return [
             TextContentBlock(
-                type="text", text=f"[Attached {block_type}: {filename}, URL: {url}] (unknown type, not loaded)"
+                type="text", text=f"[Attached {block_type}: {filename}{url_suffix}] (unknown type, not loaded)"
             )
         ]
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.get(url, timeout=60.0)
-            resp.raise_for_status()
-            raw = resp.content
-            if len(raw) > _MAX_INLINE_BYTES:
-                logger.warning(
-                    "%s block '%s' is %d bytes, over the %d-byte inline ceiling; "
-                    "forwarding as text description",
-                    block_type.capitalize(),
-                    filename,
-                    len(raw),
-                    _MAX_INLINE_BYTES,
-                )
-                return [
-                    TextContentBlock(
-                        type="text",
-                        text=(
-                            f"[{block_type.capitalize()}: {filename} ({mime_type}), URL: {url}] "
-                            f"(too large to attach: {len(raw) // (1024 * 1024)} MB)"
-                        ),
-                    )
-                ]
-            b64_data = b64.b64encode(raw).decode("utf-8")
+        await assert_public_url(url)
+        # Redirects stay off: assert_public_url vouches for the host we resolved, and a
+        # 302 would bounce the fetch to one nobody checked.
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            raw = await fetch_bytes_capped(client, url, _MAX_INLINE_BYTES, "attachment over the inline ceiling")
+    except SSRFError:
+        logger.warning("Refusing to fetch %s block '%s': non-public URL", block_type, filename, exc_info=True)
+        return [
+            TextContentBlock(
+                type="text",
+                text=f"[{block_type.capitalize()}: {filename} ({mime_type})] (blocked: URL is not publicly routable)",
+            )
+        ]
+    except PayloadTooLarge as exc:
+        measured = (
+            f"{exc.size // (1024 * 1024)} MB"
+            if exc.size is not None
+            else f"over {_MAX_INLINE_BYTES // (1024 * 1024)} MB"
+        )
+        logger.warning(
+            "%s block '%s' is %s, over the %d-byte inline ceiling; forwarding as text description",
+            block_type.capitalize(),
+            filename,
+            measured,
+            _MAX_INLINE_BYTES,
+        )
+        return [
+            TextContentBlock(
+                type="text",
+                text=(
+                    f"[{block_type.capitalize()}: {filename} ({mime_type}){url_suffix}] "
+                    f"(too large to attach: {measured})"
+                ),
+            )
+        ]
     except Exception:
         logger.warning(
             "Failed to download %s from URL, converting to text description", block_type, exc_info=True
@@ -186,12 +232,14 @@ async def _convert_block(block: dict, *, sanitize_document_name: bool = True) ->
         return [
             TextContentBlock(
                 type="text",
-                text=f"[{block_type.capitalize()}: {filename} ({mime_type}), URL: {url}] (could not load from URL)",
+                text=f"[{block_type.capitalize()}: {filename} ({mime_type}){url_suffix}] (could not load from URL)",
             )
         ]
 
-    # Bedrock only sees the inlined bytes; surface the URL as text so the LLM
-    # can still reference it (e.g. when echoing it into a tool call argument).
+    b64_data = b64.b64encode(raw).decode("utf-8")
+
+    # The model only sees the inlined bytes, so the text block re-attaches the name
+    # (and, where the caller asks for it, the URL) to keep the attachment referenceable.
     constructor = _BINARY_BLOCK_CONSTRUCTORS[block_type]
     converted = constructor(type=block_type, base64=b64_data, mime_type=mime_type)
     if block_type == "file":
@@ -201,10 +249,14 @@ async def _convert_block(block: dict, *, sanitize_document_name: bool = True) ->
         # `filename` key, which Bedrock Converse and langchain_core's OpenAI
         # translator both read. Keep that convention.
         raw_name = block.get("filename") or filename
-        converted["filename"] = _sanitize_document_name(raw_name) if sanitize_document_name else raw_name  # type: ignore[typeddict-unknown-key]
+        converted["filename"] = (  # type: ignore[typeddict-unknown-key]
+            _sanitize_document_name(raw_name)
+            if sanitize_document_name
+            else _ensure_typed_filename(raw_name, mime_type)
+        )
     logger.info("Converted URL %s to inline base64 (%d chars)", block_type, len(b64_data))
     return [
-        TextContentBlock(type="text", text=f"[Attached {block_type}: {filename}, URL: {url}]"),
+        TextContentBlock(type="text", text=f"[Attached {block_type}: {filename}{url_suffix}]"),
         converted,
     ]
 
@@ -212,8 +264,9 @@ async def _convert_block(block: dict, *, sanitize_document_name: bool = True) ->
 async def _convert_content_blocks(
     content: list[Any],
     *,
-    block_types: tuple[str, ...] = _BINARY_BLOCK_TYPES,
+    block_types: tuple[str, ...] = _BEDROCK_BINARY_TYPES,
     sanitize_document_name: bool = True,
+    surface_url: bool = True,
 ) -> list[ContentBlock]:
     """Convert URL-based binary blocks in a content list to inline base64.
 
@@ -223,7 +276,11 @@ async def _convert_content_blocks(
     new_blocks: list[ContentBlock] = []
     for block in content:
         if _is_convertible(block, block_types):
-            new_blocks.extend(await _convert_block(block, sanitize_document_name=sanitize_document_name))
+            new_blocks.extend(
+                await _convert_block(
+                    block, sanitize_document_name=sanitize_document_name, surface_url=surface_url
+                )
+            )
         else:
             new_blocks.append(block)
     return new_blocks
@@ -281,28 +338,54 @@ async def preprocess_content_blocks_for_bedrock(content: list[Any]) -> list[Any]
     return await _convert_content_blocks(content)
 
 
-async def preprocess_file_blocks_for_chat_completions(content: list[Any]) -> list[Any]:
-    """Inline URL-sourced ``file`` blocks as base64 for OpenAI Chat Completions.
+def _describe_unsupported_video(block: dict) -> ContentBlock:
+    """Render a video block as text: Chat Completions has no video representation."""
+    filename = block.get("filename") or _filename_from_url(block.get("url", ""))
+    mime_type = block.get("mime_type") or block.get("mimeType") or "video"
+    return TextContentBlock(
+        type="text",
+        text=f"[Video: {filename} ({mime_type})] (video is not supported by this model)",
+    )
 
-    ``langchain_core`` refuses to serialize a ``file`` block that carries a ``url``
-    into a Chat Completions payload — it raises ``ValueError: OpenAI Chat Completions
-    does not support file URLs`` while building the request, before anything is sent.
-    Inlining the bytes as ``file_data`` (which is what the base64 block becomes) is
-    the only representation the API accepts short of a pre-uploaded ``file_id``.
 
-    Scope is deliberately narrow: ``image`` blocks keep their URLs (the translator maps
-    those to ``image_url``, and the gateway resolves them), and blocks already carrying
-    ``base64`` are untouched. The filename keeps its extension — OpenAI uses it to
-    identify the file type.
+async def preprocess_blocks_for_chat_completions(content: list[Any]) -> list[Any]:
+    """Normalize content blocks the OpenAI Chat Completions translator would reject.
+
+    ``langchain_core`` builds the request payload client-side, and refuses three block
+    shapes outright — each raising before any request exists, so no downstream
+    normalization (our LiteLLM gateway included) can rescue them:
+
+    - ``file`` with a ``url`` → *"OpenAI Chat Completions does not support file URLs"*.
+      The spec has only ``file_data`` (inline base64) and ``file_id``.
+    - ``audio`` with a ``url`` → *"Key base64 is required for audio blocks"*.
+      ``input_audio`` is base64-only.
+    - ``video`` in **any** form → *"Block of type video is not supported"*. There is no
+      video representation to inline into, so these degrade to a text description
+      naming the file.
+
+    ``image`` blocks are deliberately left alone: their URL maps to ``image_url`` and
+    works today. Blocks already carrying ``base64`` are untouched. Inlined filenames keep
+    their extension — OpenAI uses it to identify the file type.
 
     Args:
         content: List of content blocks (dicts with a ``type`` key).
 
     Returns:
-        The content blocks with URL-sourced file blocks inlined. Files that cannot be
-        downloaded, whose MIME type cannot be resolved, or that exceed the inline size
-        ceiling degrade to a text description instead of failing the turn.
+        The content blocks in a shape the translator accepts. Attachments that cannot be
+        downloaded, whose MIME type cannot be resolved, that resolve to a non-public
+        address, or that exceed the inline size ceiling degrade to a text description
+        instead of failing the turn.
     """
-    if not _needs_conversion(content, ("file",)):
+    has_video = any(isinstance(b, dict) and b.get("type") == "video" for b in content)
+    if not has_video and not _needs_conversion(content, _CHAT_COMPLETIONS_INLINE_TYPES):
         return content
-    return await _convert_content_blocks(content, block_types=("file",), sanitize_document_name=False)
+
+    if has_video:
+        content = [_describe_unsupported_video(b) if isinstance(b, dict) and b.get("type") == "video" else b for b in content]
+
+    return await _convert_content_blocks(
+        content,
+        block_types=_CHAT_COMPLETIONS_INLINE_TYPES,
+        sanitize_document_name=False,
+        surface_url=False,
+    )
