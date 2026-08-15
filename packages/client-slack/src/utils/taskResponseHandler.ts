@@ -409,6 +409,39 @@ export async function finalizeStreamedTask(params: {
   return { messageTs: streamer.answerTs || streamer.ts || statusMessageTs || messageTs };
 }
 
+/**
+ * Decide whether a turn counts as DELIVERED, i.e. whether the in-flight record
+ * may be dropped and the recovery loop kept out of it.
+ *
+ * Extracted and unit-tested because getting it wrong is silent in both
+ * directions and it has been wrong both ways already:
+ *   - too eager  → the record is deleted for a turn the user never saw, so
+ *                  recovery finds nothing and the request is lost forever;
+ *   - too shy    → the record survives a turn the user already has, so recovery
+ *                  re-posts the same answer as a duplicate.
+ *
+ * The three inputs:
+ *   - `finalizeMessageTs`  — defined only when finalize actually posted, which
+ *     it does only for interrupted/terminal tasks. Authoritative when present.
+ *   - `hasStreamedAnswer`  — the answer reached the user chunk-by-chunk. This
+ *     covers the clean close that never delivers a terminal status-update: the
+ *     user has the answer even though finalize posted nothing.
+ *   - `streamErrored`      — the stream threw. This VETOES `hasStreamedAnswer`,
+ *     because that flag flips on the FIRST answer chunk: a stream dying
+ *     mid-answer leaves the user with a truncated reply, and treating that as
+ *     delivered would delete the record, strand the missing tail, and break the
+ *     promise made by the notice on the sealed widget. Erring toward keeping
+ *     the record costs at worst a duplicate; erring the other way loses data.
+ */
+export function isTurnDelivered(params: {
+  finalizeMessageTs: string | undefined;
+  hasStreamedAnswer: boolean;
+  streamErrored: boolean;
+}): boolean {
+  const { finalizeMessageTs, hasStreamedAnswer, streamErrored } = params;
+  return finalizeMessageTs !== undefined || (hasStreamedAnswer && !streamErrored);
+}
+
 /** rich_text block wrapping one line of plain text (for a task-card's details). */
 export function decisionRichText(text: string, max = 2000): any {
   return {

@@ -1,5 +1,5 @@
 import { describe, test, expect } from '@jest/globals';
-import { finalizeStreamedTask } from '../../src/utils/taskResponseHandler.js';
+import { finalizeStreamedTask, isTurnDelivered } from '../../src/utils/taskResponseHandler.js';
 import type { Task } from '@a2a-js/sdk';
 
 /**
@@ -73,4 +73,47 @@ describe('finalizeStreamedTask — non-terminal states', () => {
     }
   );
 
+});
+
+describe('isTurnDelivered', () => {
+  const call = (o: Partial<Parameters<typeof isTurnDelivered>[0]>) =>
+    isTurnDelivered({
+      finalizeMessageTs: undefined,
+      hasStreamedAnswer: false,
+      streamErrored: false,
+      ...o,
+    });
+
+  test('finalize posted → delivered', () => {
+    expect(call({ finalizeMessageTs: '123.456' })).toBe(true);
+  });
+
+  test('clean close after a streamed answer → delivered (no duplicate re-post)', () => {
+    // A stream can close right after the final artifact without ever sending a
+    // terminal status-update. The user has the answer; keeping the record would
+    // let recovery post it a second time.
+    expect(call({ hasStreamedAnswer: true })).toBe(true);
+  });
+
+  test('stream errored mid-answer → NOT delivered', () => {
+    // hasAnswer flips on the FIRST chunk, so a mid-answer failure leaves a
+    // truncated reply on screen. Treating that as delivered would drop the
+    // in-flight record, strand the missing tail, and break the promise made by
+    // the notice on the sealed widget.
+    expect(call({ hasStreamedAnswer: true, streamErrored: true })).toBe(false);
+  });
+
+  test('stream errored before any answer → NOT delivered', () => {
+    expect(call({ streamErrored: true })).toBe(false);
+  });
+
+  test('nothing happened → NOT delivered', () => {
+    expect(call({})).toBe(false);
+  });
+
+  test('finalize wins even if the stream errored', () => {
+    // finalize only posts for interrupted/terminal tasks, so a defined ts means
+    // the authoritative answer reached Slack regardless of how the stream ended.
+    expect(call({ finalizeMessageTs: '123.456', streamErrored: true, hasStreamedAnswer: true })).toBe(true);
+  });
 });

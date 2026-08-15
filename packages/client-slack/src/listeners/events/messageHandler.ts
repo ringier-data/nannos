@@ -12,7 +12,7 @@ import { A2AClientService, A2ASlackBasedRequest } from '../../services/a2aClient
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, ContextRecord } from '../../storage/types.js';
-import { handleError, postMessage, finalizeStreamedTask, isInterruptedOrTerminated, isTerminatedState } from '../../utils/taskResponseHandler.js';
+import { handleError, postMessage, finalizeStreamedTask, isInterruptedOrTerminated, isTerminatedState, isTurnDelivered } from '../../utils/taskResponseHandler.js';
 import { ThinkingStepsStreamer, type WorkPlanTodo } from '../../utils/thinkingStepsStreamer.js';
 import { FeedbackService } from '../../services/feedbackService.js';
 import _ from 'lodash';
@@ -1020,23 +1020,13 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         statusMessageTs,
       },
     });
-    // Mark the turn delivered if EITHER finalize posted, OR the answer was
-    // already streamed into the widget chunk-by-chunk.
-    //
-    // finalize returns `{ messageTs: undefined }` without posting when the task
-    // is non-terminal — the dropped-stream case. Setting the flag unconditionally
-    // (the old behaviour) deleted the in-flight record for a turn the user never
-    // saw, so recovery found nothing and the request was silently lost.
-    //
-    // But `result.messageTs` alone is not enough either: a stream can close
-    // cleanly right after the final artifact without ever delivering a terminal
-    // status-update (see the note at the top of this function). The user HAS the
-    // answer in that case, so keying off finalize alone would keep the record and
-    // let recovery re-post the same answer — the duplicate-post bug the original
-    // unconditional flag was guarding against. `streamer.hasAnswer` is true once
-    // answer text has been appended, which distinguishes "delivered, no terminal
-    // event" from "nothing reached the user".
-    responsePosted = result.messageTs !== undefined || streamer.hasAnswer;
+    // See isTurnDelivered for why this is a shared, tested helper rather than an
+    // inline expression: both directions fail silently, and both have been wrong.
+    responsePosted = isTurnDelivered({
+      finalizeMessageTs: result.messageTs,
+      hasStreamedAnswer: streamer.hasAnswer,
+      streamErrored,
+    });
     if (result.messageTs) {
       contextStore.set(contextKey, accumulatedTask?.contextId, result.messageTs).catch((err) => {
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
