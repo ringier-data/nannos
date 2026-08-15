@@ -346,6 +346,15 @@ class AgentSettings:
     MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
 
+    # How many MCP servers may be queried for their tool catalogue at the same time
+    # during a cold discovery.  Discovery opens one connection per server, so an
+    # unbounded fan-out holds every server's session, response body, parsed schema
+    # and resulting tool objects in memory simultaneously — with ~31 servers on prod
+    # that spike OOMKilled the pod twice on 2026-08-15, each time within seconds of a
+    # single request.  Bounding it trades a little cold-start latency for a peak that
+    # no longer scales with the size of the gateway catalogue.
+    MCP_DISCOVERY_CONCURRENCY = max(1, int(os.getenv("MCP_DISCOVERY_CONCURRENCY", "5")))
+
     # Gatana compression: slug of the MCP server that provides compression utilities.
     # When tools from compression-enabled servers are in use, all tools from this
     # server are automatically included so agents can access compressed outputs.

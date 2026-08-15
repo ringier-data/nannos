@@ -1,5 +1,7 @@
 """Unit tests for discovery services."""
 
+import asyncio
+
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -206,6 +208,7 @@ class TestToolDiscoveryService:
         config.get_oidc_issuer.return_value = "https://test.oidc.com"
         config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
         config.CONSOLE_BACKEND_URL = None
+        config.MCP_DISCOVERY_CONCURRENCY = 5
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
@@ -238,6 +241,62 @@ class TestToolDiscoveryService:
             assert len(result) == 1
             assert result[0].name == "allowed_tool"
             oauth2_client.exchange_token.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_discover_tools_bounds_concurrent_server_fetches(self):
+        """Cold discovery must not query every MCP server at once.
+
+        An unbounded fan-out holds every server's session, response body, parsed
+        schema and tool objects in memory simultaneously, so the memory peak scales
+        with the size of the gateway catalogue. That spike OOMKilled the prod pod
+        (2026-08-15). This pins the bound: with 20 servers and a limit of 3, no more
+        than 3 fetches may ever be in flight together, and every server is still
+        visited exactly once.
+        """
+        config = Mock(spec=AgentSettings)
+        config.get_oidc_client_id.return_value = "test_client_id"
+        config.get_oidc_client_secret.return_value = Mock()
+        config.get_oidc_client_secret.return_value.get_secret_value.return_value = "test_secret"
+        config.get_oidc_issuer.return_value = "https://test.oidc.com"
+        config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
+        config.CONSOLE_BACKEND_URL = None
+        config.MCP_DISCOVERY_CONCURRENCY = 3
+
+        oauth2_client = AsyncMock()
+        oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
+        service = ToolDiscoveryService(config, oauth2_client)
+
+        servers = [{"slug": f"server-{i}"} for i in range(20)]
+        in_flight = 0
+        max_in_flight = 0
+        visited: list[str] = []
+
+        async def fake_get_tools(server_name: str):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            visited.append(server_name)
+            # Yield control so overlapping fetches actually interleave; without this
+            # the coroutines would run to completion one after another and the test
+            # would pass even with an unbounded gather.
+            await asyncio.sleep(0)
+            in_flight -= 1
+            tool = Mock()
+            tool.name = f"tool_{server_name}"
+            tool.metadata = None
+            return [tool]
+
+        with patch("app.core.discovery.MultiServerMCPClient") as mock_client:
+            mock_client_instance = Mock()
+            mock_client_instance.get_tools = AsyncMock(side_effect=fake_get_tools)
+            mock_client.return_value = mock_client_instance
+            service.fetch_available_servers = AsyncMock(return_value=servers)
+
+            result = await service.discover_tools("test_token")
+
+        assert max_in_flight <= 3, f"expected at most 3 concurrent fetches, saw {max_in_flight}"
+        assert sorted(visited) == sorted(s["slug"] for s in servers)
+        assert len(result) == 20
 
     @pytest.mark.asyncio
     async def test_discover_tools_error_handling(self):

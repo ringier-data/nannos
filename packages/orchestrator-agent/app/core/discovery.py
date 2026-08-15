@@ -430,10 +430,27 @@ class ToolDiscoveryService:
                 tool_interceptors=[_console_attribution_interceptor],
             )
 
-            # Gather tools from all servers with retry logic
-            # Use asyncio.gather with return_exceptions=True to handle partial failures gracefully
+            # Gather tools from all servers with retry logic.
+            # Use asyncio.gather with return_exceptions=True to handle partial failures gracefully.
+            #
+            # Bounded by a semaphore: an unbounded fan-out keeps every server's session,
+            # response body, parsed schema and tool objects alive at once, so the memory
+            # peak scales with the number of servers on the gateway rather than with
+            # anything we control. On prod that reached ~31 concurrent fetches and
+            # OOMKilled the pod (2026-08-15). Results stay positionally aligned with
+            # `connections` below, so the zip() that follows is unaffected.
+            discovery_semaphore = asyncio.Semaphore(self.config.MCP_DISCOVERY_CONCURRENCY)
+
+            async def _bounded_get_tools(slug: str) -> list:
+                async with discovery_semaphore:
+                    return await self._get_tools_with_retry(client, slug)
+
+            logger.debug(
+                f"Discovering tools from {len(connections)} MCP servers "
+                f"(max {self.config.MCP_DISCOVERY_CONCURRENCY} concurrent)"
+            )
             results = await asyncio.gather(
-                *[self._get_tools_with_retry(client, slug) for slug in connections], return_exceptions=True
+                *[_bounded_get_tools(slug) for slug in connections], return_exceptions=True
             )
 
             # Process results - filter out exceptions and log failures
