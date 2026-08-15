@@ -184,6 +184,20 @@ export class A2AClientService {
 
     // Build A2A message send params
     const sendParams: MessageSendParams = {
+      // Register the push-notification callback for this turn. Without it the
+      // caller's webhookUrl/webhookToken were built, persisted on the in-flight
+      // record, and then never sent to the server — so the out-of-band delivery
+      // path was dead and a dropped stream had no fallback at all. The token is
+      // echoed back as X-A2A-Notification-Token and validated by the callback
+      // route (see handlers/a2aNotificationHandler).
+      ...(request.webhookUrl && {
+        configuration: {
+          pushNotificationConfig: {
+            url: request.webhookUrl,
+            ...(request.webhookToken && { token: request.webhookToken }),
+          },
+        },
+      }),
       message: {
         messageId,
         kind: 'message',

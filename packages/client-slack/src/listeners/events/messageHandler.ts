@@ -503,6 +503,13 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
   // the stream (it can close right after the final artifact), so keying deletion
   // off the state alone leaves the record behind and the recovery loop re-posts.
   let responsePosted = false;
+  // Set when the A2A stream throws mid-flight (transport drop, orchestrator
+  // restart/OOM). The task itself is usually still running server-side, so this
+  // is NOT a failed turn — it's an undelivered one. It changes two decisions in
+  // the finally cleanup: the dangling stream is sealed with a visible notice
+  // instead of being deleted, and the in-flight record is kept so the recovery
+  // loop can finish the turn.
+  let streamErrored = false;
   // Declared at function scope so the finally cleanup can read the final task
   // state to decide whether the stream was sealed.
   let accumulatedTask: Task | null = null;
@@ -975,6 +982,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         logger.debug({ taskId: accumulatedTask?.id }, `Current state: ${accumulatedTask?.status?.state}`);
       }
     } catch (error) {
+      streamErrored = true;
       logger.error(error, `A2A stream error: ${error}`);
     }
 
@@ -1005,8 +1013,13 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         statusMessageTs,
       },
     });
-    // We've delivered the final answer to Slack — recovery must never re-post it.
-    responsePosted = true;
+    // Only mark the turn delivered if finalize actually delivered it. finalize
+    // returns `{ messageTs: undefined }` without posting anything when the task
+    // is still in a non-terminal state — which is exactly what happens when the
+    // stream drops mid-flight. Setting the flag unconditionally deleted the
+    // in-flight record for a turn the user never saw, so the recovery loop found
+    // nothing to recover and the request was silently lost.
+    responsePosted = result.messageTs !== undefined;
     if (result.messageTs) {
       contextStore.set(contextKey, accumulatedTask?.contextId, result.messageTs).catch((err) => {
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
@@ -1114,13 +1127,31 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     // thinking-steps message is left behind. Inferred from the task state rather
     // than a manual flag.
     if (!isInterruptedOrTerminated(accumulatedTask?.status?.state)) {
-      await streamer.discard();
+      if (streamErrored && accumulatedTask) {
+        // The stream dropped while the agent was still working. The widget is
+        // already on screen and the user watched it appear, so deleting it (the
+        // `discard()` below) makes the bot look like it silently ignored them.
+        // Seal it with a visible notice instead and leave it in place: the task
+        // is still running server-side and the in-flight record is kept below,
+        // so the recovery loop will post the answer into this same thread.
+        await streamer
+          .finish({
+            trailingMarkdown:
+              '\n\n⚠️ _Lost the connection to the agent while it was working. ' +
+              "It's still running — I'll post the answer here as soon as I can reach it again._",
+            planTitle: 'Interrupted',
+          })
+          .catch((err) => logger.error(err, `Failed to seal dropped stream: ${err}`));
+      } else {
+        await streamer.discard();
+      }
     }
 
     // Remove the in-flight record once we've delivered a response to Slack,
     // otherwise the periodic recovery loop treats the leftover record as orphaned
     // and re-posts the message ~5 min later (the recovery cadence). The signal is
-    // `responsePosted` (set right after finalize), NOT the task state: a soft
+    // `responsePosted` (set from finalize's own result — it is false when finalize
+    // returned without posting), NOT the task state: a soft
     // `input-required` clarification ("did you mean…?") is delivered through the
     // normal finalize path, so even though the state is "interrupted" we've
     // already shown it to the user and must delete the record. A terminal state
