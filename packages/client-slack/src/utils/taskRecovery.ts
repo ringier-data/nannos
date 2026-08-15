@@ -3,9 +3,23 @@ import { Logger } from './logger.js';
 import type { IInFlightTaskStore, InFlightTask, IContextStore, IBotInstallationStore } from '../storage/types.js';
 import { A2AClientService } from '../services/a2aClientService.js';
 import { UserAuthService } from '../services/userAuthService.js';
-import { handleTask } from './taskResponseHandler.js';
+import { handleTask, postMessage } from './taskResponseHandler.js';
 
 const logger = Logger.getLogger('taskRecovery');
+
+/**
+ * How long a task may sit in a non-terminal state before we stop waiting for it
+ * and tell the user the turn was lost.
+ *
+ * A task that never reaches a terminal state is not necessarily still running:
+ * if the orchestrator is killed mid-execution (e.g. OOM) nothing re-invokes the
+ * run when it restarts, so the stored task stays "submitted"/"working" forever
+ * and polling it will never produce an answer. Without a give-up path such a
+ * record would simply age out against the store's 1h TTL and the user would
+ * never hear anything at all — the silent-failure this whole change exists to
+ * remove.
+ */
+const MAX_RECOVERY_AGE_MS = 30 * 60 * 1000;
 
 /**
  * Recover a single orphaned task by polling A2A for its status
@@ -70,10 +84,38 @@ async function recoverTask(
       },
     });
 
-    // Store context ID and last processed timestamp for conversation continuity
-    if (result.messageTs) {
-      await contextStore.set(contextKey, response.result.contextId, messageTs);
+    // `handleTask` posts nothing and returns an undefined messageTs when the task
+    // has not reached an interrupted/terminal state. Deleting the record in that
+    // case throws away the only handle we have on the turn while the user has
+    // still seen nothing — the record must survive for a later sweep instead.
+    if (!result.messageTs) {
+      const ageMs = Date.now() - task.createdAt;
+
+      if (ageMs < MAX_RECOVERY_AGE_MS) {
+        logger.info(
+          { taskId, state: response.result.status?.state },
+          `Task ${taskId} is still non-terminal after ${Math.round(ageMs / 1000)}s; keeping the in-flight record for a later sweep`
+        );
+        return false;
+      }
+
+      // Given up: tell the user rather than letting the record age out silently.
+      logger.warn(
+        { taskId, state: response.result.status?.state },
+        `Task ${taskId} never reached a terminal state after ${Math.round(ageMs / 60000)}min; giving up and notifying the user`
+      );
+      await postMessage(
+        slackClient,
+        channelId,
+        threadTs,
+        "⚠️ I lost track of this request and can't recover the answer — the agent was interrupted while working on it. Please send it again."
+      ).catch((err) => logger.error(err, `Failed to post give-up notice for task ${taskId}: ${err}`));
+      await inFlightTaskStore.delete(taskId);
+      return false;
     }
+
+    // Store context ID and last processed timestamp for conversation continuity
+    await contextStore.set(contextKey, response.result.contextId, messageTs);
 
     // Clean up - delete the in-flight task record
     await inFlightTaskStore.delete(taskId);

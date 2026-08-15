@@ -182,22 +182,17 @@ export class A2AClientService {
     // Build message parts (text + optional files)
     const messageParts = this.buildMessageParts(request);
 
-    // Build A2A message send params
+    // NOTE: no `configuration.pushNotificationConfig` is sent here, even though
+    // the request carries webhookUrl/webhookToken. Wiring it up is not a one-line
+    // change and sending it half-configured is worse than not sending it:
+    //   - the callback route validates the token against the per-installation
+    //     secret (validateNotificationToken in slackApp.ts), not against the
+    //     per-turn randomUUID the caller generates, so every push would 403 —
+    //     after an uncached listAll() scan of all installations;
+    //   - handleA2ANotification only understands scheduler payloads and DMs, so
+    //     even a validated chat-turn Task would be dropped with a warning.
+    // Tracked separately; see the follow-up issue referenced in the PR.
     const sendParams: MessageSendParams = {
-      // Register the push-notification callback for this turn. Without it the
-      // caller's webhookUrl/webhookToken were built, persisted on the in-flight
-      // record, and then never sent to the server — so the out-of-band delivery
-      // path was dead and a dropped stream had no fallback at all. The token is
-      // echoed back as X-A2A-Notification-Token and validated by the callback
-      // route (see handlers/a2aNotificationHandler).
-      ...(request.webhookUrl && {
-        configuration: {
-          pushNotificationConfig: {
-            url: request.webhookUrl,
-            ...(request.webhookToken && { token: request.webhookToken }),
-          },
-        },
-      }),
       message: {
         messageId,
         kind: 'message',

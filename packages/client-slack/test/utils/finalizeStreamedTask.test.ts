@@ -73,16 +73,4 @@ describe('finalizeStreamedTask — non-terminal states', () => {
     }
   );
 
-  test('a non-terminal result must not be read as a delivered response', async () => {
-    const result = await finalizeStreamedTask({
-      task: taskWithState('submitted'),
-      streamer: forbiddenStreamer(),
-      slackClient: forbiddenSlackClient(),
-      messageContext,
-    });
-
-    // This is exactly the expression messageHandler now assigns to responsePosted.
-    const responsePosted = result.messageTs !== undefined;
-    expect(responsePosted).toBe(false);
-  });
 });

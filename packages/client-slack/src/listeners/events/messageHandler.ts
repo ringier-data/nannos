@@ -988,9 +988,16 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     // Build the final response
     if (!accumulatedTask) {
-      logger.error(
-        `No task information received from A2A server. Silently failing without sending a response to the user.`
-      );
+      // No task event ever arrived. There is nothing to recover — without a task
+      // id we cannot poll for the result — so this turn is definitively lost and
+      // the user must be told. Previously this returned silently (the log line
+      // said so in as many words), producing the same "bot ignored me" symptom
+      // one event earlier than the dropped-stream case handled above.
+      // The finally block below discards the dangling widget (accumulatedTask is
+      // null, so it takes the discard path), leaving handleError's message as the
+      // only thing on screen.
+      logger.error(`No task information received from A2A server (streamErrored=${streamErrored})`);
+      await handleError(client, channelId, threadTs, messageTs);
       return;
     }
 
@@ -1013,13 +1020,23 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         statusMessageTs,
       },
     });
-    // Only mark the turn delivered if finalize actually delivered it. finalize
-    // returns `{ messageTs: undefined }` without posting anything when the task
-    // is still in a non-terminal state — which is exactly what happens when the
-    // stream drops mid-flight. Setting the flag unconditionally deleted the
-    // in-flight record for a turn the user never saw, so the recovery loop found
-    // nothing to recover and the request was silently lost.
-    responsePosted = result.messageTs !== undefined;
+    // Mark the turn delivered if EITHER finalize posted, OR the answer was
+    // already streamed into the widget chunk-by-chunk.
+    //
+    // finalize returns `{ messageTs: undefined }` without posting when the task
+    // is non-terminal — the dropped-stream case. Setting the flag unconditionally
+    // (the old behaviour) deleted the in-flight record for a turn the user never
+    // saw, so recovery found nothing and the request was silently lost.
+    //
+    // But `result.messageTs` alone is not enough either: a stream can close
+    // cleanly right after the final artifact without ever delivering a terminal
+    // status-update (see the note at the top of this function). The user HAS the
+    // answer in that case, so keying off finalize alone would keep the record and
+    // let recovery re-post the same answer — the duplicate-post bug the original
+    // unconditional flag was guarding against. `streamer.hasAnswer` is true once
+    // answer text has been appended, which distinguishes "delivered, no terminal
+    // event" from "nothing reached the user".
+    responsePosted = result.messageTs !== undefined || streamer.hasAnswer;
     if (result.messageTs) {
       contextStore.set(contextKey, accumulatedTask?.contextId, result.messageTs).catch((err) => {
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
@@ -1131,14 +1148,21 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         // The stream dropped while the agent was still working. The widget is
         // already on screen and the user watched it appear, so deleting it (the
         // `discard()` below) makes the bot look like it silently ignored them.
-        // Seal it with a visible notice instead and leave it in place: the task
-        // is still running server-side and the in-flight record is kept below,
-        // so the recovery loop will post the answer into this same thread.
+        // Seal it with a visible notice instead and leave it in place.
+        //
+        // The in-flight record is kept below so the recovery loop can poll the
+        // task. Whether that yields an answer depends on WHY the stream dropped:
+        // a transport blip leaves the task running server-side and recovery will
+        // post the answer into this thread, but if the orchestrator itself died
+        // (e.g. OOM) nothing re-invokes the run on restart and the task stays
+        // non-terminal forever. Recovery distinguishes the two by polling and,
+        // past MAX_RECOVERY_AGE_MS, posts a give-up notice instead — so the
+        // wording below promises a follow-up, not an answer.
         await streamer
           .finish({
             trailingMarkdown:
               '\n\n⚠️ _Lost the connection to the agent while it was working. ' +
-              "It's still running — I'll post the answer here as soon as I can reach it again._",
+              "I'll post the answer here if it can still be recovered, and tell you if it can't._",
             planTitle: 'Interrupted',
           })
           .catch((err) => logger.error(err, `Failed to seal dropped stream: ${err}`));
@@ -1155,13 +1179,18 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     // `input-required` clarification ("did you mean…?") is delivered through the
     // normal finalize path, so even though the state is "interrupted" we've
     // already shown it to the user and must delete the record. A terminal state
-    // is also a delete (covers any path that ends without posting). Records are
-    // deliberately KEPT when:
-    //   - a true HITL approval widget was posted — that path returns early before
-    //     finalize, so responsePosted stays false and the record persists for the
-    //     resume turn;
-    //   - the stream dropped/errored mid-flight while still "working" — recovery
-    //     should legitimately finish it.
+    // is also a delete (covers any path that ends without posting).
+    //
+    // A HITL approval widget is a DELETE, not a keep: that path sets
+    // responsePosted itself (see the interrupt branch above) because the widget
+    // has been delivered and the resume turn re-enters via the IDs in the
+    // button payload, not via this record. Leaving it would let recovery re-post
+    // the approval prompt ~5 min later.
+    //
+    // The record is deliberately KEPT when the stream dropped/errored mid-flight
+    // while still "working" and nothing reached the user — recovery polls the
+    // task and either delivers the answer or, past its own give-up threshold,
+    // tells the user the turn was lost.
     if (accumulatedTask && (responsePosted || isTerminatedState(accumulatedTask.status?.state))) {
       await inFlightTaskStore.delete(accumulatedTask.id).catch((err) => {
         logger.error(err, `Failed to delete in-flight task ${accumulatedTask?.id} after delivery: ${err}`);
