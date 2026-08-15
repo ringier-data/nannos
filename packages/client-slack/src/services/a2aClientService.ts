@@ -191,7 +191,7 @@ export class A2AClientService {
     //     after an uncached listAll() scan of all installations;
     //   - handleA2ANotification only understands scheduler payloads and DMs, so
     //     even a validated chat-turn Task would be dropped with a warning.
-    // Tracked separately; see the follow-up issue referenced in the PR.
+    // Tracked in ringier-data/nannos#150.
     const sendParams: MessageSendParams = {
       message: {
         messageId,
