@@ -32,6 +32,12 @@ from ..models.config import AgentSettings
 
 logger = logging.getLogger(__name__)
 
+# Process-wide bound on concurrent MCP tool-catalogue fetches; see
+# ToolDiscoveryService._discovery_semaphore for why this is not per-call.
+# Created lazily so the configured limit is read at first use rather than import.
+_DISCOVERY_SEMAPHORE: asyncio.Semaphore | None = None
+_DISCOVERY_SEMAPHORE_LIMIT: int | None = None
+
 
 async def _console_attribution_interceptor(request, handler):
     """Stamp the caller's cost-attribution (user_sub, conversation_id, sub_agent_id, …) on every
@@ -257,6 +263,25 @@ class ToolDiscoveryService:
                 logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
             return []
 
+    def _discovery_semaphore(self) -> asyncio.Semaphore:
+        """Process-wide bound on concurrent MCP catalogue fetches.
+
+        Deliberately module-level, NOT per-call: discovery runs per user on cache
+        miss, so a per-invocation semaphore would still allow limit x N concurrent
+        fetches when N users hit a cold cache together — with a limit of 5, seven
+        simultaneous users already exceed the ~31 that OOMKilled the pod. What has
+        to be capped is what the *process* holds open at once.
+
+        The cost is that unrelated users' cold discoveries queue behind each other.
+        That is the intended trade: bounded memory over parallel cold starts.
+        """
+        global _DISCOVERY_SEMAPHORE, _DISCOVERY_SEMAPHORE_LIMIT
+        limit = self.config.MCP_DISCOVERY_CONCURRENCY
+        if _DISCOVERY_SEMAPHORE is None or _DISCOVERY_SEMAPHORE_LIMIT != limit:
+            _DISCOVERY_SEMAPHORE = asyncio.Semaphore(limit)
+            _DISCOVERY_SEMAPHORE_LIMIT = limit
+        return _DISCOVERY_SEMAPHORE
+
     async def _get_tools_with_retry(
         self,
         client: MultiServerMCPClient,
@@ -286,7 +311,11 @@ class ToolDiscoveryService:
 
         for attempt in range(max_retries):
             try:
-                server_tools = await client.get_tools(server_name=server_name)
+                # Hold a slot only for the fetch itself. Keeping it across the
+                # backoff sleep below would let a few flaky servers idle away the
+                # whole budget while healthy ones wait on a user-facing path.
+                async with self._discovery_semaphore():
+                    server_tools = await client.get_tools(server_name=server_name)
                 # Tag tools with server_name metadata
                 for tool in server_tools:
                     if tool.metadata is None:
@@ -433,24 +462,23 @@ class ToolDiscoveryService:
             # Gather tools from all servers with retry logic.
             # Use asyncio.gather with return_exceptions=True to handle partial failures gracefully.
             #
-            # Bounded by a semaphore: an unbounded fan-out keeps every server's session,
-            # response body, parsed schema and tool objects alive at once, so the memory
-            # peak scales with the number of servers on the gateway rather than with
-            # anything we control. On prod that reached ~31 concurrent fetches and
-            # OOMKilled the pod (2026-08-15). Results stay positionally aligned with
-            # `connections` below, so the zip() that follows is unaffected.
-            discovery_semaphore = asyncio.Semaphore(self.config.MCP_DISCOVERY_CONCURRENCY)
-
-            async def _bounded_get_tools(slug: str) -> list:
-                async with discovery_semaphore:
-                    return await self._get_tools_with_retry(client, slug)
-
+            # Each fetch takes a slot from a process-wide semaphore (see
+            # _get_tools_with_retry), so the number of MCP sessions and response
+            # bodies held open AT ONCE no longer scales with the size of the
+            # gateway catalogue. On prod an unbounded fan-out reached ~31
+            # concurrent fetches and OOMKilled the pod (2026-08-15).
+            #
+            # Note this bounds only what is IN FLIGHT. The tools that have already
+            # been fetched are retained for the whole call, so total retained
+            # memory still scales with the catalogue; it is the concurrent peak
+            # that is capped. Results stay positionally aligned with `connections`
+            # below, so the zip() that follows is unaffected.
             logger.debug(
                 f"Discovering tools from {len(connections)} MCP servers "
-                f"(max {self.config.MCP_DISCOVERY_CONCURRENCY} concurrent)"
+                f"(max {self.config.MCP_DISCOVERY_CONCURRENCY} concurrent, process-wide)"
             )
             results = await asyncio.gather(
-                *[_bounded_get_tools(slug) for slug in connections], return_exceptions=True
+                *[self._get_tools_with_retry(client, slug) for slug in connections], return_exceptions=True
             )
 
             # Process results - filter out exceptions and log failures

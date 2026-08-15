@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
+import app.core.discovery as discovery_module
 from app.core.discovery import AgentDiscoveryService, ToolDiscoveryService
 from app.models.config import AgentSettings
 
@@ -266,6 +267,11 @@ class TestToolDiscoveryService:
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
         service = ToolDiscoveryService(config, oauth2_client)
 
+        # The semaphore is process-wide and lazily built; clear it so this test's
+        # limit applies rather than one cached by an earlier test.
+        discovery_module._DISCOVERY_SEMAPHORE = None
+        discovery_module._DISCOVERY_SEMAPHORE_LIMIT = None
+
         servers = [{"slug": f"server-{i}"} for i in range(20)]
         in_flight = 0
         max_in_flight = 0
@@ -294,7 +300,9 @@ class TestToolDiscoveryService:
 
             result = await service.discover_tools("test_token")
 
-        assert max_in_flight <= 3, f"expected at most 3 concurrent fetches, saw {max_in_flight}"
+        # Exactly 3: `<= 3` would also pass under full serialisation, which would
+        # hide a bound that throttles far harder than configured.
+        assert max_in_flight == 3, f"expected exactly 3 concurrent fetches, saw {max_in_flight}"
         assert sorted(visited) == sorted(s["slug"] for s in servers)
         assert len(result) == 20
 

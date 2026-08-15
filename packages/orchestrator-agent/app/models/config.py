@@ -353,7 +353,7 @@ class AgentSettings:
     # that spike OOMKilled the pod twice on 2026-08-15, each time within seconds of a
     # single request.  Bounding it trades a little cold-start latency for a peak that
     # no longer scales with the size of the gateway catalogue.
-    MCP_DISCOVERY_CONCURRENCY = max(1, int(os.getenv("MCP_DISCOVERY_CONCURRENCY", "5")))
+    MCP_DISCOVERY_CONCURRENCY = max(1, _int_env("MCP_DISCOVERY_CONCURRENCY", 5))
 
     # Gatana compression: slug of the MCP server that provides compression utilities.
     # When tools from compression-enabled servers are in use, all tools from this

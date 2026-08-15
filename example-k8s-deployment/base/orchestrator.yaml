@@ -63,6 +63,12 @@ spec:
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"
         - name: MCP_GATEWAY_CLIENT_ID
           value: "gatana"
+        # Max MCP servers queried for their tool catalogue at once, process-wide.
+        # Cold discovery opens one connection per server, so an unbounded fan-out
+        # makes the memory peak scale with the gateway catalogue rather than with
+        # anything the deployment controls.
+        - name: MCP_DISCOVERY_CONCURRENCY
+          value: "5"
         - name: A2A_TIMEOUT_CONNECT
           value: "10.0"
         - name: A2A_TIMEOUT_READ
