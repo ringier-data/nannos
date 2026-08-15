@@ -99,17 +99,42 @@ async function recoverTask(
         return false;
       }
 
-      // Given up: tell the user rather than letting the record age out silently.
-      logger.warn(
-        { taskId, state: response.result.status?.state },
-        `Task ${taskId} never reached a terminal state after ${Math.round(ageMs / 60000)}min; giving up and notifying the user`
-      );
-      await postMessage(
-        slackClient,
-        channelId,
-        threadTs,
-        "⚠️ I lost track of this request and can't recover the answer — the agent was interrupted while working on it. Please send it again."
-      ).catch((err) => logger.error(err, `Failed to post give-up notice for task ${taskId}: ${err}`));
+      // Given up. Tell the user — but only if they are plausibly still waiting.
+      //
+      // This notice can arrive up to MAX_RECOVERY_AGE_MS after the request. By
+      // then the user has often given up on their own, resent, and got a good
+      // answer in the same thread. Dropping "please send it again" underneath a
+      // conversation that already moved on is worse than saying nothing: it
+      // refers to a request they can no longer identify, and invites them to
+      // repeat work that already succeeded.
+      //
+      // `lastProcessedTs` advances on every delivered turn for this thread, and
+      // for THIS turn it was pinned to our own messageTs when the task started.
+      // So a strictly-later value means another turn in this thread completed
+      // after ours was submitted — the user moved past the failure.
+      const context = await contextStore.get(contextKey).catch(() => null);
+      const lastProcessedTs = context?.lastProcessedTs;
+      const supersededByLaterTurn =
+        !!lastProcessedTs && parseFloat(lastProcessedTs) > parseFloat(messageTs);
+
+      if (supersededByLaterTurn) {
+        logger.info(
+          { taskId, state: response.result.status?.state, lastProcessedTs, messageTs },
+          `Task ${taskId} never reached a terminal state after ${Math.round(ageMs / 60000)}min, but a later turn in this thread has since completed — dropping the record without notifying the user`
+        );
+      } else {
+        logger.warn(
+          { taskId, state: response.result.status?.state },
+          `Task ${taskId} never reached a terminal state after ${Math.round(ageMs / 60000)}min; giving up and notifying the user`
+        );
+        await postMessage(
+          slackClient,
+          channelId,
+          threadTs,
+          "⚠️ I couldn't finish an earlier request in this thread — the agent was interrupted while working on it and I can't recover the answer. Please send it again if you still need it."
+        ).catch((err) => logger.error(err, `Failed to post give-up notice for task ${taskId}: ${err}`));
+      }
+
       await inFlightTaskStore.delete(taskId);
       return false;
     }

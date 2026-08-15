@@ -45,7 +45,7 @@ function inFlightRecord(overrides: Partial<any> = {}): any {
   };
 }
 
-function harness(task: any, record: any) {
+function harness(task: any, record: any, lastProcessedTs?: string) {
   const store = {
     records: new Map<string, any>([[record.taskId, record]]),
     getAll: jest.fn(async () => Array.from(store.records.values())),
@@ -63,7 +63,10 @@ function harness(task: any, record: any) {
         getByAppId: jest.fn(async () => ({ botToken: 'xoxb-test' })),
         getByTeamId: jest.fn(async () => []),
       } as any,
-      { set: jest.fn(async () => undefined) } as any,
+      {
+        set: jest.fn(async () => undefined),
+        get: jest.fn(async () => (lastProcessedTs ? { contextKey: 'k', contextId: 'ctx-1', lastProcessedTs } : null)),
+      } as any,
       'xoxb-fallback',
       0
     );
@@ -121,5 +124,41 @@ describe('recoverOrphanedTasks', () => {
     expect(String((postMessageMock.mock.calls[0] as any[])[0].markdown_text)).toContain('the answer');
     expect(store.records.has('task-1')).toBe(false);
     expect(stats.recovered).toBe(1);
+  });
+
+  test('stays silent when the user already moved past the failure', async () => {
+    // The give-up notice can land up to 30 min late. If a later turn in the same
+    // thread has since completed, the user has already resent and been answered —
+    // telling them to "send it again" then points at a request they can no longer
+    // identify and invites duplicated work.
+    const task = { id: 'task-1', contextId: 'ctx-1', kind: 'task', status: { state: 'submitted' } };
+    // Our request was at ts 1; a later turn completed at ts 500.
+    const { store, run } = harness(
+      task,
+      inFlightRecord({ createdAt: Date.now() - THIRTY_ONE_MIN, messageTs: '1' }),
+      '500.000'
+    );
+
+    await run();
+
+    expect(postMessageMock).not.toHaveBeenCalled();
+    // The record is still cleaned up — it just goes quietly.
+    expect(store.records.has('task-1')).toBe(false);
+  });
+
+  test('still notifies when no later turn has completed', async () => {
+    const task = { id: 'task-1', contextId: 'ctx-1', kind: 'task', status: { state: 'submitted' } };
+    // lastProcessedTs equals our own messageTs — set when this task started, so
+    // nothing has completed since.
+    const { store, run } = harness(
+      task,
+      inFlightRecord({ createdAt: Date.now() - THIRTY_ONE_MIN, messageTs: '500.000' }),
+      '500.000'
+    );
+
+    await run();
+
+    expect(postMessageMock).toHaveBeenCalledTimes(1);
+    expect(store.records.has('task-1')).toBe(false);
   });
 });
