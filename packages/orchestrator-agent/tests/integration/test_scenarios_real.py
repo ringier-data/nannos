@@ -37,7 +37,14 @@ SCENARIOS = load_scenarios("core_routing.yaml")
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
-async def run_turn(agent, query: str, user_config, config: dict, model_type: ModelType) -> dict:
+async def run_turn(
+    agent,
+    query: str,
+    user_config,
+    config: dict,
+    model_type: ModelType,
+    attachments: list[Part] | None = None,
+) -> dict:
     """Drive one real orchestrator turn and return the final graph state.
 
     ``stream()`` already performs an end-of-stream ``aget_state`` and parks the
@@ -50,7 +57,10 @@ async def run_turn(agent, query: str, user_config, config: dict, model_type: Mod
     failed, and a runaway loop is only diagnosable from the message sequence.
     """
     turn_state = TurnState()
-    async for _ in agent.stream([Part(text=query)], user_config, config=config, turn_state=turn_state):
+    # Text first, then file parts — the shape a client actually sends, so
+    # agent.stream does the real parsing into pending_file_blocks.
+    parts = [Part(text=query), *(attachments or [])]
+    async for _ in agent.stream(parts, user_config, config=config, turn_state=turn_state):
         pass
 
     if turn_state.captured:
@@ -102,6 +112,7 @@ async def test_scenario_against_real_model(
         user_config,
         make_config(model_type),
         model_type,
+        attachments=scenario.attachment_parts(),
     )
 
     outcome = describe_outcome(state)

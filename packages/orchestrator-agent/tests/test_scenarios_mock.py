@@ -41,16 +41,39 @@ async def test_scenario_is_satisfiable(scenario):
     state = await graph.ainvoke(
         user_turn(scenario.query),
         config=turn_config(f"mock-{scenario.id}"),
-        context=runtime_context(*agents),
+        # agent.stream() is what normally populates pending_file_blocks from the
+        # message's file parts; invoking the graph directly skips it, so the
+        # scenario's attachments are parsed and injected here instead.
+        context=runtime_context(*agents, pending_file_blocks=await scenario.attachment_blocks()),
     )
 
     try:
         assert_scenario(scenario, state, agents)
+        _assert_attachments_were_appended(scenario, agents)
     except AssertionError:
         # The outcome summary is what makes a dataset failure diagnosable —
         # without it you get "expected slack-client" and no idea what happened.
         print(f"\n[{scenario.id}] outcome: {describe_outcome(state)}")
         raise
+
+
+def _assert_attachments_were_appended(scenario, agents) -> None:
+    """Check the middleware appended the attachment section, not just the script.
+
+    ``expect.instructions`` cannot prove attachment forwarding in this tier: the
+    scripted instruction is *built from* those needles, so a URL appears whether
+    or not the orchestrator forwarded anything. The "[Attached files]" header is
+    added by DynamicToolDispatchMiddleware and by nothing else, so it is the one
+    marker here that means forwarding actually happened.
+    """
+    if not scenario.attachments:
+        return
+    for agent in agents:
+        if agent.called and set(agent.input_modes) <= {"text", "text/plain"}:
+            assert any("[Attached files]" in got for got in agent.received), (
+                f"[{scenario.id}] {agent.name!r} was delegated to with attachments pending "
+                f"but received no file section; got: {agent.received}"
+            )
 
 
 def test_dataset_only_expects_orchestrator_visible_tools():

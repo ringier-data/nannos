@@ -39,7 +39,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from a2a.types import Part
 from langchain_core.messages import AIMessage
+
+from app.core.content_builder import build_text_content
 
 from .extraction import delegated_agents, delegations, final_text, task_state, tool_names
 from .graph_harness import final_response, task_call, tool_call
@@ -53,6 +56,24 @@ class SubAgentSpec:
     name: str
     description: str
     reply: str = "Done."
+    input_modes: tuple[str, ...] = ("text",)
+    """Content types the agent accepts. Text-only agents receive file URIs appended
+    to their instruction; multimodal ones receive the blocks, after LLM relevance
+    filtering — so declaring ``image`` puts the turn on a path that calls a model
+    even in the mock tier."""
+
+
+@dataclass(frozen=True)
+class AttachmentSpec:
+    """A file attached to the user's message.
+
+    Use plain ``https`` URLs: an ``s3://`` URI triggers presigned-URL generation
+    against object storage, which a test should not depend on.
+    """
+
+    url: str
+    filename: str
+    media_type: str
 
 
 @dataclass(frozen=True)
@@ -74,10 +95,30 @@ class Scenario:
     query: str
     subagents: list[SubAgentSpec]
     expect: Expectations
+    attachments: list[AttachmentSpec] = field(default_factory=list)
 
     def mock_subagents(self) -> list[MockSubAgent]:
         """Fresh mocks for this scenario — never reuse across tests, they record calls."""
-        return [MockSubAgent(s.name, s.description, reply=s.reply) for s in self.subagents]
+        return [
+            MockSubAgent(s.name, s.description, reply=s.reply, input_modes=list(s.input_modes))
+            for s in self.subagents
+        ]
+
+    def attachment_parts(self) -> list[Part]:
+        """A2A file parts for the real tier, where ``agent.stream`` does the parsing."""
+        return [Part(url=a.url, filename=a.filename, media_type=a.media_type) for a in self.attachments]
+
+    async def attachment_blocks(self) -> list:
+        """Content blocks for the mock tier, which invokes the graph directly.
+
+        ``agent.stream`` is what normally turns file parts into
+        ``pending_file_blocks``; the mock tier bypasses it, so run the same parser
+        here rather than hand-building blocks that could drift from production's.
+        """
+        if not self.attachments:
+            return []
+        _text, blocks = await build_text_content(self.attachment_parts())
+        return blocks
 
 
 def load_scenarios(filename: str) -> list[Scenario]:
@@ -107,8 +148,17 @@ def load_scenarios(filename: str) -> list[Scenario]:
                         name=s["name"],
                         description=s.get("description", ""),
                         reply=s.get("reply", "Done."),
+                        input_modes=tuple(s.get("input_modes") or ("text",)),
                     )
                     for s in (entry.get("subagents") or [])
+                ],
+                attachments=[
+                    AttachmentSpec(
+                        url=a["url"],
+                        filename=a.get("filename") or a["url"].rsplit("/", 1)[-1].split("?")[0],
+                        media_type=a["media_type"],
+                    )
+                    for a in ((entry.get("input") or {}).get("attachments") or [])
                 ],
                 expect=Expectations(
                     delegations_required=list(delegations_cfg.get("required") or []),

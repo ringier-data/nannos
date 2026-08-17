@@ -116,3 +116,62 @@
     tools:
       required: [get_current_time]
     task_state: completed
+
+# --- Attachments ---------------------------------------------------------
+# The mock tier parses these with the real content_builder and injects them as
+# pending_file_blocks; the real tier sends them as A2A file parts so
+# agent.stream does the parsing. Use https URLs — an s3:// URI would trigger
+# presigned-URL generation against object storage.
+#
+# Keep attached sub-agents text-only unless you mean to exercise the multimodal
+# path: that one calls an LLM to filter files by relevance, so it costs a model
+# call even in the mock tier.
+
+- id: forwards_attachment_to_subagent
+  description: An attached file must reach the delegated sub-agent by URI.
+  input:
+    query: "Summarise the attached report and tell me the headline number."
+    attachments:
+      - url: "https://files.example.com/q3-report.pdf?sig=test"
+        filename: "q3-report.pdf"
+        media_type: "application/pdf"
+  subagents:
+    - name: agent-runner
+      description: "Reads documents and runs analysis. Use for summarising attached files."
+      input_modes: [text]
+      reply: "The report headline is 8.2 million EUR in Q3 revenue."
+  expect:
+    delegations:
+      required: [agent-runner]
+    instructions:
+      # A text-only sub-agent can only reach the file through the URI, so the
+      # orchestrator must pass it along rather than describing it.
+      agent-runner: ["q3-report.pdf", "https://files.example.com/q3-report.pdf"]
+    # Deliberately no task_state. The URL is unreachable — a real presigned URL
+    # cannot live in a public repo's dataset — and the orchestrator also mounts
+    # attachments on a /attachments/ virtual filesystem. A model that only
+    # forwards the URI reports success; one that additionally reads the file
+    # (claude-sonnet-4-6 delegates to the built-in file-analyzer) correctly
+    # reports failure and asks for a re-upload. Both forwarded, which is what
+    # this scenario is about; the terminal state belongs to the broken URL, not
+    # to the orchestrator. Serving the file locally is not an option either —
+    # file_analyzer._assert_public_url refuses loopback and private addresses.
+
+- id: attachment_does_not_force_delegation
+  description: An attachment the orchestrator can describe itself needs no sub-agent.
+  input:
+    query: "What is the filename of the file I just attached? Answer with the name only."
+    attachments:
+      - url: "https://files.example.com/invoice-42.pdf?sig=test"
+        filename: "invoice-42.pdf"
+        media_type: "application/pdf"
+  subagents:
+    - name: agent-runner
+      description: "Reads documents and runs analysis. Use for summarising attached files."
+      input_modes: [text]
+      reply: "Not needed."
+  expect:
+    delegations:
+      forbidden: [agent-runner]
+    task_state: completed
+    response_contains: ["invoice-42"]
