@@ -295,3 +295,15 @@ async def test_session_pending_request_actually_fails(real_transport):
 
     err = result["error"]
     assert "fat-server" in str(err), f"pending request must fail with the guard's message, got: {err!r}"
+
+
+def test_extract_request_id_variants():
+    from app.core.mcp_guard import _extract_request_id
+
+    assert _extract_request_id('{"jsonrpc":"2.0","id":42,"result":{}}') == 42
+    assert _extract_request_id('{"jsonrpc":"2.0","id":-7,"result":{}}') == -7
+    assert _extract_request_id('{"jsonrpc":"2.0","id":"abc","result":{}}') == "abc"
+    assert _extract_request_id("no ids here") is None
+    # bytes path scans past the 4KB head, matching the str path's behaviour
+    late = b'{"jsonrpc":"2.0","result":{"pad":"' + b"x" * 5000 + b'"},"id":9}'
+    assert _extract_request_id(late) == 9

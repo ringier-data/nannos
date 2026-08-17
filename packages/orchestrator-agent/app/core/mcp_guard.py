@@ -125,20 +125,26 @@ def _check(data: str | bytes, url: str, max_bytes: int, warn_bytes: int) -> _Siz
 # and the first "id" key in a response document is the top-level one whenever
 # "result" follows it. A bounded head-scan plus full-scan fallback is O(n) on the
 # raw string with NO parse amplification — the entire point of rejecting here.
-_ID_RE = re.compile(r'"id"\s*:\s*(\d+|"(?:[^"\\]|\\.){1,256}")')
+_ID_RE = re.compile(r'"id"\s*:\s*(-?\d+|"(?:[^"\\]|\\.){1,256}")')
 
 
 def _extract_request_id(data: str | bytes):
     """Best-effort top-level ``id`` of a JSONRPC payload, without parsing it.
 
     Returns an ``int`` or ``str``, or ``None`` when nothing safe was found.
-    Wrong-id extraction is tolerable: the synthetic error then matches no
-    pending request, which degrades to the delivered-Exception fallback path
-    (same behaviour as not finding an id at all).
+
+    Known imprecision, accepted deliberately: when the head scan misses and the
+    full-string fallback picks up a body-level ``"id"``, the value can collide
+    with a DIFFERENT in-flight request on a multiplexed session (ids are small
+    sequential ints). The blast radius is bounded: that innocent request fails
+    fast with a correctly-attributed size error, and the truly pending one is
+    reaped by the MCP_DISCOVERY_TIMEOUT_S backstop. Escaped-string ids are also
+    returned verbatim (not unescaped) and will simply match nothing —
+    degrading, like every miss here, to the bare-exception fallback.
     """
     if isinstance(data, bytes):
-        data = data[:4096].decode("utf-8", errors="replace")
-        m = _ID_RE.search(data)
+        head = data[:4096].decode("utf-8", errors="replace")
+        m = _ID_RE.search(head) or _ID_RE.search(data.decode("utf-8", errors="replace"))
     else:
         m = _ID_RE.search(data, 0, 4096) or _ID_RE.search(data)
     if not m:
