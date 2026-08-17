@@ -42,6 +42,7 @@ Setting a threshold to ``0`` disables that threshold.
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,71 @@ def _check(data: str | bytes, url: str, max_bytes: int, warn_bytes: int) -> _Siz
     return _SizeVerdict(size, None)
 
 
+# Top-level JSONRPC ids in practice appear early ({"jsonrpc":"2.0","id":..,...}),
+# and the first "id" key in a response document is the top-level one whenever
+# "result" follows it. A bounded head-scan plus full-scan fallback is O(n) on the
+# raw string with NO parse amplification — the entire point of rejecting here.
+_ID_RE = re.compile(r'"id"\s*:\s*(\d+|"(?:[^"\\]|\\.){1,256}")')
+
+
+def _extract_request_id(data: str | bytes):
+    """Best-effort top-level ``id`` of a JSONRPC payload, without parsing it.
+
+    Returns an ``int`` or ``str``, or ``None`` when nothing safe was found.
+    Wrong-id extraction is tolerable: the synthetic error then matches no
+    pending request, which degrades to the delivered-Exception fallback path
+    (same behaviour as not finding an id at all).
+    """
+    if isinstance(data, bytes):
+        data = data[:4096].decode("utf-8", errors="replace")
+        m = _ID_RE.search(data)
+    else:
+        m = _ID_RE.search(data, 0, 4096) or _ID_RE.search(data)
+    if not m:
+        return None
+    raw = m.group(1)
+    if raw.startswith('"'):
+        return raw[1:-1]
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+async def _reject(read_stream_writer, data, error: McpEventTooLargeError) -> None:
+    """Fail the pending request per the SDK's routing rules.
+
+    Only a ``JSONRPCError`` whose ``id`` matches the pending request completes
+    ``send_request`` (which otherwise waits with ``timeout=None``); a bare
+    ``Exception`` on the read stream lands in ``_handle_incoming``, a no-op.
+    So: synthesize a JSONRPCError with the id recovered from the raw payload,
+    falling back to the bare exception when no id can be recovered.
+    """
+    from mcp.shared.message import SessionMessage
+    from mcp.types import INTERNAL_ERROR, ErrorData, JSONRPCError, JSONRPCMessage
+
+    logger.error("[MCP-GUARD] %s", error)
+    request_id = _extract_request_id(data)
+    try:
+        if request_id is not None:
+            reply = JSONRPCMessage(
+                JSONRPCError(
+                    jsonrpc="2.0",
+                    id=request_id,
+                    error=ErrorData(code=INTERNAL_ERROR, message=str(error)),
+                )
+            )
+            await read_stream_writer.send(SessionMessage(reply))
+        else:
+            logger.warning(
+                "[MCP-GUARD] could not recover a request id from the oversized payload; "
+                "delivering a bare exception (the pending request will rely on the caller's timeout)"
+            )
+            await read_stream_writer.send(error)
+    except Exception:  # writer already closed — nothing to notify
+        logger.debug("[MCP-GUARD] read_stream_writer closed while rejecting oversized message")
+
+
 def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
     """Wrap the MCP transport's inbound parse paths with the size guard.
 
@@ -155,16 +221,11 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
         if getattr(sse, "event", None) == "message" and getattr(sse, "data", None):
             verdict = _check(sse.data, self.url, max_event_bytes, warn_event_bytes)
             if verdict.error is not None:
-                logger.error("[MCP-GUARD] %s", verdict.error)
-                try:
-                    # The SDK's own parse-failure contract: deliver the error to
-                    # the session so the pending request fails immediately...
-                    await read_stream_writer.send(verdict.error)
-                except Exception:  # writer already closed — nothing to notify
-                    logger.debug("[MCP-GUARD] read_stream_writer closed while rejecting oversized event")
-                # ...and report the stream complete so the caller closes the
-                # response instead of reconnecting with Last-Event-ID and
-                # replaying the same oversized payload.
+                # Fail the pending request (JSONRPCError routed by request id —
+                # see _reject) and report the stream complete so the caller
+                # closes the response instead of reconnecting with
+                # Last-Event-ID and replaying the same oversized payload.
+                await _reject(read_stream_writer, sse.data, verdict.error)
                 return True
         return await original_sse(self, sse, read_stream_writer, *args, **kwargs)
 
@@ -177,11 +238,7 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
             return await original_json(self, response, read_stream_writer, *args, **kwargs)
         verdict = _check(content, self.url, max_event_bytes, warn_event_bytes)
         if verdict.error is not None:
-            logger.error("[MCP-GUARD] %s", verdict.error)
-            try:
-                await read_stream_writer.send(verdict.error)
-            except Exception:
-                logger.debug("[MCP-GUARD] read_stream_writer closed while rejecting oversized response")
+            await _reject(read_stream_writer, content, verdict.error)
             return None
         return await original_json(self, response, read_stream_writer, *args, **kwargs)
 

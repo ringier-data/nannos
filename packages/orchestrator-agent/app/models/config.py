@@ -354,6 +354,12 @@ class AgentSettings:
     MCP_SSE_MAX_EVENT_BYTES = _int_env("MCP_SSE_MAX_EVENT_BYTES", 10 * 1024 * 1024)
     MCP_SSE_WARN_EVENT_BYTES = _int_env("MCP_SSE_WARN_EVENT_BYTES", 1024 * 1024)
 
+    # Hard per-server timeout on a discovery tools/list fetch. The MCP session
+    # awaits responses with timeout=None, so without this backstop a stalled or
+    # guard-rejected response would hold a discovery-semaphore slot forever.
+    # 0 disables (not recommended).
+    MCP_DISCOVERY_TIMEOUT_S = _int_env("MCP_DISCOVERY_TIMEOUT_S", 120)
+
     # How many MCP servers may be queried for their tool catalogue at the same time
     # during a cold discovery.  Discovery opens one connection per server, so an
     # unbounded fan-out holds every server's session, response body, parsed schema

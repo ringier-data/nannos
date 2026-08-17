@@ -210,6 +210,7 @@ class TestToolDiscoveryService:
         config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
         config.CONSOLE_BACKEND_URL = None
         config.MCP_DISCOVERY_CONCURRENCY = 5
+        config.MCP_DISCOVERY_TIMEOUT_S = 120
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
@@ -262,6 +263,7 @@ class TestToolDiscoveryService:
         config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
         config.CONSOLE_BACKEND_URL = None
         config.MCP_DISCOVERY_CONCURRENCY = 3
+        config.MCP_DISCOVERY_TIMEOUT_S = 120
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")

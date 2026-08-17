@@ -218,3 +218,80 @@ def test_utf8_size_bounds():
     assert _utf8_size("abc", 10) == 3  # 3*4 >= 10 -> exact encode, still 3
     assert _utf8_size("a" * 100, 1000) == 100  # upper bound below threshold -> cheap path
     assert _utf8_size("\U0001f600", 2) == 4  # exact path counts bytes
+
+
+async def test_oversized_with_recoverable_id_becomes_jsonrpc_error(real_transport):
+    """When the payload's id is recoverable, the rejection is a routable
+    JSONRPCError — the form the session actually matches to a pending request."""
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCError
+
+    t = real_transport()
+    send, recv = anyio.create_memory_object_stream(10)
+    payload = '{"jsonrpc":"2.0","id":42,"result":{"pad":"' + "x" * (CAP + 1) + '"}}'
+    complete = await t._handle_sse_event(sse(payload), send)
+    assert complete is True
+    delivered = await drain_one(recv)
+    assert isinstance(delivered, SessionMessage)
+    assert isinstance(delivered.message.root, JSONRPCError)
+    assert delivered.message.root.id == 42
+    assert "fat-server" in delivered.message.root.error.message
+
+
+async def test_session_pending_request_actually_fails(real_transport):
+    """End-to-end across the session boundary: a ClientSession's pending
+    list_tools request must FAIL (not hang) when the guard rejects the
+    oversized response. This is the scenario that survived round 2's fix —
+    a bare Exception on the read stream routes to a no-op handler while
+    send_request waits with timeout=None."""
+    from mcp import ClientSession
+    from mcp.shared.exceptions import McpError
+    from mcp.shared.message import SessionMessage
+
+    t = real_transport()
+
+    # session <- read_recv ; guard writes into read_send
+    read_send, read_recv = anyio.create_memory_object_stream(16)
+    write_send, write_recv = anyio.create_memory_object_stream(16)
+
+    async with ClientSession(read_recv, write_send) as session:
+        result: dict = {}
+
+        async def run_request():
+            try:
+                await session.send_request(_list_tools_request(), _ListToolsResultType())
+            except McpError as e:
+                result["error"] = e
+            except Exception as e:  # pragma: no cover - diagnostic
+                result["error"] = e
+
+        def _list_tools_request():
+            from mcp.types import ClientRequest, ListToolsRequest
+
+            return ClientRequest(ListToolsRequest(method="tools/list"))
+
+        def _ListToolsResultType():
+            from mcp.types import ListToolsResult
+
+            return ListToolsResult
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run_request)
+            # Capture the outgoing request to learn its id.
+            with anyio.fail_after(2):
+                outgoing: SessionMessage = await write_recv.receive()
+            request_id = outgoing.message.root.id
+
+            # The server "responds" with an oversized payload carrying that id.
+            payload = (
+                '{"jsonrpc":"2.0","id":' + str(request_id) + ',"result":{"tools":[],"pad":"' + "x" * (CAP + 1) + '"}}'
+            )
+            complete = await t._handle_sse_event(sse(payload), read_send)
+            assert complete is True
+
+            with anyio.fail_after(2):
+                while "error" not in result:
+                    await anyio.sleep(0.01)
+
+    err = result["error"]
+    assert "fat-server" in str(err), f"pending request must fail with the guard's message, got: {err!r}"
