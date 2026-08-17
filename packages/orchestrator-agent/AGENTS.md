@@ -121,6 +121,21 @@ The orchestrator ships with built-in default skills (e.g., `find-skills`). These
 
 ## Critical Design Decisions
 
+### MCP Message Size Guard Is a Process-Wide Monkeypatch
+
+`app/core/mcp_guard.py` wraps `StreamableHTTPTransport._handle_sse_event` and
+`_handle_json_response` at class level, installed once during lifespan startup.
+This is deliberate: the MCP SDK offers no hook at its parse site, and the
+unbounded `JSONRPCMessage.model_validate_json` there is what OOMKilled prod
+(ringier-data/nannos#152 — one server's 21.9MB `tools/list` amplified ~7x into
+pydantic objects). Rejection must follow the SDK's parse-failure contract
+(deliver the error via `read_stream_writer`, report the stream complete) —
+raising out of the handler is swallowed by every SDK call site and triggers a
+Last-Event-ID reconnect that replays the same payload. Because it patches
+private SDK methods, treat any `mcp` version bump as a signal to re-run
+`tests/test_mcp_guard.py`, which exercises the real transport class and fails
+loudly at startup if the methods are renamed.
+
 ### One Graph Per Model Type, Not Per User
 
 Graphs are cached by `(model_name, thinking_level)`. All users share the same compiled graph. User-specific state (tools, sub-agents, preferences) is injected at runtime via `GraphRuntimeContext` and `DynamicToolDispatchMiddleware`. This is critical for performance — graph compilation is expensive.

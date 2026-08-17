@@ -1,11 +1,11 @@
-"""Size guard for inbound MCP SSE events.
+"""Size guard for inbound MCP messages.
 
 Every MCP message the orchestrator receives — tool catalogues at discovery,
-tool results mid-turn, code-mode sessions — arrives as a Server-Sent Event that
-the MCP SDK parses with ``JSONRPCMessage.model_validate_json`` and NO size
-bound (``mcp/client/streamable_http.py``). Parsing amplifies the wire size
-roughly 7x into live pydantic objects, and several parses run concurrently, so
-a single oversized payload can OOM the pod.
+tool results mid-turn, code-mode sessions — is parsed by the MCP SDK with
+``JSONRPCMessage.model_validate_json`` and NO size bound
+(``mcp/client/streamable_http.py``). Parsing amplifies the wire size roughly
+7x into live pydantic objects, and several parses run concurrently, so a
+single oversized payload can OOM the pod.
 
 This is not hypothetical: in prod, one gateway server answered ``tools/list``
 with a 21.9 MB single event; cold-cache turns peaked at 2.3-4.2 GB RSS and the
@@ -14,19 +14,29 @@ alloy-ch/rcplus-alloy-infrastructure-agents#241). Nothing named the offending
 server, so the failure surfaced as an unexplained pod kill instead of a config
 error.
 
-The guard wraps ``StreamableHTTPTransport._handle_sse_event`` process-wide —
-the SDK offers no hook at the parse site — and does two things:
+The guard wraps the transport's two inbound parse paths process-wide — the SDK
+offers no hook at the parse site — and does two things:
 
-* **rejects** any event over ``MCP_SSE_MAX_EVENT_BYTES`` *before* it is
-  parsed, raising :class:`McpEventTooLargeError` that names the server slug
-  and size. Discovery already degrades gracefully per server
-  (``_get_tools_with_retry`` catches and logs per-slug failures), so a
-  rejected catalogue costs one server's tools, not the process. A rejected
-  tool result surfaces as that tool call's error.
-* **logs** every event over ``MCP_SSE_WARN_EVENT_BYTES`` with the server slug,
-  so catalogue growth is a visible trend long before it reaches the cap.
+* **rejects** any payload over ``MCP_SSE_MAX_EVENT_BYTES`` *before* it is
+  parsed. Rejection follows the SDK's own parse-failure contract: the error is
+  delivered through ``read_stream_writer`` so the pending request FAILS with
+  :class:`McpEventTooLargeError` naming the server slug and size. It must not
+  be raised out of the handler instead — every SDK call site swallows
+  exceptions (``except Exception: logger.debug``) and then *reconnects with
+  Last-Event-ID*, which would replay the same oversized payload and leave the
+  pending request hanging on a permanently-held semaphore slot. Discovery
+  already degrades gracefully per server (``_get_tools_with_retry``), so a
+  rejected catalogue costs one server's tools, not the process; a rejected
+  tool result surfaces as that call's error.
+* **logs** every payload over ``MCP_SSE_WARN_EVENT_BYTES`` with the server
+  slug, so catalogue growth is a visible trend long before it reaches the cap.
 
-Sizes are measured on the raw SSE ``data`` string, before any parsing.
+Sizes are measured in UTF-8 **bytes** (what the parser and the allocator see),
+not characters: SSE ``data`` is already str-decoded, and a multibyte-heavy
+catalogue can weigh up to 4x its character count. The exact encode is only
+paid when the cheap character-count bounds cannot decide.
+
+Setting a threshold to ``0`` disables that threshold.
 """
 
 from __future__ import annotations
@@ -36,18 +46,18 @@ from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
-_installed = False
+_WRAP_MARKER = "_nannos_mcp_guard"
 
 
 class McpEventTooLargeError(RuntimeError):
-    """An inbound MCP SSE event exceeded the configured size cap."""
+    """An inbound MCP message exceeded the configured size cap."""
 
     def __init__(self, server: str, size_bytes: int, max_bytes: int) -> None:
         self.server = server
         self.size_bytes = size_bytes
         self.max_bytes = max_bytes
         super().__init__(
-            f"MCP SSE event from server '{server}' is {size_bytes / 2**20:.1f}MB, "
+            f"MCP message from server '{server}' is {size_bytes / 2**20:.1f}MB, "
             f"exceeding the {max_bytes / 2**20:.1f}MB cap (MCP_SSE_MAX_EVENT_BYTES). "
             f"Refusing to parse it — an unbounded parse of this payload is what "
             f"OOMKilled the orchestrator (see ringier-data/nannos#152). "
@@ -70,49 +80,117 @@ def _server_slug(url: str) -> str:
         return url
 
 
-def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
-    """Wrap the MCP transport's SSE handler with the size guard. Idempotent.
+def _utf8_size(data: str | bytes, decide_at: int) -> int:
+    """Size of *data* in bytes, paying the exact encode only when it matters.
 
-    Must be called once at startup, before any MCP session is opened. Patching
-    the class method covers every ``StreamableHTTPTransport`` in the process —
-    discovery, tool dispatch and code-mode sessions alike — which is the point:
-    the failure mode does not care which path the fat payload arrives on.
+    For ``str``, character count is a lower bound and 4x it an upper bound on
+    the UTF-8 byte size; when the upper bound stays below ``decide_at`` the
+    exact size is irrelevant and the lower bound is returned as-is.
     """
-    global _installed
-    if _installed:
-        return
+    if isinstance(data, bytes):
+        return len(data)
+    chars = len(data)
+    if decide_at <= 0 or chars * 4 < decide_at:
+        return chars
+    return len(data.encode("utf-8", errors="replace"))
 
+
+class _SizeVerdict:
+    __slots__ = ("error", "size")
+
+    def __init__(self, size: int, error: McpEventTooLargeError | None) -> None:
+        self.size = size
+        self.error = error
+
+
+def _check(data: str | bytes, url: str, max_bytes: int, warn_bytes: int) -> _SizeVerdict:
+    decide_at = min(t for t in (max_bytes, warn_bytes) if t > 0) if (max_bytes > 0 or warn_bytes > 0) else 0
+    size = _utf8_size(data, decide_at)
+    if max_bytes > 0 and size > max_bytes:
+        return _SizeVerdict(size, McpEventTooLargeError(_server_slug(url), size, max_bytes))
+    if warn_bytes > 0 and size > warn_bytes:
+        logger.warning(
+            "[MCP-GUARD] large MCP message: %.1fMB from server=%s "
+            "(warn threshold %.1fMB, cap %s — growth here eventually becomes an outage)",
+            size / 2**20,
+            _server_slug(url),
+            warn_bytes / 2**20,
+            f"{max_bytes / 2**20:.1f}MB" if max_bytes > 0 else "disabled",
+        )
+    return _SizeVerdict(size, None)
+
+
+def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
+    """Wrap the MCP transport's inbound parse paths with the size guard.
+
+    Idempotent. Must be called once at startup, before any MCP session is
+    opened. Patching the class methods covers every ``StreamableHTTPTransport``
+    in the process — discovery, tool dispatch and code-mode sessions alike —
+    which is the point: the failure mode does not care which path the fat
+    payload arrives on.
+
+    ``max_event_bytes <= 0`` disables rejection; ``warn_event_bytes <= 0``
+    disables the warning. A warn threshold above an enabled cap is clamped to
+    the cap (an event cannot warn after it has already been rejected).
+    """
     from mcp.client.streamable_http import StreamableHTTPTransport
 
-    original = StreamableHTTPTransport._handle_sse_event
+    if getattr(StreamableHTTPTransport._handle_sse_event, _WRAP_MARKER, False):
+        return
 
-    async def _guarded_handle_sse_event(self, sse, *args, **kwargs):
-        data = getattr(sse, "data", None)
-        if data:
-            size = len(data)
-            if size > max_event_bytes:
-                server = _server_slug(self.url)
-                logger.error(
-                    "[MCP-GUARD] rejecting %.1fMB SSE event from server=%s (cap %.1fMB)",
-                    size / 2**20,
-                    server,
-                    max_event_bytes / 2**20,
-                )
-                raise McpEventTooLargeError(server, size, max_event_bytes)
-            if size > warn_event_bytes:
-                logger.warning(
-                    "[MCP-GUARD] large SSE event: %.1fMB from server=%s "
-                    "(cap %.1fMB — growth here eventually becomes an outage)",
-                    size / 2**20,
-                    _server_slug(self.url),
-                    max_event_bytes / 2**20,
-                )
-        return await original(self, sse, *args, **kwargs)
+    if max_event_bytes > 0 and warn_event_bytes > max_event_bytes:
+        logger.warning(
+            "MCP_SSE_WARN_EVENT_BYTES (%d) exceeds MCP_SSE_MAX_EVENT_BYTES (%d); clamping warn to the cap",
+            warn_event_bytes,
+            max_event_bytes,
+        )
+        warn_event_bytes = max_event_bytes
 
+    original_sse = StreamableHTTPTransport._handle_sse_event
+    original_json = StreamableHTTPTransport._handle_json_response
+
+    async def _guarded_handle_sse_event(self, sse, read_stream_writer, *args, **kwargs):
+        # Only "message" events are ever parsed by the SDK; priming/unknown
+        # events pass through untouched.
+        if getattr(sse, "event", None) == "message" and getattr(sse, "data", None):
+            verdict = _check(sse.data, self.url, max_event_bytes, warn_event_bytes)
+            if verdict.error is not None:
+                logger.error("[MCP-GUARD] %s", verdict.error)
+                try:
+                    # The SDK's own parse-failure contract: deliver the error to
+                    # the session so the pending request fails immediately...
+                    await read_stream_writer.send(verdict.error)
+                except Exception:  # writer already closed — nothing to notify
+                    logger.debug("[MCP-GUARD] read_stream_writer closed while rejecting oversized event")
+                # ...and report the stream complete so the caller closes the
+                # response instead of reconnecting with Last-Event-ID and
+                # replaying the same oversized payload.
+                return True
+        return await original_sse(self, sse, read_stream_writer, *args, **kwargs)
+
+    async def _guarded_handle_json_response(self, response, read_stream_writer, *args, **kwargs):
+        # Same parse, different transport shape (application/json bodies).
+        # httpx caches aread(), so the original's own aread() is a no-op replay.
+        try:
+            content = await response.aread()
+        except Exception:
+            return await original_json(self, response, read_stream_writer, *args, **kwargs)
+        verdict = _check(content, self.url, max_event_bytes, warn_event_bytes)
+        if verdict.error is not None:
+            logger.error("[MCP-GUARD] %s", verdict.error)
+            try:
+                await read_stream_writer.send(verdict.error)
+            except Exception:
+                logger.debug("[MCP-GUARD] read_stream_writer closed while rejecting oversized response")
+            return None
+        return await original_json(self, response, read_stream_writer, *args, **kwargs)
+
+    setattr(_guarded_handle_sse_event, _WRAP_MARKER, True)
+    setattr(_guarded_handle_json_response, _WRAP_MARKER, True)
     StreamableHTTPTransport._handle_sse_event = _guarded_handle_sse_event
-    _installed = True
+    StreamableHTTPTransport._handle_json_response = _guarded_handle_json_response
     logger.info(
-        "MCP SSE size guard installed (cap=%.1fMB, warn=%.1fMB)",
-        max_event_bytes / 2**20,
-        warn_event_bytes / 2**20,
+        "MCP message size guard installed (cap=%s, warn=%s)",
+        f"{max_event_bytes / 2**20:.1f}MB" if max_event_bytes > 0 else "disabled",
+        f"{warn_event_bytes / 2**20:.1f}MB" if warn_event_bytes > 0 else "disabled",
     )
