@@ -346,6 +346,13 @@ class AgentSettings:
     MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
 
+    # Inbound MCP SSE event size guard (see app/core/mcp_guard.py). Events over
+    # the cap are rejected BEFORE the pydantic parse whose ~7x amplification
+    # OOMKilled the pod (ringier-data/nannos#152); events over the warn level are
+    # logged with their server slug so catalogue growth is visible early.
+    MCP_SSE_MAX_EVENT_BYTES = max(1, _int_env("MCP_SSE_MAX_EVENT_BYTES", 10 * 1024 * 1024))
+    MCP_SSE_WARN_EVENT_BYTES = max(1, _int_env("MCP_SSE_WARN_EVENT_BYTES", 1024 * 1024))
+
     # How many MCP servers may be queried for their tool catalogue at the same time
     # during a cold discovery.  Discovery opens one connection per server, so an
     # unbounded fan-out holds every server's session, response body, parsed schema

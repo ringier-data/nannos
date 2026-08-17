@@ -69,6 +69,13 @@ spec:
         # anything the deployment controls.
         - name: MCP_DISCOVERY_CONCURRENCY
           value: "5"
+        # Reject any single inbound MCP SSE event larger than this, before the
+        # parse whose memory amplification can OOM the pod. Warn level logs the
+        # offending server slug so catalogue growth is visible early.
+        - name: MCP_SSE_MAX_EVENT_BYTES
+          value: "10485760"
+        - name: MCP_SSE_WARN_EVENT_BYTES
+          value: "1048576"
         - name: A2A_TIMEOUT_CONNECT
           value: "10.0"
         - name: A2A_TIMEOUT_READ
