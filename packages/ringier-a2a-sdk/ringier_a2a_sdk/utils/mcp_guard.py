@@ -1,11 +1,17 @@
 """Size guard for inbound MCP messages.
 
-Every MCP message the orchestrator receives — tool catalogues at discovery,
+Shared by every service in this repo that opens an MCP client session against
+the gateway (orchestrator-agent, voice-agent, agent-runner). The failure mode
+below is a property of the MCP SDK, not of any one service, so the guard lives
+here rather than in one service's tree — see ringier-data/nannos#155.
+
+Every MCP message a client receives — tool catalogues at discovery,
 tool results mid-turn, code-mode sessions — is parsed by the MCP SDK with
 ``JSONRPCMessage.model_validate_json`` and NO size bound
 (``mcp/client/streamable_http.py``). Parsing amplifies the wire size roughly
 7x into live pydantic objects, and several parses run concurrently, so a
-single oversized payload can OOM the pod.
+single oversized payload can OOM the pod. Services with memory limits
+smaller than the orchestrator's hit that wall sooner, not later.
 
 This is not hypothetical: in prod, one gateway server answered ``tools/list``
 with a 21.9 MB single event; cold-cache turns peaked at 2.3-4.2 GB RSS and the
@@ -26,8 +32,9 @@ offers no hook at the parse site — and does two things:
   Last-Event-ID*, which would replay the same oversized payload and leave the
   pending request hanging on a permanently-held semaphore slot. Discovery
   already degrades gracefully per server (``_get_tools_with_retry``), so a
-  rejected catalogue costs one server's tools, not the process; a rejected
-  tool result surfaces as that call's error.
+  rejected catalogue costs one server's tools, not the process, wherever the
+  caller degrades per server (the orchestrator's ``_get_tools_with_retry``);
+  a rejected tool result surfaces as that call's error.
 * **logs** every payload over ``MCP_SSE_WARN_EVENT_BYTES`` with the server
   slug, so catalogue growth is a visible trend long before it reaches the cap.
 
@@ -42,6 +49,7 @@ Setting a threshold to ``0`` disables that threshold.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -256,4 +264,42 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
         "MCP message size guard installed (cap=%s, warn=%s)",
         f"{max_event_bytes / 2**20:.1f}MB" if max_event_bytes > 0 else "disabled",
         f"{warn_event_bytes / 2**20:.1f}MB" if warn_event_bytes > 0 else "disabled",
+    )
+
+
+DEFAULT_MAX_EVENT_BYTES = 10 * 1024 * 1024
+DEFAULT_WARN_EVENT_BYTES = 1024 * 1024
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read an int env var, falling back to *default* on unset/blank/garbage."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.warning("%s=%r is not an integer; using default %d", name, raw, default)
+        return default
+
+
+def install_mcp_size_guard_from_env() -> None:
+    """Install the guard using ``MCP_SSE_*`` environment variables.
+
+    The one-liner for services without a typed settings object of their own:
+    reads ``MCP_SSE_MAX_EVENT_BYTES`` / ``MCP_SSE_WARN_EVENT_BYTES`` (UTF-8
+    bytes, ``0`` disables the respective threshold) and applies the shared
+    defaults otherwise. Services that *do* have typed config — the
+    orchestrator — keep reading it there and call
+    :func:`install_mcp_size_guard` directly, so the knob stays visible in one
+    place per service.
+
+    Deliberately shares the defaults across services rather than tuning them
+    per pod: the cap is sized to the parse blow-up, not to any one pod's
+    memory limit, and a service that needs a different cap should say so
+    explicitly in its own manifest.
+    """
+    install_mcp_size_guard(
+        max_event_bytes=_int_env("MCP_SSE_MAX_EVENT_BYTES", DEFAULT_MAX_EVENT_BYTES),
+        warn_event_bytes=_int_env("MCP_SSE_WARN_EVENT_BYTES", DEFAULT_WARN_EVENT_BYTES),
     )

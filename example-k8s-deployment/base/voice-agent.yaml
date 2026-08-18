@@ -66,6 +66,17 @@ spec:
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"
         - name: MCP_TIMEOUT_SECONDS
           value: "60"
+        # Reject any single inbound MCP message larger than this, before the
+        # parse whose memory amplification can OOM the pod. Warn level logs the
+        # offending server slug so catalogue growth is visible early.
+        - name: MCP_SSE_MAX_EVENT_BYTES
+          value: "10485760"
+        - name: MCP_SSE_WARN_EVENT_BYTES
+          value: "1048576"
+        # Hard timeout (s) on the per-call tools/list fetch. Scoped to discovery,
+        # so it does not cap legitimate slow tool calls mid-conversation.
+        - name: MCP_DISCOVERY_TIMEOUT_S
+          value: "120"
         - name: LANGSMITH_TRACING
           value: "true"
         - name: LANGSMITH_ENDPOINT

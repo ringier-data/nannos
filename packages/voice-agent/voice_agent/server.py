@@ -58,6 +58,7 @@ from ringier_a2a_sdk.middleware import (
 )
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
+from ringier_a2a_sdk.utils.mcp_guard import install_mcp_size_guard_from_env
 
 from voice_agent.a2a_agent import JSON_SCHEMA
 from voice_agent.agent import warm_up_mcp_gateway
@@ -76,6 +77,12 @@ configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 @asynccontextmanager
 async def lifespan(app) -> AsyncIterator[None]:
     """Startup / shutdown lifecycle hook."""
+    # Guard inbound MCP messages before ANY session can open — the warm-up task
+    # below opens one immediately, and it is the very call (tools/list against
+    # the shared gateway) whose unbounded parse OOMKilled the orchestrator
+    # (ringier-data/nannos#152, #155). Process-wide and idempotent.
+    install_mcp_size_guard_from_env()
+
     # Warm the (external, scale-to-zero) MCP gateway in the background so the first
     # call does not pay its cold-start cost. Best-effort and non-blocking — see
     # voice_agent.agent.warm_up_mcp_gateway (disable with MCP_WARMUP_ENABLED=false).

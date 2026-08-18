@@ -462,7 +462,19 @@ class GeminiLiveAgent:
         and returns the list of ``FunctionDeclaration``s for building the
         Gemini Live connect config.
         """
-        tools_result = await mcp_session.list_tools()
+        # Hard backstop on the catalogue fetch. ClientSession.send_request awaits
+        # with timeout=None, and this session sets no sse_read_timeout, so without
+        # this a stalled — or guard-rejected-without-a-recoverable-id (see
+        # ringier_a2a_sdk.utils.mcp_guard) — tools/list hangs the whole call setup
+        # with the caller hearing dead air. Scoped to discovery on purpose: a
+        # session-wide read_timeout_seconds would also cap legitimate slow tool
+        # calls mid-conversation. 0 disables.
+        discovery_timeout = int(os.getenv("MCP_DISCOVERY_TIMEOUT_S", "120"))
+        if discovery_timeout > 0:
+            async with asyncio.timeout(discovery_timeout):
+                tools_result = await mcp_session.list_tools()
+        else:
+            tools_result = await mcp_session.list_tools()
         declarations: list[types.FunctionDeclaration] = []
 
         # Pre-score tool risks CONCURRENTLY. Scoring is an LLM call per tool; doing
