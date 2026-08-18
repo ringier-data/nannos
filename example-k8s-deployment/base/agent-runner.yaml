@@ -54,6 +54,17 @@ spec:
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"
         - name: MCP_GATEWAY_CLIENT_ID
           value: "gatana"
+        # Reject any single inbound MCP message larger than this, before the
+        # parse whose memory amplification can OOM the pod. Warn level logs the
+        # offending server slug so catalogue growth is visible early.
+        - name: MCP_SSE_MAX_EVENT_BYTES
+          value: "10485760"
+        - name: MCP_SSE_WARN_EVENT_BYTES
+          value: "1048576"
+        # Hard timeout (s) on a tools/list fetch — nothing else bounds it
+        # (sse_read_timeout is deprecated/unused in the MCP SDK >=1.25).
+        - name: MCP_DISCOVERY_TIMEOUT_S
+          value: "120"
         - name: POSTGRES_HOST
           value: "${POSTGRES_HOST}"
         - name: POSTGRES_PORT

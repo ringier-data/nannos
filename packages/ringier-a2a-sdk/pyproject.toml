@@ -13,6 +13,18 @@ dependencies = [
     "cryptography>=43.0.0",
     "authlib>=1.6.5",
     "sqlalchemy>=2.0.51",
+    # Core, not an extra: utils/mcp_guard.py patches the MCP client transport and
+    # middleware/credential_injector.py imports mcp.types at module scope. Until
+    # now this came in only transitively via the langgraph extras' langchain-mcp-adapters.
+    # Floor 1.25: the guard needs StreamableHTTPTransport and its
+    # original_request_id parameter to exist at all — on an older resolution
+    # install_mcp_size_guard is an ImportError crash-loop at startup.
+    # Capped below 2.0: the guard wraps PRIVATE transport internals
+    # (StreamableHTTPTransport._handle_sse_event / _handle_json_response), which a
+    # major bump is free to rename — and an install that silently no-ops is the
+    # outage this module exists to prevent. Lift the cap only after re-checking
+    # those attributes against the 2.x transport.
+    "mcp>=1.25.0,<2.0.0",
 ]
 
 [project.optional-dependencies]

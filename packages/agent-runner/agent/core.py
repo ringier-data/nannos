@@ -22,6 +22,7 @@ Execution flow per call:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -66,6 +67,7 @@ from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
+from ringier_a2a_sdk.utils.mcp_guard import int_env
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,21 @@ _CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
 _CONSOLE_BACKEND_CLIENT_ID = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")
 _MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
 _MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "300"))
+# Hard backstop on a tools/list fetch. StreamableHttpConnection's
+# sse_read_timeout is DEPRECATED and no longer used by the MCP SDK (>=1.25),
+# so nothing else bounds this await: ClientSession.send_request waits with
+# timeout=None, and the size guard's id-less rejection path closes the
+# stream as *complete* rather than stalled, so no read timeout can fire.
+# <= 0 disables.
+_MCP_DISCOVERY_TIMEOUT_S = int_env("MCP_DISCOVERY_TIMEOUT_S", 120)
+
+
+async def _get_tools_bounded(mcp_client):
+    """``get_tools()`` under the discovery backstop (see _MCP_DISCOVERY_TIMEOUT_S)."""
+    if _MCP_DISCOVERY_TIMEOUT_S <= 0:
+        return await mcp_client.get_tools()
+    async with asyncio.timeout(_MCP_DISCOVERY_TIMEOUT_S):
+        return await mcp_client.get_tools()
 _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
 _MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
 
@@ -768,7 +785,7 @@ class AgentRunner(BaseAgent):
         try:
             mcp_client = MultiServerMCPClient(connections)
             async with mcp_client:
-                tools = await mcp_client.get_tools()
+                tools = await _get_tools_bounded(mcp_client)
                 tool_map = {t.name: t for t in tools}
 
                 if check_tool not in tool_map:
@@ -1290,7 +1307,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                     )
 
                 mcp_client = MultiServerMCPClient(connections)
-                all_tools = await mcp_client.get_tools()
+                all_tools = await _get_tools_bounded(mcp_client)
                 tools = [t for t in all_tools if t.name in allowed]
                 logger.info(
                     "Loaded %d/%d MCP tools for job %s: %s",

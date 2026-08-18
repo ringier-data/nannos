@@ -1,11 +1,17 @@
 """Size guard for inbound MCP messages.
 
-Every MCP message the orchestrator receives — tool catalogues at discovery,
+Shared by every service in this repo that opens an MCP client session against
+the gateway (orchestrator-agent, voice-agent, agent-runner). The failure mode
+below is a property of the MCP SDK, not of any one service, so the guard lives
+here rather than in one service's tree — see ringier-data/nannos#155.
+
+Every MCP message a client receives — tool catalogues at discovery,
 tool results mid-turn, code-mode sessions — is parsed by the MCP SDK with
 ``JSONRPCMessage.model_validate_json`` and NO size bound
 (``mcp/client/streamable_http.py``). Parsing amplifies the wire size roughly
 7x into live pydantic objects, and several parses run concurrently, so a
-single oversized payload can OOM the pod.
+single oversized payload can OOM the pod. Services with memory limits
+smaller than the orchestrator's hit that wall sooner, not later.
 
 This is not hypothetical: one gateway server answered ``tools/list`` with a
 21.9 MB single event; cold-cache turns peaked at 2.3-4.2 GB RSS and the pod was
@@ -25,8 +31,9 @@ offers no hook at the parse site — and does two things:
   Last-Event-ID*, which would replay the same oversized payload and leave the
   pending request hanging on a permanently-held semaphore slot. Discovery
   already degrades gracefully per server (``_get_tools_with_retry``), so a
-  rejected catalogue costs one server's tools, not the process; a rejected
-  tool result surfaces as that call's error.
+  rejected catalogue costs one server's tools, not the process, wherever the
+  caller degrades per server (the orchestrator's ``_get_tools_with_retry``);
+  a rejected tool result surfaces as that call's error.
 * **logs** every payload over ``MCP_SSE_WARN_EVENT_BYTES`` with the server
   slug, so catalogue growth is a visible trend long before it reaches the cap.
 
@@ -41,6 +48,7 @@ Setting a threshold to ``0`` disables that threshold.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -137,7 +145,9 @@ def _extract_request_id(data: str | bytes):
     with a DIFFERENT in-flight request on a multiplexed session (ids are small
     sequential ints). The blast radius is bounded: that innocent request fails
     fast with a correctly-attributed size error, and the truly pending one is
-    reaped by the MCP_DISCOVERY_TIMEOUT_S backstop. Escaped-string ids are also
+    reaped by the caller's own discovery backstop, where it has one (each
+    service must supply it: MCP_DISCOVERY_TIMEOUT_S in orchestrator-agent,
+    voice-agent and agent-runner). Escaped-string ids are also
     returned verbatim (not unescaped) and will simply match nothing —
     degrading, like every miss here, to the bare-exception fallback.
     """
@@ -157,20 +167,27 @@ def _extract_request_id(data: str | bytes):
         return None
 
 
-async def _reject(read_stream_writer, data, error: McpEventTooLargeError) -> None:
+async def _reject(read_stream_writer, data, error: McpEventTooLargeError, original_request_id=None) -> None:
     """Fail the pending request per the SDK's routing rules.
 
     Only a ``JSONRPCError`` whose ``id`` matches the pending request completes
     ``send_request`` (which otherwise waits with ``timeout=None``); a bare
     ``Exception`` on the read stream lands in ``_handle_incoming``, a no-op.
-    So: synthesize a JSONRPCError with the id recovered from the raw payload,
-    falling back to the bare exception when no id can be recovered.
+    So: synthesize a JSONRPCError carrying the pending request's id, falling
+    back to the bare exception when no id can be recovered.
+
+    ``original_request_id`` is the SDK's own answer to "which request is this
+    response for". On the resumption/reconnect path the SDK *rewrites* the
+    parsed message's id to it (``_handle_sse_event``), so on that path the id
+    scraped from the payload is the pre-resumption one and would route the
+    rejection to nothing, hanging the very request it is meant to fail. Prefer
+    the SDK's value whenever it hands us one; scrape only as the fallback.
     """
     from mcp.shared.message import SessionMessage
     from mcp.types import INTERNAL_ERROR, ErrorData, JSONRPCError, JSONRPCMessage
 
     logger.error("[MCP-GUARD] %s", error)
-    request_id = _extract_request_id(data)
+    request_id = original_request_id if original_request_id is not None else _extract_request_id(data)
     try:
         if request_id is not None:
             reply = JSONRPCMessage(
@@ -220,7 +237,12 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
     original_sse = StreamableHTTPTransport._handle_sse_event
     original_json = StreamableHTTPTransport._handle_json_response
 
-    async def _guarded_handle_sse_event(self, sse, read_stream_writer, *args, **kwargs):
+    async def _guarded_handle_sse_event(
+        self, sse, read_stream_writer, original_request_id=None, *args, **kwargs
+    ):
+        # original_request_id is named explicitly (it is the SDK's 3rd positional)
+        # so the rejection can be routed to the request the SDK itself would have
+        # attributed the response to — see _reject.
         # Only "message" events are ever parsed by the SDK; priming/unknown
         # events pass through untouched.
         if getattr(sse, "event", None) == "message" and getattr(sse, "data", None):
@@ -230,9 +252,9 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
                 # see _reject) and report the stream complete so the caller
                 # closes the response instead of reconnecting with
                 # Last-Event-ID and replaying the same oversized payload.
-                await _reject(read_stream_writer, sse.data, verdict.error)
+                await _reject(read_stream_writer, sse.data, verdict.error, original_request_id)
                 return True
-        return await original_sse(self, sse, read_stream_writer, *args, **kwargs)
+        return await original_sse(self, sse, read_stream_writer, original_request_id, *args, **kwargs)
 
     async def _guarded_handle_json_response(self, response, read_stream_writer, *args, **kwargs):
         # Same parse, different transport shape (application/json bodies).
@@ -255,4 +277,48 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
         "MCP message size guard installed (cap=%s, warn=%s)",
         f"{max_event_bytes / 2**20:.1f}MB" if max_event_bytes > 0 else "disabled",
         f"{warn_event_bytes / 2**20:.1f}MB" if warn_event_bytes > 0 else "disabled",
+    )
+
+
+DEFAULT_MAX_EVENT_BYTES = 10 * 1024 * 1024
+DEFAULT_WARN_EVENT_BYTES = 1024 * 1024
+
+
+def int_env(name: str, default: int) -> int:
+    """Read an int env var, falling back to *default* on unset/blank/garbage.
+
+    Shared so that every MCP knob fails **safe** rather than open: a typo in a
+    manifest must not take a guard or a timeout backstop offline, which is
+    exactly what a bare ``int(os.getenv(...))`` does when the raised ValueError
+    is swallowed by a caller's broad ``except Exception``.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.warning("%s=%r is not an integer; using default %d", name, raw, default)
+        return default
+
+
+def install_mcp_size_guard_from_env() -> None:
+    """Install the guard using ``MCP_SSE_*`` environment variables.
+
+    The one-liner for services without a typed settings object of their own:
+    reads ``MCP_SSE_MAX_EVENT_BYTES`` / ``MCP_SSE_WARN_EVENT_BYTES`` (UTF-8
+    bytes, ``0`` disables the respective threshold) and applies the shared
+    defaults otherwise. Services that *do* have typed config — the
+    orchestrator — keep reading it there and call
+    :func:`install_mcp_size_guard` directly, so the knob stays visible in one
+    place per service.
+
+    Deliberately shares the defaults across services rather than tuning them
+    per pod: the cap is sized to the parse blow-up, not to any one pod's
+    memory limit, and a service that needs a different cap should say so
+    explicitly in its own manifest.
+    """
+    install_mcp_size_guard(
+        max_event_bytes=int_env("MCP_SSE_MAX_EVENT_BYTES", DEFAULT_MAX_EVENT_BYTES),
+        warn_event_bytes=int_env("MCP_SSE_WARN_EVENT_BYTES", DEFAULT_WARN_EVENT_BYTES),
     )

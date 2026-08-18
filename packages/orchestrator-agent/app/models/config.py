@@ -346,7 +346,8 @@ class AgentSettings:
     MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
 
-    # Inbound MCP message size guard (see app/core/mcp_guard.py). Messages over
+    # Inbound MCP message size guard (ringier_a2a_sdk.utils.mcp_guard, shared with
+    # voice-agent and agent-runner — see ringier-data/nannos#155). Messages over
     # the cap are rejected BEFORE the pydantic parse whose ~7x amplification
     # OOMKilled the pod (ringier-data/nannos#152); messages over the warn level
     # are logged with their server slug so catalogue growth is visible early.

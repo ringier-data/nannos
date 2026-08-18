@@ -123,7 +123,9 @@ The orchestrator ships with built-in default skills (e.g., `find-skills`). These
 
 ### MCP Message Size Guard Is a Process-Wide Monkeypatch
 
-`app/core/mcp_guard.py` wraps `StreamableHTTPTransport._handle_sse_event` and
+`ringier_a2a_sdk.utils.mcp_guard` (shared with voice-agent and agent-runner —
+it moved out of `app/core/` in ringier-data/nannos#155) wraps
+`StreamableHTTPTransport._handle_sse_event` and
 `_handle_json_response` at class level, installed once during lifespan startup.
 This is deliberate: the MCP SDK offers no hook at its parse site, and the
 unbounded `JSONRPCMessage.model_validate_json` there is what OOMKilled prod
@@ -133,8 +135,9 @@ pydantic objects). Rejection must follow the SDK's parse-failure contract
 raising out of the handler is swallowed by every SDK call site and triggers a
 Last-Event-ID reconnect that replays the same payload. Because it patches
 private SDK methods, treat any `mcp` version bump as a signal to re-run
-`tests/test_mcp_guard.py`, which exercises the real transport class and fails
-loudly at startup if the methods are renamed.
+`packages/ringier-a2a-sdk/tests/test_mcp_guard.py`, which exercises the real
+transport class and fails loudly at startup if the methods are renamed. For the
+same reason the `mcp` requirement is pinned to the 1.x line.
 
 ### One Graph Per Model Type, Not Per User
 

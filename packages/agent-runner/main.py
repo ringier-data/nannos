@@ -44,6 +44,7 @@ from ringier_a2a_sdk.middleware import (
 )
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
+from ringier_a2a_sdk.utils.mcp_guard import install_mcp_size_guard_from_env
 from starlette.applications import Starlette
 
 from agent import AgentRunner
@@ -63,6 +64,12 @@ agent = AgentRunner()
 @asynccontextmanager
 async def lifespan(app) -> AsyncIterator[None]:
     """Lifespan context manager for the FastAPI application."""
+    # Guard inbound MCP messages before any agent run can open a session against
+    # the shared gateway: the unbounded SDK parse that OOMKilled the orchestrator
+    # (ringier-data/nannos#152, #155) is transport-level, and this pod's memory
+    # limit is smaller. Process-wide and idempotent.
+    install_mcp_size_guard_from_env()
+
     await agent.setup_checkpointer()
     await agent.ensure_store_setup()
     await agent.init_sandbox_pool()

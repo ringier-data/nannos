@@ -101,7 +101,7 @@ def create_lifespan(
         # Guard inbound MCP SSE events before anything can open an MCP session:
         # an unbounded parse of one oversized event is what OOMKilled the pod
         # (ringier-data/nannos#152). Process-wide by design.
-        from app.core.mcp_guard import install_mcp_size_guard
+        from ringier_a2a_sdk.utils.mcp_guard import install_mcp_size_guard
 
         install_mcp_size_guard(
             max_event_bytes=AgentSettings.MCP_SSE_MAX_EVENT_BYTES,
