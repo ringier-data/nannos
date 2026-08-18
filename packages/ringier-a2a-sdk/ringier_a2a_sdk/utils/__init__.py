@@ -5,6 +5,7 @@ from .mcp_guard import (
     McpEventTooLargeError,
     install_mcp_size_guard,
     install_mcp_size_guard_from_env,
+    int_env,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "McpEventTooLargeError",
     "install_mcp_size_guard",
     "install_mcp_size_guard_from_env",
+    "int_env",
 ]

@@ -145,7 +145,9 @@ def _extract_request_id(data: str | bytes):
     with a DIFFERENT in-flight request on a multiplexed session (ids are small
     sequential ints). The blast radius is bounded: that innocent request fails
     fast with a correctly-attributed size error, and the truly pending one is
-    reaped by the MCP_DISCOVERY_TIMEOUT_S backstop. Escaped-string ids are also
+    reaped by the caller's own discovery backstop, where it has one (each
+    service must supply it: MCP_DISCOVERY_TIMEOUT_S in orchestrator-agent,
+    voice-agent and agent-runner). Escaped-string ids are also
     returned verbatim (not unescaped) and will simply match nothing —
     degrading, like every miss here, to the bare-exception fallback.
     """
@@ -165,20 +167,27 @@ def _extract_request_id(data: str | bytes):
         return None
 
 
-async def _reject(read_stream_writer, data, error: McpEventTooLargeError) -> None:
+async def _reject(read_stream_writer, data, error: McpEventTooLargeError, original_request_id=None) -> None:
     """Fail the pending request per the SDK's routing rules.
 
     Only a ``JSONRPCError`` whose ``id`` matches the pending request completes
     ``send_request`` (which otherwise waits with ``timeout=None``); a bare
     ``Exception`` on the read stream lands in ``_handle_incoming``, a no-op.
-    So: synthesize a JSONRPCError with the id recovered from the raw payload,
-    falling back to the bare exception when no id can be recovered.
+    So: synthesize a JSONRPCError carrying the pending request's id, falling
+    back to the bare exception when no id can be recovered.
+
+    ``original_request_id`` is the SDK's own answer to "which request is this
+    response for". On the resumption/reconnect path the SDK *rewrites* the
+    parsed message's id to it (``_handle_sse_event``), so on that path the id
+    scraped from the payload is the pre-resumption one and would route the
+    rejection to nothing, hanging the very request it is meant to fail. Prefer
+    the SDK's value whenever it hands us one; scrape only as the fallback.
     """
     from mcp.shared.message import SessionMessage
     from mcp.types import INTERNAL_ERROR, ErrorData, JSONRPCError, JSONRPCMessage
 
     logger.error("[MCP-GUARD] %s", error)
-    request_id = _extract_request_id(data)
+    request_id = original_request_id if original_request_id is not None else _extract_request_id(data)
     try:
         if request_id is not None:
             reply = JSONRPCMessage(
@@ -228,7 +237,12 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
     original_sse = StreamableHTTPTransport._handle_sse_event
     original_json = StreamableHTTPTransport._handle_json_response
 
-    async def _guarded_handle_sse_event(self, sse, read_stream_writer, *args, **kwargs):
+    async def _guarded_handle_sse_event(
+        self, sse, read_stream_writer, original_request_id=None, *args, **kwargs
+    ):
+        # original_request_id is named explicitly (it is the SDK's 3rd positional)
+        # so the rejection can be routed to the request the SDK itself would have
+        # attributed the response to — see _reject.
         # Only "message" events are ever parsed by the SDK; priming/unknown
         # events pass through untouched.
         if getattr(sse, "event", None) == "message" and getattr(sse, "data", None):
@@ -238,9 +252,9 @@ def install_mcp_size_guard(max_event_bytes: int, warn_event_bytes: int) -> None:
                 # see _reject) and report the stream complete so the caller
                 # closes the response instead of reconnecting with
                 # Last-Event-ID and replaying the same oversized payload.
-                await _reject(read_stream_writer, sse.data, verdict.error)
+                await _reject(read_stream_writer, sse.data, verdict.error, original_request_id)
                 return True
-        return await original_sse(self, sse, read_stream_writer, *args, **kwargs)
+        return await original_sse(self, sse, read_stream_writer, original_request_id, *args, **kwargs)
 
     async def _guarded_handle_json_response(self, response, read_stream_writer, *args, **kwargs):
         # Same parse, different transport shape (application/json bodies).
@@ -270,8 +284,14 @@ DEFAULT_MAX_EVENT_BYTES = 10 * 1024 * 1024
 DEFAULT_WARN_EVENT_BYTES = 1024 * 1024
 
 
-def _int_env(name: str, default: int) -> int:
-    """Read an int env var, falling back to *default* on unset/blank/garbage."""
+def int_env(name: str, default: int) -> int:
+    """Read an int env var, falling back to *default* on unset/blank/garbage.
+
+    Shared so that every MCP knob fails **safe** rather than open: a typo in a
+    manifest must not take a guard or a timeout backstop offline, which is
+    exactly what a bare ``int(os.getenv(...))`` does when the raised ValueError
+    is swallowed by a caller's broad ``except Exception``.
+    """
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -299,6 +319,6 @@ def install_mcp_size_guard_from_env() -> None:
     explicitly in its own manifest.
     """
     install_mcp_size_guard(
-        max_event_bytes=_int_env("MCP_SSE_MAX_EVENT_BYTES", DEFAULT_MAX_EVENT_BYTES),
-        warn_event_bytes=_int_env("MCP_SSE_WARN_EVENT_BYTES", DEFAULT_WARN_EVENT_BYTES),
+        max_event_bytes=int_env("MCP_SSE_MAX_EVENT_BYTES", DEFAULT_MAX_EVENT_BYTES),
+        warn_event_bytes=int_env("MCP_SSE_WARN_EVENT_BYTES", DEFAULT_WARN_EVENT_BYTES),
     )

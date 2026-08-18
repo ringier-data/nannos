@@ -32,6 +32,7 @@ from ringier_a2a_sdk.utils.mcp_guard import (
     _utf8_size,
     install_mcp_size_guard,
     install_mcp_size_guard_from_env,
+    int_env,
 )
 
 CAP = 1000
@@ -378,3 +379,78 @@ def test_from_env_actually_installs_the_guard(monkeypatch):
     monkeypatch.setenv("MCP_SSE_WARN_EVENT_BYTES", str(WARN))
     install_mcp_size_guard_from_env()
     assert getattr(sdk.StreamableHTTPTransport._handle_sse_event, "_nannos_mcp_guard", False)
+
+
+# ── original_request_id routing ───────────────────────────────────────────────
+#
+# The SDK rewrites a response's id to ``original_request_id`` on the
+# resumption/reconnect path (``_handle_sse_event``). A rejection routed by the
+# id scraped from the payload would then name the PRE-resumption request and
+# match nothing — hanging the very request it is supposed to fail.
+
+
+@pytest.mark.asyncio
+async def test_rejection_uses_original_request_id_when_the_sdk_supplies_one(real_transport):
+    from mcp.types import JSONRPCError
+
+    t = real_transport()
+    send, recv = anyio.create_memory_object_stream(10)
+    # payload says id=1; the SDK is resuming request id=99
+    payload = '{"jsonrpc":"2.0","id":1,"result":{"pad":"' + "x" * (CAP + 1) + '"}}'
+    complete = await t._handle_sse_event(sse(payload), send, 99)
+    assert complete is True
+    delivered = await drain_one(recv)
+    assert isinstance(delivered.message.root, JSONRPCError)
+    assert delivered.message.root.id == 99, "must route to the SDK's id, not the payload's"
+
+
+@pytest.mark.asyncio
+async def test_rejection_falls_back_to_the_scraped_id(real_transport):
+    """Without a resumption id the payload scrape is still the right answer."""
+    from mcp.types import JSONRPCError
+
+    t = real_transport()
+    send, recv = anyio.create_memory_object_stream(10)
+    payload = '{"jsonrpc":"2.0","id":7,"result":{"pad":"' + "x" * (CAP + 1) + '"}}'
+    await t._handle_sse_event(sse(payload), send)
+    delivered = await drain_one(recv)
+    assert isinstance(delivered.message.root, JSONRPCError)
+    assert delivered.message.root.id == 7
+
+
+@pytest.mark.asyncio
+async def test_original_request_id_is_forwarded_on_the_pass_through_path(real_transport):
+    """Under the cap the SDK must still receive the id, or it cannot rewrite it."""
+    from mcp.types import JSONRPCResponse
+
+    t = real_transport()
+    send, recv = anyio.create_memory_object_stream(10)
+    await t._handle_sse_event(sse(SMALL_RESULT), send, 42)
+    delivered = await drain_one(recv)
+    assert isinstance(delivered.message.root, JSONRPCResponse)
+    assert delivered.message.root.id == 42, "guard must not swallow the SDK's id rewrite"
+
+
+# ── int_env ───────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, 120),
+        ("", 120),
+        ("   ", 120),
+        ("nope", 120),
+        ("30s", 120),
+        ("0", 0),
+        ("45", 45),
+        (" 45 ", 45),
+    ],
+)
+def test_int_env_fails_safe(monkeypatch, raw, expected):
+    """A typo must fall back to the default, never raise into the caller."""
+    if raw is None:
+        monkeypatch.delenv("SOME_KNOB", raising=False)
+    else:
+        monkeypatch.setenv("SOME_KNOB", raw)
+    assert int_env("SOME_KNOB", 120) == expected
