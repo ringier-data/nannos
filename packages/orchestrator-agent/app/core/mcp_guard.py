@@ -7,12 +7,11 @@ tool results mid-turn, code-mode sessions — is parsed by the MCP SDK with
 7x into live pydantic objects, and several parses run concurrently, so a
 single oversized payload can OOM the pod.
 
-This is not hypothetical: in prod, one gateway server answered ``tools/list``
-with a 21.9 MB single event; cold-cache turns peaked at 2.3-4.2 GB RSS and the
-pod was OOMKilled repeatedly (2026-08-15/17, see
-alloy-ch/rcplus-alloy-infrastructure-agents#241). Nothing named the offending
-server, so the failure surfaced as an unexplained pod kill instead of a config
-error.
+This is not hypothetical: one gateway server answered ``tools/list`` with a
+21.9 MB single event; cold-cache turns peaked at 2.3-4.2 GB RSS and the pod was
+OOMKilled repeatedly. Nothing named the offending server, so the failure
+surfaced as an unexplained pod kill instead of a config error. The full
+write-up is in ringier-data/nannos#152.
 
 The guard wraps the transport's two inbound parse paths process-wide — the SDK
 offers no hook at the parse site — and does two things:
