@@ -29,8 +29,11 @@ immediately while normal runs stay fast. They previously used ``--ignore``,
 which hid the directory entirely — an a2a-sdk migration broke an import in
 ``test_a2a_streaming.py`` and nothing noticed for months.
 
-When no gateway is reachable, ``pytest_collection_modifyitems`` below skips the
-directory with a reason that says so, rather than failing mid-call.
+Because a marker expression is last-wins, that default alone is not a spend
+guard: ``-m slow`` would replace it and select exactly this directory. So
+``pytest_collection_modifyitems`` below *also* requires the tier to be asked for
+explicitly — ``-m integration`` or ``RUN_INTEGRATION_TESTS=1`` — and skips when
+no gateway is reachable, rather than failing mid-call.
 """
 
 import logging
@@ -178,6 +181,7 @@ from app.core.agent import OrchestratorDeepAgent
 from app.core.graph_factory import GraphFactory
 from app.models.config import AgentSettings, UserConfig
 from tests.support.eval_report import EvalSession, min_pass_ratio
+from tests.support.marker_gate import ENV_OPT_IN, integration_requested
 from tests.support.mock_subagents import MockSubAgent, mock_subagents
 from tests.support.usage import UsageRecorder
 
@@ -336,30 +340,48 @@ def integration_environment():
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip this directory's tests when there is no gateway to talk to.
+    """Skip this directory unless it was asked for *and* a gateway is reachable.
 
-    Done at collection rather than in a fixture so the skip lands before the
-    langsmith plugin's per-test setup, which otherwise runs (and can fail) first.
-    Only items under this directory are touched — the hook is handed the whole
-    session's items regardless of which conftest defines it.
+    Two independent guards, both applied at collection rather than in a fixture
+    so the skip lands before the langsmith plugin's per-test setup, which
+    otherwise runs (and can fail) first. Only items under this directory are
+    touched — the hook is handed the whole session's items regardless of which
+    conftest defines it.
+
+    1. **Opt-in.** A user-supplied ``-m`` replaces the ``not integration``
+       default outright, and every module here also carries ``slow``, so a
+       casual ``pytest -m slow`` would otherwise make real, billable LLM calls.
+       See ``tests/support/marker_gate`` for how intent is read.
+    2. **Reachable gateway.** Skip with a reason that says so, rather than
+       failing mid-call.
     """
-    if GATEWAY_AVAILABLE:
-        return
-
     here = Path(__file__).parent
-    skip = pytest.mark.skip(
+    markexpr = getattr(config.option, "markexpr", "")
+
+    not_requested = pytest.mark.skip(
+        reason=(
+            "Integration tier not requested. Run it with `-m integration`, or set "
+            f"{ENV_OPT_IN}=1 when selecting these tests by path or keyword."
+        )
+    )
+    no_gateway = pytest.mark.skip(
         reason=(
             "No Model Gateway. Start one with ./scripts/start-local.sh and set "
             "LLM_GATEWAY_URL / LLM_GATEWAY_API_KEY in packages/orchestrator-agent/.env"
         )
     )
+
     for item in items:
         try:
             item_path = Path(str(item.fspath))
         except Exception:
             continue
-        if here in item_path.parents:
-            item.add_marker(skip)
+        if here not in item_path.parents:
+            continue
+        if not integration_requested(markexpr, [m.name for m in item.iter_markers()]):
+            item.add_marker(not_requested)
+        elif not GATEWAY_AVAILABLE:
+            item.add_marker(no_gateway)
 
 
 # ---------------------------------------------------------------------------

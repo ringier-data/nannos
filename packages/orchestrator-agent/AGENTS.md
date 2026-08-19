@@ -171,6 +171,15 @@ in `addopts`. They used to be hidden with `--ignore`, which let an a2a-sdk migra
 break three imports in `tests/integration/` unnoticed for months. Never go back to
 `--ignore`: breakage must be visible even when the tests don't run.
 
+That default is a convenience, **not** the spend guard. `-m` is last-wins, so any
+user-supplied expression replaces it, and every integration module also carries
+`slow` — so `-m slow` would select the integration directory and nothing else.
+`tests/integration/conftest.py` therefore also requires the tier to be *requested*:
+`-m integration`, or `RUN_INTEGRATION_TESTS=1` when selecting by path or keyword.
+The predicate lives in `tests/support/marker_gate.py` and is pinned by
+`tests/test_marker_gate.py`; it fails closed, since a skipped test is cheaper than
+a surprise bill.
+
 - Mock A2A transport for sub-agent communication tests
 - Use real graph execution for middleware integration tests
 - Test HITL interrupt flow end-to-end

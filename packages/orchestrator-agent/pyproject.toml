@@ -83,6 +83,11 @@ addopts = [
     # real, billable LLM calls. Run them with:  uv run pytest -m integration
     # They previously used --ignore, which hid the whole directory from
     # collection — an a2a-sdk migration broke an import there and nothing noticed.
+    #
+    # This default is *not* the spend guard: -m is last-wins, so any user-supplied
+    # expression replaces it, and every integration module also carries `slow`.
+    # tests/integration/conftest.py additionally requires the tier to be asked for
+    # explicitly, so `-m slow` skips it instead of billing. See tests/support/marker_gate.
     "-m",
     "not integration",
 ]
