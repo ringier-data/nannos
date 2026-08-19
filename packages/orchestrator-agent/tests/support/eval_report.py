@@ -63,8 +63,22 @@ class EvalSession:
 
     records: dict[str, TestRecord] = field(default_factory=dict)
 
+    # Every failing nodeid in the session, mapped to the phase it failed in —
+    # including tests this gate does not judge. The ratio may only downgrade an
+    # exit status it can actually speak for; see ``unaccounted_problems``.
+    problems: dict[str, str] = field(default_factory=dict)
+
     def record_for(self, nodeid: str) -> TestRecord:
         return self.records.setdefault(nodeid, TestRecord(nodeid=nodeid))
+
+    def note_problem(self, nodeid: str, when: str) -> None:
+        """Remember that *nodeid* failed during the *when* phase.
+
+        Called for every failing report in the session, whatever the directory
+        or phase. The first phase seen wins: a setup error is the more useful
+        label than the teardown noise that may follow it.
+        """
+        self.problems.setdefault(nodeid, when)
 
     # -- Aggregates ---------------------------------------------------------
 
@@ -97,6 +111,40 @@ class EvalSession:
     @property
     def total_duration(self) -> float:
         return sum(r.duration for r in self.records.values())
+
+    @property
+    def unaccounted_problems(self) -> list[str]:
+        """Failing nodeids the ratio gate cannot speak for.
+
+        The ratio is evidence about one thing: how often a sampled, tolerably
+        flaky integration test passes. Two kinds of failure are not that, and
+        must never be absolved by it:
+
+        - **Errors outside the call phase.** A fixture that raises in setup
+          produces no call report, so the test is never sampled and never enters
+          the ratio at all. A fixture regression erroring a whole module would
+          otherwise vanish while the surviving tests carried the ratio.
+        - **Anything not under gating.** In a mixed run, unit-test failures are
+          deterministic and have nothing to do with sampling noise.
+
+        Strict failures land here too. ``gate_failure_reason`` already fails on
+        them, so this is redundant rather than load-bearing — but the redundancy
+        is the point: two independent reasons to keep a red run red.
+        """
+        tolerated = {r.nodeid for r in self.failed if not r.strict}
+        return sorted(
+            nodeid
+            for nodeid, when in self.problems.items()
+            if when != "call" or nodeid not in tolerated
+        )
+
+    def may_downgrade_exit_status(self) -> bool:
+        """Whether a failing session may be reported as green.
+
+        Requires both that the gate itself passes *and* that every failure in
+        the session is one the gate sampled.
+        """
+        return self.gate_failure_reason() is None and not self.unaccounted_problems
 
     def gate_failure_reason(self) -> str | None:
         """Why the session should fail, or None if it passes the gate.
@@ -159,6 +207,7 @@ class EvalSession:
             "passed": len(self.passed),
             "failed": len(self.failed),
             "judged": len(self.judged),
+            "unaccounted_problems": self.unaccounted_problems,
             "total_duration_seconds": round(self.total_duration, 2),
             "total_tokens": self.total_tokens,
             "tests": [

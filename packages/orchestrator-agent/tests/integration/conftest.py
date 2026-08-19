@@ -584,7 +584,16 @@ def usage_recorder(request):
 
 
 def pytest_runtest_logreport(report):
-    """Collect outcome and duration for the tests under gating."""
+    """Collect outcome and duration for the tests under gating.
+
+    Every failure is also noted, in any phase and any directory, because
+    ``pytest_sessionfinish`` may only downgrade an exit status the ratio can
+    speak for. A setup error produces no call report at all, so without this it
+    would never be seen by the gate.
+    """
+    if report.failed:
+        _EVAL.note_problem(report.nodeid, report.when)
+
     if report.when != "call" or not _is_integration(report.nodeid):
         return
     record = _EVAL.record_for(report.nodeid)
@@ -608,8 +617,19 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_line(f"report written to {artifact}")
 
     reason = _EVAL.gate_failure_reason()
+    unaccounted = _EVAL.unaccounted_problems
     if reason:
         terminalreporter.write_line(f"GATE FAILED: {reason}")
+    elif unaccounted:
+        # The ratio passed but the run stays red. Say why, or this looks like a
+        # bug in the gate rather than the point of it.
+        terminalreporter.write_line(
+            f"GATE PASSED on ratio, but {len(unaccounted)} failure(s) are outside it "
+            "— fixture errors never reach the call phase, and non-integration tests "
+            "are not sampled. Exit status left as-is:"
+        )
+        for nodeid in unaccounted:
+            terminalreporter.write_line(f"  {nodeid} ({_EVAL.problems[nodeid]})")
     elif _EVAL.failed:
         # Say this loudly. A green run that contains failures is surprising, and
         # silence here would look like the failures were never noticed.
@@ -625,16 +645,24 @@ def pytest_sessionfinish(session, exitstatus):
 
     Only takes over when the run was actually judging integration tests, so a
     normal unit-test run keeps pytest's own exit status untouched.
+
+    Downgrading a red run to green is the dangerous direction, so it needs more
+    than a passing ratio: every failure in the session must be one the ratio
+    actually sampled. A fixture error never reaches the call phase, and a mixed
+    run can contain deterministic unit failures — neither is sampling noise, and
+    absolving them would turn a real regression green in CI. See
+    ``EvalSession.unaccounted_problems``.
     """
     if not _EVAL.judged:
         return
 
     if _EVAL.gate_failure_reason():
         session.exitstatus = 1
-    elif exitstatus == 1:
-        # Ratio met: the failures present are tolerated sampling noise. Only
-        # override a plain test-failure status — leave collection errors,
-        # interrupts and internal errors alone.
+        return
+
+    # Only ever override a plain test-failure status — leave collection errors,
+    # interrupts and internal errors alone.
+    if exitstatus == 1 and _EVAL.may_downgrade_exit_status():
         session.exitstatus = 0
 
 
