@@ -64,16 +64,25 @@ def expression_requires_marker(
     if not expression:
         return False
 
+    without_marker = {name for name in item_markers if name != marker}
+    # Exactly False, not merely falsy: `_evaluate` returns None when it cannot
+    # answer, and that must read as "not requested" rather than as "requested".
+    return _evaluate(expression, without_marker) is False
+
+
+def _evaluate(markexpr: str, markers: Iterable[str]) -> bool | None:
+    """Evaluate *markexpr* against *markers*, or None if it cannot be evaluated.
+
+    Uses pytest's own expression compiler, which is private. If it ever moves,
+    callers see None and fail closed rather than guessing.
+    """
     try:
         from _pytest.mark.expression import Expression
 
-        compiled = Expression.compile(expression)
-        without_marker = {name for name in item_markers if name != marker}
-        return not compiled.evaluate(lambda name: name in without_marker)
+        present = set(markers)
+        return Expression.compile(markexpr).evaluate(lambda name: name in present)
     except Exception:
-        # Private pytest API. If it ever moves, degrade to "not requested"
-        # rather than to a surprise bill.
-        return False
+        return None
 
 
 def integration_requested(markexpr: str | None, item_markers: Iterable[str]) -> bool:
@@ -81,3 +90,71 @@ def integration_requested(markexpr: str | None, item_markers: Iterable[str]) -> 
     return env_opt_in() or expression_requires_marker(
         "integration", markexpr, item_markers
     )
+
+
+# ---------------------------------------------------------------------------
+# The same question, asked before collection
+# ---------------------------------------------------------------------------
+# The integration conftest probes the gateway over the network at *import* time,
+# because parametrize needs the model list while collecting. That import happens
+# on every run — the directory is collected, not ignored — so a developer with
+# gateway coordinates in .env paid for a live HTTP fetch on every unit run:
+# measured +4.8s when the hostname does not resolve, since DNS is not bounded by
+# the 2s socket timeout. Skipping the probe when the tier was never asked for
+# needs the answer before any item exists to inspect, hence the two helpers below.
+
+_MARKEXPR: str | None = None
+
+# What integration items actually carry: `pytest.mark.integration` and
+# `pytest.mark.slow` from the integration conftest's `pytestmark`, `asyncio` from
+# asyncio_mode=auto, and `langsmith` on some modules.
+_INTEGRATION_MARKER_SETS = (
+    frozenset({"integration", "slow", "asyncio"}),
+    frozenset({"integration", "slow", "asyncio", "langsmith"}),
+)
+
+
+def remember_markexpr(markexpr: str | None) -> None:
+    """Stash the session's ``-m`` expression for code that runs before collection.
+
+    Called from the root ``tests/conftest.py``, which is the only hook point
+    guaranteed to run *before* ``tests/integration/conftest.py`` is imported —
+    verified, not assumed. A subdirectory conftest cannot read ``config`` at
+    module scope, and by the time its own ``pytest_configure`` fires the import
+    has already happened.
+    """
+    global _MARKEXPR
+    _MARKEXPR = markexpr
+
+
+def markexpr_requests_integration(markexpr: str | None) -> bool:
+    """Could *any* integration item be requested by *markexpr*?
+
+    The pre-collection counterpart to ``integration_requested``. With no items
+    to inspect, it asks over the marker sets integration items are known to
+    carry and errs toward True: a false positive costs one gateway probe, while
+    a false negative would break ``-m integration`` outright.
+
+    Each candidate set must *match* the expression before being asked whether
+    ``integration`` was load-bearing in that match. Skipping that check would
+    ask a vacuous question — ``-m langsmith`` against a marker set with no
+    ``langsmith`` in it — and answer "requested" for a run that selects nothing
+    here at all.
+    """
+    if env_opt_in():
+        return True
+
+    expression = (markexpr or "").strip()
+    if not expression:
+        return False
+
+    return any(
+        _evaluate(expression, markers) is True
+        and expression_requires_marker("integration", expression, markers)
+        for markers in _INTEGRATION_MARKER_SETS
+    )
+
+
+def integration_possibly_requested() -> bool:
+    """As ``markexpr_requests_integration``, for the remembered session expression."""
+    return markexpr_requests_integration(_MARKEXPR)

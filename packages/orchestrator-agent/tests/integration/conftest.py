@@ -126,7 +126,11 @@ from app.core.agent import OrchestratorDeepAgent
 from app.core.graph_factory import GraphFactory
 from app.models.config import AgentSettings, UserConfig
 from tests.support.eval_report import EvalSession, min_pass_ratio
-from tests.support.marker_gate import ENV_OPT_IN, integration_requested
+from tests.support.marker_gate import (
+    ENV_OPT_IN,
+    integration_possibly_requested,
+    integration_requested,
+)
 from tests.support.mock_subagents import MockSubAgent, mock_subagents
 from tests.support.usage import UsageRecorder
 
@@ -170,7 +174,20 @@ def _discover_models() -> list[ModelType]:
 
     ``get_available_models`` swallows fetch failures and returns an empty registry,
     so a down gateway costs one ~2s timeout at collection, not an error.
+
+    Skipped outright when nothing asked for this tier. Otherwise every plain unit
+    run pays for a live HTTP fetch, which the marker-based selection made
+    unavoidable: the directory is collected rather than ignored, so this module
+    is imported whether or not its tests will run. Measured at +4.8s when the
+    gateway hostname does not resolve — DNS is not bounded by the socket timeout.
+    Returning an empty list is already the well-trodden path, identical to a
+    gateway being down: parametrized tests report an empty parameter set and the
+    collection hook skips the directory as not requested.
     """
+    if not integration_possibly_requested():
+        logger.debug("Integration tier not requested — skipping gateway discovery.")
+        return []
+
     saved = {k: os.environ.get(k) for k in GATEWAY_KEYS}
     os.environ.update(_gateway_env_from_files())
     try:

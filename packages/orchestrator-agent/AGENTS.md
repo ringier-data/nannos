@@ -180,6 +180,15 @@ The predicate lives in `tests/support/marker_gate.py` and is pinned by
 `tests/test_marker_gate.py`; it fails closed, since a skipped test is cheaper than
 a surprise bill.
 
+The same predicate keeps the unit loop network-free. Because the directory is
+collected, `tests/integration/conftest.py` is *imported* on every run — and it
+probes the gateway at import, since parametrize needs the model list while
+collecting. That probe is now skipped unless the tier was requested (+4.8s
+otherwise, when the gateway hostname does not resolve — DNS is not bounded by the
+2s socket timeout). It has to be decided before collection, so the root
+`tests/conftest.py` stashes the `-m` expression in `pytest_configure`: that is the
+only hook that runs before a subdirectory conftest is imported. Keep it there.
+
 - Mock A2A transport for sub-agent communication tests
 - Use real graph execution for middleware integration tests
 - Test HITL interrupt flow end-to-end
