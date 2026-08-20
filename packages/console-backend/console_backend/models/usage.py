@@ -201,6 +201,7 @@ class UsageLog(BaseModel):
     scheduled_job_name: str | None = None
     catalog_id: str | None = None
     catalog_name: str | None = None
+    voice_session_id: str | None = None
     provider: str | None = None
     model_name: str | None = None
     total_cost_usd: Decimal
@@ -321,7 +322,7 @@ class UsageByConversation(BaseModel):
 
 
 class UsageByService(BaseModel):
-    """Usage breakdown by service type (orchestrator, catalog, scheduler)."""
+    """Usage breakdown by service type (voice, orchestrator, catalog, scheduler)."""
 
     service: str
     total_cost_usd: Decimal

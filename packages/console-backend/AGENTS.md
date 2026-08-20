@@ -477,6 +477,42 @@ functions — do not fold them back into one with a mode flag:
   that very prefix. An unroutable prefix is caught by the mandatory post-registration test call,
   which rolls it back.
 
+#### Voice-agent rate cards must be created by hand
+
+The voice agent calls Vertex AI directly, so its models are keyed on the real family
+`vertex_ai` — no exception needed — but nothing creates their cards: no rate cards are seeded
+(migration 076) and no registration flow runs for them, because they never touch the gateway.
+They must be created once per environment via the Rate Cards page or
+`POST /api/v1/admin/rate-cards/model`. Until then voice usage rows are written with correct
+units and attribution but cost **$0.00** (`calculate_cost` failure → `Decimal("0.00")`).
+
+Two cards, prices in USD per **million** tokens (Vertex Standard tier, verified 2026-08-19 at
+cloud.google.com/vertex-ai/generative-ai/pricing — the page lists the Live model as
+"Gemini 2.5 Flash Live API", never "native audio"):
+
+| provider | model_name | billing unit | flow | $/1M |
+|---|---|---|---|---|
+| `vertex_ai` | `gemini-live-2.5-flash-native-audio` | `audio_input_tokens` | input | 3.00 |
+| | | `audio_output_tokens` | output | 12.00 |
+| | | `base_input_tokens` | input | 0.50 |
+| | | `base_output_tokens` | output | 2.00 |
+| `vertex_ai` | `gemini-2.5-flash` | `base_input_tokens` | input | 0.30 |
+| (MCP tool risk scorer) | | `base_output_tokens` | output | 2.50 |
+| | | `cache_read_input_tokens` | input | 0.03 |
+
+`model_name` must match what the agent reports — `GEMINI_MODEL_ID` and
+`GEMINI_RISK_SCORER_MODEL` in `voice-agent/voice_agent/agent.py`.
+
+Deliberately unpriced: **`cache_read_input_tokens` on the Live model**. Vertex prints "N/A" for
+its cached-input column and the model is absent from the cache-storage table, so no rate exists
+to enter. `usage_metadata_to_billing_units` still reports the unit if Gemini ever returns
+`cached_content_token_count > 0` — that surfaces as a "missing rate card / partial cost" warning,
+which is the signal to go find the published rate, not a bug to silence.
+
+Both models have retirement dates (Live: 2026-12-13, flash: 2026-10-20). Cards are
+time-versioned, so a successor model needs its own card — usage on an unpriced model bills $0
+silently, and only the Rate Cards banner will say so.
+
 Do NOT key or "correct" a card from the gateway's
 `model_info.litellm_provider`: that is LiteLLM's cost-map *implementation tag*
 (`bedrock_converse`, `vertex_ai-language-models`, `vertex_ai-anthropic_models`) — a different

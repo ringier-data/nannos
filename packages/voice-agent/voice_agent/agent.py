@@ -114,6 +114,120 @@ SYSTEM_PROMPT = """
  """
 
 
+# ── Usage / cost metering ─────────────────────────────────────────────────────
+
+# Provider family the voice agent's spend is billed under. The calls go straight to
+# Vertex AI (not through the Model Gateway), so rate cards must be keyed on this.
+USAGE_PROVIDER = "vertex_ai"
+
+# Modality → billing unit. Audio units are priced separately from text on native-audio
+# models, so the modality split is what makes voice billable at all. Names match the
+# platform's existing units (see console-frontend/src/lib/billing-units.ts).
+_INPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_input_tokens", "TEXT": "base_input_tokens"}
+_OUTPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_output_tokens", "TEXT": "base_output_tokens"}
+
+# How to fold a session's successive usage reports into one billable total.
+#
+# Gemini Live reports the two sides with DIFFERENT semantics — measured on a real 10-turn
+# call (2026-09-01), not assumed:
+#
+#   response_token_count is a PER-TURN DELTA. It decreases between turns
+#     (250 → 118 → 112 → 28 → …), which a cumulative counter cannot do. Summing is the
+#     only correct fold; taking the last value dropped 71% of the output tokens.
+#
+#   prompt_token_count is a CUMULATIVE GAUGE of the context. It rises monotonically, and
+#     every rise equals (previous response + a little new audio) — i.e. the conversation
+#     being appended to the context and re-presented each turn. Its final value is
+#     therefore the total distinct input the model ever saw.
+#
+# So input-side units take the max and output-side units sum. `max` rather than `last`
+# because context-window compression (configured at 128k → 32k) can *shrink* the context
+# mid-call, and the tokens before a compression were still processed.
+_GAUGE_UNITS = frozenset({"audio_input_tokens", "base_input_tokens", "cache_read_input_tokens"})
+_DELTA_UNITS = frozenset({"audio_output_tokens", "base_output_tokens"})
+
+
+def fold_usage_into(totals: dict[str, int], units: dict[str, int]) -> None:
+    """Fold one usage report's billing units into a session's running totals.
+
+    Gauge units (input side) take the maximum seen; delta units (output side) accumulate.
+    An unrecognised unit accumulates — under-reporting spend is the worse failure.
+    """
+    for unit, count in units.items():
+        if unit in _GAUGE_UNITS:
+            totals[unit] = max(totals.get(unit, 0), count)
+        else:
+            totals[unit] = totals.get(unit, 0) + count
+
+
+def _accumulate_modalities(
+    details: list | None,
+    unit_by_modality: dict[str, str],
+    out: dict[str, int],
+) -> int:
+    """Fold a list of ModalityTokenCount into `out`. Returns the total counted."""
+    counted = 0
+    for detail in details or []:
+        token_count = getattr(detail, "token_count", None) or 0
+        if token_count <= 0:
+            continue
+        modality = getattr(detail, "modality", None)
+        # MediaModality is a str enum; normalise both enum and plain-str forms.
+        name = getattr(modality, "value", modality)
+        unit = unit_by_modality.get(str(name).upper())
+        if unit is None:
+            # An unpriced modality (IMAGE/VIDEO/DOCUMENT) — don't silently fold it into
+            # a text/audio bucket and mis-bill it.
+            logger.warning("Ignoring usage for unmapped modality %r (%d tokens)", name, token_count)
+            continue
+        out[unit] = out.get(unit, 0) + token_count
+        counted += token_count
+    return counted
+
+
+def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
+    """Convert a Gemini ``UsageMetadata`` into a billing-unit breakdown.
+
+    Prefers the per-modality detail lists so audio and text tokens are billed at their
+    own rates. Falls back to the flat prompt/response counts as text units when the
+    detail lists are absent — under-reporting audio would be worse than approximating.
+
+    Zero counts are omitted: the backend rejects non-positive unit counts.
+    """
+    if usage_metadata is None:
+        return {}
+
+    breakdown: dict[str, int] = {}
+
+    prompt_counted = _accumulate_modalities(
+        getattr(usage_metadata, "prompt_tokens_details", None), _INPUT_UNIT_BY_MODALITY, breakdown
+    )
+    response_counted = _accumulate_modalities(
+        getattr(usage_metadata, "response_tokens_details", None), _OUTPUT_UNIT_BY_MODALITY, breakdown
+    )
+
+    if not prompt_counted:
+        prompt_total = getattr(usage_metadata, "prompt_token_count", None) or 0
+        if prompt_total > 0:
+            breakdown["base_input_tokens"] = breakdown.get("base_input_tokens", 0) + prompt_total
+    if not response_counted:
+        response_total = getattr(usage_metadata, "response_token_count", None) or 0
+        if response_total > 0:
+            breakdown["base_output_tokens"] = breakdown.get("base_output_tokens", 0) + response_total
+
+    # Tool-use prompt tokens are billed as ordinary input; they are reported separately
+    # by the API but priced the same.
+    tool_use = getattr(usage_metadata, "tool_use_prompt_token_count", None) or 0
+    if tool_use > 0:
+        breakdown["base_input_tokens"] = breakdown.get("base_input_tokens", 0) + tool_use
+
+    cached = getattr(usage_metadata, "cached_content_token_count", None) or 0
+    if cached > 0:
+        breakdown["cache_read_input_tokens"] = cached
+
+    return {unit: count for unit, count in breakdown.items() if count > 0}
+
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 
@@ -225,8 +339,13 @@ async def _llm_score_tool_risk(
     name: str,
     description: str,
     input_schema: dict,
+    usage_sink: dict[str, int] | None = None,
 ) -> float:
-    """Use Gemini Flash to score a tool's write risk. Returns 0.0–1.0."""
+    """Use Gemini Flash to score a tool's write risk. Returns 0.0–1.0.
+
+    When `usage_sink` is given, this call's token usage is accumulated into it (per-call
+    deltas, so they sum). This is real Vertex spend that bypasses the Model Gateway.
+    """
     schema_str = (
         json.dumps(input_schema, indent=2) if input_schema else "No schema available"
     )
@@ -243,6 +362,13 @@ async def _llm_score_tool_risk(
             response_mime_type="application/json",
         ),
     )
+    if usage_sink is not None:
+        # Distinct one-shot generate_content calls, so every unit here is a true delta —
+        # fold_usage_into's gauge rule must NOT apply. Accumulate directly.
+        for unit, count in usage_metadata_to_billing_units(
+            getattr(response, "usage_metadata", None)
+        ).items():
+            usage_sink[unit] = usage_sink.get(unit, 0) + count
     data = json.loads(response.text)
     return float(data["score"])
 
@@ -252,6 +378,7 @@ async def _score_tool_risk(
     name: str,
     description: str,
     input_schema: dict,
+    usage_sink: dict[str, int] | None = None,
 ) -> float:
     """Return write-risk score for an MCP tool (0.0–1.0).
 
@@ -262,7 +389,7 @@ async def _score_tool_risk(
         return cached
 
     try:
-        score = await _llm_score_tool_risk(client, name, description, input_schema)
+        score = await _llm_score_tool_risk(client, name, description, input_schema, usage_sink)
         logger.debug("Tool %r LLM risk score: %.2f", name, score)
     except Exception:
         logger.warning(
@@ -449,6 +576,55 @@ class GeminiLiveAgent:
         self.mcp_status: asyncio.Future[bool] | None = None
         # Updated during the session when Gemini sends resumption handle updates.
         self.latest_resumption_handle: str | None = session_resumption_handle
+        # Billable totals for the Live session, folded per `fold_usage_into` (input side
+        # is a gauge → max, output side is a delta → sum; measured, not assumed).
+        self.live_usage_totals: dict[str, int] = {}
+        # Tool risk-scoring spend (a separate model, direct to Vertex). These ARE
+        # per-call deltas, so they accumulate.
+        self.risk_scorer_usage: dict[str, int] = {}
+
+    def build_usage_entries(self) -> list[dict]:
+        """Return the session's measured spend as voice-usage report entries.
+
+        One entry per model: the Live session, plus the tool risk-scorer when it made
+        any calls (a warm process reuses _TOOL_RISK_CACHE and scores nothing, so an
+        empty risk-scorer breakdown is normal, not a failure). Entries with no units are
+        omitted — the backend rejects empty/zero breakdowns.
+        """
+        entries: list[dict] = []
+
+        live_units = {unit: count for unit, count in self.live_usage_totals.items() if count > 0}
+        if live_units:
+            entries.append(
+                {
+                    "provider": USAGE_PROVIDER,
+                    "model_name": self.model_id,
+                    "billing_unit_breakdown": live_units,
+                }
+            )
+        else:
+            logger.warning(
+                "No Gemini Live usage captured for session %s — this call will bill $0",
+                self.session_id,
+            )
+
+        risk_units = {unit: count for unit, count in self.risk_scorer_usage.items() if count > 0}
+        if risk_units:
+            entries.append(
+                {
+                    "provider": USAGE_PROVIDER,
+                    "model_name": _RISK_SCORER_MODEL,
+                    "billing_unit_breakdown": risk_units,
+                }
+            )
+
+        if entries:
+            logger.info(
+                "Voice session %s billed usage: %s",
+                self.session_id,
+                {e["model_name"]: e["billing_unit_breakdown"] for e in entries},
+            )
+        return entries
 
     async def _init_mcp_tools(
         self,
@@ -479,7 +655,10 @@ class GeminiLiveAgent:
         if to_score:
             await asyncio.gather(
                 *(
-                    _score_tool_risk(client, t.name, t.description or "", dict(t.inputSchema or {}))
+                    _score_tool_risk(
+                        client, t.name, t.description or "", dict(t.inputSchema or {}),
+                        self.risk_scorer_usage,
+                    )
                     for t in to_score
                 ),
                 return_exceptions=True,
@@ -513,8 +692,11 @@ class GeminiLiveAgent:
                 continue
             raw_schema = dict(tool.inputSchema or {})
             logger.debug("MCP tool schema for %r: %s", tool.name, raw_schema)
+            # Normally a cache hit from the pre-scoring gather above; still passes the
+            # sink because a tool whose pre-score raised (swallowed by
+            # return_exceptions) makes a real LLM call here.
             risk_score = await _score_tool_risk(
-                client, tool.name, tool.description or "", raw_schema
+                client, tool.name, tool.description or "", raw_schema, self.risk_scorer_usage
             )
             is_risky = risk_score >= _WRITE_RISK_THRESHOLD
             declarations.append(
@@ -1005,6 +1187,31 @@ class GeminiLiveAgent:
                                 await event_out.put(
                                     {"type": "session_resumption_handle", "handle": handle}
                                 )
+
+                        # ── Usage metadata ────────────────────────────────
+                        # Also a TOP-LEVEL field, and usage-only messages carry no
+                        # server_content and no tool_call — so this must stay above the
+                        # `if sc is None: continue` below, which would otherwise discard
+                        # every usage report and leave voice calls billing $0.
+                        #
+                        # Folded per report rather than snapshotted: the input and output
+                        # sides have different semantics (see fold_usage_into). DEBUG
+                        # because this fires every turn — build_usage_entries logs the
+                        # billed total once per call at INFO.
+                        usage = getattr(response, "usage_metadata", None)
+                        if usage is not None:
+                            fold_usage_into(
+                                self.live_usage_totals,
+                                usage_metadata_to_billing_units(usage),
+                            )
+                            logger.debug(
+                                "Gemini usage: prompt=%s response=%s (turn=%d) → billable %s",
+                                getattr(usage, "prompt_token_count", None),
+                                getattr(usage, "response_token_count", None),
+                                turn,
+                                self.live_usage_totals,
+                            )
+
 
                         # ── Tool calls ───────────────────────────────────
                         # Dispatch each call as a background task so the

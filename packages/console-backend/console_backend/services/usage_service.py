@@ -71,6 +71,7 @@ class UsageService:
         sub_agent_config_version_id: int | None = None,
         langsmith_run_id: str | None = None,
         langsmith_trace_id: str | None = None,
+        voice_session_id: str | None = None,
     ) -> int:
         """
         Log usage with automatic cost calculation.
@@ -87,6 +88,8 @@ class UsageService:
             sub_agent_config_version_id: Optional sub-agent config version ID
             langsmith_run_id: Optional LangSmith run ID
             langsmith_trace_id: Optional LangSmith trace ID
+            voice_session_id: Optional voice session (phone call) ID — also the
+                discriminator that classifies the row under the 'voice' service
 
         Returns:
             ID of created usage log
@@ -142,6 +145,7 @@ class UsageService:
             sub_agent_config_version_id=sub_agent_config_version_id,
             langsmith_run_id=langsmith_run_id,
             langsmith_trace_id=langsmith_trace_id,
+            voice_session_id=voice_session_id,
         )
 
         logger.info(
