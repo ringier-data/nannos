@@ -469,6 +469,7 @@ function CreateJobDialog({
                     job_type: v as JobType,
                     sub_agent_id: '',
                     voice_call: false,
+                    prompt: '',
                   }))
                 }
               >
