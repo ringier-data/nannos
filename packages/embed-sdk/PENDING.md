@@ -98,25 +98,32 @@ tool result. Protocol change (agent-common + orchestrator + SDK).
 
 ---
 
-## 5. 🟡 client-action kind parity across the three copies
+## 5. ✅ client-action kind parity across the three copies — DONE
 
-**Problem.** The client-action directive `kind`s live in **three** places that
-must stay in lockstep (see `a2a-extensions.json` `_clientActionKindsComment`):
-1. `agent-common` `client_action_tool.py` — the tool's arg schema (what the agent can emit),
-2. `embed-sdk` `schemas.ts` — the widget's zod boundary (what the client accepts),
-3. the risk scorer — a deterministic score per kind.
+**Was.** The directive `kind`s live in three places that must stay in lockstep
+(see `a2a-extensions.json` `_clientActionKindsComment`): the tool's arg schema
+(`agent-common` `client_action_tool.py`), the widget's zod boundary (`embed-sdk`
+`schemas.ts`), and the risk scorer's per-kind score. A kind in the tool but not
+the zod union is emitted by the agent, refused client-side, and reported to the
+user as done — silent. Prose comments were the only guard.
 
-A kind added to the Python tool but missing from the zod union is **emitted by
-the agent, refused client-side, and reported to the user as done** — a silent
-correctness failure. Today only prose comments guard this.
+**Now.** `a2a-extensions.json` `clientActionKinds` is the canonical list and both
+languages pin against it in CI:
+- `embed-sdk` `src/core/schemas.test.ts` — introspects the zod discriminated
+  union's literals and asserts set equality with the registry.
+- `agent-common` `tests/test_client_action_conformance.py` — same for the tool's
+  `Literal`, plus every registry kind has a deterministic risk score. Extra
+  pre-listed scorer kinds are allowed on purpose (unknown kinds fail safe to the
+  gating default), so a kind can be scored before it is live.
 
-**Plan.** Make the parity enforceable, not documented: a single source of truth
-for the kind list (or a test that asserts the three sets are equal + the scorer
-has an entry per kind). Cheapest: a CI test in agent-common that imports the kind
-list and cross-checks the scorer, plus an embed-sdk test pinning the zod union to
-the same list (via `a2a-extensions.json` as the canonical list).
+The extension URNs are pinned the same way in four copies (`extensions.test.ts`
+here, orchestrator and console-backend `test_a2a_extensions_conformance.py`).
 
-**Effort.** Small. High value — turns a silent footgun into a failing test.
+**Still open.** Adding a kind is now a failing test rather than a silent bug, but
+it is not yet *one* edit: a new kind means touching the registry, both copies, the
+scorer, `executeClientAction`'s switch and a host hook. `refresh` (see CONTEXT.md
+— designed, scored, deliberately not in the registry) is the next one to land and
+is a feature, not a parity fix: it needs a host-side re-render contract.
 
 ---
 
@@ -169,10 +176,11 @@ prop-threading is a documented footgun.
 
 ## Recommended order
 
-1. **#5 kind parity** — cheap, removes a silent correctness footgun. Do first.
+1. ~~**#5 kind parity**~~ — done, pinned in CI in both languages.
 2. **#2 theming** — the "feels native" finish; small, embed-local.
 3. **#4 apply self-correction** and **#3 auth preset** — larger, schedule as
-   protocol/infra work lands.
+   protocol/infra work lands. #4 is now the top silent-failure item: the host can
+   see rejections (`onApplyResult`), the agent still cannot.
 4. **#6/#7/#8** — opportunistic.
 5. **#1 i18n** — real, but **not embed-local**: fold into a Nannos-wide i18n
    effort so the console and embed share one solution. Only do a tactical embed
