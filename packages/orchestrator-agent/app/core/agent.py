@@ -87,10 +87,11 @@ _ACTIVITY_LOG_EXCLUDED_TOOLS: frozenset[str] = frozenset(
 def _extract_scheduled_run_provenance(message_parts: list[Part]) -> dict[str, Any] | None:
     """Extract scheduled-run provenance from an incoming DataPart, if present.
 
-    Chat clients forward the first reply under a delivered scheduled-run
-    notification with a DataPart ``{"scheduled_run": {...}}`` carrying the
-    run's own A2A contextId and the job/run/sub-agent that produced it
-    (see client-slack's messageHandler). The run's contextId names the
+    Implements the request side of SCHEDULED_RUN_CONTEXT_EXTENSION (see
+    app.core.a2a_extensions for the contract): chat clients forward replies
+    under a delivered scheduled-run notification with a DataPart
+    ``{"scheduled_run": {...}}`` carrying the run's own A2A contextId and the
+    job/run/sub-agent that produced it. The run's contextId names the
     sub-agent's conversation on agent-runner — it is provenance data, never
     this conversation's contextId.
     """

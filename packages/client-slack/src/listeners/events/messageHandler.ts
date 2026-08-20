@@ -645,7 +645,10 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     // Reply under a delivered scheduled-run notification: forward the run's
     // provenance as a DataPart so the orchestrator can reconstruct the
-    // delegation in the conversation it opens for this thread. Attached on
+    // delegation in the conversation it opens for this thread. This is the
+    // client side of urn:nannos:a2a:scheduled-run-context:1.0 (declared in the
+    // orchestrator's agent card; contract documented in the orchestrator's
+    // app/core/a2a_extensions.py). Attached on
     // EVERY thread reply that has a provenance row — the orchestrator injects
     // only on a conversation with no history, and it is the side that actually
     // knows whether history exists (a contextId stored here can belong to a
