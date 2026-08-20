@@ -251,9 +251,23 @@ Learned the hard way; each cost real debugging time.
   `list[CompiledSubAgent]` whose `runnable` is a `Runnable`, which no A2A runnable
   actually is; production only works because `executor.py` assigns after construction,
   bypassing validation. Passing them to the constructor raises.
-- **A turn is capped at ~6 model calls.** Each costs ~8 LangGraph super-steps because
-  every middleware hook is its own node, against `MAX_RECURSION_LIMIT=50`. Multi-step
-  scenarios can exhaust it even when the orchestrator behaves correctly.
+- **A turn's budget is counted in LangGraph super-steps, not model calls.** Every
+  middleware hook is its own graph node, so one model call costs several super-steps
+  and the affordable calls are
+  `(MAX_RECURSION_LIMIT - BASE_STEPS) // STEPS_PER_MODEL_CALL`. Multi-step scenarios
+  can exhaust the budget even when the orchestrator behaves correctly.
+
+  Read the current values from `AgentSettings.MAX_RECURSION_LIMIT`
+  (`app/models/config.py`, env-overridable) and the constants in
+  `tests/test_step_budget.py`. Deliberately not restated here: the last version of
+  this bullet hardcoded them and was wrong within one commit. Those constants are a
+  *pin* on measured behaviour — if the headroom assertion fails, a middleware was
+  added and the budget really did tighten. Fix the limit, not the test.
+
+  The current limit is a stopgap; the unit is wrong. Note also that
+  `MAX_RECURSION_LIMIT` is read from the same env var by `agent-runner`,
+  `agent-common` and `ringier-a2a-sdk`, each with a *different* built-in default —
+  so setting it to suit the orchestrator moves the others too.
 
 ### Adding a scenario
 
