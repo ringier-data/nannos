@@ -639,9 +639,11 @@ class AgentRunner(BaseAgent):
         # --- 2. Sub-agent execution (dispatched by type) ---
         if sub_agent_id:
             # For tasks, use the message_text as the prompt
-            # For watches with sub-agents, use a generic prompt (notification is separate)
+            # For watches with sub-agents, use the job's custom instruction when set
+            # (message_text carries the notification, which is separate)
             if job_type == "watch":
-                prompt = f"Watch condition triggered. Take appropriate action based on: {json.dumps(last_check_result, default=str)}"
+                instruction = (watch or {}).get("prompt") or "Take appropriate action based on the check result."
+                prompt = f"Watch condition triggered. {instruction}\n\nCheck result: {json.dumps(last_check_result, default=str)}"
             else:
                 prompt = message_text or "Execute your configured task."
 

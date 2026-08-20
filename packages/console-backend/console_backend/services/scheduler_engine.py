@@ -245,6 +245,9 @@ class SchedulerEngine:
                 "expected_value": job.expected_value,
                 "llm_condition": job.llm_condition,
                 "last_check_result": job.last_check_result,
+                # Custom instruction for the sub-agent triggered by the condition
+                # (agent-runner falls back to a generic instruction when unset).
+                "prompt": job.prompt or None,
             }
 
         # Select the appropriate message content based on job type

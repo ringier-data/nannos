@@ -613,3 +613,39 @@ class TestFinalizeInvalidTimezone:
         assert "Invalid timezone" in kwargs["paused_reason"]
         assert "Zurich" in kwargs["paused_reason"]
 
+
+
+class TestBuildMessageArgs:
+    """Watch dispatch metadata must carry the sub-agent instruction (prompt)."""
+
+    @pytest.mark.asyncio
+    async def test_watch_metadata_includes_sub_agent_prompt(self):
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH)
+        job.check_tool = "ping_tool"
+        job.condition_expr = "$.status"
+
+        parts, metadata, push_config = await engine._build_message_args(
+            job, run_id=7, access_token="tok", db=AsyncMock()
+        )
+
+        assert metadata["watch"]["prompt"] == "Do something"
+        assert metadata["sub_agent_id"] == 42
+        # The text part carries the notification message, never the prompt.
+        assert parts == [{"kind": "text", "text": ""}]
+        assert push_config is None
+
+    @pytest.mark.asyncio
+    async def test_watch_metadata_prompt_is_none_when_unset(self):
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.prompt = ""
+        job.check_tool = "ping_tool"
+        job.condition_expr = "$.status"
+
+        _, metadata, _ = await engine._build_message_args(
+            job, run_id=7, access_token="tok", db=AsyncMock()
+        )
+
+        assert metadata["watch"]["prompt"] is None
+        assert "sub_agent_id" not in metadata

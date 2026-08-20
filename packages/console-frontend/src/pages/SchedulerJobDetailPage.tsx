@@ -330,6 +330,9 @@ function EditForm({ job }: { job: ScheduledJob }) {
   );
   const initialSubAgentId = job.sub_agent_id != null ? String(job.sub_agent_id) : '';
   const [subAgentId, setSubAgentId] = useState(initialSubAgentId);
+  // Watch jobs: instruction for the sub-agent triggered by the condition
+  // (task jobs edit their prompt through `message` instead).
+  const [watchPrompt, setWatchPrompt] = useState(job.prompt ?? '');
   const [checkTool, setCheckTool] = useState(job.check_tool ?? '');
   const [checkArgsText, setCheckArgsText] = useState(
     job.check_args ? JSON.stringify(job.check_args, null, 2) : '',
@@ -385,6 +388,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setRunAt(initialRunAt);
     setMessage(job.job_type === 'task' ? (job.prompt ?? '') : (job.notification_message ?? ''));
     setSubAgentId(initialSubAgentId);
+    setWatchPrompt(job.prompt ?? '');
     setCheckTool(job.check_tool ?? '');
     setCheckArgsText(job.check_args ? JSON.stringify(job.check_args, null, 2) : '');
     setConditionExpr(job.condition_expr ?? '');
@@ -480,6 +484,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
       }),
       ...(job.job_type === 'watch' && {
         notification_message: message.trim() ? message.trim() : null, // Watch jobs use notification_message field
+        prompt: watchPrompt.trim() ? watchPrompt.trim() : null, // Instruction for the triggered sub-agent
         check_tool: checkTool || undefined,
         check_args,
         condition_expr: conditionExpr || undefined,
@@ -754,11 +759,31 @@ function EditForm({ job }: { job: ScheduledJob }) {
               includeNone
             />
             <p className="text-xs text-muted-foreground">
-              When the condition is met, this sub-agent is invoked with the check tool's result as its input
-              ("Watch condition triggered. Take appropriate action based on: &lt;check result&gt;") and acts per
-              its own system prompt. Its response is delivered instead of the notification message.
+              When the condition is met, this sub-agent is invoked with the check tool's result as its
+              input, plus the instruction below. Its response is delivered instead of the notification
+              message.
             </p>
           </div>
+
+          {/* Instruction for the triggered sub-agent */}
+          {subAgentId && (
+            <div className="grid gap-1.5">
+              <Label>
+                Sub-agent instruction{' '}
+                <span className="text-muted-foreground text-xs">(optional)</span>
+              </Label>
+              <Textarea
+                rows={3}
+                value={watchPrompt}
+                onChange={(e) => { setWatchPrompt(e.target.value); touch(); }}
+                placeholder="e.g. Summarize the result and email it to the account owner…"
+              />
+              <p className="text-xs text-muted-foreground">
+                Sent to the sub-agent together with the check result when the condition triggers. If
+                empty, the agent is asked to "take appropriate action based on the check result".
+              </p>
+            </div>
+          )}
 
         </>
       )}

@@ -415,7 +415,10 @@ function CreateJobDialog({
       body.notification_message = form.notification_message.trim();
       // Optional: run an existing sub-agent when the condition is met (inline
       // sub_agent_parameters stay task-only by design).
-      if (form.sub_agent_id) body.sub_agent_id = parseInt(form.sub_agent_id);
+      if (form.sub_agent_id) {
+        body.sub_agent_id = parseInt(form.sub_agent_id);
+        body.prompt = form.prompt.trim() || undefined;
+      }
     }
 
     setSubmitting(true);
@@ -947,11 +950,32 @@ function CreateJobDialog({
                   includeNone
                 />
                 <p className="text-xs text-muted-foreground">
-                  When the condition is met, this sub-agent is invoked with the check tool's result as its input
-                  ("Watch condition triggered. Take appropriate action based on: &lt;check result&gt;") and acts per
-                  its own system prompt. Its response is delivered instead of the notification message.
+                  When the condition is met, this sub-agent is invoked with the check tool's result as its
+                  input, plus the instruction below. Its response is delivered instead of the notification
+                  message.
                 </p>
               </div>
+
+              {/* Instruction for the triggered sub-agent */}
+              {form.sub_agent_id && (
+                <div className="grid gap-1.5">
+                  <Label htmlFor="watch_prompt">
+                    Sub-agent instruction{' '}
+                    <span className="text-muted-foreground text-xs">(optional)</span>
+                  </Label>
+                  <Textarea
+                    id="watch_prompt"
+                    rows={3}
+                    value={form.prompt}
+                    onChange={(e) => update('prompt', e.target.value)}
+                    placeholder="e.g. Summarize the result and email it to the account owner…"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Sent to the sub-agent together with the check result when the condition triggers. If
+                    empty, the agent is asked to "take appropriate action based on the check result".
+                  </p>
+                </div>
+              )}
             </>
           )}
 

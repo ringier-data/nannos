@@ -196,7 +196,7 @@ class ScheduledJobCreate(BaseModel):
     prompt: str = Field(
         default="",
         max_length=4000,
-        description="Instruction/prompt for the agent to execute (task jobs only). Example: 'Analyze the sales data and create a summary'.",
+        description="Instruction/prompt for the agent to execute. For watch jobs it applies only when a sub_agent_id is set and instructs the sub-agent triggered by the condition. Example: 'Analyze the sales data and create a summary'.",
     )
     notification_message: str = Field(
         default="",
