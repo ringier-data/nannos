@@ -15,6 +15,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -108,10 +109,11 @@ def _scheduled_run_frame_text(text: str) -> str:
     """Neutralize a closing tag inside text interpolated into the <scheduled_run> frame.
 
     Run prompts/outputs routinely contain untrusted content; a literal
-    ``</scheduled_run>`` would escape the frame and read as first-person user
+    ``</scheduled_run>`` (in any casing — models treat XML-ish tags
+    case-insensitively) would escape the frame and read as first-person user
     input on the conversation's first turn.
     """
-    return text.replace("</scheduled_run", "<\\/scheduled_run")
+    return re.sub(r"(?i)</(scheduled_run)", r"<\\/\1", text)
 
 
 def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
@@ -175,7 +177,9 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
     if failed:
         tool_content = f"The scheduled run FAILED: {error_message or 'unknown error'}"
         if result_summary:
-            tool_content += f"\nPartial output delivered to the user: {result_summary}"
+            # For failed runs, result_summary is the user-facing failure
+            # notification text, not partial task output.
+            tool_content += f"\nNotification delivered to the user: {result_summary}"
     else:
         tool_content = result_summary or "(the output was delivered to the user)"
 
@@ -236,7 +240,13 @@ def _build_origin_history(origin: dict[str, Any]) -> list[Any] | None:
     if builder is None:
         logger.info(f"Ignoring conversation origin of unknown kind {kind!r}")
         return None
-    return builder(origin)
+    try:
+        return builder(origin)
+    except Exception:
+        # A malformed descriptor must degrade like an unknown kind — the
+        # origin is optional enrichment; never fail the turn over it.
+        logger.warning(f"Failed to build history for conversation origin kind {kind!r}; skipping", exc_info=True)
+        return None
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
