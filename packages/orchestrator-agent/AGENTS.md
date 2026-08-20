@@ -257,17 +257,22 @@ Learned the hard way; each cost real debugging time.
   `(MAX_RECURSION_LIMIT - BASE_STEPS) // STEPS_PER_MODEL_CALL`. Multi-step scenarios
   can exhaust the budget even when the orchestrator behaves correctly.
 
-  Read the current values from `AgentSettings.MAX_RECURSION_LIMIT`
-  (`app/models/config.py`, env-overridable) and the constants in
-  `tests/test_step_budget.py`. Deliberately not restated here: the last version of
-  this bullet hardcoded them and was wrong within one commit. Those constants are a
-  *pin* on measured behaviour — if the headroom assertion fails, a middleware was
-  added and the budget really did tighten. Fix the limit, not the test.
+  `MAX_RECURSION_LIMIT` is **derived**, not written down: all four constants live on
+  `AgentSettings` (`app/models/config.py`). Read them there; deliberately not
+  restated here, since the last version of this bullet hardcoded them and was wrong
+  within one commit of the config changing.
 
-  The current limit is a stopgap; the unit is wrong. Note also that
-  `MAX_RECURSION_LIMIT` is read from the same env var by `agent-runner`,
-  `agent-common` and `ringier-a2a-sdk`, each with a *different* built-in default —
-  so setting it to suit the orchestrator moves the others too.
+  Configure the budget with `ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN`, in model calls.
+  The shared `MAX_RECURSION_LIMIT` env var is **not** read — `agent-runner`,
+  `agent-common` and `ringier-a2a-sdk` all read that name with different defaults
+  (50, 75, 50), so one value cannot serve all four; setting it logs a warning and
+  otherwise does nothing here.
+
+  `tests/test_step_budget.py` counts the super-steps of a real graph run against
+  `BASE_STEPS` / `STEPS_PER_MODEL_CALL`. Those assertions are a *pin* on measured
+  behaviour, so if one fails a middleware was added and the per-call cost genuinely
+  rose. Update the constant — which raises the derived limit with it, preserving the
+  model-call headroom — rather than adjusting the test.
 
 ### Adding a scenario
 

@@ -17,9 +17,17 @@ No LLM, no gateway.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
-from app.models.config import AgentSettings
+from app.models.config import (
+    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
+    LEGACY_RECURSION_LIMIT_ENV,
+    MAX_MODEL_CALLS_PER_TURN_ENV,
+    AgentSettings,
+    _resolve_max_model_calls_per_turn,
+)
 from tests.support.graph_harness import (
     final_response,
     runtime_context,
@@ -31,11 +39,13 @@ from tests.support.graph_harness import (
 from tests.support.mock_subagents import MockSubAgent
 from tests.support.scripted_model import ScriptedChatModel
 
-# Measured cost of the current graph. Both are asserted rather than assumed: if a
-# middleware is added or removed these change, and the point of this module is
-# that such a change is never silent.
-STEPS_PER_MODEL_CALL = 8
-BASE_STEPS = 2
+# The app's own constants, not a private copy. The limit is derived from them, so
+# a copy here could agree with the tests while disagreeing with production — and
+# the arithmetic would have three homes again. What makes these a *pin* rather
+# than a tautology is that `_super_steps` counts the steps of a real graph run:
+# add a middleware and the measurement diverges from the constant.
+STEPS_PER_MODEL_CALL = AgentSettings.STEPS_PER_MODEL_CALL
+BASE_STEPS = AgentSettings.BASE_STEPS
 
 
 async def _super_steps(delegations: int) -> int:
@@ -98,3 +108,74 @@ async def test_limit_still_bounds_a_runaway_loop():
         "the recursion limit is the only backstop against a runaway agent loop; "
         "keep it well below the deepagents default of 1000"
     )
+
+
+# ---------------------------------------------------------------------------
+# The limit is derived, and derived from an unshared env var
+# ---------------------------------------------------------------------------
+
+
+def test_the_limit_is_derived_from_the_step_cost():
+    """One source of truth for the arithmetic.
+
+    It used to live in three places — this module, the config comment and
+    AGENTS.md — and the AGENTS.md copy was wrong within a commit of the config
+    changing.
+    """
+    assert AgentSettings.MAX_RECURSION_LIMIT == (
+        AgentSettings.BASE_STEPS
+        + AgentSettings.STEPS_PER_MODEL_CALL * AgentSettings.MAX_MODEL_CALLS_PER_TURN
+    )
+
+
+def test_the_derived_limit_affords_exactly_the_configured_model_calls():
+    """The round trip: super-steps back to the unit that was actually chosen."""
+    affordable = (AgentSettings.MAX_RECURSION_LIMIT - AgentSettings.BASE_STEPS) // AgentSettings.STEPS_PER_MODEL_CALL
+
+    assert affordable == AgentSettings.MAX_MODEL_CALLS_PER_TURN
+
+
+def test_the_shared_env_var_no_longer_configures_the_orchestrator(monkeypatch):
+    """The reported design bug.
+
+    `MAX_RECURSION_LIMIT` is read by agent-runner and ringier-a2a-sdk (default 50)
+    and agent-common (75). A deployment pinning 50 — the orchestrator's own former
+    default — used to silently reinstate the truncation, and CI could not catch it:
+    the env var is unset there, so the tests stayed green against 200.
+    """
+    monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
+
+    assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+
+
+def test_setting_the_shared_env_var_warns_that_it_is_ignored(monkeypatch, caplog):
+    """Ignoring it silently would be its own trap."""
+    monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
+
+    with caplog.at_level(logging.WARNING):
+        _resolve_max_model_calls_per_turn()
+
+    assert LEGACY_RECURSION_LIMIT_ENV in caplog.text
+    assert MAX_MODEL_CALLS_PER_TURN_ENV in caplog.text
+
+
+def test_nothing_is_warned_about_when_the_shared_var_is_unset(monkeypatch, caplog):
+    monkeypatch.delenv(LEGACY_RECURSION_LIMIT_ENV, raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        _resolve_max_model_calls_per_turn()
+
+    assert caplog.text == ""
+
+
+def test_the_budget_is_configured_in_model_calls(monkeypatch):
+    """The knob is in the unit a human can reason about."""
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "40")
+
+    assert _resolve_max_model_calls_per_turn() == 40
+
+
+def test_a_malformed_value_falls_back_rather_than_crashing_at_import(monkeypatch):
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "twenty")
+
+    assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
