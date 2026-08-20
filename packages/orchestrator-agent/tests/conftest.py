@@ -7,6 +7,8 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from tests.support.marker_gate import remember_markexpr
+
 # Add app directory to Python path for imports
 app_dir = Path(__file__).parent.parent / "app"
 sys.path.insert(0, str(app_dir))
@@ -43,6 +45,12 @@ def event_loop_policy():
 def pytest_configure(config):
     """Configure pytest with asyncio support."""
     config.option.asyncio_mode = "auto"
+
+    # Must happen here rather than in tests/integration/conftest.py: that module
+    # probes the gateway over the network while being imported, and this is the
+    # only hook that runs before the import. Lets the probe be skipped entirely
+    # when nothing asked for the integration tier — see tests/support/marker_gate.
+    remember_markexpr(getattr(config.option, "markexpr", None))
 
 
 @pytest.fixture(scope="function")

@@ -19,9 +19,8 @@ from a2a.types import (
     TaskArtifactUpdateEvent,
     TaskState,
     TaskStatusUpdateEvent,
-    TextPart,
 )
-from a2a.utils import new_agent_text_message
+from a2a.helpers import new_text_message
 from agent_common.models.base import ModelType
 from langsmith import testing as t
 
@@ -30,7 +29,7 @@ from app.models.responses import AgentStreamResponse
 
 from .conftest import (
     ALL_MODELS,
-    has_credentials,
+    one_model_per_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,7 +57,7 @@ async def collect_events_from_stream(
     responses: list[AgentStreamResponse] = []
     full_text = ""
 
-    parts = [Part(root=TextPart(text=prompt))]
+    parts = [Part(text=prompt)]
 
     async for item in agent.stream(parts, user_config, config=config):
         responses.append(item)
@@ -88,13 +87,13 @@ async def simulate_executor_events(
     # Emit initial working status (like executor does)
     await updater.update_status(
         TaskState.TASK_STATE_WORKING,
-        new_agent_text_message("Agent execution started.", context_id, task_id),
+        new_text_message("Agent execution started.", context_id=context_id, task_id=task_id),
     )
 
     streaming_artifact_id = str(uuid.uuid4())
     first_chunk_sent = False
 
-    parts = [Part(root=TextPart(text=prompt))]
+    parts = [Part(text=prompt)]
 
     async for item in agent.stream(parts, user_config, config=config):
         state = item.state
@@ -104,7 +103,7 @@ async def simulate_executor_events(
         if state == TaskState.TASK_STATE_WORKING and metadata.get("streaming_chunk"):
             append = first_chunk_sent
             await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
+                [Part(text=content)],
                 artifact_id=streaming_artifact_id,
                 append=append,
                 last_chunk=False,
@@ -115,7 +114,7 @@ async def simulate_executor_events(
         elif state == TaskState.TASK_STATE_COMPLETED:
             if first_chunk_sent:
                 await updater.add_artifact(
-                    [Part(root=TextPart(text=""))],
+                    [Part(text="")],
                     artifact_id=streaming_artifact_id,
                     append=True,
                     last_chunk=True,
@@ -125,20 +124,20 @@ async def simulate_executor_events(
             else:
                 await updater.update_status(
                     TaskState.TASK_STATE_COMPLETED,
-                    new_agent_text_message(content or "Done", context_id, task_id),
+                    new_text_message(content or "Done", context_id=context_id, task_id=task_id),
                     metadata=metadata or None,
                 )
 
         elif state == TaskState.TASK_STATE_FAILED:
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
-                new_agent_text_message(content or "Error", context_id, task_id),
+                new_text_message(content or "Error", context_id=context_id, task_id=task_id),
             )
 
         elif state == TaskState.TASK_STATE_WORKING:
             await updater.update_status(
                 TaskState.TASK_STATE_WORKING,
-                new_agent_text_message(content, context_id, task_id),
+                new_text_message(content, context_id=context_id, task_id=task_id),
                 metadata=metadata or None,
             )
 
@@ -178,9 +177,6 @@ async def test_simple_prompt_event_sequence(
     4. TaskArtifactUpdateEvent(append=True, last_chunk=True) — stream close
     5. TaskStatusUpdateEvent(state=completed, final=True) — terminal status
     """
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Hi, respond in one short sentence."
     t.log_inputs({"prompt": prompt, "model": model_type})
     test_user_config.model = model_type
@@ -225,8 +221,8 @@ async def test_simple_prompt_event_sequence(
     full_text = ""
     for ae in artifact_events:
         for part in ae.artifact.parts:
-            if hasattr(part.root, "text"):
-                full_text += part.root.text
+            if part.text:
+                full_text += part.text
     assert len(full_text.strip()) > 0, "Artifact content should not be empty"
 
     t.log_outputs({"full_text": full_text, "event_count": len(events), "artifact_count": len(artifact_events)})
@@ -235,8 +231,7 @@ async def test_simple_prompt_event_sequence(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "google-genai"],
+    one_model_per_provider(),
 )
 async def test_time_tool_invocation_events(
     model_type: ModelType,
@@ -245,9 +240,6 @@ async def test_time_tool_invocation_events(
     make_config,
 ):
     """Verify the model uses the get_current_time tool and events follow A2A protocol."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "What is the current time? Use the get_current_time tool."
     t.log_inputs({"prompt": prompt, "model": model_type})
     test_user_config.model = model_type
@@ -278,12 +270,12 @@ async def test_time_tool_invocation_events(
     for ae in events:
         if isinstance(ae, TaskArtifactUpdateEvent):
             for part in ae.artifact.parts:
-                if hasattr(part.root, "text"):
-                    full_text += part.root.text
+                if part.text:
+                    full_text += part.text
         elif isinstance(ae, TaskStatusUpdateEvent) and ae.status.message:
             for part in ae.status.message.parts:
-                if hasattr(part.root, "text"):
-                    full_text += part.root.text
+                if part.text:
+                    full_text += part.text
 
     # Response should mention time-related content
     text_lower = full_text.lower()
@@ -297,8 +289,7 @@ async def test_time_tool_invocation_events(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "google-genai"],
+    one_model_per_provider(),
 )
 async def test_event_ids_consistent(
     model_type: ModelType,
@@ -307,9 +298,6 @@ async def test_event_ids_consistent(
     make_config,
 ):
     """Verify all events share the same task_id and context_id."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Hello!"
     t.log_inputs({"prompt": prompt, "model": model_type})
     test_user_config.model = model_type

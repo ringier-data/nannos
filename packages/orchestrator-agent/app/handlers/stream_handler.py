@@ -17,44 +17,49 @@ from ..models import AgentStreamResponse
 logger = logging.getLogger(__name__)
 
 
+def current_turn_messages(messages: list) -> list:
+    """Extract messages from the current conversation turn.
+
+    A turn starts with a HumanMessage (user input). Finds the most recent
+    HumanMessage and returns all messages that come after it, representing the
+    current turn's conversation flow.
+
+    Public because the integration-test assertion vocabulary
+    (``tests/support/extraction.py``) shares this definition of "this turn" rather
+    than reimplementing it — a second implementation would drift from the one the
+    executor relies on. Keep it importable; renaming it breaks that layer.
+
+    Args:
+        messages: List of conversation messages
+
+    Returns:
+        List of messages from the current turn (after the last HumanMessage)
+    """
+    if not messages:
+        return []
+
+    # Find the index of the most recent HumanMessage (start of current turn)
+    last_human_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_human_idx = i
+            break
+
+    if last_human_idx is None:
+        # No HumanMessage found, return all messages (shouldn't normally happen)
+        logger.warning("[STREAM HANDLER] No HumanMessage found in conversation, using all messages")
+        return messages
+    else:
+        # Return only messages after the last HumanMessage (current turn)
+        current_turn = messages[last_human_idx + 1 :]
+        logger.debug(
+            f"[STREAM HANDLER] Current turn starts at index {last_human_idx}, {len(current_turn)} messages in turn"
+        )
+        return current_turn
+
+
 class StreamHandler:
     """Handles stream response generation and state parsing."""
-
-    @staticmethod
-    def _extract_current_turn_messages(messages: list) -> list:
-        """Extract messages from the current conversation turn.
-
-        A turn starts with a HumanMessage (user input). This method finds the most
-        recent HumanMessage and returns all messages that come after it, representing
-        the current turn's conversation flow.
-
-        Args:
-            messages: List of conversation messages
-
-        Returns:
-            List of messages from the current turn (after the last HumanMessage)
-        """
-        if not messages:
-            return []
-
-        # Find the index of the most recent HumanMessage (start of current turn)
-        last_human_idx = None
-        for i in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[i], HumanMessage):
-                last_human_idx = i
-                break
-
-        if last_human_idx is None:
-            # No HumanMessage found, return all messages (shouldn't normally happen)
-            logger.warning("[STREAM HANDLER] No HumanMessage found in conversation, using all messages")
-            return messages
-        else:
-            # Return only messages after the last HumanMessage (current turn)
-            current_turn = messages[last_human_idx + 1 :]
-            logger.debug(
-                f"[STREAM HANDLER] Current turn starts at index {last_human_idx}, {len(current_turn)} messages in turn"
-            )
-            return current_turn
 
     @staticmethod
     def _extract_recently_called_subagents(final_state: Dict[str, Any]) -> set[str]:
@@ -71,7 +76,7 @@ class StreamHandler:
             Set of sub-agent names that were called in the current turn
         """
         messages = final_state.get("messages", [])
-        messages_to_check = StreamHandler._extract_current_turn_messages(messages)
+        messages_to_check = current_turn_messages(messages)
 
         recently_called = set()
 
@@ -114,7 +119,7 @@ class StreamHandler:
         structured: Any = None
         messages = final_state.get("messages", [])
         if messages:
-            for msg in reversed(StreamHandler._extract_current_turn_messages(messages)):
+            for msg in reversed(current_turn_messages(messages)):
                 if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
                     for tool_call in msg.tool_calls:
                         if tool_call.get("name") == "FinalResponseSchema":
@@ -342,10 +347,10 @@ class StreamHandler:
             messages = final_state.get("messages", [])
             if messages:
                 # Extract current turn messages only (after last HumanMessage)
-                current_turn_messages = StreamHandler._extract_current_turn_messages(messages)
+                turn_messages = current_turn_messages(messages)
 
                 # Search backwards through current turn for FinalResponseSchema tool call
-                for msg in reversed(current_turn_messages):
+                for msg in reversed(turn_messages):
                     if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
                         for tool_call in msg.tool_calls:
                             if tool_call.get("name") == "FinalResponseSchema":
@@ -424,12 +429,12 @@ class StreamHandler:
                     messages = final_state.get("messages", [])
                     if messages:
                         # Get current turn messages (after last HumanMessage)
-                        current_turn_messages = StreamHandler._extract_current_turn_messages(messages)
+                        turn_messages = current_turn_messages(messages)
 
                         # Build a map of tool_call_id -> tool_call so we can filter
                         # ToolMessages down to "task" calls (sub-agents) only.
                         tool_call_map = {}
-                        for msg in current_turn_messages:
+                        for msg in turn_messages:
                             if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
                                 for tool_call in msg.tool_calls:
                                     tool_call_map[tool_call.get("id")] = tool_call
@@ -437,7 +442,7 @@ class StreamHandler:
                         # Adopt the most-recent "task" ToolMessage whose extracted content
                         # is actually non-empty. An empty extraction must NOT short-circuit
                         # the search — keep walking so we surface a usable reply.
-                        for msg in reversed(current_turn_messages):
+                        for msg in reversed(turn_messages):
                             if not isinstance(msg, ToolMessage):
                                 continue
                             tool_call = tool_call_map.get(msg.tool_call_id)
@@ -625,7 +630,7 @@ class StreamHandler:
         rendering of an output-budget cutoff) with no tool call. A truncated-but-tool-calling
         turn is a normal continuation and is not flagged.
         """
-        for msg in reversed(StreamHandler._extract_current_turn_messages(messages)):
+        for msg in reversed(current_turn_messages(messages)):
             if isinstance(msg, AIMessage):
                 if getattr(msg, "tool_calls", None):
                     return False

@@ -52,6 +52,7 @@ dependencies = [
 dev = [
     "debugpy>=1.8.20",
     "moto>=5.1.15",
+    "pyyaml>=6.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
@@ -77,7 +78,18 @@ addopts = [
     "--tb=short",
     "--strict-markers",
     "--disable-warnings",
-    "--ignore=tests/integration",
+    # Integration tests are collected (so breakage in them is visible) but
+    # deselected by default, since they need a reachable Model Gateway and make
+    # real, billable LLM calls. Run them with:  uv run pytest -m integration
+    # They previously used --ignore, which hid the whole directory from
+    # collection — an a2a-sdk migration broke an import there and nothing noticed.
+    #
+    # This default is *not* the spend guard: -m is last-wins, so any user-supplied
+    # expression replaces it, and every integration module also carries `slow`.
+    # tests/integration/conftest.py additionally requires the tier to be asked for
+    # explicitly, so `-m slow` skips it instead of billing. See tests/support/marker_gate.
+    "-m",
+    "not integration",
 ]
 markers = [
     "asyncio: marks tests as async (deselect with '-m \"not asyncio\"')",
@@ -85,6 +97,10 @@ markers = [
     "integration: marks tests as integration tests",
     "slow: marks tests as slow running",
     "langsmith: marks tests tracked in LangSmith experiments",
+    # Exempt from the integration pass-ratio gate: a strict test must pass, so a
+    # single failure fails the session however good the aggregate ratio is. Use
+    # it for behaviour that is not supposed to be probabilistic.
+    "strict: marks tests that must pass regardless of the aggregate pass ratio",
 ]
 env = [
     "OIDC_ISSUER=https://login.p.nannos.rcplus.io/realms/nannos",

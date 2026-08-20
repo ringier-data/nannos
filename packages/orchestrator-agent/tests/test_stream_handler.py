@@ -3,7 +3,7 @@
 from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.handlers import StreamHandler
+from app.handlers import StreamHandler, current_turn_messages
 
 
 class TestBuildAuthResponse:
@@ -282,7 +282,7 @@ class TestStreamHandlerEdgeCases:
 
 
 class TestExtractCurrentTurnMessages:
-    """Test _extract_current_turn_messages static method."""
+    """Test the current_turn_messages turn-scoping function."""
 
     def test_extract_current_turn_single_turn(self):
         """Test extracting messages from a single turn."""
@@ -293,7 +293,7 @@ class TestExtractCurrentTurnMessages:
             AIMessage(content="Final answer"),
         ]
 
-        current_turn = StreamHandler._extract_current_turn_messages(messages)
+        current_turn = current_turn_messages(messages)
 
         assert len(current_turn) == 3  # All messages after HumanMessage
         assert isinstance(current_turn[0], AIMessage)
@@ -311,7 +311,7 @@ class TestExtractCurrentTurnMessages:
             AIMessage(content="Second answer"),
         ]
 
-        current_turn = StreamHandler._extract_current_turn_messages(messages)
+        current_turn = current_turn_messages(messages)
 
         assert len(current_turn) == 3  # Only messages after last HumanMessage
         assert current_turn[0].tool_calls[0]["id"] == "call_2"
@@ -325,7 +325,7 @@ class TestExtractCurrentTurnMessages:
             AIMessage(content="AI message 2"),
         ]
 
-        current_turn = StreamHandler._extract_current_turn_messages(messages)
+        current_turn = current_turn_messages(messages)
 
         # Should return all messages with a warning
         assert len(current_turn) == 3
@@ -335,7 +335,7 @@ class TestExtractCurrentTurnMessages:
         """Test with empty message list."""
         messages = []
 
-        current_turn = StreamHandler._extract_current_turn_messages(messages)
+        current_turn = current_turn_messages(messages)
 
         assert current_turn == []
 
@@ -343,7 +343,7 @@ class TestExtractCurrentTurnMessages:
         """Test with only a HumanMessage."""
         messages = [HumanMessage(content="User question")]
 
-        current_turn = StreamHandler._extract_current_turn_messages(messages)
+        current_turn = current_turn_messages(messages)
 
         assert len(current_turn) == 0  # No messages after HumanMessage
 

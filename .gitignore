@@ -300,9 +300,12 @@ build/
 coverage/
 
 # Environment variables
-.env
-.env.local
-.env.*.local
+# Ignore every .env variant by default and re-include the committed templates.
+# This is a public repo: enumerating specific names fails open, so a future
+# .env.staging with real keys would be tracked (.env.integration already was).
+.env*
+!.env*.template
+!.env*.example
 
 # IDE
 .idea/

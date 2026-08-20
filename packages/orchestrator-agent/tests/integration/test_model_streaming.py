@@ -21,7 +21,6 @@ from app.models.responses import AgentStreamResponse
 from .conftest import (
     ALL_MODELS,
     THINKING_MODELS,
-    has_credentials,
     one_model_per_provider,
 )
 
@@ -63,9 +62,6 @@ async def test_model_streams_tokens(
     make_config,
 ):
     """Verify each model streams multiple AgentStreamResponse items with streaming_chunk metadata."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Say hello in exactly one sentence."
     t.log_inputs({"prompt": prompt, "model": model_type})
 
@@ -121,9 +117,6 @@ async def test_thinking_model_streaming(
     make_config,
 ):
     """Verify thinking models stream correctly and no thinking tokens leak into output."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "What is 15 * 37? Reply with just the answer."
     t.log_inputs({"prompt": prompt, "model": model_type, "thinking_level": thinking_level.value})
 
@@ -160,8 +153,7 @@ async def test_thinking_model_streaming(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "vertexai"],
+    one_model_per_provider(),
 )
 async def test_static_tools_available(
     model_type: ModelType,
@@ -170,9 +162,6 @@ async def test_static_tools_available(
     make_config,
 ):
     """Verify the model can use the get_current_time static tool."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "What time is it right now? Use the get_current_time tool to find out."
     t.log_inputs({"prompt": prompt, "model": model_type})
 
@@ -204,8 +193,7 @@ async def test_static_tools_available(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "vertexai"],
+    one_model_per_provider(),
 )
 async def test_multiturn_context_preservation(
     model_type: ModelType,
@@ -215,9 +203,6 @@ async def test_multiturn_context_preservation(
     memory_checkpointer,
 ):
     """Verify multi-turn conversation preserves context across turns via checkpoint."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     test_user_config.model = model_type
 
     # Use a shared context_id for both turns
@@ -277,9 +262,6 @@ async def test_failed_state_not_on_simple_prompt(
     make_config,
 ):
     """Verify simple prompts complete without failures."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Hello!"
     t.log_inputs({"prompt": prompt, "model": model_type})
 
