@@ -67,6 +67,7 @@ from tests.support.gateway_env import (
 _ENV_INTEGRATION_FILE = Path(__file__).parent / ".env.integration"
 _ORCHESTRATOR_ENV_FILE = Path(__file__).parent.parent.parent / ".env"
 
+
 def _restore_real_credentials() -> None:
     """Swap pytest-env's placeholders for the real environment, in place.
 
@@ -99,6 +100,7 @@ def _restore_real_credentials() -> None:
 # tests and spammed LangSmith 401s the moment the directory became visible.
 # Those mutations now live in the `integration_environment` autouse fixture
 # below, which only applies to tests under this directory.
+
 
 def _gateway_env_from_files() -> dict[str, str]:
     """Gateway coordinates, layered per key across both env files.
@@ -516,6 +518,7 @@ def usage_recorder(request):
     record = _EVAL.record_for(request.node.nodeid)
     record.input_tokens += recorder.input_tokens
     record.output_tokens += recorder.output_tokens
+    record.unattributed_calls += recorder.unattributed_calls
 
 
 def pytest_runtest_logreport(report):

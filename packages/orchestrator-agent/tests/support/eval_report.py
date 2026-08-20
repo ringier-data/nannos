@@ -51,6 +51,10 @@ class TestRecord:
     strict: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
+    # Calls whose usage langchain-core declined to attribute, read by our fallback
+    # instead. Reported so the fallback can be deleted on evidence — see
+    # tests/support/usage.py.
+    unattributed_calls: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -198,6 +202,12 @@ class EvalSession:
         # rather than letting a zero read as "this run was free".
         if self.total_tokens == 0:
             lines.append("(no token usage captured — the provider may not report usage_metadata)")
+        unattributed = sum(r.unattributed_calls for r in self.records.values())
+        if unattributed:
+            lines.append(
+                f"({unattributed} call(s) needed the local usage fallback — "
+                "langchain-core did not attribute them; the fallback is still earning its keep)"
+            )
         return lines
 
     def as_dict(self) -> dict[str, Any]:
@@ -218,6 +228,7 @@ class EvalSession:
                     "strict": r.strict,
                     "input_tokens": r.input_tokens,
                     "output_tokens": r.output_tokens,
+                    "unattributed_calls": r.unattributed_calls,
                 }
                 for r in self.records.values()
             ],
