@@ -46,11 +46,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from app.handlers import StreamHandler
-
-# The production definition of "this turn" — imported rather than reimplemented
-# so eval assertions cannot drift from the behaviour the executor relies on.
-_current_turn_messages = StreamHandler._extract_current_turn_messages
+from app.handlers import current_turn_messages
 
 TASK_TOOL = "task"
 FINAL_RESPONSE_TOOL = "FinalResponseSchema"
@@ -95,7 +91,7 @@ def _messages(values: Any, *, all_turns: bool = False) -> list:
     if not isinstance(values, dict):
         return []
     messages = values.get("messages") or []
-    return list(messages) if all_turns else _current_turn_messages(messages)
+    return list(messages) if all_turns else current_turn_messages(messages)
 
 
 def message_text(message: Any) -> str:
