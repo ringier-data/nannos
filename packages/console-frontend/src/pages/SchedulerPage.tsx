@@ -971,7 +971,9 @@ function CreateJobDialog({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Run this sub-agent when the condition is met. Its response is delivered instead of the notification message.
+                  When the condition is met, this sub-agent is invoked with the check tool's result as its input
+                  ("Watch condition triggered. Take appropriate action based on: &lt;check result&gt;") and acts per
+                  its own system prompt. Its response is delivered instead of the notification message.
                 </p>
               </div>
             </>
