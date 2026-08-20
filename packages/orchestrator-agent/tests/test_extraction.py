@@ -250,6 +250,35 @@ def test_plain_string_content_passes_through():
     assert message_text(AIMessage(content="plain")) == "plain"
 
 
+def test_reasoning_only_content_is_empty_not_reasoning():
+    """The failure mode worth naming: a turn that only thought must read as silent."""
+    msg = AIMessage(content=[{"type": "thinking", "thinking": "still deciding"}])
+
+    assert message_text(msg) == ""
+
+
+def test_multiple_text_blocks_are_joined():
+    msg = AIMessage(
+        content=[
+            {"type": "text", "text": "Sent to John."},
+            {"type": "text", "text": " And to Jane."},
+        ]
+    )
+
+    assert message_text(msg) == "Sent to John. And to Jane."
+
+
+def test_bare_string_blocks_are_kept():
+    assert message_text(AIMessage(content=["a", "b"])) == "ab"
+
+
+def test_a_non_message_is_tolerated_rather_than_raising():
+    """This module prefers an empty result to an AttributeError mid-assertion."""
+    assert message_text(None) == ""
+    assert message_text({"not": "a message"}) == ""
+    assert message_text("bare string") == "bare string"
+
+
 # ---------------------------------------------------------------------------
 # A2A tracking channel
 # ---------------------------------------------------------------------------

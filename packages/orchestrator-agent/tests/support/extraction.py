@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from app.handlers import StreamHandler
 
@@ -99,28 +99,13 @@ def _messages(values: Any, *, all_turns: bool = False) -> list:
 
 
 def message_text(message: Any) -> str:
-    """Flatten a message's content to plain text.
+    """A message's user-visible text — text blocks only, never reasoning.
 
-    Content is a bare string on some providers and a list of blocks on others
-    (Bedrock). Only text blocks are kept — thinking/reasoning blocks are not
-    part of what the user sees and must not leak into response assertions.
+    Non-messages return ``""`` rather than raising, as elsewhere here.
     """
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict):
-            if block.get("type") == "text" and block.get("text"):
-                parts.append(str(block["text"]))
-        elif getattr(block, "type", None) == "text":
-            parts.append(str(getattr(block, "text", "")))
-    return "".join(parts)
+    if isinstance(message, BaseMessage):
+        return message.text
+    return message if isinstance(message, str) else ""
 
 
 def tool_calls(values: Any, *, all_turns: bool = False) -> list[ToolCall]:
