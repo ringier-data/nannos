@@ -38,6 +38,45 @@ DEFAULT_MODEL_TYPE = "claude-sonnet-4.5"
 DEFAULT_THREAD_ID = "test-thread"
 
 
+# The private attributes both tiers substitute. Named here so `test_graph_harness`
+# can fail loudly if GraphFactory renames one — the dangerous outcome is not a
+# break but a silent pass against a half-initialized factory, which voids the
+# whole point of compiling the real graph.
+PATCHED_ATTRIBUTES = (
+    "_checkpointer",
+    "_store",
+    "_store_setup_complete",
+    "_static_tools_cache",
+    "_create_model",
+)
+
+
+def patched_factory(
+    *,
+    checkpointer: Any = None,
+    store: Any = None,
+    model: Any = None,
+) -> GraphFactory:
+    """A GraphFactory with test doubles for DynamoDB and Postgres.
+
+    One copy of this recipe, shared by the mock tier and the integration
+    conftest, because it reaches past the public API: ``GraphFactory`` offers no
+    injection seam, so both tiers poke the same private attributes and a second
+    copy would drift from this one.
+
+    ``model``, when given, shadows ``_create_model`` on the *instance* rather
+    than the class, so the swap needs no fixture and cannot leak between tests.
+    """
+    factory = GraphFactory(config=AgentSettings(), cost_logger=None)
+    factory._checkpointer = MemorySaver() if checkpointer is None else checkpointer
+    factory._store = InMemoryStore() if store is None else store
+    factory._store_setup_complete = True
+    factory._static_tools_cache = [create_time_tool()]
+    if model is not None:
+        factory._create_model = lambda *_args, **_kwargs: model  # type: ignore[method-assign]
+    return factory
+
+
 def scripted_graph(
     model: ScriptedChatModel,
     *,
@@ -46,22 +85,15 @@ def scripted_graph(
 ):
     """A real compiled orchestrator graph whose LLM is ``model``.
 
-    In-memory checkpointer and store stand in for DynamoDB and Postgres, the
-    same substitution the integration conftest makes. ``_create_model`` is
-    shadowed on the instance rather than monkeypatched on the class, so the
-    swap is scoped to this factory and needs no fixture.
-
     The model type only steers provider-shaped decisions (structured-output
     strategy, prompt caching); no model of that name is ever contacted.
-    """
-    factory = GraphFactory(config=AgentSettings(), cost_logger=None)
-    factory._checkpointer = MemorySaver()
-    factory._store = InMemoryStore()
-    factory._store_setup_complete = True
-    factory._static_tools_cache = [create_time_tool()]
-    factory._create_model = lambda *_args, **_kwargs: model  # type: ignore[method-assign]
 
-    return factory._create_graph(model_type, thinking_level)
+    Compiled per call, deliberately. It costs ~21ms, and the alternative — one
+    module-scoped graph with a per-test reset — would mean swapping the scripted
+    model on shared state, which is the cross-test leakage this tier exists to
+    rule out.
+    """
+    return patched_factory(model=model)._create_graph(model_type, thinking_level)
 
 
 def runtime_context(*agents: MockSubAgent, **overrides: Any) -> GraphRuntimeContext:

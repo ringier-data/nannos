@@ -125,9 +125,9 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import SecretStr
 
 from app.core.agent import OrchestratorDeepAgent
-from app.core.graph_factory import GraphFactory
 from app.models.config import AgentSettings, UserConfig
 from tests.support.eval_report import EvalSession, min_pass_ratio
+from tests.support.graph_harness import patched_factory
 from tests.support.marker_gate import (
     ENV_OPT_IN,
     integration_possibly_requested,
@@ -407,22 +407,12 @@ def patched_graph_factory(memory_checkpointer, memory_store):
 
     Session-scoped so graphs are cached across tests (they are expensive to create).
     The checkpointer and store are also session-scoped.
+
+    The substitution recipe itself lives in ``tests.support.graph_harness`` and is
+    shared with the mock tier: it pokes private attributes, so a second copy would
+    drift from this one.
     """
-    settings = AgentSettings()
-
-    factory = GraphFactory(config=settings, cost_logger=None)
-
-    # Replace DynamoDB checkpointer and PostgreSQL store with in-memory versions
-    factory._checkpointer = memory_checkpointer
-    factory._store = memory_store
-    factory._store_setup_complete = True
-
-    # Pre-initialize static tools cache (avoids needing backend_factory)
-    from app.core.time_tools import create_time_tool
-
-    factory._static_tools_cache = [create_time_tool()]
-
-    return factory
+    return patched_factory(checkpointer=memory_checkpointer, store=memory_store)
 
 
 @pytest.fixture(scope="session")
