@@ -469,6 +469,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
       }),
       ...(job.job_type === 'watch' && {
         notification_message: message.trim() ? message.trim() : null, // Watch jobs use notification_message field
+        // Optional for watches: null clears it back to notify-only.
+        sub_agent_id: subAgentId ? parseInt(subAgentId) : null,
         check_tool: checkTool || undefined,
         check_args,
         condition_expr: conditionExpr || undefined,
@@ -748,6 +750,39 @@ function EditForm({ job }: { job: ScheduledJob }) {
             />
           </div>
 
+          {/* Optional sub-agent trigger */}
+          <div className="grid gap-1.5">
+            <Label>
+              Sub-agent{' '}
+              <span className="text-muted-foreground text-xs">(optional)</span>
+            </Label>
+            <Select
+              value={subAgentId || '_none'}
+              onValueChange={(v) => { setSubAgentId(v === '_none' ? '' : v); touch(); }}
+              disabled={!editing}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="None (notify only)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_none">
+                  <span className="text-muted-foreground">None (notify only)</span>
+                </SelectItem>
+                {subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
+                  <SelectItem key={sa.id} value={String(sa.id)}>
+                    <span>{sa.name}</span>
+                    {sa.type === 'automated' && (
+                      <span className="ml-2 text-xs text-muted-foreground">(automated)</span>
+                    )}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Run this sub-agent when the condition is met. Its response is delivered instead of the notification message.
+            </p>
+          </div>
+
         </>
       )}
 
@@ -762,7 +797,9 @@ function EditForm({ job }: { job: ScheduledJob }) {
             placeholder="Message sent when the condition is met."
           />
           <p className="text-xs text-muted-foreground">
-            Custom notification message delivered when the condition is met. If left empty, an LLM will generate a message based on the check result.
+            {subAgentId
+              ? 'Not used while a sub-agent is set — the sub-agent’s response is delivered instead.'
+              : 'Custom notification message delivered when the condition is met. If left empty, an LLM will generate a message based on the check result.'}
           </p>
         </div>
       )}

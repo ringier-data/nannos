@@ -472,6 +472,67 @@ class TestUpdateJobUnsetSentinel:
         assert fields["delivery_channel_id"] is None
 
     @pytest.mark.asyncio
+    async def test_update_sets_sub_agent_on_watch_after_access_check(
+        self,
+        service: SchedulerService,
+        mock_repo: AsyncMock,
+        mock_sub_agent_service: AsyncMock,
+        actor: User,
+    ):
+        """A watch job can be given a sub_agent_id, subject to the access check."""
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id, job_type=JobType.WATCH, sub_agent_id=None)
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+        accessible = MagicMock()
+        accessible.id = 42
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+
+        await service.update_job(
+            db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=42
+        )
+
+        mock_sub_agent_service.get_accessible_sub_agents.assert_awaited_once()
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["sub_agent_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_update_clearing_sub_agent_on_watch_skips_access_check(
+        self,
+        service: SchedulerService,
+        mock_repo: AsyncMock,
+        mock_sub_agent_service: AsyncMock,
+        actor: User,
+    ):
+        """Setting sub_agent_id=None on a watch clears it back to notify-only."""
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id, job_type=JobType.WATCH)
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        await service.update_job(
+            db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=None
+        )
+
+        mock_sub_agent_service.get_accessible_sub_agents.assert_not_awaited()
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["sub_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_clearing_sub_agent_on_task_is_rejected(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        """Task jobs require a sub-agent, so clearing it must fail."""
+        db = AsyncMock()
+        mock_repo.get_job.return_value = _make_job(user_id=actor.id, job_type=JobType.TASK)
+
+        with pytest.raises(ValueError, match="cannot be cleared on a task job"):
+            await service.update_job(
+                db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=None
+            )
+        mock_repo.update_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_update_returns_none_for_other_users_job(
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):

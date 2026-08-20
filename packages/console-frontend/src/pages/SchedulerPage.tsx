@@ -412,6 +412,9 @@ function CreateJobDialog({
       body.llm_condition = form.llm_condition.trim() || undefined;
       body.destroy_after_trigger = form.destroy_after_trigger;
       body.notification_message = form.notification_message.trim();
+      // Optional: run an existing sub-agent when the condition is met (inline
+      // sub_agent_parameters stay task-only by design).
+      if (form.sub_agent_id) body.sub_agent_id = parseInt(form.sub_agent_id);
     }
 
     setSubmitting(true);
@@ -461,7 +464,7 @@ function CreateJobDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="task">Task – run agent</SelectItem>
-                  <SelectItem value="watch">Watch – poll condition then notify</SelectItem>
+                  <SelectItem value="watch">Watch – poll condition, then notify or run agent</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -939,11 +942,43 @@ function CreateJobDialog({
               <p className="text-xs text-muted-foreground -mt-1 ml-6">
                 When enabled (default), the watch will automatically be disabled after the condition is met once. Disable this to keep the watch running indefinitely.
               </p>
+
+              {/* Optional sub-agent trigger */}
+              <div className="grid gap-1.5">
+                <Label>
+                  Sub-agent{' '}
+                  <span className="text-muted-foreground text-xs">(optional)</span>
+                </Label>
+                <Select
+                  value={form.sub_agent_id || '_none'}
+                  onValueChange={(v) => update('sub_agent_id', v === '_none' ? '' : v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="None (notify only)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="_none">
+                      <span className="text-muted-foreground">None (notify only)</span>
+                    </SelectItem>
+                    {subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
+                      <SelectItem key={sa.id} value={String(sa.id)}>
+                        <span>{sa.name}</span>
+                        {sa.type === 'automated' && (
+                          <span className="ml-2 text-xs text-muted-foreground">(automated)</span>
+                        )}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Run this sub-agent when the condition is met. Its response is delivered instead of the notification message.
+                </p>
+              </div>
             </>
           )}
 
-          {/* Notification message for watch jobs */}
-          {form.job_type === 'watch' && (
+          {/* Notification message for watch jobs (superseded by the sub-agent's response when one is set) */}
+          {form.job_type === 'watch' && !form.sub_agent_id && (
             <div className="grid gap-1.5">
               <Label htmlFor="notification_message">Notification message (optional)</Label>
               <Textarea

@@ -222,6 +222,7 @@ async def update_job(
             delivery_channel_id=(
                 data.delivery_channel_id if "delivery_channel_id" in data.model_fields_set else _UNSET
             ),
+            sub_agent_id=data.sub_agent_id if "sub_agent_id" in data.model_fields_set else _UNSET,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e

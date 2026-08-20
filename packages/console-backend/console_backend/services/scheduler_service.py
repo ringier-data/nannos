@@ -11,6 +11,7 @@ from console_backend.services.user_settings_service import UserSettingsService
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.scheduled_job import (
+    JobType,
     ScheduledJob,
     ScheduledJobCreate,
     ScheduledJobRun,
@@ -219,6 +220,7 @@ class SchedulerService:
         destroy_after_trigger: bool | None = _UNSET,
         check_args: dict | None = _UNSET,
         delivery_channel_id: int | None = _UNSET,
+        sub_agent_id: int | None = _UNSET,
         **kwargs,
     ) -> ScheduledJob | None:
         job = await self.repo.get_job(db, job_id)
@@ -250,9 +252,13 @@ class SchedulerService:
             if delivery_channel_id is not None:
                 await self._validate_delivery_channel(db, delivery_channel_id)
             fields["delivery_channel_id"] = delivery_channel_id
+        if sub_agent_id is not _UNSET:
+            if sub_agent_id is None and job.job_type == JobType.TASK:
+                raise ValueError("sub_agent_id cannot be cleared on a task job")
+            fields["sub_agent_id"] = sub_agent_id
 
         # Handle fields that still use old pattern (from kwargs/data)
-        for attr in ("enabled", "max_failures", "sub_agent_id", "voice_call"):
+        for attr in ("enabled", "max_failures", "voice_call"):
             val = getattr(data, attr, None)
             if val is not None:
                 fields[attr] = val
