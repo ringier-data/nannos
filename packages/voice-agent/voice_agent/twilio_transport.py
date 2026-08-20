@@ -272,8 +272,13 @@ async def twilio_stream(websocket: WebSocket) -> None:
         except Exception:
             logger.exception("twilio→agent error")
         finally:
-            # Signal end of session to agent
+            # Snapshot the call's token usage BEFORE ending the session — _end_session
+            # pops it from _active_sessions, after which there is nothing left to read.
+            # The outer finally block reports it (that's where voice_session_id lives).
             if state["session_key"]:
+                state["usage_entries"] = _voice_agent.collect_usage_entries(
+                    state["session_key"]
+                )
                 await _voice_agent._end_session(state["session_key"])
 
     async def _agent_to_twilio(session_key: str, init_query: str) -> None:
@@ -384,11 +389,27 @@ async def twilio_stream(websocket: WebSocket) -> None:
             _fut.set_result({"transcript": transcript, "call_sid": call_sid})
             logger.info("Resolved A2A future for call_sid=%s", call_sid)
 
-        # Mark inbound voice session complete (fire-and-forget)
+        # Report usage, then mark the voice session complete (both fire-and-forget).
+        # Usage is posted first so the rows land while the session is still resolvable.
         voice_session_id = state.get("voice_session_id")
         if voice_session_id:
-            from voice_agent.console_client import (
-                complete_voice_session,  # noqa: PLC0415
+            from voice_agent.console_client import (  # noqa: PLC0415
+                complete_voice_session,
+                report_voice_usage,
             )
 
-            _fire_and_forget(complete_voice_session(voice_session_id))
+            async def _report_then_complete(
+                session_id: str = voice_session_id,
+                entries: list = state.get("usage_entries") or [],
+            ) -> None:
+                await report_voice_usage(session_id, entries)
+                await complete_voice_session(session_id)
+
+            _fire_and_forget(_report_then_complete())
+        elif state.get("usage_entries"):
+            # No session record (default-config fallback path), so there is nothing to
+            # attribute this spend to. Surface it rather than dropping it silently.
+            logger.warning(
+                "Discarding usage for call_sid=%s — no voice session record to attribute it to",
+                call_sid,
+            )

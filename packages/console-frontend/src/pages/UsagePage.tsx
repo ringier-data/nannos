@@ -218,6 +218,20 @@ export function UsagePage() {
     })) || [];
   }, [detailed]);
 
+  const SERVICE_LABELS: Record<string, string> = {
+    orchestrator: 'Orchestrator',
+    catalog: 'Catalog',
+    scheduler: 'Scheduler',
+    voice: 'Voice',
+  };
+
+  const SERVICE_COLORS: Record<string, string> = {
+    orchestrator: '#8b5cf6',
+    catalog: '#f59e0b',
+    scheduler: '#10b981',
+    voice: '#3b82f6',
+  };
+
   const byServiceChartData = useMemo(() => {
     return detailed?.by_service?.map((item: UsageByService) => ({
       name: SERVICE_LABELS[item.service] || item.service,
@@ -348,7 +362,7 @@ export function UsagePage() {
         <Card>
           <CardHeader>
             <CardTitle>Cost by Service</CardTitle>
-            <CardDescription>Orchestrator vs Catalog vs Scheduler vs Console</CardDescription>
+            <CardDescription>Orchestrator vs Catalog vs Scheduler vs Console vs Voice</CardDescription>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={300}>

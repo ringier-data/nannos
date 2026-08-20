@@ -967,6 +967,23 @@ class VoiceAgent(BaseAgent):
         logger.info("Outbound voice session created: id=%s call_sid=%s", session.id, call_sid)
         return session.id
 
+    def collect_usage_entries(self, session_key: str) -> list[dict]:
+        """Snapshot a live session's measured spend as voice-usage report entries.
+
+        Must be called BEFORE ``_end_session``, which pops the session from
+        ``_active_sessions`` and would leave nothing to read. Returns [] for an unknown
+        key so callers can report unconditionally.
+        """
+        session = self._active_sessions.get(session_key)
+        if session is None:
+            logger.warning("collect_usage_entries: no active session for %s", session_key)
+            return []
+        try:
+            return session["agent"].build_usage_entries()
+        except Exception:
+            logger.exception("Failed to collect usage entries for session %s", session_key)
+            return []
+
     async def _end_session(self, session_key: str):
         # Cancel any pending pre-warm task that never got picked up
         prewarm_task = self._prewarm_tasks.pop(session_key, None)
