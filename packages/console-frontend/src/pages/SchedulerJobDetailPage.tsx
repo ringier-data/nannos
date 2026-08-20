@@ -49,6 +49,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { config } from '@/config';
 import {
   type JobRunStatus,
@@ -327,9 +328,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
   const [message, setMessage] = useState(
     job.job_type === 'task' ? (job.prompt ?? '') : (job.notification_message ?? '')
   );
-  const [subAgentId, setSubAgentId] = useState(
-    job.sub_agent_id != null ? String(job.sub_agent_id) : '',
-  );
+  const initialSubAgentId = job.sub_agent_id != null ? String(job.sub_agent_id) : '';
+  const [subAgentId, setSubAgentId] = useState(initialSubAgentId);
   const [checkTool, setCheckTool] = useState(job.check_tool ?? '');
   const [checkArgsText, setCheckArgsText] = useState(
     job.check_args ? JSON.stringify(job.check_args, null, 2) : '',
@@ -384,7 +384,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setIntervalSeconds(job.interval_seconds != null ? String(job.interval_seconds) : '');
     setRunAt(initialRunAt);
     setMessage(job.job_type === 'task' ? (job.prompt ?? '') : (job.notification_message ?? ''));
-    setSubAgentId(job.sub_agent_id != null ? String(job.sub_agent_id) : '');
+    setSubAgentId(initialSubAgentId);
     setCheckTool(job.check_tool ?? '');
     setCheckArgsText(job.check_args ? JSON.stringify(job.check_args, null, 2) : '');
     setConditionExpr(job.condition_expr ?? '');
@@ -463,14 +463,23 @@ function EditForm({ job }: { job: ScheduledJob }) {
       // resending the prefill on an unrelated edit would needlessly re-touch
       // the schedule.
       ...(job.schedule_kind === 'once' && runAt !== initialRunAt && { run_at: runAt || undefined }),
+      // Only send sub_agent_id when it actually changed: an unchanged value
+      // would still re-run the backend's access check on every save, and would
+      // reject unrelated edits outright once the agent is no longer accessible.
+      // For watches an explicit null clears it back to notify-only; task jobs
+      // require one, so an emptied value is simply not sent.
+      ...(subAgentId !== initialSubAgentId && {
+        sub_agent_id: subAgentId
+          ? parseInt(subAgentId)
+          : job.job_type === 'watch'
+            ? null
+            : undefined,
+      }),
       ...(job.job_type === 'task' && {
-        sub_agent_id: subAgentId ? parseInt(subAgentId) : undefined,
         prompt: message.trim() ? message.trim() : null, // Task jobs use prompt field
       }),
       ...(job.job_type === 'watch' && {
         notification_message: message.trim() ? message.trim() : null, // Watch jobs use notification_message field
-        // Optional for watches: null clears it back to notify-only.
-        sub_agent_id: subAgentId ? parseInt(subAgentId) : null,
         check_tool: checkTool || undefined,
         check_args,
         condition_expr: conditionExpr || undefined,
@@ -588,33 +597,14 @@ function EditForm({ job }: { job: ScheduledJob }) {
         <>
           <div className="grid gap-1.5">
             <Label>Sub-agent</Label>
-            <Select
+            <SubAgentSelect
               value={subAgentId}
-              onValueChange={(v) => { setSubAgentId(v); touch(); }}
+              onChange={(v) => { setSubAgentId(v); touch(); }}
+              subAgents={subAgents}
               disabled={!editing}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select a sub-agent…" />
-              </SelectTrigger>
-              <SelectContent>
-                {subAgents.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-muted-foreground">
-                    No sub-agents found
-                  </div>
-                ) : (
-                  subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
-                    <SelectItem key={sa.id} value={String(sa.id)}>
-                      <span>{sa.name}</span>
-                      {sa.type === 'automated' && (
-                        <span className="ml-2 text-xs text-muted-foreground">(automated)</span>
-                      )}
-                    </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
+            />
             <p className="text-xs text-muted-foreground">
-              {subAgents.find(sa => sa.id === parseInt(subAgentId))?.type === 'automated' 
+              {subAgents.find(sa => sa.id === parseInt(subAgentId))?.type === 'automated'
                 ? 'This automated sub-agent has a predefined system prompt.'
                 : 'Select a sub-agent to execute for this scheduled job.'}
             </p>
@@ -756,28 +746,13 @@ function EditForm({ job }: { job: ScheduledJob }) {
               Sub-agent{' '}
               <span className="text-muted-foreground text-xs">(optional)</span>
             </Label>
-            <Select
-              value={subAgentId || '_none'}
-              onValueChange={(v) => { setSubAgentId(v === '_none' ? '' : v); touch(); }}
+            <SubAgentSelect
+              value={subAgentId}
+              onChange={(v) => { setSubAgentId(v); touch(); }}
+              subAgents={subAgents}
               disabled={!editing}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="None (notify only)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_none">
-                  <span className="text-muted-foreground">None (notify only)</span>
-                </SelectItem>
-                {subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
-                  <SelectItem key={sa.id} value={String(sa.id)}>
-                    <span>{sa.name}</span>
-                    {sa.type === 'automated' && (
-                      <span className="ml-2 text-xs text-muted-foreground">(automated)</span>
-                    )}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              includeNone
+            />
             <p className="text-xs text-muted-foreground">
               When the condition is met, this sub-agent is invoked with the check tool's result as its input
               ("Watch condition triggered. Take appropriate action based on: &lt;check result&gt;") and acts per

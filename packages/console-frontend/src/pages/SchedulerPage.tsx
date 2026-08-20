@@ -74,6 +74,7 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import { config } from '@/config';
 import { CronField } from '@/components/CronField';
+import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { describeCron } from '@/lib/cron';
 
 // ---------------------------------------------------------------------------
@@ -457,7 +458,16 @@ function CreateJobDialog({
               <Label>Job type</Label>
               <Select
                 value={form.job_type}
-                onValueChange={(v) => update('job_type', v as JobType)}
+                onValueChange={(v) =>
+                  // Reset cross-type fields so a task-mode selection can't
+                  // silently carry over into a watch (and vice versa).
+                  setForm((f) => ({
+                    ...f,
+                    job_type: v as JobType,
+                    sub_agent_id: '',
+                    voice_call: false,
+                  }))
+                }
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -551,30 +561,11 @@ function CreateJobDialog({
                 <>
                   <div className="grid gap-1.5">
                     <Label>Sub-agent</Label>
-                    <Select
+                    <SubAgentSelect
                       value={form.sub_agent_id}
-                      onValueChange={(v) => update('sub_agent_id', v)}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select a sub-agent…" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {subAgents.filter((sa) => sa.name !== 'voice-agent').length === 0 ? (
-                          <div className="px-3 py-2 text-sm text-muted-foreground">
-                            No sub-agents found
-                          </div>
-                        ) : (
-                          subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
-                            <SelectItem key={sa.id} value={String(sa.id)}>
-                              <span>{sa.name}</span>
-                              {sa.type === 'automated' && (
-                                <span className="ml-2 text-xs text-muted-foreground">(automated)</span>
-                              )}
-                            </SelectItem>
-                          ))
-                        )}
-                      </SelectContent>
-                    </Select>
+                      onChange={(v) => update('sub_agent_id', v)}
+                      subAgents={subAgents}
+                    />
                   </div>
                 </>
               )}
@@ -949,27 +940,12 @@ function CreateJobDialog({
                   Sub-agent{' '}
                   <span className="text-muted-foreground text-xs">(optional)</span>
                 </Label>
-                <Select
-                  value={form.sub_agent_id || '_none'}
-                  onValueChange={(v) => update('sub_agent_id', v === '_none' ? '' : v)}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="None (notify only)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="_none">
-                      <span className="text-muted-foreground">None (notify only)</span>
-                    </SelectItem>
-                    {subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
-                      <SelectItem key={sa.id} value={String(sa.id)}>
-                        <span>{sa.name}</span>
-                        {sa.type === 'automated' && (
-                          <span className="ml-2 text-xs text-muted-foreground">(automated)</span>
-                        )}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <SubAgentSelect
+                  value={form.sub_agent_id}
+                  onChange={(v) => update('sub_agent_id', v)}
+                  subAgents={subAgents}
+                  includeNone
+                />
                 <p className="text-xs text-muted-foreground">
                   When the condition is met, this sub-agent is invoked with the check tool's result as its input
                   ("Watch condition triggered. Take appropriate action based on: &lt;check result&gt;") and acts per
@@ -980,7 +956,7 @@ function CreateJobDialog({
           )}
 
           {/* Notification message for watch jobs (superseded by the sub-agent's response when one is set) */}
-          {form.job_type === 'watch' && !form.sub_agent_id && (
+          {form.job_type === 'watch' && (
             <div className="grid gap-1.5">
               <Label htmlFor="notification_message">Notification message (optional)</Label>
               <Textarea
@@ -991,7 +967,9 @@ function CreateJobDialog({
                 placeholder="Leave empty to auto-generate with LLM."
               />
               <p className="text-xs text-muted-foreground">
-                If left empty, an LLM will generate a notification message based on the check result.
+                {form.sub_agent_id
+                  ? 'Not used while a sub-agent is set — the sub-agent’s response is delivered instead.'
+                  : 'If left empty, an LLM will generate a notification message based on the check result.'}
               </p>
             </div>
           )}
