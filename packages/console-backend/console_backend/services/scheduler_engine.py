@@ -231,6 +231,9 @@ class SchedulerEngine:
             "scheduled_job_id": job.id,
             "scheduled_job_run_id": run_id,
             "job_type": job.job_type.value,
+            # The job's IANA timezone, so the runner's tool-less LLM calls
+            # (condition eval, notification generation) can be told "now".
+            "timezone": job.timezone or None,
         }
 
         if job.sub_agent_id is not None:

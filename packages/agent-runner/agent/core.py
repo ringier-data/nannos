@@ -26,8 +26,9 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from a2a.types import AgentCard, Message, Task, TaskState
@@ -48,7 +49,8 @@ from agent_common.core.model_factory import (
     require_default_model,
 )
 from agent_common.core.stream_watchdog import watch_stream_with_resume
-from google.protobuf.json_format import ParseDict
+from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.struct_pb2 import Struct
 from object_storage import get_object_storage_service
 
 if TYPE_CHECKING:
@@ -174,6 +176,23 @@ def _a2a_messages_to_human_messages(messages: list[Message]) -> list[HumanMessag
     return result
 
 
+def _current_time_context(timezone_name: str | None) -> str:
+    """Render "now" for tool-less LLM prompts (condition eval, message generation).
+
+    Those calls cannot consult date tools, so without an anchor the model latches
+    onto whatever timestamp appears in the data (e.g. a stale snapshot date).
+    """
+    now_utc = datetime.now(UTC)
+    line = f"Current time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    if timezone_name:
+        try:
+            local = now_utc.astimezone(ZoneInfo(timezone_name))
+            line += f" ({local.strftime('%Y-%m-%d %H:%M:%S')} {timezone_name})"
+        except Exception:
+            pass
+    return line
+
+
 def _extract_message_metadata(task: Task) -> dict[str, Any]:
     """Extract scheduler metadata from the A2A task's message history.
 
@@ -195,7 +214,14 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
         if task.history:
             last_msg = task.history[-1]
             if hasattr(last_msg, "metadata") and last_msg.metadata:
-                return dict(last_msg.metadata)
+                meta = last_msg.metadata
+                # Over gRPC the metadata is a protobuf Struct; dict() would only
+                # convert the top level, leaving nested values (e.g. "watch") as
+                # Structs that support ["key"] but not .get(). Convert the whole
+                # tree to plain Python instead.
+                if isinstance(meta, Struct):
+                    return MessageToDict(meta)
+                return dict(meta)
     except Exception:
         pass
     return {}
@@ -599,11 +625,17 @@ class AgentRunner(BaseAgent):
         # Extract scheduler-specific metadata from the message
         message_meta = _extract_message_metadata(task)
 
-        sub_agent_id: int | None = message_meta.get("sub_agent_id")
+        # Struct numbers arrive as floats (protobuf doubles); coerce the ids back
+        # to int — e.g. the sub-agent config URL path rejects "42.0".
+        def _meta_int(key: str) -> int | None:
+            value = message_meta.get(key)
+            return int(value) if isinstance(value, int | float) else None
+
+        sub_agent_id: int | None = _meta_int("sub_agent_id")
         job_type: str = message_meta.get("job_type", "task")
         watch: dict | None = message_meta.get("watch")
-        scheduled_job_id: int | None = message_meta.get("scheduled_job_id")
-        scheduled_job_run_id: int = message_meta.get("scheduled_job_run_id", "")
+        scheduled_job_id: int | None = _meta_int("scheduled_job_id")
+        scheduled_job_run_id: int | str = _meta_int("scheduled_job_run_id") or ""
 
         # SECURITY: Use verified access token from JWT (validated by JWTValidatorMiddleware)
         # and fetch user_id from backend API to prevent privilege escalation
@@ -616,7 +648,9 @@ class AgentRunner(BaseAgent):
 
         # --- 1. Watch condition evaluation (skips LLM if condition not met) ---
         if job_type == "watch" and watch:
-            condition_met, check_result = await self._evaluate_watch(watch, user_access_token)
+            condition_met, check_result = await self._evaluate_watch(
+                watch, user_access_token, timezone_name=message_meta.get("timezone")
+            )
             last_check_result = check_result
             if not condition_met:
                 logger.info(f"Watch condition NOT met for job {scheduled_job_id} — skipping execution")
@@ -633,7 +667,9 @@ class AgentRunner(BaseAgent):
 
             # Generate agent message if none was provided
             # This is what gets delivered to the user
-            agent_message = message_text or await self._generate_watch_message(check_result, user_config.user_sub)
+            agent_message = message_text or await self._generate_watch_message(
+                check_result, user_config.user_sub, timezone_name=message_meta.get("timezone")
+            )
             logger.info(f"Watch notification: {agent_message[:100]}...")
 
         # --- 2. Sub-agent execution (dispatched by type) ---
@@ -721,7 +757,9 @@ class AgentRunner(BaseAgent):
             logger.error(f"[SECURITY] Failed to fetch user_id from backend: {exc}")
             return None
 
-    async def _evaluate_watch(self, watch: dict, user_access_token: str) -> tuple[bool, dict]:
+    async def _evaluate_watch(
+        self, watch: dict, user_access_token: str, timezone_name: str | None = None
+    ) -> tuple[bool, dict]:
         """Call the check_tool via MCP gateway and evaluate the condition.
 
         Args:
@@ -769,34 +807,33 @@ class AgentRunner(BaseAgent):
         check_result: dict = {}
         try:
             mcp_client = MultiServerMCPClient(connections)
-            async with mcp_client:
-                tools = await mcp_client.get_tools()
-                tool_map = {t.name: t for t in tools}
+            tools = await mcp_client.get_tools()
+            tool_map = {t.name: t for t in tools}
 
-                if check_tool not in tool_map:
-                    raise ValueError(f"Watch check_tool '{check_tool}' not found in MCP gateway")
+            if check_tool not in tool_map:
+                raise ValueError(f"Watch check_tool '{check_tool}' not found in MCP gateway")
 
-                raw = await tool_map[check_tool].ainvoke(check_args)
-                # ainvoke returns list[TextContentBlock | ImageContentBlock | FileContentBlock]
-                # (langchain_core TypedDicts, already converted from raw MCP content blocks).
-                if isinstance(raw, list):
-                    text_parts: list[str] = [
-                        block["text"] for block in raw if isinstance(block, dict) and block.get("type") == "text"
-                    ]
-                    combined = "\n".join(text_parts) if text_parts else ""
-                    try:
-                        check_result = json.loads(combined) if combined else {}
-                    except json.JSONDecodeError:
-                        check_result = {"output": combined}
-                elif isinstance(raw, dict):
-                    check_result = raw
-                elif isinstance(raw, str):
-                    try:
-                        check_result = json.loads(raw)
-                    except json.JSONDecodeError:
-                        check_result = {"output": raw}
-                else:
-                    check_result = {"output": str(raw)}
+            raw = await tool_map[check_tool].ainvoke(check_args)
+            # ainvoke returns list[TextContentBlock | ImageContentBlock | FileContentBlock]
+            # (langchain_core TypedDicts, already converted from raw MCP content blocks).
+            if isinstance(raw, list):
+                text_parts: list[str] = [
+                    block["text"] for block in raw if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                combined = "\n".join(text_parts) if text_parts else ""
+                try:
+                    check_result = json.loads(combined) if combined else {}
+                except json.JSONDecodeError:
+                    check_result = {"output": combined}
+            elif isinstance(raw, dict):
+                check_result = raw
+            elif isinstance(raw, str):
+                try:
+                    check_result = json.loads(raw)
+                except json.JSONDecodeError:
+                    check_result = {"output": raw}
+            else:
+                check_result = {"output": str(raw)}
 
         except Exception as exc:
             logger.exception("Watch check_tool '%s' call failed", check_tool)
@@ -828,7 +865,9 @@ class AgentRunner(BaseAgent):
                         "Be precise and objective in your evaluation."
                     )
 
-                    user_prompt = f"""Evaluate this condition:
+                    user_prompt = f"""{_current_time_context(timezone_name)}
+
+Evaluate this condition:
 {llm_condition}
 
 Extracted value from JSONPath:
@@ -875,7 +914,9 @@ Evaluate whether the condition is met and provide brief reasoning."""
         logger.info("Watch condition met=%s", condition_met)
         return condition_met, check_result
 
-    async def _generate_watch_message(self, check_result: dict, user_sub: str) -> str:
+    async def _generate_watch_message(
+        self, check_result: dict, user_sub: str, timezone_name: str | None = None
+    ) -> str:
         """Generate a notification message using LLM when no explicit message was provided.
 
         Args:
@@ -900,7 +941,9 @@ Evaluate whether the condition is met and provide brief reasoning."""
                 "The message should be human-readable and highlight the key information from the result."
             )
 
-            user_prompt = f"""Generate a notification message for this watch condition result:
+            user_prompt = f"""{_current_time_context(timezone_name)}
+
+Generate a notification message for this watch condition result:
 
 {json.dumps(check_result, indent=2)}
 

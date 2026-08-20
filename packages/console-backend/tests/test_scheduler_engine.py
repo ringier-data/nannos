@@ -624,6 +624,7 @@ class TestBuildMessageArgs:
         job = _make_job(job_type=JobType.WATCH)
         job.check_tool = "ping_tool"
         job.condition_expr = "$.status"
+        job.timezone = "Europe/Zurich"
 
         parts, metadata, push_config = await engine._build_message_args(
             job, run_id=7, access_token="tok", db=AsyncMock()
@@ -631,6 +632,7 @@ class TestBuildMessageArgs:
 
         assert metadata["watch"]["prompt"] == "Do something"
         assert metadata["sub_agent_id"] == 42
+        assert metadata["timezone"] == "Europe/Zurich"
         # The text part carries the notification message, never the prompt.
         assert parts == [{"kind": "text", "text": ""}]
         assert push_config is None
