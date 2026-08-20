@@ -695,8 +695,12 @@ class AgentRunner(BaseAgent):
                 prompt = message_text or "Execute your configured task."
 
             try:
-                agent_message, sub_agent_name = await self._execute_sub_agent(
-                    sub_agent_id=sub_agent_id,
+                # Fetched here (not inside _execute_sub_agent) so the failure
+                # branch below still knows which sub-agent was targeted.
+                sub_agent_cfg = await self._fetch_sub_agent_config(sub_agent_id, user_access_token)
+                sub_agent_name = sub_agent_cfg["name"]
+                agent_message = await self._execute_sub_agent(
+                    sub_agent_cfg=sub_agent_cfg,
                     prompt=prompt,
                     raw_a2a_messages=messages,
                     user_access_token=user_access_token,
@@ -1035,7 +1039,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
 
     async def _execute_sub_agent(
         self,
-        sub_agent_id: int,
+        sub_agent_cfg: dict,
         prompt: str,
         user_access_token: str,
         scheduled_job_id: int,
@@ -1044,11 +1048,11 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
-    ) -> tuple[str | None, str]:
-        """Fetch sub-agent config and dispatch to the appropriate execution method.
+    ) -> str | None:
+        """Dispatch a sub-agent config to the appropriate execution method.
 
         Args:
-            sub_agent_id: ID of the sub-agent to run.
+            sub_agent_cfg: Result of _fetch_sub_agent_config().
             prompt: The user message to process (used for local/foundry agents).
             user_access_token: Token passed through for authentication.
             scheduled_job_id: The ID of the scheduled job.
@@ -1059,14 +1063,12 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             raw_a2a_messages: Original A2A messages (used for remote agents to preserve DataParts).
 
         Returns:
-            Tuple of (agent_message, sub_agent_name).
+            agent_message (str | None)
         """
-        sub_agent_cfg = await self._fetch_sub_agent_config(sub_agent_id, user_access_token)
         agent_type = sub_agent_cfg["type"]
-        sub_agent_name = sub_agent_cfg["name"]
 
         if agent_type in ("automated", "local"):
-            agent_message = await self._run_langgraph_agent(
+            return await self._run_langgraph_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 prompt=prompt,
                 raw_a2a_messages=raw_a2a_messages,
@@ -1078,7 +1080,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 context_id=context_id,
             )
         elif agent_type == "foundry":
-            agent_message = await self._run_foundry_agent(
+            return await self._run_foundry_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 prompt=prompt,
                 user_config=user_config,
@@ -1086,7 +1088,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 scheduled_job_run_id=scheduled_job_run_id,
             )
         elif agent_type == "remote":
-            agent_message = await self._run_remote_agent(
+            return await self._run_remote_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 raw_a2a_messages=raw_a2a_messages or [],
                 prompt=prompt,
@@ -1095,9 +1097,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 scheduled_job_run_id=scheduled_job_run_id,
             )
         else:
-            raise ValueError(f"Unsupported sub-agent type '{agent_type}' for sub-agent {sub_agent_id}")
-
-        return agent_message, sub_agent_name
+            raise ValueError(f"Unsupported sub-agent type '{agent_type}' for sub-agent {sub_agent_cfg.get('sub_agent_id')}")
 
     async def _run_langgraph_agent(
         self,

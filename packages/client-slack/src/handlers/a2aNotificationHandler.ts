@@ -27,6 +27,7 @@ interface SchedulerPayload {
   sub_agent_id?: number;
   sub_agent_name?: string;
   prompt?: string;
+  error_message?: string;
 }
 
 function getSchedulerPayload(task: Task): SchedulerPayload | undefined {
@@ -125,7 +126,7 @@ export async function handleA2ANotification(
     if (scheduledRunStore && postResult.ts && task.contextId) {
       try {
         await scheduledRunStore.set({
-          contextKey: scheduledRunStore.buildKey(botInstallation.teamId, dmResult.channel.id, postResult.ts),
+          contextKey: scheduledRunStore.buildKey(dmResult.channel.id, postResult.ts),
           contextId: task.contextId,
           scheduledJobId: schedulerPayload.scheduled_job_id,
           scheduledJobRunId: schedulerPayload.scheduled_job_run_id,
@@ -133,6 +134,8 @@ export async function handleA2ANotification(
           subAgentName: schedulerPayload.sub_agent_name,
           prompt: schedulerPayload.prompt,
           resultSummary: schedulerPayload.agent_message,
+          schedulerStatus: schedulerPayload.scheduler_status,
+          errorMessage: schedulerPayload.error_message,
         });
         logger.info(
           `[A2ACallback] Stored scheduled-run provenance for message ts=${postResult.ts} (contextId=${task.contextId})`

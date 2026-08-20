@@ -240,7 +240,10 @@ class TestWatchConditionNotMet:
         """When watch condition IS met, _execute_sub_agent is called."""
         check_result = {"value": 10}
         agent_runner._evaluate_watch = AsyncMock(return_value=(True, check_result))
-        agent_runner._execute_sub_agent = AsyncMock(return_value=("Agent completed task.", "watch-agent"))
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "watch-agent", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(return_value="Agent completed task.")
         agent_runner._generate_watch_message = AsyncMock(return_value="Watch triggered.")
 
         task = MagicMock()

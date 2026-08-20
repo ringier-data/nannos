@@ -119,11 +119,13 @@ export interface IContextStore {
 
 /**
  * Provenance of a scheduled-run notification delivered to Slack, keyed by the
- * delivered message ({teamId}:{channelId}:{messageTs}). `contextId` is the
- * run's own A2A conversation on agent-runner — it is forwarded to the
- * orchestrator as structured data only, NEVER as the request contextId
- * (the orchestrator checkpoints under the same key convention, so reusing it
- * as a conversation id would collide with the sub-agent's state).
+ * delivered message ({channelId}:{messageTs} — channel id + ts already
+ * uniquely identify the message; keying without the team id keeps writer and
+ * reader on the same id source). `contextId` is the run's own A2A conversation
+ * on agent-runner — it is forwarded to the orchestrator as structured data
+ * only, NEVER as the request contextId (the orchestrator checkpoints under
+ * the same key convention, so reusing it as a conversation id would collide
+ * with the sub-agent's state).
  */
 export interface ScheduledRunRecord {
   contextKey: string;
@@ -134,6 +136,9 @@ export interface ScheduledRunRecord {
   subAgentName?: string;
   prompt?: string;
   resultSummary?: string;
+  /** 'success' | 'failed' (condition_not_met notifications are never delivered) */
+  schedulerStatus?: string;
+  errorMessage?: string;
 }
 
 /**
@@ -142,7 +147,7 @@ export interface ScheduledRunRecord {
 export interface IScheduledRunStore {
   set(record: ScheduledRunRecord): Promise<void>;
   get(key: string): Promise<ScheduledRunRecord | null>;
-  buildKey(teamId: string, channelId: string, messageTs: string): string;
+  buildKey(channelId: string, messageTs: string): string;
 }
 
 /**

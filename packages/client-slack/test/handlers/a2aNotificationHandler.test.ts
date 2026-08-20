@@ -52,7 +52,7 @@ function mockScheduledRunStore(): IScheduledRunStore {
   return {
     set: jest.fn<(r: ScheduledRunRecord) => Promise<void>>().mockResolvedValue(undefined),
     get: jest.fn<() => Promise<ScheduledRunRecord | null>>().mockResolvedValue(null),
-    buildKey: (teamId: string, channelId: string, messageTs: string) => `${teamId}:${channelId}:${messageTs}`,
+    buildKey: (channelId: string, messageTs: string) => `${channelId}:${messageTs}`,
   };
 }
 
@@ -93,7 +93,7 @@ describe('handleA2ANotification scheduled-run provenance', () => {
 
     expect(slackClient.chat.postMessage).toHaveBeenCalledWith({ channel: 'D1', text: 'Sales were up 4%.' });
     expect(scheduledRunStore.set).toHaveBeenCalledWith({
-      contextKey: 'T1:D1:111.222',
+      contextKey: 'D1:111.222',
       contextId: 'run-ctx-123',
       scheduledJobId: 7,
       scheduledJobRunId: 42,
@@ -101,6 +101,8 @@ describe('handleA2ANotification scheduled-run provenance', () => {
       subAgentName: 'Report Agent',
       prompt: "Summarize yesterday's sales.",
       resultSummary: 'Sales were up 4%.',
+      schedulerStatus: 'success',
+      errorMessage: undefined,
     });
   });
 

@@ -643,16 +643,19 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     const existingContext: ContextRecord | null = await contextStore.get(contextKey);
     const existingContextId = existingContext?.contextId;
 
-    // Reply under a delivered scheduled-run notification: on the FIRST reply
-    // (no orchestrator conversation yet for this thread) forward the run's
+    // Reply under a delivered scheduled-run notification: forward the run's
     // provenance as a DataPart so the orchestrator can reconstruct the
-    // delegation and adopt the run's sub-agent conversation. The run's
+    // delegation in the conversation it opens for this thread. Attached on
+    // EVERY thread reply that has a provenance row — the orchestrator injects
+    // only on a conversation with no history, and it is the side that actually
+    // knows whether history exists (a contextId stored here can belong to a
+    // first turn that failed before any checkpoint was written). The run's
     // contextId is deliberately NOT sent as the request contextId — it names
     // the sub-agent's own conversation, not an orchestrator one.
     let scheduledRunDataPart: Record<string, unknown> | undefined;
-    if (!existingContextId && threadTs !== messageTs && scheduledRunStore) {
+    if (threadTs !== messageTs && scheduledRunStore) {
       try {
-        const runRecord = await scheduledRunStore.get(scheduledRunStore.buildKey(teamId, channelId, threadTs));
+        const runRecord = await scheduledRunStore.get(scheduledRunStore.buildKey(channelId, threadTs));
         if (runRecord) {
           scheduledRunDataPart = {
             scheduled_run: {
@@ -663,6 +666,8 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               sub_agent_name: runRecord.subAgentName,
               prompt: runRecord.prompt,
               result_summary: runRecord.resultSummary,
+              scheduler_status: runRecord.schedulerStatus,
+              error_message: runRecord.errorMessage,
             },
           };
           logger.info(

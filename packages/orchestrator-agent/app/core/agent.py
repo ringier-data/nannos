@@ -104,32 +104,45 @@ def _extract_scheduled_run_provenance(message_parts: list[Part]) -> dict[str, An
     return None
 
 
-def _build_scheduled_run_history(run: dict[str, Any]) -> tuple[list[Any], dict[str, Any]] | None:
-    """Build a synthetic delegation turn for a scheduled run, plus its a2a_tracking seed.
+def _scheduled_run_frame_text(text: str) -> str:
+    """Neutralize a closing tag inside text interpolated into the <scheduled_run> frame.
+
+    Run prompts/outputs routinely contain untrusted content; a literal
+    ``</scheduled_run>`` would escape the frame and read as first-person user
+    input on the conversation's first turn.
+    """
+    return text.replace("</scheduled_run", "<\\/scheduled_run")
+
+
+def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
+    """Build synthetic history reconstructing a scheduled run for a fresh conversation.
 
     The scheduler dispatched the run directly to agent-runner, so this fresh
     orchestrator conversation has no record of it. Reconstruct the turn the
-    orchestrator *would* have produced had it dispatched the run itself:
-    the job prompt as the human request (first non-system message must be a
-    human one — some providers reject a leading assistant tool-call), the
-    ``task`` tool call to the sub-agent, and the run's output as the tool
-    result. The a2a_tracking seed makes the sub-agent contextId waterfall
-    (agent_common.a2a.base) resume the run's own agent-runner conversation on
-    the next delegation, instead of starting a blank one.
+    orchestrator *would* have produced had it dispatched the run itself: the
+    job prompt as the human request (first non-system message must be a human
+    one — some providers reject a leading assistant tool-call), the ``task``
+    tool call to the sub-agent, and the run's output as the tool result. This
+    gives the model the run's prompt and output as real context; it does NOT
+    resume the run's checkpoint — the run executed on agent-runner, whose
+    conversation state is not reachable from the orchestrator's delegation
+    paths (cross-service adoption is a separate follow-up).
 
-    Returns None when the provenance lacks a sub-agent or contextId (e.g. a
-    watch notification that ran no sub-agent) — there is no delegation to
-    reconstruct in that case.
+    For a run without a sub-agent (a plain watch notification) there is no
+    delegation to reconstruct — only the framing HumanMessage carrying the
+    delivered notification text is returned, so the model still knows what
+    the user is replying to.
+
+    Returns None when the provenance carries nothing to reconstruct.
     """
-    # Same normalization as the delegation waterfall's tracking key
-    # (agent_common.a2a.base: ``self.name.replace(" ", "")``).
-    sub_agent_name = (run.get("sub_agent_name") or "").replace(" ", "")
-    run_context_id = run.get("context_id")
-    if not sub_agent_name or not run_context_id:
-        return None
-
-    prompt = run.get("prompt") or "Execute your configured task."
-    result_summary = run.get("result_summary") or "(the output was delivered to the user)"
+    # Raw config name: the sub-agent registry is keyed by the unmodified name
+    # for local/foundry agents, so the synthetic tool call must show the form
+    # the model can actually re-use on a follow-up delegation.
+    sub_agent_name = run.get("sub_agent_name") or ""
+    prompt = run.get("prompt")
+    result_summary = run.get("result_summary")
+    failed = run.get("scheduler_status") == "failed"
+    error_message = run.get("error_message")
 
     def _fmt_id(value: Any) -> str:
         # MessageToDict renders protobuf numbers as floats; ids must not print as "42.0".
@@ -137,13 +150,45 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> tuple[list[Any], dict[s
 
     job_id = _fmt_id(run.get("scheduled_job_id"))
     run_id = _fmt_id(run.get("scheduled_job_run_id"))
-    tool_call_id = f"scheduled_run_{run_id or run_context_id}"
+    frame_attrs = f'source="scheduler" job_id="{job_id}" run_id="{run_id}"' + (
+        ' status="failed"' if failed else ""
+    )
+
+    if not sub_agent_name:
+        # Watch notification without a sub-agent: no delegation happened; give
+        # the model the delivered notification as context.
+        if not result_summary:
+            return None
+        return [
+            HumanMessage(
+                content=(
+                    f"<scheduled_run {frame_attrs}>"
+                    f"{_scheduled_run_frame_text(result_summary)}"
+                    "</scheduled_run>\n"
+                    "The message above was produced by a scheduled watch and delivered to the user; "
+                    "they are now replying to it."
+                )
+            )
+        ]
+
+    prompt = prompt or "Execute your configured task."
+    if failed:
+        tool_content = f"The scheduled run FAILED: {error_message or 'unknown error'}"
+        if result_summary:
+            tool_content += f"\nPartial output delivered to the user: {result_summary}"
+    else:
+        tool_content = result_summary or "(the output was delivered to the user)"
+
+    tool_call_id = f"scheduled_run_{run_id or run.get('context_id') or 'unknown'}"
 
     human_msg = HumanMessage(
         content=(
-            f'<scheduled_run source="scheduler" job_id="{job_id}" run_id="{run_id}">'
-            f"{prompt}"
-            "</scheduled_run>"
+            f"<scheduled_run {frame_attrs}>"
+            f"{_scheduled_run_frame_text(prompt)}"
+            "</scheduled_run>\n"
+            "The request above ran on a schedule and its output was already delivered to the user, "
+            "who is now replying to it. When the reply needs content from that output, restate it "
+            "explicitly in your answer — do not reference it via include_subagent_output."
         )
     )
     ai_msg = AIMessage(
@@ -157,17 +202,18 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> tuple[list[Any], dict[s
             }
         ],
     )
-    tracking_entry = {
-        "context_id": run_context_id,
-        "is_complete": True,
-        "state": "TASK_STATE_COMPLETED",
-    }
     tool_msg = ToolMessage(
-        content=result_summary,
+        content=tool_content,
         tool_call_id=tool_call_id,
-        additional_kwargs={"a2a_metadata": {**tracking_entry, "agent_name": sub_agent_name}},
+        additional_kwargs={
+            "a2a_metadata": {
+                "is_complete": True,
+                "state": "TASK_STATE_FAILED" if failed else "TASK_STATE_COMPLETED",
+                "agent_name": sub_agent_name,
+            }
+        },
     )
-    return [human_msg, ai_msg, tool_msg], {sub_agent_name: tracking_entry}
+    return [human_msg, ai_msg, tool_msg]
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -506,27 +552,26 @@ class OrchestratorDeepAgent:
             # Scheduled-run follow-up: on the FIRST turn of a conversation opened
             # by replying under a scheduled-run notification, prepend a synthetic
             # delegation turn (job prompt → task tool call → run output) so the
-            # model sees the run it is being asked about, and seed a2a_tracking so
-            # the next dispatch to that sub-agent resumes the run's own
-            # agent-runner conversation (checkpointed under the run's contextId).
-            # The synthetic turn MUST precede current_msg: the stream handler
-            # treats everything after the last HumanMessage as "this turn", and a
-            # trailing synthetic pair would trip its blocked-agent heuristics.
-            # Never inject into a conversation that already has history — the
-            # provenance is only meaningful for the reply that opened it.
-            scheduled_run = _extract_scheduled_run_provenance(message_parts)
-            if scheduled_run and not checkpoint_msgs:
-                synthetic = _build_scheduled_run_history(scheduled_run)
-                if synthetic:
-                    synthetic_msgs, tracking_seed = synthetic
-                    input_data = {
-                        "messages": [*synthetic_msgs, current_msg],
-                        "a2a_tracking": tracking_seed,
-                    }
-                    logger.info(
-                        "Injected synthetic scheduled-run delegation turn "
-                        f"(sub_agent={list(tracking_seed)[0]}, run_context_id={scheduled_run.get('context_id')})"
-                    )
+            # model sees the run it is being asked about. The synthetic turn MUST
+            # precede current_msg: the stream handler treats everything after the
+            # last HumanMessage as "this turn", and a trailing synthetic pair
+            # would trip its blocked-agent heuristics. Never inject into a
+            # conversation that already has history — the provenance is only
+            # meaningful for the reply that opened it (clients attach it on every
+            # thread reply precisely so a first turn that failed before any
+            # checkpoint was written still gets it on retry).
+            if not checkpoint_msgs:
+                scheduled_run = _extract_scheduled_run_provenance(message_parts)
+                if scheduled_run:
+                    synthetic_msgs = _build_scheduled_run_history(scheduled_run)
+                    if synthetic_msgs:
+                        input_data = {"messages": [*synthetic_msgs, current_msg]}
+                        logger.info(
+                            "Injected synthetic scheduled-run context "
+                            f"(sub_agent={scheduled_run.get('sub_agent_name')!r}, "
+                            f"job={scheduled_run.get('scheduled_job_id')}, "
+                            f"run={scheduled_run.get('scheduled_job_run_id')})"
+                        )
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0
