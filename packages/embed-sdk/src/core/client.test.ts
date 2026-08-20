@@ -235,6 +235,52 @@ describe('NannosCore.bindClientActions', () => {
     expect(core.clientActionsBound).toBe(false);
   });
 
+  it('forwards apply rejections to a binding that only wired onApplyResult', async () => {
+    // <NannosProvider onApplyResult> binds with no navigate/highlight. Such a
+    // binding must still count as bound (it suppresses the widget's own demux)
+    // AND deliver the rejection — a host wiring only this hook is the whole
+    // reason it exists.
+    const fake = new FakeSocket();
+    const core = createNannos({}, () => fake as unknown as Socket);
+    await core.connect();
+    core.register({
+      type: 'Campaign',
+      id: '123',
+      scope: 'update',
+      getState: () => ({}),
+      apply: () => ({ applied: ['name'], rejected: [{ field: 'kpi', reason: 'failed schema validation' }] }),
+    });
+    const onApplyResult = vi.fn();
+    core.bindClientActions({ onApplyResult });
+    expect(core.clientActionsBound).toBe(true);
+
+    fake.fire('agent_response', {
+      kind: 'status-update',
+      status: {
+        message: {
+          extensions: [CLIENT_ACTION_EXT],
+          parts: [
+            {
+              kind: 'data',
+              data: {
+                directive: {
+                  kind: 'apply',
+                  target: { type: 'Campaign', id: '123' },
+                  values: { name: 'Spring', kpi: 'bogus' },
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onApplyResult).toHaveBeenCalledWith(
+      { type: 'Campaign', id: '123' },
+      { applied: ['name'], rejected: [{ field: 'kpi', reason: 'failed schema validation' }] },
+    );
+  });
+
   it('ignores plain streaming events without schema errors', async () => {
     const fake = new FakeSocket();
     const core = createNannos({}, () => fake as unknown as Socket);

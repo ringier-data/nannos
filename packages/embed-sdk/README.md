@@ -105,6 +105,28 @@ the SDK writes them through your `setValue` — validated per-field against the
 schema. The human still saves. `navigate`/`highlight` come from the provider props;
 `apply` needs nothing extra (it goes through the registered handle).
 
+Validation is **per field**, so a value the agent guessed wrong is skipped while
+the rest land. Wire **`onApplyResult`** to say so — it fires only when a field was
+rejected, and it is the only place that surfaces: the agent gets no ack, so it
+reports the apply as done either way, and an unwired host leaves the user with a
+part-filled form that looks complete.
+
+```tsx
+<NannosProvider
+  config={…}
+  onApplyResult={(target, { rejected }) =>
+    toast.warning(`Couldn't fill: ${rejected.map((r) => r.field).join(', ')}`)
+  }
+/>
+```
+
+Wire client-action hooks (`navigate`, `highlight`, `onApplyResult`) either all on
+the provider or all on `adapter.routing` — never a mix. A provider-level binding
+deliberately suppresses the widget's own dispatch so a directive runs once, which
+means hooks left on the adapter stop firing. The provider is the better home: its
+binding lives as long as the provider, while the widget's only runs while the chat
+panel is mounted.
+
 > **Custom layout?** Skip `<NannosWidget>` and call `mount(useNannos()!, el)` into
 > your own sized container (a definite height/width — the widget fills it).
 >
