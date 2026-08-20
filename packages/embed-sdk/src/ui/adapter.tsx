@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
-import type { NannosConfig, NannosCore, Settings } from '../core';
+import type { ApplyResult, NannosConfig, NannosCore, Settings } from '../core';
 
 export type FeedbackRating = 'positive' | 'negative';
 
@@ -89,6 +89,14 @@ export interface NannosHostAdapter {
      *  directives no-op. `target` is the registered ontology object; `field` (when
      *  present) is the specific schema field to emphasise. */
     highlight?: (target: { type: string; id: string }, field?: string) => void;
+    /** Called after an `apply` that REJECTED at least one field (a value failing
+     *  the object's schema is skipped, never written), so the host can tell the
+     *  user what didn't land — without it the SDK can only `console.warn` and a
+     *  partially-filled form reads as a complete one. The agent is not told
+     *  either way (no ack channel), so this is the only place a rejection
+     *  surfaces. Same contract as `<NannosProvider onApplyResult>`: wire it on
+     *  ONE of the two, since a provider-level binding suppresses this demux. */
+    onApplyResult?: (target: { type: string; id: string }, result: ApplyResult) => void;
   };
 
   /**

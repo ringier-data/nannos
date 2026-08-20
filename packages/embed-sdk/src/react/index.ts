@@ -21,6 +21,7 @@ import {
   createPkceAuth,
   handleAuthCallback,
   zodFormRegistration,
+  type ApplyResult,
   type FieldBridge,
   type FormAdapter,
   type NannosAuth,
@@ -85,6 +86,17 @@ export interface NannosProviderProps {
   navigate?: (to: string) => void;
   /** Host highlight for `highlight` client-actions (scroll-into-view / outline). */
   highlight?: (target: { type: string; id: string }, field?: string) => void;
+  /**
+   * Called after an `apply` that REJECTED at least one field (a value that failed
+   * the object's schema is skipped, never written). Wire it to whatever the host
+   * uses to tell the user something didn't land — without it the SDK can only
+   * `console.warn`, so a partially-filled form looks like a complete one.
+   *
+   * The agent is NOT told: there is no ack channel back from a client-action, so
+   * it reports the apply as done regardless. Surfacing this to the USER is
+   * currently the only way a rejection becomes visible.
+   */
+  onApplyResult?: (target: { type: string; id: string }, result: ApplyResult) => void;
   /** Forward SDK-internal failures (connection / init / auth / apply) to host
    *  monitoring (Sentry etc.). Diagnostics only — the SDK still degrades gracefully. */
   onError?: (e: NannosErrorEvent) => void;
@@ -98,7 +110,7 @@ export interface NannosProviderProps {
  * hand-rolled singleton, no "second core → empty registry" footgun.
  */
 export function NannosProvider(props: NannosProviderProps): ReactNode {
-  const { children, config, core, auth, enabled = true, navigate, highlight, onError } = props;
+  const { children, config, core, auth, enabled = true, navigate, highlight, onApplyResult, onError } = props;
 
   // The core is created ONCE, the first time we're enabled — `config`/`auth` are
   // captured at that moment and NOT re-read afterward (change them by remounting
@@ -121,11 +133,19 @@ export function NannosProvider(props: NannosProviderProps): ReactNode {
     return () => resolved.transport.disconnect();
   }, [resolved]);
 
-  // Route navigate/highlight directives to the host's hooks.
+  // Route client-action directives to the host's hooks.
+  //
+  // Binding here makes the provider the SINGLE handler: the mounted widget checks
+  // `core.clientActionsBound` and skips its own adapter-routing demux so a
+  // directive runs exactly once. So this is all-or-nothing per host — wire every
+  // hook you want HERE, or every hook on `adapter.routing`, never a mix, or the
+  // ones left on the adapter silently stop firing. Wiring here is preferable: the
+  // binding lives as long as the provider, whereas the widget's demux only runs
+  // while the chat panel is mounted.
   useEffect(() => {
-    if (!resolved || (!navigate && !highlight)) return;
-    return resolved.bindClientActions({ navigate, highlight });
-  }, [resolved, navigate, highlight]);
+    if (!resolved || (!navigate && !highlight && !onApplyResult)) return;
+    return resolved.bindClientActions({ navigate, highlight, onApplyResult });
+  }, [resolved, navigate, highlight, onApplyResult]);
 
   // Forward SDK-internal errors to the host's monitoring.
   useEffect(() => {

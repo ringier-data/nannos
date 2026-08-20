@@ -9,9 +9,15 @@ export interface ClientActionDeps {
   navigate?: (to: string) => void;
   /** Host-provided highlight hook (scroll-into-view / outline a field). */
   highlight?: (target: { type: string; id: string }, field?: string) => void;
-  /** Notified after an `apply` with which fields landed vs. were rejected, so the
-   *  host can surface "couldn't apply X". Absent → rejections are console.warn'd
-   *  (never silent). */
+  /** Notified after an `apply` that rejected AT LEAST ONE field (a clean apply
+   *  doesn't call it — the filled form is its own feedback), with which fields
+   *  landed vs. were rejected, so the host can surface "couldn't apply X".
+   *  Absent → rejections are console.warn'd (never silent).
+   *
+   *  This is the ONLY place a rejection becomes visible: there is no ack channel
+   *  back to the agent, so it reports the apply as done whatever happened here.
+   *  A host that wires nothing leaves the user with a part-filled form and no
+   *  indication of it. */
   onApplyResult?: (target: { type: string; id: string }, result: ApplyResult) => void;
 }
 

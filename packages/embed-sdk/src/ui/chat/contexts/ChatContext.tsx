@@ -590,6 +590,10 @@ export function ChatProvider({ children, playgroundMode, autoSelectConversation 
                 registry: core.registry,
                 navigate: routingRef.current.navigate,
                 highlight: routingRef.current.highlight,
+                // Kept at parity with the core-level binding's deps: a hook this
+                // path drops is a hook that silently stops working for every host
+                // wiring through the adapter instead of <NannosProvider>.
+                onApplyResult: routingRef.current.onApplyResult,
               }).catch((err) => {
                 console.warn('[CLIENT-ACTION] handler threw:', err);
               });
