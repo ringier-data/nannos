@@ -29,7 +29,6 @@ from app.models.responses import AgentStreamResponse
 
 from .conftest import (
     ALL_MODELS,
-    has_credentials,
     one_model_per_provider,
 )
 
@@ -178,9 +177,6 @@ async def test_simple_prompt_event_sequence(
     4. TaskArtifactUpdateEvent(append=True, last_chunk=True) — stream close
     5. TaskStatusUpdateEvent(state=completed, final=True) — terminal status
     """
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Hi, respond in one short sentence."
     t.log_inputs({"prompt": prompt, "model": model_type})
     test_user_config.model = model_type
@@ -244,9 +240,6 @@ async def test_time_tool_invocation_events(
     make_config,
 ):
     """Verify the model uses the get_current_time tool and events follow A2A protocol."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "What is the current time? Use the get_current_time tool."
     t.log_inputs({"prompt": prompt, "model": model_type})
     test_user_config.model = model_type
@@ -305,9 +298,6 @@ async def test_event_ids_consistent(
     make_config,
 ):
     """Verify all events share the same task_id and context_id."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Hello!"
     t.log_inputs({"prompt": prompt, "model": model_type})
     test_user_config.model = model_type

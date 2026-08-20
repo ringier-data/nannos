@@ -21,7 +21,6 @@ from app.models.responses import AgentStreamResponse
 
 from .conftest import (
     ALL_MODELS,
-    has_credentials,
     models_sharing_a_provider,
     one_model_per_provider,
 )
@@ -69,9 +68,6 @@ async def test_static_tools_bound_to_graph(
     Inspects the graph's tool list to confirm get_current_time and other
     static tools are properly bound.
     """
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     t.log_inputs({"model": model_type, "check": "graph tool binding"})
 
     graph = await patched_agent.get_or_create_graph(model_type=model_type, thinking_level=None)
@@ -105,9 +101,6 @@ async def test_concurrent_streams_isolated(
     memory_checkpointer,
 ):
     """Verify two concurrent streams produce independent, non-interleaved results."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     test_user_config.model = model_type
 
     config_a = {
@@ -179,9 +172,6 @@ async def test_long_response_streams_incrementally(
     make_config,
 ):
     """Verify a longer response produces multiple streaming chunks (not buffered)."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "List the first 15 prime numbers, one per line."
     t.log_inputs({"prompt": prompt, "model": model_type})
 
@@ -222,9 +212,6 @@ async def test_short_prompt_completes(
     make_config,
 ):
     """Verify 'Hi' completes without error and produces at least one response."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Hi"
     t.log_inputs({"prompt": prompt, "model": model_type})
 
@@ -272,9 +259,6 @@ async def test_streaming_chunks_are_word_aligned(
     The agent uses a 40-char buffer with word-boundary flushing.
     Most chunks should end with a space or be full words.
     """
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Write a short paragraph about the weather."
     t.log_inputs({"prompt": prompt, "model": model_type})
 

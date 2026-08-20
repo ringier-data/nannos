@@ -222,33 +222,6 @@ GATEWAY_AVAILABLE: bool = bool(ALL_MODELS)
 THINKING_MODELS: dict[ModelType, list[ThinkingLevel]] = {model: [ThinkingLevel.low] for model in ALL_MODELS}
 
 
-def model_available(model_type: ModelType) -> bool:
-    """Whether the gateway serves this alias."""
-    return model_type in ALL_MODELS
-
-
-# Legacy name kept so the older integration modules keep importing cleanly. It no
-# longer inspects credentials — see the note above.
-has_credentials = model_available
-
-
-requires_gateway = pytest.mark.skipif(
-    not GATEWAY_AVAILABLE,
-    reason=(
-        "Model Gateway unreachable or serving no models. Start one with "
-        "./scripts/start-local.sh and set LLM_GATEWAY_URL / LLM_GATEWAY_API_KEY."
-    ),
-)
-
-
-def skip_marker_for(model_type: ModelType):
-    """Skip marker for a model the gateway does not serve."""
-    return pytest.mark.skipif(
-        not model_available(model_type),
-        reason=f"Model Gateway does not serve '{model_type}'",
-    )
-
-
 # ---------------------------------------------------------------------------
 # Module-level marker: all tests in this directory are integration tests
 # ---------------------------------------------------------------------------
