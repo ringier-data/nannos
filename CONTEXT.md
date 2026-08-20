@@ -261,7 +261,11 @@ layer). The agent declares the ontology-level outcome; the host renders it.
 - **Bulk/cascade writes + other users/tabs → the backend-change-events layer**
   (UI subscribes, re-renders regardless of actor) — the robust upgrade, since the
   agent won't always enumerate everything it touched.
-- **v1 client-action kinds: `apply` + `highlight` + `navigate` + `refresh`.**
+- **v1 client-action kinds: `apply` + `highlight` + `navigate`** — shipped, and
+  pinned in `a2a-extensions.json` (`clientActionKinds`), which is the source of
+  truth for what the agent may emit. **`refresh` is designed, not built:** a risk
+  score is reserved for it, but it is deliberately absent from the registry, the
+  tool `Literal` and the zod union until it has a host-side re-render contract.
 
 ⚠️ The shipped `cockpit-ontology` skill still says "MCP read-only, mutations only
 via UI" — that guidance is now **wrong** and must be rewritten to "writes allowed,
