@@ -644,11 +644,11 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     const existingContextId = existingContext?.contextId;
 
     // Reply under a delivered scheduled-run notification: forward the run's
-    // provenance as a DataPart so the orchestrator can reconstruct the
-    // delegation in the conversation it opens for this thread. This is the
-    // client side of urn:nannos:a2a:scheduled-run-context:1.0 (declared in the
-    // orchestrator's agent card; contract documented in the orchestrator's
-    // app/core/a2a_extensions.py). Attached on
+    // provenance as a conversation-origin DataPart so the orchestrator can
+    // reconstruct the delegation in the conversation it opens for this thread.
+    // This is the client side of urn:nannos:a2a:conversation-origin:1.0, kind
+    // "scheduled_run" (declared in the orchestrator's agent card; contract
+    // documented in the orchestrator's app/core/a2a_extensions.py). Attached on
     // EVERY thread reply that has a provenance row — the orchestrator injects
     // only on a conversation with no history, and it is the side that actually
     // knows whether history exists (a contextId stored here can belong to a
@@ -661,7 +661,8 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         const runRecord = await scheduledRunStore.get(scheduledRunStore.buildKey(channelId, threadTs));
         if (runRecord) {
           scheduledRunDataPart = {
-            scheduled_run: {
+            origin: {
+              kind: 'scheduled_run',
               context_id: runRecord.contextId,
               scheduled_job_id: runRecord.scheduledJobId,
               scheduled_job_run_id: runRecord.scheduledJobRunId,

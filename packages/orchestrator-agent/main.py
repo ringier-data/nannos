@@ -57,9 +57,9 @@ from ringier_a2a_sdk.server import AuthRequestContextBuilder
 
 from app.core.a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    CONVERSATION_ORIGIN_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
-    SCHEDULED_RUN_CONTEXT_EXTENSION,
     WORK_PLAN_EXTENSION,
 )
 from app.core.agent import OrchestratorDeepAgent
@@ -267,10 +267,11 @@ def create_app():
                 "Response: send a DataPart with {decisions: [{type, ...}]}.",
             ),
             AgentExtension(
-                uri=SCHEDULED_RUN_CONTEXT_EXTENSION,
-                description="Accepts scheduled-run provenance on incoming messages: a DataPart with "
-                "{scheduled_run: {...}} attached to replies under a delivered scheduled-run notification. "
-                "Consumed only on the first turn of a conversation, where the run is reconstructed as context.",
+                uri=CONVERSATION_ORIGIN_EXTENSION,
+                description="Accepts an origin descriptor on incoming messages: a DataPart with "
+                "{origin: {kind, ...}} describing prior work this conversation is about (e.g. a delivered "
+                "scheduled-run notification the user replies to). Consumed only on the first turn of a "
+                "conversation, where the kind's builder reconstructs the origin as context.",
             ),
         ],
     )

@@ -84,24 +84,23 @@ _ACTIVITY_LOG_EXCLUDED_TOOLS: frozenset[str] = frozenset(
 )
 
 
-def _extract_scheduled_run_provenance(message_parts: list[Part]) -> dict[str, Any] | None:
-    """Extract scheduled-run provenance from an incoming DataPart, if present.
+def _extract_conversation_origin(message_parts: list[Part]) -> dict[str, Any] | None:
+    """Extract a conversation-origin descriptor from an incoming DataPart, if present.
 
-    Implements the request side of SCHEDULED_RUN_CONTEXT_EXTENSION (see
-    app.core.a2a_extensions for the contract): chat clients forward replies
-    under a delivered scheduled-run notification with a DataPart
-    ``{"scheduled_run": {...}}`` carrying the run's own A2A contextId and the
-    job/run/sub-agent that produced it. The run's contextId names the
-    sub-agent's conversation on agent-runner — it is provenance data, never
-    this conversation's contextId.
+    Implements the request side of CONVERSATION_ORIGIN_EXTENSION (see
+    app.core.a2a_extensions for the contract): clients describe prior work a
+    fresh conversation is about — a delivered scheduled-run notification, and
+    other kinds over time — as a DataPart ``{"origin": {"kind": ..., ...}}``.
+    The descriptor carries data, never conversation state: any contextId in it
+    is provenance about another agent's conversation, not this one's.
     """
     from google.protobuf.json_format import MessageToDict
 
     for part in message_parts:
         if part.WhichOneof("content") == "data":
             data = MessageToDict(part.data)
-            if isinstance(data, dict) and isinstance(data.get("scheduled_run"), dict):
-                return data["scheduled_run"]
+            if isinstance(data, dict) and isinstance(data.get("origin"), dict):
+                return data["origin"]
     return None
 
 
@@ -116,7 +115,7 @@ def _scheduled_run_frame_text(text: str) -> str:
 
 
 def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
-    """Build synthetic history reconstructing a scheduled run for a fresh conversation.
+    """Origin builder for kind ``scheduled_run`` (CONVERSATION_ORIGIN_EXTENSION).
 
     The scheduler dispatched the run directly to agent-runner, so this fresh
     orchestrator conversation has no record of it. Reconstruct the turn the
@@ -215,6 +214,29 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
         },
     )
     return [human_msg, ai_msg, tool_msg]
+
+
+# Origin-kind registry for CONVERSATION_ORIGIN_EXTENSION: each builder turns a
+# validated origin descriptor into synthetic history for a fresh conversation.
+# A builder may return None when the descriptor carries nothing to reconstruct.
+_ORIGIN_HISTORY_BUILDERS: dict[str, Any] = {
+    "scheduled_run": _build_scheduled_run_history,
+}
+
+
+def _build_origin_history(origin: dict[str, Any]) -> list[Any] | None:
+    """Dispatch an origin descriptor to its kind's history builder.
+
+    Unknown kinds are skipped with a log line rather than an error — the
+    descriptor is an optional context enrichment, and a newer client must be
+    able to talk to an older orchestrator.
+    """
+    kind = origin.get("kind")
+    builder = _ORIGIN_HISTORY_BUILDERS.get(kind) if isinstance(kind, str) else None
+    if builder is None:
+        logger.info(f"Ignoring conversation origin of unknown kind {kind!r}")
+        return None
+    return builder(origin)
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -550,28 +572,26 @@ class OrchestratorDeepAgent:
 
             input_data = {"messages": [current_msg]}
 
-            # Scheduled-run follow-up: on the FIRST turn of a conversation opened
-            # by replying under a scheduled-run notification, prepend a synthetic
-            # delegation turn (job prompt → task tool call → run output) so the
-            # model sees the run it is being asked about. The synthetic turn MUST
-            # precede current_msg: the stream handler treats everything after the
-            # last HumanMessage as "this turn", and a trailing synthetic pair
-            # would trip its blocked-agent heuristics. Never inject into a
-            # conversation that already has history — the provenance is only
-            # meaningful for the reply that opened it (clients attach it on every
-            # thread reply precisely so a first turn that failed before any
-            # checkpoint was written still gets it on retry).
+            # Conversation origin (CONVERSATION_ORIGIN_EXTENSION): on the FIRST
+            # turn of a conversation opened about prior work the orchestrator
+            # never saw (e.g. a reply under a scheduled-run notification),
+            # prepend the kind's synthetic-history reconstruction so the model
+            # sees what it is being asked about. The synthetic turn MUST precede
+            # current_msg: the stream handler treats everything after the last
+            # HumanMessage as "this turn", and a trailing synthetic pair would
+            # trip its blocked-agent heuristics. Never inject into a
+            # conversation that already has history — the origin is only
+            # meaningful for the message that opened it (clients attach it on
+            # every message of its context precisely so a first turn that failed
+            # before any checkpoint was written still gets it on retry).
             if not checkpoint_msgs:
-                scheduled_run = _extract_scheduled_run_provenance(message_parts)
-                if scheduled_run:
-                    synthetic_msgs = _build_scheduled_run_history(scheduled_run)
+                origin = _extract_conversation_origin(message_parts)
+                if origin:
+                    synthetic_msgs = _build_origin_history(origin)
                     if synthetic_msgs:
                         input_data = {"messages": [*synthetic_msgs, current_msg]}
                         logger.info(
-                            "Injected synthetic scheduled-run context "
-                            f"(sub_agent={scheduled_run.get('sub_agent_name')!r}, "
-                            f"job={scheduled_run.get('scheduled_job_id')}, "
-                            f"run={scheduled_run.get('scheduled_job_run_id')})"
+                            f"Injected synthetic conversation-origin context (kind={origin.get('kind')!r})"
                         )
         try:
             # Use streaming with memory for multi-turn conversation support

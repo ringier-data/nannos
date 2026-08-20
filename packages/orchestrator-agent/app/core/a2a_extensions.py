@@ -56,16 +56,38 @@ Decision formats:
   - reject:  {"type": "reject", "message": "reason text"}
 """
 
-SCHEDULED_RUN_CONTEXT_EXTENSION = "urn:nannos:a2a:scheduled-run-context:1.0"
-"""Request-side extension: scheduled-run provenance attached to thread replies.
+CONVERSATION_ORIGIN_EXTENSION = "urn:nannos:a2a:conversation-origin:1.0"
+"""Request-side extension: what a new conversation originates from.
 
-When a user replies under a chat message that delivered a scheduled-run
-notification, the client attaches a DataPart carrying the run's provenance
-(identified by its top-level ``scheduled_run`` key, mirroring the
-``decisions`` convention of the human-in-the-loop extension):
+A conversation is sometimes opened *about* prior work the orchestrator never
+saw — a scheduled run's delivered output, a reported bug, an old conversation
+found in search. Clients describe that origin as a DataPart (identified by its
+top-level ``origin`` key, mirroring the ``decisions`` convention of the
+human-in-the-loop extension):
 
   {
-    "scheduled_run": {
+    "origin": {
+      "kind": "<origin kind>",
+      ...kind-specific fields
+    }
+  }
+
+Clients may attach it on every message of the thread/channel context it
+belongs to; the orchestrator consumes it only on the first turn of a
+conversation (empty checkpoint), where the kind's registered builder
+reconstructs the origin as synthetic history, and ignores it otherwise
+(unknown kinds are skipped with a log line, never an error). This carries
+*data*, not state: it reconstructs context for the model — it does not fork
+or resume the referenced conversation's checkpoint.
+
+Registered kinds:
+
+``scheduled_run`` — a scheduled job run executed on agent-runner whose output
+was delivered to the user (the reply arrives under that notification):
+
+  {
+    "origin": {
+      "kind": "scheduled_run",
       "context_id": "<A2A context id of the run on agent-runner>",
       "scheduled_job_id": 7,
       "scheduled_job_run_id": 42,
@@ -78,11 +100,9 @@ notification, the client attaches a DataPart carrying the run's provenance
     }
   }
 
-Clients may attach it on every reply in the thread; the orchestrator consumes
-it only on the first turn of a conversation (empty checkpoint), where it
-injects a synthetic delegation turn reconstructing the run, and ignores it
-otherwise. ``context_id`` is provenance data about the sub-agent's own
-conversation — it must never be sent as the request's contextId.
+Reconstructed as a synthetic delegation turn (job prompt -> ``task`` tool
+call -> run output). ``context_id`` is provenance data about the sub-agent's
+own conversation — it must never be sent as the request's contextId.
 """
 
 ALL_EXTENSIONS = [
@@ -91,7 +111,7 @@ ALL_EXTENSIONS = [
     INTERMEDIATE_OUTPUT_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
-    SCHEDULED_RUN_CONTEXT_EXTENSION,
+    CONVERSATION_ORIGIN_EXTENSION,
 ]
 
 
