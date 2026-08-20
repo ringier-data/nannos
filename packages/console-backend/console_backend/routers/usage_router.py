@@ -68,7 +68,7 @@ async def log_usage(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to log usage: {str(e)}",
+            detail=f"Failed to log usage: {e!s}",
         )
 
 
@@ -124,7 +124,7 @@ async def gateway_batch_log_usage(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to log usage: {str(e)}",
+            detail=f"Failed to log usage: {e!s}",
         )
 
 
@@ -163,7 +163,7 @@ async def batch_log_usage(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to batch log usage: {str(e)}",
+            detail=f"Failed to batch log usage: {e!s}",
         )
 
 
@@ -192,7 +192,7 @@ async def get_my_usage_summary(
         logger.error(f"Failed to get usage summary: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get usage summary: {str(e)}",
+            detail=f"Failed to get usage summary: {e!s}",
         )
 
 
@@ -221,7 +221,7 @@ async def get_my_detailed_usage(
         logger.error(f"Failed to get detailed usage: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get detailed usage: {str(e)}",
+            detail=f"Failed to get detailed usage: {e!s}",
         )
 
 
@@ -274,6 +274,7 @@ async def get_my_usage_logs(
                     catalog_id=str(log["catalog_id"]) if log.get("catalog_id") else None,
                     catalog_name=log.get("catalog_name"),
                     service=log.get("service"),
+                    voice_session_id=str(log["voice_session_id"]) if log.get("voice_session_id") else None,
                     provider=log["provider"],
                     model_name=log["model_name"],
                     total_cost_usd=log["total_cost_usd"],
@@ -296,7 +297,7 @@ async def get_my_usage_logs(
         logger.error(f"Failed to get usage logs: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get usage logs: {str(e)}",
+            detail=f"Failed to get usage logs: {e!s}",
         )
 
 
@@ -335,7 +336,7 @@ async def get_global_usage_summary(
         logger.error(f"Failed to get global usage summary: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get global usage summary: {str(e)}",
+            detail=f"Failed to get global usage summary: {e!s}",
         )
 
 
@@ -373,5 +374,5 @@ async def get_user_usage_summary(
         logger.error(f"Failed to get user usage summary: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get user usage summary: {str(e)}",
+            detail=f"Failed to get user usage summary: {e!s}",
         )

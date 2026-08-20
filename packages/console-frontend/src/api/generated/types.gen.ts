@@ -7055,6 +7055,10 @@ export type UsageLog = {
      */
     service?: string | null;
     /**
+     * Voice Session Id
+     */
+    voice_session_id?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;

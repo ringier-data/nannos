@@ -31,6 +31,7 @@ class UsageRepository:
         langsmith_trace_id: str | None = None,
         catalog_id: str | None = None,
         service: str | None = None,
+        voice_session_id: str | None = None,
     ) -> int:
         """
         Create a usage log with billing unit details.
@@ -50,6 +51,7 @@ class UsageRepository:
             langsmith_run_id: Optional LangSmith run ID
             langsmith_trace_id: Optional LangSmith trace ID
             service: Optional service whose own work this was; None → derived at read time
+            voice_session_id: Optional voice session (phone call) ID
 
         Returns:
             ID of created usage log
@@ -59,12 +61,12 @@ class UsageRepository:
             INSERT INTO usage_logs (
                 user_id, conversation_id, sub_agent_id, scheduled_job_id, sub_agent_config_version_id,
                 provider, model_name, total_cost_usd,
-                langsmith_run_id, langsmith_trace_id, invoked_at, catalog_id, service
+                langsmith_run_id, langsmith_trace_id, invoked_at, catalog_id, service, voice_session_id
             )
             VALUES (
                 :user_id, :conversation_id, :sub_agent_id, :scheduled_job_id, :sub_agent_config_version_id,
                 :provider, :model_name, :total_cost_usd,
-                :langsmith_run_id, :langsmith_trace_id, :invoked_at, :catalog_id, :service
+                :langsmith_run_id, :langsmith_trace_id, :invoked_at, :catalog_id, :service, :voice_session_id
             )
             RETURNING id
         """)
@@ -85,6 +87,7 @@ class UsageRepository:
                 "invoked_at": invoked_at,
                 "catalog_id": catalog_id,
                 "service": service,
+                "voice_session_id": voice_session_id,
             },
         )
         usage_log_id = result.scalar_one()
@@ -407,7 +410,7 @@ class UsageRepository:
         end_date: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Get usage breakdown by service type (orchestrator, catalog, scheduler).
+        Get usage breakdown by service type (voice, orchestrator, catalog, scheduler).
 
         Classification: the `service` a caller declared, else derived from whichever id is
         set — `scheduled_job_id` → 'scheduler', `catalog_id` without a conversation →
@@ -435,6 +438,7 @@ class UsageRepository:
                 COALESCE(
                     service,
                     CASE
+                        WHEN voice_session_id IS NOT NULL THEN 'voice'
                         WHEN scheduled_job_id IS NOT NULL THEN 'scheduler'
                         WHEN catalog_id IS NOT NULL AND conversation_id IS NULL THEN 'catalog'
                         ELSE 'orchestrator'
