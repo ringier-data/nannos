@@ -240,7 +240,7 @@ class TestWatchConditionNotMet:
         """When watch condition IS met, _execute_sub_agent is called."""
         check_result = {"value": 10}
         agent_runner._evaluate_watch = AsyncMock(return_value=(True, check_result))
-        agent_runner._execute_sub_agent = AsyncMock(return_value="Agent completed task.")
+        agent_runner._execute_sub_agent = AsyncMock(return_value=("Agent completed task.", "watch-agent"))
         agent_runner._generate_watch_message = AsyncMock(return_value="Watch triggered.")
 
         task = MagicMock()
@@ -277,6 +277,11 @@ class TestWatchConditionNotMet:
         # Sub-agent was called
         agent_runner._execute_sub_agent.assert_awaited_once()
 
-        # Final response is success
+        # Final response is success and carries the correlation/provenance fields
+        # the delivery channel needs to link thread replies back to this run.
         final_content = json.loads(responses[-1].content)
         assert final_content["scheduler_status"] == "success"
+        assert final_content["scheduled_job_id"] == 10
+        assert final_content["sub_agent_id"] == 5
+        assert final_content["sub_agent_name"] == "watch-agent"
+        assert final_content["agent_message"] == "Agent completed task."

@@ -295,6 +295,7 @@ export async function startSlackApp(config: Config) {
           // Process notification asynchronously
           handleA2ANotification(task, botInstallation, {
             userAuthStorage: storage.userAuth,
+            scheduledRunStore: storage.scheduledRun,
           }).catch((error) => {
             logger.error(error, `[A2ACallback] Error handling notification: ${error}`);
           });
@@ -396,6 +397,7 @@ export async function startSlackApp(config: Config) {
       config.isLocal(),
       storage.botInstallation,
       feedbackService,
+      storage.scheduledRun,
     );
 
     // Start the app

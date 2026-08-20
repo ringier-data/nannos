@@ -645,6 +645,16 @@ class AgentRunner(BaseAgent):
         message_text = "\n".join(_extract_text_from_message(m) for m in messages).strip()
         last_check_result: dict | None = None
         agent_message: str | None = None
+        sub_agent_name: str | None = None
+        prompt: str | None = None
+
+        # Correlation ids echoed back in every result so the delivery channel can
+        # link a notification (and later thread replies) to this job/run/sub-agent.
+        correlation_meta = {
+            "scheduled_job_id": scheduled_job_id,
+            "scheduled_job_run_id": scheduled_job_run_id or None,
+            "sub_agent_id": sub_agent_id,
+        }
 
         # --- 1. Watch condition evaluation (skips LLM if condition not met) ---
         if job_type == "watch" and watch:
@@ -658,6 +668,7 @@ class AgentRunner(BaseAgent):
                     "scheduler_status": "condition_not_met",
                     "last_check_result": last_check_result,
                     "user_sub": user_config.user_sub,
+                    **correlation_meta,
                 }
                 yield AgentStreamResponse(
                     state=TaskState.TASK_STATE_COMPLETED,
@@ -684,7 +695,7 @@ class AgentRunner(BaseAgent):
                 prompt = message_text or "Execute your configured task."
 
             try:
-                agent_message = await self._execute_sub_agent(
+                agent_message, sub_agent_name = await self._execute_sub_agent(
                     sub_agent_id=sub_agent_id,
                     prompt=prompt,
                     raw_a2a_messages=messages,
@@ -704,6 +715,9 @@ class AgentRunner(BaseAgent):
                     "last_check_result": last_check_result,
                     "agent_message": agent_message,
                     "user_sub": user_config.user_sub,
+                    "sub_agent_name": sub_agent_name,
+                    "prompt": prompt,
+                    **correlation_meta,
                 }
                 yield AgentStreamResponse(
                     state=TaskState.TASK_STATE_FAILED,
@@ -716,6 +730,9 @@ class AgentRunner(BaseAgent):
             "agent_message": agent_message,
             "last_check_result": last_check_result,
             "user_sub": user_config.user_sub,
+            "sub_agent_name": sub_agent_name,
+            "prompt": prompt,
+            **correlation_meta,
         }
         yield AgentStreamResponse(
             state=TaskState.TASK_STATE_COMPLETED,
@@ -1027,7 +1044,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, str]:
         """Fetch sub-agent config and dispatch to the appropriate execution method.
 
         Args:
@@ -1042,13 +1059,14 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             raw_a2a_messages: Original A2A messages (used for remote agents to preserve DataParts).
 
         Returns:
-            agent_message (str | None)
+            Tuple of (agent_message, sub_agent_name).
         """
         sub_agent_cfg = await self._fetch_sub_agent_config(sub_agent_id, user_access_token)
         agent_type = sub_agent_cfg["type"]
+        sub_agent_name = sub_agent_cfg["name"]
 
         if agent_type in ("automated", "local"):
-            return await self._run_langgraph_agent(
+            agent_message = await self._run_langgraph_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 prompt=prompt,
                 raw_a2a_messages=raw_a2a_messages,
@@ -1060,7 +1078,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 context_id=context_id,
             )
         elif agent_type == "foundry":
-            return await self._run_foundry_agent(
+            agent_message = await self._run_foundry_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 prompt=prompt,
                 user_config=user_config,
@@ -1068,7 +1086,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 scheduled_job_run_id=scheduled_job_run_id,
             )
         elif agent_type == "remote":
-            return await self._run_remote_agent(
+            agent_message = await self._run_remote_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 raw_a2a_messages=raw_a2a_messages or [],
                 prompt=prompt,
@@ -1078,6 +1096,8 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             )
         else:
             raise ValueError(f"Unsupported sub-agent type '{agent_type}' for sub-agent {sub_agent_id}")
+
+        return agent_message, sub_agent_name
 
     async def _run_langgraph_agent(
         self,

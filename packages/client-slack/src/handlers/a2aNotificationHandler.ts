@@ -12,7 +12,7 @@
 import { WebClient } from '@slack/web-api';
 import { Task } from '@a2a-js/sdk';
 import { Logger } from '../utils/logger.js';
-import type { IUserAuthStorage, BotInstallation } from '../storage/types.js';
+import type { IUserAuthStorage, IScheduledRunStore, BotInstallation } from '../storage/types.js';
 
 const logger = Logger.getLogger('a2aNotificationHandler');
 
@@ -20,6 +20,13 @@ interface SchedulerPayload {
   scheduler_status: string;
   agent_message: string;
   user_sub: string;
+  // Correlation fields echoed by agent-runner so thread replies under the
+  // delivered notification can be linked back to the job/run/sub-agent.
+  scheduled_job_id?: number;
+  scheduled_job_run_id?: number;
+  sub_agent_id?: number;
+  sub_agent_name?: string;
+  prompt?: string;
 }
 
 function getSchedulerPayload(task: Task): SchedulerPayload | undefined {
@@ -44,6 +51,9 @@ function getSchedulerPayload(task: Task): SchedulerPayload | undefined {
 
 export interface A2ANotificationDeps {
   userAuthStorage: IUserAuthStorage;
+  scheduledRunStore?: IScheduledRunStore;
+  /** Test seam: build the Slack client for a bot token (defaults to `new WebClient(token)`). */
+  slackClientFactory?: (botToken: string) => WebClient;
 }
 
 /**
@@ -54,7 +64,7 @@ export async function handleA2ANotification(
   botInstallation: BotInstallation,
   deps: A2ANotificationDeps,
 ): Promise<void> {
-  const { userAuthStorage } = deps;
+  const { userAuthStorage, scheduledRunStore, slackClientFactory } = deps;
 
   const schedulerPayload = getSchedulerPayload(task);
   if (!schedulerPayload) {
@@ -88,7 +98,9 @@ export async function handleA2ANotification(
 
   // Send DM notification to the user via the authenticated team's bot
   try {
-    const slackClient = new WebClient(botInstallation.botToken);
+    const slackClient = slackClientFactory
+      ? slackClientFactory(botInstallation.botToken)
+      : new WebClient(botInstallation.botToken);
 
     const dmResult = await slackClient.conversations.open({ users: userAuth.userId });
     if (!dmResult.ok || !dmResult.channel?.id) {
@@ -98,7 +110,7 @@ export async function handleA2ANotification(
       return;
     }
 
-    await slackClient.chat.postMessage({
+    const postResult = await slackClient.chat.postMessage({
       channel: dmResult.channel.id,
       text: schedulerPayload.agent_message,
     });
@@ -106,6 +118,30 @@ export async function handleA2ANotification(
     logger.info(
       `[A2ACallback] Sent notification to user ${userAuth.userId} in team ${botInstallation.teamId}`
     );
+
+    // Persist the run's provenance keyed by the delivered message, so a thread
+    // reply under it can be correlated to the scheduled job/run and forwarded
+    // to the orchestrator as structured data (see messageHandler).
+    if (scheduledRunStore && postResult.ts && task.contextId) {
+      try {
+        await scheduledRunStore.set({
+          contextKey: scheduledRunStore.buildKey(botInstallation.teamId, dmResult.channel.id, postResult.ts),
+          contextId: task.contextId,
+          scheduledJobId: schedulerPayload.scheduled_job_id,
+          scheduledJobRunId: schedulerPayload.scheduled_job_run_id,
+          subAgentId: schedulerPayload.sub_agent_id,
+          subAgentName: schedulerPayload.sub_agent_name,
+          prompt: schedulerPayload.prompt,
+          resultSummary: schedulerPayload.agent_message,
+        });
+        logger.info(
+          `[A2ACallback] Stored scheduled-run provenance for message ts=${postResult.ts} (contextId=${task.contextId})`
+        );
+      } catch (error) {
+        // Provenance is best-effort: the notification itself was delivered.
+        logger.error(error, `[A2ACallback] Failed to store scheduled-run provenance: ${error}`);
+      }
+    }
   } catch (error) {
     logger.error(error, `[A2ACallback] Failed to send DM notification: ${error}`);
   }

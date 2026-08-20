@@ -9,6 +9,7 @@ import type {
   IInFlightTaskStore,
   IOAuthStateStore,
   IBotInstallationStore,
+  IScheduledRunStore,
 } from '../storage/types.js';
 import { registerAppMentionListener } from './events/appMention.js';
 import { registerMessageListeners } from './events/directMessage.js';
@@ -42,6 +43,7 @@ export async function registerListeners(
   isLocalMode: boolean,
   botInstallationStore: IBotInstallationStore,
   feedbackService?: FeedbackService,
+  scheduledRunStore?: IScheduledRunStore,
 ): Promise<void> {
   // Register event listeners (botToken/botName resolved per-event via context)
   registerAppMentionListener(
@@ -69,6 +71,7 @@ export async function registerListeners(
     fileStorageService,
     isLocalMode,
     feedbackService,
+    scheduledRunStore,
   );
 
   // Register slash commands dynamically for every active bot installation

@@ -53,4 +53,6 @@ export type {
   AdminSession,
   IAdminSessionStore,
   IInstallationSecretStore,
+  ScheduledRunRecord,
+  IScheduledRunStore,
 } from './types.js';

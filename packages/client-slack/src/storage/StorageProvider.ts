@@ -7,6 +7,7 @@ import type {
   IBotInstallationStore,
   IAdminSessionStore,
   IInstallationSecretStore,
+  IScheduledRunStore,
 } from './types.js';
 
 /**
@@ -22,6 +23,7 @@ export abstract class StorageProvider {
   abstract readonly botInstallation: IBotInstallationStore;
   abstract readonly adminSession: IAdminSessionStore;
   abstract readonly installationSecret: IInstallationSecretStore;
+  abstract readonly scheduledRun: IScheduledRunStore;
 
   /**
    * Gracefully shutdown the storage provider.

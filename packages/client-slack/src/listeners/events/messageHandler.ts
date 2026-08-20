@@ -11,7 +11,13 @@ import { UserAuthService } from '../../services/userAuthService.js';
 import { A2AClientService, A2ASlackBasedRequest } from '../../services/a2aClientService.js';
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
-import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, ContextRecord } from '../../storage/types.js';
+import type {
+  IContextStore,
+  IPendingRequestStore,
+  IInFlightTaskStore,
+  IScheduledRunStore,
+  ContextRecord,
+} from '../../storage/types.js';
 import { handleError, postMessage, finalizeStreamedTask, isInterruptedOrTerminated, isTerminatedState, isTurnDelivered } from '../../utils/taskResponseHandler.js';
 import { ThinkingStepsStreamer, type WorkPlanTodo } from '../../utils/thinkingStepsStreamer.js';
 import { FeedbackService } from '../../services/feedbackService.js';
@@ -57,6 +63,7 @@ export interface HandlerDependencies {
   fileStorageService: FileStorageService;
   isLocalMode: boolean;
   feedbackService?: FeedbackService;
+  scheduledRunStore?: IScheduledRunStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +499,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     botName,
     fileStorageService,
     isLocalMode,
+    scheduledRunStore,
   } = deps;
 
   let statusMessageTs: string | undefined;
@@ -635,6 +643,37 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     const existingContext: ContextRecord | null = await contextStore.get(contextKey);
     const existingContextId = existingContext?.contextId;
 
+    // Reply under a delivered scheduled-run notification: on the FIRST reply
+    // (no orchestrator conversation yet for this thread) forward the run's
+    // provenance as a DataPart so the orchestrator can reconstruct the
+    // delegation and adopt the run's sub-agent conversation. The run's
+    // contextId is deliberately NOT sent as the request contextId — it names
+    // the sub-agent's own conversation, not an orchestrator one.
+    let scheduledRunDataPart: Record<string, unknown> | undefined;
+    if (!existingContextId && threadTs !== messageTs && scheduledRunStore) {
+      try {
+        const runRecord = await scheduledRunStore.get(scheduledRunStore.buildKey(teamId, channelId, threadTs));
+        if (runRecord) {
+          scheduledRunDataPart = {
+            scheduled_run: {
+              context_id: runRecord.contextId,
+              scheduled_job_id: runRecord.scheduledJobId,
+              scheduled_job_run_id: runRecord.scheduledJobRunId,
+              sub_agent_id: runRecord.subAgentId,
+              sub_agent_name: runRecord.subAgentName,
+              prompt: runRecord.prompt,
+              result_summary: runRecord.resultSummary,
+            },
+          };
+          logger.info(
+            `Thread reply correlates to scheduled run (job=${runRecord.scheduledJobId}, run=${runRecord.scheduledJobRunId}, contextId=${runRecord.contextId})`
+          );
+        }
+      } catch (e) {
+        logger.warn(`Failed to look up scheduled-run provenance for thread ${threadTs}: ${e}`);
+      }
+    }
+
     let currentUserName = '';
     try {
       const userInfo = await client.users.info({ user: userId });
@@ -745,7 +784,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               url: f.url,
             }))
           : undefined,
-      dataParts,
+      dataParts: scheduledRunDataPart ? [...(dataParts ?? []), scheduledRunDataPart] : dataParts,
       contextId: existingContextId || undefined,
       webhookUrl: isLocalMode ? undefined : webhookUrl,
       webhookToken: isLocalMode ? undefined : webhookToken,

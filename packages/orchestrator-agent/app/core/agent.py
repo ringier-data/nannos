@@ -33,7 +33,7 @@ from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.middleware.tool_status import TOOL_STATUS_EVENT
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
@@ -82,6 +82,92 @@ _ACTIVITY_LOG_EXCLUDED_TOOLS: frozenset[str] = frozenset(
         PTC_CODE_INTERPRETER_TOOL_NAME,
     }
 )
+
+
+def _extract_scheduled_run_provenance(message_parts: list[Part]) -> dict[str, Any] | None:
+    """Extract scheduled-run provenance from an incoming DataPart, if present.
+
+    Chat clients forward the first reply under a delivered scheduled-run
+    notification with a DataPart ``{"scheduled_run": {...}}`` carrying the
+    run's own A2A contextId and the job/run/sub-agent that produced it
+    (see client-slack's messageHandler). The run's contextId names the
+    sub-agent's conversation on agent-runner — it is provenance data, never
+    this conversation's contextId.
+    """
+    from google.protobuf.json_format import MessageToDict
+
+    for part in message_parts:
+        if part.WhichOneof("content") == "data":
+            data = MessageToDict(part.data)
+            if isinstance(data, dict) and isinstance(data.get("scheduled_run"), dict):
+                return data["scheduled_run"]
+    return None
+
+
+def _build_scheduled_run_history(run: dict[str, Any]) -> tuple[list[Any], dict[str, Any]] | None:
+    """Build a synthetic delegation turn for a scheduled run, plus its a2a_tracking seed.
+
+    The scheduler dispatched the run directly to agent-runner, so this fresh
+    orchestrator conversation has no record of it. Reconstruct the turn the
+    orchestrator *would* have produced had it dispatched the run itself:
+    the job prompt as the human request (first non-system message must be a
+    human one — some providers reject a leading assistant tool-call), the
+    ``task`` tool call to the sub-agent, and the run's output as the tool
+    result. The a2a_tracking seed makes the sub-agent contextId waterfall
+    (agent_common.a2a.base) resume the run's own agent-runner conversation on
+    the next delegation, instead of starting a blank one.
+
+    Returns None when the provenance lacks a sub-agent or contextId (e.g. a
+    watch notification that ran no sub-agent) — there is no delegation to
+    reconstruct in that case.
+    """
+    # Same normalization as the delegation waterfall's tracking key
+    # (agent_common.a2a.base: ``self.name.replace(" ", "")``).
+    sub_agent_name = (run.get("sub_agent_name") or "").replace(" ", "")
+    run_context_id = run.get("context_id")
+    if not sub_agent_name or not run_context_id:
+        return None
+
+    prompt = run.get("prompt") or "Execute your configured task."
+    result_summary = run.get("result_summary") or "(the output was delivered to the user)"
+
+    def _fmt_id(value: Any) -> str:
+        # MessageToDict renders protobuf numbers as floats; ids must not print as "42.0".
+        return str(int(value)) if isinstance(value, (int, float)) else ""
+
+    job_id = _fmt_id(run.get("scheduled_job_id"))
+    run_id = _fmt_id(run.get("scheduled_job_run_id"))
+    tool_call_id = f"scheduled_run_{run_id or run_context_id}"
+
+    human_msg = HumanMessage(
+        content=(
+            f'<scheduled_run source="scheduler" job_id="{job_id}" run_id="{run_id}">'
+            f"{prompt}"
+            "</scheduled_run>"
+        )
+    )
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": tool_call_id,
+                "name": "task",
+                "type": "tool_call",
+                "args": {"subagent_type": sub_agent_name, "description": prompt},
+            }
+        ],
+    )
+    tracking_entry = {
+        "context_id": run_context_id,
+        "is_complete": True,
+        "state": "TASK_STATE_COMPLETED",
+    }
+    tool_msg = ToolMessage(
+        content=result_summary,
+        tool_call_id=tool_call_id,
+        additional_kwargs={"a2a_metadata": {**tracking_entry, "agent_name": sub_agent_name}},
+    )
+    return [human_msg, ai_msg, tool_msg], {sub_agent_name: tracking_entry}
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -416,6 +502,31 @@ class OrchestratorDeepAgent:
                 config.setdefault("metadata", {})["has_attachments"] = True
 
             input_data = {"messages": [current_msg]}
+
+            # Scheduled-run follow-up: on the FIRST turn of a conversation opened
+            # by replying under a scheduled-run notification, prepend a synthetic
+            # delegation turn (job prompt → task tool call → run output) so the
+            # model sees the run it is being asked about, and seed a2a_tracking so
+            # the next dispatch to that sub-agent resumes the run's own
+            # agent-runner conversation (checkpointed under the run's contextId).
+            # The synthetic turn MUST precede current_msg: the stream handler
+            # treats everything after the last HumanMessage as "this turn", and a
+            # trailing synthetic pair would trip its blocked-agent heuristics.
+            # Never inject into a conversation that already has history — the
+            # provenance is only meaningful for the reply that opened it.
+            scheduled_run = _extract_scheduled_run_provenance(message_parts)
+            if scheduled_run and not checkpoint_msgs:
+                synthetic = _build_scheduled_run_history(scheduled_run)
+                if synthetic:
+                    synthetic_msgs, tracking_seed = synthetic
+                    input_data = {
+                        "messages": [*synthetic_msgs, current_msg],
+                        "a2a_tracking": tracking_seed,
+                    }
+                    logger.info(
+                        "Injected synthetic scheduled-run delegation turn "
+                        f"(sub_agent={list(tracking_seed)[0]}, run_context_id={scheduled_run.get('context_id')})"
+                    )
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0

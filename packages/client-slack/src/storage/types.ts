@@ -118,6 +118,34 @@ export interface IContextStore {
 }
 
 /**
+ * Provenance of a scheduled-run notification delivered to Slack, keyed by the
+ * delivered message ({teamId}:{channelId}:{messageTs}). `contextId` is the
+ * run's own A2A conversation on agent-runner — it is forwarded to the
+ * orchestrator as structured data only, NEVER as the request contextId
+ * (the orchestrator checkpoints under the same key convention, so reusing it
+ * as a conversation id would collide with the sub-agent's state).
+ */
+export interface ScheduledRunRecord {
+  contextKey: string;
+  contextId: string;
+  scheduledJobId?: number;
+  scheduledJobRunId?: number;
+  subAgentId?: number;
+  subAgentName?: string;
+  prompt?: string;
+  resultSummary?: string;
+}
+
+/**
+ * Interface for scheduled-run provenance storage
+ */
+export interface IScheduledRunStore {
+  set(record: ScheduledRunRecord): Promise<void>;
+  get(key: string): Promise<ScheduledRunRecord | null>;
+  buildKey(teamId: string, channelId: string, messageTs: string): string;
+}
+
+/**
  * Pending request data structure
  */
 export interface PendingRequest {
