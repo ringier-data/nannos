@@ -360,3 +360,23 @@ async def list_runs(
     if runs is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return runs
+
+
+@router.get(
+    "/jobs/{job_id}/runs/{run_id}",
+    response_model=ScheduledJobRun,
+    summary="Get a single execution run of a scheduled job.",
+    description="Returns one run by id, however old — the run listing is capped to the most recent 50.",
+)
+async def get_run(
+    job_id: int,
+    run_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> ScheduledJobRun:
+    service = _get_scheduler_service(request)
+    run = await service.get_run(db=db, job_id=job_id, run_id=run_id, user_id=current_user.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return run

@@ -901,3 +901,34 @@ class TestSettingsTimezoneFallback:
         )
         with pytest.raises(ValueError, match="settings timezone"):
             await service.create_job(db=AsyncMock(), data=data, actor=actor)
+
+
+class TestGetRun:
+    """get_run(): single-run lookup for conversation adoption — must stay
+    user-scoped and reachable for runs older than the list_runs cap."""
+
+    @pytest.mark.asyncio
+    async def test_returns_run_for_owned_job(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        mock_repo.get_job.return_value = _make_job(user_id=actor.id)
+        sentinel_run = object()
+        mock_repo.get_run.return_value = sentinel_run
+
+        result = await service.get_run(db=db, job_id=1, run_id=42, user_id=actor.id)
+
+        assert result is sentinel_run
+        mock_repo.get_run.assert_awaited_once_with(db, 1, 42)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_other_users_job(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        mock_repo.get_job.return_value = _make_job(user_id="other-user")
+
+        result = await service.get_run(db=db, job_id=1, run_id=42, user_id=actor.id)
+
+        assert result is None
+        mock_repo.get_run.assert_not_awaited()

@@ -14,8 +14,8 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 import re
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Optional
@@ -119,6 +119,19 @@ def _scheduled_run_frame_text(text: str) -> str:
     return re.sub(r"(?i)</(scheduled_run)", r"<\\/\1", text)
 
 
+def _origin_int(value: Any) -> int | None:
+    """Coerce an origin id field to int (MessageToDict renders protobuf numbers
+    as floats). Single helper for every reading of the same DataPart, so
+    rendering and adoption can't disagree on what counts as a valid id."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
 def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
     """Origin builder for kind ``scheduled_run`` (CONVERSATION_ORIGIN_EXTENSION).
 
@@ -152,8 +165,8 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
     error_message = run.get("error_message")
 
     def _fmt_id(value: Any) -> str:
-        # MessageToDict renders protobuf numbers as floats; ids must not print as "42.0".
-        return str(int(value)) if isinstance(value, (int, float)) else ""
+        parsed = _origin_int(value)
+        return str(parsed) if parsed is not None else ""
 
     job_id = _fmt_id(run.get("scheduled_job_id"))
     run_id = _fmt_id(run.get("scheduled_job_run_id"))
@@ -254,27 +267,18 @@ def _build_origin_history(origin: dict[str, Any]) -> list[Any] | None:
         return None
 
 
-# Timeout for the console-backend ownership lookups behind conversation
-# adoption. Adoption is an enrichment on the conversation's first turn only;
-# a slow backend must degrade to "no adoption", not stall the turn.
-_ADOPTION_LOOKUP_TIMEOUT_S = 5.0
-
-
-def _origin_int(value: Any) -> int | None:
-    """Coerce an origin id field to int (MessageToDict renders numbers as floats)."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return None
+# Overall deadline for the console-backend ownership lookups behind
+# conversation adoption. Adoption is an enrichment on the conversation's first
+# turn only; a slow backend must degrade to "no adoption", not stall the turn
+# — asyncio.timeout enforces this across BOTH lookups combined.
+_ADOPTION_LOOKUP_TIMEOUT_S = 3.0
 
 
 async def _resolve_scheduled_run_adoption(
     origin: dict[str, Any],
     subagent_registry: dict[str, Any],
     access_token: str,
+    console_backend_url: str,
 ) -> tuple[str, str] | None:
     """Resolve a scheduled_run origin into an adoptable sub-agent conversation.
 
@@ -300,6 +304,10 @@ async def _resolve_scheduled_run_adoption(
     token (a job another user owns simply 404s), the sub-agent binding is
     checked server-side, and the SERVER-stored conversation_id is seeded —
     the forwarded ``context_id`` is never used for adoption.
+
+    Expected failures (backend down/slow, non-2xx, malformed body) degrade to
+    None with a warning; programming errors propagate to the caller so they
+    stay visible rather than masquerading as pre-adoption behavior.
 
     Returns ``(a2a_tracking key, conversation_id)`` or None when the origin
     does not resolve to an adoptable, owned conversation.
@@ -328,10 +336,16 @@ async def _resolve_scheduled_run_adoption(
         )
         return None
 
-    backend_url = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
     headers = {"Authorization": f"Bearer {access_token}"}
-    async with httpx.AsyncClient(base_url=backend_url, timeout=_ADOPTION_LOOKUP_TIMEOUT_S) as client:
-        job_resp = await client.get(f"/api/v1/scheduler/jobs/{job_id}", headers=headers)
+    try:
+        async with asyncio.timeout(_ADOPTION_LOOKUP_TIMEOUT_S):
+            async with httpx.AsyncClient(base_url=console_backend_url) as client:
+                # The binding check post-filters, so both lookups can run
+                # concurrently under the shared deadline.
+                job_resp, run_resp = await asyncio.gather(
+                    client.get(f"/api/v1/scheduler/jobs/{job_id}", headers=headers),
+                    client.get(f"/api/v1/scheduler/jobs/{job_id}/runs/{run_id}", headers=headers),
+                )
         if job_resp.status_code != 200:
             logger.info(
                 f"Conversation adoption skipped: job {job_id} not resolvable for this user "
@@ -344,24 +358,25 @@ async def _resolve_scheduled_run_adoption(
                 f"job {job_id}'s server-side sub-agent binding"
             )
             return None
-        runs_resp = await client.get(f"/api/v1/scheduler/jobs/{job_id}/runs", headers=headers)
-        if runs_resp.status_code != 200:
+        if run_resp.status_code != 200:
+            logger.info(
+                f"Conversation adoption skipped: run {run_id} not resolvable on job {job_id} "
+                f"(HTTP {run_resp.status_code})"
+            )
             return None
-        run = next((r for r in runs_resp.json() if _origin_int(r.get("id")) == run_id), None)
-    if run is None:
-        logger.info(f"Conversation adoption skipped: run {run_id} not found on job {job_id}")
+        run = run_resp.json()
+    except (httpx.HTTPError, TimeoutError, ValueError):
+        # ValueError also covers .json() on a non-JSON 200 (e.g. an auth proxy
+        # interposing an HTML page).
+        logger.warning("Conversation adoption lookup failed; continuing without it", exc_info=True)
         return None
     conversation_id = run.get("conversation_id")
     if not isinstance(conversation_id, str) or not conversation_id:
         return None
 
-    # Key must match A2AClientRunnable._extract_tracking_ids' reader key
-    # (self.name with spaces stripped — for remote agents this also equals the
-    # registry key the tracking middleware later writes under).
-    tracking_key = str(getattr(runnable, "name", "")).replace(" ", "")
-    if not tracking_key:
-        return None
-    return tracking_key, conversation_id
+    # For remote agents this also equals the registry key the tracking
+    # middleware later writes under.
+    return runnable.tracking_key, conversation_id
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -723,19 +738,15 @@ class OrchestratorDeepAgent:
                     # resumable (validated server-side against console-backend
                     # under the authenticated user's token), seed a2a_tracking
                     # so the next delegation to that agent continues the run's
-                    # own conversation instead of starting blank. Best-effort:
-                    # any failure degrades to the synthetic history alone.
-                    try:
-                        adoption = await _resolve_scheduled_run_adoption(
-                            origin,
-                            runtime_context.subagent_registry,
-                            user_config.access_token.get_secret_value(),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Conversation adoption lookup failed; continuing without it", exc_info=True
-                        )
-                        adoption = None
+                    # own conversation instead of starting blank. Expected
+                    # lookup failures degrade to the synthetic history alone
+                    # inside the resolver.
+                    adoption = await _resolve_scheduled_run_adoption(
+                        origin,
+                        runtime_context.subagent_registry,
+                        user_config.access_token.get_secret_value(),
+                        self.config.CONSOLE_BACKEND_URL or "http://localhost:5001",
+                    )
                     if adoption:
                         tracking_key, run_conversation_id = adoption
                         input_data["a2a_tracking"] = {
@@ -744,6 +755,17 @@ class OrchestratorDeepAgent:
                                 "is_complete": True,
                             }
                         }
+                        # The seed only pays off if the model re-delegates with
+                        # the DISPATCHABLE agent label: for remote agents the
+                        # registry key is the agent-card name (spaces stripped),
+                        # which may differ from the console config name the
+                        # provenance carries. Rewrite the synthetic tool call to
+                        # the label the model can actually re-use.
+                        for _msg in synthetic_msgs or []:
+                            if isinstance(_msg, AIMessage):
+                                for _tc in _msg.tool_calls:
+                                    if _tc.get("name") == "task":
+                                        _tc["args"]["subagent_type"] = tracking_key
                         logger.info(
                             f"Adopted scheduled-run conversation {run_conversation_id} "
                             f"for sub-agent {tracking_key!r}"

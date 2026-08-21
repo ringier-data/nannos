@@ -88,6 +88,17 @@ class BaseA2ARunnable(ABC):
         """Return the agent description use for agent selection."""
         ...
 
+    @property
+    def tracking_key(self) -> str:
+        """The key this runnable's tracking state lives under in a2a_tracking.
+
+        Single home for the convention: anything seeding or reading
+        a2a_tracking entries for this runnable (the orchestrator's dispatch
+        middleware, conversation adoption, _extract_tracking_ids) must use
+        this key, not re-derive it from the name.
+        """
+        return self.name.replace(" ", "")
+
     async def ainvoke(self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> StreamEvent:
         """Async invoke the sub-agent by collecting stream results.
 
@@ -338,7 +349,7 @@ class BaseA2ARunnable(ABC):
         """
         logger.debug(f"Extracting tracking IDs for agent: {self.name}")
         logger.debug(f"Full a2a_tracking state: {input_data.a2a_tracking}")
-        agent_name = self.name.replace(" ", "")
+        agent_name = self.tracking_key
         agent_tracking = input_data.a2a_tracking.get(agent_name, {})
 
         # Waterfall: Try persisted context_id first, fallback to orchestrator's

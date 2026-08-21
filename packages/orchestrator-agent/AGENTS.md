@@ -156,6 +156,15 @@ How each type reaches the model (all traffic goes through the gateway as a langc
 
 `ErrorClassificationMiddleware` classifies errors from sub-agent execution (auth failures, tool errors, etc.) to provide actionable feedback to the orchestrator's planning loop.
 
+### Scheduled-Run Conversation Adoption Is Remote-Only, Server-Validated
+
+A conversation opened with a `scheduled_run` origin (conversation-origin extension) gets, besides the synthetic-history reconstruction, an `a2a_tracking` seed so the next delegation to the run's sub-agent **resumes the run's own conversation** — but only when that sub-agent is a **remote** A2A agent (`_resolve_scheduled_run_adoption` in `app/core/agent.py`). Two invariants:
+
+- **Never seed local/foundry agents.** Local runs checkpoint inside agent-runner under a bare `thread_id = contextId`, unreachable from the orchestrator's in-process thread keys — and a seeded `a2a_tracking.context_id` changes the runnable's execution thread while `DynamicToolDispatchMiddleware`'s HITL checkpoint probe still probes the `orchestrator_conversation_id`-derived thread, silently breaking tool-approval resume (the exact regression dropped in PR #161 round 1). Foundry continuity is a `foundry_session_rid` the provenance doesn't carry.
+- **The seed key is `runnable.tracking_key`** (`agent_common/a2a/base.py`) — the single home of the name-with-spaces-stripped convention shared by the registry key (`discovery.py`), the `a2a_tracking` writers, and `_extract_tracking_ids`' reader. Never re-derive it from a name.
+
+The origin DataPart is untrusted: the job/run are re-resolved via console-backend under the authenticated user's token (single-run endpoint `GET /api/v1/scheduler/jobs/{id}/runs/{run_id}` — the run *listing* is capped to the newest 50), the job's server-side sub-agent binding must match, and the **server-stored** `conversation_id` is what gets seeded. agent-runner makes those ids meaningful by sending the run task's contextId on remote dispatches (`_run_remote_agent`).
+
 ## Testing
 
 **Prefer the runTests MCP tool over terminal commands when running tests.**

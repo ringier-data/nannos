@@ -163,7 +163,9 @@ class AgentDiscoveryService:
         logger.debug(f"A2A runnable created successfully for {card_url} with sub_agent_id={sub_agent_id}")
 
         # Create the sub-agent (middleware will be applied by create_deep_agent)
-        agent_name = agent_card.name.replace(" ", "")  # Remove spaces for tool name
+        # Registry key = tracking key: the same label must reach the `task` tool
+        # enum, the a2a_tracking writers, and _extract_tracking_ids' reader.
+        agent_name = base_runnable.tracking_key
 
         agent = CompiledSubAgent(
             name=agent_name,

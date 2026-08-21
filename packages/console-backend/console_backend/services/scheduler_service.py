@@ -379,3 +379,18 @@ class SchedulerService:
         if job is None or job.user_id != user_id:
             return None
         return await self.repo.list_runs(db, job_id, limit)
+
+    async def get_run(
+        self,
+        db: AsyncSession,
+        job_id: int,
+        run_id: int,
+        user_id: str,
+    ) -> ScheduledJobRun | None:
+        """Fetch one run of the user's job by id — unlike list_runs, not capped
+        to the newest 50, so arbitrarily old runs stay resolvable (conversation
+        adoption looks up the run a thread reply refers to)."""
+        job = await self.repo.get_job(db, job_id)
+        if job is None or job.user_id != user_id:
+            return None
+        return await self.repo.get_run(db, job_id, run_id)
