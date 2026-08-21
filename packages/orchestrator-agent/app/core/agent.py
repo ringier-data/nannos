@@ -14,10 +14,13 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Optional
+
+import httpx
 
 if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
@@ -116,7 +119,22 @@ def _scheduled_run_frame_text(text: str) -> str:
     return re.sub(r"(?i)</(scheduled_run)", r"<\\/\1", text)
 
 
-def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
+def _origin_int(value: Any) -> int | None:
+    """Coerce an origin id field to int (MessageToDict renders protobuf numbers
+    as floats). Single helper for every reading of the same DataPart, so
+    rendering and adoption can't disagree on what counts as a valid id."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _build_scheduled_run_history(
+    run: dict[str, Any], *, delegation_label: str | None = None
+) -> list[Any] | None:
     """Origin builder for kind ``scheduled_run`` (CONVERSATION_ORIGIN_EXTENSION).
 
     The scheduler dispatched the run directly to agent-runner, so this fresh
@@ -126,35 +144,65 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
     one — some providers reject a leading assistant tool-call), the ``task``
     tool call to the sub-agent, and the run's output as the tool result. This
     gives the model the run's prompt and output as real context; it does NOT
-    resume the run's checkpoint — the run executed on agent-runner, whose
-    conversation state is not reachable from the orchestrator's delegation
-    paths (cross-service adoption is a separate follow-up).
+    by itself resume the run's checkpoint. Conversation adoption is seeded
+    separately (_validate_scheduled_run_origin + _build_adoption_seed): a
+    follow-up delegation resumes the run's conversation on the executing
+    server for remote sub-agents, or on a fork of the run's checkpoint for
+    local/automated ones.
 
     For a run without a sub-agent (a plain watch notification) there is no
     delegation to reconstruct — only the framing HumanMessage carrying the
     delivered notification text is returned, so the model still knows what
     the user is replying to.
 
+    ``delegation_label`` is the DISPATCHABLE registry key of the run's
+    sub-agent, when the caller resolved one (adoption): the synthetic tool
+    call must show the label the model can actually re-use, which for remote
+    agents (card name, spaces stripped) may differ from the console config
+    name the provenance carries. Without it, the provenance name is the best
+    available approximation (local/foundry registries are keyed by the
+    unmodified config name).
+
+    The provenance may carry the run's terminal ``task_state``. It matters for
+    the framing: a run that ended ``input_required`` did not finish — the
+    sub-agent asked the user a question and its conversation is waiting for
+    the answer, so the reconstruction must steer the model toward forwarding
+    the user's reply to the sub-agent instead of answering on its behalf
+    (delivered as TASK_STATE_COMPLETED framing, the orchestrator role-played
+    the sub-agent's side of an unfinished exchange — observed live: it
+    invented its own "secret number" via eval rather than delegating).
+
+    When adoption resolved a ``delegation_label``, the framing also states
+    that delegating RESUMES the run's conversation with the sub-agent's
+    memory intact — without it the model falls back on its "sub-agents are
+    stateless" prior and reconstructs (i.e. fabricates) run-internal state
+    itself.
+
     Returns None when the provenance carries nothing to reconstruct.
     """
-    # Raw config name: the sub-agent registry is keyed by the unmodified name
-    # for local/foundry agents, so the synthetic tool call must show the form
-    # the model can actually re-use on a follow-up delegation.
     sub_agent_name = run.get("sub_agent_name") or ""
     prompt = run.get("prompt")
     result_summary = run.get("result_summary")
     failed = run.get("scheduler_status") == "failed"
     error_message = run.get("error_message")
+    # Untrusted enrichment like prompt/result_summary; anything but the known
+    # scheduler-facing states is ignored (forward compatibility).
+    task_state = run.get("task_state")
+    if task_state not in ("completed", "input_required", "failed"):
+        task_state = None
+    awaiting_input = task_state == "input_required" and not failed
 
     def _fmt_id(value: Any) -> str:
-        # MessageToDict renders protobuf numbers as floats; ids must not print as "42.0".
-        return str(int(value)) if isinstance(value, (int, float)) else ""
+        parsed = _origin_int(value)
+        return str(parsed) if parsed is not None else ""
 
     job_id = _fmt_id(run.get("scheduled_job_id"))
     run_id = _fmt_id(run.get("scheduled_job_run_id"))
-    frame_attrs = f'source="scheduler" job_id="{job_id}" run_id="{run_id}"' + (
-        ' status="failed"' if failed else ""
-    )
+    frame_attrs = f'source="scheduler" job_id="{job_id}" run_id="{run_id}"'
+    if failed:
+        frame_attrs += ' status="failed"'
+    elif task_state:
+        frame_attrs += f' task_state="{task_state}"'
 
     if not sub_agent_name:
         # Watch notification without a sub-agent: no delegation happened; give
@@ -185,14 +233,52 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
 
     tool_call_id = f"scheduled_run_{run_id or run.get('context_id') or 'unknown'}"
 
+    if awaiting_input and delegation_label:
+        # Forwarding is only honest advice when adoption validated: without
+        # the a2a_tracking seed a delegation starts the sub-agent blank, and
+        # the model would forward the answer into a void.
+        framing = (
+            "The request above ran on a schedule but did NOT finish: the sub-agent's delivered "
+            "output asks the user a question and the run is waiting for their answer. The user "
+            "is replying to that question — forward their reply to the sub-agent via the task "
+            f"tool ({delegation_label!r}); do not answer the question or continue the exchange on "
+            "the sub-agent's behalf."
+        )
+    elif awaiting_input:
+        framing = (
+            "The request above ran on a schedule but did NOT finish: the sub-agent's delivered "
+            "output asks the user a question. Its conversation could NOT be resumed from here, "
+            "so the sub-agent has no memory of asking — handle the user's reply yourself, using "
+            "the delivered output above as the exchange so far, and be upfront about anything "
+            "the run kept internal (it is unrecoverable)."
+        )
+    else:
+        framing = (
+            "The request above ran on a schedule and its output was already delivered to the user, "
+            "who is now replying to it. When the reply needs content from that output, restate it "
+            "explicitly in your answer — do not reference it via include_subagent_output (this "
+            "restriction covers only the already-delivered output above; relay the result of any "
+            "NEW delegation faithfully, as usual)."
+        )
+    if delegation_label:
+        # Only rendered when adoption validated (see docstring): delegating
+        # really does resume the run's conversation, so tell the model —
+        # otherwise its "sub-agents are stateless" prior wins and it
+        # reconstructs run-internal state itself.
+        framing += (
+            f"\nDelegating to {delegation_label!r} RESUMES the run's own conversation: the "
+            "sub-agent retains the run's full memory, including internal state not shown here "
+            "(values it computed, files it wrote, decisions it made). For any follow-up that "
+            "depends on that state, delegate to it — never reconstruct, recompute, or simulate "
+            "that state yourself."
+        )
+
     human_msg = HumanMessage(
         content=(
             f"<scheduled_run {frame_attrs}>"
             f"{_scheduled_run_frame_text(prompt)}"
             "</scheduled_run>\n"
-            "The request above ran on a schedule and its output was already delivered to the user, "
-            "who is now replying to it. When the reply needs content from that output, restate it "
-            "explicitly in your answer — do not reference it via include_subagent_output."
+            f"{framing}"
         )
     )
     ai_msg = AIMessage(
@@ -202,17 +288,26 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
                 "id": tool_call_id,
                 "name": "task",
                 "type": "tool_call",
-                "args": {"subagent_type": sub_agent_name, "description": prompt},
+                "args": {"subagent_type": delegation_label or sub_agent_name, "description": prompt},
             }
         ],
     )
+    if failed:
+        synthetic_state = "TASK_STATE_FAILED"
+    elif awaiting_input:
+        synthetic_state = "TASK_STATE_INPUT_REQUIRED"
+    else:
+        synthetic_state = "TASK_STATE_COMPLETED"
     tool_msg = ToolMessage(
         content=tool_content,
         tool_call_id=tool_call_id,
         additional_kwargs={
             "a2a_metadata": {
-                "is_complete": True,
-                "state": "TASK_STATE_FAILED" if failed else "TASK_STATE_COMPLETED",
+                # Message-level rendering only — the a2a_tracking continuity
+                # state is seeded separately (_build_adoption_seed) and always
+                # carries is_complete=True (there is no resumable task_id).
+                "is_complete": not awaiting_input,
+                "state": synthetic_state,
                 "agent_name": sub_agent_name,
             }
         },
@@ -228,8 +323,15 @@ _ORIGIN_HISTORY_BUILDERS: dict[str, Any] = {
 }
 
 
-def _build_origin_history(origin: dict[str, Any]) -> list[Any] | None:
+def _build_origin_history(
+    origin: dict[str, Any], *, delegation_label: str | None = None
+) -> list[Any] | None:
     """Dispatch an origin descriptor to its kind's history builder.
+
+    ``delegation_label`` is the resolved dispatchable label of the origin's
+    sub-agent when adoption validated one (see _build_adoption_seed); builders
+    render it in the synthetic delegation so the model re-uses a label that
+    actually dispatches.
 
     Unknown kinds are skipped with a log line rather than an error — the
     descriptor is an optional context enrichment, and a newer client must be
@@ -241,12 +343,195 @@ def _build_origin_history(origin: dict[str, Any]) -> list[Any] | None:
         logger.info(f"Ignoring conversation origin of unknown kind {kind!r}")
         return None
     try:
-        return builder(origin)
+        return builder(origin, delegation_label=delegation_label)
     except Exception:
         # A malformed descriptor must degrade like an unknown kind — the
         # origin is optional enrichment; never fail the turn over it.
         logger.warning(f"Failed to build history for conversation origin kind {kind!r}; skipping", exc_info=True)
         return None
+
+
+# Overall deadline for the console-backend ownership lookups behind
+# conversation adoption. Adoption is an enrichment on the conversation's first
+# turn only; a slow backend must degrade to "no adoption", not stall the turn
+# — asyncio.timeout enforces this across BOTH lookups combined.
+_ADOPTION_LOOKUP_TIMEOUT_S = 3.0
+
+
+async def _validate_scheduled_run_origin(
+    origin: dict[str, Any],
+    access_token: str,
+    console_backend_url: str,
+) -> dict[str, Any] | None:
+    """Validate a scheduled_run origin server-side and resolve its run conversation.
+
+    Cross-service conversation adoption, step 1 of 2 (see _build_adoption_seed
+    for step 2 and the delegation-path mechanics). The client-forwarded
+    DataPart is treated as an untrusted hint: the job and run are re-resolved
+    from console-backend under the AUTHENTICATED user's token (a job another
+    user owns simply 404s), the sub-agent binding is checked server-side, and
+    the SERVER-stored conversation_id is what adoption uses — the forwarded
+    ``context_id`` plays no part.
+
+    Expected failures (backend down/slow, non-2xx, malformed body) degrade to
+    None with a warning; programming errors propagate to the caller so they
+    stay visible rather than masquerading as pre-adoption behavior.
+
+    Returns ``{"sub_agent_id", "conversation_id", "job_id", "run_id"}`` or
+    None when the origin does not resolve to an owned run with a stored
+    conversation.
+    """
+    if origin.get("kind") != "scheduled_run":
+        return None
+
+    job_id = _origin_int(origin.get("scheduled_job_id"))
+    run_id = _origin_int(origin.get("scheduled_job_run_id"))
+    sub_agent_id = _origin_int(origin.get("sub_agent_id"))
+    if job_id is None or run_id is None or sub_agent_id is None:
+        return None
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        async with asyncio.timeout(_ADOPTION_LOOKUP_TIMEOUT_S):
+            async with httpx.AsyncClient(base_url=console_backend_url) as client:
+                # The binding check post-filters, so both lookups can run
+                # concurrently under the shared deadline. return_exceptions
+                # keeps a second in-flight failure from becoming an
+                # "exception was never retrieved" warning; re-raise the first
+                # so the except below handles both lookups uniformly.
+                job_resp, run_resp = await asyncio.gather(
+                    client.get(f"/api/v1/scheduler/jobs/{job_id}", headers=headers),
+                    client.get(f"/api/v1/scheduler/jobs/{job_id}/runs/{run_id}", headers=headers),
+                    return_exceptions=True,
+                )
+                for resp in (job_resp, run_resp):
+                    if isinstance(resp, BaseException):
+                        raise resp
+        if job_resp.status_code != 200:
+            logger.info(
+                f"Conversation adoption skipped: job {job_id} not resolvable for this user "
+                f"(HTTP {job_resp.status_code})"
+            )
+            return None
+        if _origin_int(job_resp.json().get("sub_agent_id")) != sub_agent_id:
+            logger.warning(
+                f"Conversation adoption skipped: origin sub_agent_id {sub_agent_id} does not match "
+                f"job {job_id}'s server-side sub-agent binding"
+            )
+            return None
+        if run_resp.status_code != 200:
+            logger.info(
+                f"Conversation adoption skipped: run {run_id} not resolvable on job {job_id} "
+                f"(HTTP {run_resp.status_code})"
+            )
+            return None
+        run = run_resp.json()
+    except (httpx.HTTPError, TimeoutError, ValueError):
+        # ValueError also covers .json() on a non-JSON 200 (e.g. an auth proxy
+        # interposing an HTML page).
+        logger.warning("Conversation adoption lookup failed; continuing without it", exc_info=True)
+        return None
+    conversation_id = run.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return None
+
+    return {
+        "sub_agent_id": sub_agent_id,
+        "conversation_id": conversation_id,
+        "job_id": job_id,
+        "run_id": run_id,
+    }
+
+
+def _build_adoption_seed(
+    validated: dict[str, Any],
+    subagent_registry: dict[str, Any],
+) -> tuple[str, str, dict[str, Any]] | None:
+    """Build the a2a_tracking adoption record for a server-validated run.
+
+    Cross-service conversation adoption, step 2 of 2. One contract, two
+    continuity mechanisms — the record seeded under the runnable's
+    tracking_key tells the next delegation to that sub-agent to continue the
+    run's conversation instead of starting blank:
+
+    - REMOTE agents: ``{"context_id": <run conversation_id>}``. agent-runner
+      dispatched the run with the run task's contextId on the wire, so the
+      remote server checkpoints the run's conversation under exactly this id;
+      the A2AClientRunnable waterfall puts a seeded context_id back on the
+      wire unchanged.
+    - LOCAL/AUTOMATED agents: ``{"adopt_thread_from": <run conversation_id>}``.
+      The run's checkpoint lives at bare ``thread_id = conversation_id`` in
+      the SHARED checkpoint tables (both services point at the same
+      Postgres schema); DynamicToolDispatchMiddleware forks it into the
+      conversation's own ``{ctx}::dynamic-{name}`` thread on first
+      delegation. The run ctx must NEVER be seeded as ``context_id`` for a
+      local runnable — that changes its execution thread while the HITL
+      checkpoint probe still probes the conversation-derived thread,
+      silently breaking tool-approval resume (PR #161 round 1).
+    - Foundry: not adoptable — continuity is a session rid the provenance
+      does not carry.
+
+    Returns ``(registry_key, tracking_key, record)`` or None. registry_key is
+    the ``task`` tool label (raw config name for local agents, card name with
+    spaces stripped for remote); tracking_key is where the record lives in
+    a2a_tracking (identical to registry_key for local agents, whose names
+    cannot contain spaces).
+    """
+    from agent_common.a2a.client_runnable import A2AClientRunnable
+    from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
+
+    sub_agent_id = validated["sub_agent_id"]
+    conversation_id = validated["conversation_id"]
+
+    for registry_key, entry in subagent_registry.items():
+        if entry.get("sub_agent_id") != sub_agent_id:
+            continue
+        runnable = entry.get("runnable")
+        # sub_agent_id makes the record self-describing: later turns (and HITL
+        # resumes) re-derive adopted_sub_agent_ids from the persisted tracking
+        # state, keeping the adopted agent registered for the whole
+        # conversation (_adopted_sub_agent_ids_from_tracking).
+        if isinstance(runnable, A2AClientRunnable):
+            return registry_key, runnable.tracking_key, {
+                "context_id": conversation_id,
+                "is_complete": True,
+                "sub_agent_id": sub_agent_id,
+            }
+        if isinstance(runnable, DynamicLocalAgentRunnable):
+            return registry_key, runnable.tracking_key, {
+                "adopt_thread_from": conversation_id,
+                "is_complete": True,
+                "sub_agent_id": sub_agent_id,
+            }
+        logger.info(
+            f"Conversation adoption skipped: sub-agent {sub_agent_id} "
+            f"({type(runnable).__name__}) has no adoptable continuity mechanism"
+        )
+        return None
+
+    logger.info(f"Conversation adoption skipped: sub-agent {sub_agent_id} is not registered")
+    return None
+
+
+def _adopted_sub_agent_ids_from_tracking(a2a_tracking: dict[str, Any]) -> set[int] | None:
+    """Recover the conversation's adopted sub-agent ids from persisted state.
+
+    The adoption seed (_build_adoption_seed) stamps ``sub_agent_id`` into the
+    a2a_tracking record, which lives in the checkpoint from the first turn on.
+    Re-deriving the ids from it on EVERY turn — HITL resumes included — keeps
+    the adopted automated agent registered for the conversation's whole
+    lifetime; deriving them only from the origin DataPart would deregister the
+    agent after turn one (and silently drop the approval of its own first
+    delegation's interrupt).
+    """
+    adopted: set[int] = set()
+    for record in a2a_tracking.values():
+        if not isinstance(record, dict):
+            continue
+        sub_agent_id = _origin_int(record.get("sub_agent_id"))
+        if sub_agent_id is not None:
+            adopted.add(sub_agent_id)
+    return adopted or None
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -357,7 +642,10 @@ class OrchestratorDeepAgent:
         return self._graph_factory.get_graph(model_type, thinking_level=thinking_level)
 
     def build_runtime_context(
-        self, user_config: UserConfig, sandbox_pool: SandboxPool | None = None
+        self,
+        user_config: UserConfig,
+        sandbox_pool: SandboxPool | None = None,
+        adopted_sub_agent_ids: set[int] | None = None,
     ) -> GraphRuntimeContext:
         """Build GraphRuntimeContext from enriched user config.
 
@@ -368,6 +656,15 @@ class OrchestratorDeepAgent:
         Args:
             user_config: User configuration enriched with discovered tools/agents
             sandbox_pool: Optional SandboxPool for sandbox-enabled sub-agents
+            adopted_sub_agent_ids: Console ids of sub-agents this conversation
+                adopted a scheduled run of. Validated server-side on the blank
+                first turn (_validate_scheduled_run_origin), then re-derived on
+                every later turn — HITL resumes included — from the a2a_tracking
+                records persisted in the checkpoint
+                (_adopted_sub_agent_ids_from_tracking). Unlocks registration of
+                the matching automated (interactive=False) sub-agents for this
+                conversation; see build_runtime_context in app/utils.py for the
+                gating.
 
         Returns:
             GraphRuntimeContext: Ready for graph invocation with all registries populated
@@ -396,6 +693,7 @@ class OrchestratorDeepAgent:
             backend_url=backend_url,
             sandbox_pool=sandbox_pool,
             tool_risk_cache=getattr(self, "tool_risk_cache", None),
+            adopted_sub_agent_ids=adopted_sub_agent_ids,
         )
 
     async def get_or_create_graph(
@@ -502,9 +800,41 @@ class OrchestratorDeepAgent:
             )
             return
 
+        # Conversation-origin adoption, resolved BEFORE the runtime context is
+        # built: an automated (scheduler-only) sub-agent is registered into
+        # this conversation only when the origin validated server-side as one
+        # of the user's own runs (see _validate_scheduled_run_origin), so the
+        # adopted ids must be known at registry-build time. The expensive
+        # validation runs on the blank first turn only; EVERY turn — including
+        # HITL resumes, where the adopted agent's own interrupt is being
+        # answered — re-derives the adopted ids from the a2a_tracking records
+        # persisted in the checkpoint, or the agent would vanish from the
+        # registry after turn one.
+        checkpoint_state = await graph.aget_state(config)
+        checkpoint_msgs: list[Any] = list(checkpoint_state.values.get("messages") or [])
+        adopted_ids = _adopted_sub_agent_ids_from_tracking(
+            checkpoint_state.values.get("a2a_tracking") or {}
+        )
+        origin: dict[str, Any] | None = None
+        validated_origin: dict[str, Any] | None = None
+        if resume is None and not checkpoint_msgs:
+            origin = _extract_conversation_origin(message_parts)
+            if origin:
+                validated_origin = await _validate_scheduled_run_origin(
+                    origin,
+                    user_config.access_token.get_secret_value(),
+                    self.config.CONSOLE_BACKEND_URL or "http://localhost:5001",
+                )
+                if validated_origin:
+                    adopted_ids = (adopted_ids or set()) | {validated_origin["sub_agent_id"]}
+
         # Build GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
         # UserConfig should already have tools/agents discovered by executor via discover_capabilities()
-        runtime_context = self.build_runtime_context(user_config, sandbox_pool=self.sandbox_pool)
+        runtime_context = self.build_runtime_context(
+            user_config,
+            sandbox_pool=self.sandbox_pool,
+            adopted_sub_agent_ids=adopted_ids,
+        )
 
         # Token for the per-turn attachments context registration (reset in finally).
         _attachments_token = None
@@ -517,8 +847,8 @@ class OrchestratorDeepAgent:
             # this works across nodes without any separate persistence layer.
             input_data = Command(resume=resume)
             logger.info(f"Resume input data: Command(resume={resume})")
-            checkpoint_state = await graph.aget_state(config)
-            blocks = collect_attachment_blocks_from_messages(checkpoint_state.values.get("messages") or [])
+            # checkpoint_state was loaded by the adoption pre-pass above.
+            blocks = collect_attachment_blocks_from_messages(checkpoint_msgs)
             attachments_backend = build_attachments_backend_from_blocks(blocks)
             if attachments_backend is not None:
                 logger.info(
@@ -568,8 +898,8 @@ class OrchestratorDeepAgent:
             # with any blocks from the last 20 checkpoint messages.  The current
             # message is appended as newest so its files win on filename collisions
             # while still preserving attachments from prior turns.
-            checkpoint_state = await graph.aget_state(config)
-            checkpoint_msgs = list(checkpoint_state.values.get("messages") or [])
+            # checkpoint_msgs was loaded before the runtime context was built
+            # (the adoption pre-pass above).
             all_blocks = collect_attachment_blocks_from_messages(checkpoint_msgs + [current_msg])
             attachments_backend = build_attachments_backend_from_blocks(all_blocks)
             if attachments_backend is not None:
@@ -594,15 +924,36 @@ class OrchestratorDeepAgent:
             # meaningful for the message that opened it (clients attach it on
             # every message of its context precisely so a first turn that failed
             # before any checkpoint was written still gets it on retry).
-            if not checkpoint_msgs:
-                origin = _extract_conversation_origin(message_parts)
-                if origin:
-                    synthetic_msgs = _build_origin_history(origin)
-                    if synthetic_msgs:
-                        input_data = {"messages": [*synthetic_msgs, current_msg]}
-                        logger.info(
-                            f"Injected synthetic conversation-origin context (kind={origin.get('kind')!r})"
-                        )
+            if not checkpoint_msgs and origin:
+                # Cross-service conversation adoption: seed the a2a_tracking
+                # record so the next delegation to the run's sub-agent
+                # continues the run's own conversation instead of starting
+                # blank — wire-level contextId resume for remote agents,
+                # checkpoint fork for local/automated ones (see
+                # _build_adoption_seed). Only for a server-validated origin.
+                # Resolved BEFORE the synthetic history is built so the
+                # reconstruction renders the dispatchable delegation label.
+                seed = (
+                    _build_adoption_seed(validated_origin, runtime_context.subagent_registry)
+                    if validated_origin
+                    else None
+                )
+                synthetic_msgs = _build_origin_history(
+                    origin, delegation_label=seed[0] if seed else None
+                )
+                if synthetic_msgs:
+                    input_data = {"messages": [*synthetic_msgs, current_msg]}
+                    logger.info(
+                        f"Injected synthetic conversation-origin context (kind={origin.get('kind')!r})"
+                    )
+                if seed:
+                    registry_key, tracking_key, record = seed
+                    input_data["a2a_tracking"] = {tracking_key: record}
+                    logger.info(
+                        f"Adopted scheduled-run conversation "
+                        f"{record.get('context_id') or record.get('adopt_thread_from')} "
+                        f"for sub-agent {registry_key!r}"
+                    )
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0

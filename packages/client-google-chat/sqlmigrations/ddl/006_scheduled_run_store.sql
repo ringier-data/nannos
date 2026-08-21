@@ -23,6 +23,8 @@ create table scheduled_run_store (
     result_summary text,                    -- the agent output delivered to the user
     scheduler_status text,                  -- success | failed (condition_not_met is never delivered)
     error_message text,                     -- set when scheduler_status = 'failed'
+    task_state text,                        -- terminal A2A task state of the run: completed | input_required | failed
+                                            -- (input_required = the run asked the user a question and awaits the answer)
     expires_at timestamptz not null default (now() + interval '30 days'),
     created_at timestamptz not null default (now()),
     updated_at timestamptz not null default (now())

@@ -22,12 +22,12 @@ export class PgScheduledRunStore implements IScheduledRunStore {
         INSERT INTO scheduled_run_store (
           context_key, context_id, scheduled_job_id, scheduled_job_run_id,
           sub_agent_id, sub_agent_name, prompt, result_summary,
-          scheduler_status, error_message
+          scheduler_status, error_message, task_state
         )
         VALUES (
           ${record.contextKey}, ${record.contextId}, ${record.scheduledJobId}, ${record.scheduledJobRunId},
           ${record.subAgentId}, ${record.subAgentName}, ${record.prompt}, ${record.resultSummary},
-          ${record.schedulerStatus}, ${record.errorMessage}
+          ${record.schedulerStatus}, ${record.errorMessage}, ${record.taskState}
         )
         ON CONFLICT (context_key) DO UPDATE SET
           context_id = EXCLUDED.context_id,
@@ -38,7 +38,8 @@ export class PgScheduledRunStore implements IScheduledRunStore {
           prompt = EXCLUDED.prompt,
           result_summary = EXCLUDED.result_summary,
           scheduler_status = EXCLUDED.scheduler_status,
-          error_message = EXCLUDED.error_message
+          error_message = EXCLUDED.error_message,
+          task_state = EXCLUDED.task_state
       `);
       this.logger.debug(`Saved scheduled-run provenance for key ${record.contextKey}`);
     } catch (error) {
@@ -52,7 +53,7 @@ export class PgScheduledRunStore implements IScheduledRunStore {
       const result = await this.pool.query(SQL`
         SELECT context_key, context_id, scheduled_job_id, scheduled_job_run_id,
                sub_agent_id, sub_agent_name, prompt, result_summary,
-               scheduler_status, error_message
+               scheduler_status, error_message, task_state
         FROM scheduled_run_store
         WHERE context_key = ${key} AND expires_at > now()
       `);
@@ -73,6 +74,7 @@ export class PgScheduledRunStore implements IScheduledRunStore {
         resultSummary: row.result_summary ?? undefined,
         schedulerStatus: row.scheduler_status ?? undefined,
         errorMessage: row.error_message ?? undefined,
+        taskState: row.task_state ?? undefined,
       };
     } catch (error) {
       this.logger.error(error, `Failed to get scheduled-run provenance: ${error}`);

@@ -63,8 +63,10 @@ class TestAgentDiscoveryService:
             mock_http_client.get = AsyncMock(return_value=mock_response)
             mock_client.return_value.__aenter__.return_value = mock_http_client
 
-            # Mock A2A runnable
+            # Mock A2A runnable — the registry key comes from its tracking_key
+            # (card name, spaces stripped)
             mock_runnable_instance = Mock()
+            mock_runnable_instance.tracking_key = "TestAgent"
             mock_runnable.return_value = mock_runnable_instance
 
             result = await service.register_agents(agent_metadata, token)

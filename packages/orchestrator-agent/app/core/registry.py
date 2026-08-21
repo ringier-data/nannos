@@ -383,11 +383,6 @@ class RegistryService:
             if not sa.config_version:
                 continue
 
-            # Automated sub-agents are for system scheduling only — never exposed to users
-            if sa.type == "automated":
-                logger.debug(f"Skipping automated sub-agent '{sa.name}' (not for interactive use)")
-                continue
-
             cv = sa.config_version
             if sa.type == "remote":
                 # Remote A2A agents have agent_url at root level
@@ -399,8 +394,13 @@ class RegistryService:
                         "name": sa.name,
                         "description": cv.description,
                     }
-            elif sa.type == "local":
-                # Local agents have system_prompt and mcp_tools at root level
+            elif sa.type in ("local", "automated"):
+                # Local agents have system_prompt and mcp_tools at root level.
+                # Automated agents share the exact config shape (agent-runner
+                # executes both through the same path) but are for system
+                # scheduling: they carry interactive=False and are registered
+                # into a conversation only when it adopted one of their
+                # scheduled runs (conversation-origin extension).
                 system_prompt = resolve_prompt_placeholders(cv.system_prompt or "")
                 mcp_tools = cv.mcp_tools or []
 
@@ -418,6 +418,7 @@ class RegistryService:
                         LocalLangGraphSubAgentConfig(
                             name=sa.name,
                             description=cv.description or f"Local agent: {sa.name}",
+                            interactive=sa.type == "local",
                             system_prompt=system_prompt,
                             mcp_tools=mcp_tools if mcp_tools else None,
                             model_name=effective_model,

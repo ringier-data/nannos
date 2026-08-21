@@ -83,6 +83,7 @@ def build_runtime_context(
     backend_url: str | None = None,
     sandbox_pool: SandboxPool | None = None,
     tool_risk_cache: ToolRiskCache | None = None,
+    adopted_sub_agent_ids: set[int] | None = None,
 ) -> Any:  # GraphRuntimeContext
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
@@ -120,6 +121,13 @@ def build_runtime_context(
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
+        adopted_sub_agent_ids: Console ids of sub-agents this conversation adopted a
+            scheduled run of (conversation-origin extension, server-validated).
+            Non-interactive configs (automated, scheduler-only sub-agents carry
+            ``interactive=False``) are registered ONLY when their id is in this set —
+            making the run's agent delegable inside the adopting conversation while
+            staying invisible to every other one. Interactive configs ignore it.
+            None (the default) registers interactive configs only.
 
     Returns:
         GraphRuntimeContext for graph invocation
@@ -289,6 +297,14 @@ def build_runtime_context(
 
         for config in user_config.local_subagents:
             try:
+                # Automated (scheduler-only) sub-agents are registered only into
+                # a conversation that adopted one of their scheduled runs — they
+                # stay invisible to every other interactive conversation.
+                if not getattr(config, "interactive", True) and (
+                    adopted_sub_agent_ids is None
+                    or getattr(config, "sub_agent_id", None) not in adopted_sub_agent_ids
+                ):
+                    continue
                 if isinstance(config, LocalFoundrySubAgentConfig):
                     # Create Foundry local sub-agent
                     dynamic_subagent = create_foundry_local_subagent(

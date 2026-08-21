@@ -383,6 +383,118 @@ def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decis
     return Command(resume=payload)
 
 
+def _seal_dangling_tool_calls(messages: list[Any]) -> list[Any]:
+    """Answer AI tool calls that never got a ToolMessage with a synthetic one.
+
+    A scheduled run that died mid-tool (exception, timeout, pod restart)
+    commits its last checkpoint right after the model emitted tool_calls —
+    the tool results never landed. Forking that state and then appending the
+    user's next message would send ``tool_use`` with no ``tool_result``,
+    which providers reject outright. Sealing the gap with an explicit
+    "never completed" result keeps the history valid AND tells the model the
+    truth about what happened to those calls.
+    """
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+    sealed = list(messages)
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        for tool_call in msg.tool_calls or []:
+            call_id = tool_call.get("id")
+            if call_id and call_id not in answered:
+                answered.add(call_id)
+                sealed.append(
+                    ToolMessage(
+                        content=(
+                            "(no result: the scheduled run ended before this tool call "
+                            "completed)"
+                        ),
+                        tool_call_id=call_id,
+                        status="error",
+                    )
+                )
+    return sealed
+
+
+async def _maybe_adopt_run_thread(
+    checkpointer: Any,
+    source_thread_id: str,
+    subagent_config: dict[str, Any],
+    subagent_type: str,
+) -> None:
+    """Fork a scheduled run's checkpoint into the sub-agent's conversation thread.
+
+    Copies the LATEST checkpoint of the run's thread (bare
+    ``thread_id = source_thread_id``, the convention agent-runner uses for
+    scheduled local/automated executions) onto the sub-agent's standard
+    conversation thread — only when that target thread has no checkpoint yet,
+    so the fork happens exactly once per conversation and later delegations
+    keep continuing the forked thread.
+
+    Scheduled-run graphs carry no HITL middleware (build_sub_agent_graph
+    attaches it only with hitl_guarded_tools/risk_scorer, which agent-runner
+    does not pass — scheduling is fail-open), so no pending interrupt can
+    exist on the source; pending_writes are deliberately not copied either,
+    which keeps that true even if agent-runner ever gains HITL. What a
+    FAILED run can leave behind is a trailing AIMessage with unanswered
+    tool_calls — those are sealed in the copy (never in the source) so the
+    forked history stays provider-valid.
+    """
+    target = await checkpointer.aget_tuple(subagent_config)
+    if target is not None:
+        return
+
+    source_config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
+    source = await checkpointer.aget_tuple(source_config)
+    if source is None:
+        logger.info(
+            "[ADOPT] No checkpoint found for run thread '%s' (unshared checkpoint store, "
+            "or the run predates contextId-keyed execution); '%s' starts blank",
+            source_thread_id,
+            subagent_type,
+        )
+        return
+
+    # Work on a copy of the containers we touch — aget_tuple may hand back
+    # references into the checkpointer's own store (MemorySaver does).
+    checkpoint = dict(source.checkpoint)
+    channel_values = dict(checkpoint.get("channel_values") or {})
+    messages = channel_values.get("messages")
+    if isinstance(messages, list) and messages:
+        sealed = _seal_dangling_tool_calls(messages)
+        if len(sealed) != len(messages):
+            logger.info(
+                "[ADOPT] Sealed %d unanswered tool call(s) from run thread '%s' "
+                "(the run ended mid-tool)",
+                len(sealed) - len(messages),
+                source_thread_id,
+            )
+            channel_values["messages"] = sealed
+    checkpoint["channel_values"] = channel_values
+
+    target_config = {
+        "configurable": {
+            "thread_id": subagent_config["configurable"]["thread_id"],
+            "checkpoint_ns": "",
+        }
+    }
+    # aget_tuple returns the checkpoint with channel_values deserialized;
+    # aput re-serializes every channel named in new_versions onto the new
+    # thread, giving a complete, independent copy of the run's state.
+    await checkpointer.aput(
+        target_config,
+        checkpoint,
+        source.metadata,
+        checkpoint.get("channel_versions") or {},
+    )
+    logger.info(
+        "[ADOPT] Forked run thread '%s' into '%s' for sub-agent '%s'",
+        source_thread_id,
+        target_config["configurable"]["thread_id"],
+        subagent_type,
+    )
+
+
 class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]):
     """Middleware for runtime MCP tool injection and A2A subagent handling.
 
@@ -1715,6 +1827,35 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Instead, we keep is_nested=False (the default) and rely on a
         # post-stream check in dynamic_agent._astream_impl to detect
         # suppressed interrupts and re-raise GraphInterrupt.
+
+        # Cross-service conversation adoption (fork-on-adopt): a server-
+        # validated scheduled_run origin left an adoption record for this
+        # sub-agent (agent.py::_build_adoption_seed). The run's conversation
+        # checkpoint lives at bare thread_id = run contextId in the SHARED
+        # checkpoint tables (agent-runner and the orchestrator point at the
+        # same Postgres schema and both graphs come from build_sub_agent_graph),
+        # so copy its latest checkpoint into this conversation's own thread the
+        # first time the agent is delegated. Fork, not re-point: the run's
+        # thread stays an untouched record, execution stays on the standard
+        # thread the HITL probe below already targets (no probe/execution
+        # desync possible), and parallel conversations adopting the same run
+        # do not share mutable state. Absent source (unshared DB, expired
+        # data) degrades to a blank start.
+        if isinstance(runnable, DynamicLocalAgentRunnable) and checkpointer is not None:
+            _adopt_record = (subagent_state.get("a2a_tracking") or {}).get(
+                getattr(runnable, "tracking_key", ""), {}
+            ) or {}
+            _adopt_source = _adopt_record.get("adopt_thread_from")
+            if _adopt_source and isinstance(_adopt_source, str):
+                try:
+                    await _maybe_adopt_run_thread(checkpointer, _adopt_source, subagent_config, subagent_type)
+                except Exception:
+                    logger.warning(
+                        "[ADOPT] Fork of run thread '%s' for '%s' failed; delegating on a blank thread",
+                        _adopt_source,
+                        subagent_type,
+                        exc_info=True,
+                    )
 
         # Check if the sub-agent has a pending HITL interrupt in its checkpoint from a previous invocation.
         # This happens when: sub-agent interrupted → orchestrator surfaced it → user approved → orchestrator

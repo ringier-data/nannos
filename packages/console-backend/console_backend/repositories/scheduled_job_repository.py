@@ -326,6 +326,23 @@ class ScheduledJobRepository(AuditedRepository):
             },
         )
 
+    async def get_run(
+        self,
+        db: AsyncSession,
+        job_id: int,
+        run_id: int,
+    ) -> ScheduledJobRun | None:
+        """Fetch a single run of a job by id, regardless of age."""
+        result = await db.execute(
+            text("""
+                SELECT * FROM scheduled_job_runs
+                WHERE id = :run_id AND job_id = :job_id
+            """),
+            {"run_id": run_id, "job_id": job_id},
+        )
+        row = result.mappings().first()
+        return _row_to_run(row) if row is not None else None
+
     async def list_runs(
         self,
         db: AsyncSession,
