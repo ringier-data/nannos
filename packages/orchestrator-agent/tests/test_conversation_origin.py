@@ -129,6 +129,92 @@ class TestBuildScheduledRunHistory:
         (tool_call,) = messages[1].tool_calls
         assert tool_call["args"]["subagent_type"] == "ReportAgent"
 
+    def test_input_required_run_steers_reply_to_the_sub_agent(self):
+        # A run that ended input_required did not finish: the sub-agent asked
+        # the user a question and its conversation is waiting for the answer.
+        # The framing must steer the model toward forwarding the reply, not
+        # role-playing the sub-agent's side of the unfinished exchange.
+        run = dict(SCHEDULED_RUN_ORIGIN, task_state="input_required")
+        messages = _build_scheduled_run_history(run, delegation_label="ReportAgent")
+        assert messages is not None
+        human, _, tool = messages
+        assert 'task_state="input_required"' in human.content
+        assert "did NOT finish" in human.content
+        assert "waiting for their answer" in human.content
+        assert "'ReportAgent'" in human.content
+        assert "already delivered" not in human.content
+        assert tool.additional_kwargs["a2a_metadata"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+        assert tool.additional_kwargs["a2a_metadata"]["is_complete"] is False
+
+    def test_input_required_without_adoption_does_not_promise_forwarding(self):
+        # No validated adoption ⇒ a delegation would start the sub-agent
+        # blank, so the framing must not tell the model to forward the answer
+        # into a void — it handles the reply itself, on the delivered output.
+        run = dict(SCHEDULED_RUN_ORIGIN, task_state="input_required")
+        messages = _build_scheduled_run_history(run)
+        assert messages is not None
+        human = messages[0]
+        assert "did NOT finish" in human.content
+        assert "could NOT be resumed" in human.content
+        assert "forward their reply" not in human.content
+
+    def test_adoption_renders_memory_note(self):
+        # delegation_label is only resolved when adoption validated, so it
+        # doubles as "delegating resumes the run's memory" — without the note
+        # the model's "sub-agents are stateless" prior wins and it fabricates
+        # run-internal state instead of delegating (observed live).
+        messages = _build_scheduled_run_history(
+            dict(SCHEDULED_RUN_ORIGIN), delegation_label="ReportAgent"
+        )
+        assert messages is not None
+        human = messages[0]
+        assert "RESUMES the run's own conversation" in human.content
+        assert "never reconstruct, recompute, or simulate" in human.content
+
+    def test_no_memory_note_without_adoption(self):
+        # Without a validated adoption, delegating starts the sub-agent blank —
+        # promising memory here would be a lie the model acts on.
+        messages = _build_scheduled_run_history(dict(SCHEDULED_RUN_ORIGIN))
+        assert messages is not None
+        assert "RESUMES" not in messages[0].content
+
+    def test_completed_task_state_keeps_default_framing(self):
+        run = dict(SCHEDULED_RUN_ORIGIN, task_state="completed")
+        messages = _build_scheduled_run_history(run)
+        assert messages is not None
+        human, _, tool = messages
+        assert 'task_state="completed"' in human.content
+        assert "already delivered" in human.content
+        assert tool.additional_kwargs["a2a_metadata"]["state"] == "TASK_STATE_COMPLETED"
+        assert tool.additional_kwargs["a2a_metadata"]["is_complete"] is True
+
+    def test_unknown_task_state_is_ignored(self):
+        # Forward compatibility: a newer runner may report states this side
+        # does not know; they must degrade to the default framing.
+        run = dict(SCHEDULED_RUN_ORIGIN, task_state="rejected")
+        messages = _build_scheduled_run_history(run)
+        assert messages is not None
+        human, _, tool = messages
+        assert "task_state=" not in human.content
+        assert "already delivered" in human.content
+        assert tool.additional_kwargs["a2a_metadata"]["state"] == "TASK_STATE_COMPLETED"
+
+    def test_failed_run_wins_over_input_required_task_state(self):
+        # A failed dispatch trumps whatever state the sub-agent reported
+        # mid-flight: there is no waiting conversation to forward into.
+        run = dict(
+            SCHEDULED_RUN_ORIGIN,
+            scheduler_status="failed",
+            error_message="boom",
+            task_state="input_required",
+        )
+        messages = _build_scheduled_run_history(run)
+        assert messages is not None
+        human, _, tool = messages
+        assert 'status="failed"' in human.content
+        assert "waiting for their answer" not in human.content
+        assert tool.additional_kwargs["a2a_metadata"]["state"] == "TASK_STATE_FAILED"
+
     def test_float_ids_render_as_integers(self):
         # protobuf Struct numbers arrive as floats via MessageToDict
         run = dict(

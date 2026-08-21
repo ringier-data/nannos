@@ -99,7 +99,12 @@ was delivered to the user (the reply arrives under that notification):
       "prompt": "<the prompt the run was dispatched with>",
       "result_summary": "<the delivered agent output>",
       "scheduler_status": "success" | "failed",
-      "error_message": "<set when failed>"
+      "error_message": "<set when failed>",
+      "task_state": "completed" | "input_required" | "failed"  // optional: the
+        // sub-agent's terminal A2A task state. "input_required" means the run
+        // did not finish — it asked the user a question and its conversation
+        // is waiting for the answer; the reconstruction then frames the reply
+        // as that answer and steers toward forwarding it to the sub-agent.
     }
   }
 

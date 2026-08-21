@@ -227,7 +227,17 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
     return {}
 
 
-async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> str | None:
+# A2A task states worth reporting as a run's terminal task_state (see
+# _collect_stream_text). Non-terminal states (working, ...) map to None:
+# they carry no information about how the run ended.
+_TERMINAL_TASK_STATE_NAMES = {
+    TaskState.TASK_STATE_COMPLETED: "completed",
+    TaskState.TASK_STATE_INPUT_REQUIRED: "input_required",
+    TaskState.TASK_STATE_FAILED: "failed",
+}
+
+
+async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> tuple[str | None, str | None]:
     """Collect the final text result from an A2A runnable's stream.
 
     Accumulates non-intermediate ``ArtifactUpdate`` content (the main
@@ -235,8 +245,12 @@ async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> str 
     to extracting text from the last ``TaskResponseData`` messages when
     neither artifact nor message content was streamed.
 
-    Returns the accumulated text, or None if the stream produced no
-    readable content.
+    Returns ``(text, task_state)``: the accumulated text (None if the stream
+    produced no readable content) and the run's terminal task state as a
+    scheduler-facing string (``completed`` | ``input_required`` | ``failed``),
+    or None when the stream never reported one. ``input_required`` matters
+    downstream: it tells a conversation adopting this run that the sub-agent
+    asked the user a question and is waiting for the answer.
     """
     parts: list[str] = []
     last_data: TaskResponseData = TaskResponseData()
@@ -248,13 +262,15 @@ async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> str 
         elif isinstance(item, TaskUpdate):
             last_data = item.data
         elif isinstance(item, ErrorEvent):
-            return f"Error: {item.error}" if item.error else None
+            return (f"Error: {item.error}" if item.error else None), "failed"
+
+    task_state = _TERMINAL_TASK_STATE_NAMES.get(last_data.state)
 
     if parts:
-        return "".join(parts).strip() or None
+        return ("".join(parts).strip() or None), task_state
 
     # Fallback: extract text from the last TaskResponseData messages
-    return _extract_text_from_messages(last_data.messages)
+    return _extract_text_from_messages(last_data.messages), task_state
 
 
 def _extract_text_from_messages(messages: list) -> str | None:
@@ -645,6 +661,7 @@ class AgentRunner(BaseAgent):
         message_text = "\n".join(_extract_text_from_message(m) for m in messages).strip()
         last_check_result: dict | None = None
         agent_message: str | None = None
+        sub_agent_task_state: str | None = None
         sub_agent_name: str | None = None
         prompt: str | None = None
 
@@ -699,7 +716,7 @@ class AgentRunner(BaseAgent):
                 # branch below still knows which sub-agent was targeted.
                 sub_agent_cfg = await self._fetch_sub_agent_config(sub_agent_id, user_access_token)
                 sub_agent_name = sub_agent_cfg["name"]
-                agent_message = await self._execute_sub_agent(
+                agent_message, sub_agent_task_state = await self._execute_sub_agent(
                     sub_agent_cfg=sub_agent_cfg,
                     prompt=prompt,
                     raw_a2a_messages=messages,
@@ -732,6 +749,12 @@ class AgentRunner(BaseAgent):
         result_meta = {
             "scheduler_status": "success",
             "agent_message": agent_message,
+            # The sub-agent's terminal A2A task state — notably
+            # "input_required" (the run asked the user a question and is
+            # waiting). Delivery channels persist it with the run's provenance
+            # and forward it in the conversation-origin DataPart so the
+            # adopting orchestrator can frame the user's reply correctly.
+            "task_state": sub_agent_task_state,
             "last_check_result": last_check_result,
             "user_sub": user_config.user_sub,
             "sub_agent_name": sub_agent_name,
@@ -1048,7 +1071,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """Dispatch a sub-agent config to the appropriate execution method.
 
         Args:
@@ -1063,7 +1086,11 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             raw_a2a_messages: Original A2A messages (used for remote agents to preserve DataParts).
 
         Returns:
-            agent_message (str | None)
+            (agent_message, task_state) — task_state is the sub-agent's
+            terminal A2A task state ("completed" | "input_required" |
+            "failed") when it reported one, else None. It rides the result
+            metadata so a conversation later adopting this run knows whether
+            the run finished or is waiting for the user's answer.
         """
         agent_type = sub_agent_cfg["type"]
 
@@ -1111,7 +1138,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """Run a one-shot LangGraph agent using agent-common's model factory.
 
         Uses create_model() for multi-provider support (Bedrock, OpenAI, Google)
@@ -1128,7 +1155,9 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             context_id: Natural A2A context_id for thread isolation (conversation_id).
 
         Returns:
-            agent_message (str | None)
+            (agent_message, task_state) — task_state is the sub-agent's
+            structured-response state ("completed" | "input_required" |
+            "failed"), or None when no structured response was produced.
         """
         # Ensure the document store is ready before building the graph (which binds self.store).
         # Idempotent and cheap once set up; on a cold start it retries until the gateway/embedding
@@ -1172,6 +1201,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         thread_id = context_id
 
         result_summary: str | None = None
+        task_state: str | None = None
 
         # Sandbox lifecycle
         sandbox_active = sub_agent_cfg.get("sandbox_enabled", False) and self._sandbox_pool is not None
@@ -1186,7 +1216,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         pooled_sandbox = None
 
         async def _run_graph(tools: list) -> None:
-            nonlocal result_summary, pooled_sandbox
+            nonlocal result_summary, task_state, pooled_sandbox
 
             extra_middlewares = None
             sandbox_backend_factory = None
@@ -1271,6 +1301,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             structured_response = final_state.get("structured_response") if final_state else None
             if structured_response and isinstance(structured_response, SubAgentResponseSchema):
                 result_summary = structured_response.message
+                task_state = structured_response.task_state
             elif isinstance(output_messages, list):
                 # 2. Check message tool_calls for SubAgentResponseSchema (Bedrock + thinking)
                 for msg in reversed(output_messages):
@@ -1280,6 +1311,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                                 try:
                                     schema = SubAgentResponseSchema(**tool_call.get("args", {}))
                                     result_summary = schema.message
+                                    task_state = schema.task_state
                                 except Exception:
                                     pass
                     if result_summary:
@@ -1373,11 +1405,12 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 await self._sandbox_pool.release(thread_id, sub_agent_cfg["name"])
 
         logger.info(
-            "LangGraph agent execution complete for job %s: %d chars",
+            "LangGraph agent execution complete for job %s: %d chars (task_state=%s)",
             scheduled_job_id,
             len(result_summary or ""),
+            task_state,
         )
-        return result_summary
+        return result_summary, task_state
 
     def int_to_uuid(self, value: int) -> str:
         """Convert an integer ID to a UUID string format used by Foundry.
@@ -1394,7 +1427,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_config: UserConfig,
         scheduled_job_id: int,
         scheduled_job_run_id: int,
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """Run a Foundry query-API agent using agent-common's foundry module.
 
         Args:
@@ -1404,7 +1437,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             scheduled_job_id: For logging.
             scheduled_job_run_id: For tracking the conversation.
         Returns:
-            result_summary (str | None)
+            (result_summary, task_state) — see _collect_stream_text.
         """
         # Build LocalFoundrySubAgentConfig from the backend response
         foundry_config = LocalFoundrySubAgentConfig(
@@ -1437,14 +1470,15 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         input_data = SubAgentInput(
             messages=[{"role": "user", "content": prompt}],
         )
-        result_summary = await _collect_stream_text(compiled_subagent["runnable"], input_data)
+        result_summary, task_state = await _collect_stream_text(compiled_subagent["runnable"], input_data)
 
         logger.info(
-            "Foundry agent execution complete for job %d: %d chars",
+            "Foundry agent execution complete for job %d: %d chars (task_state=%s)",
             scheduled_job_id,
             len(result_summary or ""),
+            task_state,
         )
-        return result_summary
+        return result_summary, task_state
 
     def _get_oauth2_client(self) -> OidcOAuth2Client:
         """Lazily create an OAuth2 client for outbound A2A agent communication.
@@ -1472,7 +1506,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         scheduled_job_id: int,
         scheduled_job_run_id: int,
         context_id: str | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """Run a remote A2A agent by discovering its agent card and invoking it.
 
         Uses lossless A2A→HumanMessage conversion so DataParts and TextParts
@@ -1498,7 +1532,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 the conversation-origin extension.
 
         Returns:
-            result_summary (str | None)
+            (result_summary, task_state) — see _collect_stream_text.
         """
         agent_url: str | None = sub_agent_cfg.get("agent_url")
         if not agent_url:
@@ -1550,11 +1584,12 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             scheduled_job_id=scheduled_job_id,
             orchestrator_conversation_id=context_id,
         )
-        result_summary = await _collect_stream_text(runnable, input_data)
+        result_summary, task_state = await _collect_stream_text(runnable, input_data)
 
         logger.info(
-            "Remote agent execution complete for job %d: %d chars",
+            "Remote agent execution complete for job %d: %d chars (task_state=%s)",
             scheduled_job_id,
             len(result_summary or ""),
+            task_state,
         )
-        return result_summary
+        return result_summary, task_state

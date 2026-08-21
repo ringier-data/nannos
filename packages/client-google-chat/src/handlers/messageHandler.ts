@@ -607,6 +607,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               result_summary: runRecord.resultSummary,
               scheduler_status: runRecord.schedulerStatus,
               error_message: runRecord.errorMessage,
+              task_state: runRecord.taskState,
             },
           };
           logger.info(

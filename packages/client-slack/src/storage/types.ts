@@ -139,6 +139,12 @@ export interface ScheduledRunRecord {
   /** 'success' | 'failed' (condition_not_met notifications are never delivered) */
   schedulerStatus?: string;
   errorMessage?: string;
+  /**
+   * Terminal A2A task state of the run ('completed' | 'input_required' |
+   * 'failed'); 'input_required' = the run asked the user a question and its
+   * conversation is waiting for the answer.
+   */
+  taskState?: string;
 }
 
 /**

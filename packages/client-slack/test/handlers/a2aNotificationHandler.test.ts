@@ -65,6 +65,7 @@ const schedulerPayload = {
   sub_agent_id: 5,
   sub_agent_name: 'Report Agent',
   prompt: "Summarize yesterday's sales.",
+  task_state: 'input_required',
 };
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,9 @@ describe('handleA2ANotification scheduled-run provenance', () => {
       resultSummary: 'Sales were up 4%.',
       schedulerStatus: 'success',
       errorMessage: undefined,
+      // The run's terminal task state: 'input_required' tells the adopting
+      // orchestrator the run asked the user a question and awaits the answer.
+      taskState: 'input_required',
     });
   });
 

@@ -163,6 +163,21 @@ def _build_scheduled_run_history(
     available approximation (local/foundry registries are keyed by the
     unmodified config name).
 
+    The provenance may carry the run's terminal ``task_state``. It matters for
+    the framing: a run that ended ``input_required`` did not finish — the
+    sub-agent asked the user a question and its conversation is waiting for
+    the answer, so the reconstruction must steer the model toward forwarding
+    the user's reply to the sub-agent instead of answering on its behalf
+    (delivered as TASK_STATE_COMPLETED framing, the orchestrator role-played
+    the sub-agent's side of an unfinished exchange — observed live: it
+    invented its own "secret number" via eval rather than delegating).
+
+    When adoption resolved a ``delegation_label``, the framing also states
+    that delegating RESUMES the run's conversation with the sub-agent's
+    memory intact — without it the model falls back on its "sub-agents are
+    stateless" prior and reconstructs (i.e. fabricates) run-internal state
+    itself.
+
     Returns None when the provenance carries nothing to reconstruct.
     """
     sub_agent_name = run.get("sub_agent_name") or ""
@@ -170,6 +185,12 @@ def _build_scheduled_run_history(
     result_summary = run.get("result_summary")
     failed = run.get("scheduler_status") == "failed"
     error_message = run.get("error_message")
+    # Untrusted enrichment like prompt/result_summary; anything but the known
+    # scheduler-facing states is ignored (forward compatibility).
+    task_state = run.get("task_state")
+    if task_state not in ("completed", "input_required", "failed"):
+        task_state = None
+    awaiting_input = task_state == "input_required" and not failed
 
     def _fmt_id(value: Any) -> str:
         parsed = _origin_int(value)
@@ -177,9 +198,11 @@ def _build_scheduled_run_history(
 
     job_id = _fmt_id(run.get("scheduled_job_id"))
     run_id = _fmt_id(run.get("scheduled_job_run_id"))
-    frame_attrs = f'source="scheduler" job_id="{job_id}" run_id="{run_id}"' + (
-        ' status="failed"' if failed else ""
-    )
+    frame_attrs = f'source="scheduler" job_id="{job_id}" run_id="{run_id}"'
+    if failed:
+        frame_attrs += ' status="failed"'
+    elif task_state:
+        frame_attrs += f' task_state="{task_state}"'
 
     if not sub_agent_name:
         # Watch notification without a sub-agent: no delegation happened; give
@@ -210,14 +233,52 @@ def _build_scheduled_run_history(
 
     tool_call_id = f"scheduled_run_{run_id or run.get('context_id') or 'unknown'}"
 
+    if awaiting_input and delegation_label:
+        # Forwarding is only honest advice when adoption validated: without
+        # the a2a_tracking seed a delegation starts the sub-agent blank, and
+        # the model would forward the answer into a void.
+        framing = (
+            "The request above ran on a schedule but did NOT finish: the sub-agent's delivered "
+            "output asks the user a question and the run is waiting for their answer. The user "
+            "is replying to that question — forward their reply to the sub-agent via the task "
+            f"tool ({delegation_label!r}); do not answer the question or continue the exchange on "
+            "the sub-agent's behalf."
+        )
+    elif awaiting_input:
+        framing = (
+            "The request above ran on a schedule but did NOT finish: the sub-agent's delivered "
+            "output asks the user a question. Its conversation could NOT be resumed from here, "
+            "so the sub-agent has no memory of asking — handle the user's reply yourself, using "
+            "the delivered output above as the exchange so far, and be upfront about anything "
+            "the run kept internal (it is unrecoverable)."
+        )
+    else:
+        framing = (
+            "The request above ran on a schedule and its output was already delivered to the user, "
+            "who is now replying to it. When the reply needs content from that output, restate it "
+            "explicitly in your answer — do not reference it via include_subagent_output (this "
+            "restriction covers only the already-delivered output above; relay the result of any "
+            "NEW delegation faithfully, as usual)."
+        )
+    if delegation_label:
+        # Only rendered when adoption validated (see docstring): delegating
+        # really does resume the run's conversation, so tell the model —
+        # otherwise its "sub-agents are stateless" prior wins and it
+        # reconstructs run-internal state itself.
+        framing += (
+            f"\nDelegating to {delegation_label!r} RESUMES the run's own conversation: the "
+            "sub-agent retains the run's full memory, including internal state not shown here "
+            "(values it computed, files it wrote, decisions it made). For any follow-up that "
+            "depends on that state, delegate to it — never reconstruct, recompute, or simulate "
+            "that state yourself."
+        )
+
     human_msg = HumanMessage(
         content=(
             f"<scheduled_run {frame_attrs}>"
             f"{_scheduled_run_frame_text(prompt)}"
             "</scheduled_run>\n"
-            "The request above ran on a schedule and its output was already delivered to the user, "
-            "who is now replying to it. When the reply needs content from that output, restate it "
-            "explicitly in your answer — do not reference it via include_subagent_output."
+            f"{framing}"
         )
     )
     ai_msg = AIMessage(
@@ -231,13 +292,22 @@ def _build_scheduled_run_history(
             }
         ],
     )
+    if failed:
+        synthetic_state = "TASK_STATE_FAILED"
+    elif awaiting_input:
+        synthetic_state = "TASK_STATE_INPUT_REQUIRED"
+    else:
+        synthetic_state = "TASK_STATE_COMPLETED"
     tool_msg = ToolMessage(
         content=tool_content,
         tool_call_id=tool_call_id,
         additional_kwargs={
             "a2a_metadata": {
-                "is_complete": True,
-                "state": "TASK_STATE_FAILED" if failed else "TASK_STATE_COMPLETED",
+                # Message-level rendering only — the a2a_tracking continuity
+                # state is seeded separately (_build_adoption_seed) and always
+                # carries is_complete=True (there is no resumable task_id).
+                "is_complete": not awaiting_input,
+                "state": synthetic_state,
                 "agent_name": sub_agent_name,
             }
         },

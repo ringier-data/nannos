@@ -27,6 +27,12 @@ interface SchedulerPayload {
   sub_agent_name?: string;
   prompt?: string;
   error_message?: string;
+  /**
+   * Terminal A2A task state of the sub-agent run ('completed' |
+   * 'input_required' | 'failed'), when it reported one. 'input_required'
+   * means the run asked the user a question and is waiting for the answer.
+   */
+  task_state?: string;
 }
 
 function getSchedulerPayload(task: Task)  {
@@ -113,6 +119,7 @@ export async function handleA2ANotification(
           resultSummary: schedulerPayload.agent_message,
           schedulerStatus: schedulerPayload.scheduler_status,
           errorMessage: schedulerPayload.error_message,
+          taskState: schedulerPayload.task_state,
         });
         logger.info(
           `[A2ACallback] Stored scheduled-run provenance for thread=${threadName} (contextId=${task.contextId})`

@@ -243,7 +243,7 @@ class TestWatchConditionNotMet:
         agent_runner._fetch_sub_agent_config = AsyncMock(
             return_value={"type": "automated", "name": "watch-agent", "sub_agent_id": 5}
         )
-        agent_runner._execute_sub_agent = AsyncMock(return_value="Agent completed task.")
+        agent_runner._execute_sub_agent = AsyncMock(return_value=("Agent completed task.", "completed"))
         agent_runner._generate_watch_message = AsyncMock(return_value="Watch triggered.")
 
         task = MagicMock()
@@ -288,6 +288,10 @@ class TestWatchConditionNotMet:
         assert final_content["sub_agent_id"] == 5
         assert final_content["sub_agent_name"] == "watch-agent"
         assert final_content["agent_message"] == "Agent completed task."
+        # The sub-agent's terminal task state rides the result metadata so an
+        # adopting conversation knows whether the run finished or is waiting
+        # for the user's answer (input_required).
+        assert final_content["task_state"] == "completed"
 
 
 class TestRemoteAgentContextPropagation:
@@ -309,7 +313,7 @@ class TestRemoteAgentContextPropagation:
 
         async def fake_collect(runnable, input_data):
             captured["input_data"] = input_data
-            return "done"
+            return "done", "completed"
 
         agent_runner._get_oauth2_client = MagicMock()
 
@@ -331,13 +335,13 @@ class TestRemoteAgentContextPropagation:
                 context_id="run-ctx-1",
             )
 
-        assert result == "done"
+        assert result == ("done", "completed")
         assert captured["input_data"].orchestrator_conversation_id == "run-ctx-1"
         assert captured["input_data"].scheduled_job_id == 10
 
     @pytest.mark.asyncio
     async def test_execute_sub_agent_forwards_context_id_to_remote(self, agent_runner):
-        agent_runner._run_remote_agent = AsyncMock(return_value="ok")
+        agent_runner._run_remote_agent = AsyncMock(return_value=("ok", None))
 
         await agent_runner._execute_sub_agent(
             sub_agent_cfg={"type": "remote", "name": "Remote Agent", "agent_url": "https://remote.example"},
