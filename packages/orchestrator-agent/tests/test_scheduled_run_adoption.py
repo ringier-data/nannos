@@ -26,7 +26,11 @@ import pytest
 from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 
-from app.core.agent import _build_adoption_seed, _validate_scheduled_run_origin
+from app.core.agent import (
+    _adopted_sub_agent_ids_from_tracking,
+    _build_adoption_seed,
+    _validate_scheduled_run_origin,
+)
 from app.middleware.dynamic_tool_dispatch import _maybe_adopt_run_thread
 
 BACKEND_URL = "http://console-backend.test"
@@ -177,7 +181,7 @@ class TestBuildAdoptionSeed:
         # The seed key must be the runnable's own tracking_key (name with
         # spaces stripped) — the key _extract_tracking_ids reads back.
         assert tracking_key == runnable.tracking_key == "ReportAgent"
-        assert record == {"context_id": "server-run-ctx", "is_complete": True}
+        assert record == {"context_id": "server-run-ctx", "is_complete": True, "sub_agent_id": 5}
 
     def test_local_agent_gets_fork_record_never_context_id(self):
         runnable = _local_runnable("report-agent")
@@ -185,7 +189,7 @@ class TestBuildAdoptionSeed:
         assert seed is not None
         registry_key, tracking_key, record = seed
         assert registry_key == tracking_key == "report-agent"
-        assert record == {"adopt_thread_from": "server-run-ctx", "is_complete": True}
+        assert record == {"adopt_thread_from": "server-run-ctx", "is_complete": True, "sub_agent_id": 5}
         # A context_id on a local runnable changes its execution thread while
         # the HITL probe keeps probing the conversation-derived thread.
         assert "context_id" not in record
@@ -197,6 +201,33 @@ class TestBuildAdoptionSeed:
     def test_unregistered_sub_agent_is_not_adopted(self):
         registry = _registry(_local_runnable(), sub_agent_id=999)
         assert _build_adoption_seed(dict(VALIDATED), registry) is None
+
+
+class TestAdoptedIdsFromTracking:
+    """Adopted ids must survive beyond the first turn: later turns (and HITL
+    resumes) rebuild the runtime context from the persisted a2a_tracking
+    record, not from the origin DataPart — otherwise the adopted automated
+    agent deregisters after turn one and its own interrupt's approval is
+    silently dropped (round-3 review finding)."""
+
+    def test_recovers_ids_from_adoption_records(self):
+        tracking = {
+            "report-agent": {"adopt_thread_from": "run-ctx", "is_complete": True, "sub_agent_id": 5},
+            "RemoteAgent": {"context_id": "other-ctx", "is_complete": True, "sub_agent_id": 9},
+        }
+        assert _adopted_sub_agent_ids_from_tracking(tracking) == {5, 9}
+
+    def test_ordinary_tracking_records_yield_none(self):
+        # Records written by the tracking middleware for normal delegations
+        # carry no sub_agent_id — no adoption, no gating change.
+        tracking = {
+            "some-agent": {"context_id": "ctx", "task_id": "t1", "is_complete": False},
+        }
+        assert _adopted_sub_agent_ids_from_tracking(tracking) is None
+
+    def test_empty_and_malformed_state_yield_none(self):
+        assert _adopted_sub_agent_ids_from_tracking({}) is None
+        assert _adopted_sub_agent_ids_from_tracking({"x": "not-a-dict", "y": {"sub_agent_id": "abc"}}) is None
 
 
 def _configurable(thread_id: str) -> dict:

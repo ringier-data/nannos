@@ -417,15 +417,21 @@ def _build_adoption_seed(
         if entry.get("sub_agent_id") != sub_agent_id:
             continue
         runnable = entry.get("runnable")
+        # sub_agent_id makes the record self-describing: later turns (and HITL
+        # resumes) re-derive adopted_sub_agent_ids from the persisted tracking
+        # state, keeping the adopted agent registered for the whole
+        # conversation (_adopted_sub_agent_ids_from_tracking).
         if isinstance(runnable, A2AClientRunnable):
             return registry_key, runnable.tracking_key, {
                 "context_id": conversation_id,
                 "is_complete": True,
+                "sub_agent_id": sub_agent_id,
             }
         if isinstance(runnable, DynamicLocalAgentRunnable):
             return registry_key, runnable.tracking_key, {
                 "adopt_thread_from": conversation_id,
                 "is_complete": True,
+                "sub_agent_id": sub_agent_id,
             }
         logger.info(
             f"Conversation adoption skipped: sub-agent {sub_agent_id} "
@@ -435,6 +441,27 @@ def _build_adoption_seed(
 
     logger.info(f"Conversation adoption skipped: sub-agent {sub_agent_id} is not registered")
     return None
+
+
+def _adopted_sub_agent_ids_from_tracking(a2a_tracking: dict[str, Any]) -> set[int] | None:
+    """Recover the conversation's adopted sub-agent ids from persisted state.
+
+    The adoption seed (_build_adoption_seed) stamps ``sub_agent_id`` into the
+    a2a_tracking record, which lives in the checkpoint from the first turn on.
+    Re-deriving the ids from it on EVERY turn — HITL resumes included — keeps
+    the adopted automated agent registered for the conversation's whole
+    lifetime; deriving them only from the origin DataPart would deregister the
+    agent after turn one (and silently drop the approval of its own first
+    delegation's interrupt).
+    """
+    adopted: set[int] = set()
+    for record in a2a_tracking.values():
+        if not isinstance(record, dict):
+            continue
+        sub_agent_id = _origin_int(record.get("sub_agent_id"))
+        if sub_agent_id is not None:
+            adopted.add(sub_agent_id)
+    return adopted or None
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -560,11 +587,14 @@ class OrchestratorDeepAgent:
             user_config: User configuration enriched with discovered tools/agents
             sandbox_pool: Optional SandboxPool for sandbox-enabled sub-agents
             adopted_sub_agent_ids: Console ids of sub-agents this conversation
-                adopted a scheduled run of — only computed on a first turn whose
-                origin DataPart validated server-side (_validate_scheduled_run_origin).
-                Unlocks registration of the matching automated (interactive=False)
-                sub-agents for this conversation; see build_runtime_context in
-                app/utils.py for the gating.
+                adopted a scheduled run of. Validated server-side on the blank
+                first turn (_validate_scheduled_run_origin), then re-derived on
+                every later turn — HITL resumes included — from the a2a_tracking
+                records persisted in the checkpoint
+                (_adopted_sub_agent_ids_from_tracking). Unlocks registration of
+                the matching automated (interactive=False) sub-agents for this
+                conversation; see build_runtime_context in app/utils.py for the
+                gating.
 
         Returns:
             GraphRuntimeContext: Ready for graph invocation with all registries populated
@@ -702,30 +732,38 @@ class OrchestratorDeepAgent:
 
         # Conversation-origin adoption, resolved BEFORE the runtime context is
         # built: an automated (scheduler-only) sub-agent is registered into
-        # this conversation only when the origin validates server-side as one
+        # this conversation only when the origin validated server-side as one
         # of the user's own runs (see _validate_scheduled_run_origin), so the
-        # adopted ids must be known at registry-build time. First turn only.
+        # adopted ids must be known at registry-build time. The expensive
+        # validation runs on the blank first turn only; EVERY turn — including
+        # HITL resumes, where the adopted agent's own interrupt is being
+        # answered — re-derives the adopted ids from the a2a_tracking records
+        # persisted in the checkpoint, or the agent would vanish from the
+        # registry after turn one.
+        checkpoint_state = await graph.aget_state(config)
+        checkpoint_msgs: list[Any] = list(checkpoint_state.values.get("messages") or [])
+        adopted_ids = _adopted_sub_agent_ids_from_tracking(
+            checkpoint_state.values.get("a2a_tracking") or {}
+        )
         origin: dict[str, Any] | None = None
         validated_origin: dict[str, Any] | None = None
-        checkpoint_msgs: list[Any] = []
-        if resume is None:
-            checkpoint_state = await graph.aget_state(config)
-            checkpoint_msgs = list(checkpoint_state.values.get("messages") or [])
-            if not checkpoint_msgs:
-                origin = _extract_conversation_origin(message_parts)
-                if origin:
-                    validated_origin = await _validate_scheduled_run_origin(
-                        origin,
-                        user_config.access_token.get_secret_value(),
-                        self.config.CONSOLE_BACKEND_URL or "http://localhost:5001",
-                    )
+        if resume is None and not checkpoint_msgs:
+            origin = _extract_conversation_origin(message_parts)
+            if origin:
+                validated_origin = await _validate_scheduled_run_origin(
+                    origin,
+                    user_config.access_token.get_secret_value(),
+                    self.config.CONSOLE_BACKEND_URL or "http://localhost:5001",
+                )
+                if validated_origin:
+                    adopted_ids = (adopted_ids or set()) | {validated_origin["sub_agent_id"]}
 
         # Build GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
         # UserConfig should already have tools/agents discovered by executor via discover_capabilities()
         runtime_context = self.build_runtime_context(
             user_config,
             sandbox_pool=self.sandbox_pool,
-            adopted_sub_agent_ids={validated_origin["sub_agent_id"]} if validated_origin else None,
+            adopted_sub_agent_ids=adopted_ids,
         )
 
         # Token for the per-turn attachments context registration (reset in finally).
@@ -739,8 +777,8 @@ class OrchestratorDeepAgent:
             # this works across nodes without any separate persistence layer.
             input_data = Command(resume=resume)
             logger.info(f"Resume input data: Command(resume={resume})")
-            checkpoint_state = await graph.aget_state(config)
-            blocks = collect_attachment_blocks_from_messages(checkpoint_state.values.get("messages") or [])
+            # checkpoint_state was loaded by the adoption pre-pass above.
+            blocks = collect_attachment_blocks_from_messages(checkpoint_msgs)
             attachments_backend = build_attachments_backend_from_blocks(blocks)
             if attachments_backend is not None:
                 logger.info(
