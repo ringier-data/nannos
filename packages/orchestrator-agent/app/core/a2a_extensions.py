@@ -78,7 +78,10 @@ conversation (empty checkpoint), where the kind's registered builder
 reconstructs the origin as synthetic history, and ignores it otherwise
 (unknown kinds are skipped with a log line, never an error). This carries
 *data*, not state: it reconstructs context for the model — it does not fork
-or resume the referenced conversation's checkpoint.
+or resume the referenced conversation's checkpoint. A kind MAY additionally
+enable cross-service conversation adoption (below), but only from ids the
+orchestrator re-resolves server-side for the authenticated user — never from
+the DataPart's own values, which are client-supplied and untrusted.
 
 Registered kinds:
 
@@ -103,6 +106,16 @@ was delivered to the user (the reply arrives under that notification):
 Reconstructed as a synthetic delegation turn (job prompt -> ``task`` tool
 call -> run output). ``context_id`` is provenance data about the sub-agent's
 own conversation — it must never be sent as the request's contextId.
+
+When the run executed on a REMOTE sub-agent, the orchestrator additionally
+attempts conversation adoption: it resolves the job and run via
+console-backend under the authenticated user's token (ownership check +
+server-stored ``conversation_id``, ignoring the DataPart's ``context_id``)
+and seeds ``a2a_tracking`` so a follow-up delegation to that sub-agent
+resumes the run's own conversation on the executing server — the workflow
+continues (e.g. a run that ended asking the user for input) instead of the
+sub-agent starting blank. Local/automated and foundry runs are not adopted:
+their state is not reachable from the orchestrator's delegation paths.
 """
 
 ALL_EXTENSIONS = [

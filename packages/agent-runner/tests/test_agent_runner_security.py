@@ -288,3 +288,66 @@ class TestWatchConditionNotMet:
         assert final_content["sub_agent_id"] == 5
         assert final_content["sub_agent_name"] == "watch-agent"
         assert final_content["agent_message"] == "Agent completed task."
+
+
+class TestRemoteAgentContextPropagation:
+    """Cross-service conversation adoption: the run task's contextId must ride
+    the outgoing A2A message so the remote agent checkpoints the run's
+    conversation under the id this side stores as
+    scheduled_job_runs.conversation_id."""
+
+    @pytest.mark.asyncio
+    async def test_remote_dispatch_carries_run_context_id(self, agent_runner):
+        card_response = MagicMock()
+        card_response.json.return_value = {"name": "Remote Agent"}
+        card_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=card_response)
+
+        captured = {}
+
+        async def fake_collect(runnable, input_data):
+            captured["input_data"] = input_data
+            return "done"
+
+        agent_runner._get_oauth2_client = MagicMock()
+
+        with (
+            patch("httpx.AsyncClient") as mock_cls,
+            patch("agent.core.make_a2a_async_runnable", return_value=MagicMock()),
+            patch("agent.core._collect_stream_text", side_effect=fake_collect),
+        ):
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await agent_runner._run_remote_agent(
+                sub_agent_cfg={"name": "Remote Agent", "agent_url": "https://remote.example", "sub_agent_id": 5},
+                raw_a2a_messages=[],
+                prompt="Do the thing.",
+                user_access_token="tok",
+                scheduled_job_id=10,
+                scheduled_job_run_id=99,
+                context_id="run-ctx-1",
+            )
+
+        assert result == "done"
+        assert captured["input_data"].orchestrator_conversation_id == "run-ctx-1"
+        assert captured["input_data"].scheduled_job_id == 10
+
+    @pytest.mark.asyncio
+    async def test_execute_sub_agent_forwards_context_id_to_remote(self, agent_runner):
+        agent_runner._run_remote_agent = AsyncMock(return_value="ok")
+
+        await agent_runner._execute_sub_agent(
+            sub_agent_cfg={"type": "remote", "name": "Remote Agent", "agent_url": "https://remote.example"},
+            prompt="p",
+            user_access_token="tok",
+            scheduled_job_id=10,
+            scheduled_job_run_id=99,
+            user_config=MagicMock(),
+            context_id="run-ctx-1",
+        )
+
+        kwargs = agent_runner._run_remote_agent.await_args.kwargs
+        assert kwargs["context_id"] == "run-ctx-1"

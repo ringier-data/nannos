@@ -102,9 +102,11 @@ class TestBuildScheduledRunHistory:
         assert tool.tool_call_id == tool_call["id"]
         assert tool.content == "Sales were up 4%."
         assert tool.additional_kwargs["a2a_metadata"]["state"] == "TASK_STATE_COMPLETED"
-        # No context_id: the run's conversation lives on agent-runner and is
-        # not resumable from the orchestrator's delegation paths — seeding the
-        # tracking state would desynchronize the HITL checkpoint probe.
+        # No context_id in the synthetic tool metadata: adoption of a REMOTE
+        # run's conversation goes through the server-validated a2a_tracking
+        # seed (_resolve_scheduled_run_adoption), never through client-supplied
+        # provenance — and for local runs a seed would desynchronize the HITL
+        # checkpoint probe.
         assert "context_id" not in tool.additional_kwargs["a2a_metadata"]
 
     def test_float_ids_render_as_integers(self):

@@ -1095,6 +1095,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 user_access_token=user_access_token,
                 scheduled_job_id=scheduled_job_id,
                 scheduled_job_run_id=scheduled_job_run_id,
+                context_id=context_id,
             )
         else:
             raise ValueError(f"Unsupported sub-agent type '{agent_type}' for sub-agent {sub_agent_cfg.get('sub_agent_id')}")
@@ -1470,6 +1471,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_access_token: str,
         scheduled_job_id: int,
         scheduled_job_run_id: int,
+        context_id: str | None = None,
     ) -> str | None:
         """Run a remote A2A agent by discovering its agent card and invoking it.
 
@@ -1488,6 +1490,12 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             user_access_token: User's token for auth (passed to SmartTokenInterceptor).
             scheduled_job_id: For logging.
             scheduled_job_run_id: ID of the scheduled job run.
+            context_id: The run task's own contextId. Sent as the outgoing A2A
+                message's contextId so the remote agent checkpoints the run's
+                conversation under an id this side actually stores
+                (scheduled_job_runs.conversation_id) — the prerequisite for a
+                later orchestrator delegation to resume that conversation via
+                the conversation-origin extension.
 
         Returns:
             result_summary (str | None)
@@ -1532,9 +1540,15 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             # Fallback to plain text prompt
             messages_input = [{"role": "user", "content": prompt}]
 
+        # orchestrator_conversation_id feeds A2AClientRunnable's contextId
+        # waterfall (_extract_tracking_ids), putting the run task's contextId on
+        # the wire. The remote keys its checkpoints by the contextId it
+        # receives, so the run's stored conversation_id then names a real,
+        # resumable conversation on the executing side.
         input_data = SubAgentInput(
             messages=messages_input,
             scheduled_job_id=scheduled_job_id,
+            orchestrator_conversation_id=context_id,
         )
         result_summary = await _collect_stream_text(runnable, input_data)
 

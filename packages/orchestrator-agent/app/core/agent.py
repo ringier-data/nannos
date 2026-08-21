@@ -15,9 +15,12 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Optional
+
+import httpx
 
 if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
@@ -126,9 +129,11 @@ def _build_scheduled_run_history(run: dict[str, Any]) -> list[Any] | None:
     one — some providers reject a leading assistant tool-call), the ``task``
     tool call to the sub-agent, and the run's output as the tool result. This
     gives the model the run's prompt and output as real context; it does NOT
-    resume the run's checkpoint — the run executed on agent-runner, whose
-    conversation state is not reachable from the orchestrator's delegation
-    paths (cross-service adoption is a separate follow-up).
+    by itself resume the run's checkpoint. For runs executed by a REMOTE
+    sub-agent, _resolve_scheduled_run_adoption separately seeds a2a_tracking
+    so a follow-up delegation resumes the run's conversation on the executing
+    server; local/automated runs checkpoint inside agent-runner, out of reach
+    of the orchestrator's in-process delegation paths.
 
     For a run without a sub-agent (a plain watch notification) there is no
     delegation to reconstruct — only the framing HumanMessage carrying the
@@ -247,6 +252,116 @@ def _build_origin_history(origin: dict[str, Any]) -> list[Any] | None:
         # origin is optional enrichment; never fail the turn over it.
         logger.warning(f"Failed to build history for conversation origin kind {kind!r}; skipping", exc_info=True)
         return None
+
+
+# Timeout for the console-backend ownership lookups behind conversation
+# adoption. Adoption is an enrichment on the conversation's first turn only;
+# a slow backend must degrade to "no adoption", not stall the turn.
+_ADOPTION_LOOKUP_TIMEOUT_S = 5.0
+
+
+def _origin_int(value: Any) -> int | None:
+    """Coerce an origin id field to int (MessageToDict renders numbers as floats)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+async def _resolve_scheduled_run_adoption(
+    origin: dict[str, Any],
+    subagent_registry: dict[str, Any],
+    access_token: str,
+) -> tuple[str, str] | None:
+    """Resolve a scheduled_run origin into an adoptable sub-agent conversation.
+
+    Cross-service conversation adoption: agent-runner dispatches remote
+    scheduled runs with the run task's contextId on the wire, so the remote
+    agent checkpoints the run's conversation under the id stored in
+    ``scheduled_job_runs.conversation_id``. Seeding that id into
+    ``a2a_tracking`` makes the next delegation to the same sub-agent resume
+    the run's conversation (tool state, intermediate results — e.g. a run
+    that ended asking the user for input) instead of starting blank.
+
+    Only REMOTE sub-agents are adoptable: their conversation lives on the
+    executing server, keyed by the contextId in the outgoing message, and the
+    orchestrator's remote delegation path puts a seeded contextId on the wire
+    unchanged. Local/automated runs checkpoint inside agent-runner under a
+    thread key none of the orchestrator's in-process delegation paths use
+    (and seeding those desynchronizes the HITL checkpoint probe from the
+    execution thread — see DynamicToolDispatchMiddleware); foundry continuity
+    would need a session rid the provenance does not carry.
+
+    The client-forwarded DataPart is treated as an untrusted hint: the job and
+    run are re-resolved from console-backend under the AUTHENTICATED user's
+    token (a job another user owns simply 404s), the sub-agent binding is
+    checked server-side, and the SERVER-stored conversation_id is seeded —
+    the forwarded ``context_id`` is never used for adoption.
+
+    Returns ``(a2a_tracking key, conversation_id)`` or None when the origin
+    does not resolve to an adoptable, owned conversation.
+    """
+    if origin.get("kind") != "scheduled_run":
+        return None
+
+    job_id = _origin_int(origin.get("scheduled_job_id"))
+    run_id = _origin_int(origin.get("scheduled_job_run_id"))
+    sub_agent_id = _origin_int(origin.get("sub_agent_id"))
+    if job_id is None or run_id is None or sub_agent_id is None:
+        return None
+
+    from agent_common.a2a.client_runnable import A2AClientRunnable
+
+    runnable = None
+    for entry in subagent_registry.values():
+        if entry.get("sub_agent_id") == sub_agent_id:
+            candidate = entry.get("runnable")
+            if isinstance(candidate, A2AClientRunnable):
+                runnable = candidate
+            break
+    if runnable is None:
+        logger.info(
+            f"Conversation adoption skipped: sub-agent {sub_agent_id} is not a registered remote agent"
+        )
+        return None
+
+    backend_url = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with httpx.AsyncClient(base_url=backend_url, timeout=_ADOPTION_LOOKUP_TIMEOUT_S) as client:
+        job_resp = await client.get(f"/api/v1/scheduler/jobs/{job_id}", headers=headers)
+        if job_resp.status_code != 200:
+            logger.info(
+                f"Conversation adoption skipped: job {job_id} not resolvable for this user "
+                f"(HTTP {job_resp.status_code})"
+            )
+            return None
+        if _origin_int(job_resp.json().get("sub_agent_id")) != sub_agent_id:
+            logger.warning(
+                f"Conversation adoption skipped: origin sub_agent_id {sub_agent_id} does not match "
+                f"job {job_id}'s server-side sub-agent binding"
+            )
+            return None
+        runs_resp = await client.get(f"/api/v1/scheduler/jobs/{job_id}/runs", headers=headers)
+        if runs_resp.status_code != 200:
+            return None
+        run = next((r for r in runs_resp.json() if _origin_int(r.get("id")) == run_id), None)
+    if run is None:
+        logger.info(f"Conversation adoption skipped: run {run_id} not found on job {job_id}")
+        return None
+    conversation_id = run.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return None
+
+    # Key must match A2AClientRunnable._extract_tracking_ids' reader key
+    # (self.name with spaces stripped — for remote agents this also equals the
+    # registry key the tracking middleware later writes under).
+    tracking_key = str(getattr(runnable, "name", "")).replace(" ", "")
+    if not tracking_key:
+        return None
+    return tracking_key, conversation_id
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -602,6 +717,36 @@ class OrchestratorDeepAgent:
                         input_data = {"messages": [*synthetic_msgs, current_msg]}
                         logger.info(
                             f"Injected synthetic conversation-origin context (kind={origin.get('kind')!r})"
+                        )
+                    # Cross-service conversation adoption: when the origin's
+                    # sub-agent is a remote agent whose run conversation is
+                    # resumable (validated server-side against console-backend
+                    # under the authenticated user's token), seed a2a_tracking
+                    # so the next delegation to that agent continues the run's
+                    # own conversation instead of starting blank. Best-effort:
+                    # any failure degrades to the synthetic history alone.
+                    try:
+                        adoption = await _resolve_scheduled_run_adoption(
+                            origin,
+                            runtime_context.subagent_registry,
+                            user_config.access_token.get_secret_value(),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Conversation adoption lookup failed; continuing without it", exc_info=True
+                        )
+                        adoption = None
+                    if adoption:
+                        tracking_key, run_conversation_id = adoption
+                        input_data["a2a_tracking"] = {
+                            tracking_key: {
+                                "context_id": run_conversation_id,
+                                "is_complete": True,
+                            }
+                        }
+                        logger.info(
+                            f"Adopted scheduled-run conversation {run_conversation_id} "
+                            f"for sub-agent {tracking_key!r}"
                         )
         try:
             # Use streaming with memory for multi-turn conversation support
