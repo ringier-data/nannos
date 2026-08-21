@@ -38,6 +38,14 @@ class BaseLocalSubAgentConfig(BaseModel):
         default=None,
         description="Optional list of input modalities supported by this agent (e.g., ['text', 'image']). If None, derived from the model's capabilities.",
     )
+    interactive: bool = Field(
+        default=True,
+        description=(
+            "Whether the sub-agent is registered for interactive delegation by default. "
+            "Automated (scheduler-only) sub-agents carry False and are only registered "
+            "into a conversation that adopted one of their scheduled runs."
+        ),
+    )
 
 
 class LocalFoundrySubAgentConfig(BaseLocalSubAgentConfig):

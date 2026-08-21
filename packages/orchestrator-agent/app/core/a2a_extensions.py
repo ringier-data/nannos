@@ -107,15 +107,19 @@ Reconstructed as a synthetic delegation turn (job prompt -> ``task`` tool
 call -> run output). ``context_id`` is provenance data about the sub-agent's
 own conversation — it must never be sent as the request's contextId.
 
-When the run executed on a REMOTE sub-agent, the orchestrator additionally
-attempts conversation adoption: it resolves the job and run via
-console-backend under the authenticated user's token (ownership check +
-server-stored ``conversation_id``, ignoring the DataPart's ``context_id``)
-and seeds ``a2a_tracking`` so a follow-up delegation to that sub-agent
-resumes the run's own conversation on the executing server — the workflow
-continues (e.g. a run that ended asking the user for input) instead of the
-sub-agent starting blank. Local/automated and foundry runs are not adopted:
-their state is not reachable from the orchestrator's delegation paths.
+The orchestrator additionally attempts conversation adoption: it resolves
+the job and run via console-backend under the authenticated user's token
+(ownership check + server-stored ``conversation_id``, ignoring the
+DataPart's ``context_id``) and seeds ``a2a_tracking`` so a follow-up
+delegation to that sub-agent continues the run's own conversation — the
+workflow continues (e.g. a run that ended asking the user for input)
+instead of the sub-agent starting blank. One contract, two continuity
+mechanisms: REMOTE runs resume by contextId on the executing server;
+LOCAL/AUTOMATED runs are forked — the run's checkpoint is copied from the
+shared checkpoint tables into the conversation's own thread on first
+delegation. Automated (scheduler-only) sub-agents become delegable inside
+the adopting conversation only. Foundry runs are not adopted (their
+continuity is a session rid the provenance does not carry).
 """
 
 ALL_EXTENSIONS = [

@@ -58,6 +58,8 @@ dev = [
     "pytest-env>=1.2.0",
     "pytest-mock>=3.12.0",
     "langsmith[pytest]>=0.4.37",
+    "docker>=7.0.0",
+    "testcontainers[postgres]>=4.0.0",
 ]
 
 [tool.uv.sources]

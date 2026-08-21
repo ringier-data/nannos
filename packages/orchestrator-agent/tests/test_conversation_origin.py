@@ -102,12 +102,32 @@ class TestBuildScheduledRunHistory:
         assert tool.tool_call_id == tool_call["id"]
         assert tool.content == "Sales were up 4%."
         assert tool.additional_kwargs["a2a_metadata"]["state"] == "TASK_STATE_COMPLETED"
-        # No context_id in the synthetic tool metadata: adoption of a REMOTE
-        # run's conversation goes through the server-validated a2a_tracking
-        # seed (_resolve_scheduled_run_adoption), never through client-supplied
-        # provenance — and for local runs a seed would desynchronize the HITL
-        # checkpoint probe.
+        # No context_id in the synthetic tool metadata: conversation adoption
+        # goes through the server-validated a2a_tracking seed
+        # (_validate_scheduled_run_origin + _build_adoption_seed), never
+        # through client-supplied provenance — and a raw context_id seed on a
+        # local runnable would desynchronize the HITL checkpoint probe.
         assert "context_id" not in tool.additional_kwargs["a2a_metadata"]
+
+    def test_delegation_label_overrides_provenance_name(self):
+        # When adoption resolved the sub-agent's dispatchable registry key
+        # (e.g. remote card name with spaces stripped), the synthetic tool
+        # call must carry that label, not the console config name — the model
+        # imitates what it sees, and only the registry key dispatches.
+        messages = _build_scheduled_run_history(
+            dict(SCHEDULED_RUN_ORIGIN), delegation_label="ReportAgent"
+        )
+        assert messages is not None
+        (tool_call,) = messages[1].tool_calls
+        assert tool_call["args"]["subagent_type"] == "ReportAgent"
+
+    def test_delegation_label_flows_through_kind_dispatch(self):
+        messages = _build_origin_history(
+            dict(SCHEDULED_RUN_ORIGIN), delegation_label="ReportAgent"
+        )
+        assert messages is not None
+        (tool_call,) = messages[1].tool_calls
+        assert tool_call["args"]["subagent_type"] == "ReportAgent"
 
     def test_float_ids_render_as_integers(self):
         # protobuf Struct numbers arrive as floats via MessageToDict
