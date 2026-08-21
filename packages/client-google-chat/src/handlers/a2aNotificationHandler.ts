@@ -19,6 +19,14 @@ interface SchedulerPayload {
   scheduler_status: string;
   agent_message: string;
   user_sub: string;
+  // Correlation fields echoed by agent-runner so thread replies under the
+  // delivered notification can be linked back to the job/run/sub-agent.
+  scheduled_job_id?: number;
+  scheduled_job_run_id?: number;
+  sub_agent_id?: number;
+  sub_agent_name?: string;
+  prompt?: string;
+  error_message?: string;
 }
 
 function getSchedulerPayload(task: Task)  {
@@ -49,7 +57,7 @@ export async function handleA2ANotification(
   projectId: string,
   deps: HandlerDependencies,
 ): Promise<void> {
-  const { chatService, userAuthStorage } = deps;
+  const { chatService, userAuthStorage, scheduledRunStore } = deps;
 
   const schedulerPayload = getSchedulerPayload(task)
   if (!schedulerPayload) {
@@ -81,11 +89,39 @@ export async function handleA2ANotification(
       return;
     }
 
-    await chatService.sendTextMessage(projectId, dmSpace.name, schedulerPayload.agent_message);
+    const sentMessage = await chatService.sendTextMessage(projectId, dmSpace.name, schedulerPayload.agent_message);
 
     logger.info(
       `[A2ACallback] Sent notification to user ${userAuth.userId} in space ${dmSpace.name}`
     );
+
+    // Persist the run's provenance keyed by the delivered message's thread, so
+    // a thread reply under it can be correlated to the scheduled job/run and
+    // forwarded to the orchestrator as a conversation-origin DataPart (see
+    // messageHandler).
+    const threadName = sentMessage.thread?.name;
+    if (threadName && task.contextId) {
+      try {
+        await scheduledRunStore.set({
+          contextKey: scheduledRunStore.buildKey(threadName),
+          contextId: task.contextId,
+          scheduledJobId: schedulerPayload.scheduled_job_id,
+          scheduledJobRunId: schedulerPayload.scheduled_job_run_id,
+          subAgentId: schedulerPayload.sub_agent_id,
+          subAgentName: schedulerPayload.sub_agent_name,
+          prompt: schedulerPayload.prompt,
+          resultSummary: schedulerPayload.agent_message,
+          schedulerStatus: schedulerPayload.scheduler_status,
+          errorMessage: schedulerPayload.error_message,
+        });
+        logger.info(
+          `[A2ACallback] Stored scheduled-run provenance for thread=${threadName} (contextId=${task.contextId})`
+        );
+      } catch (error) {
+        // Provenance is best-effort: the notification itself was delivered.
+        logger.error(error, `[A2ACallback] Failed to store scheduled-run provenance: ${error}`);
+      }
+    }
   } catch (error) {
     logger.error(error, `[A2ACallback] Failed to send DM notification: ${error}`);
   }

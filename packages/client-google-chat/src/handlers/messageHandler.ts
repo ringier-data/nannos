@@ -535,6 +535,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     inFlightTaskStore,
     fileStorageService,
     feedbackService,
+    scheduledRunStore,
     config,
   } = deps;
 
@@ -576,6 +577,46 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     // Get thread history if we're in a thread (i.e. threadId differs from messageId). This will be included in the A2A request so the server can have more context about the conversation. We also fetch attachments from the thread history so they can be processed and included in the A2A request if needed.
     const isInThread = threadId !== messageId; // If thread ID differs from message ID, we're in a thread
+
+    // Reply under a delivered scheduled-run notification: forward the run's
+    // provenance as a conversation-origin DataPart so the orchestrator can
+    // reconstruct the delegation in the conversation it opens for this thread.
+    // This is the client side of urn:nannos:a2a:conversation-origin:1.0, kind
+    // "scheduled_run" (declared in the orchestrator's agent card; contract
+    // documented in the orchestrator's app/core/a2a_extensions.py). Attached on
+    // EVERY thread reply that has a provenance row — the orchestrator injects
+    // only on a conversation with no history, and it is the side that actually
+    // knows whether history exists (a contextId stored here can belong to a
+    // first turn that failed before any checkpoint was written). The run's
+    // contextId is deliberately NOT sent as the request contextId — it names
+    // the sub-agent's own conversation, not an orchestrator one.
+    let scheduledRunDataPart: Record<string, unknown> | undefined;
+    if (isInThread) {
+      try {
+        const runRecord = await scheduledRunStore.get(scheduledRunStore.buildKey(threadId));
+        if (runRecord) {
+          scheduledRunDataPart = {
+            origin: {
+              kind: 'scheduled_run',
+              context_id: runRecord.contextId,
+              scheduled_job_id: runRecord.scheduledJobId,
+              scheduled_job_run_id: runRecord.scheduledJobRunId,
+              sub_agent_id: runRecord.subAgentId,
+              sub_agent_name: runRecord.subAgentName,
+              prompt: runRecord.prompt,
+              result_summary: runRecord.resultSummary,
+              scheduler_status: runRecord.schedulerStatus,
+              error_message: runRecord.errorMessage,
+            },
+          };
+          logger.info(
+            `Thread reply correlates to scheduled run (job=${runRecord.scheduledJobId}, run=${runRecord.scheduledJobRunId}, contextId=${runRecord.contextId})`
+          );
+        }
+      } catch (e) {
+        logger.warn(`Failed to look up scheduled-run provenance for thread ${threadId}: ${e}`);
+      }
+    }
     let threadHistoryResult: ThreadHistoryResult | undefined = undefined;
     if (isInThread) {
       const sinceMessageId = existingContext?.lastProcessedMessageId;
@@ -639,7 +680,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               url: f.url,
             }))
           : undefined,
-      dataParts,
+      dataParts: scheduledRunDataPart ? [...(dataParts ?? []), scheduledRunDataPart] : dataParts,
       contextId: existingContextId || undefined,
       webhookUrl: config.isLocal() ? undefined : webhookUrl,
       webhookToken: config.isLocal() ? undefined : webhookToken,

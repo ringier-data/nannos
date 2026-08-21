@@ -6,6 +6,7 @@ import { PgPendingRequestStore } from './pgPendingRequestStore.js';
 import { PgInFlightTaskStore } from './pgInFlightTaskStore.js';
 import { PgOAuthStateStore } from './pgOAuthStateStore.js';
 import { PgInstallationSecretStore } from './pgInstallationSecretStore.js';
+import { PgScheduledRunStore } from './pgScheduledRunStore.js';
 import { Logger } from '../../../utils/logger.js';
 
 export interface PostgresStorageConfig {
@@ -31,6 +32,7 @@ export class PostgresStorageProvider extends StorageProvider {
   readonly inFlightTask: PgInFlightTaskStore;
   readonly oauthState: PgOAuthStateStore;
   readonly installationSecret: PgInstallationSecretStore;
+  readonly scheduledRun: PgScheduledRunStore;
 
   constructor(config: PostgresStorageConfig) {
     super();
@@ -57,6 +59,7 @@ export class PostgresStorageProvider extends StorageProvider {
     this.inFlightTask = new PgInFlightTaskStore(this.pool);
     this.oauthState = new PgOAuthStateStore(this.pool);
     this.installationSecret = new PgInstallationSecretStore(this.pool);
+    this.scheduledRun = new PgScheduledRunStore(this.pool);
     this.logger.info(`PostgreSQL storage provider initialized for ${config.host}:${config.port}/${config.database}`);
   }
 

@@ -49,4 +49,6 @@ export type {
   OAuthStateData,
   IOAuthStateStore,
   IInstallationSecretStore,
+  ScheduledRunRecord,
+  IScheduledRunStore,
 } from './types.js';
