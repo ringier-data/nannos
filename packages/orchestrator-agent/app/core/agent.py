@@ -341,11 +341,18 @@ async def _resolve_scheduled_run_adoption(
         async with asyncio.timeout(_ADOPTION_LOOKUP_TIMEOUT_S):
             async with httpx.AsyncClient(base_url=console_backend_url) as client:
                 # The binding check post-filters, so both lookups can run
-                # concurrently under the shared deadline.
+                # concurrently under the shared deadline. return_exceptions
+                # keeps a second in-flight failure from becoming an
+                # "exception was never retrieved" warning; re-raise the first
+                # so the except below handles both lookups uniformly.
                 job_resp, run_resp = await asyncio.gather(
                     client.get(f"/api/v1/scheduler/jobs/{job_id}", headers=headers),
                     client.get(f"/api/v1/scheduler/jobs/{job_id}/runs/{run_id}", headers=headers),
+                    return_exceptions=True,
                 )
+                for resp in (job_resp, run_resp):
+                    if isinstance(resp, BaseException):
+                        raise resp
         if job_resp.status_code != 200:
             logger.info(
                 f"Conversation adoption skipped: job {job_id} not resolvable for this user "
