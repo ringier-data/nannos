@@ -10,7 +10,15 @@
  * `storeConsentApiV1SchedulerConsentPost`.
  */
 import { client } from './generated/client.gen';
-import type { RunNowResponse, ScheduledJob, ScheduledJobRun } from './generated/types.gen';
+import type {
+  McpToolInvokeResponse,
+  McpToolRisk,
+  RunNowResponse,
+  ScheduledJob,
+  ScheduledJobDraft,
+  ScheduledJobRun,
+  ValidateConditionResponse,
+} from './generated/types.gen';
 
 export type { RunNowResponse };
 
@@ -24,6 +32,42 @@ export type {
   ScheduledJobRun,
   ScheduledJobUpdate,
 } from './generated/types.gen';
+
+/**
+ * Turn an API error into something worth showing a person.
+ *
+ * FastAPI answers a validation failure with `detail` as a list of `{loc, msg}` objects,
+ * which `String(...)` renders as "[object Object]". That started mattering when the API
+ * began rejecting unparsable watch conditions: the message explains which syntax works,
+ * and it was being thrown away.
+ */
+export function formatApiError(error: unknown): string {
+  const detail = (error as { detail?: unknown } | null)?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const lines = detail
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        const { loc, msg } = (item ?? {}) as { loc?: unknown[]; msg?: string };
+        if (!msg) return null;
+        // Skip the "body" prefix every FastAPI location carries.
+        const field = Array.isArray(loc) ? loc.filter((p) => p !== 'body').join('.') : '';
+        return field ? `${field}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+    if (lines.length) return lines.join('\n');
+  }
+  if (detail && typeof detail === 'object') {
+    const message = (detail as { message?: string }).message;
+    if (message) return message;
+  }
+  if (error instanceof Error) return error.message;
+  try {
+    return JSON.stringify(detail ?? error);
+  } catch {
+    return String(error);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Delivery channels
@@ -88,30 +132,165 @@ export async function deleteDeliveryChannel(id: number): Promise<void> {
 // AI-assisted watch parameter generation
 // ---------------------------------------------------------------------------
 
-export interface GenerateWatchParamsResponse {
-  check_tool?: string | null;
-  check_args?: Record<string, unknown> | null;
-  condition_expr?: string | null;
-  expected_value?: string | null;
-  llm_condition?: string | null;
-  notification_message?: string | null;
-}
+export type { ConditionEvaluation } from './generated/types.gen';
 
 /**
- * Call the backend LLM endpoint to pick the best tool and suggest check_args,
- * condition_expr and a notification message for a watch job.
+ * A partial scheduled job. The backend derives it from its create model, so these are
+ * the create-body field names and a draft applies field for field.
  */
-export async function generateWatchParams(
+export type { ScheduledJobDraft } from './generated/types.gen';
+
+/**
+ * Draft a whole scheduled job from a one-line description: job type, schedule, check
+ * tool and arguments, condition, outcome and delivery. Fields the generator cannot infer
+ * are omitted for the form to fill in.
+ */
+export async function generateJobDraft(
   tools: Record<string, unknown>[],
   query: string,
-): Promise<GenerateWatchParamsResponse> {
+): Promise<ScheduledJobDraft> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = await (client as any).post({
-    url: '/api/v1/scheduler/generate-watch-params',
+    url: '/api/v1/scheduler/generate-job-draft',
     body: { tools, query },
   });
   if (error) throw error;
-  return data as GenerateWatchParamsResponse;
+  return data as ScheduledJobDraft;
+}
+
+export interface GenerateConditionResult {
+  cel_expr?: string | null;
+  llm_condition?: string | null;
+  /** With a payload: compiled AND evaluated against it. Without one: only compiled. */
+  verified: boolean;
+  /** Evaluation against the supplied payload: {gate, extracted}. */
+  evaluation?: { gate: boolean; extracted: unknown } | null;
+  notes: string[];
+}
+
+/**
+ * Write or refine just the condition of a watch. Narrower than generateJobDraft: it
+ * sees the real response shape, so it writes field paths that exist — and the backend
+ * compiles, evaluates and repairs every candidate before returning it.
+ */
+export async function generateCondition(body: {
+  query: string;
+  current_cel_expr?: string | null;
+  current_llm_condition?: string | null;
+  result?: unknown;
+  check_tool?: string | null;
+}): Promise<GenerateConditionResult> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (client as any).post({
+    url: '/api/v1/scheduler/generate-condition',
+    body,
+  });
+  if (error) throw new Error(formatApiError(error));
+  return data as GenerateConditionResult;
+}
+
+export interface ValidateArgsExprResult {
+  valid: boolean;
+  error?: string | null;
+  /** The merged arguments the tool would be called with right now. */
+  resolved?: Record<string, unknown> | null;
+}
+
+/**
+ * Resolve a dynamic-arguments expression against the current time — the same
+ * resolution the scheduler performs before each check-tool call.
+ */
+export async function validateArgsExpr(body: {
+  check_args_exprs: Record<string, string>;
+  check_args?: Record<string, unknown> | null;
+  prev?: unknown;
+}): Promise<ValidateArgsExprResult> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (client as any).post({
+    url: '/api/v1/scheduler/validate-args-expr',
+    body,
+  });
+  if (error) throw new Error(formatApiError(error));
+  return data as ValidateArgsExprResult;
+}
+
+// ---------------------------------------------------------------------------
+// One-off MCP tool call ("run the check now")
+// ---------------------------------------------------------------------------
+
+export type { McpToolInvokeResponse, McpToolRisk } from './generated/types.gen';
+
+/** Thrown when the backend wants the caller to confirm a tool that may change data. */
+export class McpToolRiskError extends Error {
+  readonly risk?: McpToolRisk;
+  constructor(message: string, risk?: McpToolRisk) {
+    super(message);
+    this.name = 'McpToolRiskError';
+    this.risk = risk;
+  }
+}
+
+/**
+ * Run one MCP tool with the current user's credentials and return its response, so a
+ * watch condition can be written against a real payload.
+ *
+ * The call is real: a tool that writes will write. The backend answers 428 for any tool
+ * it cannot confirm is read-only; re-call with `acknowledgeRisk` once the user agrees.
+ */
+export async function invokeMcpTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  opts: { serverSlug?: string | null; acknowledgeRisk?: boolean } = {},
+): Promise<McpToolInvokeResponse> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error, response } = await (client as any).post({
+    url: '/api/v1/mcp/tools/invoke',
+    body: {
+      tool_name: toolName,
+      arguments: args,
+      server_slug: opts.serverSlug ?? null,
+      acknowledge_risk: opts.acknowledgeRisk ?? false,
+    },
+  });
+  if (error) {
+    const detail = (error as { detail?: unknown }).detail;
+    if (response?.status === 428 && detail && typeof detail === 'object') {
+      const d = detail as { message?: string; risk?: McpToolRisk };
+      throw new McpToolRiskError(d.message ?? 'This tool may change data.', d.risk);
+    }
+    throw new Error(formatApiError(error));
+  }
+  return data as McpToolInvokeResponse;
+}
+
+// ---------------------------------------------------------------------------
+// Condition validation ("what would this condition do?")
+// ---------------------------------------------------------------------------
+
+export type { ValidateConditionResponse } from './generated/types.gen';
+
+/**
+ * Try a condition against a payload without creating a job.
+ *
+ * The expression language is narrower than people expect — `&&`, `!` and method
+ * calls are parse errors — so an untested condition can look right and silently
+ * never fire.
+ */
+export async function validateCondition(body: {
+  result: unknown;
+  /** The CEL condition, when there is one. */
+  cel_expr?: string | null;
+  /** Previous check result, for CEL conditions that use `prev`. */
+  prev?: unknown;
+  llm_condition?: string | null;
+}): Promise<ValidateConditionResponse> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (client as any).post({
+    url: '/api/v1/scheduler/validate-condition',
+    body,
+  });
+  if (error) throw new Error(formatApiError(error));
+  return data as ValidateConditionResponse;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,8 +329,10 @@ export interface ScheduledJobCreateExtended {
   notification_message?: string;
   check_tool?: string;
   check_args?: Record<string, unknown>;
-  condition_expr?: string;
-  expected_value?: string;
+  /** Dynamic arguments: argument name → CEL expression, resolved and merged each run. */
+  check_args_exprs?: Record<string, string>;
+  /** CEL condition over `result`, `now` and `prev`. A watch needs this, llm_condition, or both. */
+  cel_expr?: string;
   llm_condition?: string;
   destroy_after_trigger?: boolean;
   /** Registered delivery channel ID. */
@@ -167,9 +348,7 @@ export async function createScheduledJob(body: ScheduledJobCreateExtended): Prom
     url: '/api/v1/scheduler/jobs',
     body,
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as ScheduledJob;
 }
 
@@ -187,8 +366,11 @@ export interface ScheduledJobUpdateExtended {
   sub_agent_id?: number | null;
   check_tool?: string | null;
   check_args?: Record<string, unknown> | null;
-  condition_expr?: string | null;
-  expected_value?: string | null;
+  /** Dynamic arguments; null clears them. */
+  check_args_exprs?: Record<string, string> | null;
+  /** CEL condition; null clears it, leaving llm_condition as the whole condition. */
+  cel_expr?: string | null;
+  llm_condition?: string | null;
   delivery_channel_id?: number | null;
   max_failures?: number | null;
   enabled?: boolean | null;
@@ -203,9 +385,7 @@ export async function updateScheduledJob(
     url: `/api/v1/scheduler/jobs/${jobId}`,
     body,
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as ScheduledJob;
 }
 
@@ -226,9 +406,7 @@ export async function runJobNow(jobId: number): Promise<RunNowResponse> {
     url: `/api/v1/scheduler/jobs/${jobId}/run-now`,
     body: {},
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as RunNowResponse;
 }
 
@@ -241,9 +419,7 @@ export async function listJobs(): Promise<ScheduledJob[]> {
   const { data, error } = await (client as any).get({
     url: '/api/v1/scheduler/jobs',
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as ScheduledJob[];
 }
 
@@ -252,9 +428,7 @@ export async function getJob(jobId: number): Promise<ScheduledJob> {
   const { data, error } = await (client as any).get({
     url: `/api/v1/scheduler/jobs/${jobId}`,
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as ScheduledJob;
 }
 
@@ -264,9 +438,7 @@ export async function pauseJob(jobId: number): Promise<ScheduledJob> {
     url: `/api/v1/scheduler/jobs/${jobId}/pause`,
     body: {},
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as ScheduledJob;
 }
 
@@ -276,9 +448,7 @@ export async function resumeJob(jobId: number): Promise<ScheduledJob> {
     url: `/api/v1/scheduler/jobs/${jobId}/resume`,
     body: {},
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as ScheduledJob;
 }
 
@@ -287,9 +457,7 @@ export async function deleteJob(jobId: number): Promise<void> {
   const { error } = await (client as any).delete({
     url: `/api/v1/scheduler/jobs/${jobId}`,
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
 }
 
 export async function listRuns(jobId: number, limit?: number): Promise<ScheduledJobRun[]> {
@@ -298,8 +466,6 @@ export async function listRuns(jobId: number, limit?: number): Promise<Scheduled
     url: `/api/v1/scheduler/jobs/${jobId}/runs`,
     query: limit ? { limit } : undefined,
   });
-  if (error) throw new Error(typeof error === 'object' && error !== null && 'detail' in error
-    ? String((error as { detail: unknown }).detail)
-    : String(error));
+  if (error) throw new Error(formatApiError(error));
   return data as ScheduledJobRun[];
 }

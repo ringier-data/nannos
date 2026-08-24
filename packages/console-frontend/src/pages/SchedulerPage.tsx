@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -13,15 +13,14 @@ import {
   ChevronRight,
   Sparkles,
   Loader2,
+  Undo2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { TableSkeleton } from '@/components/skeletons';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
   DialogContent,
@@ -30,7 +29,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { useAvailableModels, modelSelectOptions, MODEL_TIER_OPTIONS } from '@/config/models';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -44,10 +42,7 @@ import {
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
-  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
@@ -59,7 +54,7 @@ import {
   type ScheduledJobCreateExtended,
   type AutomatedSubAgentConfig,
   getDeliveryChannels,
-  generateWatchParams,
+  generateJobDraft,
   createScheduledJob,
   type DeliveryChannel,
   listJobs,
@@ -74,8 +69,13 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import { config } from '@/config';
 import { CronField } from '@/components/CronField';
-import { SubAgentSelect } from '@/components/SubAgentSelect';
+import { AgentActionFields } from '@/components/AgentActionFields';
+import { isModelTier, modelTierOf } from '@/config/models';
+import { parseToolSchema } from '@/lib/mcpTools';
+import { missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
+import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
+import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -193,10 +193,19 @@ interface CreateJobForm {
   // Watch-specific
   notification_message: string;
   check_tool: string;
+  /** Arguments as edited through the schema-generated fields. */
+  check_args: Record<string, unknown>;
+  /** Arguments as edited raw. Authoritative while args_mode is 'json'. */
   check_args_text: string;
-  condition_expr: string;
-  expected_value: string;
+  args_mode: 'fields' | 'json';
+  /** Per-argument CEL expressions (`= …` values), resolved and merged on every run. */
+  check_args_exprs: Record<string, string>;
+  /** CEL expression: extracts the evidence and gates the trigger in one. Optional. */
+  cel_expr: string;
+  /** Judged by a model — alone over the whole response, or on what cel_expr returned. */
   llm_condition: string;
+  /** Notify, or hand the result to a sub-agent. Mutually exclusive. */
+  outcome: 'notify' | 'agent';
   destroy_after_trigger: boolean;
   delivery_channel: string;
 }
@@ -223,10 +232,13 @@ const defaultForm: CreateJobForm = {
   prompt: '',
   notification_message: '',
   check_tool: '',
+  check_args: {},
   check_args_text: '',
-  condition_expr: '',
-  expected_value: '',
+  args_mode: 'fields',
+  check_args_exprs: {},
+  cel_expr: '',
   llm_condition: '',
+  outcome: 'notify',
   destroy_after_trigger: true,
   delivery_channel: '',
 };
@@ -241,31 +253,24 @@ function CreateJobDialog({
   onCreated: (jobId: number) => void;
 }) {
   const [form, setForm] = useState<CreateJobForm>({ ...defaultForm });
-  const { models: availableModels } = useAvailableModels();
   const [error, setError] = useState<string | null>(null);
 
-  // automated_model holds either a capability tier (`tier:<tier>`) or a concrete alias.
-  const isTierSelected = form.automated_model.startsWith('tier:');
-  const modelAlias = isTierSelected ? '' : form.automated_model;
-  const modelTier = isTierSelected ? form.automated_model.slice('tier:'.length) : null;
-
-  // A tier always resolves (it follows the fleet default), so only a concrete alias can go
-  // stale. If the picked alias is no longer registered on the gateway, fall back to the
-  // standard tier rather than rendering an empty picker / submitting a dead model.
-  useEffect(() => {
-    if (isTierSelected) return;
-    if (availableModels.length > 0 && !availableModels.some((m) => m.value === form.automated_model)) {
-      setForm((f) => ({ ...f, automated_model: 'tier:standard' }));
-    }
-  }, [availableModels, form.automated_model, isTierSelected]);
   const [aiQuery, setAiQuery] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+  /** Field keys the last AI fill wrote, so each one can say where its value came from. */
+  const [aiFilled, setAiFilled] = useState<Set<string>>(new Set());
+  /** Form state from just before the AI fill, for a one-step undo. */
+  const [aiUndo, setAiUndo] = useState<CreateJobForm | null>(null);
+  /** Per-field validation, so an error lands next to the field that caused it. */
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const qc = useQueryClient();
 
   // ── Data queries ──────────────────────────────────────────────────────────
   const { data: subAgentsData } = useQuery(
-    consoleListSubAgentsOptions({ query: { owned_only: true } }),
+    // Not owned_only: a job may run any sub-agent shared with the user, and listing
+    // only owned ones made a legitimately chosen agent render as "not in your list".
+    consoleListSubAgentsOptions({}),
   );
   const subAgents = subAgentsData?.items ?? [];
 
@@ -282,37 +287,145 @@ function CreateJobDialog({
     staleTime: 60_000,
   });
 
-  // Pre-select the first channel once loaded
-  useEffect(() => {
-  }, [channels]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const selectedTool = mcpTools.find((t) => t.name === form.check_tool);
-
   // ── Helpers ───────────────────────────────────────────────────────────────
   function update<K extends keyof CreateJobForm>(key: K, value: CreateJobForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
     setError(null);
   }
 
+  /** Drop the AI marker from fields the user has just edited by hand. */
+  function clearAi(...keys: string[]) {
+    setAiFilled((prev) => {
+      if (!keys.some((k) => prev.has(k))) return prev;
+      const next = new Set(prev);
+      keys.forEach((k) => next.delete(k));
+      return next;
+    });
+  }
+
+  function clearFieldError(...keys: string[]) {
+    setFieldErrors((prev) => {
+      if (!keys.some((k) => k in prev)) return prev;
+      const next = { ...prev };
+      keys.forEach((k) => delete next[k]);
+      return next;
+    });
+  }
+
   // ── AI generation ─────────────────────────────────────────────────────────
+  /**
+   * Fill the form from one sentence.
+   *
+   * Scope is deliberately the whole form, not just the condition fields: the field
+   * it cannot see is the one the user has to guess at. Every field written is marked
+   * and the previous state kept, because values that appear without explanation are
+   * values nobody trusts.
+   */
   async function handleAiGenerate() {
     if (!aiQuery.trim()) return;
     setAiLoading(true);
     setError(null);
     try {
-      const result = await generateWatchParams(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await generateJobDraft(
         mcpTools as unknown as Record<string, unknown>[],
         aiQuery,
       );
-      if (result.check_tool) update('check_tool', result.check_tool);
-      if (result.check_args) {
-        update('check_args_text', JSON.stringify(result.check_args, null, 2));
-      }
-      if (result.condition_expr) update('condition_expr', result.condition_expr);
-      if (result.expected_value) update('expected_value', result.expected_value);
-      if (result.llm_condition) update('llm_condition', result.llm_condition);
-      if (result.notification_message) update('notification_message', result.notification_message);
+      const filled = new Set<string>();
+      setAiUndo(form);
+      setForm((f) => {
+        const next = { ...f };
+        // Name is only suggested into an empty field — overwriting a name the user
+        // already chose would be the fill exceeding its remit. Everything else is
+        // applied, because the whole point is that one sentence configures the job.
+        if (result.name && !f.name.trim()) {
+          next.name = result.name;
+          filled.add('name');
+        }
+        // The job type decides what the rest of the form even means, so it is
+        // applied first and the fields that do not survive the switch are reset.
+        if (result.job_type && result.job_type !== f.job_type) {
+          next.job_type = result.job_type;
+          filled.add('job_type');
+        }
+        if (result.schedule_kind) {
+          next.schedule_kind = result.schedule_kind;
+          filled.add('schedule');
+        }
+        if (result.cron_expr) {
+          next.cron_expr = result.cron_expr;
+          next.schedule_kind = result.schedule_kind ?? 'cron';
+          filled.add('schedule');
+        }
+        if (result.interval_seconds) {
+          next.interval_seconds = String(result.interval_seconds);
+          next.schedule_kind = result.schedule_kind ?? 'interval';
+          filled.add('schedule');
+        }
+        if (result.run_at) {
+          // datetime-local wants "YYYY-MM-DDTHH:mm"; the API answers ISO 8601.
+          next.run_at = result.run_at.slice(0, 16);
+          next.schedule_kind = result.schedule_kind ?? 'once';
+          filled.add('schedule');
+        }
+        if (result.check_tool) {
+          next.check_tool = result.check_tool;
+          filled.add('check_tool');
+        }
+        if (result.check_args) {
+          const args = result.check_args as Record<string, unknown>;
+          next.check_args = args;
+          next.check_args_text = JSON.stringify(args, null, 2);
+          // Show whichever editor can display all of what was generated: the field
+          // form only renders scalars the schema declares, so an argument outside
+          // that set would be submitted without ever being visible.
+          const renderable = new Set(
+            parseToolSchema(mcpTools.find((t) => t.name === result.check_tool)).params.map(
+              (param) => param.key,
+            ),
+          );
+          next.args_mode = Object.keys(args).every((key) => renderable.has(key)) ? 'fields' : 'json';
+          filled.add('check_args');
+        }
+        if (result.check_args_exprs && Object.keys(result.check_args_exprs).length > 0) {
+          next.check_args_exprs = result.check_args_exprs as Record<string, string>;
+          filled.add('check_args');
+        }
+        if (result.cel_expr) {
+          next.cel_expr = result.cel_expr;
+          filled.add('cel_expr');
+        }
+        if (result.llm_condition) {
+          next.llm_condition = result.llm_condition;
+          filled.add('llm_condition');
+        }
+        // A sub-agent means the outcome is "run an agent"; the notification text is
+        // then unused, so the two are applied as the exclusive choice they are.
+        if (result.sub_agent_id) {
+          next.sub_agent_id = String(result.sub_agent_id);
+          next.outcome = 'agent';
+          next.sub_agent_mode = 'existing';
+          filled.add('sub_agent_id');
+          if (result.prompt) {
+            next.prompt = result.prompt;
+            filled.add('prompt');
+          }
+        } else if (result.notification_message) {
+          next.notification_message = result.notification_message;
+          next.outcome = 'notify';
+          filled.add('notification_message');
+        }
+        if (result.delivery_channel_id) {
+          next.delivery_channel = String(result.delivery_channel_id);
+          filled.add('delivery_channel');
+        }
+        if (result.destroy_after_trigger != null) {
+          next.destroy_after_trigger = result.destroy_after_trigger;
+          filled.add('destroy_after_trigger');
+        }
+        return next;
+      });
+      setAiFilled(filled);
+      setFieldErrors({});
     } catch {
       setError('AI generation failed. Please fill in the fields manually.');
     } finally {
@@ -320,20 +433,35 @@ function CreateJobDialog({
     }
   }
 
+  function undoAiFill() {
+    if (!aiUndo) return;
+    setForm(aiUndo);
+    setAiUndo(null);
+    setAiFilled(new Set());
+    setFieldErrors({});
+  }
+
   // ── Submission ────────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit() {
-    if (!form.name.trim()) return setError('Name is required');
+    // Schedule and name errors are per-field too, so nothing about what to fix is
+    // left to a single sentence above the footer.
+    const scheduleErrors: Record<string, string> = {};
+    if (!form.name.trim()) scheduleErrors.name = 'Give the job a name.';
     if (form.schedule_kind === 'cron') {
-      if (!form.cron_expr.trim()) return setError('Cron expression is required');
-      if (!describeCron(form.cron_expr).ok)
-        return setError('Cron expression is invalid');
+      if (!form.cron_expr.trim()) scheduleErrors.cron_expr = 'A cron expression is required.';
+      else if (!describeCron(form.cron_expr).ok)
+        scheduleErrors.cron_expr = 'That is not a valid cron expression.';
     }
     if (form.schedule_kind === 'interval' && !form.interval_seconds)
-      return setError('Interval is required');
+      scheduleErrors.interval_seconds = 'An interval is required.';
     if (form.schedule_kind === 'once' && !form.run_at)
-      return setError('Date/time is required');
+      scheduleErrors.run_at = 'A date and time is required.';
+    if (Object.keys(scheduleErrors).length > 0) {
+      setFieldErrors(scheduleErrors);
+      return setError(null);
+    }
     
     // Task job validations
     if (form.job_type === 'task') {
@@ -352,21 +480,33 @@ function CreateJobDialog({
       // Message is optional for all task jobs
     }
     
-    // Watch job validations
-    if (form.job_type === 'watch') {
-      if (!form.check_tool) return setError('Check tool is required for watch jobs');
-      if (!form.condition_expr.trim()) return setError('Condition expression is required for watch jobs');
-      // Message is optional - LLM will generate one if left empty
-    }
-
-    // Parse check_args JSON
+    // Watch job validations. Errors are collected per field rather than returned as
+    // one string, so the user is told which control to fix instead of hunting for it.
     let check_args: Record<string, unknown> | undefined;
-    if (form.check_args_text.trim()) {
-      try {
-        check_args = JSON.parse(form.check_args_text);
-      } catch {
-        return setError('Check arguments must be valid JSON');
+    if (form.job_type === 'watch') {
+      const errors: Record<string, string> = {};
+      if (!form.check_tool) errors.check_tool = 'Choose the tool this job should call.';
+
+      const parsed = resolveArgs(form);
+      if (parsed.error) errors.check_args = parsed.error;
+      check_args = parsed.args;
+
+      const selectedTool = mcpTools.find((t) => t.name === form.check_tool);
+      const missing = missingRequiredArgs(selectedTool, form, check_args);
+      if (missing.size > 0) {
+        errors.check_args = `Fill in ${[...missing].join(', ')}.`;
       }
+
+      if (!form.cel_expr.trim() && !form.llm_condition.trim()) {
+        // A watch needs something to decide with; either half of the condition works.
+        errors.cel_expr = 'Write an expression, a condition for the model to judge, or both.';
+      }
+
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        return setError(null);
+      }
+      setFieldErrors({});
     }
 
     const body: ScheduledJobCreateExtended = {
@@ -392,8 +532,10 @@ function CreateJobDialog({
           name: form.automated_name.trim(),
           description: form.automated_description.trim(),
           // Send exactly one of model / model_tier (backend validates the XOR).
-          model: isTierSelected ? undefined : form.automated_model,
-          model_tier: isTierSelected ? (modelTier as NonNullable<AutomatedSubAgentConfig['model_tier']>) : undefined,
+          // Exactly one of model / model_tier (the backend validates the XOR).
+          model: isModelTier(form.automated_model) ? undefined : form.automated_model,
+          model_tier: (modelTierOf(form.automated_model) ??
+            undefined) as AutomatedSubAgentConfig['model_tier'],
           system_prompt: form.automated_system_prompt.trim(),
           mcp_tools: form.automated_mcp_tools.length > 0 ? form.automated_mcp_tools : null,
           enable_thinking: form.automated_enable_thinking || null,
@@ -408,16 +550,22 @@ function CreateJobDialog({
     if (form.job_type === 'watch') {
       body.check_tool = form.check_tool;
       body.check_args = check_args;
-      body.condition_expr = form.condition_expr.trim();
-      body.expected_value = form.expected_value.trim() || undefined;
-      body.llm_condition = form.llm_condition.trim() || undefined;
+      body.check_args_exprs =
+        Object.keys(form.check_args_exprs).length > 0 ? form.check_args_exprs : undefined;
       body.destroy_after_trigger = form.destroy_after_trigger;
-      body.notification_message = form.notification_message.trim();
-      // Optional: run an existing sub-agent when the condition is met (inline
-      // sub_agent_parameters stay task-only by design).
-      if (form.sub_agent_id) {
+      // The two halves of the condition: the expression gates deterministically, the
+      // judgement is the semantic stage on what it returned. At least one is set —
+      // validated above and by the API.
+      body.cel_expr = form.cel_expr.trim() || undefined;
+      body.llm_condition = form.llm_condition.trim() || undefined;
+
+      // The two outcomes are exclusive: a sub-agent's reply replaces the
+      // notification, so sending both would leave one of them dead.
+      if (form.outcome === 'agent' && form.sub_agent_id) {
         body.sub_agent_id = parseInt(form.sub_agent_id);
         body.prompt = form.prompt.trim() || undefined;
+      } else {
+        body.notification_message = form.notification_message.trim();
       }
     }
 
@@ -444,34 +592,96 @@ function CreateJobDialog({
         </DialogHeader>
 
         <div className="grid gap-4 py-2">
+          {/* Describe-the-job entry point. Above the fields it fills, because a box that
+              writes into the form has to be read before the form, not after it — and
+              shown for both job types, since it decides which one this is. */}
+          <div className="bg-muted grid gap-2.5 rounded-md border p-3.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Sparkles className="size-3.5" />
+                <span className="text-[13px] font-semibold">Describe the job</span>
+                <span className="text-muted-foreground text-xs">
+                  fills every field below — review before saving
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  className="bg-background flex-1"
+                  placeholder="e.g. every weekday morning, check whether my next meeting has attendees from outside the company and report to Slack"
+                  value={aiQuery}
+                  onChange={(e) => setAiQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAiGenerate()}
+                />
+                <Button
+                  type="button"
+                  disabled={!aiQuery.trim() || aiLoading || mcpTools.length === 0}
+                  onClick={handleAiGenerate}
+                >
+                  {aiLoading ? <Loader2 className="size-4 animate-spin" /> : 'Generate'}
+                </Button>
+              </div>
+              {aiFilled.size > 0 && (
+                <div className="flex flex-wrap items-center gap-2 border-t pt-2.5">
+                  <span className="flex items-center gap-1.5 text-xs">
+                    <CheckCircle2 className="size-3.5" />
+                    Filled {aiFilled.size} field{aiFilled.size === 1 ? '' : 's'}, each marked below.
+                  </span>
+                  {aiUndo && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto"
+                      onClick={undoAiFill}
+                    >
+                      <Undo2 className="size-3.5" /> Undo AI fill
+                    </Button>
+                  )}
+                </div>
+            )}
+          </div>
+
+          <SectionHeader n={1} title="What & when" />
+
           {/* Name */}
           <div className="grid gap-1.5">
-            <Label htmlFor="name">Name</Label>
+            <Label htmlFor="name">
+              Name
+              {aiFilled.has('name') && <AiBadge />}
+            </Label>
             <Input
               id="name"
               value={form.name}
-              onChange={(e) => update('name', e.target.value)}
+              aria-invalid={Boolean(fieldErrors.name) || undefined}
+              onChange={(e) => {
+                update('name', e.target.value);
+                clearAi('name');
+                clearFieldError('name');
+              }}
               placeholder="e.g. Daily report"
             />
+            {fieldErrors.name && <FieldError>{fieldErrors.name}</FieldError>}
           </div>
 
           {/* Job type / Schedule kind */}
           <div className="grid grid-cols-2 gap-4">
             <div className="grid gap-1.5">
-              <Label>Job type</Label>
+              <Label>
+                Job type
+                {aiFilled.has('job_type') && <AiBadge />}
+              </Label>
               <Select
                 value={form.job_type}
-                onValueChange={(v) =>
+                onValueChange={(v) => {
                   // Reset cross-type fields so a task-mode selection can't
                   // silently carry over into a watch (and vice versa).
                   setForm((f) => ({
                     ...f,
                     job_type: v as JobType,
                     sub_agent_id: '',
-                    voice_call: false,
                     prompt: '',
-                  }))
-                }
+                  }));
+                  clearAi('job_type');
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -483,10 +693,16 @@ function CreateJobDialog({
               </Select>
             </div>
             <div className="grid gap-1.5">
-              <Label>Schedule</Label>
+              <Label>
+                Schedule
+                {aiFilled.has('schedule') && <AiBadge />}
+              </Label>
               <Select
                 value={form.schedule_kind}
-                onValueChange={(v) => update('schedule_kind', v as ScheduleKind)}
+                onValueChange={(v) => {
+                  update('schedule_kind', v as ScheduleKind);
+                  clearAi('schedule');
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -540,472 +756,87 @@ function CreateJobDialog({
             </div>
           )}
 
-          {/* Task job configuration */}
+          {/* What to run. The same panel serves the watch job's sub-agent outcome:
+              the trigger differs, what runs does not. */}
           {form.job_type === 'task' && (
             <>
-              {/* Sub-agent mode selector */}
-              <div className="grid gap-1.5">
-                <Label>Sub-agent configuration</Label>
-                <Select
-                  value={form.sub_agent_mode}
-                  onValueChange={(v) => update('sub_agent_mode', v as SubAgentMode)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="existing">Use existing sub-agent</SelectItem>
-                    <SelectItem value="automated">Create automated sub-agent</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {/* Existing sub-agent mode */}
-              {form.sub_agent_mode === 'existing' && (
-                <>
-                  <div className="grid gap-1.5">
-                    <Label>Sub-agent</Label>
-                    <SubAgentSelect
-                      value={form.sub_agent_id}
-                      onChange={(v) => update('sub_agent_id', v)}
-                      subAgents={subAgents}
-                    />
-                  </div>
-                </>
-              )}
-
-              {/* Automated sub-agent mode */}
-              {form.sub_agent_mode === 'automated' && (
-                <>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="grid gap-1.5">
-                      <Label htmlFor="automated_name">Sub-agent name</Label>
-                      <Input
-                        id="automated_name"
-                        value={form.automated_name}
-                        onChange={(e) => update('automated_name', e.target.value)}
-                        placeholder="My Automated Agent"
-                      />
-                    </div>
-                    <div className="grid gap-1.5">
-                      <Label htmlFor="automated_model">Model</Label>
-                      <Select
-                        value={form.automated_model}
-                        onValueChange={(v) => update('automated_model', v)}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select a model or tier" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            <SelectLabel>Tier (follows the fleet default for that tier)</SelectLabel>
-                            {MODEL_TIER_OPTIONS.map((opt) => (
-                              <SelectItem key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                          <SelectSeparator />
-                          <SelectGroup>
-                            <SelectLabel>Specific model</SelectLabel>
-                            {modelSelectOptions(modelAlias, availableModels, false).options.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                      {isTierSelected ? (
-                        <p className="text-xs text-muted-foreground">
-                          Runs on whichever model is the current default for this tier — survives model upgrades.
-                        </p>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="automated_description">
-                      Description{' '}
-                      <span className="text-muted-foreground text-xs">(max 200 chars)</span>
-                    </Label>
-                    <Input
-                      id="automated_description"
-                      value={form.automated_description}
-                      onChange={(e) => update('automated_description', e.target.value)}
-                      placeholder="Short description of the agent's skill"
-                      maxLength={200}
-                    />
-                  </div>
-
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="automated_system_prompt">
-                      System prompt{' '}
-                      <span className="text-muted-foreground text-xs">(max {config.autoApprove.maxSystemPromptLength} chars)</span>
-                    </Label>
-                    <Textarea
-                      id="automated_system_prompt"
-                      rows={4}
-                      value={form.automated_system_prompt}
-                      onChange={(e) => update('automated_system_prompt', e.target.value)}
-                      placeholder="System prompt describing the task for the agent…"
-                      maxLength={config.autoApprove.maxSystemPromptLength}
-                    />
-                  </div>
-
-                  <div className="grid gap-1.5">
-                    <Label>
-                      MCP tools{' '}
-                      <span className="text-muted-foreground text-xs">(max {config.autoApprove.maxMcpToolsCount}, optional)</span>
-                    </Label>
-                    <Select
-                      value={form.automated_mcp_tools[0] || ''}
-                      onValueChange={(v) => {
-                        if (v && !form.automated_mcp_tools.includes(v)) {
-                          update('automated_mcp_tools', [...form.automated_mcp_tools, v]);
-                        }
-                      }}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Add MCP tools…" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {mcpTools.length === 0 ? (
-                          <div className="px-3 py-2 text-sm text-muted-foreground">
-                            No MCP tools available
-                          </div>
-                        ) : (
-                          mcpTools
-                            .filter(tool => !form.automated_mcp_tools.includes(tool.name))
-                            .map((tool) => (
-                              <SelectItem key={tool.name} value={tool.name}>
-                                <span>{tool.name}</span>
-                                {tool.server && (
-                                  <span className="ml-2 text-xs text-muted-foreground">
-                                    ({tool.server})
-                                  </span>
-                                )}
-                              </SelectItem>
-                            ))
-                        )}
-                      </SelectContent>
-                    </Select>
-                    {form.automated_mcp_tools.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {form.automated_mcp_tools.map((tool) => (
-                          <Badge key={tool} variant="secondary" className="gap-1">
-                            {tool}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                update('automated_mcp_tools', form.automated_mcp_tools.filter(t => t !== tool));
-                              }}
-                              className="ml-1 hover:text-destructive"
-                            >
-                              ×
-                            </button>
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Extended thinking (only for Claude/Gemini models) */}
-                  {(form.automated_model.startsWith('claude') || form.automated_model.startsWith('gemini')) && (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id="automated_enable_thinking"
-                          checked={form.automated_enable_thinking}
-                          onChange={(e) => update('automated_enable_thinking', e.target.checked)}
-                          className="h-4 w-4"
-                        />
-                        <Label htmlFor="automated_enable_thinking" className="cursor-pointer">
-                          Enable extended thinking
-                        </Label>
-                      </div>
-
-                      {form.automated_enable_thinking && (
-                        <div className="grid gap-1.5">
-                          <Label>Thinking level</Label>
-                          <Select
-                            value={form.automated_thinking_level}
-                            onValueChange={(v) => update('automated_thinking_level', v)}
-                          >
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="minimal">Minimal</SelectItem>
-                              <SelectItem value="low">Low</SelectItem>
-                              <SelectItem value="medium">Medium</SelectItem>
-                              <SelectItem value="high">High</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
+              <SectionHeader n={2} title="What to run" />
+              <AgentActionFields
+                value={form}
+                onChange={(patch) => {
+                  setForm((f) => ({ ...f, ...patch }));
+                  setError(null);
+                }}
+                subAgents={subAgents}
+                mcpTools={mcpTools}
+                instructionLabel="Prompt"
+                instructionPlaceholder="Specific task or instruction for this execution (leave empty for default behavior)…"
+                instructionHint={
+                  form.sub_agent_mode === 'automated'
+                    ? 'If empty, the agent follows its configured system prompt.'
+                    : 'Sent to the sub-agent. If empty, defaults to "Execute your configured task."'
+                }
+                onLimitExceeded={setError}
+                fieldErrors={fieldErrors}
+              />
             </>
           )}
 
-          {/* Voice call toggle — dispatch job as a phone call via voice-agent */}
-          {form.job_type === 'task' && (
-            <div className="flex items-center justify-between rounded-lg border p-3">
-              <div className="space-y-0.5">
-                <Label htmlFor="voice_call" className="cursor-pointer">Voice call</Label>
-                <p className="text-xs text-muted-foreground">
-                  Dispatch this job as a phone call via the voice agent.
-                </p>
-              </div>
-              <Switch
-                id="voice_call"
-                checked={form.voice_call}
-                onCheckedChange={(checked) => update('voice_call', checked)}
-              />
-            </div>
+          {/* Watch fields — the same component the job detail page renders, so a field
+              cannot be added to one and forgotten in the other. */}
+          {form.job_type === 'watch' && (
+            <WatchFields
+              mode="edit"
+              value={form}
+              onChange={(next) => {
+                setForm((f) => ({ ...f, ...next }));
+                // Editing a field is what clears its AI marker and its error: the page
+                // knows which keys changed, so neither has to be cleared field by field.
+                clearAi(...Object.keys(next));
+                clearFieldError(...Object.keys(next));
+                setError(null);
+              }}
+              mcpTools={mcpTools}
+              subAgents={subAgents}
+              fieldErrors={fieldErrors}
+              aiFilled={aiFilled}
+              onError={setError}
+            />
           )}
 
-          {/* Prompt for task jobs */}
-          {form.job_type === 'task' && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="prompt">
-                Prompt{' '}
-                <span className="text-muted-foreground text-xs">(optional)</span>
+          {/* How the outcome reaches the user. Voice belongs here rather than with the
+              agent config: it decides how the user hears about it, and it applies to a
+              watch that only notifies just as much as to one that runs an agent. */}
+          <SectionHeader n={form.job_type === 'watch' ? 5 : 4} title="How to reach you" />
+
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div className="space-y-0.5">
+              <Label htmlFor="voice_call" className="cursor-pointer">
+                Phone call
               </Label>
-              <Textarea
-                id="prompt"
-                rows={3}
-                value={form.prompt}
-                onChange={(e) => update('prompt', e.target.value)}
-                placeholder="Specific task or instruction for this execution (leave empty for default behavior)…"
-              />
-              <p className="text-xs text-muted-foreground">
-                {form.sub_agent_mode === 'automated' 
-                  ? 'Optional task-specific instruction. If empty, the agent will follow its configured system prompt.'
-                  : 'This instruction will be sent to the sub-agent. If empty, defaults to "Execute your configured task."'}
+              <p className="text-muted-foreground text-xs">
+                {form.job_type === 'watch'
+                  ? 'Call instead of sending a message, when the condition is met.'
+                  : 'Deliver this job as a phone call via the voice agent.'}
               </p>
             </div>
-          )}
+            <Switch
+              id="voice_call"
+              checked={form.voice_call}
+              onCheckedChange={(checked) => update('voice_call', checked)}
+            />
+          </div>
 
-          {/* Watch fields */}
-          {form.job_type === 'watch' && (
-            <>
-              {/* AI generate – shown always for watch jobs */}
-              <div className="grid gap-2 rounded-lg border border-dashed px-3 py-3">
-                <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  AI-fill all watch fields
-                </p>
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="Describe the condition to watch (e.g. 'price drops below 100')"
-                    value={aiQuery}
-                    onChange={(e) => setAiQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleAiGenerate()}
-                    className="flex-1 text-sm"
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    disabled={!aiQuery.trim() || aiLoading || mcpTools.length === 0}
-                    onClick={handleAiGenerate}
-                  >
-                    {aiLoading ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      'Generate'
-                    )}
-                  </Button>
-                </div>
-              </div>
-
-              {/* Check tool */}
-              <div className="grid gap-1.5">
-                <Label>Check tool</Label>
-                <Select
-                  value={form.check_tool}
-                  onValueChange={(v) => update('check_tool', v)}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select an MCP tool…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {mcpTools.length === 0 ? (
-                      <div className="px-3 py-2 text-sm text-muted-foreground">
-                        No MCP tools available
-                      </div>
-                    ) : (
-                      mcpTools.map((tool) => (
-                        <SelectItem key={tool.name} value={tool.name}>
-                          <span>{tool.name}</span>
-                          {tool.server && (
-                            <span className="ml-2 text-xs text-muted-foreground">
-                              ({tool.server})
-                            </span>
-                          )}
-                        </SelectItem>
-                      ))
-                    )}
-                  </SelectContent>
-                </Select>
-                {selectedTool?.description && (
-                  <p className="text-xs text-muted-foreground">{selectedTool.description}</p>
-                )}
-              </div>
-
-              {/* Check arguments */}
-              <div className="grid gap-1.5">
-                <Label htmlFor="check_args">
-                  Check arguments{' '}
-                  <span className="text-muted-foreground text-xs">(JSON, optional)</span>
-                </Label>
-                <Textarea
-                  id="check_args"
-                  rows={2}
-                  value={form.check_args_text}
-                  onChange={(e) => update('check_args_text', e.target.value)}
-                  placeholder='{"key": "value"}'
-                  className="font-mono text-xs"
-                />
-              </div>
-
-              {/* Condition expression + expected value */}
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="grid gap-1.5">
-                  <Label htmlFor="condition_expr">
-                    Condition expression{' '}
-                    <span className="text-muted-foreground text-xs">(JSONPath)</span>
-                  </Label>
-                  <Input
-                    id="condition_expr"
-                    value={form.condition_expr}
-                    onChange={(e) => update('condition_expr', e.target.value)}
-                    placeholder="$.status"
-                  />
-                </div>
-                <div className="grid gap-1.5">
-                  <Label htmlFor="expected_value">
-                    Expected value{' '}
-                    <span className="text-muted-foreground text-xs">(leave empty to check "is not null")</span>
-                  </Label>
-                  <Input
-                    id="expected_value"
-                    value={form.expected_value}
-                    onChange={(e) => update('expected_value', e.target.value)}
-                    placeholder="success"
-                  />
-                </div>
-              </div>
-
-              {/* LLM Condition */}
-              <div className="grid gap-1.5">
-                <Label htmlFor="llm_condition">
-                  LLM condition{' '}
-                  <span className="text-muted-foreground text-xs">(optional - uses GPT-4o-mini)</span>
-                </Label>
-                <Textarea
-                  id="llm_condition"
-                  rows={2}
-                  value={form.llm_condition}
-                  onChange={(e) => update('llm_condition', e.target.value)}
-                  placeholder="The status indicates success or completion"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Natural language condition evaluated by LLM. Use when exact matching is not suitable. Takes precedence over expected value when provided.
-                </p>
-              </div>
-
-              {/* Destroy after trigger */}
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="destroy_after_trigger"
-                  checked={form.destroy_after_trigger}
-                  onCheckedChange={(checked) => update('destroy_after_trigger', checked === true)}
-                />
-                <Label
-                  htmlFor="destroy_after_trigger"
-                  className="text-sm font-normal cursor-pointer"
-                >
-                  Disable job after first successful trigger
-                </Label>
-              </div>
-              <p className="text-xs text-muted-foreground -mt-1 ml-6">
-                When enabled (default), the watch will automatically be disabled after the condition is met once. Disable this to keep the watch running indefinitely.
-              </p>
-
-              {/* Optional sub-agent trigger */}
-              <div className="grid gap-1.5">
-                <Label>
-                  Sub-agent{' '}
-                  <span className="text-muted-foreground text-xs">(optional)</span>
-                </Label>
-                <SubAgentSelect
-                  value={form.sub_agent_id}
-                  onChange={(v) => update('sub_agent_id', v)}
-                  subAgents={subAgents}
-                  includeNone
-                />
-                <p className="text-xs text-muted-foreground">
-                  When the condition is met, this sub-agent is invoked with the check tool's result as its
-                  input, plus the instruction below. Its response is delivered instead of the notification
-                  message.
-                </p>
-              </div>
-
-              {/* Instruction for the triggered sub-agent */}
-              {form.sub_agent_id && (
-                <div className="grid gap-1.5">
-                  <Label htmlFor="watch_prompt">
-                    Sub-agent instruction{' '}
-                    <span className="text-muted-foreground text-xs">(optional)</span>
-                  </Label>
-                  <Textarea
-                    id="watch_prompt"
-                    rows={3}
-                    value={form.prompt}
-                    onChange={(e) => update('prompt', e.target.value)}
-                    placeholder="e.g. Summarize the result and email it to the account owner…"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Sent to the sub-agent together with the check result when the condition triggers. If
-                    empty, the agent is asked to "take appropriate action based on the check result".
-                  </p>
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Notification message for watch jobs (superseded by the sub-agent's response when one is set) */}
-          {form.job_type === 'watch' && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="notification_message">Notification message (optional)</Label>
-              <Textarea
-                id="notification_message"
-                rows={3}
-                value={form.notification_message}
-                onChange={(e) => update('notification_message', e.target.value)}
-                placeholder="Leave empty to auto-generate with LLM."
-              />
-              <p className="text-xs text-muted-foreground">
-                {form.sub_agent_id
-                  ? 'Not used while a sub-agent is set — the sub-agent’s response is delivered instead.'
-                  : 'If left empty, an LLM will generate a notification message based on the check result.'}
-              </p>
-            </div>
-          )}
-
-          {/* Delivery channel */}
           <div className="grid gap-1.5">
-            <Label>Delivery channel <span className="text-muted-foreground text-xs">(optional)</span></Label>
+            <Label>
+              Delivery channel <span className="text-muted-foreground text-xs">(optional)</span>
+              {aiFilled.has('delivery_channel') && <AiBadge />}
+            </Label>
             <Select
               value={form.delivery_channel || '_none'}
               onValueChange={(v) => {
                 update('delivery_channel', v === '_none' ? '' : v);
+                clearAi('delivery_channel');
               }}
             >
               <SelectTrigger>

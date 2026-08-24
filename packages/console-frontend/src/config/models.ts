@@ -155,3 +155,17 @@ export function useEmbeddingConfigured() {
   });
   return { embeddingConfigured: !!data?.ready, embeddingStatus: data, isLoading };
 }
+
+/**
+ * Whether a model selection is a capability tier (`tier:<tier>`) rather than a pinned
+ * alias. A tier follows the fleet default for that tier, so it survives a model
+ * retirement; a pinned alias does not.
+ */
+export function isModelTier(model: string): boolean {
+  return model.startsWith('tier:');
+}
+
+/** The tier name behind a `tier:` selection, or null for a pinned alias. */
+export function modelTierOf(model: string): string | null {
+  return isModelTier(model) ? model.slice('tier:'.length) : null;
+}
