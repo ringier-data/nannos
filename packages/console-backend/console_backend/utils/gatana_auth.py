@@ -73,9 +73,12 @@ async def get_user_subject_token(request: Request, user: User) -> str:
         #
         # The caller authenticates to console-backend with an `agent-console`-audience
         # token (the orchestrator exchanges user → CONSOLE_BACKEND_CLIENT_ID to reach us,
-        # see orchestrator discovery), NOT a gatana token. Gatana validates the audience
-        # and rejects an agent-console token with 401, so we must exchange the incoming
-        # token for the gatana client id here — mirroring the session path below.
+        # see orchestrator discovery), NOT a token for whatever we are about to call.
+        # Returned unexchanged on purpose: this function's job is to identify the user,
+        # and the exchange belongs to the caller that knows the target audience —
+        # `get_gatana_token` for the gateway, `token_for` when the audience follows the
+        # tool. Both paths of this function return a subject token, and every caller
+        # exchanges it; a gateway call made with this token directly would be a 401.
         if not auth_header.startswith("Bearer "):
             logger.error("Invalid Authorization header format")
             raise HTTPException(
