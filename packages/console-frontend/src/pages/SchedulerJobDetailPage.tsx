@@ -41,7 +41,7 @@ import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
 import { LastCheckPanel } from '@/components/LastCheckPanel';
 import { argsModeFor, resolveArgs } from '@/lib/watchArgs';
-import { automatedSubAgentParameters } from '@/lib/agentAction';
+import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
 import { config } from '@/config';
 import {
   type JobRunStatus,
@@ -458,6 +458,17 @@ function EditForm({ job }: { job: ScheduledJob }) {
       if (!watch.cel_expr.trim() && !watch.llm_condition.trim()) {
         setError('Write an expression, a condition for the model to judge, or both.');
         return;
+      }
+      // The same standard the create dialog holds an agent outcome to. Without it,
+      // outcome "agent" with nothing selected saved silently as notify-only — the
+      // downgrade this page was already fixed for on the sending side — and an
+      // incomplete inline definition surfaced as a raw 422 instead of the message.
+      if (watch.outcome === 'agent') {
+        const agentError = agentActionError(watch);
+        if (agentError) {
+          setError(agentError);
+          return;
+        }
       }
     }
 

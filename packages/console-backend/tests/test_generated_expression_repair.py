@@ -132,6 +132,19 @@ class TestCelRepair:
         assert generate.await_count == _GENERATE_CONDITION_RETRIES
 
     @pytest.mark.asyncio
+    async def test_an_omitted_expression_is_taken_as_an_answer_not_a_gap(self):
+        # The retry prompt invites the model to drop cel_expr and judge instead. Merging
+        # the retry over the previous candidate used to resurrect the uncompilable
+        # expression, so it failed again on the identical error and burnt the remaining
+        # retry before reaching the fallback.
+        generate = AsyncMock(return_value={"llm_condition": "an outsider is invited"})
+        result = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "q")
+
+        assert result["cel_expr"] is None
+        assert result["llm_condition"] == "an outsider is invited"
+        assert generate.await_count == 1  # no retry spent re-failing the same expression
+
+    @pytest.mark.asyncio
     async def test_a_generated_llm_condition_is_preferred_over_the_raw_query(self):
         generate = AsyncMock(return_value={"llm_condition": "an external attendee is invited"})
         result = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "raw query")

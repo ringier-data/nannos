@@ -348,7 +348,11 @@ export function WatchFields({
                       {liveResult ? 'Run again' : 'Run check now'}
                     </Button>
                     <span className="text-muted-foreground text-xs">
-                      {check.result
+                      {/* liveResult, not check.result: once the tool or its arguments
+                          change, the stored result describes a call the job would no
+                          longer make. The panel and the button label already drop it,
+                          and this line kept describing it next to "Run check now". */}
+                      {liveResult
                         ? `${check.isError ? 'Tool reported an error' : 'Responded'} in ${check.elapsedMs}ms${check.truncated ? ' · response truncated' : ''}`
                         : 'See the real response before writing a condition.'}
                     </span>

@@ -195,7 +195,14 @@ async def _repair_cel(
         except Exception:
             logger.warning("Retry for an unusable cel_expr failed", exc_info=True)
             break
+        # Merged so the rest of the draft survives a retry that only restates the
+        # condition — but an omitted cel_expr is an answer, not a gap: the retry prompt
+        # invites the model to drop it and judge instead. Merging would have resurrected
+        # the uncompilable expression, failed it again on the identical error, and burnt
+        # the remaining retry before reaching the fallback.
         candidate = {**candidate, **retried}
+        if "cel_expr" not in retried:
+            candidate.pop("cel_expr", None)
 
     logger.info("No usable cel_expr after retries — falling back to a judged condition")
     repaired = {k: v for k, v in candidate.items() if k != "cel_expr"}

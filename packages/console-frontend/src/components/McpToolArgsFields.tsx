@@ -61,6 +61,22 @@ export function McpToolArgsFields({
   // is re-rendered with normalised spacing.
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
+  /**
+   * The text to show for a field: the draft only while it still agrees with what is
+   * stored, otherwise the stored state.
+   *
+   * Validity is derived rather than invalidated, because a draft is a view of state the
+   * field does not own. Anything can replace `exprs` from outside — applying an AI draft,
+   * switching the check tool — and a draft that outlived such a change would keep showing
+   * an expression that is no longer the one being submitted.
+   */
+  function shownFor(key: string, expr: string | undefined, raw: unknown): string {
+    const draft = drafts[key];
+    if (draft !== undefined && draft.slice(1).trimStart() === (expr ?? '')) return draft;
+    if (expr !== undefined) return `= ${expr}`;
+    return raw === undefined || raw === null ? '' : String(raw);
+  }
+
   function setDraft(key: string, text: string | undefined) {
     setDrafts((prev) => {
       if (text === undefined) {
@@ -172,13 +188,7 @@ export function McpToolArgsFields({
                 // expression over `now` and `prev`, resolved fresh on every run —
                 // how a rolling date window lives in a date argument.
                 const expr = exprs[param.key];
-                const shown =
-                  drafts[param.key] ??
-                  (expr !== undefined
-                    ? `= ${expr}`
-                    : raw === undefined || raw === null
-                      ? ''
-                      : String(raw));
+                const shown = shownFor(param.key, expr, raw);
                 return (
                   <Input
                     id={`arg-${param.key}`}
@@ -187,6 +197,11 @@ export function McpToolArgsFields({
                     inputMode={param.type === 'string' || expr !== undefined ? undefined : 'decimal'}
                     value={shown}
                     placeholder={param.placeholder ?? param.description ?? ''}
+                    onBlur={() => {
+                      // A field left at a bare `=` stores nothing, so without this it
+                      // would go on looking configured while the argument is unset.
+                      if (exprs[param.key] === undefined) setDraft(param.key, undefined);
+                    }}
                     onChange={(e) => {
                       const text = e.target.value;
                       if (text.startsWith('=')) {

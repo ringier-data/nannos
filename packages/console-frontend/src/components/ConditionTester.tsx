@@ -69,7 +69,12 @@ export function ConditionTester({
   // Re-validate whenever the condition or the payload changes. Keyed on the
   // serialised payload so a re-run of the same tool returning the same data does not
   // trigger a pointless call.
-  const payloadKey = hasPayload ? JSON.stringify(payload) : '';
+  // Memoised: a check response can be tens of kilobytes, and this runs in the render
+  // body — unmemoised it re-serialised on every keystroke anywhere in the watch form.
+  const payloadKey = useMemo(
+    () => (hasPayload ? JSON.stringify(payload) : ''),
+    [hasPayload, payload],
+  );
   useEffect(() => {
     if (!hasPayload && !parseCheckOnly) return;
     if (!cel && !judge) return;
