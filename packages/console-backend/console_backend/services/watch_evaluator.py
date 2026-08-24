@@ -6,7 +6,9 @@ concluded nothing had happened. Three things were wrong with that.
 
   * The scheduler could not act on the outcome, because it learned it only after
     dispatching. A voice-call watch therefore rang on every poll, before anything had
-    been evaluated, which is why voice calls were restricted to task jobs.
+    been evaluated, which is why voice calls were restricted to task jobs. That
+    restriction is gone: a watch reaches dispatch only once its condition is met, so a
+    watch can ring a phone and it rings because something happened.
   * Every quiet poll cost a full agent run. An hourly watch that fires monthly spent
     ~700 agent invocations a month deciding to do nothing.
   * "Would this condition trigger?" — which the console answers while a job is being

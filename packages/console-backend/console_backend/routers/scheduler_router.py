@@ -446,9 +446,12 @@ async def generate_job_draft(
                 logger.info("Discarding uncompilable generated check_args_exprs[%r] %r: %s", key, expr, exc)
         result["check_args_exprs"] = kept or None
 
-    # Fields the model is never allowed to set: an inline sub-agent would be created
-    # for real, voice_call does not work on watch jobs (the runner would ring on every
-    # poll), and the rest are deployment concerns rather than things a sentence implies.
+    # Fields the model is never allowed to set: an inline sub-agent would be created for
+    # real, a voice call places an outbound phone call and is left for the person to tick
+    # deliberately, and the rest are deployment concerns rather than things a sentence
+    # implies. (voice_call was excluded because the old runner would have rung on every
+    # poll; that is no longer true — evaluation happens before dispatch now, so a watch
+    # rings only when its condition is met. It stays excluded for the reason above.)
     generated = {
         key: value
         for key, value in result.items()
