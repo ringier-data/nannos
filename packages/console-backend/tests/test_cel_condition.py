@@ -294,3 +294,76 @@ class TestResourceCeilings:
         # Nothing else is reachable by name from an expression.
         with pytest.raises((CelEvaluationError, CelSyntaxError)):
             await evaluate_cel("__import__", {}, datetime.now(timezone.utc))
+
+
+class TestMigrationCompatibilityFunctions:
+    """jsonpath() and eq_ci() are no longer advertised, so these tests are what keep them.
+
+    Migration 083 rewrote every stored JSONPath condition onto these two functions on the
+    promise that no verdict would change. That makes them load-bearing for jobs nobody
+    will re-author — while CEL_SYNTAX_HINT deliberately no longer mentions them, because
+    they are the only part of a stored condition a conformant CEL engine would not
+    understand. Unadvertised plus untested is what gets deleted by a tidy-up, so the
+    contracts the migration relied on are pinned here rather than left to the docstring.
+    """
+
+    NOW = datetime.now(timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_jsonpath_returns_null_for_no_match(self):
+        cel = await evaluate_cel('jsonpath(result, "$.missing")', {"a": 1}, self.NOW)
+        assert cel.value is None
+        assert cel.gate is False  # nothing extracted is nothing to trigger on
+
+    @pytest.mark.asyncio
+    async def test_jsonpath_returns_the_value_itself_for_one_match(self):
+        # Not a one-element list: the old extractor unwrapped, and a condition comparing
+        # against a scalar would break if this started wrapping.
+        cel = await evaluate_cel('jsonpath(result, "$.a.b")', {"a": {"b": "x"}}, self.NOW)
+        assert cel.value == "x"
+
+    @pytest.mark.asyncio
+    async def test_jsonpath_returns_a_list_for_several_matches(self):
+        cel = await evaluate_cel(
+            'jsonpath(result, "$.items[*].n")', {"items": [{"n": 1}, {"n": 2}]}, self.NOW
+        )
+        assert cel.value == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_jsonpath_does_what_native_cel_cannot(self):
+        # The one capability with no native spelling: recursive descent to unknown depth.
+        cel = await evaluate_cel('jsonpath(result, "$..n")', {"x": {"y": {"n": 7}}}, self.NOW)
+        assert cel.value == 7
+
+    @pytest.mark.asyncio
+    async def test_eq_ci_compares_case_insensitively(self):
+        cel = await evaluate_cel('eq_ci(result.s, "failed")', {"s": "FAILED"}, self.NOW)
+        assert cel.value is True
+        assert cel.is_boolean  # a boolean result gates directly
+
+    @pytest.mark.asyncio
+    async def test_eq_ci_compares_both_sides_as_text(self):
+        # The old comparison stringified, so a numeric payload matched a string expected
+        # value. Jobs migrated on that behaviour.
+        cel = await evaluate_cel('eq_ci(result.code, "200")', {"code": 200}, self.NOW)
+        assert cel.value is True
+
+    @pytest.mark.asyncio
+    async def test_eq_ci_needs_no_regex_escaping(self):
+        # Why it stays registered rather than being dropped for matches("(?i)…"): the
+        # standard spelling would read these metacharacters as a pattern.
+        cel = await evaluate_cel('eq_ci(result.v, "V1.2+BUILD")', {"v": "v1.2+build"}, self.NOW)
+        assert cel.value is True
+
+    @pytest.mark.asyncio
+    async def test_the_advertised_case_insensitive_spelling_works(self):
+        # What CEL_SYNTAX_HINT teaches instead, and the reason it can: matches is core CEL.
+        cel = await evaluate_cel('result.s.matches("(?i)^failed$")', {"s": "FAILED"}, self.NOW)
+        assert cel.value is True
+
+    @pytest.mark.asyncio
+    async def test_the_strings_extension_is_not_available(self):
+        # lowerAscii() would be the obvious spelling; celpy does not register it, which is
+        # why the hint teaches matches() and why eq_ci had no native equivalent.
+        with pytest.raises((CelEvaluationError, CelSyntaxError)):
+            await evaluate_cel('result.s.lowerAscii() == "failed"', {"s": "FAILED"}, self.NOW)

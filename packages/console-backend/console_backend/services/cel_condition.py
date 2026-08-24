@@ -18,14 +18,28 @@ The expression is evaluated against three variables:
                  change-detection gates (``result != prev``) possible without state
                  beyond what the job already keeps.
 
-Two extension functions exist mainly so the SQL migration off the old JSONPath
-conditions could be a string rewrite rather than a parser, but both remain available
-to authors:
+Three extension functions are registered. One is for authoring; two exist so the SQL
+migration off the old JSONPath conditions could be a string rewrite rather than a
+parser, and are deliberately not advertised in CEL_SYNTAX_HINT:
 
-  * ``jsonpath(value, "$.a[*].b")`` — extract with a JSONPath, for path styles CEL
-    cannot express (regex filters, recursive descent). Returns null on no match, the
-    value on one match, a list on several — the old extractor's exact contract.
+  * ``strftime(t, "%Y-%m-%d")`` — format a timestamp. Load-bearing, and advertised:
+    dynamic check arguments are usually a formatted date, and CEL has no native
+    formatting (``string(t)`` gives ISO 8601 and nothing narrower).
+  * ``jsonpath(value, "$.a[*].b")`` — extract with a JSONPath. Returns null on no
+    match, the value on one match, a list on several: the old extractor's exact
+    contract, which is the point. Native CEL covers all of this except recursive
+    descent over unknown depth (``$..n``) and regex filters, and a condition is
+    written against one known tool response, so new work should use ``map``/``filter``.
   * ``eq_ci(a, b)`` — the old rules' comparison: both sides as text, case-insensitive.
+    ``matches("(?i)^x$")`` is the standard spelling and what the hint teaches. (Note
+    ``lowerAscii()`` is *not* available: it belongs to the CEL strings extension, which
+    celpy does not register.) eq_ci needs no regex escaping, so it is still the safer
+    choice for a value full of metacharacters — one reason it stays registered rather
+    than being dropped.
+
+Not advertising the latter two is about portability: they are the only part of a stored
+condition that a conformant CEL engine would not understand, so every new expression
+that avoids them is one an engine change would not have to re-migrate.
 
 CEL rather than JSONPath filters or a JS sandbox on purpose: it is non-Turing-complete
 (evaluation always terminates), has native timestamp/duration arithmetic, and an
@@ -117,8 +131,8 @@ CEL_SYNTAX_HINT = (
     "returns is also what is recorded on the run and handed to the model or agent, "
     "so prefer returning the evidence over returning a bare boolean. Guard optional "
     "fields with has(), e.g. has(e.attendees) && e.attendees.exists(a, ...). "
-    'For path styles CEL cannot express, jsonpath(result, "$.a[*].b") extracts with '
-    "a JSONPath; eq_ci(a, b) compares as text, case-insensitively; "
+    "Compare text case-insensitively with matches, e.g. "
+    'result.status.matches("(?i)^failed$"). '
     "strftime(t, '%Y-%m-%d') formats a timestamp (string(t) renders ISO 8601)."
 )
 
