@@ -10,7 +10,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditEntityType
-from ..models.scheduled_job import JobRunStatus, JobType, ScheduledJob, ScheduledJobRun, ScheduleKind
+from ..models.scheduled_job import (
+    ConditionEvaluation,
+    JobRunStatus,
+    JobType,
+    ScheduledJob,
+    ScheduledJobRun,
+    ScheduleKind,
+)
 from ..models.user import User
 from ..utils.timezones import resolve_timezone
 from .base import AuditedRepository
@@ -309,7 +316,7 @@ class ScheduledJobRepository(AuditedRepository):
         error_message: str | None = None,
         conversation_id: str | None = None,
         delivered: bool = False,
-        condition_evaluation: dict[str, Any] | None = None,
+        condition_evaluation: ConditionEvaluation | None = None,
     ) -> None:
         """Finalise a run record with execution outcome."""
         await db.execute(
@@ -332,8 +339,12 @@ class ScheduledJobRepository(AuditedRepository):
                 "error_message": error_message,
                 "conversation_id": conversation_id,
                 "delivered": delivered,
+                # mode="json" so the stored form is exactly what ScheduledJobRun will
+                # validate when it is read back.
                 "condition_evaluation": (
-                    json.dumps(condition_evaluation) if condition_evaluation is not None else None
+                    json.dumps(condition_evaluation.model_dump(mode="json"))
+                    if condition_evaluation is not None
+                    else None
                 ),
             },
         )

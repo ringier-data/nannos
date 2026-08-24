@@ -44,6 +44,15 @@ class ConditionEvaluation(BaseModel):
     Recorded per run because it explains an occurrence, and because a model's judgement
     cannot be reconstructed afterwards: the reasoning exists only while the run happens.
     Without it "Condition not met" is the entire explanation a user ever gets.
+
+    Written as this model and read back as this model, so one declaration governs both
+    directions. What that catches: an invented `mode` (the Literal rejects it at write
+    time) and a mistyped field name (pyright, in the editor — there is no type-check gate
+    in CI). What it deliberately does not catch is an *unknown* key at runtime: extras
+    stay tolerated, because this same model parses stored JSONB, and forbidding them
+    would turn "a newer version wrote a field this one does not know" into a failure to
+    read the run at all — a rollback would take the run history down with it. Extras are
+    dropped on read, which is how rows written before a field was removed still read.
     """
 
     met: bool

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from console_backend.models.scheduled_job import JobType, ScheduledJob, ScheduleKind
+from console_backend.models.scheduled_job import ConditionEvaluation
 from console_backend.services.mcp_tool_client import GatewayError, ToolCallResult
 from console_backend.services.watch_evaluator import WatchEvaluator
 
@@ -134,9 +135,9 @@ class TestCelConditions:
         _gateway(monkeypatch, {"items": [{"status": "FAILED", "id": 7}, {"status": "OK", "id": 8}]})
         outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "tok")
         assert outcome.condition_met is True
-        assert outcome.evaluation["mode"] == "cel"
-        assert outcome.evaluation["gate_met"] is True
-        assert outcome.evaluation["extracted"] == [{"status": "FAILED", "id": 7}]
+        assert outcome.evaluation.mode == "cel"
+        assert outcome.evaluation.gate_met is True
+        assert outcome.evaluation.extracted == [{"status": "FAILED", "id": 7}]
 
     @pytest.mark.asyncio
     async def test_an_empty_extraction_is_a_quiet_poll(self, monkeypatch):
@@ -144,12 +145,9 @@ class TestCelConditions:
         outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "tok")
         assert outcome.condition_met is False
         assert outcome.error is None
-        assert outcome.evaluation == {
-            "met": False,
-            "mode": "cel",
-            "gate_met": False,
-            "extracted": [],
-        }
+        assert outcome.evaluation == ConditionEvaluation(
+            met=False, mode="cel", gate_met=False, extracted=[]
+        )
 
     @pytest.mark.asyncio
     async def test_a_boolean_expression_gates_directly(self, monkeypatch):
@@ -158,7 +156,7 @@ class TestCelConditions:
             AsyncMock(), _job(cel_expr="size(result.items) > 2"), "tok"
         )
         assert outcome.condition_met is True
-        assert outcome.evaluation["extracted"] is True
+        assert outcome.evaluation.extracted is True
 
     @pytest.mark.asyncio
     async def test_time_relative_conditions_use_the_real_clock(self, monkeypatch):
@@ -178,7 +176,7 @@ class TestCelConditions:
             "tok",
         )
         assert outcome.condition_met is True
-        assert outcome.evaluation["extracted"] == [{"start": soon}]
+        assert outcome.evaluation.extracted == [{"start": soon}]
 
     @pytest.mark.asyncio
     async def test_prev_is_the_last_check_result(self, monkeypatch):
@@ -276,8 +274,8 @@ class TestJudgedConditions:
                     "tok",
                 )
         assert outcome.condition_met is True
-        assert outcome.evaluation["mode"] == "judge"
-        assert outcome.evaluation["reasoning"] == "external attendee"
+        assert outcome.evaluation.mode == "judge"
+        assert outcome.evaluation.reasoning == "external attendee"
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_fails_closed(self, monkeypatch):
@@ -296,7 +294,7 @@ class TestJudgedConditions:
                     AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok"
                 )
         assert outcome.condition_met is False
-        assert "could not be judged" in outcome.evaluation["reasoning"]
+        assert "could not be judged" in outcome.evaluation.reasoning
 
     @pytest.mark.asyncio
     async def test_no_configured_model_fails_closed_and_says_that(self, monkeypatch):
@@ -309,7 +307,7 @@ class TestJudgedConditions:
                 AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok"
             )
         assert outcome.condition_met is False
-        assert "No chat model is configured" in outcome.evaluation["reasoning"]
+        assert "No chat model is configured" in outcome.evaluation.reasoning
 
     @pytest.mark.asyncio
     async def test_an_overlong_reasoning_is_capped(self, monkeypatch):
@@ -326,7 +324,7 @@ class TestJudgedConditions:
                 outcome = await WatchEvaluator().evaluate(
                     AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok"
                 )
-        assert len(outcome.evaluation["reasoning"]) == 2000
+        assert len(outcome.evaluation.reasoning) == 2000
 
     @pytest.mark.asyncio
     async def test_a_large_extracted_value_is_not_copied_onto_every_run(self, monkeypatch):
@@ -344,8 +342,8 @@ class TestJudgedConditions:
                 outcome = await WatchEvaluator().evaluate(
                     AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok"
                 )
-        assert isinstance(outcome.evaluation["extracted"], str)
-        assert outcome.evaluation["extracted"].endswith("… (truncated)")
+        assert isinstance(outcome.evaluation.extracted, str)
+        assert outcome.evaluation.extracted.endswith("… (truncated)")
 
 
 class TestCelGateThenJudge:
@@ -363,8 +361,8 @@ class TestCelGateThenJudge:
             )
         judge.assert_not_awaited()
         assert outcome.condition_met is False
-        assert outcome.evaluation["mode"] == "cel+judge"
-        assert outcome.evaluation["gate_met"] is False
+        assert outcome.evaluation.mode == "cel+judge"
+        assert outcome.evaluation.gate_met is False
 
     @pytest.mark.asyncio
     async def test_a_passed_gate_hands_the_model_the_extraction(self, monkeypatch):
@@ -379,13 +377,13 @@ class TestCelGateThenJudge:
                     AsyncMock(), _job(llm_condition="the failure looks urgent"), "tok"
                 )
         assert outcome.condition_met is True
-        assert outcome.evaluation == {
-            "met": True,
-            "mode": "cel+judge",
-            "gate_met": True,
-            "reasoning": "disk full is urgent",
-            "extracted": [{"status": "FAILED", "note": "disk full"}],
-        }
+        assert outcome.evaluation == ConditionEvaluation(
+            met=True,
+            mode="cel+judge",
+            gate_met=True,
+            reasoning="disk full is urgent",
+            extracted=[{"status": "FAILED", "note": "disk full"}],
+        )
         # The judge received the evidence the gate matched, not just the raw response.
         prompt = judge.await_args.args[0]
         assert "disk full" in prompt
@@ -408,8 +406,8 @@ class TestCelGateThenJudge:
                     AsyncMock(), _job(llm_condition="the failure looks urgent"), "tok"
                 )
         assert outcome.condition_met is False
-        assert outcome.evaluation["gate_met"] is True
-        assert outcome.evaluation["met"] is False
+        assert outcome.evaluation.gate_met is True
+        assert outcome.evaluation.met is False
 
 
 class TestJudgeKnowsTheTime:

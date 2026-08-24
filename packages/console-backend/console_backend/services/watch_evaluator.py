@@ -37,7 +37,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from .cel_condition import CelEvaluationError, CelSyntaxError, evaluate_arg_exprs, evaluate_cel
 
-from ..models.scheduled_job import ScheduledJob
+from ..models.scheduled_job import ConditionEvaluation, ScheduledJob
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from ..services.llm_gateway import gateway_chat_json
 from ..services.mcp_tool_client import GatewayError, call_tool, token_for
@@ -96,10 +96,14 @@ class WatchOutcome:
     #: Set when the check could not be performed at all — an unreachable gateway, a tool
     #: that no longer exists. Distinct from "condition not met", which is a normal outcome.
     error: str | None = None
-    #: How the condition was decided, recorded on the run. A rule can be re-evaluated
+    #: How the condition was decided, recorded on the run. Typed, because this is what
+    #: ScheduledJobRun validates on the way back out of the database: as a bare dict, a
+    #: misspelled key serialised happily and then read back as a default — a run whose
+    #: expression matched would explain itself as one that matched nothing, with nothing
+    #: raising anywhere. A rule can be re-evaluated
     #: against check_result later; a model's reasoning cannot be reconstructed at all, so
     #: it is captured here or lost.
-    evaluation: dict[str, Any] | None = None
+    evaluation: ConditionEvaluation | None = None
 
 
 class WatchEvaluator:
@@ -177,12 +181,12 @@ class WatchEvaluator:
             )
 
         met, reasoning = await self._judge(db, job, check_result, check_result)
-        evaluation = {
-            "met": met,
-            "mode": "judge",
-            "reasoning": reasoning,
-            "extracted": _for_display(check_result),
-        }
+        evaluation = ConditionEvaluation(
+            met=met,
+            mode="judge",
+            reasoning=reasoning,
+            extracted=_for_display(check_result),
+        )
         logger.info("Job %d: watch condition met=%s", job.id, met)
         return WatchOutcome(condition_met=met, check_result=check_result, evaluation=evaluation)
 
@@ -222,23 +226,23 @@ class WatchEvaluator:
         extracted = _for_display(cel.value)
 
         if not cel.gate or not job.llm_condition:
-            evaluation = {
-                "met": cel.gate,
-                "mode": "cel+judge" if job.llm_condition else "cel",
-                "gate_met": cel.gate,
-                "extracted": extracted,
-            }
+            evaluation = ConditionEvaluation(
+                met=cel.gate,
+                mode="cel+judge" if job.llm_condition else "cel",
+                gate_met=cel.gate,
+                extracted=extracted,
+            )
             logger.info("Job %d: CEL gate met=%s (judged=no)", job.id, cel.gate)
             return WatchOutcome(condition_met=cel.gate, check_result=check_result, evaluation=evaluation)
 
         met, reasoning = await self._judge(db, job, cel.value, check_result)
-        evaluation = {
-            "met": met,
-            "mode": "cel+judge",
-            "gate_met": True,
-            "reasoning": reasoning,
-            "extracted": extracted,
-        }
+        evaluation = ConditionEvaluation(
+            met=met,
+            mode="cel+judge",
+            gate_met=True,
+            reasoning=reasoning,
+            extracted=extracted,
+        )
         logger.info("Job %d: CEL gate passed, model judged met=%s", job.id, met)
         return WatchOutcome(condition_met=met, check_result=check_result, evaluation=evaluation)
 

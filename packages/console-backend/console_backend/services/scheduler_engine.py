@@ -21,7 +21,7 @@ from sqlalchemy import text
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from .llm_gateway import gateway_chat
 from .watch_evaluator import WatchEvaluator, WatchOutcome
-from ..models.scheduled_job import JobRunStatus, JobType, ScheduledJob
+from ..models.scheduled_job import ConditionEvaluation, JobRunStatus, JobType, ScheduledJob
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
 from ..services.scheduler_token_service import SchedulerTokenService
@@ -534,7 +534,7 @@ class SchedulerEngine:
         delivered: bool = False,
         last_check_result: dict | None = None,
         paused_reason: str | None = None,
-        condition_evaluation: dict | None = None,
+        condition_evaluation: ConditionEvaluation | None = None,
     ) -> None:
         """Persist run outcome and advance job state."""
         success = status in (JobRunStatus.SUCCESS, JobRunStatus.CONDITION_NOT_MET)
