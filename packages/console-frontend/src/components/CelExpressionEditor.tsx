@@ -107,7 +107,9 @@ export function CelExpressionEditor({
       if (generated.llm_condition) patch.llm_condition = generated.llm_condition;
       onChange(patch);
       setAiNotes(generated.notes ?? []);
-      setAiVerified(generated.verified);
+      // The generated type has this optional (the field carries a default), unlike the
+      // hand-written one it replaced; null is this component's "not known".
+      setAiVerified(generated.verified ?? null);
       setAiQuery('');
     } catch (e) {
       setAiError(e instanceof Error ? e.message : String(e));

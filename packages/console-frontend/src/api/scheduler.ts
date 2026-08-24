@@ -1,22 +1,38 @@
 /**
  * Scheduler API shim
  *
- * Re-exports generated types so callers have a single import path, and
- * provides manual wrappers for endpoints whose bodies the generated SDK
- * cannot yet describe (because the backend previously used raw `request.json()`).
+ * Re-exports generated types so callers have a single import path, and adds the small
+ * amount of behaviour the generated operations do not carry: error messages worth
+ * showing a person (`formatApiError`), and the 428 risk handshake on a tool invoke.
  *
- * TODO: after running `npm run gen-sdk` following the backend fix,
- * `storeSchedulerConsent` can be removed and replaced by the generated
- * `storeConsentApiV1SchedulerConsentPost`.
+ * The five AI/validation/invoke calls go through the generated SDK. They used to be
+ * hand-rolled `(client as any).post({url})` with hand-written result types, because the
+ * backend read those bodies with raw `request.json()` and the SDK could not describe
+ * them; that is no longer true of any of them, and
+ * `packages/console-frontend/AGENTS.md` asks for the generated client. The remaining
+ * raw calls below are the CRUD ones whose bodies are still wider than the generated
+ * types (createScheduledJob's delivery_channel_id, for one).
  */
 import { client } from './generated/client.gen';
+import {
+  generateConditionApiV1SchedulerGenerateConditionPost,
+  generateJobDraftApiV1SchedulerGenerateJobDraftPost,
+  invokeMcpToolApiV1McpToolsInvokePost,
+  validateArgsExprApiV1SchedulerValidateArgsExprPost,
+  validateConditionApiV1SchedulerValidateConditionPost,
+} from './generated/sdk.gen';
 import type {
+  GenerateConditionRequest,
+  GenerateConditionResponse,
   McpToolInvokeResponse,
   McpToolRisk,
   RunNowResponse,
   ScheduledJob,
   ScheduledJobDraft,
   ScheduledJobRun,
+  ValidateArgsExprRequest,
+  ValidateArgsExprResponse,
+  ValidateConditionRequest,
   ValidateConditionResponse,
 } from './generated/types.gen';
 
@@ -149,69 +165,40 @@ export async function generateJobDraft(
   tools: Record<string, unknown>[],
   query: string,
 ): Promise<ScheduledJobDraft> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).post({
-    url: '/api/v1/scheduler/generate-job-draft',
+  const { data, error } = await generateJobDraftApiV1SchedulerGenerateJobDraftPost({
     body: { tools, query },
   });
   if (error) throw error;
   return data as ScheduledJobDraft;
 }
 
-export interface GenerateConditionResult {
-  cel_expr?: string | null;
-  llm_condition?: string | null;
-  /** With a payload: compiled AND evaluated against it. Without one: only compiled. */
-  verified: boolean;
-  /** Evaluation against the supplied payload: {gate, extracted}. */
-  evaluation?: { gate: boolean; extracted: unknown } | null;
-  notes: string[];
-}
+export type { GenerateConditionResponse } from './generated/types.gen';
 
 /**
  * Write or refine just the condition of a watch. Narrower than generateJobDraft: it
  * sees the real response shape, so it writes field paths that exist — and the backend
  * compiles, evaluates and repairs every candidate before returning it.
  */
-export async function generateCondition(body: {
-  query: string;
-  current_cel_expr?: string | null;
-  current_llm_condition?: string | null;
-  result?: unknown;
-  check_tool?: string | null;
-}): Promise<GenerateConditionResult> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).post({
-    url: '/api/v1/scheduler/generate-condition',
-    body,
-  });
+export async function generateCondition(
+  body: GenerateConditionRequest,
+): Promise<GenerateConditionResponse> {
+  const { data, error } = await generateConditionApiV1SchedulerGenerateConditionPost({ body });
   if (error) throw new Error(formatApiError(error));
-  return data as GenerateConditionResult;
+  return data as GenerateConditionResponse;
 }
 
-export interface ValidateArgsExprResult {
-  valid: boolean;
-  error?: string | null;
-  /** The merged arguments the tool would be called with right now. */
-  resolved?: Record<string, unknown> | null;
-}
+export type { ValidateArgsExprResponse } from './generated/types.gen';
 
 /**
  * Resolve a dynamic-arguments expression against the current time — the same
  * resolution the scheduler performs before each check-tool call.
  */
-export async function validateArgsExpr(body: {
-  check_args_exprs: Record<string, string>;
-  check_args?: Record<string, unknown> | null;
-  prev?: unknown;
-}): Promise<ValidateArgsExprResult> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).post({
-    url: '/api/v1/scheduler/validate-args-expr',
-    body,
-  });
+export async function validateArgsExpr(
+  body: ValidateArgsExprRequest,
+): Promise<ValidateArgsExprResponse> {
+  const { data, error } = await validateArgsExprApiV1SchedulerValidateArgsExprPost({ body });
   if (error) throw new Error(formatApiError(error));
-  return data as ValidateArgsExprResult;
+  return data as ValidateArgsExprResponse;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,9 +229,7 @@ export async function invokeMcpTool(
   args: Record<string, unknown>,
   opts: { serverSlug?: string | null; acknowledgeRisk?: boolean } = {},
 ): Promise<McpToolInvokeResponse> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error, response } = await (client as any).post({
-    url: '/api/v1/mcp/tools/invoke',
+  const { data, error, response } = await invokeMcpToolApiV1McpToolsInvokePost({
     body: {
       tool_name: toolName,
       arguments: args,
@@ -276,19 +261,10 @@ export type { ValidateConditionResponse } from './generated/types.gen';
  * calls are parse errors — so an untested condition can look right and silently
  * never fire.
  */
-export async function validateCondition(body: {
-  result: unknown;
-  /** The CEL condition, when there is one. */
-  cel_expr?: string | null;
-  /** Previous check result, for CEL conditions that use `prev`. */
-  prev?: unknown;
-  llm_condition?: string | null;
-}): Promise<ValidateConditionResponse> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).post({
-    url: '/api/v1/scheduler/validate-condition',
-    body,
-  });
+export async function validateCondition(
+  body: ValidateConditionRequest,
+): Promise<ValidateConditionResponse> {
+  const { data, error } = await validateConditionApiV1SchedulerValidateConditionPost({ body });
   if (error) throw new Error(formatApiError(error));
   return data as ValidateConditionResponse;
 }

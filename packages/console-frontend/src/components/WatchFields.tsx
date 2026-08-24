@@ -141,7 +141,11 @@ export function WatchFields({
 
   // A result describes one specific call. When the tool or its arguments change it stops
   // describing anything, so it is dropped here rather than every caller remembering to.
-  const callSignature = `${value.check_tool}|${JSON.stringify(value.check_args)}|${value.check_args_text}`;
+  // argsExprsKey belongs in it: runCheck resolves the `= …` expressions into the call, so
+  // editing one changes what the tool is called with. Without it the old payload survived
+  // the edit and went on feeding the picker, the CEL editor and the tester — testing the
+  // condition against a response the job would no longer produce.
+  const callSignature = `${value.check_tool}|${JSON.stringify(value.check_args)}|${value.check_args_text}|${argsExprsKey}`;
   const liveResult = check.signature === callSignature ? check.result : undefined;
 
   /** The response a condition is tested against: this session's call, else the last run's. */
@@ -383,8 +387,6 @@ export function WatchFields({
                       </div>
                       <JsonPathPicker
                         value={liveResult}
-                        allowObjects
-                        selectedPath=""
                         onPick={(path) => {
                           // A click seeds the expression with that location in CEL's
                           // spelling; refining it into a filter is then typing, not

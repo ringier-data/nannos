@@ -101,11 +101,7 @@ export function LastCheckPanel({
               )}
             </div>
             {result ? (
-              <JsonPathPicker
-                value={result}
-                allowObjects
-                onPick={(path) => onUseValue?.(path)}
-              />
+              <JsonPathPicker value={result} onPick={(path) => onUseValue?.(path)} />
             ) : (
               <p className="text-muted-foreground px-3.5 py-3 text-xs">
                 The response was not stored for this run.

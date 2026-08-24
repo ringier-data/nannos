@@ -17,6 +17,22 @@ export interface WatchArgsValue {
   check_args_exprs: Record<string, string>;
 }
 
+/**
+ * Which arguments editor can show all of `args`.
+ *
+ * The field form only renders the scalars the tool's schema declares, so an argument
+ * outside that set would be submitted without ever being visible. Both draft-application
+ * paths (the create dialog and the job detail page) need the same answer; the detail
+ * page's copy hardcoded 'fields' and so reintroduced exactly that.
+ */
+export function argsModeFor(
+  args: Record<string, unknown>,
+  tool: McpTool | undefined,
+): 'fields' | 'json' {
+  const renderable = new Set(parseToolSchema(tool).params.map((param) => param.key));
+  return Object.keys(args).every((key) => renderable.has(key)) ? 'fields' : 'json';
+}
+
 /** The arguments to send, or the reason the raw JSON cannot be used. */
 export function resolveArgs(value: WatchArgsValue): {
   args: Record<string, unknown> | undefined;

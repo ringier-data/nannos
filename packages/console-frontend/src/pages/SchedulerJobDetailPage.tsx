@@ -40,7 +40,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
 import { LastCheckPanel } from '@/components/LastCheckPanel';
-import { resolveArgs } from '@/lib/watchArgs';
+import { argsModeFor, resolveArgs } from '@/lib/watchArgs';
+import { automatedSubAgentParameters } from '@/lib/agentAction';
 import { config } from '@/config';
 import {
   type JobRunStatus,
@@ -48,6 +49,7 @@ import {
   type ScheduledJobRun,
   getDeliveryChannels,
   generateJobDraft,
+  formatApiError,
   updateScheduledJob,
   runJobNow,
   type DeliveryChannel,
@@ -391,9 +393,13 @@ function EditForm({ job }: { job: ScheduledJob }) {
         const next = { ...w };
         if (draft.check_tool) next.check_tool = draft.check_tool;
         if (draft.check_args) {
-          next.check_args = draft.check_args as Record<string, unknown>;
-          next.check_args_text = JSON.stringify(draft.check_args, null, 2);
-          next.args_mode = 'fields';
+          const args = draft.check_args as Record<string, unknown>;
+          next.check_args = args;
+          next.check_args_text = JSON.stringify(args, null, 2);
+          next.args_mode = argsModeFor(
+            args,
+            mcpTools.find((t) => t.name === (draft.check_tool ?? next.check_tool)),
+          );
         }
         if (draft.check_args_exprs && Object.keys(draft.check_args_exprs).length > 0) {
           next.check_args_exprs = draft.check_args_exprs as Record<string, string>;
@@ -410,8 +416,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
         return next;
       });
       touch();
-    } catch {
-      setError('AI generation failed. Please edit the fields manually.');
+    } catch (e) {
+      setError(`AI generation failed: ${formatApiError(e)}. Please edit the fields manually.`);
     } finally {
       setAiLoading(false);
     }
@@ -446,6 +452,13 @@ function EditForm({ job }: { job: ScheduledJob }) {
         setError(argsError);
         return;
       }
+      // Both halves are sent as explicit nulls, so emptying both would ask the backend
+      // for a watch with nothing to decide with. It refuses; say so here, against the
+      // fields the user is looking at.
+      if (!watch.cel_expr.trim() && !watch.llm_condition.trim()) {
+        setError('Write an expression, a condition for the model to judge, or both.');
+        return;
+      }
     }
 
     const body: Record<string, unknown> = {
@@ -466,10 +479,17 @@ function EditForm({ job }: { job: ScheduledJob }) {
       // For watches an explicit null clears it back to notify-only; task jobs
       // require one, so an emptied value is simply not sent.
       ...(job.job_type === 'watch'
-        ? watch.sub_agent_id !== initialSubAgentId && {
-            sub_agent_id:
-              watch.outcome === 'agent' && watch.sub_agent_id ? parseInt(watch.sub_agent_id) : null,
-          }
+        ? watch.outcome === 'agent' && watch.sub_agent_mode === 'automated'
+          ? // An inline definition is a valid outcome for a watch; it used to be dropped
+            // here, so switching to "agent" with one silently PATCHed sub_agent_id: null
+            // and left the job notify-only.
+            { sub_agent_parameters: automatedSubAgentParameters(watch) }
+          : watch.sub_agent_id !== initialSubAgentId && {
+              sub_agent_id:
+                watch.outcome === 'agent' && watch.sub_agent_id
+                  ? parseInt(watch.sub_agent_id)
+                  : null,
+            }
         : subAgentId !== initialSubAgentId && {
             sub_agent_id: subAgentId ? parseInt(subAgentId) : undefined,
           }),

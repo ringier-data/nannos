@@ -9,6 +9,8 @@ dependency-light (httpx only; no langchain in console-backend).
 import json
 import logging
 import os
+import re
+from typing import Any
 
 import httpx
 from ringier_a2a_sdk.utils.http_pool import LazyClient
@@ -135,6 +137,36 @@ async def gateway_chat(
     # _first_message tolerates an empty choices array the same way (returns {} → "").
     content = _first_message(resp.json()).get("content")
     return content or ""
+
+
+async def gateway_chat_json(
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int = 1024,
+    metadata: dict | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """`gateway_chat`, for the common case of asking for a single JSON object.
+
+    Models wrap JSON in markdown fences or a sentence of prose however firmly they are
+    told not to, so the object has to be dug out of the text. That salvage lived in three
+    places — draft generation, condition generation and the watch judge — character for
+    character, which meant any robustness fix had to be made three times and a divergence
+    would let one path succeed while another silently read `{}`.
+
+    Returns `{}` when there is no object to be found, which every caller already treats as
+    "no usable output" and answers with its own fallback.
+    """
+    text = await gateway_chat(
+        prompt, model=model, max_tokens=max_tokens, metadata=metadata, timeout=timeout
+    )
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return {}
+    parsed = json.loads(match.group())
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _extract_citations(resp_json: dict) -> list[dict]:

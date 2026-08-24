@@ -52,7 +52,6 @@ import {
   type JobType,
   type ScheduleKind,
   type ScheduledJobCreateExtended,
-  type AutomatedSubAgentConfig,
   getDeliveryChannels,
   generateJobDraft,
   createScheduledJob,
@@ -67,12 +66,10 @@ import {
   consoleListMcpToolsOptions,
   getCurrentUserSettingsApiV1AuthMeSettingsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import { config } from '@/config';
 import { CronField } from '@/components/CronField';
 import { AgentActionFields } from '@/components/AgentActionFields';
-import { isModelTier, modelTierOf } from '@/config/models';
-import { parseToolSchema } from '@/lib/mcpTools';
-import { missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
+import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
+import { argsModeFor, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
 import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
@@ -375,15 +372,10 @@ function CreateJobDialog({
           const args = result.check_args as Record<string, unknown>;
           next.check_args = args;
           next.check_args_text = JSON.stringify(args, null, 2);
-          // Show whichever editor can display all of what was generated: the field
-          // form only renders scalars the schema declares, so an argument outside
-          // that set would be submitted without ever being visible.
-          const renderable = new Set(
-            parseToolSchema(mcpTools.find((t) => t.name === result.check_tool)).params.map(
-              (param) => param.key,
-            ),
+          next.args_mode = argsModeFor(
+            args,
+            mcpTools.find((t) => t.name === result.check_tool),
           );
-          next.args_mode = Object.keys(args).every((key) => renderable.has(key)) ? 'fields' : 'json';
           filled.add('check_args');
         }
         if (result.check_args_exprs && Object.keys(result.check_args_exprs).length > 0) {
@@ -465,18 +457,8 @@ function CreateJobDialog({
     
     // Task job validations
     if (form.job_type === 'task') {
-      if (form.sub_agent_mode === 'existing') {
-        if (!form.sub_agent_id) return setError('Sub-agent is required');
-      } else {
-        // Automated sub-agent validations
-        if (!form.automated_name.trim()) return setError('Sub-agent name is required');
-        if (!form.automated_description.trim()) return setError('Sub-agent description is required');
-        if (!form.automated_model) return setError('Model is required');
-        if (!form.automated_system_prompt.trim()) return setError('System prompt is required');
-        if (form.automated_system_prompt.length > config.autoApprove.maxSystemPromptLength) return setError(`System prompt must be ${config.autoApprove.maxSystemPromptLength} characters or less`);
-        if (form.automated_description.length > 200) return setError('Description must be 200 characters or less');
-        if (form.automated_mcp_tools.length > config.autoApprove.maxMcpToolsCount) return setError(`Maximum ${config.autoApprove.maxMcpToolsCount} MCP tools allowed`);
-      }
+      const agentError = agentActionError(form);
+      if (agentError) return setError(agentError);
       // Message is optional for all task jobs
     }
     
@@ -507,6 +489,12 @@ function CreateJobDialog({
         return setError(null);
       }
       setFieldErrors({});
+
+      // Held to the same standard as a task's, now that a watch can carry one.
+      if (form.outcome === 'agent') {
+        const agentError = agentActionError(form);
+        if (agentError) return setError(agentError);
+      }
     }
 
     const body: ScheduledJobCreateExtended = {
@@ -527,20 +515,7 @@ function CreateJobDialog({
       if (form.sub_agent_mode === 'existing') {
         body.sub_agent_id = parseInt(form.sub_agent_id);
       } else {
-        // Automated sub-agent configuration
-        body.sub_agent_parameters = {
-          name: form.automated_name.trim(),
-          description: form.automated_description.trim(),
-          // Send exactly one of model / model_tier (backend validates the XOR).
-          // Exactly one of model / model_tier (the backend validates the XOR).
-          model: isModelTier(form.automated_model) ? undefined : form.automated_model,
-          model_tier: (modelTierOf(form.automated_model) ??
-            undefined) as AutomatedSubAgentConfig['model_tier'],
-          system_prompt: form.automated_system_prompt.trim(),
-          mcp_tools: form.automated_mcp_tools.length > 0 ? form.automated_mcp_tools : null,
-          enable_thinking: form.automated_enable_thinking || null,
-          thinking_level: form.automated_enable_thinking ? form.automated_thinking_level : null,
-        };
+        body.sub_agent_parameters = automatedSubAgentParameters(form);
       }
       // Always include prompt for task jobs (optional - backend will use default if empty)
       body.prompt = form.prompt.trim() || undefined;
@@ -561,8 +536,14 @@ function CreateJobDialog({
 
       // The two outcomes are exclusive: a sub-agent's reply replaces the
       // notification, so sending both would leave one of them dead.
-      if (form.outcome === 'agent' && form.sub_agent_id) {
-        body.sub_agent_id = parseInt(form.sub_agent_id);
+      if (form.outcome === 'agent') {
+        if (form.sub_agent_mode === 'existing') {
+          body.sub_agent_id = parseInt(form.sub_agent_id);
+        } else {
+          // An inline definition is as valid an outcome for a watch as for a task; it
+          // used to be dropped here, silently downgrading the job to notify-only.
+          body.sub_agent_parameters = automatedSubAgentParameters(form);
+        }
         body.prompt = form.prompt.trim() || undefined;
       } else {
         body.notification_message = form.notification_message.trim();

@@ -279,6 +279,20 @@ class SchedulerService:
             if val is not None:
                 fields[attr] = val
 
+        # A watch must keep at least one condition. Create rejects a watch with neither,
+        # and WatchEvaluator treats that combination as unreachable — but a PATCH clearing
+        # both produces exactly it, leaving a job that calls its check tool on every poll
+        # and then fails until it auto-pauses. The effective pair is what matters, since
+        # either half may be untouched by this request.
+        if job.job_type == JobType.WATCH and ("cel_expr" in fields or "llm_condition" in fields):
+            new_cel = fields["cel_expr"] if "cel_expr" in fields else job.cel_expr
+            new_llm = fields["llm_condition"] if "llm_condition" in fields else job.llm_condition
+            if not (new_cel or "").strip() and not (new_llm or "").strip():
+                raise ValueError(
+                    "A watch needs at least one of cel_expr or llm_condition; clearing "
+                    "both would leave it with no condition to evaluate"
+                )
+
         # SECURITY: Validate that user has access to the referenced sub-agent
         # if sub_agent_id is being updated
         if "sub_agent_id" in fields and fields["sub_agent_id"] is not None:

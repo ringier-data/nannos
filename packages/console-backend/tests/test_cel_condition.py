@@ -6,12 +6,14 @@ conditions are the reason this exists: `now` is a variable, so "starts within th
 hour" is decided by date math instead of a model guessing what time it is.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
 from console_backend.services.cel_condition import (
     MAX_CEL_EXPR_LENGTH,
+    MAX_CEL_PAYLOAD_BYTES,
+    _CEL_EXECUTOR,
     CelEvaluationError,
     CelSyntaxError,
     evaluate_cel,
@@ -242,3 +244,53 @@ class TestModelValidation:
 
         with pytest.raises(ValueError, match="CEL"):
             ScheduledJobUpdate(cel_expr="&&")
+
+
+class TestResourceCeilings:
+    """The limits that actually bound evaluation, since the timeout cannot.
+
+    `asyncio.wait_for` cancels the waiter, not the interpreter thread — Python cannot
+    kill a thread — so an oversized expression or payload has to be refused before
+    evaluation starts rather than interrupted once it is slow.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_payload_is_refused_not_evaluated(self):
+        # Cost is a function of the data as much as the expression, and a check tool's
+        # response is not something the condition's author controls.
+        huge = {"items": ["x" * 1024] * 2048}
+        with pytest.raises(CelEvaluationError, match="the maximum an expression"):
+            await evaluate_cel("size(result.items) > 0", huge, datetime.now(timezone.utc))
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_prev_is_refused_too(self):
+        huge = {"items": ["x" * 1024] * 2048}
+        with pytest.raises(CelEvaluationError, match="`prev`"):
+            await evaluate_cel("result != prev", {"a": 1}, datetime.now(timezone.utc), prev=huge)
+
+    @pytest.mark.asyncio
+    async def test_a_payload_just_under_the_ceiling_still_evaluates(self):
+        ok = {"blob": "x" * (MAX_CEL_PAYLOAD_BYTES // 2)}
+        cel = await evaluate_cel("size(result.blob) > 0", ok, datetime.now(timezone.utc))
+        assert cel.gate is True
+
+    def test_the_expression_cap_is_checked_before_the_parser(self):
+        # A megabyte of nested parens must not reach the parser at all.
+        with pytest.raises(CelSyntaxError, match="the maximum is"):
+            validate_cel_expression("(" * (MAX_CEL_EXPR_LENGTH + 1))
+
+    @pytest.mark.asyncio
+    async def test_evaluation_does_not_use_the_shared_default_executor(self):
+        # A burst of pathological expressions must degrade condition previews only, not
+        # every other to_thread caller in the process.
+        name = await evaluate_cel(
+            "result.thread", {"thread": "x"}, datetime.now(timezone.utc)
+        )
+        assert name.value == "x"
+        assert _CEL_EXECUTOR._thread_name_prefix == "cel"
+
+    @pytest.mark.asyncio
+    async def test_only_the_three_documented_names_are_bound(self):
+        # Nothing else is reachable by name from an expression.
+        with pytest.raises((CelEvaluationError, CelSyntaxError)):
+            await evaluate_cel("__import__", {}, datetime.now(timezone.utc))

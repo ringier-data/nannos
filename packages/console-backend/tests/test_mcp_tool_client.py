@@ -14,6 +14,7 @@ import pytest
 from console_backend.services import mcp_tool_client as tc
 from console_backend.services.mcp_tool_client import (
     GatewayError,
+    GatewayTimeout,
     ToolNotFound,
     call_tool,
     content_to_result,
@@ -30,9 +31,9 @@ def _reply(monkeypatch, payload: dict) -> MagicMock:
 
     client = MagicMock()
     client.post = AsyncMock(return_value=response)
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
-    monkeypatch.setattr(tc.httpx, "AsyncClient", MagicMock(return_value=client))
+    # The module holds one pooled client for the process (llm_gateway's pattern), so the
+    # stub replaces what the pool hands out rather than the AsyncClient constructor.
+    monkeypatch.setattr(tc._client, "get", lambda: client)
     return client
 
 
@@ -85,8 +86,51 @@ class TestEnvelopeParsing:
         with pytest.raises(GatewayError):
             parse_envelope(response)
 
+    def test_a_notification_streamed_first_is_skipped(self):
+        # A server may stream progress ahead of the reply. Taking the first `data:` line
+        # would hand that notification back as the tool's answer, and the condition would
+        # then be evaluated against {}.
+        response = MagicMock()
+        response.headers = {"content-type": "text/event-stream"}
+        response.text = (
+            'data: {"jsonrpc": "2.0", "method": "notifications/progress", "params": {}}\n\n'
+            'data: {"jsonrpc": "2.0", "id": 1, "result": {"content": []}}\n\n'
+        )
+        assert parse_envelope(response, expect_id=1) == {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": []},
+        }
+
+    def test_a_reply_for_another_id_is_skipped(self):
+        response = MagicMock()
+        response.headers = {"content-type": "text/event-stream"}
+        response.text = (
+            'data: {"id": 7, "result": {"content": [{"type": "text", "text": "other"}]}}\n\n'
+            'data: {"id": 1, "result": {"content": []}}\n\n'
+        )
+        assert parse_envelope(response, expect_id=1)["id"] == 1
+
+    def test_data_without_a_space_is_sse_legal(self):
+        response = MagicMock()
+        response.headers = {"content-type": "text/event-stream"}
+        response.text = 'data:{"result": {"content": []}}\n\n'
+        assert parse_envelope(response) == {"result": {"content": []}}
+
 
 class TestCallTool:
+    @pytest.mark.asyncio
+    async def test_an_explicit_null_error_is_not_a_failure(self, monkeypatch):
+        # Some frameworks always emit both members. Keying on presence made every such
+        # reply a GatewayError("unknown gateway error"), failing the run and eventually
+        # auto-pausing the job, though the tool answered correctly.
+        _reply(
+            monkeypatch,
+            {"error": None, "result": {"content": [{"type": "text", "text": '{"status": "OK"}'}]}},
+        )
+        call = await call_tool("tok", "some_tool", {})
+        assert call.result == {"status": "OK"}
+
     @pytest.mark.asyncio
     async def test_a_successful_call(self, monkeypatch):
         _reply(monkeypatch, {"result": {"content": [{"type": "text", "text": '{"status": "OK"}'}]}})
@@ -109,6 +153,25 @@ class TestCallTool:
         _reply(monkeypatch, {"error": {"code": -32602, "message": "unknown tool: nope"}})
         with pytest.raises(ToolNotFound):
             await call_tool("tok", "nope")
+
+    @pytest.mark.asyncio
+    async def test_a_tool_reporting_not_found_is_not_a_missing_tool(self, monkeypatch):
+        # The tool exists and answered; the thing it was asked about does not. Classifying
+        # on the message put this in front of the user as a 404 "tool is not available".
+        _reply(monkeypatch, {"error": {"code": -32000, "message": "campaign 999 not found"}})
+        with pytest.raises(GatewayError) as exc:
+            await call_tool("tok", "naonous_get_campaign")
+        assert not isinstance(exc.value, ToolNotFound)
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_is_its_own_type(self, monkeypatch):
+        import httpx
+
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=httpx.ReadTimeout("too slow"))
+        monkeypatch.setattr(tc._client, "get", lambda: client)
+        with pytest.raises(GatewayTimeout):
+            await call_tool("tok", "slow_tool", timeout=1.0)
 
     @pytest.mark.asyncio
     async def test_other_gateway_errors_are_gateway_errors(self, monkeypatch):

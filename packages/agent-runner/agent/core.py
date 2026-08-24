@@ -44,7 +44,6 @@ from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.model_factory import (
     create_model,
-    get_default_fast_model,
     get_default_model,
     is_valid_model,
     require_default_model,
@@ -56,14 +55,13 @@ from object_storage import get_object_storage_service
 
 if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel as PydanticBaseModel
 from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
@@ -77,20 +75,6 @@ _MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://nannos.gatana.nannos.ri
 _MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "300"))
 _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
 _MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
-
-
-# Structured output models for LLM operations
-class ConditionEvaluationResult(PydanticBaseModel):
-    """Structured output for LLM-based condition evaluation."""
-
-    condition_met: bool
-    reasoning: str
-
-
-class GeneratedMessage(PydanticBaseModel):
-    """Structured output for LLM-generated notification message."""
-
-    message: str
 
 
 def _build_postgres_conn() -> str | None:

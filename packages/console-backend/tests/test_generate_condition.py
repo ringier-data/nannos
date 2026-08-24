@@ -36,7 +36,7 @@ def _defaults(monkeypatch, model: str | None = "std-model"):
 async def _call(monkeypatch, replies: list[str], **request):
     _defaults(monkeypatch)
     chat = AsyncMock(side_effect=replies)
-    with patch("console_backend.routers.scheduler_router.gateway_chat", chat):
+    with patch("console_backend.services.llm_gateway.gateway_chat", chat):
         response = await generate_condition(
             GenerateConditionRequest(**request), AsyncMock(), _user()
         )

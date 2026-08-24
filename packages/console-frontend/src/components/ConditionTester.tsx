@@ -43,7 +43,11 @@ export function ConditionTester({
   const cel = celExpr?.trim() || '';
   const judge = llmCondition?.trim() || '';
 
-  const mock = (() => {
+  // Memoised rather than parsed inline: a fresh parse on every render gives `payload`
+  // (and so `subject`, which the validate effect depends on) a new identity each time, so
+  // every response re-triggers the effect — one backend call, an LLM call when a judge is
+  // set, every debounce interval for as long as the mode stays open.
+  const mock = useMemo(() => {
     if (source !== 'mock') return { value: undefined, error: null as string | null };
     if (!mockText.trim()) return { value: undefined, error: null };
     try {
@@ -51,7 +55,7 @@ export function ConditionTester({
     } catch {
       return { value: undefined, error: 'That is not valid JSON.' };
     }
-  })();
+  }, [source, mockText]);
 
   const payload = source === 'mock' ? mock.value : liveResult;
   const hasPayload = payload !== undefined;
@@ -182,12 +186,6 @@ export function ConditionTester({
               <span className="mt-0.5 block font-mono text-[11px] opacity-80">{shown.error}</span>
             </span>
           </span>
-          {(shown.notes ?? []).map((note) => (
-            <span key={note} className="text-muted-foreground flex items-start gap-1.5 text-xs">
-              <Info className="mt-0.5 size-3.5 shrink-0" />
-              {note}
-            </span>
-          ))}
         </div>
       )}
 
@@ -200,12 +198,6 @@ export function ConditionTester({
             <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
             {shown.error}
           </span>
-          {(shown.notes ?? []).map((note) => (
-            <span key={note} className="text-muted-foreground flex items-start gap-1.5 text-xs">
-              <Info className="mt-0.5 size-3.5 shrink-0" />
-              {note}
-            </span>
-          ))}
         </div>
       )}
 
@@ -215,9 +207,9 @@ export function ConditionTester({
             <span
               className={cn(
                 'inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
-                verdict.tone === 'met' && 'bg-green-600/10 text-green-700 dark:text-green-400',
-                verdict.tone === 'unmet' && 'bg-muted text-muted-foreground',
-                verdict.tone === 'muted' && 'bg-muted text-muted-foreground',
+                verdict.tone === 'met'
+                  ? 'bg-green-600/10 text-green-700 dark:text-green-400'
+                  : 'bg-muted text-muted-foreground',
               )}
             >
               {verdict.tone === 'met' && <Check className="size-3" />}
@@ -227,14 +219,16 @@ export function ConditionTester({
           <pre className="bg-muted max-h-32 overflow-auto rounded-sm px-2 py-1.5 font-mono text-[11px] leading-5">
             {JSON.stringify(shown.extracted, null, 2) ?? 'null'}
           </pre>
-          {(shown.notes ?? []).map((note) => (
-            <span key={note} className="text-muted-foreground flex items-start gap-1.5 text-xs">
-              <Info className="mt-0.5 size-3.5 shrink-0" />
-              {note}
-            </span>
-          ))}
         </div>
       )}
+
+      {/* The notes belong to the outcome, not to whichever branch above rendered it. */}
+      {(shown?.notes ?? []).map((note) => (
+        <span key={note} className="text-muted-foreground flex items-start gap-1.5 text-xs">
+          <Info className="mt-0.5 size-3.5 shrink-0" />
+          {note}
+        </span>
+      ))}
     </div>
   );
 }

@@ -39,6 +39,8 @@ def _make_job(
     job_type: JobType = JobType.TASK,
     schedule_kind: ScheduleKind = ScheduleKind.INTERVAL,
     interval_seconds: int | None = 3600,
+    cel_expr: str | None = None,
+    llm_condition: str | None = None,
 ) -> ScheduledJob:
     now = datetime.now(timezone.utc)
     return ScheduledJob(
@@ -49,6 +51,8 @@ def _make_job(
         job_type=job_type,
         schedule_kind=schedule_kind,
         interval_seconds=interval_seconds,
+        cel_expr=cel_expr,
+        llm_condition=llm_condition,
         next_run_at=now + timedelta(hours=1),
         enabled=True,
         max_failures=3,
@@ -530,6 +534,75 @@ class TestUpdateJobUnsetSentinel:
                 db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=None
             )
         mock_repo.update_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_cannot_strip_a_watch_of_both_conditions(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        """The frontend's save sends both fields, so both arrive as explicit nulls.
+
+        Create rejects a watch with neither condition and WatchEvaluator treats the
+        combination as unreachable; a PATCH producing it would leave a job that calls its
+        check tool on every poll and then fails until it auto-pauses.
+        """
+        db = AsyncMock()
+        mock_repo.get_job.return_value = _make_job(
+            user_id=actor.id, job_type=JobType.WATCH, cel_expr="result.items", llm_condition=None
+        )
+
+        with pytest.raises(ValueError, match="at least one of cel_expr or llm_condition"):
+            await service.update_job(
+                db=db,
+                job_id=1,
+                data=ScheduledJobUpdate(),
+                actor=actor,
+                cel_expr=None,
+                llm_condition=None,
+            )
+        mock_repo.update_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_can_clear_one_condition_while_the_other_stands(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        """The guard is about the effective pair, not about clearing as such."""
+        db = AsyncMock()
+        existing_job = _make_job(
+            user_id=actor.id,
+            job_type=JobType.WATCH,
+            cel_expr="result.items",
+            llm_condition="somebody external is invited",
+        )
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        await service.update_job(
+            db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, cel_expr=None
+        )
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["cel_expr"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_clearing_both_conditions_on_a_task_is_allowed(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        """A task has no condition to keep — the guard is watch-only."""
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id, job_type=JobType.TASK)
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        await service.update_job(
+            db=db,
+            job_id=1,
+            data=ScheduledJobUpdate(),
+            actor=actor,
+            cel_expr=None,
+            llm_condition=None,
+        )
+
+        assert mock_repo.update_job.await_count == 1
 
     @pytest.mark.asyncio
     async def test_update_returns_none_for_other_users_job(

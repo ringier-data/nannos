@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -38,7 +37,7 @@ from .cel_condition import CelEvaluationError, CelSyntaxError, evaluate_arg_expr
 
 from ..models.scheduled_job import ScheduledJob
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
-from ..services.llm_gateway import gateway_chat
+from ..services.llm_gateway import gateway_chat_json
 from ..services.mcp_tool_client import GatewayError, call_tool, token_for
 from ..utils.timezones import resolve_timezone
 
@@ -287,10 +286,7 @@ class WatchEvaluator:
             + f"Full tool response:\n{json.dumps(check_result, indent=2, default=str)[:8000]}"
         )
         try:
-            text = await gateway_chat(prompt, model=model, max_tokens=512)
-            cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
-            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-            parsed = json.loads(match.group()) if match else {}
+            parsed = await gateway_chat_json(prompt, model=model, max_tokens=512)
             met = bool(parsed.get("condition_met"))
             reasoning = parsed.get("reasoning")
             reasoning = str(reasoning)[:_MAX_REASONING_CHARS] if reasoning else None

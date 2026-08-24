@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from ringier_a2a_sdk.utils.http_pool import LazyClient
 
 from ..config import config
 from ..utils.gatana_auth import exchange_for_audience
@@ -62,12 +63,40 @@ async def token_for(tool_name: str, user_access_token: str) -> str:
     return await exchange_for_audience(user_access_token, audience)
 
 
+#: The JSON-RPC id this client sends, so a streamed reply can be told from a
+#: notification that happens to arrive first.
+_CALL_ID = 1
+
+# One process-wide pooled client, as llm_gateway does, instead of a fresh DNS lookup, TCP
+# connect and TLS handshake to the same host on every call. This is the scheduler's
+# per-poll hot path, and every "Run check now" as well. Per-call timeouts still vary, so
+# each request passes its own `timeout=`.
+_client = LazyClient(lambda: httpx.AsyncClient())
+
+
 class GatewayError(RuntimeError):
     """The gateway could not be reached, or refused the call."""
 
 
 class ToolNotFound(GatewayError):
     """The gateway does not expose a tool by that name."""
+
+
+class GatewayTimeout(GatewayError):
+    """The tool did not answer in time.
+
+    A distinct type because callers map it differently — an HTTP 504 rather than a 502,
+    a run failure rather than a configuration problem. It used to be recovered by
+    matching the English of the message this module composes, so rewording that message
+    silently turned every check-tool timeout into a 502 with no test failing.
+    """
+
+
+#: JSON-RPC codes that mean "no such method/tool" rather than "the server is unwell".
+#: Preferred over reading the message, which is prose written by whichever server
+#: answered: a tool legitimately reporting "resource not found" was classified as a
+#: missing tool and surfaced as a 404.
+_NOT_FOUND_CODES = frozenset({-32601, -32602})
 
 
 @dataclass
@@ -81,20 +110,35 @@ class ToolCallResult:
     is_error: bool = False
 
 
-def parse_envelope(response: httpx.Response) -> dict[str, Any]:
-    """Decode a JSON-RPC reply, which arrives as JSON or as a single SSE event."""
+def parse_envelope(response: httpx.Response, expect_id: Any = None) -> dict[str, Any]:
+    """Decode a JSON-RPC reply, which arrives as JSON or as a single SSE event.
+
+    The reply is not necessarily the *first* event: a server may stream progress
+    notifications or pings ahead of it. So take the first event that is a response —
+    it carries `result` or `error`, and its `id` matches the request when one is given.
+    Taking the first `data:` line whatever it is would hand a notification back as the
+    tool's answer, and a condition would then be evaluated against `{}`.
+    """
     content_type = response.headers.get("content-type", "")
 
     if "text/event-stream" not in content_type:
         return response.json()  # type: ignore[no-any-return]
 
     for line in response.text.strip().split("\n"):
-        if not line.startswith("data: "):
+        if not line.startswith("data:"):
             continue
+        # A single optional space after the colon is SSE's own framing, not data.
         try:
-            return json.loads(line[6:])  # type: ignore[no-any-return]
+            envelope = json.loads(line[5:].removeprefix(" "))
         except json.JSONDecodeError:
             continue
+        if not isinstance(envelope, dict):
+            continue
+        if "result" not in envelope and "error" not in envelope:
+            continue
+        if expect_id is not None and envelope.get("id") != expect_id:
+            continue
+        return envelope
 
     logger.error("Unparsable SSE reply from MCP gateway: %s", response.text[:500])
     raise GatewayError("Invalid SSE response from MCP gateway")
@@ -157,30 +201,31 @@ async def call_tool(
 
     Raises:
         ToolNotFound: the server rejected the tool name.
-        GatewayError: the server was unreachable, timed out, or errored.
+        GatewayTimeout: the tool did not answer within `timeout`.
+        GatewayError: the server was unreachable or errored.
     """
     url = _console_mcp_url() if is_console_tool(tool_name) else config.mcp_gateway.url
     started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": arguments or {}},
-                },
-            )
-            response.raise_for_status()
-            data = parse_envelope(response)
+        response = await _client.get().post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": _CALL_ID,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments or {}},
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = parse_envelope(response, expect_id=_CALL_ID)
     except httpx.TimeoutException as exc:
-        raise GatewayError(f"'{tool_name}' did not respond within {timeout:.0f}s") from exc
+        raise GatewayTimeout(f"'{tool_name}' did not respond within {timeout:.0f}s") from exc
     except httpx.HTTPStatusError as exc:
         raise GatewayError(
             f"{url} returned HTTP {exc.response.status_code} for '{tool_name}'"
@@ -190,11 +235,14 @@ async def call_tool(
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-    if "error" in data:
-        message = (data.get("error") or {}).get("message") or "unknown gateway error"
+    if data.get("error") is not None:
+        error = data["error"] if isinstance(data["error"], dict) else {}
+        message = error.get("message") or "unknown gateway error"
         # An unknown tool is worth distinguishing: it means the job references something
         # the gateway no longer exposes, which is a configuration problem, not an outage.
-        if "not found" in message.lower() or "unknown tool" in message.lower():
+        # Decided by code, with the message only as a fallback for servers that answer
+        # a missing tool with a generic code.
+        if error.get("code") in _NOT_FOUND_CODES or "unknown tool" in message.lower():
             raise ToolNotFound(f"'{tool_name}' is not available: {message}")
         raise GatewayError(f"'{tool_name}' failed: {message}")
 

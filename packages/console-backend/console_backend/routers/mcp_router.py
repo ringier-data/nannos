@@ -13,7 +13,14 @@ from ..config import config
 from ..db.session import DbSession
 from ..dependencies import require_auth, require_auth_or_bearer_token
 from ..models.user import User
-from ..services.mcp_tool_client import GatewayError, ToolNotFound, call_tool, parse_envelope, token_for
+from ..services.mcp_tool_client import (
+    GatewayError,
+    GatewayTimeout,
+    ToolNotFound,
+    call_tool,
+    parse_envelope,
+    token_for,
+)
 from ..utils.gatana_auth import get_user_subject_token
 
 logger = logging.getLogger(__name__)
@@ -330,7 +337,7 @@ async def _list_mcp_tools(
         response.raise_for_status()
 
         try:
-            data = parse_envelope(response)
+            data = parse_envelope(response, expect_id=1)
         except GatewayError as exc:
             # The parsing moved into the gateway client, which reports a domain error;
             # this listing has always answered 503 for an unreadable gateway reply.
@@ -568,11 +575,11 @@ async def invoke_mcp_tool(
         call = await call_tool(token, tool_name, body.arguments, timeout=30.0)
     except ToolNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    except GatewayError as exc:
+    except GatewayTimeout as exc:
         # A timeout is about this call; anything else is the gateway being unwell.
-        raise HTTPException(
-            status_code=504 if "did not respond" in str(exc) else 502, detail=str(exc)
-        )
+        raise HTTPException(status_code=504, detail=str(exc))
+    except GatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
     result = call.result
 

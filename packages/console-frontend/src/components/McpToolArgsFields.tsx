@@ -7,7 +7,7 @@
  * from it — typed, marked required, with enums as selects — and the JSON textarea
  * kept as an escape hatch for shapes a flat form cannot express.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -53,6 +53,25 @@ export function McpToolArgsFields({
   missingRequired?: Set<string>;
 }) {
   const { params } = useMemo(() => parseToolSchema(tool), [tool]);
+  // What the user has typed, while a field is in expression mode. Needed because an
+  // expression is stored without its `=` and empty expressions are not stored at all:
+  // deriving the text from state alone made the first `=` disappear as it was typed
+  // (empty expression → deleted → nothing to render), so the mode was reachable only by
+  // pasting a complete `= …` string. It also keeps the caret still, since the stored form
+  // is re-rendered with normalised spacing.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  function setDraft(key: string, text: string | undefined) {
+    setDrafts((prev) => {
+      if (text === undefined) {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: text };
+    });
+  }
 
   function set(key: string, value: unknown) {
     const next = { ...values };
@@ -154,11 +173,12 @@ export function McpToolArgsFields({
                 // how a rolling date window lives in a date argument.
                 const expr = exprs[param.key];
                 const shown =
-                  expr !== undefined
+                  drafts[param.key] ??
+                  (expr !== undefined
                     ? `= ${expr}`
                     : raw === undefined || raw === null
                       ? ''
-                      : String(raw);
+                      : String(raw));
                 return (
                   <Input
                     id={`arg-${param.key}`}
@@ -170,10 +190,12 @@ export function McpToolArgsFields({
                     onChange={(e) => {
                       const text = e.target.value;
                       if (text.startsWith('=')) {
+                        setDraft(param.key, text);
                         set(param.key, undefined);
                         setExpr(param.key, text.slice(1).trimStart());
                         return;
                       }
+                      setDraft(param.key, undefined);
                       setExpr(param.key, undefined);
                       if (param.type === 'string' || text === '') return set(param.key, text);
                       // Keep the raw text while it is not yet a number, so typing "-" or

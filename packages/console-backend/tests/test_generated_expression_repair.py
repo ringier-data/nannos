@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from console_backend.routers.scheduler_router import _ARGS_RULES, _EXPRESSION_RULES, _repair_cel
+from console_backend.routers.scheduler_router import (
+    _ARGS_RULES,
+    _EXPRESSION_RULES,
+    _GENERATE_CONDITION_RETRIES,
+    _repair_cel,
+)
 
 BAD_CEL = "result.events.filter("
 GOOD_CEL = "result.events.filter(e, has(e.attendees))"
@@ -117,6 +122,14 @@ class TestCelRepair:
         )
         assert result["cel_expr"] is None
         assert result["llm_condition"] == "tell me when an outsider is invited"
+
+    @pytest.mark.asyncio
+    async def test_it_retries_as_often_as_the_condition_endpoint_does(self):
+        # The two paths used to disagree — one retry here, two there — so an improvement
+        # to one silently missed the other. Pinned so they cannot drift apart again.
+        generate = AsyncMock(return_value={"cel_expr": "still broken ("})
+        await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "q")
+        assert generate.await_count == _GENERATE_CONDITION_RETRIES
 
     @pytest.mark.asyncio
     async def test_a_generated_llm_condition_is_preferred_over_the_raw_query(self):

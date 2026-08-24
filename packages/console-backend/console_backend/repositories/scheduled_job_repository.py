@@ -252,7 +252,13 @@ class ScheduledJobRepository(AuditedRepository):
                 "last_run_at": now,
                 "next_run_at": next_run_at,
                 "paused_reason": paused_reason,
-                "last_check_result": json.dumps(last_check_result) if last_check_result else None,
+                # `is not None`, not truthiness: `{}` is a real response (a tool with no
+                # content returns one), and mapping it to NULL makes the COALESCE above
+                # keep the previous payload — so `prev` never catches up and a
+                # `result != prev` condition stays true on every poll.
+                "last_check_result": (
+                    json.dumps(last_check_result) if last_check_result is not None else None
+                ),
                 "now": now,
             },
         )

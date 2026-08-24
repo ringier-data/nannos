@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from console_backend.routers import mcp_router
 from console_backend.routers.mcp_router import MCPToolInvokeRequest, invoke_mcp_tool
-from console_backend.services.mcp_tool_client import GatewayError, ToolCallResult
+from console_backend.services.mcp_tool_client import GatewayError, GatewayTimeout, ToolCallResult
 
 @pytest.fixture
 def user():
@@ -149,11 +149,14 @@ class TestGatewayErrors:
 
     @pytest.mark.asyncio
     async def test_a_timeout_becomes_504(self, user, monkeypatch):
+        # Keyed on the exception type, not on the wording of the message: the mapping used
+        # to match "did not respond", so rewording that message silently made every
+        # check-tool timeout a 502.
         _gateway(monkeypatch, {})
         monkeypatch.setattr(
             mcp_router,
             "call_tool",
-            AsyncMock(side_effect=GatewayError("'slow' did not respond within 30s")),
+            AsyncMock(side_effect=GatewayTimeout("'slow' took too long")),
         )
         body = MCPToolInvokeRequest(tool_name="slow", acknowledge_risk=True)
         with pytest.raises(HTTPException) as exc:

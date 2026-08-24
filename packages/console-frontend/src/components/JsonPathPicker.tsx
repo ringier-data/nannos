@@ -12,12 +12,13 @@
  * entries with the rest behind a click, so a hundred-row list cannot bury everything
  * else.
  *
- * `allowObjects` follows the condition semantics: equality and numeric comparison need
- * a single value, while an AI judgement or a presence check is happy with a subtree.
- * It gates objects only — scalars and arrays are pickable in every mode.
+ * Every node is pickable, objects included: a CEL expression is as happy with a subtree
+ * as with a scalar, so the old "single value only" mode (which existed for JSONPath
+ * equality) has nothing left to mean.
  */
 import { useMemo, useState } from 'react';
 
+import { pathSegment } from '@/lib/watchCondition';
 import { cn } from '@/lib/utils';
 
 /** Array entries shown before the "show all" row appears. */
@@ -51,7 +52,7 @@ function summarise(value: unknown): { text: string; tone: Line['tone'] } {
 }
 
 /** Flatten a JSON value into printable lines, in document order. */
-function flatten(root: unknown, allowObjects: boolean, expanded: Set<string>): Line[] {
+function flatten(root: unknown, expanded: Set<string>): Line[] {
   const lines: Line[] = [];
   let truncated = false;
 
@@ -74,7 +75,7 @@ function flatten(root: unknown, allowObjects: boolean, expanded: Set<string>): L
           depth,
           label,
           value: `{}${comma}`,
-          path: allowObjects ? path : null,
+          path,
           tone: 'punctuation',
         });
         return;
@@ -85,13 +86,13 @@ function flatten(root: unknown, allowObjects: boolean, expanded: Set<string>): L
           depth,
           label,
           value: '{',
-          path: allowObjects ? path : null,
+          path,
           tone: 'punctuation',
         })
       )
         return;
       entries.forEach(([k, v], i) =>
-        child(v, `${path}.${k}`, `"${k}": `, i < entries.length - 1 ? ',' : '', depth + 1)
+        child(v, `${path}${pathSegment(k)}`, `"${k}": `, i < entries.length - 1 ? ',' : '', depth + 1)
       );
       push({
         key: `${path}#close`,
@@ -164,7 +165,9 @@ function flatten(root: unknown, allowObjects: boolean, expanded: Set<string>): L
   } else {
     const entries = Object.entries(root as Record<string, unknown>);
     push({ key: '#open', depth: 0, label: '', value: '{', path: null, tone: 'punctuation' });
-    entries.forEach(([k, v], i) => child(v, `$.${k}`, `"${k}": `, i < entries.length - 1 ? ',' : '', 1));
+    entries.forEach(([k, v], i) =>
+      child(v, `$${pathSegment(k)}`, `"${k}": `, i < entries.length - 1 ? ',' : '', 1),
+    );
     push({ key: '#close', depth: 0, label: '', value: '}', path: null, tone: 'punctuation' });
   }
 
@@ -183,18 +186,13 @@ function flatten(root: unknown, allowObjects: boolean, expanded: Set<string>): L
 
 export function JsonPathPicker({
   value,
-  allowObjects,
-  selectedPath,
   onPick,
 }: {
   value: unknown;
-  allowObjects: boolean;
-  /** Path to highlight — the one currently used by the condition. */
-  selectedPath?: string;
   onPick: (path: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const lines = useMemo(() => flatten(value, allowObjects, expanded), [value, allowObjects, expanded]);
+  const lines = useMemo(() => flatten(value, expanded), [value, expanded]);
 
   function toggle(path: string) {
     setExpanded((prev) => {
@@ -222,7 +220,6 @@ export function JsonPathPicker({
           );
         }
         const selectable = line.path !== null;
-        const isSelected = Boolean(line.path) && line.path === selectedPath;
         return (
           <div
             key={line.key}
@@ -243,8 +240,7 @@ export function JsonPathPicker({
             style={{ paddingLeft: `${0.5 + line.depth}rem` }}
             className={cn(
               'rounded-sm py-px font-mono text-xs leading-5 whitespace-pre',
-              selectable && 'hover:bg-accent cursor-pointer',
-              isSelected && 'bg-accent ring-ring/50 ring-1'
+              selectable && 'hover:bg-accent cursor-pointer'
             )}
           >
             <span className="text-muted-foreground">{line.label}</span>

@@ -263,7 +263,7 @@ class TestJudgedConditions:
     async def test_the_model_decides(self, monkeypatch):
         _gateway(monkeypatch, {"attendees": ["a@x.com"]})
         with patch(
-            "console_backend.services.watch_evaluator.gateway_chat",
+            "console_backend.services.llm_gateway.gateway_chat",
             AsyncMock(return_value='{"condition_met": true, "reasoning": "external attendee"}'),
         ):
             with patch(
@@ -285,7 +285,7 @@ class TestJudgedConditions:
         # poll until somebody notices.
         _gateway(monkeypatch, {"attendees": []})
         with patch(
-            "console_backend.services.watch_evaluator.gateway_chat",
+            "console_backend.services.llm_gateway.gateway_chat",
             AsyncMock(side_effect=RuntimeError("gateway down")),
         ):
             with patch(
@@ -316,7 +316,7 @@ class TestJudgedConditions:
         _gateway(monkeypatch, {"a": 1})
         long = "x" * 5000
         with patch(
-            "console_backend.services.watch_evaluator.gateway_chat",
+            "console_backend.services.llm_gateway.gateway_chat",
             AsyncMock(return_value='{"condition_met": false, "reasoning": "' + long + '"}'),
         ):
             with patch(
@@ -334,7 +334,7 @@ class TestJudgedConditions:
         big = {"rows": ["y" * 200 for _ in range(100)]}
         _gateway(monkeypatch, big)
         with patch(
-            "console_backend.services.watch_evaluator.gateway_chat",
+            "console_backend.services.llm_gateway.gateway_chat",
             AsyncMock(return_value='{"condition_met": false, "reasoning": "nothing"}'),
         ):
             with patch(
@@ -357,7 +357,7 @@ class TestCelGateThenJudge:
         # LLM call on every quiet poll.
         _gateway(monkeypatch, {"items": [{"status": "OK"}]})
         judge = AsyncMock()
-        with patch("console_backend.services.watch_evaluator.gateway_chat", judge):
+        with patch("console_backend.services.llm_gateway.gateway_chat", judge):
             outcome = await WatchEvaluator().evaluate(
                 AsyncMock(), _job(llm_condition="the failure looks urgent"), "tok"
             )
@@ -370,7 +370,7 @@ class TestCelGateThenJudge:
     async def test_a_passed_gate_hands_the_model_the_extraction(self, monkeypatch):
         _gateway(monkeypatch, {"items": [{"status": "FAILED", "note": "disk full"}]})
         judge = AsyncMock(return_value='{"condition_met": true, "reasoning": "disk full is urgent"}')
-        with patch("console_backend.services.watch_evaluator.gateway_chat", judge):
+        with patch("console_backend.services.llm_gateway.gateway_chat", judge):
             with patch(
                 "console_backend.services.watch_evaluator.ModelDefaultsRepository.get_all",
                 AsyncMock(return_value={"chat:low": "m"}),
@@ -397,7 +397,7 @@ class TestCelGateThenJudge:
         # stage made the call.
         _gateway(monkeypatch, {"items": [{"status": "FAILED", "note": "test env"}]})
         with patch(
-            "console_backend.services.watch_evaluator.gateway_chat",
+            "console_backend.services.llm_gateway.gateway_chat",
             AsyncMock(return_value='{"condition_met": false, "reasoning": "test env, not urgent"}'),
         ):
             with patch(
@@ -419,7 +419,7 @@ class TestJudgeKnowsTheTime:
         # infers from payload timestamps.
         _gateway(monkeypatch, {"events": []})
         judge = AsyncMock(return_value='{"condition_met": false, "reasoning": "nothing soon"}')
-        with patch("console_backend.services.watch_evaluator.gateway_chat", judge):
+        with patch("console_backend.services.llm_gateway.gateway_chat", judge):
             with patch(
                 "console_backend.services.watch_evaluator.ModelDefaultsRepository.get_all",
                 AsyncMock(return_value={"chat:low": "m"}),

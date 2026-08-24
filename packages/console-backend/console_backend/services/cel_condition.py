@@ -29,9 +29,37 @@ to authors:
 
 CEL rather than JSONPath filters or a JS sandbox on purpose: it is non-Turing-complete
 (evaluation always terminates), has native timestamp/duration arithmetic, and an
-expression can only touch the variables above — there is no I/O to reach. The remaining
-risk is resource exhaustion, not escape, so expressions are capped in length and
-evaluated under a timeout that fails closed.
+expression can only touch the variables above — there is no I/O to reach.
+
+The remaining risk is resource exhaustion, not escape, and it is bounded by *upfront
+constraints* rather than by the timeout. This matters because the timeout cannot
+actually stop the work: `asyncio.wait_for` cancels the coroutine that is waiting, while
+the interpreter keeps running in its worker thread to completion — Python cannot kill a
+thread. So the limits that do the real work are applied before evaluation begins:
+
+  * the expression is capped at MAX_CEL_EXPR_LENGTH before the parser ever sees it, so
+    a megabyte of nested parens cannot exhaust memory during the parse;
+  * the payload bound to `result`/`prev` is capped at MAX_CEL_PAYLOAD_BYTES, because
+    cost is a function of the data as much as the expression — a comprehension over ten
+    items is free, the same one over a million is not;
+  * evaluation runs on a small dedicated executor, so however slow one expression is it
+    cannot starve every other `to_thread` caller in the process, nor the scheduler tick;
+  * only `result`, `now` and `prev` are ever bound — nothing else is reachable by name.
+
+The timeout stays as a backstop that fails closed (an error, never a quiet "not met"),
+and it does return the request promptly; it simply is not what makes this safe.
+
+celpy (pure Python) rather than the Rust-backed `common-expression-language`, measured
+2026-08-24 on the payload shape this actually sees — a list of events under a filter
+comprehension. The Rust binding is ~3x faster on a small payload (2.9ms vs 9.2ms at 50
+items, precompiled with a reused Context) and then inverts sharply: 206ms vs celpy's
+~65ms at 500 items, and 3.7s vs 257ms at 2000. Its documented "no GIL-blocking, safe
+concurrent evaluation" did not materialise either — four threads over the same program
+measured a 1.00x speedup, so there is no multi-core win to trade for the regression. It
+is also ~80% CEL-conformant by its own README, and migration 083 rewrote live conditions
+onto jsonpath()/eq_ci() promising no verdict would change, which a different engine
+reopens. Revisit if payloads get small and conformance gets complete; the numbers, not
+the architecture, are the reason.
 """
 
 from __future__ import annotations
@@ -39,6 +67,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -54,10 +85,25 @@ logger = logging.getLogger(__name__)
 #: much room.
 MAX_CEL_EXPR_LENGTH = 2000
 
-#: Hard ceiling on one evaluation. CEL cannot loop forever, but a deeply nested
-#: comprehension over a large payload can still be slow, and the scheduler tick must
-#: not wait on it. Exceeding it is an error (fail closed), not a quiet "not met".
+#: Ceiling on how long a caller waits for one evaluation. Exceeding it is an error
+#: (fail closed), not a quiet "not met". Note this bounds the *wait*, not the work: the
+#: worker thread runs to completion regardless, which is why the limits below exist.
 CEL_EVAL_TIMEOUT_SECONDS = 2.0
+
+#: Ceiling on the JSON size of the data bound to `result` and `prev`, each. Evaluation
+#: cost is a function of the payload as much as of the expression — `result.items.map(...)`
+#: is trivial over ten items and ruinous over a million — and a check tool's response is
+#: not something the person writing the condition controls. Over this, the evaluation
+#: fails closed rather than being attempted; 1 MiB is far above any real tool response
+#: (the invoke endpoint already truncates its own preview well below it).
+MAX_CEL_PAYLOAD_BYTES = 1_048_576
+
+#: Evaluation runs here rather than on asyncio's default thread pool. Since a slow
+#: expression cannot be interrupted, the only protection is to bound how much of the
+#: process it can occupy: a handful of threads that are all its own, so a burst of
+#: pathological /validate-condition requests degrades condition previews and nothing
+#: else — not the scheduler tick, not any other to_thread caller.
+_CEL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cel")
 
 #: Shown wherever an expression is rejected, phrased for the person (or model) writing it.
 CEL_SYNTAX_HINT = (
@@ -208,6 +254,52 @@ _EXTENSION_FUNCTIONS = {
 }
 
 
+#: One Environment, and one parse per distinct expression. celpy re-runs its Lark parse
+#: on every compile, and for the small expressions a condition actually is, that parse is
+#: the dominant cost — paid once per poll per job, once per dynamic argument per run, and
+#: once per debounced /validate-condition keystroke. Expressions are capped at
+#: MAX_CEL_EXPR_LENGTH and the cache is bounded, so it cannot grow without limit. The AST
+#: is cached rather than the Program because a Program is bound to a function set and is
+#: cheap to build from a parsed AST.
+_ENV = celpy.Environment(annotations=_EXTENSION_ANNOTATIONS)
+#: celpy's parser is shared mutable state and these compiles happen in `to_thread`
+#: workers, so serialise them — a parse is short, and the cache means it is rare.
+_COMPILE_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=512)
+def _compile_cached(expr: str) -> Any:
+    """Parse `expr`, reusing the result across evaluations. Raises CELParseError."""
+    with _COMPILE_LOCK:
+        return _ENV.compile(expr)
+
+
+def _bind_payload(value: Any, name: str) -> Any:
+    """JSON-round-trip a payload for CEL, refusing one too large to evaluate over.
+
+    The round-trip is so a payload carrying non-JSON scalars (datetimes a client library
+    deserialised, Decimals) cannot crash json_to_cel. The size ceiling is here because
+    this is the one place a payload enters the evaluator, and the serialised form is what
+    there is to measure.
+    """
+    encoded = json.dumps(value, default=str)
+    if len(encoded) > MAX_CEL_PAYLOAD_BYTES:
+        raise CelEvaluationError(
+            f"`{name}` is {len(encoded)} bytes; the maximum an expression can be "
+            f"evaluated over is {MAX_CEL_PAYLOAD_BYTES}. Narrow what the check tool "
+            "returns."
+        )
+    return celpy.json_to_cel(json.loads(encoded))
+
+
+def _check_length(expr: str, what: str = "CEL expression") -> None:
+    """One spelling of the size cap, so the three entry points cannot drift apart."""
+    if len(expr) > MAX_CEL_EXPR_LENGTH:
+        raise CelSyntaxError(
+            f"{what} is {len(expr)} characters; the maximum is {MAX_CEL_EXPR_LENGTH}."
+        )
+
+
 def validate_cel_expression(expr: str | None) -> None:
     """Check that an expression compiles, without a payload to try it against.
 
@@ -219,31 +311,27 @@ def validate_cel_expression(expr: str | None) -> None:
     """
     if not expr:
         return
-    if len(expr) > MAX_CEL_EXPR_LENGTH:
-        raise CelSyntaxError(
-            f"CEL expression is {len(expr)} characters; the maximum is {MAX_CEL_EXPR_LENGTH}."
-        )
+    _check_length(expr)
     try:
-        celpy.Environment(annotations=_EXTENSION_ANNOTATIONS).compile(expr)
+        _compile_cached(expr)
     except CELParseError as exc:
         raise CelSyntaxError(str(exc)) from exc
 
 
 def _evaluate_sync(expr: str, result: Any, now: datetime, prev: Any) -> CelEvaluation:
-    env = celpy.Environment(annotations=_EXTENSION_ANNOTATIONS)
     try:
-        program = env.program(env.compile(expr), functions=_EXTENSION_FUNCTIONS)
+        program = _ENV.program(_compile_cached(expr), functions=_EXTENSION_FUNCTIONS)
     except CELParseError as exc:
         raise CelSyntaxError(str(exc)) from exc
 
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
+    # Only these three names are ever bound; nothing else is reachable from an
+    # expression.
     activation = {
-        # Round-trip through json so a payload carrying non-JSON scalars (datetimes a
-        # client library deserialised, Decimals) cannot crash json_to_cel.
-        "result": celpy.json_to_cel(json.loads(json.dumps(result, default=str))),
+        "result": _bind_payload(result, "result"),
         "now": celtypes.TimestampType(now),
-        "prev": celpy.json_to_cel(json.loads(json.dumps(prev, default=str))),
+        "prev": _bind_payload(prev, "prev"),
     }
     try:
         raw = program.evaluate(activation)
@@ -257,7 +345,6 @@ def _evaluate_sync(expr: str, result: Any, now: datetime, prev: Any) -> CelEvalu
 
 
 def _evaluate_arg_exprs_sync(exprs: dict[str, str], now: datetime, prev: Any) -> dict[str, Any]:
-    env = celpy.Environment(annotations=_EXTENSION_ANNOTATIONS)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     activation = {
@@ -265,13 +352,13 @@ def _evaluate_arg_exprs_sync(exprs: dict[str, str], now: datetime, prev: Any) ->
         # so an expression reaching for the response fails with a clear error instead
         # of a mystifying null.
         "now": celtypes.TimestampType(now),
-        "prev": celpy.json_to_cel(json.loads(json.dumps(prev, default=str))),
+        "prev": _bind_payload(prev, "prev"),
     }
 
     resolved: dict[str, Any] = {}
     for key, expr in exprs.items():
         try:
-            program = env.program(env.compile(expr), functions=_EXTENSION_FUNCTIONS)
+            program = _ENV.program(_compile_cached(expr), functions=_EXTENSION_FUNCTIONS)
         except CELParseError as exc:
             raise CelSyntaxError(f"argument {key!r}: {exc}") from exc
         try:
@@ -311,14 +398,12 @@ async def evaluate_arg_exprs(
         CelEvaluationError: an expression failed to evaluate, or the batch timed out.
     """
     for key, expr in exprs.items():
-        if len(expr) > MAX_CEL_EXPR_LENGTH:
-            raise CelSyntaxError(
-                f"argument {key!r}: expression is {len(expr)} characters; "
-                f"the maximum is {MAX_CEL_EXPR_LENGTH}."
-            )
+        _check_length(expr, f"argument {key!r}: expression")
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_evaluate_arg_exprs_sync, exprs, now, prev),
+            asyncio.get_running_loop().run_in_executor(
+                _CEL_EXECUTOR, _evaluate_arg_exprs_sync, exprs, now, prev
+            ),
             timeout=CEL_EVAL_TIMEOUT_SECONDS,
         )
     except TimeoutError as exc:
@@ -342,13 +427,12 @@ async def evaluate_cel(
         CelSyntaxError: the expression does not compile.
         CelEvaluationError: evaluation failed against this payload, or timed out.
     """
-    if len(expr) > MAX_CEL_EXPR_LENGTH:
-        raise CelSyntaxError(
-            f"CEL expression is {len(expr)} characters; the maximum is {MAX_CEL_EXPR_LENGTH}."
-        )
+    _check_length(expr)
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_evaluate_sync, expr, result, now, prev),
+            asyncio.get_running_loop().run_in_executor(
+                _CEL_EXECUTOR, _evaluate_sync, expr, result, now, prev
+            ),
             timeout=CEL_EVAL_TIMEOUT_SECONDS,
         )
     except TimeoutError as exc:

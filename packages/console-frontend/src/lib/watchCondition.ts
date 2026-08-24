@@ -7,6 +7,19 @@
  */
 
 /**
+ * One path segment, spelled so JSONPath and CEL read it the same way.
+ *
+ * `.key` only works for a bare identifier: in CEL `result.content-type` is subtraction,
+ * `result.2` does not parse, and a key containing a dot silently becomes two segments —
+ * so a click seeded a condition that could never compile, with no hint that the bracket
+ * form was needed. Bracket-quoting is valid in both languages, which is what lets
+ * jsonPathToCel stay a prefix swap.
+ */
+export function pathSegment(key: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? `.${key}` : `[${JSON.stringify(key)}]`;
+}
+
+/**
  * Turn a picked JSONPath into the CEL spelling of the same location, so clicking a
  * value in the response result seeds the expression instead of doing nothing.
  * `$.a.b[0]` addresses the tool response, which CEL sees as `result`.

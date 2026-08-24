@@ -43,6 +43,18 @@ WHERE job_type = 'watch'
   AND (llm_condition IS NULL OR llm_condition = '')
   AND condition_expr IS NOT NULL AND condition_expr <> '';
 
+-- An empty condition_expr is reachable: the old CHECK (034) only required NOT NULL, and
+-- the old PATCH path stored '' unvalidated. The pre-CEL runner read that as condition-met
+-- on every poll, so leaving such a row with no condition at all would silently turn a
+-- working (if noisy) job into one that fails every poll until it auto-pauses. `true` is
+-- that old behaviour, said in CEL.
+UPDATE scheduled_jobs
+SET cel_expr = 'true'
+WHERE job_type = 'watch'
+  AND cel_expr IS NULL
+  AND (llm_condition IS NULL OR llm_condition = '')
+  AND (condition_expr IS NULL OR condition_expr = '');
+
 -- A watch needs a tool and a condition (cel_expr, llm_condition, or both); the API
 -- enforces the condition half, the constraint keeps requiring the tool.
 ALTER TABLE scheduled_jobs DROP CONSTRAINT IF EXISTS scheduled_jobs_watch_requires_check;
