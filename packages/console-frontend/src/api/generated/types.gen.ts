@@ -1386,10 +1386,6 @@ export type ConditionEvaluation = {
      */
     extracted?: unknown;
     /**
-     * Match Count
-     */
-    match_count?: number;
-    /**
      * Reasoning
      */
     reasoning?: string | null;
@@ -1397,14 +1393,6 @@ export type ConditionEvaluation = {
      * Gate Met
      */
     gate_met?: boolean | null;
-    /**
-     * Operator
-     */
-    operator?: string | null;
-    /**
-     * Expected Value
-     */
-    expected_value?: string | null;
 };
 
 /**
@@ -7827,7 +7815,7 @@ export type ActionEnum = 'suspend' | 'activate' | 'delete';
 /**
  * Mode
  */
-export type ModeEnum = 'rule' | 'judge' | 'cel' | 'cel+judge';
+export type ModeEnum = 'judge' | 'cel' | 'cel+judge';
 
 /**
  * Role

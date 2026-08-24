@@ -48,29 +48,19 @@ class ConditionEvaluation(BaseModel):
 
     met: bool
     #: How it was decided. A literal rather than a string so the generated client can
-    #: branch on it without widening. "cel" is a CEL expression's own gate;
-    #: "cel+judge" is a CEL gate that passed, with a model's verdict on what it matched.
-    #: "rule" appears only on runs recorded before conditions became CEL — the
-    #: JSONPath+operator machinery is gone, but its run records still explain themselves.
-    mode: Literal["rule", "judge", "cel", "cel+judge"]
+    #: branch on it without widening. "judge" is a model reading the whole response;
+    #: "cel" is a CEL expression's own gate; "cel+judge" is a CEL gate that passed,
+    #: with a model's verdict on what it matched.
+    mode: Literal["judge", "cel", "cel+judge"]
     #: The value the condition was applied to, serialised and truncated for display.
     #: For CEL modes this is what the expression returned — the evidence itself.
     extracted: Any = None
-    #: How many nodes the path matched. Historical "rule"/"judge" runs only.
-    match_count: int = 0
     #: The model's own account of its decision. Judge modes only.
     reasoning: str | None = None
     #: What the CEL gate decided, recorded separately from `met` because in
     #: "cel+judge" mode the gate can pass while the model still says no — and a run
     #: must show which stage made the call. CEL modes only.
     gate_met: bool | None = None
-    #: Historical "rule" runs only, so those records read on their own terms.
-    operator: str | None = None
-    expected_value: str | None = None
-    #: Rule mode only, so a run can be read without going back to the job — which may
-    #: have been edited since.
-    operator: str | None = None
-    expected_value: str | None = None
 
 
 class ScheduledJobRun(BaseModel):

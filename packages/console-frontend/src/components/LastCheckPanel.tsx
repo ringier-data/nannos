@@ -6,8 +6,8 @@
  * met. The material is already stored — the tool response on the job, and how the
  * condition was decided on the run — so it costs nothing but showing it.
  *
- * The two kinds of explanation are genuinely different. A rule is derivable: the response
- * is here, so the comparison can be re-read at any time. A model's judgement cannot be
+ * The two kinds of explanation are genuinely different. An expression is derivable: the
+ * response is here, so it can be re-evaluated at any time. A model's judgement cannot be
  * reconstructed at all, which is why its reasoning is recorded at the run — that record
  * is the only account of it that will ever exist.
  */
@@ -55,20 +55,16 @@ export function LastCheckPanel({
   // evaluating a condition.
   if (!run || (!evaluation && !result)) return null;
 
-  const judged = evaluation?.mode === 'judge';
   const cel = evaluation?.mode === 'cel' || evaluation?.mode === 'cel+judge';
   // A stacked evaluation has two stages, and the record must show which one made the
   // call: a false gate means the model was never asked at all.
   const celJudged = evaluation?.mode === 'cel+judge' && evaluation.gate_met === true;
-  const matched = evaluation?.match_count ?? 0;
 
   const badge = cel
     ? celJudged
       ? 'expression gate, then judged by a model'
       : 'decided by an expression'
-    : judged
-      ? 'judged by a model'
-      : 'decided by a rule';
+    : 'judged by a model';
 
   return (
     <div className="overflow-hidden rounded-lg border">
@@ -143,7 +139,7 @@ export function LastCheckPanel({
                   </span>
                 )}
               </div>
-            ) : judged ? (
+            ) : (
               <div className="grid gap-1.5">
                 <p className="text-[13px] leading-relaxed">
                   {evaluation?.reasoning ? `“${evaluation.reasoning}”` : 'The model gave no reason.'}
@@ -153,12 +149,6 @@ export function LastCheckPanel({
                   recomputed, so this is the only explanation this run will ever have.
                 </span>
               </div>
-            ) : (
-              <p className="text-[13px] leading-relaxed">
-                {matched === 0
-                  ? 'The path matched nothing in this response, so there was no value to compare.'
-                  : `The path matched ${matched === 1 ? '1 value' : `${matched} values`} and the comparison ${evaluation?.met ? 'held' : 'did not hold'}.`}
-              </p>
             )}
 
             {evaluation && (
@@ -170,19 +160,6 @@ export function LastCheckPanel({
                     : typeof evaluation.extracted === 'string'
                       ? evaluation.extracted
                       : JSON.stringify(evaluation.extracted)}
-                </span>
-              </div>
-            )}
-
-            {evaluation && !judged && !cel && (
-              <div className="grid gap-1">
-                <span className="text-muted-foreground text-[11px]">Compared with</span>
-                <span className="font-mono text-xs">
-                  {evaluation.operator}
-                  {evaluation.expected_value ? ` ${evaluation.expected_value}` : ' (no value needed)'}
-                </span>
-                <span className="text-muted-foreground text-xs">
-                  As the job was configured for this run, not as it is now.
                 </span>
               </div>
             )}
