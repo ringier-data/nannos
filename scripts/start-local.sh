@@ -591,7 +591,7 @@ docker compose exec -T postgres-console psql -U postgres -d console -c \
 docker compose exec -T postgres-console psql -U postgres -d console -c \
   "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status, created_at, updated_at)
    VALUES (gen_random_uuid(), 'local-test-user', 'test@local.dev', 'Test', 'User', true, 'admin', 'active', now(), now())
-   ON CONFLICT (email) DO UPDATE SET is_administrator = true, role = 'admin';" \
+   ON CONFLICT (LOWER(email)) WHERE deleted_at IS NULL DO UPDATE SET is_administrator = true, role = 'admin';" \
   >/dev/null 2>&1 || true
 
 # ─── 6. Wait for Keycloak ────────────────────────────────────────

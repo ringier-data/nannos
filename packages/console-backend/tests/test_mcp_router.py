@@ -108,7 +108,7 @@ class TestListMcpTools:
                 # Verify MCP JSON-RPC request
                 mock_client.post.assert_awaited_once()
                 call_args = mock_client.post.call_args
-                assert call_args[0][0] == "https://alloych.gatana.ai/mcp"
+                assert call_args[0][0] == "https://nannos.gatana.nannos.ringier.ch/mcp"
                 assert call_args[1]["headers"]["Authorization"] == "Bearer mcp_gateway_token"
                 assert call_args[1]["json"]["method"] == "tools/list"
                 assert call_args[1]["json"]["jsonrpc"] == "2.0"

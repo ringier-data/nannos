@@ -30,6 +30,7 @@ interface OutboundScimEndpoint {
   enabled: boolean;
   push_users: boolean;
   push_groups: boolean;
+  is_mcp_gateway: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -43,6 +44,7 @@ interface OutboundScimEndpointCreated {
   enabled: boolean;
   push_users: boolean;
   push_groups: boolean;
+  is_mcp_gateway: boolean;
   created_at: string;
 }
 
@@ -83,6 +85,7 @@ export function OutboundScimPage() {
   const [bearerToken, setBearerToken] = useState('');
   const [pushUsers, setPushUsers] = useState(true);
   const [pushGroups, setPushGroups] = useState(true);
+  const [isMcpGateway, setIsMcpGateway] = useState(false);
 
   // Edit form state
   const [editName, setEditName] = useState('');
@@ -91,6 +94,7 @@ export function OutboundScimPage() {
   const [editPushUsers, setEditPushUsers] = useState(true);
   const [editPushGroups, setEditPushGroups] = useState(true);
   const [editEnabled, setEditEnabled] = useState(true);
+  const [editIsMcpGateway, setEditIsMcpGateway] = useState(false);
 
   const { data, isLoading } = useQuery<OutboundScimListResponse>({
     queryKey: ['outboundScimEndpoints'],
@@ -107,6 +111,7 @@ export function OutboundScimPage() {
       bearer_token: string;
       push_users: boolean;
       push_groups: boolean;
+      is_mcp_gateway: boolean;
     }) => {
       const res = await client.post<OutboundScimEndpointCreated>({ url: API_BASE, body });
       return res.data as OutboundScimEndpointCreated;
@@ -187,6 +192,7 @@ export function OutboundScimPage() {
     setBearerToken('');
     setPushUsers(true);
     setPushGroups(true);
+    setIsMcpGateway(false);
   };
 
   const handleCreate = () => {
@@ -196,6 +202,7 @@ export function OutboundScimPage() {
       bearer_token: bearerToken,
       push_users: pushUsers,
       push_groups: pushGroups,
+      is_mcp_gateway: isMcpGateway,
     });
   };
 
@@ -206,6 +213,7 @@ export function OutboundScimPage() {
     setEditPushUsers(endpoint.push_users);
     setEditPushGroups(endpoint.push_groups);
     setEditEnabled(endpoint.enabled);
+    setEditIsMcpGateway(endpoint.is_mcp_gateway);
     setEditDialog({ open: true, endpoint });
   };
 
@@ -217,6 +225,7 @@ export function OutboundScimPage() {
       push_users: editPushUsers,
       push_groups: editPushGroups,
       enabled: editEnabled,
+      is_mcp_gateway: editIsMcpGateway,
     };
     if (editBearerToken) body.bearer_token = editBearerToken;
     updateMutation.mutate({ id: editDialog.endpoint.id, body });
@@ -277,6 +286,7 @@ export function OutboundScimPage() {
                     <div className="flex gap-1">
                       {ep.push_users && <Badge variant="secondary">Users</Badge>}
                       {ep.push_groups && <Badge variant="secondary">Groups</Badge>}
+                      {ep.is_mcp_gateway && <Badge>MCP Gateway</Badge>}
                     </div>
                   </TableCell>
                   <TableCell>
@@ -395,6 +405,14 @@ export function OutboundScimPage() {
                 <Label htmlFor="ep-push-groups">Push Groups</Label>
               </div>
             </div>
+            <div className="flex items-center gap-2">
+              <Switch id="ep-is-mcp-gateway" checked={isMcpGateway} onCheckedChange={setIsMcpGateway} />
+              <Label htmlFor="ep-is-mcp-gateway">MCP Gateway endpoint</Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Mark this endpoint as the MCP gateway (Gatana) to enable server access management for groups synced to
+              it.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>
@@ -452,6 +470,10 @@ export function OutboundScimPage() {
                 <Switch id="edit-push-groups" checked={editPushGroups} onCheckedChange={setEditPushGroups} />
                 <Label htmlFor="edit-push-groups">Push Groups</Label>
               </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch id="edit-is-mcp-gateway" checked={editIsMcpGateway} onCheckedChange={setEditIsMcpGateway} />
+              <Label htmlFor="edit-is-mcp-gateway">MCP Gateway endpoint</Label>
             </div>
             <div className="flex items-center gap-2">
               <Switch id="edit-enabled" checked={editEnabled} onCheckedChange={setEditEnabled} />

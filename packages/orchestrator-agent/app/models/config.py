@@ -343,7 +343,7 @@ class AgentSettings:
     DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "dev-nannos-infrastructure-agents-files")
 
     # MCP gateway configuration
-    MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
+    MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://nannos.gatana.nannos.ringier.ch/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
 
     # How many MCP servers may be queried for their tool catalogue at the same time

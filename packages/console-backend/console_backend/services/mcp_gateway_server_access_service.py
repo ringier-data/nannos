@@ -2,11 +2,11 @@
 
 Manages server access permissions in the MCP gateway (Gatana) for groups
 that are synced via outbound SCIM. A group is "managed" if it has a SCIM
-remote_id for an outbound endpoint whose hostname matches MCP_GATEWAY_URL.
+remote_id for an outbound endpoint flagged as the MCP gateway
+(outbound_scim_endpoints.is_mcp_gateway).
 """
 
 import logging
-from urllib.parse import urlparse
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,23 +17,11 @@ from ..models.mcp_gateway_server_access import McpGatewayServerPermission
 logger = logging.getLogger(__name__)
 
 
-def _apex_domain(hostname: str) -> str:
-    """Extract apex domain (last two labels) from a hostname.
-
-    e.g. 'scim.gatana.ai' -> 'gatana.ai', 'alloych.gatana.ai' -> 'gatana.ai'
-    """
-    parts = hostname.rstrip(".").split(".")
-    if len(parts) >= 2:
-        return ".".join(parts[-2:])
-    return hostname
-
-
 class McpGatewayServerAccessService:
     """Manages MCP gateway server access permissions for groups."""
 
     def __init__(self) -> None:
         self._db_session_factory: async_sessionmaker[AsyncSession] | None = None
-        self._gateway_hostname: str | None = None
         self._api_base_url: str | None = None
 
     def set_db_session_factory(self, factory: async_sessionmaker[AsyncSession]) -> None:
@@ -44,14 +32,6 @@ class McpGatewayServerAccessService:
         if self._db_session_factory is None:
             raise RuntimeError("db_session_factory not set on McpGatewayServerAccessService")
         return self._db_session_factory
-
-    @property
-    def gateway_hostname(self) -> str:
-        """Hostname of the MCP gateway URL, used for matching outbound SCIM endpoints."""
-        if self._gateway_hostname is None:
-            parsed = urlparse(config.mcp_gateway.url)
-            self._gateway_hostname = parsed.hostname or ""
-        return self._gateway_hostname
 
     @property
     def api_base_url(self) -> str:
@@ -73,79 +53,52 @@ class McpGatewayServerAccessService:
         """Resolve the MCP gateway team ID for a group.
 
         Looks up the outbound SCIM sync state to find a remote_id for this group
-        at an endpoint whose hostname matches the MCP gateway hostname.
+        at an active endpoint flagged as the MCP gateway (is_mcp_gateway).
 
         Returns:
             The remote_id (Gatana team ID) if found, None otherwise.
         """
-        gateway_host = self.gateway_hostname
-        logger.debug(
-            f"resolve_gateway_team_id: group_id={group_id}, "
-            f"gateway_hostname='{gateway_host}', "
-            f"mcp_gateway_url='{config.mcp_gateway.url}'"
-        )
-        if not gateway_host:
-            logger.warning("resolve_gateway_team_id: gateway_hostname is empty, returning None")
-            return None
-
         async with self.db_session_factory() as db:
             result = await db.execute(
                 text("""
-                    SELECT ss.remote_id, ss.entity_id, ss.entity_type, ss.endpoint_id,
-                           ep.endpoint_url, ep.enabled, ep.deleted_at
+                    SELECT ss.remote_id, ss.endpoint_id, ep.endpoint_url
                     FROM outbound_scim_sync_state ss
                     JOIN outbound_scim_endpoints ep
                         ON ep.id = ss.endpoint_id
                     WHERE ss.entity_type = 'group'
                       AND ss.entity_id = :entity_id
+                      AND ss.remote_id IS NOT NULL
+                      AND ep.is_mcp_gateway = true
+                      AND ep.enabled = true
+                      AND ep.deleted_at IS NULL
+                    ORDER BY ss.endpoint_id
                 """),
                 {"entity_id": str(group_id)},
             )
-            all_rows = result.fetchall()
+            rows = result.fetchall()
 
-        logger.debug(
-            f"resolve_gateway_team_id: found {len(all_rows)} total sync_state rows "
-            f"for group entity_id='{group_id}'"
-        )
-
-        for row in all_rows:
-            logger.debug(
-                f"resolve_gateway_team_id: row endpoint_id={row.endpoint_id}, "
-                f"endpoint_url='{row.endpoint_url}', "
-                f"remote_id='{row.remote_id}', "
-                f"enabled={row.enabled}, "
-                f"deleted_at={row.deleted_at}"
+        if not rows:
+            logger.warning(
+                f"resolve_gateway_team_id: no sync state for group_id={group_id} at any "
+                f"active endpoint flagged is_mcp_gateway. Check that the MCP gateway's "
+                f"outbound SCIM endpoint has the flag set."
             )
-            if row.remote_id is None:
-                logger.debug("  -> skipped: remote_id is None")
-                continue
-            if row.deleted_at is not None:
-                logger.debug("  -> skipped: endpoint deleted_at is set")
-                continue
-            if not row.enabled:
-                logger.debug("  -> skipped: endpoint is disabled")
-                continue
+            return None
 
-            ep_hostname = urlparse(row.endpoint_url).hostname or ""
-            ep_apex = _apex_domain(ep_hostname)
-            gw_apex = _apex_domain(gateway_host)
-            logger.debug(
-                f"  -> parsed endpoint hostname='{ep_hostname}' (apex='{ep_apex}'), "
-                f"comparing to gateway_host='{gateway_host}' (apex='{gw_apex}'), "
-                f"match={ep_apex == gw_apex}"
+        if len(rows) > 1:
+            logger.warning(
+                f"resolve_gateway_team_id: group_id={group_id} is synced to "
+                f"{len(rows)} endpoints flagged is_mcp_gateway "
+                f"({[(r.endpoint_id, r.endpoint_url) for r in rows]}); "
+                f"using endpoint_id={rows[0].endpoint_id}"
             )
-            if ep_apex == gw_apex:
-                logger.info(
-                    f"resolve_gateway_team_id: matched! group_id={group_id} -> "
-                    f"team_id='{row.remote_id}'"
-                )
-                return row.remote_id
 
-        logger.warning(
-            f"resolve_gateway_team_id: no matching endpoint found for group_id={group_id}. "
-            f"Expected gateway_host='{gateway_host}'"
+        row = rows[0]
+        logger.info(
+            f"resolve_gateway_team_id: group_id={group_id} -> team_id='{row.remote_id}' "
+            f"(endpoint_id={row.endpoint_id})"
         )
-        return None
+        return row.remote_id
 
     async def list_server_access(
         self, gatana_token: str, group_id: int

@@ -15,6 +15,7 @@ class OutboundScimEndpointCreate(BaseModel):
     bearer_token: str = Field(..., min_length=1, description="Bearer token for authenticating with the remote SCIM server")
     push_users: bool = Field(True, description="Whether to push user changes to this endpoint")
     push_groups: bool = Field(True, description="Whether to push group changes to this endpoint")
+    is_mcp_gateway: bool = Field(False, description="Whether this endpoint is the MCP gateway (Gatana), enabling server access management for synced groups")
 
 
 class OutboundScimEndpointUpdate(BaseModel):
@@ -26,6 +27,7 @@ class OutboundScimEndpointUpdate(BaseModel):
     enabled: bool | None = None
     push_users: bool | None = None
     push_groups: bool | None = None
+    is_mcp_gateway: bool | None = None
 
 
 class OutboundScimEndpoint(BaseModel):
@@ -38,6 +40,7 @@ class OutboundScimEndpoint(BaseModel):
     enabled: bool
     push_users: bool
     push_groups: bool
+    is_mcp_gateway: bool
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -56,6 +59,7 @@ class OutboundScimEndpointCreated(BaseModel):
     enabled: bool
     push_users: bool
     push_groups: bool
+    is_mcp_gateway: bool
     created_at: datetime
 
 

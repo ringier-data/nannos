@@ -146,10 +146,10 @@ class TestToolDiscoveryService:
             # ".com" host (verified against the old code: it produces
             # "https://gateway.example.co", dropping the "m"). This is the one
             # case that actually fails without the fix; the others below don't
-            # (alloych.gatana.ai ends in "i", not m/c/p — accidentally correct
+            # (nannos.gatana.nannos.ringier.ch ends in "i", not m/c/p — accidentally correct
             # either way — and are kept for the trailing-slash-only regression).
             ("https://gateway.example.com/mcp", "https://gateway.example.com/api/v1/mcp-servers"),
-            ("https://alloych.gatana.ai/mcp", "https://alloych.gatana.ai/api/v1/mcp-servers"),
+            ("https://nannos.gatana.nannos.ringier.ch/mcp", "https://nannos.gatana.nannos.ringier.ch/api/v1/mcp-servers"),
             # A trailing slash is a no-op for removesuffix("/mcp") unless the
             # slash is stripped first — regression coverage for that fix.
             ("https://gw.example/mcp/", "https://gw.example/api/v1/mcp-servers"),

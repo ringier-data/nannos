@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 _CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
 _CONSOLE_BACKEND_CLIENT_ID = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")
-_MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
+_MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://nannos.gatana.nannos.ringier.ch/mcp")
 _MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "300"))
 _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
 _MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))

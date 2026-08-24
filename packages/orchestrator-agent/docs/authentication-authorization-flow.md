@@ -316,7 +316,7 @@ async def discover_tools(self, token: str, white_list: List[str] = None):
         connections={
             "gatana": StreamableHttpConnection(
                 transport="streamable_http",
-                url="https://alloych.gatana.ai/mcp",
+                url="https://nannos.gatana.nannos.ringier.ch/mcp",
                 headers={"Authorization": f"Bearer {mcp_gateway_token}"},
             )
         }

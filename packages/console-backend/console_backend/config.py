@@ -104,7 +104,7 @@ class KeycloakAdminConfig(BaseModel):
 class MCPGatewayConfig(BaseModel):
     """MCP Gateway configuration for tool discovery."""
 
-    url: str = Field(default_factory=lambda: os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp"))
+    url: str = Field(default_factory=lambda: os.getenv("MCP_GATEWAY_URL", "https://nannos.gatana.nannos.ringier.ch/mcp"))
     client_id: str = Field(default_factory=lambda: os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana"))
 
 
