@@ -133,7 +133,6 @@ dependencies = [
     { name = "deepagents", extra = ["quickjs"] },
     { name = "gatana-langchain" },
     { name = "httpx" },
-    { name = "jsonpath-ng" },
     { name = "langchain" },
     { name = "langchain-aws" },
     { name = "langchain-mcp-adapters" },
@@ -176,7 +175,6 @@ requires-dist = [
     { name = "deepagents", extras = ["quickjs"], specifier = ">=0.6.0,<0.7.0" },
     { name = "gatana-langchain", specifier = ">=0.1.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "jsonpath-ng", specifier = ">=1.6.0" },
     { name = "langchain", specifier = ">=1.0.0" },
     { name = "langchain-aws", specifier = ">=1.4.3" },
     { name = "langchain-mcp-adapters", specifier = ">=0.1.11" },
@@ -1365,15 +1363,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/42/78/18813351fe5d63acad16aec57f94ec2b70a09e53ca98145589e185423873/jsonpatch-1.33.tar.gz", hash = "sha256:9fcd4009c41e6d12348b4a0ff2563ba56a2923a7dfee731d004e212e1ee5030c", size = 21699, upload-time = "2023-06-26T12:07:29.144Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/07/02e16ed01e04a374e644b575638ec7987ae846d25ad97bcc9945a3ee4b0e/jsonpatch-1.33-py2.py3-none-any.whl", hash = "sha256:0ae28c0cd062bbd8b8ecc26d7d164fbbea9652a1a3693f3b956c1eae5145dade", size = 12898, upload-time = "2023-06-16T21:01:28.466Z" },
-]
-
-[[package]]
-name = "jsonpath-ng"
-version = "1.8.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/32/58/250751940d75c8019659e15482d548a4aa3b6ce122c515102a4bfdac50e3/jsonpath_ng-1.8.0.tar.gz", hash = "sha256:54252968134b5e549ea5b872f1df1168bd7defe1a52fed5a358c194e1943ddc3", size = 74513, upload-time = "2026-02-24T14:42:06.182Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/99/33c7d78a3fb70d545fd5411ac67a651c81602cc09c9cf0df383733f068c5/jsonpath_ng-1.8.0-py3-none-any.whl", hash = "sha256:b8dde192f8af58d646fc031fac9c99fe4d00326afc4148f1f043c601a8cfe138", size = 67844, upload-time = "2026-02-28T00:53:19.637Z" },
 ]
 
 [[package]]

@@ -18,6 +18,9 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
+from ..repositories.model_defaults_repository import ModelDefaultsRepository
+from .llm_gateway import gateway_chat
+from .watch_evaluator import WatchEvaluator, WatchOutcome
 from ..models.scheduled_job import JobRunStatus, JobType, ScheduledJob
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
@@ -26,6 +29,15 @@ from ..services.socket_notification_manager import SocketNotificationManager
 from ..utils.a2a_dispatch import dispatch_streaming
 
 logger = logging.getLogger(__name__)
+
+# How long a run may sit in 'running' before the healer calls it interrupted.
+#
+# Generous on purpose. The healer now sweeps on every tick, so this bound is the only
+# thing standing between a legitimately slow dispatch and a run record that says it
+# failed while the agent is still working. Runs this process started are excluded
+# outright (_in_flight), so the window only has to cover dispatches this process cannot
+# see: another instance's, or a crashed predecessor's.
+STUCK_RUN_THRESHOLD = "30 minutes"
 
 
 class SchedulerEngine:
@@ -52,6 +64,10 @@ class SchedulerEngine:
         self._claim_limit = claim_limit
         self._running = False
         self._task: asyncio.Task | None = None
+        self._watch_evaluator = WatchEvaluator()
+        # Runs this process is dispatching right now. The healer must not touch them
+        # however long they take — a slow agent is not a stuck run.
+        self._in_flight: set[int] = set()
 
     async def start(self) -> None:
         """Start the background tick loop."""
@@ -67,32 +83,39 @@ class SchedulerEngine:
         )
 
     async def _heal_stuck_runs(self) -> None:
-        """Mark runs that have been stuck in 'running' state for >10 minutes as failed.
+        """Fail runs left in 'running' longer than STUCK_RUN_THRESHOLD.
 
-        Runs can get stuck if the process was killed mid-dispatch or if _finalize
-        raised an unhandled exception.  This cleanup runs once at startup so the
-        UI does not show stale 'Running' entries indefinitely.
+        A run gets stranded when the process is killed mid-dispatch, or when recording
+        its outcome fails. Nothing else ever revisits the row: it reads as work in
+        progress forever, with no duration and no error.
+
+        This used to run only at startup, which meant a stranded run cleared on the next
+        restart or never. It now runs on every tick, so a strand self-clears within the
+        threshold wherever it came from. Runs this process is still dispatching are
+        excluded — see _in_flight.
         """
         try:
             async with self._db_session_factory() as db:
                 result = await db.execute(
-                    text("""
+                    text(f"""
                         UPDATE scheduled_job_runs
                         SET
                             status       = 'failed',
                             completed_at = NOW(),
                             error_message = 'Run was interrupted before completing (process restart or unhandled error)'
                         WHERE status = 'running'
-                          AND started_at < NOW() - INTERVAL '10 minutes'
+                          AND started_at < NOW() - INTERVAL '{STUCK_RUN_THRESHOLD}'
+                          AND NOT (id = ANY(:in_flight))
                         RETURNING id
-                    """)
+                    """),
+                    {"in_flight": list(self._in_flight)},
                 )
-                healed = result.rowcount
+                healed = [r["id"] for r in result.mappings().all()]
                 await db.commit()
             if healed:
-                logger.warning("Healed %d stuck 'running' run(s) on startup", healed)
+                logger.warning("Healed %d stuck 'running' run(s): %s", len(healed), healed)
         except Exception:
-            logger.exception("Failed to heal stuck runs on startup")
+            logger.exception("Failed to heal stuck runs")
 
     async def stop(self) -> None:
         """Stop the background tick loop gracefully."""
@@ -128,6 +151,8 @@ class SchedulerEngine:
             await asyncio.sleep(self._tick_interval)
 
     async def _tick(self) -> None:
+        await self._heal_stuck_runs()
+
         async with self._db_session_factory() as db:
             jobs = await self._repo.claim_due_jobs(db, limit=self._claim_limit)
             await db.commit()
@@ -152,6 +177,7 @@ class SchedulerEngine:
 
         logger.info("Dispatching job %d (run %d) to agent-runner", job.id, run_id)
 
+        self._in_flight.add(run_id)
         try:
             # Resolve user access token and build payload in a single DB session
             async with self._db_session_factory() as db:
@@ -169,8 +195,41 @@ class SchedulerEngine:
                     )
                     return
 
+                # Watch jobs: decide here whether anything is happening. A poll that
+                # does not trigger dispatches nothing at all — and knowing the outcome
+                # before dispatch is what lets the trigger choose its target (an agent,
+                # or a phone call).
+                watch_outcome: WatchOutcome | None = None
+                if self._watch_evaluator.can_evaluate(job):
+                    watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token)
+
+                    if watch_outcome.error:
+                        await self._finalize(
+                            run_id=run_id,
+                            job=job,
+                            status=JobRunStatus.FAILED,
+                            error_message=watch_outcome.error,
+                            delivered=False,
+                            last_check_result=watch_outcome.check_result,
+                            condition_evaluation=watch_outcome.evaluation,
+                        )
+                        return
+
+                    if not watch_outcome.condition_met:
+                        await self._finalize(
+                            run_id=run_id,
+                            job=job,
+                            status=JobRunStatus.CONDITION_NOT_MET,
+                            delivered=False,
+                            last_check_result=watch_outcome.check_result,
+                            condition_evaluation=watch_outcome.evaluation,
+                        )
+                        return
+
                 # Build the A2A message args for agent-runner
-                parts, metadata, push_config = await self._build_message_args(job, run_id, access_token, db)
+                parts, metadata, push_config = await self._build_message_args(
+                    job, run_id, access_token, db, watch_outcome=watch_outcome
+                )
 
             # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client. SSE keeps
             # bytes flowing so CloudFront/ALB idle-timeout never fires for long-running jobs.
@@ -195,7 +254,12 @@ class SchedulerEngine:
                 error_message=error_msg,
                 conversation_id=conversation_id,
                 delivered=(job.delivery_channel_id is not None),
-                last_check_result=result_data.get("last_check_result"),
+                # From the local evaluation: the scheduler performed the check, so the
+                # runner has no reason to echo it back.
+                last_check_result=(
+                    watch_outcome.check_result if watch_outcome else result_data.get("last_check_result")
+                ),
+                condition_evaluation=watch_outcome.evaluation if watch_outcome else None,
             )
 
         except httpx.HTTPStatusError as e:
@@ -222,11 +286,23 @@ class SchedulerEngine:
                 )
             except Exception:
                 logger.exception("Failed to finalize run %s for job %d after dispatch error", run_id, job.id)
+        finally:
+            self._in_flight.discard(run_id)
 
     async def _build_message_args(
-        self, job: ScheduledJob, run_id: int, access_token: str, db: Any
+        self,
+        job: ScheduledJob,
+        run_id: int,
+        access_token: str,
+        db: Any,
+        watch_outcome: WatchOutcome | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str] | None]:
-        """Build the (message parts, metadata, push_config) for the A2A SDK dispatch."""
+        """Build the (message parts, metadata, push_config) for the A2A SDK dispatch.
+
+        `watch_outcome` is set when the condition was already evaluated here, which is the
+        normal path for a watch job. It is passed on so agent-runner does not call the
+        tool a second time or reach a different verdict than the one that got us here.
+        """
         metadata: dict[str, Any] = {
             "scheduled_job_id": job.id,
             "scheduled_job_run_id": run_id,
@@ -240,43 +316,70 @@ class SchedulerEngine:
             # sub-agent config will be fetched by agent-runner using the sub_agent_id
             metadata["sub_agent_id"] = job.sub_agent_id
 
-        if job.job_type.value == "watch":
-            metadata["watch"] = {
-                "check_tool": job.check_tool,
-                "check_args": job.check_args or {},
-                "condition_expr": job.condition_expr,
-                "expected_value": job.expected_value,
-                "llm_condition": job.llm_condition,
-                "last_check_result": job.last_check_result,
-                # Custom instruction for the sub-agent triggered by the condition
-                # (agent-runner falls back to a generic instruction when unset).
-                "prompt": job.prompt or None,
-            }
-
-        # Select the appropriate message content based on job type
+        # What the dispatch carries. agent-runner does not know a watch from a task:
+        # it runs the sub-agent a job names, or delivers the text it was given.
         if job.job_type.value == "task":
             message_text = job.prompt or "Execute the task you are designed for."
+        elif job.sub_agent_id is not None:
+            # A triggered watch with an agent: the instruction plus what triggered it,
+            # since the agent is expected to act on the result.
+            instruction = job.prompt or "Take appropriate action based on the check result."
+            result_json = json.dumps((watch_outcome.check_result if watch_outcome else None), default=str)
+            message_text = f"Watch condition triggered. {instruction}\n\nCheck result: {result_json}"
         else:
-            message_text = job.notification_message or ""
+            # A triggered watch that only notifies: the text is the notification, written
+            # here when the author left it empty. It used to be written inside the agent
+            # run, which is why a notification-only watch needed one at all.
+            message_text = job.notification_message or await self._write_notification(job, watch_outcome)
 
-        # Voice-call dispatch: override target to voice-agent and build
-        # DataPart (sub_agent_id config) + TextPart (prompt) message.
-        if job.voice_call and job.job_type.value == "task":
+        # Voice-call dispatch: the target becomes the voice-agent, which reads its
+        # configuration from a DataPart and injects any TextParts into the live session
+        # as context.
+        #
+        # No job-type distinction: a watch only reaches here once its condition has been
+        # evaluated and met, so a call happens because something happened. (While the
+        # evaluation lived in agent-runner, dispatch preceded the verdict and this had to
+        # be task-only or the phone would have rung on every poll.)
+        if job.voice_call:
             voice_agent_id = await self._resolve_voice_agent_id(db)
             if voice_agent_id is not None:
                 metadata["sub_agent_id"] = voice_agent_id
             else:
                 logger.warning("voice_call=True for job %d but voice-agent not found in DB", job.id)
 
+            # VoiceCallRequest: sub_agent_id borrows another agent's configuration,
+            # system_prompt is the alternative when there is no agent to borrow from.
+            # One of them has to be set, or the call has no direction — and the payload
+            # must not be an empty object, which the voice agent rejects outright.
+            call_config: dict[str, Any] = {}
+            if job.sub_agent_id is not None:
+                call_config["sub_agent_id"] = job.sub_agent_id
+            else:
+                call_config["system_prompt"] = (
+                    f"You are calling the user because their scheduled watch '{job.name}' "
+                    "triggered. Tell them what happened, using the check result below, "
+                    "then answer any questions they have about it."
+                )
+
             parts: list[dict[str, Any]] = [
                 {
                     "kind": "data",
-                    "data": {"sub_agent_id": job.sub_agent_id},
+                    "data": call_config,
                     "metadata": {"mimeType": "application/json"},
                 },
             ]
             if message_text and message_text != "Execute the task you are designed for.":
                 parts.append({"kind": "text", "text": message_text})
+            if watch_outcome is not None and watch_outcome.check_result:
+                # Without this a notification-only watch would call with nothing to
+                # report: the message may be empty, and the agent-runner path that
+                # writes one is not taken when the target is the voice agent.
+                parts.append(
+                    {
+                        "kind": "text",
+                        "text": f"Check result: {json.dumps(watch_outcome.check_result, default=str)[:4000]}",
+                    }
+                )
         else:
             parts = [{"kind": "text", "text": message_text}]
 
@@ -284,6 +387,11 @@ class SchedulerEngine:
         # registers it for the task and BasePushNotificationSender can deliver it
         # upon completion.  The channel secret is sent as X-A2A-Notification-Token
         # so the webhook receiver can verify ownership of the notification.
+        #
+        # This is why a triggered watch is dispatched even when it only sends a
+        # notification and runs no agent: delivery is the push sender's job, and the
+        # payload is an A2A Task envelope that the delivery channels normalise. Posting
+        # it from here would duplicate that contract across three receivers.
         push_config: dict[str, str] | None = None
         if job.delivery_channel_id is not None:
             channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
@@ -291,6 +399,44 @@ class SchedulerEngine:
                 push_config = {"url": channel["webhook_url"], "token": channel["secret"]}
 
         return parts, metadata, push_config
+
+    async def _write_notification(self, job: ScheduledJob, outcome: WatchOutcome | None) -> str:
+        """Write the notification for a triggered watch whose author left it empty.
+
+        Moved here from agent-runner along with the rest of the decision: the scheduler
+        already has the check result, and a notification-only watch was otherwise paying
+        for a whole agent run just to have this sentence written.
+
+        Falls back to reporting the raw result. A watch that triggered has something to
+        say, so an unreachable model must not turn that into silence.
+        """
+        check_result = outcome.check_result if outcome else None
+        if not check_result:
+            return f"The watch '{job.name}' triggered."
+
+        async with self._db_session_factory() as db:
+            defaults = await ModelDefaultsRepository().get_all(db)
+        model = defaults.get("chat:low") or defaults.get("chat")
+        if not model:
+            logger.warning("Job %d: no chat model configured, reporting the raw result", job.id)
+            return f"The watch '{job.name}' triggered. Result: {json.dumps(check_result, default=str)[:300]}"
+
+        prompt = (
+            "Write the notification a user receives when a scheduled watch triggers. "
+            "One or two sentences, factual, highlighting what changed. Reply with the "
+            "message text only, no preamble.\n\n"
+            f"Watch: {job.name}\n"
+            f"Result:\n{json.dumps(check_result, indent=2, default=str)[:6000]}"
+        )
+        try:
+            message = await gateway_chat(prompt, model=model, max_tokens=256)
+            written = message.strip().strip('"')
+            if written:
+                logger.info("Job %d: wrote notification %r", job.id, written[:100])
+                return written
+        except Exception:
+            logger.warning("Job %d: writing the notification failed", job.id, exc_info=True)
+        return f"The watch '{job.name}' triggered. Result: {json.dumps(check_result, default=str)[:300]}"
 
     async def _resolve_voice_agent_id(self, db: Any) -> int | None:
         """Look up the voice-agent sub_agent_id from the DB (system-owned)."""
@@ -388,6 +534,7 @@ class SchedulerEngine:
         delivered: bool = False,
         last_check_result: dict | None = None,
         paused_reason: str | None = None,
+        condition_evaluation: dict | None = None,
     ) -> None:
         """Persist run outcome and advance job state."""
         success = status in (JobRunStatus.SUCCESS, JobRunStatus.CONDITION_NOT_MET)
@@ -410,18 +557,20 @@ class SchedulerEngine:
             if paused_reason is None:
                 paused_reason = f"Invalid timezone {job.timezone!r} — fix the job's timezone and resume it."
 
+        # Advance the job first, in its own transaction, and record the run second.
+        #
+        # These used to share one transaction with the run record written first, which
+        # made the schedule advance depend on the bookkeeping write succeeding. When it
+        # failed — a column the deployed schema did not have yet — next_run_at stayed in
+        # the past and claim_due_jobs re-claimed the job on every tick, forever, calling
+        # the check tool each time. The same trap the timezone branch above guards.
+        #
+        # Splitting them costs atomicity in one direction only: a crash between the two
+        # leaves a run stuck in 'running' for the healer to sweep, while the job itself
+        # carries on correctly. The other order risks a tight loop, which is far worse.
         async with self._db_session_factory() as db:
-            await self._repo.complete_run(
-                db=db,
-                run_id=run_id,
-                status=status,
-                result_summary=result_summary,
-                error_message=error_message,
-                conversation_id=conversation_id,
-                delivered=delivered,
-            )
-
-            # Disable watch job if destroy_after_trigger is True and condition was successfully met
+            # Disable watch job if destroy_after_trigger is True and condition was
+            # successfully met. Belongs with the job update: both are job state.
             should_disable = (
                 job.job_type == JobType.WATCH and job.destroy_after_trigger and status == JobRunStatus.SUCCESS
             )
@@ -452,6 +601,24 @@ class SchedulerEngine:
                 paused_reason=paused_reason,
             )
             await db.commit()
+
+        try:
+            async with self._db_session_factory() as db:
+                await self._repo.complete_run(
+                    db=db,
+                    run_id=run_id,
+                    status=status,
+                    result_summary=result_summary,
+                    error_message=error_message,
+                    conversation_id=conversation_id,
+                    delivered=delivered,
+                    condition_evaluation=condition_evaluation,
+                )
+                await db.commit()
+        except Exception:
+            # The schedule is already advanced, so this cannot loop. The run is left for
+            # the healer, and the job keeps working while somebody reads this.
+            logger.exception("Job %d: failed to record run %d; the job itself advanced", job.id, run_id)
 
         logger.info(
             "Job %d run %d finished: status=%s delivered=%s",

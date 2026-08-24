@@ -12,27 +12,58 @@ from ..models.user import User
 logger = logging.getLogger(__name__)
 
 
-async def get_gatana_token(request: Request, user: User) -> str:
-    """Get Gatana MCP gateway token from request.
+async def exchange_for_audience(subject_token: str, target_client_id: str) -> str:
+    """Exchange a user-scoped token for one the named audience will accept.
 
-    Both authentication patterns end by exchanging a subject token for the Gatana
-    (MCP gateway) audience — Gatana validates the audience and rejects tokens minted
-    for any other client:
-    1. Session-based (frontend): takes the user token from request.state, refreshes it
-       if needed, then exchanges it for the Gatana audience.
-    2. Bearer token (orchestrator/A2A): takes the incoming Bearer token (minted for the
-       agent-console audience to reach console-backend) and exchanges it for the Gatana
-       audience.
+    Every audience validates its own: the MCP gateway rejects a token minted for this
+    backend and vice versa, so a call has to be paired with the right exchange. Callable
+    without a Request on purpose — the scheduler acts on behalf of a job's owner, where
+    there is no request at all.
+
+    Raises:
+        ValueError: the exchange was refused.
+    """
+    oauth2_client = OidcOAuth2Client(
+        client_id=config.oidc.client_id,
+        client_secret=config.oidc.client_secret.get_secret_value(),
+        issuer=config.oidc.issuer,
+    )
+    try:
+        return await oauth2_client.exchange_token(
+            subject_token=subject_token,
+            target_client_id=target_client_id,
+            requested_scopes=["openid", "profile", "offline_access"],
+        )
+    except Exception as exc:
+        raise ValueError(f"Failed to exchange token for the {target_client_id} audience: {exc}") from exc
+
+
+async def exchange_for_gatana(subject_token: str) -> str:
+    """Exchange a user-scoped token for one the MCP gateway will accept."""
+    return await exchange_for_audience(subject_token, config.mcp_gateway.client_id)
+
+
+async def get_user_subject_token(request: Request, user: User) -> str:
+    """The token that identifies the user, whichever way they authenticated.
+
+    Two patterns reach this backend, and both end with a token that still has to be
+    exchanged for whatever audience is about to be called:
+    1. Session-based (frontend): the user token from request.state, refreshed if needed.
+    2. Bearer (orchestrator/A2A): the incoming token, minted for the agent-console
+       audience to reach us.
+
+    Split from the exchange on purpose: which audience to ask for depends on which server
+    hosts the tool being called, and only the caller knows that.
 
     Args:
         request: FastAPI request object
         user: Authenticated user
 
     Returns:
-        Gatana MCP gateway token (already exchanged)
+        A user-scoped token, not yet exchanged for any target audience.
 
     Raises:
-        HTTPException: If token is missing, expired, or exchange fails
+        HTTPException: If the token is missing or cannot be refreshed.
     """
     # Check if Authorization header is present (Bearer token from orchestrator)
     auth_header = request.headers.get("Authorization")
@@ -53,28 +84,7 @@ async def get_gatana_token(request: Request, user: User) -> str:
             )
         incoming_token = auth_header[len("Bearer ") :].strip()
 
-        oauth2_client = OidcOAuth2Client(
-            client_id=config.oidc.client_id,
-            client_secret=config.oidc.client_secret.get_secret_value(),
-            issuer=config.oidc.issuer,
-        )
-        try:
-            mcp_gateway_token = await oauth2_client.exchange_token(
-                subject_token=incoming_token,
-                target_client_id=config.mcp_gateway.client_id,
-                requested_scopes=["openid", "profile", "offline_access"],
-            )
-            logger.info(
-                f"Exchanged Bearer token for {config.mcp_gateway.client_id} audience "
-                f"(user {user.email})"
-            )
-            return mcp_gateway_token
-        except Exception as e:
-            logger.error(f"Failed to exchange Bearer token for gatana audience: {e}")
-            raise HTTPException(
-                status_code=401,
-                detail="Failed to exchange token for MCP gateway audience.",
-            )
+        return incoming_token
 
     # Session-based path: need to get user token and exchange it for Gatana token
     access_token = getattr(request.state, "access_token", None)
@@ -141,24 +151,23 @@ async def get_gatana_token(request: Request, user: User) -> str:
                 detail="Session expired: Unable to refresh access token. Please re-authenticate.",
             )
 
-    # Exchange user token for MCP gateway token
-    oauth2_client = OidcOAuth2Client(
-        client_id=config.oidc.client_id,
-        client_secret=config.oidc.client_secret.get_secret_value(),
-        issuer=config.oidc.issuer,
-    )
+    return access_token
 
+
+async def get_gatana_token(request: Request, user: User) -> str:
+    """The MCP gateway token for this request's user.
+
+    Gatana validates the audience and rejects a token minted for any other client, so
+    every path to the gateway ends here.
+
+    Raises:
+        HTTPException: If the token is missing, expired, or the exchange fails.
+    """
+    subject_token = await get_user_subject_token(request, user)
     try:
-        mcp_gateway_token = await oauth2_client.exchange_token(
-            subject_token=access_token,
-            target_client_id=config.mcp_gateway.client_id,
-            requested_scopes=["openid", "profile", "offline_access"],
-        )
-        logger.info(f"Successfully exchanged token for {config.mcp_gateway.client_id} for user {user.email}")
-        return mcp_gateway_token
-    except Exception as e:
+        token = await exchange_for_gatana(subject_token)
+        logger.info(f"Exchanged token for {config.mcp_gateway.client_id} audience (user {user.email})")
+        return token
+    except ValueError as e:
         logger.error(f"Token exchange failed: {e}")
-        raise HTTPException(
-            status_code=401,
-            detail=f"Token exchange failed: {str(e)}",
-        )
+        raise HTTPException(status_code=401, detail=f"Token exchange failed: {e}")

@@ -29,7 +29,6 @@ dependencies = [
     # HTTP client
     "httpx>=0.28.1",
     # Watch condition evaluation
-    "jsonpath-ng>=1.6.0",
     # Data models
     "pydantic>=2.10.6",
     # Shared SDKs

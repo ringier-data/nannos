@@ -22,6 +22,7 @@ from console_backend.models.scheduled_job import (
 )
 from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
+from console_backend.services.watch_evaluator import WatchOutcome
 from console_backend.services.scheduler_engine import SchedulerEngine
 from console_backend.services.scheduler_token_service import SchedulerTokenService
 from sqlalchemy import text
@@ -218,7 +219,7 @@ class TestHealStuckRuns:
 
     @pytest.mark.asyncio
     async def test_marks_old_running_runs_as_failed(self, pg_session: AsyncSession):
-        """Runs stuck in 'running' for >10 min are marked 'failed'."""
+        """Runs stuck in 'running' past STUCK_RUN_THRESHOLD are marked 'failed'."""
         # Insert prerequisite: user + job
         user_id = "heal-user-1"
         await pg_session.execute(
@@ -230,17 +231,17 @@ class TestHealStuckRuns:
         result = await pg_session.execute(
             text("""
                 INSERT INTO scheduled_jobs
-                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, condition_expr)
+                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, cel_expr)
                 VALUES
-                    (:uid, 'Heal Job', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result > 0')
+                    (:uid, 'Heal Job', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result != null')
                 RETURNING id
             """),
             {"uid": user_id},
         )
         job_id = result.mappings().first()["id"]
 
-        # Insert a run that started 20 minutes ago (stuck)
-        stale_started = datetime.now(timezone.utc) - timedelta(minutes=20)
+        # Insert a run that started well past the threshold (stuck)
+        stale_started = datetime.now(timezone.utc) - timedelta(minutes=45)
         result = await pg_session.execute(
             text("""
                 INSERT INTO scheduled_job_runs (job_id, started_at, status)
@@ -289,16 +290,16 @@ class TestHealStuckRuns:
         result = await pg_session.execute(
             text("""
                 INSERT INTO scheduled_jobs
-                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, condition_expr)
+                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, cel_expr)
                 VALUES
-                    (:uid, 'Heal Job 2', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result > 0')
+                    (:uid, 'Heal Job 2', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result != null')
                 RETURNING id
             """),
             {"uid": user_id},
         )
         job_id = result.mappings().first()["id"]
 
-        stale_started = datetime.now(timezone.utc) - timedelta(minutes=30)
+        stale_started = datetime.now(timezone.utc) - timedelta(minutes=45)
         result = await pg_session.execute(
             text("""
                 INSERT INTO scheduled_job_runs (job_id, started_at, completed_at, status)
@@ -318,6 +319,95 @@ class TestHealStuckRuns:
             text("SELECT status FROM scheduled_job_runs WHERE id = :id"), {"id": old_success_run_id}
         )
         assert r.scalar_one() == "success"
+
+    @pytest.mark.asyncio
+    async def test_in_flight_run_is_never_healed(self, pg_session: AsyncSession):
+        """A dispatch this process is still running is not stuck, however long it takes.
+
+        The healer runs on every tick now, so without this exclusion a slow agent would
+        have its own run marked failed underneath it — and then overwrite that verdict
+        when it finished.
+        """
+        user_id = "heal-user-3"
+        await pg_session.execute(
+            text(
+                "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status) VALUES (:id, :sub, :email, :fn, :ln, false, 'member', 'active')"
+            ),
+            {"id": user_id, "sub": "heal-sub-3", "email": "heal3@test.com", "fn": "Heal", "ln": "Three"},
+        )
+        result = await pg_session.execute(
+            text("""
+                INSERT INTO scheduled_jobs
+                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, cel_expr)
+                VALUES
+                    (:uid, 'Heal Job 3', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result != null')
+                RETURNING id
+            """),
+            {"uid": user_id},
+        )
+        job_id = result.mappings().first()["id"]
+
+        long_started = datetime.now(timezone.utc) - timedelta(hours=3)
+        result = await pg_session.execute(
+            text("""
+                INSERT INTO scheduled_job_runs (job_id, started_at, status)
+                VALUES (:job_id, :started_at, 'running')
+                RETURNING id
+            """),
+            {"job_id": job_id, "started_at": long_started},
+        )
+        live_run_id = result.mappings().first()["id"]
+        await pg_session.commit()
+
+        engine = _make_engine(db_session_factory=make_pg_session_factory(pg_session))
+        engine._in_flight.add(live_run_id)
+
+        await engine._heal_stuck_runs()
+
+        r = await pg_session.execute(
+            text("SELECT status FROM scheduled_job_runs WHERE id = :id"), {"id": live_run_id}
+        )
+        assert r.scalar_one() == "running"
+
+
+class TestFinalizeAdvancesDespiteRunWriteFailure:
+    """The schedule must advance even when the run record cannot be written.
+
+    This is the shape of a real outage: complete_run failed on a column the deployed
+    schema did not have, which rolled back the shared transaction and left next_run_at
+    in the past — so claim_due_jobs re-claimed the job every tick and the check tool was
+    called hundreds of times. Advancing first makes the loop impossible.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_write_failure_does_not_block_schedule_advance(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.complete_job = AsyncMock()
+        repo.complete_run = AsyncMock(side_effect=RuntimeError("column does not exist"))
+
+        engine = _make_engine(repo=repo)
+        job = _make_job(job_id=77, schedule_kind=ScheduleKind.INTERVAL, interval_seconds=3600)
+
+        # Must not raise: the caller has nothing useful to do with a bookkeeping failure.
+        await engine._finalize(run_id=99, job=job, status=JobRunStatus.SUCCESS)
+
+        repo.complete_job.assert_awaited_once()
+        kwargs = repo.complete_job.call_args[1]
+        assert kwargs["next_run_at"] is not None
+        assert kwargs["next_run_at"] > datetime.now(timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_schedule_advances_before_the_run_is_recorded(self):
+        """Ordering, not just independence — the advance cannot be the write's hostage."""
+        calls: list[str] = []
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.complete_job = AsyncMock(side_effect=lambda **_: calls.append("job"))
+        repo.complete_run = AsyncMock(side_effect=lambda **_: calls.append("run"))
+
+        engine = _make_engine(repo=repo)
+        await engine._finalize(run_id=1, job=_make_job(), status=JobRunStatus.SUCCESS)
+
+        assert calls == ["job", "run"]
 
 
 class TestDispatchJobNoToken:
@@ -616,38 +706,463 @@ class TestFinalizeInvalidTimezone:
 
 
 class TestBuildMessageArgs:
-    """Watch dispatch metadata must carry the sub-agent instruction (prompt)."""
+    """What a dispatch carries now that agent-runner knows nothing about watches.
+
+    The sub-agent instruction used to travel in metadata["watch"]["prompt"] and be
+    reassembled there. The scheduler builds the whole prompt now, so it travels in the
+    text part like any other job's.
+    """
 
     @pytest.mark.asyncio
-    async def test_watch_metadata_includes_sub_agent_prompt(self):
+    async def test_a_triggered_watch_with_an_agent_carries_instruction_and_result(self):
         engine = _make_engine()
         job = _make_job(job_type=JobType.WATCH)
         job.check_tool = "ping_tool"
-        job.condition_expr = "$.status"
+        job.cel_expr = "result.status != ''"
         job.timezone = "Europe/Zurich"
 
         parts, metadata, push_config = await engine._build_message_args(
-            job, run_id=7, access_token="tok", db=AsyncMock()
+            job,
+            run_id=7,
+            access_token="tok",
+            db=AsyncMock(),
+            watch_outcome=WatchOutcome(condition_met=True, check_result={"status": "FAILED"}),
         )
 
-        assert metadata["watch"]["prompt"] == "Do something"
+        text = parts[0]["text"]
+        assert "Do something" in text  # the job's instruction
+        assert '"status": "FAILED"' in text  # and what triggered it
         assert metadata["sub_agent_id"] == 42
         assert metadata["timezone"] == "Europe/Zurich"
-        # The text part carries the notification message, never the prompt.
-        assert parts == [{"kind": "text", "text": ""}]
+        assert "watch" not in metadata  # the contract is gone
         assert push_config is None
 
     @pytest.mark.asyncio
-    async def test_watch_metadata_prompt_is_none_when_unset(self):
+    async def test_an_agent_without_an_instruction_gets_a_default(self):
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = _make_job(job_type=JobType.WATCH)
         job.prompt = ""
         job.check_tool = "ping_tool"
-        job.condition_expr = "$.status"
 
-        _, metadata, _ = await engine._build_message_args(
-            job, run_id=7, access_token="tok", db=AsyncMock()
+        parts, _, _ = await engine._build_message_args(
+            job,
+            run_id=7,
+            access_token="tok",
+            db=AsyncMock(),
+            watch_outcome=WatchOutcome(condition_met=True, check_result={"a": 1}),
+        )
+        assert "Take appropriate action based on the check result" in parts[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_a_notification_only_watch_carries_the_written_message(self):
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.check_tool = "ping_tool"
+        job.notification_message = "Sync broke again."
+
+        parts, metadata, _ = await engine._build_message_args(
+            job,
+            run_id=7,
+            access_token="tok",
+            db=AsyncMock(),
+            watch_outcome=WatchOutcome(condition_met=True, check_result={"a": 1}),
+        )
+        assert parts == [{"kind": "text", "text": "Sync broke again."}]
+        assert "sub_agent_id" not in metadata
+
+    @pytest.mark.asyncio
+    async def test_an_empty_notification_is_written_here(self):
+        # It used to be written inside the agent run, which is why a watch that only
+        # notifies needed an agent at all.
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.check_tool = "ping_tool"
+        job.notification_message = ""
+
+        with patch.object(engine, "_write_notification", AsyncMock(return_value="Written here.")):
+            parts, _, _ = await engine._build_message_args(
+                job,
+                run_id=7,
+                access_token="tok",
+                db=AsyncMock(),
+                watch_outcome=WatchOutcome(condition_met=True, check_result={"a": 1}),
+            )
+        assert parts == [{"kind": "text", "text": "Written here."}]
+
+
+class TestWatchEvaluatedBeforeDispatch:
+    """A watch's condition is decided here, before anything is dispatched.
+
+    The point of moving it: a poll that does not trigger costs no agent run, and a poll
+    that does can choose its target — which is what makes a voice-call watch possible.
+    """
+
+    @staticmethod
+    def _watch_job(**overrides) -> ScheduledJob:
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None, **overrides)
+        return job.model_copy(
+            update={
+                "check_tool": "naonous_get_campaign",
+                "cel_expr": "eq_ci(result.status, 'FAILED')",
+            }
         )
 
-        assert metadata["watch"]["prompt"] is None
-        assert "sub_agent_id" not in metadata
+    @pytest.mark.asyncio
+    async def test_an_unmet_condition_dispatches_nothing(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 7
+        engine = _make_engine(repo=repo)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, check_result={"status": "OK"})),
+        ):
+            with patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+                await engine._dispatch_job(self._watch_job())
+
+        dispatch.assert_not_called()
+        kwargs = repo.complete_run.call_args[1]
+        assert kwargs["status"] == JobRunStatus.CONDITION_NOT_MET
+
+    @pytest.mark.asyncio
+    async def test_a_check_failure_is_a_failed_run_not_a_quiet_one(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 8
+        engine = _make_engine(repo=repo)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, error="gateway unreachable")),
+        ):
+            with patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+                await engine._dispatch_job(self._watch_job())
+
+        dispatch.assert_not_called()
+        kwargs = repo.complete_run.call_args[1]
+        assert kwargs["status"] == JobRunStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_a_met_condition_dispatches_with_the_verdict_attached(self):
+        # The runner must not call the tool again or reach a different answer.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 9
+        engine = _make_engine(repo=repo)
+        result = {"status": "FAILED"}
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=True, check_result=result)),
+        ):
+            with patch(
+                "console_backend.services.scheduler_engine.dispatch_streaming",
+                AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+            ) as dispatch:
+                await engine._dispatch_job(self._watch_job())
+
+        # The verdict no longer travels: the runner never second-guesses it, so what
+        # matters is that the dispatch carries what to act on.
+        call = dispatch.await_args[1]
+        assert "watch" not in call["metadata"]
+        assert '"status": "FAILED"' in call["parts"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_console_served_tools_are_evaluated_here_too(self):
+        # They were the last case the runner still decided, which is why it kept a copy
+        # of the evaluation. The tool client reaches this backend's own /mcp mount now.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 10
+        engine = _make_engine(repo=repo)
+        job = self._watch_job().model_copy(update={"check_tool": "console_list_mcp_tools"})
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=True, check_result={"tools": []})),
+        ) as evaluate:
+            with patch(
+                "console_backend.services.scheduler_engine.dispatch_streaming",
+                AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+            ) as dispatch:
+                await engine._dispatch_job(job)
+
+        evaluate.assert_awaited_once()
+        assert "watch" not in dispatch.await_args[1]["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_a_triggered_watch_can_be_dispatched_as_a_voice_call(self):
+        # This is the payoff: the target is chosen after the condition is known, so the
+        # phone only rings because something happened.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 11
+        engine = _make_engine(repo=repo)
+        job = self._watch_job().model_copy(update={"voice_call": True, "sub_agent_id": 42})
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=True, check_result={"status": "FAILED"})),
+        ):
+            with patch.object(engine, "_resolve_voice_agent_id", AsyncMock(return_value=99)):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ) as dispatch:
+                    await engine._dispatch_job(job)
+
+        call = dispatch.await_args[1]
+        assert call["metadata"]["sub_agent_id"] == 99
+        assert any(part.get("kind") == "data" for part in call["parts"])
+
+
+class TestVoiceCallDispatch:
+    """A voice call is a delivery choice, not a job-type capability.
+
+    It was task-only while agent-runner evaluated watch conditions: dispatch preceded the
+    verdict, so a voice watch would have rung on every poll. The scheduler decides first
+    now, so a call only happens because something happened.
+    """
+
+    @staticmethod
+    def _watch_job(**overrides) -> ScheduledJob:
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None, **overrides)
+        return job.model_copy(
+            update={"check_tool": "naonous_get_campaign", "cel_expr": "result.status", "voice_call": True}
+        )
+
+    async def _dispatch(self, engine, job, outcome: WatchOutcome | None):
+        patched_eval = (
+            patch.object(engine._watch_evaluator, "evaluate", AsyncMock(return_value=outcome))
+            if outcome
+            else patch.object(engine._watch_evaluator, "can_evaluate", MagicMock(return_value=False))
+        )
+        with patched_eval:
+            with patch.object(engine, "_resolve_voice_agent_id", AsyncMock(return_value=99)):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ) as dispatch:
+                    await engine._dispatch_job(job)
+        return dispatch.await_args[1]
+
+    @pytest.mark.asyncio
+    async def test_a_notify_only_watch_can_be_a_call(self):
+        # No sub-agent to borrow config from, so the call needs a system prompt of its
+        # own — and an empty DataPart is rejected by the voice agent outright.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 20
+        engine = _make_engine(repo=repo)
+        call = await self._dispatch(
+            engine,
+            self._watch_job(),
+            WatchOutcome(condition_met=True, check_result={"status": "FAILED"}),
+        )
+
+        assert call["metadata"]["sub_agent_id"] == 99  # dispatched to the voice agent
+        data = next(p for p in call["parts"] if p.get("kind") == "data")["data"]
+        assert data.get("sub_agent_id") is None
+        assert "system_prompt" in data
+        # The call has something to report: the result is injected as session context,
+        # because the runner path that would have written a message is not taken here.
+        assert any("Check result" in p.get("text", "") for p in call["parts"])
+
+    @pytest.mark.asyncio
+    async def test_a_watch_with_a_sub_agent_borrows_its_config(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 21
+        engine = _make_engine(repo=repo)
+        call = await self._dispatch(
+            engine,
+            self._watch_job().model_copy(update={"sub_agent_id": 42}),
+            WatchOutcome(condition_met=True, check_result={"status": "FAILED"}),
+        )
+
+        data = next(p for p in call["parts"] if p.get("kind") == "data")["data"]
+        assert data["sub_agent_id"] == 42
+        assert "system_prompt" not in data
+
+    @pytest.mark.asyncio
+    async def test_a_task_still_dispatches_as_a_call(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 22
+        engine = _make_engine(repo=repo)
+        job = _make_job(job_type=JobType.TASK, sub_agent_id=42).model_copy(update={"voice_call": True})
+        call = await self._dispatch(engine, job, None)
+
+        assert call["metadata"]["sub_agent_id"] == 99
+        assert next(p for p in call["parts"] if p.get("kind") == "data")["data"]["sub_agent_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_an_unmet_watch_never_rings(self):
+        # The whole reason this was task-only.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 23
+        engine = _make_engine(repo=repo)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, check_result={"status": "OK"})),
+        ):
+            with patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+                await engine._dispatch_job(self._watch_job())
+
+        dispatch.assert_not_called()
+
+
+class TestWriteNotification:
+    """Writing the notification for a watch whose author left it empty.
+
+    Moved here from agent-runner with the rest of the decision: the scheduler already has
+    the check result, and a notification-only watch was otherwise paying for a whole agent
+    run to have one sentence written.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_model_writes_it(self):
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        with patch(
+            "console_backend.services.scheduler_engine.gateway_chat",
+            AsyncMock(return_value='  "Campaign 4821 stopped syncing."  '),
+        ):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                written = await engine._write_notification(
+                    job, WatchOutcome(condition_met=True, check_result={"status": "FAILED"})
+                )
+        # Quotes and padding stripped: this goes straight to a person.
+        assert written == "Campaign 4821 stopped syncing."
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_model_still_says_something(self):
+        # A watch that triggered has something to report; silence would be the worst
+        # possible outcome, so the raw result is reported instead.
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        with patch(
+            "console_backend.services.scheduler_engine.gateway_chat",
+            AsyncMock(side_effect=RuntimeError("gateway down")),
+        ):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "m"}),
+            ):
+                written = await engine._write_notification(
+                    job, WatchOutcome(condition_met=True, check_result={"status": "FAILED"})
+                )
+        assert "triggered" in written
+        assert "FAILED" in written
+
+    @pytest.mark.asyncio
+    async def test_no_configured_model_still_says_something(self):
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        with patch(
+            "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+            AsyncMock(return_value={}),
+        ):
+            written = await engine._write_notification(
+                job, WatchOutcome(condition_met=True, check_result={"status": "FAILED"})
+            )
+        assert "FAILED" in written
+
+    @pytest.mark.asyncio
+    async def test_an_empty_result_needs_no_model(self):
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        with patch(
+            "console_backend.services.scheduler_engine.gateway_chat", AsyncMock()
+        ) as chat:
+            written = await engine._write_notification(job, WatchOutcome(condition_met=True))
+        chat.assert_not_awaited()
+        assert job.name in written
+
+
+class TestConditionEvaluationIsPersisted:
+    """The run records how its condition was decided, on every path."""
+
+    @staticmethod
+    def _watch_job() -> ScheduledJob:
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        return job.model_copy(update={"check_tool": "t", "cel_expr": "result.status"})
+
+    @pytest.mark.asyncio
+    async def test_an_unmet_condition_still_records_why(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 30
+        engine = _make_engine(repo=repo)
+        evaluation = {"met": False, "mode": "judge", "reasoning": "nobody external was invited"}
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(
+                return_value=WatchOutcome(
+                    condition_met=False, check_result={"a": 1}, evaluation=evaluation
+                )
+            ),
+        ):
+            with patch("console_backend.services.scheduler_engine.dispatch_streaming"):
+                await engine._dispatch_job(self._watch_job())
+
+        assert repo.complete_run.call_args[1]["condition_evaluation"] == evaluation
+
+    @pytest.mark.asyncio
+    async def test_a_triggered_condition_records_it_too(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 31
+        engine = _make_engine(repo=repo)
+        evaluation = {"met": True, "mode": "judge", "reasoning": "two external attendees"}
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(
+                return_value=WatchOutcome(
+                    condition_met=True, check_result={"a": 1}, evaluation=evaluation
+                )
+            ),
+        ):
+            with patch(
+                "console_backend.services.scheduler_engine.dispatch_streaming",
+                AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+            ):
+                await engine._dispatch_job(self._watch_job())
+
+        assert repo.complete_run.call_args[1]["condition_evaluation"] == evaluation
+
+    @pytest.mark.asyncio
+    async def test_a_failed_check_records_whatever_was_decided(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 32
+        engine = _make_engine(repo=repo)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, error="gateway down")),
+        ):
+            with patch("console_backend.services.scheduler_engine.dispatch_streaming"):
+                await engine._dispatch_job(self._watch_job())
+
+        # Nothing was decided, so there is nothing to explain.
+        assert repo.complete_run.call_args[1]["condition_evaluation"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_task_run_records_none(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 33
+        engine = _make_engine(repo=repo)
+
+        with patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+        ):
+            await engine._dispatch_job(_make_job(job_type=JobType.TASK, sub_agent_id=42))
+
+        assert repo.complete_run.call_args[1]["condition_evaluation"] is None

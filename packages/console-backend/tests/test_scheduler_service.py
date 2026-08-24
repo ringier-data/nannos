@@ -311,7 +311,7 @@ class TestCreateJobAccessControl:
             interval_seconds=300,
             next_run_at=now + timedelta(minutes=5),
             check_tool="gh_get_pr",
-            condition_expr="$.state",
+            cel_expr="eq_ci(result.state, 'merged')",
             enabled=True,
             max_failures=3,
             consecutive_failures=0,
@@ -327,8 +327,7 @@ class TestCreateJobAccessControl:
             schedule_kind=ScheduleKind.INTERVAL,
             interval_seconds=300,
             check_tool="gh_get_pr",
-            condition_expr="$.state",
-            expected_value="merged",
+            cel_expr="eq_ci(result.state, 'merged')",
         )
         result = await service.create_job(db=db, data=watch_data, actor=actor)
 

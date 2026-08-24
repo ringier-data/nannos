@@ -3,9 +3,12 @@
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, create_model, field_validator, model_validator
+
+from ..services.cel_condition import CEL_SYNTAX_HINT, CelSyntaxError, validate_cel_expression
+from pydantic.fields import FieldInfo
 
 from ..utils.timezones import validate_timezone_name as _validate_timezone_name
 from .sub_agent import ModelName, ModelTier, ThinkingLevel
@@ -32,7 +35,42 @@ class JobRunStatus(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
-    CONDITION_NOT_MET = "condition_not_met"  # Watch check passed but JSONPath condition was false
+    CONDITION_NOT_MET = "condition_not_met"  # Watch check ran but the condition was false
+
+
+class ConditionEvaluation(BaseModel):
+    """How one run decided its watch condition.
+
+    Recorded per run because it explains an occurrence, and because a model's judgement
+    cannot be reconstructed afterwards: the reasoning exists only while the run happens.
+    Without it "Condition not met" is the entire explanation a user ever gets.
+    """
+
+    met: bool
+    #: How it was decided. A literal rather than a string so the generated client can
+    #: branch on it without widening. "cel" is a CEL expression's own gate;
+    #: "cel+judge" is a CEL gate that passed, with a model's verdict on what it matched.
+    #: "rule" appears only on runs recorded before conditions became CEL — the
+    #: JSONPath+operator machinery is gone, but its run records still explain themselves.
+    mode: Literal["rule", "judge", "cel", "cel+judge"]
+    #: The value the condition was applied to, serialised and truncated for display.
+    #: For CEL modes this is what the expression returned — the evidence itself.
+    extracted: Any = None
+    #: How many nodes the path matched. Historical "rule"/"judge" runs only.
+    match_count: int = 0
+    #: The model's own account of its decision. Judge modes only.
+    reasoning: str | None = None
+    #: What the CEL gate decided, recorded separately from `met` because in
+    #: "cel+judge" mode the gate can pass while the model still says no — and a run
+    #: must show which stage made the call. CEL modes only.
+    gate_met: bool | None = None
+    #: Historical "rule" runs only, so those records read on their own terms.
+    operator: str | None = None
+    expected_value: str | None = None
+    #: Rule mode only, so a run can be read without going back to the job — which may
+    #: have been edited since.
+    operator: str | None = None
+    expected_value: str | None = None
 
 
 class ScheduledJobRun(BaseModel):
@@ -47,6 +85,7 @@ class ScheduledJobRun(BaseModel):
     error_message: str | None = None
     conversation_id: str | None = None
     delivered: bool
+    condition_evaluation: ConditionEvaluation | None = None
 
 
 class RunNowResponse(BaseModel):
@@ -79,8 +118,8 @@ class ScheduledJob(BaseModel):
     # Watch fields
     check_tool: str | None = None
     check_args: dict[str, Any] | None = None
-    condition_expr: str | None = None
-    expected_value: str | None = None
+    check_args_exprs: dict[str, str] | None = None
+    cel_expr: str | None = None
     llm_condition: str | None = None
     destroy_after_trigger: bool = True
     last_check_result: dict[str, Any] | None = None
@@ -159,7 +198,12 @@ class ScheduledJobCreate(BaseModel):
 
     sub_agent_id: int | None = Field(
         default=None,
-        description="ID of an existing sub-agent to execute. Alternatively a custom automated sub-agent can be provided through sub_agent_parameters. Required for job_type='task'; optional for 'watch'.",
+        description=(
+            "ID of an existing sub-agent to execute. Alternatively a custom automated "
+            "sub-agent can be provided through sub_agent_parameters, for either job type. "
+            "Required for job_type='task'; optional for 'watch', where it runs when the "
+            "condition is met and its reply replaces the notification."
+        ),
     )
     sub_agent_parameters: AutomatedSubAgentConfig | None = Field(
         default=None,
@@ -207,17 +251,43 @@ class ScheduledJobCreate(BaseModel):
     # Watch fields — required when job_type='watch'
     check_tool: str | None = Field(default=None, description="MCP tool name to evaluate the watch condition")
     check_args: dict[str, Any] | None = Field(default=None, description="Arguments for the check tool")
-    condition_expr: str | None = Field(
+    check_args_exprs: dict[str, str] | None = Field(
         default=None,
-        description="JSONPath expression to extract a value from the tool response.",
+        description=(
+            "Dynamic arguments: a JSON object mapping argument names to CEL "
+            "expressions over `now` (current time in the job's timezone) and `prev` "
+            "(the previous check result). Each is evaluated fresh on every run and "
+            "its value becomes that argument, merged over check_args (the expression "
+            "wins per key). This is how a rolling time window reaches a tool "
+            'argument — e.g. {"start_date": "strftime(now - duration(\'168h\'), '
+            "'%Y-%m-%d')\"}. Never put a literal date in check_args; it goes stale."
+        ),
     )
-    expected_value: str | None = Field(
+    cel_expr: str | None = Field(
         default=None,
-        description="Expected value to compare against the JSONPath result. If null, checks that result is not null. Otherwise performs exact string comparison.",
+        description=(
+            "CEL (Common Expression Language) condition over `result` (the tool "
+            "response), `now` (current time in the job's timezone) and `prev` (the "
+            "previous check result, null on the first run). Does date math, boolean "
+            "logic and filtering deterministically. A boolean result gates the trigger "
+            "directly; any other result triggers when non-empty — return the matching "
+            "items themselves, since what the expression returns is recorded on the "
+            "run and handed to the model or agent. jsonpath(result, \"$.a[*].b\") and "
+            "eq_ci(a, b) are available for JSONPath extraction and case-insensitive "
+            "comparison. Composes with llm_condition: the CEL gate runs first and the "
+            "model judges only what passed it. A watch needs cel_expr, llm_condition, "
+            "or both."
+        ),
     )
     llm_condition: str | None = Field(
         default=None,
-        description="Natural language condition for LLM-based evaluation. Use when exact matching is not suitable. Example: 'The status indicates success or completion'.",
+        description=(
+            "Natural language condition judged by a model on each run. Use only for "
+            "genuinely semantic judgement (tone, intent, 'looks external') — never for "
+            "arithmetic, counting, time windows or string matching, which belong in "
+            "cel_expr. Composes with cel_expr: the CEL gate runs first, and the model "
+            "judges what the expression returned."
+        ),
     )
     destroy_after_trigger: bool = Field(
         default=True,
@@ -242,6 +312,32 @@ class ScheduledJobCreate(BaseModel):
     @classmethod
     def validate_timezone(cls, v: str | None) -> str | None:
         return _validate_timezone_name(v)
+
+    @field_validator("cel_expr")
+    @classmethod
+    def validate_cel_expr(cls, v: str | None) -> str | None:
+        """Reject a CEL expression that cannot compile.
+
+        Stored unchecked, it yields a job that looks configured and never fires.
+        Compiling needs no payload, so it belongs here.
+        """
+        try:
+            validate_cel_expression(v)
+        except CelSyntaxError as exc:
+            raise ValueError(f"{exc}. {CEL_SYNTAX_HINT}") from exc
+        return v
+
+    @field_validator("check_args_exprs")
+    @classmethod
+    def validate_check_args_exprs(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        """Reject a dynamic-argument expression that cannot compile — per entry,
+        naming the argument, so the error points at the field that caused it."""
+        for key, expr in (v or {}).items():
+            try:
+                validate_cel_expression(expr)
+            except CelSyntaxError as exc:
+                raise ValueError(f"argument {key!r}: {exc}. {CEL_SYNTAX_HINT}") from exc
+        return v
 
     @field_validator("check_args", mode="before")
     @classmethod
@@ -271,11 +367,17 @@ class ScheduledJobCreate(BaseModel):
         if self.job_type == JobType.TASK and self.sub_agent_id is None and self.sub_agent_parameters is None:
             raise ValueError("sub_agent_id or sub_agent_parameters is required for job_type='task'")
 
-        # watches require condition fields
+        # Watches require something to call and something to decide with: a watch
+        # with neither a CEL gate nor a judged condition can never fire, and would sit
+        # polling forever while looking configured.
         if self.job_type == JobType.WATCH:
-            missing = [f for f in ("check_tool", "condition_expr") if not getattr(self, f)]
-            if missing:
-                raise ValueError(f"Watch jobs require: {', '.join(missing)}")
+            if not self.check_tool:
+                raise ValueError("Watch jobs require: check_tool")
+            if not self.cel_expr and not self.llm_condition:
+                raise ValueError(
+                    "Watch jobs require a condition: cel_expr (deterministic), "
+                    "llm_condition (judged by a model), or both (gate then judge)"
+                )
 
         # schedule kind config
         if self.schedule_kind == ScheduleKind.CRON and not self.cron_expr:
@@ -288,8 +390,8 @@ class ScheduledJobCreate(BaseModel):
         return self
 
 
-class GenerateWatchParamsRequest(BaseModel):
-    """Request body for AI-assisted watch parameter generation."""
+class GenerateJobDraftRequest(BaseModel):
+    """Request body for generating a scheduled job from a one-line description."""
 
     tools: list[dict[str, Any]] = Field(
         description="List of available MCP tool objects (name, description, input_schema.)"
@@ -297,19 +399,166 @@ class GenerateWatchParamsRequest(BaseModel):
     query: str = Field(
         min_length=1,
         max_length=500,
-        description="Natural-language description of the condition to watch for.",
+        description="Natural-language description of what the job should do.",
     )
 
 
-class GenerateWatchParamsResponse(BaseModel):
-    """AI-generated tool selection, arguments, condition expression and notification text for a watch job."""
+def _draft_field(info: FieldInfo) -> tuple[Any, FieldInfo]:
+    """Relax one ScheduledJobCreate field into a draft field.
 
-    check_tool: str | None = None
-    check_args: dict[str, Any] | None = None
-    condition_expr: str | None = None
-    expected_value: str | None = None
-    llm_condition: str | None = None
-    notification_message: str | None = None
+    Optional, defaulting to None, and stripped of constraints: a draft is what a model
+    proposed, so a too-long name or an empty string has to survive being returned and
+    shown rather than failing the whole generation. The real constraints apply when the
+    job is actually created through ScheduledJobCreate.
+    """
+    annotation = Any if info.annotation is None else info.annotation | None
+    return annotation, FieldInfo(default=None, description=info.description)
+
+
+#: A partial scheduled job — every field of ScheduledJobCreate, all optional.
+#:
+#: Derived from ScheduledJobCreate rather than restated so the two cannot drift: a new
+#: job field becomes generatable without touching this, and a field cannot be misspelled
+#: here into something the create endpoint silently ignores. Nothing is required because
+#: a generated draft is allowed to be incomplete — a fabricated schedule would be worse
+#: than an empty one — and the consistency rules live on ScheduledJobCreate, which is
+#: what the draft is eventually submitted as.
+ScheduledJobDraft = create_model(  # type: ignore[call-overload]
+    "ScheduledJobDraft",
+    __doc__=(
+        "A partial scheduled job: every ScheduledJobCreate field, all optional. Fields "
+        "the generator could not infer are omitted for the caller to fill in."
+    ),
+    **{name: _draft_field(info) for name, info in ScheduledJobCreate.model_fields.items()},
+)
+
+class GenerateConditionRequest(BaseModel):
+    """Ask a model to write (or refine) just the condition of a watch job.
+
+    Narrower than generate-job-draft on purpose: complex CEL is the hard part of
+    authoring a watch, and it is best written against the real response shape — which
+    the caller has (from "Run check now" or the last stored run) and the draft
+    generator does not.
+    """
+
+    query: str = Field(
+        min_length=1,
+        max_length=1000,
+        description=(
+            "What the condition should do, in natural language — either a fresh "
+            "description or a refinement of current_cel_expr ('also exclude declined "
+            "attendees')."
+        ),
+    )
+    current_cel_expr: str | None = Field(
+        default=None,
+        description="The expression as it stands, when refining rather than starting fresh.",
+    )
+    current_llm_condition: str | None = Field(
+        default=None,
+        description="The judged condition as it stands, so a refinement can keep or adjust the split.",
+    )
+    result: Any = Field(
+        default=None,
+        description=(
+            "A real tool response to write against and verify with. Without one the "
+            "expression is only compile-checked, not evaluated."
+        ),
+    )
+    check_tool: str | None = Field(
+        default=None,
+        description="Name of the check tool, for context only.",
+    )
+
+
+class GenerateConditionResponse(BaseModel):
+    """A generated condition, verified as far as the given material allows."""
+
+    cel_expr: str | None = Field(
+        default=None,
+        description="The expression. None when the ask is purely semantic (judge-only).",
+    )
+    llm_condition: str | None = Field(
+        default=None,
+        description="The semantic stage, when the ask has one; judged on what cel_expr returns.",
+    )
+    #: What "verified" means depends on what was provided: with a payload, the
+    #: expression compiled AND evaluated against it; without one, it only compiled.
+    verified: bool = False
+    #: The evaluation against the supplied payload, so the caller can show the result
+    #: without a second round-trip: {gate, extracted}. None when no payload was given.
+    evaluation: dict[str, Any] | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class ValidateArgsExprRequest(BaseModel):
+    """A dynamic-arguments expression, to resolve without running the job."""
+
+    check_args_exprs: dict[str, str] = Field(
+        min_length=1,
+        description="Argument name to CEL expression over `now` and `prev`.",
+    )
+    check_args: dict[str, Any] | None = Field(
+        default=None,
+        description="The static arguments, so the response shows the merged result.",
+    )
+    prev: Any = Field(
+        default=None,
+        description="The previous check result, for expressions that use `prev`.",
+    )
+
+
+class ValidateArgsExprResponse(BaseModel):
+    """What the arguments would be if the check ran right now."""
+
+    valid: bool = Field(description="False when the expression could not be compiled or evaluated.")
+    error: str | None = None
+    #: The merged arguments the tool would be called with — static plus resolved,
+    #: expression winning per key. What "Run check now" and the scheduler both use.
+    resolved: dict[str, Any] | None = None
+
+
+class ValidateConditionRequest(BaseModel):
+    """A condition plus the payload to try it against."""
+
+    result: Any = Field(
+        description=(
+            "The tool response to evaluate against — either one returned by "
+            "/mcp/tools/invoke or a payload the author pasted in."
+        ),
+    )
+    cel_expr: str | None = Field(
+        default=None,
+        description=(
+            "CEL condition over `result`, `now` and `prev`. `now` is the server's "
+            "current time; pass `prev` to try change-detection conditions."
+        ),
+    )
+    prev: Any = Field(
+        default=None,
+        description="The previous check result, for trying CEL conditions that use `prev`.",
+    )
+    llm_condition: str | None = Field(
+        default=None,
+        description=(
+            "A judged condition is not judged here — that needs a model call — but its "
+            "presence changes what the preview reports: with cel_expr, the gate is "
+            "still evaluated, and a false gate means the model would never be asked."
+        ),
+    )
+
+
+class ValidateConditionResponse(BaseModel):
+    """What a condition does to a given payload."""
+
+    valid: bool = Field(description="False when the expression could not be parsed.")
+    error: str | None = None
+    extracted: Any = None
+    condition_met: bool | None = Field(
+        default=None,
+        description="None when not evaluated: invalid expression, or judged by a model.",
+    )
+    notes: list[str] = Field(default_factory=list)
 
 
 class ScheduledJobUpdate(BaseModel):
@@ -329,8 +578,20 @@ class ScheduledJobUpdate(BaseModel):
     sub_agent_id: int | None = None
     check_tool: str | None = None
     check_args: dict[str, Any] | None = None
-    condition_expr: str | None = None
-    expected_value: str | None = None
+    check_args_exprs: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Dynamic arguments: argument name to CEL expression over `now`/`prev`, "
+            "each resolved on every run and merged over check_args. Null clears them."
+        ),
+    )
+    cel_expr: str | None = Field(
+        default=None,
+        description=(
+            "CEL condition over `result`, `now` and `prev`. Null clears it, leaving "
+            "llm_condition as the whole condition — a watch must keep at least one."
+        ),
+    )
     llm_condition: str | None = None
     destroy_after_trigger: bool | None = None
     delivery_channel_id: int | None = None
@@ -342,3 +603,24 @@ class ScheduledJobUpdate(BaseModel):
     @classmethod
     def validate_timezone(cls, v: str | None) -> str | None:
         return _validate_timezone_name(v)
+
+    @field_validator("cel_expr")
+    @classmethod
+    def validate_cel_expr(cls, v: str | None) -> str | None:
+        """Reject a CEL expression that cannot compile — same rule as create."""
+        try:
+            validate_cel_expression(v)
+        except CelSyntaxError as exc:
+            raise ValueError(f"{exc}. {CEL_SYNTAX_HINT}") from exc
+        return v
+
+    @field_validator("check_args_exprs")
+    @classmethod
+    def validate_check_args_exprs(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        """Reject a dynamic-argument expression that cannot compile — same rule as create."""
+        for key, expr in (v or {}).items():
+            try:
+                validate_cel_expression(expr)
+            except CelSyntaxError as exc:
+                raise ValueError(f"argument {key!r}: {exc}. {CEL_SYNTAX_HINT}") from exc
+        return v

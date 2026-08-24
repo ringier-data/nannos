@@ -2,15 +2,19 @@
 
 import json
 import logging
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ringier_a2a_sdk.utils.schema_cleaning import clean_gemini_schema
 
 from ..config import config
-from ..dependencies import require_auth_or_bearer_token
+from ..db.session import DbSession
+from ..dependencies import require_auth, require_auth_or_bearer_token
 from ..models.user import User
+from ..services.mcp_tool_client import GatewayError, ToolNotFound, call_tool, parse_envelope, token_for
+from ..utils.gatana_auth import get_user_subject_token
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,47 @@ class MCPToolsResponse(BaseModel):
     """Response model for MCP tools list."""
 
     tools: list[MCPTool]
+
+
+class MCPToolInvokeRequest(BaseModel):
+    """Request body for a one-off tool call made on the user's behalf."""
+
+    tool_name: str = Field(..., min_length=1, max_length=256)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    server_slug: str | None = Field(
+        default=None,
+        description=(
+            "Server the tool belongs to. Used only to look up the tool's risk score — "
+            "the call itself resolves the tool by name across all servers, so a wrong "
+            "slug cannot make the call fail."
+        ),
+    )
+    acknowledge_risk: bool = Field(
+        default=False,
+        description=(
+            "Confirms the caller accepts that the tool may change data. Required when the "
+            "tool has no risk score or scores above the read-only threshold."
+        ),
+    )
+
+
+class MCPToolRisk(BaseModel):
+    """Known risk of a tool, echoed so the caller can warn before re-sending."""
+
+    base_score: float | None = None
+    risk_factors: dict[str, Any] = Field(default_factory=dict)
+    known: bool = False
+
+
+class MCPToolInvokeResponse(BaseModel):
+    """Result of a one-off tool call."""
+
+    tool_name: str
+    result: dict[str, Any]
+    elapsed_ms: int
+    is_error: bool = False
+    truncated: bool = False
+    risk: MCPToolRisk | None = None
 
 
 class MCPServer(BaseModel):
@@ -284,36 +329,12 @@ async def _list_mcp_tools(
 
         response.raise_for_status()
 
-        # Parse response based on content type
-        content_type = response.headers.get("content-type", "")
-
-        if "text/event-stream" in content_type:
-            # Handle Server-Sent Events format
-            # SSE format: "data: {json}\n\n"
-            logger.debug("Parsing SSE response from MCP gateway")
-            lines = response.text.strip().split("\n")
-            json_data = None
-
-            for line in lines:
-                if line.startswith("data: "):
-                    json_str = line[6:]  # Remove "data: " prefix
-                    try:
-                        json_data = json.loads(json_str)
-                        break
-                    except json.JSONDecodeError:
-                        continue
-
-            if not json_data:
-                logger.error(f"Failed to parse SSE response: {response.text[:500]}")
-                raise HTTPException(
-                    status_code=503,
-                    detail="Invalid SSE response from MCP gateway",
-                )
-
-            data = json_data
-        else:
-            # Handle regular JSON response
-            data = response.json()
+        try:
+            data = parse_envelope(response)
+        except GatewayError as exc:
+            # The parsing moved into the gateway client, which reports a domain error;
+            # this listing has always answered 503 for an unreadable gateway reply.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         # Extract tools from MCP response
         if "result" not in data or "tools" not in data["result"]:
@@ -421,6 +442,157 @@ async def list_mcp_tools(
             status_code=500,
             detail=f"Internal server error: {type(e).__name__}",
         )
+
+
+#: Tools scoring at or above this are treated as capable of changing data, so an
+#: unattended call needs the caller to acknowledge it first. The scale comes from the
+#: scorer's own prompt in agent-common (0.0 read-only retrieval, 0.3 filtered reads,
+#: 0.5 writes to the user's own data, 0.7 shared writes, 1.0 destructive), so the cut
+#: sits between "reads" and "writes".
+_READ_ONLY_RISK_CEILING = 0.4
+
+#: HTTP methods that cannot change state. Gateway tools generated from an OpenAPI spec
+#: carry their method at the start of the description ("GET /campaign/{id}/sync-status"),
+#: which is a fact about the endpoint rather than a naming convention — enough to treat
+#: the tool as read-only when nothing has scored it yet. Consulted only in that case:
+#: a recorded score always wins, so this can never downgrade a known risk.
+_READ_ONLY_HTTP_METHODS = ("GET ", "HEAD ", "OPTIONS ")
+
+
+async def _describes_a_read(request: Request, user: User, tool_name: str) -> bool:
+    """Whether the gateway describes this tool as a read-only HTTP endpoint."""
+    try:
+        listing = await _list_mcp_tools(request, user)
+    except Exception:  # pragma: no cover - discovery must not block the call path
+        logger.warning("Tool discovery failed while classifying %s", tool_name, exc_info=True)
+        return False
+    for tool in listing.tools:
+        if tool.name != tool_name:
+            continue
+        description = (tool.description or "").lstrip()
+        return description.upper().startswith(_READ_ONLY_HTTP_METHODS)
+    return False
+
+#: Serialized result size handed back to the browser. A tool that returns a large
+#: page of records would otherwise stall the dialog rendering it.
+_MAX_RESULT_BYTES = 64_000
+
+
+@router.post("/tools/invoke", response_model=MCPToolInvokeResponse)
+async def invoke_mcp_tool(
+    body: MCPToolInvokeRequest,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> MCPToolInvokeResponse:
+    """Call one MCP tool once with the user's own credentials and return its response.
+
+    This exists so a watch can be authored against a real payload instead of a guess:
+    the scheduler UI runs the check, shows the response, and lets the user pick the
+    value to watch out of it.
+
+    The call is real — there is no dry-run at the MCP layer — so a tool that writes
+    will write. Tools without a read-only risk score therefore require
+    `acknowledge_risk`, answered with 428 until the caller sets it.
+
+    Session auth only (no bearer): this is a UI affordance, and exposing arbitrary
+    tool invocation to token holders would widen the orchestrator's reach for no gain.
+
+    Raises:
+        400: The tool is served by this backend rather than the gateway.
+        428: The tool may change data and `acknowledge_risk` was not set.
+        502/503/504: The gateway failed, was unreachable, or timed out.
+    """
+    tool_name = body.tool_name.strip()
+
+    rows: list[dict[str, Any]] = []
+    try:
+        risk_service = request.app.state.tool_risk_service
+        rows = await risk_service.get_scores_by_tool(db, tool_name)
+    except Exception:  # pragma: no cover - risk lookup must never block the call path
+        logger.warning("Risk score lookup failed for %s; treating as unscored", tool_name, exc_info=True)
+
+    scored = [r for r in rows if r.get("base_score") is not None]
+    worst = max(scored, key=lambda r: r["base_score"]) if scored else None
+    base_score = worst["base_score"] if worst else None
+    risk = MCPToolRisk(
+        base_score=base_score,
+        risk_factors=(worst or {}).get("risk_factors") or {},
+        known=worst is not None,
+    )
+
+    if base_score is not None:
+        needs_ack = base_score >= _READ_ONLY_RISK_CEILING
+        reason = f"is scored {base_score:.2f}, above the read-only threshold of {_READ_ONLY_RISK_CEILING}"
+    else:
+        # Nothing has scored this tool: the table is filled lazily by agent runs, so
+        # most tools are absent. Fall back to what the gateway says the endpoint does.
+        needs_ack = not await _describes_a_read(request, user, tool_name)
+        reason = "has not been assessed yet, so it is not known to be read-only"
+
+    if needs_ack and not body.acknowledge_risk:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                # Surfaced verbatim in the scheduler dialog, so it says why rather than
+                # naming a request field: an API caller has the 428 and the documented
+                # flag already.
+                "message": f"{tool_name} {reason}. Running it may change data.",
+                "risk": risk.model_dump(),
+            },
+        )
+
+    # Deliberately not a DB audit entry: audit_entity_type/audit_action are Postgres
+    # enums and would need their own migration. Arguments are logged by key only —
+    # values routinely carry ids, addresses and other user data.
+    logger.info(
+        "MCP tool invoke by %s: tool=%s server=%s arg_keys=%s risk=%s",
+        user.sub,
+        tool_name,
+        body.server_slug or "-",
+        sorted(body.arguments.keys()),
+        base_score,
+    )
+
+    # The audience follows the tool: a console_* tool is served by this backend and
+    # rejects a gateway token, and vice versa.
+    subject_token = await get_user_subject_token(request, user)
+    try:
+        token = await token_for(tool_name, subject_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    try:
+        # The same call the scheduler makes when it evaluates a watch, so the payload
+        # previewed here is the one a condition will actually be evaluated against.
+        call = await call_tool(token, tool_name, body.arguments, timeout=30.0)
+    except ToolNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GatewayError as exc:
+        # A timeout is about this call; anything else is the gateway being unwell.
+        raise HTTPException(
+            status_code=504 if "did not respond" in str(exc) else 502, detail=str(exc)
+        )
+
+    result = call.result
+
+    truncated = False
+    if len(json.dumps(result, default=str)) > _MAX_RESULT_BYTES:
+        truncated = True
+        result = {
+            "_truncated": True,
+            "_note": "The response was too large to show in full; narrow the tool arguments.",
+            "keys": sorted(result.keys())[:100] if isinstance(result, dict) else [],
+        }
+
+    return MCPToolInvokeResponse(
+        tool_name=tool_name,
+        result=result,
+        elapsed_ms=call.elapsed_ms,
+        is_error=call.is_error,
+        truncated=truncated,
+        risk=risk,
+    )
 
 
 async def _get_gatana_token(request: Request, user: User) -> str:

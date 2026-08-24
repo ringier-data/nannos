@@ -37,8 +37,8 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         notification_message=row.get("notification_message"),
         check_tool=row["check_tool"],
         check_args=row["check_args"],
-        condition_expr=row["condition_expr"],
-        expected_value=row.get("expected_value"),
+        check_args_exprs=row.get("check_args_exprs"),
+        cel_expr=row.get("cel_expr"),
         llm_condition=row.get("llm_condition"),
         destroy_after_trigger=row.get("destroy_after_trigger", True),
         last_check_result=row["last_check_result"],
@@ -66,6 +66,7 @@ def _row_to_run(row: Any) -> ScheduledJobRun:
         error_message=row["error_message"],
         conversation_id=row.get("conversation_id"),
         delivered=row["delivered"],
+        condition_evaluation=row.get("condition_evaluation"),
     )
 
 
@@ -302,6 +303,7 @@ class ScheduledJobRepository(AuditedRepository):
         error_message: str | None = None,
         conversation_id: str | None = None,
         delivered: bool = False,
+        condition_evaluation: dict[str, Any] | None = None,
     ) -> None:
         """Finalise a run record with execution outcome."""
         await db.execute(
@@ -313,7 +315,8 @@ class ScheduledJobRepository(AuditedRepository):
                     result_summary   = :result_summary,
                     error_message    = :error_message,
                     conversation_id  = :conversation_id,
-                    delivered        = :delivered
+                    delivered        = :delivered,
+                    condition_evaluation = :condition_evaluation
                 WHERE id = :run_id
             """),
             {
@@ -323,6 +326,9 @@ class ScheduledJobRepository(AuditedRepository):
                 "error_message": error_message,
                 "conversation_id": conversation_id,
                 "delivered": delivered,
+                "condition_evaluation": (
+                    json.dumps(condition_evaluation) if condition_evaluation is not None else None
+                ),
             },
         )
 

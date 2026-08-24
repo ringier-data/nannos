@@ -107,6 +107,21 @@ class SchedulerService:
             return run_at.replace(tzinfo=resolve_timezone(tz))
         return run_at
 
+    async def schedulable_sub_agents(self, db: AsyncSession, user_id: str) -> list:
+        """The sub-agents a scheduled job may run on this user's behalf.
+
+        One definition on purpose. Anything that offers a choice of sub-agent — the
+        picker, the AI fill — has to offer exactly this set, because this is what
+        create_job validates against. An offer that is wider produces a job the user
+        cannot save; one that is narrower hides agents they could have used.
+
+        Note it is deliberately not admin-aware: a scheduled job runs as its owner, so
+        being an administrator does not widen what a job of theirs may invoke.
+        """
+        if self._sub_agent_service is None:
+            raise RuntimeError("SubAgentService not injected. Call set_sub_agent_service() during initialization.")
+        return await self._sub_agent_service.get_accessible_sub_agents(db, user_id)
+
     async def create_job(
         self,
         db: AsyncSession,
@@ -115,7 +130,10 @@ class SchedulerService:
     ) -> ScheduledJob:
         """Create a new scheduled job for the authenticated user."""
 
-        if data.job_type == "task" and not data.sub_agent_id and data.sub_agent_parameters is not None:
+        # Watch jobs can run an agent too — when their condition is met — so an inline
+        # sub-agent is created for either job type. What differs between them is the
+        # trigger, not what runs.
+        if not data.sub_agent_id and data.sub_agent_parameters is not None:
             if self._sub_agent_service is None:
                 raise RuntimeError("SubAgentService not injected. Call set_sub_agent_service() during initialization.")
             # Create a new sub-agent based on the provided parameters and use its ID for the job
@@ -134,9 +152,7 @@ class SchedulerService:
         # This prevents users from creating jobs with sub-agents they can't access,
         # which would fail at execution time with confusing 403 errors
         if data.sub_agent_id is not None:
-            if self._sub_agent_service is None:
-                raise RuntimeError("SubAgentService not injected. Call set_sub_agent_service() during initialization.")
-            accessible_agents = await self._sub_agent_service.get_accessible_sub_agents(db, actor.id)
+            accessible_agents = await self.schedulable_sub_agents(db, actor.id)
             if not any(sa.id == data.sub_agent_id for sa in accessible_agents):
                 raise ValueError(
                     f"Access denied: You do not have permission to create jobs with sub-agent {data.sub_agent_id}"
@@ -178,8 +194,8 @@ class SchedulerService:
             "notification_message": data.notification_message,
             "check_tool": data.check_tool,
             "check_args": json.dumps(data.check_args) if data.check_args is not None else None,
-            "condition_expr": data.condition_expr,
-            "expected_value": data.expected_value,
+            "check_args_exprs": json.dumps(data.check_args_exprs) if data.check_args_exprs is not None else None,
+            "cel_expr": data.cel_expr,
             "llm_condition": data.llm_condition,
             "destroy_after_trigger": data.destroy_after_trigger,
             "delivery_channel_id": data.delivery_channel_id,
@@ -214,8 +230,8 @@ class SchedulerService:
         prompt: str | None = _UNSET,
         notification_message: str | None = _UNSET,
         check_tool: str | None = _UNSET,
-        condition_expr: str | None = _UNSET,
-        expected_value: str | None = _UNSET,
+        check_args_exprs: dict | None = _UNSET,
+        cel_expr: str | None = _UNSET,
         llm_condition: str | None = _UNSET,
         destroy_after_trigger: bool | None = _UNSET,
         check_args: dict | None = _UNSET,
@@ -238,10 +254,10 @@ class SchedulerService:
             fields["notification_message"] = notification_message
         if check_tool is not _UNSET:
             fields["check_tool"] = check_tool
-        if condition_expr is not _UNSET:
-            fields["condition_expr"] = condition_expr
-        if expected_value is not _UNSET:
-            fields["expected_value"] = expected_value
+        if check_args_exprs is not _UNSET:
+            fields["check_args_exprs"] = json.dumps(check_args_exprs) if check_args_exprs is not None else None
+        if cel_expr is not _UNSET:
+            fields["cel_expr"] = cel_expr
         if llm_condition is not _UNSET:
             fields["llm_condition"] = llm_condition
         if destroy_after_trigger is not _UNSET:
@@ -266,9 +282,7 @@ class SchedulerService:
         # SECURITY: Validate that user has access to the referenced sub-agent
         # if sub_agent_id is being updated
         if "sub_agent_id" in fields and fields["sub_agent_id"] is not None:
-            if self._sub_agent_service is None:
-                raise RuntimeError("SubAgentService not injected. Call set_sub_agent_service() during initialization.")
-            accessible_agents = await self._sub_agent_service.get_accessible_sub_agents(db, actor.id)
+            accessible_agents = await self.schedulable_sub_agents(db, actor.id)
             if not any(sa.id == fields["sub_agent_id"] for sa in accessible_agents):
                 raise ValueError(f"Access denied: You do not have permission to use sub-agent {fields['sub_agent_id']}")
 

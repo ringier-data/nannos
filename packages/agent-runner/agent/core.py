@@ -12,7 +12,8 @@ Follows the same A2A pattern as the other A2A agents (e.g. alloy-agent):
 
 Execution flow per call:
 1. Extract scheduler metadata from the A2A message (task.history)
-2. For watch jobs: call the check_tool via MCP and evaluate the JSONPath condition
+2. Nothing watch-specific: the scheduler decides whether a watch acts and what it says,
+   then dispatches a plain prompt like any other job
 3. If condition met (or task job): fetch sub-agent config from agent-console backend and
    dispatch to the appropriate agent runner (LangGraph / Foundry / remote A2A),
    capture result
@@ -55,7 +56,6 @@ from object_storage import get_object_storage_service
 
 if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
-from jsonpath_ng.ext import parse as jsonpath_parse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
@@ -197,7 +197,7 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
     """Extract scheduler metadata from the A2A task's message history.
 
     The scheduler engine injects metadata (user_access_token, sub_agent_id,
-    watch, job_type, scheduled_job_id, scheduled_job_run_id) into the A2A message.
+    scheduled_job_id, scheduled_job_run_id) into the A2A message.
     These end up in task.history[-1].metadata when the message is processed.
 
     SECURITY NOTE: user_id is NOT extracted from message metadata as it would be
@@ -216,7 +216,7 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
             if hasattr(last_msg, "metadata") and last_msg.metadata:
                 meta = last_msg.metadata
                 # Over gRPC the metadata is a protobuf Struct; dict() would only
-                # convert the top level, leaving nested values (e.g. "watch") as
+                # convert the top level, leaving nested values as
                 # Structs that support ["key"] but not .get(). Convert the whole
                 # tree to plain Python instead.
                 if isinstance(meta, Struct):
@@ -648,8 +648,6 @@ class AgentRunner(BaseAgent):
             return int(value) if isinstance(value, int | float) else None
 
         sub_agent_id: int | None = _meta_int("sub_agent_id")
-        job_type: str = message_meta.get("job_type", "task")
-        watch: dict | None = message_meta.get("watch")
         scheduled_job_id: int | None = _meta_int("scheduled_job_id")
         scheduled_job_run_id: int | str = _meta_int("scheduled_job_run_id") or ""
 
@@ -659,7 +657,6 @@ class AgentRunner(BaseAgent):
         user_id: str | None = await self._fetch_user_id_from_backend(user_access_token) if user_access_token else None
 
         message_text = "\n".join(_extract_text_from_message(m) for m in messages).strip()
-        last_check_result: dict | None = None
         agent_message: str | None = None
         sub_agent_task_state: str | None = None
         sub_agent_name: str | None = None
@@ -673,43 +670,9 @@ class AgentRunner(BaseAgent):
             "sub_agent_id": sub_agent_id,
         }
 
-        # --- 1. Watch condition evaluation (skips LLM if condition not met) ---
-        if job_type == "watch" and watch:
-            condition_met, check_result = await self._evaluate_watch(
-                watch, user_access_token, timezone_name=message_meta.get("timezone")
-            )
-            last_check_result = check_result
-            if not condition_met:
-                logger.info(f"Watch condition NOT met for job {scheduled_job_id} — skipping execution")
-                result_meta = {
-                    "scheduler_status": "condition_not_met",
-                    "last_check_result": last_check_result,
-                    "user_sub": user_config.user_sub,
-                    **correlation_meta,
-                }
-                yield AgentStreamResponse(
-                    state=TaskState.TASK_STATE_COMPLETED,
-                    content=json.dumps(result_meta, default=str),
-                )
-                return
-
-            # Generate agent message if none was provided
-            # This is what gets delivered to the user
-            agent_message = message_text or await self._generate_watch_message(
-                check_result, user_config.user_sub, timezone_name=message_meta.get("timezone")
-            )
-            logger.info(f"Watch notification: {agent_message[:100]}...")
-
-        # --- 2. Sub-agent execution (dispatched by type) ---
+        # --- 2. Sub-agent execution ---
         if sub_agent_id:
-            # For tasks, use the message_text as the prompt
-            # For watches with sub-agents, use the job's custom instruction when set
-            # (message_text carries the notification, which is separate)
-            if job_type == "watch":
-                instruction = (watch or {}).get("prompt") or "Take appropriate action based on the check result."
-                prompt = f"Watch condition triggered. {instruction}\n\nCheck result: {json.dumps(last_check_result, default=str)}"
-            else:
-                prompt = message_text or "Execute your configured task."
+            prompt = message_text or "Execute your configured task."
 
             try:
                 # Fetched here (not inside _execute_sub_agent) so the failure
@@ -733,8 +696,7 @@ class AgentRunner(BaseAgent):
                 result_meta = {
                     "scheduler_status": "failed",
                     "error_message": error_message,
-                    "last_check_result": last_check_result,
-                    "agent_message": agent_message,
+                            "agent_message": agent_message,
                     "user_sub": user_config.user_sub,
                     "sub_agent_name": sub_agent_name,
                     "prompt": prompt,
@@ -748,14 +710,17 @@ class AgentRunner(BaseAgent):
 
         result_meta = {
             "scheduler_status": "success",
-            "agent_message": agent_message,
+            # No sub-agent means there is nothing to run: the dispatch carries the text
+            # to deliver and echoing it back is what the delivery channel picks up. That
+            # is a watch whose outcome is a notification — the scheduler decided the
+            # condition was met and wrote what to say before dispatching.
+            "agent_message": agent_message or message_text or None,
             # The sub-agent's terminal A2A task state — notably
             # "input_required" (the run asked the user a question and is
             # waiting). Delivery channels persist it with the run's provenance
             # and forward it in the conversation-origin DataPart so the
             # adopting orchestrator can frame the user's reply correctly.
             "task_state": sub_agent_task_state,
-            "last_check_result": last_check_result,
             "user_sub": user_config.user_sub,
             "sub_agent_name": sub_agent_name,
             "prompt": prompt,
@@ -800,211 +765,6 @@ class AgentRunner(BaseAgent):
         except Exception as exc:
             logger.error(f"[SECURITY] Failed to fetch user_id from backend: {exc}")
             return None
-
-    async def _evaluate_watch(
-        self, watch: dict, user_access_token: str, timezone_name: str | None = None
-    ) -> tuple[bool, dict]:
-        """Call the check_tool via MCP gateway and evaluate the condition.
-
-        Args:
-            watch: Dict with keys check_tool, check_args, condition_expr, expected_value, llm_condition, last_check_result.
-            user_access_token: orchestrator token for MCP gateway authentication.
-
-        Returns:
-            (condition_met, check_result_dict)
-        """
-        check_tool: str = watch["check_tool"]
-        check_args: dict = watch.get("check_args") or {}
-        condition_expr: str | None = watch.get("condition_expr")
-        expected_value: str | None = watch.get("expected_value")
-        llm_condition: str | None = watch.get("llm_condition")
-
-        mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
-
-        # Build MCP connections based on the check_tool prefix
-        connections: dict[str, StreamableHttpConnection] = {}
-
-        if check_tool.startswith("console_"):
-            # Console backend MCP — exchange token for agent-console audience
-            console_mcp_url = f"{_CONSOLE_BACKEND_URL}/mcp"
-            console_token = await (self._get_oauth2_client()).exchange_token(
-                user_access_token, _CONSOLE_BACKEND_CLIENT_ID
-            )
-            connections["console"] = StreamableHttpConnection(
-                transport="streamable_http",
-                url=console_mcp_url,
-                headers={"Authorization": f"Bearer {console_token}"},
-                timeout=mcp_timeout,
-                sse_read_timeout=mcp_timeout,
-            )
-        else:
-            # Gatana gateway — requires token exchange
-            gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
-            connections["gateway"] = StreamableHttpConnection(
-                transport="streamable_http",
-                url=_MCP_GATEWAY_URL,
-                headers={"Authorization": f"Bearer {gatana_access_token}"},
-                timeout=mcp_timeout,
-                sse_read_timeout=mcp_timeout,
-            )
-
-        check_result: dict = {}
-        try:
-            mcp_client = MultiServerMCPClient(connections)
-            tools = await mcp_client.get_tools()
-            tool_map = {t.name: t for t in tools}
-
-            if check_tool not in tool_map:
-                raise ValueError(f"Watch check_tool '{check_tool}' not found in MCP gateway")
-
-            raw = await tool_map[check_tool].ainvoke(check_args)
-            # ainvoke returns list[TextContentBlock | ImageContentBlock | FileContentBlock]
-            # (langchain_core TypedDicts, already converted from raw MCP content blocks).
-            if isinstance(raw, list):
-                text_parts: list[str] = [
-                    block["text"] for block in raw if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                combined = "\n".join(text_parts) if text_parts else ""
-                try:
-                    check_result = json.loads(combined) if combined else {}
-                except json.JSONDecodeError:
-                    check_result = {"output": combined}
-            elif isinstance(raw, dict):
-                check_result = raw
-            elif isinstance(raw, str):
-                try:
-                    check_result = json.loads(raw)
-                except json.JSONDecodeError:
-                    check_result = {"output": raw}
-            else:
-                check_result = {"output": str(raw)}
-
-        except Exception as exc:
-            logger.exception("Watch check_tool '%s' call failed", check_tool)
-            raise RuntimeError(f"Watch check failed: {exc}") from exc
-
-        # Evaluate the JSONPath condition expression
-        if not condition_expr:
-            return True, check_result
-
-        try:
-            expr = jsonpath_parse(condition_expr)
-            matches = expr.find(check_result)
-
-            # Extract the value from JSONPath
-            extracted_value = None
-            if matches:
-                extracted_value = matches[0].value if len(matches) == 1 else [m.value for m in matches]
-
-            # Evaluate condition: LLM takes precedence if provided
-            if llm_condition:
-                # Use LLM-based evaluation on the fleet's cheap/fast chat tier
-                try:
-                    llm = create_model(get_default_fast_model() or require_default_model()).bind(temperature=0)
-                    structured_llm = llm.with_structured_output(ConditionEvaluationResult)
-
-                    system_prompt = (
-                        "You are a condition evaluator for a scheduling system. "
-                        "Evaluate whether the given condition is met based on the provided data. "
-                        "Be precise and objective in your evaluation."
-                    )
-
-                    user_prompt = f"""{_current_time_context(timezone_name)}
-
-Evaluate this condition:
-{llm_condition}
-
-Extracted value from JSONPath:
-{json.dumps(extracted_value, indent=2)}
-
-Full tool response:
-{json.dumps(check_result, indent=2)}
-
-Evaluate whether the condition is met and provide brief reasoning."""
-
-                    # Cost tracking callback (if cost logger is available)
-                    callbacks = self.get_langchain_callbacks() or []
-
-                    messages = [
-                        SystemMessage(content=system_prompt),
-                        HumanMessage(content=user_prompt),
-                    ]
-
-                    result: ConditionEvaluationResult = await structured_llm.ainvoke(
-                        messages, config={"callbacks": callbacks}
-                    )
-                    condition_met = result.condition_met
-                    logger.info(
-                        "LLM condition '%s' met=%s (reasoning: %s)",
-                        llm_condition,
-                        condition_met,
-                        result.reasoning,
-                    )
-                except Exception as exc:
-                    logger.error("LLM condition evaluation failed: %s", exc)
-                    condition_met = False
-            elif expected_value is not None:
-                # Use exact string comparison
-                extracted_str = str(extracted_value) if extracted_value is not None else ""
-                condition_met = extracted_str.lower() == expected_value.lower()
-            else:
-                # Default: check that extracted value is not null/empty
-                condition_met = extracted_value is not None and extracted_value not in ("", 0, False, [], {})
-
-        except Exception as exc:
-            logger.error("JSONPath condition '%s' evaluation failed: %s", condition_expr, exc)
-            condition_met = False
-
-        logger.info("Watch condition met=%s", condition_met)
-        return condition_met, check_result
-
-    async def _generate_watch_message(
-        self, check_result: dict, user_sub: str, timezone_name: str | None = None
-    ) -> str:
-        """Generate a notification message using LLM when no explicit message was provided.
-
-        Args:
-            check_result: The watch check result dictionary from the MCP tool.
-            user_sub: User subject from JWT for cost tracking (fallback when user_id unavailable).
-
-        Returns:
-            Generated notification message string.
-        """
-        try:
-            llm = create_model(get_default_fast_model() or require_default_model()).bind(
-                temperature=0.7
-            )  # Slightly creative for message generation
-            structured_llm = llm.with_structured_output(GeneratedMessage)
-
-            # Cost tracking callback (if cost logger is available)
-            callbacks = self.get_langchain_callbacks() or []
-
-            system_prompt = (
-                "You are a notification message generator for a scheduling system. "
-                "Generate clear, concise, and informative notification messages based on watch condition results. "
-                "The message should be human-readable and highlight the key information from the result."
-            )
-
-            user_prompt = f"""{_current_time_context(timezone_name)}
-
-Generate a notification message for this watch condition result:
-
-{json.dumps(check_result, indent=2)}
-
-Create a brief, actionable message (1-2 sentences) that a user would want to receive as a notification."""
-
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-
-            result: GeneratedMessage = await structured_llm.ainvoke(messages, config={"callbacks": callbacks})
-            logger.info("Generated watch message: %s", result.message)
-            return result.message
-        except Exception as exc:
-            logger.error("LLM message generation failed: %s", exc)
-            # Fallback to a simple default message
-            return f"Watch condition triggered. Result: {json.dumps(check_result, default=str)[:200]}"
 
     async def _fetch_sub_agent_config(self, sub_agent_id: int, user_access_token: str) -> dict:
         """Fetch sub-agent configuration from the agent-console API.
