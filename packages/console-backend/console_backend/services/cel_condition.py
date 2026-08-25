@@ -51,11 +51,14 @@ coroutine that is waiting, while the interpreter keeps running in its worker thr
 completion — Python cannot kill a thread. So the limits that do the real work are these,
 the first applied *during* evaluation and the rest before it begins:
 
-  * evaluation is metered at MAX_CEL_STEPS AST-node visits and raises past it, which is
-    the only ceiling that can stop work already running. The input caps below bound the
-    inputs, and cost is not a function of size alone: a short expression over a small
-    payload can still be quadratic. See MeteredEvaluator, and note it is celpy's
-    interpreter that makes this possible — no CEL implementation available to Python
+  * evaluation is metered at MAX_CEL_STEPS AST-node visits, and stops itself at
+    CEL_EVAL_DEADLINE_SECONDS — the only ceilings that can stop work already running.
+    The input caps below bound the inputs, and cost is not a function of size alone: a
+    short expression over a small payload can still be quadratic. Both exist because
+    they answer different questions — how much work is too much, which must not vary
+    with how busy the host is, and how long a worker thread may be held, which is
+    exactly a wall-clock question. See MeteredEvaluator, and note it is celpy's
+    interpreter that makes either possible — no CEL implementation available to Python
     offers a cost or gas limit of its own;
   * the expression is capped at MAX_CEL_EXPR_LENGTH before the parser ever sees it, so
     a megabyte of nested parens cannot exhaust memory during the parse;
@@ -67,7 +70,9 @@ the first applied *during* evaluation and the rest before it begins:
   * only `result`, `now` and `prev` are ever bound — nothing else is reachable by name.
 
 The timeout stays as a backstop that fails closed (an error, never a quiet "not met"),
-and it does return the request promptly; it simply is not what makes this safe.
+and it does return the request promptly; it simply is not what makes this safe. It should
+now be the ceiling that never fires: the in-interpreter deadline is set below it, so a
+slow evaluation ends with an error naming what happened rather than a bare timeout.
 
 celpy (pure Python) rather than the Rust-backed `common-expression-language`, measured
 2026-08-24 on the payload shape this actually sees — a list of events under a filter
@@ -90,6 +95,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from time import monotonic
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -130,14 +136,24 @@ MAX_CEL_PAYLOAD_BYTES = 1_048_576
 #: `filter` once whether it runs over ten items or a million, while counting node visits
 #: prices the iteration itself. See MeteredEvaluator.
 #:
-#: Sized from measurement (2026-08-25, this machine, ~2.2us per step): the realistic
-#: worst case is a filter over a large tool response, which costs ~65 steps per item —
-#: 32.5k steps (61ms) over 500 events, 130k (245ms) over 2000, the most a response under
-#: MAX_CEL_PAYLOAD_BYTES is likely to carry. 300k leaves that headroom while stopping a
-#: quadratic comprehension after ~650ms, comfortably inside CEL_EVAL_TIMEOUT_SECONDS so
-#: the caller gets this specific error rather than an unhelpful timeout. Re-tune from the
-#: warnings CEL_STEP_WARN_RATIO emits, not from this comment.
+#: Sized from measurement (2026-08-25): the realistic worst case is a filter over a large
+#: tool response, which costs ~65 steps per item — 32.5k steps over 500 events, 130k over
+#: 2000, about the most a response under MAX_CEL_PAYLOAD_BYTES can carry. 300k leaves that
+#: headroom. Deliberately a count and not a duration: how long a step takes depends on
+#: what else the host is doing (~2us idle, 7-10us under load), so a ceiling expressed in
+#: seconds would reject different expressions on a busy machine than on an idle one. The
+#: wall-clock bound is CEL_EVAL_DEADLINE_SECONDS, and the two are independent on purpose.
+#: Re-tune from the warnings CEL_STEP_WARN_RATIO emits, not from this comment.
 MAX_CEL_STEPS = 300_000
+
+#: Wall-clock bound checked *inside* the interpreter, unlike CEL_EVAL_TIMEOUT_SECONDS
+#: which only bounds the caller's wait. Set below that timeout so this fires first: the
+#: thread then stops itself rather than running on unobserved after the request has already
+#: failed, and the author gets an error naming what happened instead of a bare timeout.
+#: Which of this and MAX_CEL_STEPS trips first is load-dependent, which is why both exist —
+#: the step count is the load-independent statement of how much work is too much, and this
+#: is the promise that the thread is released whatever the host is doing.
+CEL_EVAL_DEADLINE_SECONDS = 1.5
 
 #: Fraction of MAX_CEL_STEPS above which an evaluation is logged. Nothing is rejected
 #: here — this is how the ceiling gets re-tuned from real conditions instead of guesses.
@@ -186,6 +202,15 @@ class CelEvaluationError(RuntimeError):
     Typically a field the payload does not have or a type mismatch. Distinct from
     "condition not met": a condition that cannot see its subject must fail the run,
     not silently read as false.
+    """
+
+
+class CelDeadlineExceededError(CelEvaluationError):
+    """Evaluation ran past CEL_EVAL_DEADLINE_SECONDS and stopped itself.
+
+    Distinct from the `asyncio.wait_for` timeout around it, which only ends the wait:
+    this one ends the work. Same reasoning as CelBudgetExceededError about not being a
+    CELEvalError.
     """
 
 
@@ -327,11 +352,12 @@ class _StepMeter:
     for.
     """
 
-    __slots__ = ("steps", "limit")
+    __slots__ = ("steps", "limit", "deadline")
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, deadline: float) -> None:
         self.steps = 0
         self.limit = limit
+        self.deadline = deadline
 
 
 class MeteredEvaluator(Evaluator):
@@ -374,6 +400,14 @@ class MeteredEvaluator(Evaluator):
                 "filter the outer collection down first, or narrow what the check tool "
                 "returns."
             )
+        # Clock reads are the expensive part of metering — the step count alone is two
+        # integer ops — so the deadline is checked every 1024 nodes. That granularity
+        # costs at most ~10ms of overshoot even at the slow end of the per-step range.
+        if not meter.steps & 1023 and monotonic() > meter.deadline:
+            raise CelDeadlineExceededError(
+                f"Evaluation ran longer than {CEL_EVAL_DEADLINE_SECONDS}s and was "
+                "stopped. Simplify the expression, or narrow what the check tool returns."
+            )
         return super()._visit_tree(tree)
 
 
@@ -386,7 +420,7 @@ class MeteredRunner(celpy.InterpretedRunner):
     """
 
     def evaluate(self, context: Any) -> celtypes.Value:
-        meter = _StepMeter(MAX_CEL_STEPS)
+        meter = _StepMeter(MAX_CEL_STEPS, deadline=monotonic() + CEL_EVAL_DEADLINE_SECONDS)
         evaluator = MeteredEvaluator(
             ast=self.ast, activation=self.new_activation(), meter=meter
         )
@@ -515,8 +549,8 @@ def _evaluate_arg_exprs_sync(exprs: dict[str, str], now: datetime, prev: Any) ->
             raw = program.evaluate(activation)
         except CELEvalError as exc:
             raise CelEvaluationError(f"argument {key!r}: {exc}") from exc
-        except CelBudgetExceededError as exc:
-            raise CelBudgetExceededError(f"argument {key!r}: {exc}") from exc
+        except (CelBudgetExceededError, CelDeadlineExceededError) as exc:
+            raise type(exc)(f"argument {key!r}: {exc}") from exc
         value = to_python(raw)
         # celpy quirk: an unbound variable becomes a lazy error VALUE, and string()
         # coerces it into its repr instead of raising — which would send that garbage

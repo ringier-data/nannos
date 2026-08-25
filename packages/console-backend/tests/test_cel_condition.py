@@ -13,11 +13,13 @@ import pytest
 from console_backend.services import cel_condition
 from console_backend.services.cel_condition import (
     CEL_SYNTAX_HINT,
+    CEL_EVAL_TIMEOUT_SECONDS,
     MAX_CEL_EXPR_LENGTH,
     MAX_CEL_PAYLOAD_BYTES,
     MAX_CEL_STEPS,
     _CEL_EXECUTOR,
     CelBudgetExceededError,
+    CelDeadlineExceededError,
     CelEvaluationError,
     CelSyntaxError,
     evaluate_cel,
@@ -376,12 +378,36 @@ class TestStepBudget:
                 NOW,
             )
 
+    @pytest.mark.asyncio
+    async def test_the_interpreter_stops_itself_before_the_caller_times_out(self, monkeypatch):
+        # The point of an in-interpreter deadline: `asyncio.wait_for` ends the wait but
+        # leaves the thread running, so under load the caller used to see a bare timeout
+        # while the work carried on unobserved behind it.
+        monkeypatch.setattr(cel_condition, "CEL_EVAL_DEADLINE_SECONDS", 0.05)
+        payload = {"items": list(range(2000))}
+        with pytest.raises(CelDeadlineExceededError, match="was stopped"):
+            await evaluate_cel(self.QUADRATIC, payload, NOW)
+
+    @pytest.mark.asyncio
+    async def test_the_deadline_leaves_a_normal_condition_alone(self):
+        payload = {
+            "events": [
+                {"start": {"dateTime": "2026-08-24T12:00:00+02:00"}, "attendees": []}
+                for _ in range(500)
+            ]
+        }
+        assert (await evaluate_cel(WITHIN_THE_HOUR, payload, NOW)).gate is True
+
+    def test_the_deadline_is_set_below_the_caller_timeout(self):
+        # If these ever cross, the timeout wins and the specific error is unreachable.
+        assert cel_condition.CEL_EVAL_DEADLINE_SECONDS < CEL_EVAL_TIMEOUT_SECONDS
+
     def test_the_meter_survives_into_macro_bodies(self):
         # The superclass hardcodes `Evaluator(...)` in sub_evaluator, so a missing
         # override would silently drop the meter at every map/filter/all/exists.
         from console_backend.services.cel_condition import MeteredEvaluator, _StepMeter
 
-        meter = _StepMeter(limit=10)
+        meter = _StepMeter(limit=10, deadline=float("inf"))
         evaluator = MeteredEvaluator(ast=None, activation=None, meter=meter)
         nested = evaluator.sub_evaluator(ast=None)
         assert isinstance(nested, MeteredEvaluator)
