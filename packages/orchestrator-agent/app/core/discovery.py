@@ -316,8 +316,20 @@ class ToolDiscoveryService:
                 # Hold a slot only for the fetch itself. Keeping it across the
                 # backoff sleep below would let a few flaky servers idle away the
                 # whole budget while healthy ones wait on a user-facing path.
+                #
+                # The timeout is the backstop that guarantees the slot is ever
+                # released: session.send_request waits with timeout=None, so any
+                # response that never completes (stalled server, or an inbound
+                # message the size guard rejected without being able to recover
+                # the request id) would otherwise hold this slot forever and
+                # deadlock discovery process-wide after a handful of failures.
                 async with self._discovery_semaphore():
-                    server_tools = await client.get_tools(server_name=server_name)
+                    timeout_s = self.config.MCP_DISCOVERY_TIMEOUT_S
+                    if timeout_s > 0:
+                        async with asyncio.timeout(timeout_s):
+                            server_tools = await client.get_tools(server_name=server_name)
+                    else:
+                        server_tools = await client.get_tools(server_name=server_name)
                 # Tag tools with server_name metadata
                 for tool in server_tools:
                     if tool.metadata is None:

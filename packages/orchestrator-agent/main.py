@@ -99,6 +99,16 @@ def create_lifespan(
         # Startup: Initialize and start budget guard singleton
         logger.info("Starting application lifespan...")
 
+        # Guard inbound MCP SSE events before anything can open an MCP session:
+        # an unbounded parse of one oversized event is what OOMKilled the pod
+        # (ringier-data/nannos#152). Process-wide by design.
+        from app.core.mcp_guard import install_mcp_size_guard
+
+        install_mcp_size_guard(
+            max_event_bytes=AgentSettings.MCP_SSE_MAX_EVENT_BYTES,
+            warn_event_bytes=AgentSettings.MCP_SSE_WARN_EVENT_BYTES,
+        )
+
         # Fail fast if the Model Gateway isn't configured: it's the sole path
         # for LLM traffic, so surface a missing LLM_GATEWAY_URL loudly at boot rather than
         # as an opaque per-request failure (or a misleading "no models registered").
