@@ -1726,9 +1726,12 @@ class SubAgentService:
         query = text("""
             SELECT DISTINCT u.id
             FROM users u
-            WHERE 
+            WHERE
+                -- Only active users can act on an approval request
+                u.status = 'active'
+                AND u.deleted_at IS NULL
                 -- User has approver or admin role
-                (u.role IN ('approver', 'admin') OR u.is_administrator = true)
+                AND (u.role IN ('approver', 'admin') OR u.is_administrator = true)
                 AND (
                     -- User is the owner
                     EXISTS (

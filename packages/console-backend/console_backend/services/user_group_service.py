@@ -14,7 +14,7 @@ from ..authorization import (
 )
 from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import ActivationSource
-from ..models.user import User
+from ..models.user import User, UserStatus
 from ..models.user_group import (
     BulkDeleteResult,
     MemberInfo,
@@ -570,6 +570,25 @@ class UserGroupService:
 
     # Member management
 
+    async def _reject_inactive_users(self, db: AsyncSession, user_ids: list[str]) -> None:
+        """Raise if any of the given user IDs is unknown, soft-deleted or not active.
+
+        Args:
+            db: Database session
+            user_ids: User IDs to validate
+
+        Raises:
+            ValueError: If at least one ID does not belong to an active user
+        """
+        result = await db.execute(
+            text("SELECT id, status FROM users WHERE id = ANY(:user_ids) AND deleted_at IS NULL"),
+            {"user_ids": user_ids},
+        )
+        status_by_id = {row[0]: row[1] for row in result.fetchall()}
+        not_active = sorted({uid for uid in user_ids if status_by_id.get(uid) != UserStatus.ACTIVE.value})
+        if not_active:
+            raise ValueError(f"Cannot add users that are not active: {', '.join(not_active)}")
+
     async def _add_members(
         self,
         db: AsyncSession,
@@ -577,6 +596,7 @@ class UserGroupService:
         group_id: int,
         user_ids: list[str],
         role: Literal["read", "write", "manager"] = "read",
+        require_active: bool = True,
     ) -> list[MemberInfo]:
         """Internal helper to add members to a group.
 
@@ -589,6 +609,8 @@ class UserGroupService:
             group_id: Group ID
             user_ids: List of user IDs to add
             role: Role for the new members
+            require_active: Reject user IDs that are not active users. Only SCIM sets this to False,
+                where the IdP is authoritative for the group graph.
 
         Returns:
             List of added members
@@ -596,6 +618,12 @@ class UserGroupService:
         existing = await self.get_group(db, group_id)
         if existing is None:
             raise ValueError("Group not found")
+
+        # Only active users may be added. Every membership read is scoped to active users, so accepting
+        # a suspended or soft-deleted one would create a member nobody can see or remove, and a client
+        # picking from an unfiltered user list must not be able to slip one through.
+        if require_active:
+            await self._reject_inactive_users(db, user_ids)
 
         # Prepare member additions
         member_additions = [{"user_id": user_id, "role": role} for user_id in user_ids]
@@ -812,6 +840,7 @@ class UserGroupService:
         group_id: int,
         user_ids: list[str],
         role: Literal["read", "write", "manager"] = "read",
+        require_active: bool = True,
     ) -> list[MemberInfo]:
         """Add members to a group (bulk operation).
 
@@ -821,13 +850,14 @@ class UserGroupService:
             group_id: Group ID
             user_ids: List of user IDs to add
             role: Role for the new members
+            require_active: Reject user IDs that are not active users (see _add_members)
 
         Returns:
             Updated member list
         """
         try:
             # Use internal helper
-            await self._add_members(db, actor, group_id, user_ids, role)
+            await self._add_members(db, actor, group_id, user_ids, role, require_active=require_active)
 
             # Trigger outbound SCIM push (fire-and-forget)
             if self._outbound_scim_push_service:
@@ -847,6 +877,7 @@ class UserGroupService:
         group_id: int,
         user_id: str,
         role: Literal["read", "write", "manager"] = "read",
+        require_active: bool = True,
     ) -> MemberInfo:
         """Add a single member to a group.
 
@@ -856,13 +887,14 @@ class UserGroupService:
             group_id: Group ID
             user_id: User ID to add
             role: Role for the new member
+            require_active: Reject the user ID if it is not an active user (see _add_members)
 
         Returns:
             Added member info
         """
         try:
             # Use internal helper
-            added = await self._add_members(db, actor, group_id, [user_id], role)
+            added = await self._add_members(db, actor, group_id, [user_id], role, require_active=require_active)
             if not added:
                 raise ValueError("Failed to add member")
             return added[0]

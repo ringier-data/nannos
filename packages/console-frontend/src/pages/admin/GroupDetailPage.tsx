@@ -285,7 +285,9 @@ export function GroupDetailPage() {
   const membersMeta = membersData?.meta ?? { page: 1, limit: 20, total: 0 };
   const allUsers = usersData?.data ?? [];
   const memberUserIds = new Set(members.map((m) => m.user_id));
-  const availableUsers = allUsers.filter((u) => !memberUserIds.has(u.id));
+  // Only active users can be added to a group — the backend rejects anyone else, and the admin user
+  // list this comes from deliberately still shows suspended users.
+  const availableUsers = allUsers.filter((u) => u.status === 'active' && !memberUserIds.has(u.id));
 
   const accessibleAgents = defaultAgentsData ?? [];
   const defaultAgents = accessibleAgents.filter((a: any) => a.is_default);

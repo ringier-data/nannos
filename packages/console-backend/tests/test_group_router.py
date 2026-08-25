@@ -436,6 +436,42 @@ class TestAddMembersEndpoint:
         assert "user-3" in user_ids and "user-4" in user_ids
 
     @pytest.mark.asyncio
+    async def test_add_members_rejects_non_active_users(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
+        """Test that suspended and unknown users are rejected server-side, not just hidden in the UI."""
+        from console_backend.models.user_group import GroupMemberAdd
+
+        await pg_session.execute(
+            text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+            VALUES ('user-5', 'user-5', 'user5@test.com', 'User', 'Five', false, 'member', 'suspended')
+            """),
+        )
+        await pg_session.commit()
+        mock_request = get_mock_request(user=mock_user)
+
+        for user_ids in (["user-5"], ["user-unknown"], ["user-5", "user-unknown"]):
+            request_body = GroupMemberAdd(user_ids=user_ids, role="write")
+            with pytest.raises(HTTPException) as exc_info:
+                await group_router.add_members(1, mock_request, request_body, pg_session, mock_user)
+            assert exc_info.value.status_code == 400
+
+        # No membership row was created for any of them
+        count = await pg_session.execute(
+            text("""
+                SELECT COUNT(*) FROM user_group_members
+                WHERE user_group_id = 1 AND user_id IN ('user-5', 'user-unknown')
+            """)
+        )
+        assert count.scalar() == 0
+
+    @pytest.mark.asyncio
     async def test_add_members_group_not_found(
         self,
         get_mock_request,

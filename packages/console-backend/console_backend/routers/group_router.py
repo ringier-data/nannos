@@ -145,13 +145,19 @@ async def add_members(
             detail="Group not found",
         )
 
-    members = await user_group_service.add_members(
-        db,
-        actor=user,
-        group_id=group_id,
-        user_ids=request_body.user_ids,
-        role=request_body.role,
-    )
+    try:
+        members = await user_group_service.add_members(
+            db,
+            actor=user,
+            group_id=group_id,
+            user_ids=request_body.user_ids,
+            role=request_body.role,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
     await db.commit()
 
     return GroupMemberListResponse(
