@@ -32,6 +32,14 @@ from ..services.sub_agent_service import SubAgentService
 logger = logging.getLogger(__name__)
 
 
+class InactiveUserError(ValueError):
+    """Raised when a group membership change targets a user that is not active.
+
+    A ValueError subclass so that callers which already map ValueError to a client error keep
+    working, while routers that need to answer this case specifically can catch just this.
+    """
+
+
 class UserGroupService:
     """Service for managing user groups and memberships."""
 
@@ -578,7 +586,7 @@ class UserGroupService:
             user_ids: User IDs to validate
 
         Raises:
-            ValueError: If at least one ID does not belong to an active user
+            InactiveUserError: If at least one ID does not belong to an active user
         """
         result = await db.execute(
             text("SELECT id, status FROM users WHERE id = ANY(:user_ids) AND deleted_at IS NULL"),
@@ -587,7 +595,7 @@ class UserGroupService:
         status_by_id = {row[0]: row[1] for row in result.fetchall()}
         not_active = sorted({uid for uid in user_ids if status_by_id.get(uid) != UserStatus.ACTIVE.value})
         if not_active:
-            raise ValueError(f"Cannot add users that are not active: {', '.join(not_active)}")
+            raise InactiveUserError(f"Cannot add users that are not active: {', '.join(not_active)}")
 
     async def _add_members(
         self,

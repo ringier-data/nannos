@@ -22,7 +22,7 @@ from ..models.user_group import (
     UserGroupWithMembers,
 )
 from ..services.orchestrator_cache import schedule_orchestrator_discovery_cache_invalidation
-from ..services.user_group_service import UserGroupService
+from ..services.user_group_service import InactiveUserError, UserGroupService
 
 router = APIRouter(prefix="/api/v1/groups", tags=["groups"])
 
@@ -153,7 +153,7 @@ async def add_members(
             user_ids=request_body.user_ids,
             role=request_body.role,
         )
-    except ValueError as e:
+    except InactiveUserError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),

@@ -21,6 +21,7 @@ from ..models.user import (
     UserGroupsUpdate,
     UserListResponse,
     UserRoleUpdate,
+    UserStatus,
     UserStatusUpdate,
 )
 from ..services.audit_service import AuditService
@@ -181,6 +182,19 @@ async def update_user_groups(
     # Get current group IDs
     current_group_ids = {g.group_id for g in current_user.groups}
     target_group_ids = set(update_request.group_ids)
+
+    # A user that is not active cannot be added to a group. Refuse before anything runs: removals
+    # sync to Keycloak as they go, so failing on a later add would roll back the database and leave
+    # those Keycloak removals behind.
+    if (
+        update_request.operation in ("set", "add")
+        and target_group_ids - current_group_ids
+        and current_user.status != UserStatus.ACTIVE
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot add users that are not active: {user_id}",
+        )
 
     try:
         if update_request.operation == "set":
