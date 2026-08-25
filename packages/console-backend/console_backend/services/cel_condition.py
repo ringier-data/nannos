@@ -45,12 +45,18 @@ CEL rather than JSONPath filters or a JS sandbox on purpose: it is non-Turing-co
 (evaluation always terminates), has native timestamp/duration arithmetic, and an
 expression can only touch the variables above — there is no I/O to reach.
 
-The remaining risk is resource exhaustion, not escape, and it is bounded by *upfront
-constraints* rather than by the timeout. This matters because the timeout cannot
-actually stop the work: `asyncio.wait_for` cancels the coroutine that is waiting, while
-the interpreter keeps running in its worker thread to completion — Python cannot kill a
-thread. So the limits that do the real work are applied before evaluation begins:
+The remaining risk is resource exhaustion, not escape, and it is not the timeout that
+bounds it. The timeout cannot actually stop the work: `asyncio.wait_for` cancels the
+coroutine that is waiting, while the interpreter keeps running in its worker thread to
+completion — Python cannot kill a thread. So the limits that do the real work are these,
+the first applied *during* evaluation and the rest before it begins:
 
+  * evaluation is metered at MAX_CEL_STEPS AST-node visits and raises past it, which is
+    the only ceiling that can stop work already running. The input caps below bound the
+    inputs, and cost is not a function of size alone: a short expression over a small
+    payload can still be quadratic. See MeteredEvaluator, and note it is celpy's
+    interpreter that makes this possible — no CEL implementation available to Python
+    offers a cost or gas limit of its own;
   * the expression is capped at MAX_CEL_EXPR_LENGTH before the parser ever sees it, so
     a megabyte of nested parens cannot exhaust memory during the parse;
   * the payload bound to `result`/`prev` is capped at MAX_CEL_PAYLOAD_BYTES, because
@@ -89,7 +95,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 import celpy
+import lark
 from celpy import CELEvalError, CELParseError, celtypes
+from celpy.evaluation import Activation, Evaluator
 from jsonpath_ng.ext import parse as jsonpath_parse
 
 logger = logging.getLogger(__name__)
@@ -112,6 +120,29 @@ CEL_EVAL_TIMEOUT_SECONDS = 2.0
 #: (the invoke endpoint already truncates its own preview well below it).
 MAX_CEL_PAYLOAD_BYTES = 1_048_576
 
+#: Ceiling on how many AST nodes one evaluation may visit. This is the only limit that
+#: can stop work already under way — the timeout cannot, and the size caps above only
+#: bound the *inputs*, which is not the same thing: an expression well under
+#: MAX_CEL_EXPR_LENGTH over a payload well under MAX_CEL_PAYLOAD_BYTES can still cost
+#: quadratically, e.g. `result.items.filter(i, result.items.exists(j, j == i))`.
+#: Counted per node visit rather than per comprehension because celpy builds a macro's
+#: nested evaluator once and calls it per item: counting macros would count the same
+#: `filter` once whether it runs over ten items or a million, while counting node visits
+#: prices the iteration itself. See MeteredEvaluator.
+#:
+#: Sized from measurement (2026-08-25, this machine, ~2.2us per step): the realistic
+#: worst case is a filter over a large tool response, which costs ~65 steps per item —
+#: 32.5k steps (61ms) over 500 events, 130k (245ms) over 2000, the most a response under
+#: MAX_CEL_PAYLOAD_BYTES is likely to carry. 300k leaves that headroom while stopping a
+#: quadratic comprehension after ~650ms, comfortably inside CEL_EVAL_TIMEOUT_SECONDS so
+#: the caller gets this specific error rather than an unhelpful timeout. Re-tune from the
+#: warnings CEL_STEP_WARN_RATIO emits, not from this comment.
+MAX_CEL_STEPS = 300_000
+
+#: Fraction of MAX_CEL_STEPS above which an evaluation is logged. Nothing is rejected
+#: here — this is how the ceiling gets re-tuned from real conditions instead of guesses.
+CEL_STEP_WARN_RATIO = 0.25
+
 #: Evaluation runs here rather than on asyncio's default thread pool. Since a slow
 #: expression cannot be interrupted, the only protection is to bound how much of the
 #: process it can occupy: a handful of threads that are all its own, so a burst of
@@ -130,10 +161,18 @@ CEL_SYNTAX_HINT = (
     "and the condition is met when the result is non-empty. What the expression "
     "returns is also what is recorded on the run and handed to the model or agent, "
     "so prefer returning the evidence over returning a bare boolean. Guard optional "
-    "fields with has(), e.g. has(e.attendees) && e.attendees.exists(a, ...). "
+    "fields with has(), e.g. has(e.attendees) && e.attendees.exists(a, ...), and "
+    "guard map keys with in, e.g. \'code\' in result && result[\'code\'] == 200 "
+    "(the optional forms .? and [?] are not available). Guard division against a zero "
+    "denominator, and divide doubles unless you mean integer division, e.g. "
+    "result.total != 0 && double(result.hits) / double(result.total) > 0.5. Where a "
+    "field may hold either a string or a list, check before using it, e.g. "
+    "type(result.tags) == list && \'urgent\' in result.tags. "
     "Compare text case-insensitively with matches, e.g. "
     'result.status.matches("(?i)^failed$"). '
-    "strftime(t, '%Y-%m-%d') formats a timestamp (string(t) renders ISO 8601)."
+    "strftime(t, '%Y-%m-%d') formats a timestamp (string(t) renders ISO 8601). "
+    "Evaluation is metered, so filter a large collection down before mapping over it "
+    "rather than nesting a comprehension inside another comprehension."
 )
 
 
@@ -147,6 +186,17 @@ class CelEvaluationError(RuntimeError):
     Typically a field the payload does not have or a type mismatch. Distinct from
     "condition not met": a condition that cannot see its subject must fail the run,
     not silently read as false.
+    """
+
+
+class CelBudgetExceededError(CelEvaluationError):
+    """The expression visited more AST nodes than MAX_CEL_STEPS allows.
+
+    Deliberately *not* a CELEvalError subclass. celpy turns those into values rather
+    than propagating them — macros catch CELEvalError per item and hand it back as the
+    item's result, and `||`/`&&`/`?:` bottle them up to implement short-circuiting — so
+    a budget error spelled that way would be swallowed and evaluation would continue,
+    which is the one thing this must never do.
     """
 
 
@@ -268,6 +318,90 @@ _EXTENSION_FUNCTIONS = {
 }
 
 
+class _StepMeter:
+    """One evaluation's step count, shared by every evaluator that evaluation creates.
+
+    Shared rather than per-evaluator because macros evaluate their body in a *nested*
+    evaluator: a counter that started at zero for each `filter` item would never reach
+    the ceiling however many items there were, which is exactly the case the ceiling is
+    for.
+    """
+
+    __slots__ = ("steps", "limit")
+
+    def __init__(self, limit: int) -> None:
+        self.steps = 0
+        self.limit = limit
+
+
+class MeteredEvaluator(Evaluator):
+    """celpy's interpreter, counting node visits and stopping at MAX_CEL_STEPS.
+
+    This is the only limit that acts on work in progress. It is worth the coupling to
+    celpy's internals because the alternative is none: no CEL implementation available
+    to Python exposes a cost or gas limit — not celpy, not the cel-cpp binding
+    (`cel-expr/cel-python`, whose Options carries a single parser flag), not the Rust
+    one — although cel-cpp's own runtime has `comprehension_max_iterations` one layer
+    below its bindings.
+    """
+
+    def __init__(self, ast: lark.Tree, activation: Activation, meter: _StepMeter) -> None:
+        super().__init__(ast, activation=activation)
+        self.meter = meter
+
+    def sub_evaluator(self, ast: lark.Tree) -> "MeteredEvaluator":
+        """Extend the superclass to carry the meter into macro bodies.
+
+        The superclass hardcodes `Evaluator(...)` here, so without this override the
+        meter would be dropped at the entrance to every map/filter/all/exists — the
+        only places where an expression's cost depends on the payload's size.
+        """
+        return type(self)(ast, activation=self.activation, meter=self.meter)
+
+    def _visit_tree(self, tree: lark.Tree) -> Any:
+        """Extend lark's dispatch — the one point every node visit passes through.
+
+        Not `__default__`: lark reaches that only via `__getattr__`, for node types the
+        visitor has no method for, and celpy defines a method for nearly every CEL
+        production. Metering there would meter almost nothing.
+        """
+        meter = self.meter
+        meter.steps += 1
+        if meter.steps > meter.limit:
+            raise CelBudgetExceededError(
+                f"Evaluation visited more than {meter.limit} expression nodes. This is "
+                "usually a comprehension inside a comprehension over a large response; "
+                "filter the outer collection down first, or narrow what the check tool "
+                "returns."
+            )
+        return super()._visit_tree(tree)
+
+
+class MeteredRunner(celpy.InterpretedRunner):
+    """Runs a program with a fresh MeteredEvaluator, so each evaluation gets its budget.
+
+    Note this deliberately extends the *interpreted* runner. celpy also ships a
+    CompiledRunner that transpiles to Python and exec()s it; it never touches the
+    visitor, so switching to it for speed would silently remove this ceiling.
+    """
+
+    def evaluate(self, context: Any) -> celtypes.Value:
+        meter = _StepMeter(MAX_CEL_STEPS)
+        evaluator = MeteredEvaluator(
+            ast=self.ast, activation=self.new_activation(), meter=meter
+        )
+        try:
+            return evaluator.evaluate(context)
+        finally:
+            self.last_steps = meter.steps
+            if meter.steps > MAX_CEL_STEPS * CEL_STEP_WARN_RATIO:
+                logger.warning(
+                    "CEL evaluation used %d of %d permitted steps", meter.steps, MAX_CEL_STEPS
+                )
+            else:
+                logger.debug("CEL evaluation used %d steps", meter.steps)
+
+
 #: One Environment, and one parse per distinct expression. celpy re-runs its Lark parse
 #: on every compile, and for the small expressions a condition actually is, that parse is
 #: the dominant cost — paid once per poll per job, once per dynamic argument per run, and
@@ -275,7 +409,9 @@ _EXTENSION_FUNCTIONS = {
 #: MAX_CEL_EXPR_LENGTH and the cache is bounded, so it cannot grow without limit. The AST
 #: is cached rather than the Program because a Program is bound to a function set and is
 #: cheap to build from a parsed AST.
-_ENV = celpy.Environment(annotations=_EXTENSION_ANNOTATIONS)
+_ENV = celpy.Environment(
+    annotations=_EXTENSION_ANNOTATIONS, runner_class=MeteredRunner
+)
 #: celpy's parser is shared mutable state and these compiles happen in `to_thread`
 #: workers, so serialise them — a parse is short, and the cache means it is rare.
 _COMPILE_LOCK = threading.Lock()
@@ -379,6 +515,8 @@ def _evaluate_arg_exprs_sync(exprs: dict[str, str], now: datetime, prev: Any) ->
             raw = program.evaluate(activation)
         except CELEvalError as exc:
             raise CelEvaluationError(f"argument {key!r}: {exc}") from exc
+        except CelBudgetExceededError as exc:
+            raise CelBudgetExceededError(f"argument {key!r}: {exc}") from exc
         value = to_python(raw)
         # celpy quirk: an unbound variable becomes a lazy error VALUE, and string()
         # coerces it into its repr instead of raising — which would send that garbage

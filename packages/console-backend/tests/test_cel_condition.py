@@ -10,10 +10,14 @@ from datetime import datetime, timezone
 
 import pytest
 
+from console_backend.services import cel_condition
 from console_backend.services.cel_condition import (
+    CEL_SYNTAX_HINT,
     MAX_CEL_EXPR_LENGTH,
     MAX_CEL_PAYLOAD_BYTES,
+    MAX_CEL_STEPS,
     _CEL_EXECUTOR,
+    CelBudgetExceededError,
     CelEvaluationError,
     CelSyntaxError,
     evaluate_cel,
@@ -294,6 +298,141 @@ class TestResourceCeilings:
         # Nothing else is reachable by name from an expression.
         with pytest.raises((CelEvaluationError, CelSyntaxError)):
             await evaluate_cel("__import__", {}, datetime.now(timezone.utc))
+
+
+class TestStepBudget:
+    """The step meter, which is the only ceiling that acts on work already running.
+
+    The input caps refuse an oversized expression or payload before evaluation starts,
+    but cost is not a function of size alone: a short expression over a small payload
+    can still be quadratic. These tests pin the three things that make the meter work —
+    it counts inside macros, it is not reset per item, and it cannot be swallowed.
+    """
+
+    QUADRATIC = "result.items.filter(i, result.items.exists(j, j == i))"
+
+    @pytest.fixture
+    def small_budget(self, monkeypatch):
+        """Shrink the ceiling so a test trips it in milliseconds, not seconds."""
+        monkeypatch.setattr(cel_condition, "MAX_CEL_STEPS", 2_000)
+
+    @pytest.mark.asyncio
+    async def test_a_quadratic_comprehension_is_stopped(self, small_budget):
+        # Well under both input caps — ~11 KB of payload, a 60-character expression —
+        # and still unbounded work, which is the case the meter exists for.
+        payload = {"items": list(range(2000))}
+        with pytest.raises(CelBudgetExceededError, match="expression nodes"):
+            await evaluate_cel(self.QUADRATIC, payload, NOW)
+
+    @pytest.mark.asyncio
+    async def test_the_budget_is_not_reset_for_each_macro_item(self, small_budget):
+        # celpy evaluates a macro body in a nested evaluator. If the meter did not
+        # travel into it, or restarted per item, this would pass under any ceiling:
+        # each item on its own costs almost nothing.
+        payload = {"items": list(range(500))}
+        with pytest.raises(CelBudgetExceededError):
+            await evaluate_cel("result.items.map(i, i * 2)", payload, NOW)
+
+    @pytest.mark.asyncio
+    async def test_short_circuiting_cannot_swallow_the_budget_error(self, small_budget):
+        # The reason CelBudgetExceededError is not a CELEvalError: celpy bottles those
+        # up as values to implement `||`, so an expensive left operand would be quietly
+        # discarded and the whole expression would return true.
+        payload = {"items": list(range(2000))}
+        with pytest.raises(CelBudgetExceededError):
+            await evaluate_cel(f"({self.QUADRATIC}).size() > 0 || true", payload, NOW)
+
+    @pytest.mark.asyncio
+    async def test_a_filter_inside_a_macro_cannot_hide_from_the_meter(self, small_budget):
+        payload = {"items": [{"tags": list(range(50))} for _ in range(50)]}
+        with pytest.raises(CelBudgetExceededError):
+            await evaluate_cel(
+                "result.items.filter(i, i.tags.exists(t, t > 48))", payload, NOW
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_realistic_condition_stays_well_inside_the_budget(self):
+        # Regression guard on the ceiling itself: a filter over a large tool response
+        # is the shape conditions actually have, and must not be collateral damage.
+        payload = {
+            "events": [
+                {"start": {"dateTime": "2026-08-24T12:00:00+02:00"}, "attendees": []}
+                for _ in range(500)
+            ]
+        }
+        cel = await evaluate_cel(WITHIN_THE_HOUR, payload, NOW)
+        assert cel.gate is True
+        assert len(cel.value) == 500
+        assert cel_condition._ENV.runnable.last_steps < MAX_CEL_STEPS // 4
+
+    @pytest.mark.asyncio
+    async def test_the_budget_error_names_the_argument_it_came_from(self, small_budget):
+        from console_backend.services.cel_condition import evaluate_arg_exprs
+
+        with pytest.raises(CelBudgetExceededError, match="'window'"):
+            await evaluate_arg_exprs(
+                {"window": "[0].map(i, [1,2,3,4,5,6,7,8].map(j, [1,2,3,4,5,6,7,8]"
+                 ".map(k, [1,2,3,4,5,6,7,8].map(l, l + k + j))))"},
+                NOW,
+            )
+
+    def test_the_meter_survives_into_macro_bodies(self):
+        # The superclass hardcodes `Evaluator(...)` in sub_evaluator, so a missing
+        # override would silently drop the meter at every map/filter/all/exists.
+        from console_backend.services.cel_condition import MeteredEvaluator, _StepMeter
+
+        meter = _StepMeter(limit=10)
+        evaluator = MeteredEvaluator(ast=None, activation=None, meter=meter)
+        nested = evaluator.sub_evaluator(ast=None)
+        assert isinstance(nested, MeteredEvaluator)
+        assert nested.meter is meter
+
+
+class TestSyntaxHintTeachesWhatTheEngineSupports:
+    """Every construct the hint teaches must actually work, on this engine.
+
+    The hint is what a model writes conditions from, so an example that does not
+    evaluate here is a condition that will fail on its first poll.
+    """
+
+    @pytest.mark.parametrize(
+        "expr,payload,expected",
+        [
+            ("'code' in result && result['code'] == 200", {"code": 200}, True),
+            ("'code' in result && result['code'] == 200", {"other": 1}, False),
+            (
+                "result.total != 0 && double(result.hits) / double(result.total) > 0.5",
+                {"hits": 3, "total": 4},
+                True,
+            ),
+            (
+                "result.total != 0 && double(result.hits) / double(result.total) > 0.5",
+                {"hits": 3, "total": 0},
+                False,
+            ),
+            ("type(result.tags) == list && 'urgent' in result.tags", {"tags": ["urgent"]}, True),
+            ("type(result.tags) == list && 'urgent' in result.tags", {"tags": "urgent"}, False),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_guard_examples_evaluate(self, expr, payload, expected):
+        assert (await evaluate_cel(expr, payload, NOW)).gate is expected
+
+    def test_the_hint_does_not_teach_optional_syntax(self):
+        # celpy has no `.?`, `[?]` or orValue() — they are a CEL extension it does not
+        # implement — so the hint must keep steering to has() and in.
+        assert "orValue" not in CEL_SYNTAX_HINT
+        assert "has()" in CEL_SYNTAX_HINT and " in " in CEL_SYNTAX_HINT
+
+    def test_the_hint_advertises_only_registered_functions(self):
+        from console_backend.services.cel_condition import _EXTENSION_FUNCTIONS
+
+        assert "strftime" in _EXTENSION_FUNCTIONS
+        # jsonpath() and eq_ci() stay registered for migrated conditions but must not
+        # be taught: they are the only part of a stored condition a conformant CEL
+        # engine would not understand.
+        assert "jsonpath(" not in CEL_SYNTAX_HINT
+        assert "eq_ci(" not in CEL_SYNTAX_HINT
 
 
 class TestMigrationCompatibilityFunctions:
