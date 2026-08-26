@@ -10,6 +10,7 @@
  * core registry listener and deliberately produce NO chunks.
  */
 import type { AgentResponseData } from '../core/wire';
+import { clientActionPartId } from './approval-codec';
 import {
   extractPartTexts,
   getPartKind,
@@ -237,17 +238,35 @@ function parseInterrupt(data: AgentResponseData): ParsedInterrupt {
   return parsed;
 }
 
+/** Which kind of answer an `input-required` prompt waits for. */
+export type ApprovalPromptKind = 'hitl' | 'client-action';
+
+export interface ApprovalPrompt {
+  /** `hitl` — a human decision on a tool call; `client-action` — the awaited
+   *  round trip the BROWSER answers with its execution result. */
+  kind: ApprovalPromptKind;
+  ids: string[];
+}
+
 /**
- * The approval call ids an `input-required` event asks about — HITL action
- * requests (#13a) or a client-action round trip (#8). Returns null when the
- * event is not an approval prompt, or when any request carries no stable
- * `_call_id`: with nothing to match on it must always render.
+ * The approval prompt an `input-required` event carries — HITL action requests
+ * (#13a) or a client-action round trip (#8) — as its kind plus the call ids it
+ * asks about. Returns null when the event is not an approval prompt, or when
+ * any request carries no stable `_call_id`: with nothing to match on it must
+ * always render.
  *
  * Used by the TurnSession to recognise a prompt it has ALREADY answered. The
  * id is `ptc_guard._call_key` — a hash of tool + args, deterministic within a
  * turn, and the same key the middleware itself dedupes on server-side.
+ *
+ * The KIND is part of that identity because the two prompt shapes SHARE one
+ * id: a risk-gated `client_action` call is approved under its `_call_id`, and
+ * the round-trip request the tool then emits reuses that same id (it IS the
+ * injected `tool_call_id`). Matching on the id alone made the request look
+ * like a replay of the approval just answered — it was dropped, nothing
+ * executed in the page, and the turn parked forever.
  */
-export function approvalCallIds(data: AgentResponseData): string[] | null {
+export function approvalPrompt(data: AgentResponseData): ApprovalPrompt | null {
   if (data.kind !== 'status-update') return null;
   if (getTaskState(data.status?.state) !== 'input-required') return null;
   const exts = statusExtensions(data);
@@ -257,12 +276,12 @@ export function approvalCallIds(data: AgentResponseData): string[] | null {
         | { data?: { request?: { id?: string; directive?: unknown } } }
         | undefined
     )?.data?.request;
-    return request?.id && request.directive ? [request.id] : null;
+    return request?.id && request.directive ? { kind: 'client-action', ids: [request.id] } : null;
   }
   if (!exts.includes(HITL_EXT)) return null;
   const ids = parseInterrupt(data).actionRequests.map((a) => a.args?._call_id);
   if (ids.length === 0 || ids.some((id) => typeof id !== 'string' || !id)) return null;
-  return ids as string[];
+  return { kind: 'hitl', ids: ids as string[] };
 }
 
 /**
@@ -388,20 +407,24 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
       ) {
         closeThought(state, out);
         closeText(state, out);
+        // Its OWN part id: a risk-gated `client_action` was already approved
+        // under this very call id, and that part is settled — see
+        // `clientActionPartId`. Stripped again on the way back out.
+        const partId = clientActionPartId(request.id);
         out.push({
           type: 'tool-input-start',
-          toolCallId: request.id,
+          toolCallId: partId,
           toolName: 'client_action',
           dynamic: true,
         });
         out.push({
           type: 'tool-input-available',
-          toolCallId: request.id,
+          toolCallId: partId,
           toolName: 'client_action',
           input: { directive: request.directive, _clientActionRequest: true },
           dynamic: true,
         });
-        out.push({ type: 'tool-approval-request', approvalId: request.id, toolCallId: request.id });
+        out.push({ type: 'tool-approval-request', approvalId: partId, toolCallId: partId });
         return { chunks: out, done: 'input-required' };
       }
       return { chunks: out };
@@ -413,11 +436,17 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
       const text = Array.isArray(msg?.parts) ? extractPartTexts(msg.parts).join('') : '';
       if (text.trim()) {
         closeThought(state, out);
-        const source = (msg?.metadata as Record<string, unknown> | undefined)?.source;
+        const meta = msg?.metadata as Record<string, unknown> | undefined;
+        const source = meta?.source;
+        // A mid-turn note (notify_user) rides the same extension with kind='note'.
+        // Unknown kinds are dropped: an older/newer agent must not make the line
+        // render as something this build has no styling for.
+        const isNote = meta?.kind === 'note';
         state.activitySeq += 1;
         const activity = {
           text,
           ...(typeof source === 'string' && { source }),
+          ...(isNote && { kind: 'note' as const }),
           ts: Date.now(),
         };
         const actId = `${state.idPrefix}act-${state.activitySeq}`;

@@ -23,6 +23,7 @@ import {
   shouldDisplayMessageParts,
 } from '../core/protocol';
 import { ACTIVITY_LOG_EXT, CLIENT_ACTION_EXT, HITL_EXT, INTERMEDIATE_OUTPUT_EXT } from '../core/extensions';
+import { clientActionPartId } from './approval-codec';
 import { textArrival } from './ai-types';
 import type { NannosUIMessage, ReviewConfig } from './ai-types';
 import { readAuthRequired } from './demux';
@@ -85,6 +86,8 @@ interface PayloadFacts {
   artifactMetadata: Record<string, unknown> | undefined;
   artifactParts: Array<{ kind?: string; text?: string }> | undefined;
   source?: string;
+  /** `'note'` for a mid-turn note (notify_user); undefined for a machine line. */
+  noteKind?: 'note';
 }
 
 function payloadFacts(payload: Record<string, unknown> | null): PayloadFacts {
@@ -107,6 +110,7 @@ function payloadFacts(payload: Record<string, unknown> | null): PayloadFacts {
     artifactMetadata: artifact?.metadata as Record<string, unknown> | undefined,
     artifactParts: artifact?.parts as Array<{ kind?: string; text?: string }> | undefined,
     source,
+    noteKind: msgMeta?.kind === 'note' ? 'note' : undefined,
   };
 }
 
@@ -217,7 +221,12 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
         assistantParts.push({
           type: 'data-activity',
           id: `hist-act-${seq}`,
-          data: { text, ...(facts.source && { source: facts.source }), ts: time },
+          data: {
+            text,
+            ...(facts.source && { source: facts.source }),
+            ...(facts.noteKind && { kind: facts.noteKind }),
+            ts: time,
+          },
         });
       }
       continue;
@@ -253,6 +262,22 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
           facts.topMeta ?? (nested?.metadata as Record<string, unknown> | undefined),
         ),
       });
+      continue;
+    }
+
+    // Approval prompt (HITL risk gate / client-action round trip) → never text.
+    // Its status text is the gate's note to the agent ("Tool 'client_action'
+    // has risk score 0.90 (threshold: 0.80)") — the user reads the approval
+    // card instead, which `findPendingInterrupt` restores while the prompt is
+    // still open. An ANSWERED prompt leaves no trace at all, exactly as the
+    // live demux renders it. Plain `input-required` rows (no extension) are a
+    // real question to the user and still fall through to the text branch.
+    if (
+      row.kind === 'status-update' &&
+      state === 'input-required' &&
+      (facts.statusExtensions.includes(HITL_EXT) ||
+        facts.statusExtensions.includes(CLIENT_ACTION_EXT))
+    ) {
       continue;
     }
 
@@ -333,7 +358,10 @@ export function findPendingInterrupt(rows: RestMessageRow[]): RestoredInterrupt 
           args: {
             directive: request.directive,
             _clientActionRequest: true,
-            _call_id: request.id,
+            // Same derived part id the live path uses, so a reload restores the
+            // request as its own part even when the risk gate's approval for
+            // that call id is also in the mapped history.
+            _call_id: clientActionPartId(request.id!),
           },
         },
       ],

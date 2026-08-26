@@ -11,6 +11,36 @@
  */
 import { z } from 'zod';
 
+/**
+ * Suffix that separates the awaited client-action REQUEST from the human risk
+ * gate on the SAME tool call.
+ *
+ * The backend reuses one id for both prompts (the request carries the injected
+ * `tool_call_id`, which is also the risk gate's `_call_id`), but a UI message
+ * models ONE lifecycle per `toolCallId` — a part already settled as
+ * `output-available` by the approval cannot reopen as `approval-requested`.
+ * So the request gets its own part id, derived here and stripped again before
+ * the decision goes back on the wire (the backend matches the raw id).
+ */
+const CLIENT_ACTION_PART_SUFFIX = '#client-action';
+
+/** Part id for the round-trip request on call `id`. */
+export function clientActionPartId(id: string): string {
+  return `${id}${CLIENT_ACTION_PART_SUFFIX}`;
+}
+
+/** Whether a part id belongs to a client-action REQUEST (vs. a human gate). */
+export function isClientActionPartId(partId: string): boolean {
+  return partId.endsWith(CLIENT_ACTION_PART_SUFFIX);
+}
+
+/** The wire call id behind a part id — the plain id for every other part. */
+export function wireCallId(partId: string): string {
+  return partId.endsWith(CLIENT_ACTION_PART_SUFFIX)
+    ? partId.slice(0, -CLIENT_ACTION_PART_SUFFIX.length)
+    : partId;
+}
+
 /** A single HITL decision as the backend consumes it (aligned by `id` = `_call_id`). */
 export interface Decision {
   id?: string;
@@ -69,7 +99,8 @@ export function encodeApproval(decision: Decision): ApprovalResponse {
 
 /** Decode an approval response (from an `approval-responded` tool part) back into a Decision. */
 export function decodeApproval(approvalId: string, response: ApprovalResponse): Decision {
-  const base: Decision = { id: approvalId, type: response.approved ? 'approve' : 'reject' };
+  // The approval id may be a derived PART id; the backend matches the raw one.
+  const base: Decision = { id: wireCallId(approvalId), type: response.approved ? 'approve' : 'reject' };
   if (!response.reason) return base;
 
   let parsed: unknown;

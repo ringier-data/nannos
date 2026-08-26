@@ -26,6 +26,7 @@ import {
   ConnectionStore,
   ConversationsStore,
   WireLog,
+  WireStore,
   lastAssistantMessageIsCompleteWithApprovalResponses,
   type NannosUIMessage,
   type SendContext,
@@ -39,6 +40,7 @@ import {
   type UserChatSettings,
 } from '../react';
 import { ComposerFocusSignal } from './composer-focus';
+import { resolveDevMode, useDevModeControls } from './dev-mode';
 
 export interface PlaygroundMode {
   /** The version hash of the sub-agent config being tested. */
@@ -170,6 +172,11 @@ function ChatScopeInner({
   // the memoized engine must not rebuild on navigation.
   const pageContextRef = useRef<NannosPageContext | null>(pageContext);
   pageContextRef.current = pageContext;
+  // Dev mode decides whether the wire log is PERSISTED: raw payloads have no
+  // business in an end user's localStorage. `available` covers the panel's
+  // prop; a bare scope (no <AssistantPanel> above) still honors the
+  // localStorage escape hatch. Read once — neither source flips at runtime.
+  const persistWire = useDevModeControls().available || resolveDevMode();
 
   const engine = useMemo<ChatEngine>(() => {
     const ownSocket = !!customHeaders || !!playground;
@@ -225,7 +232,7 @@ function ChatScopeInner({
 
     const composerFocus = new ComposerFocusSignal();
 
-    const wireLog = new WireLog();
+    const wireLog = new WireLog(persistWire ? new WireStore() : undefined);
     const transport = new A2AChatTransport({
       client,
       whenReady: () => connection.whenReady(),

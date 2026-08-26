@@ -279,3 +279,28 @@ class TestToolStatusMiddleware:
 
         assert len(captured) == 1
         assert captured[0][1]["status"] == "Reading /project/data.json\u2026"
+
+
+class TestNotifyUserIsSilent:
+    """``notify_user``'s output IS an activity line — the note itself. A generic
+    "Using notify_user…" label would land directly above it and duplicate it,
+    which is exactly what the panel showed before this suppression."""
+
+    @pytest.mark.asyncio
+    async def test_no_status_for_notify_user(self):
+        from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+
+        middleware = ToolStatusMiddleware()
+        handler = AsyncMock(return_value=MagicMock(content="ok", status="success"))
+        request = MagicMock()
+        request.tool_call = {"name": NOTIFY_USER_TOOL_NAME, "args": {"text": "Understood — starting now."}}
+
+        captured = []
+        with patch(
+            "agent_common.middleware.tool_status.get_stream_writer",
+            return_value=lambda event: captured.append(event),
+        ):
+            await middleware.awrap_tool_call(request, handler)
+
+        handler.assert_awaited_once_with(request)
+        assert captured == []

@@ -22,6 +22,20 @@ heavy multi-tab users.
 The engine is spike-verified headless (S1–S5) and against recorded wire
 semantics; the panel needs a human pass on a real backend per environment
 (dev harness: `npm run dev` → localhost:3000, env switcher + token paste).
+Client actions now have their own lens for this pass: the dev inspector's
+**client actions** section logs every executed directive (path, outcome,
+registered targets at the time) and its **run a directive** box fires one
+host-side without an agent — see `core/client-action-log.ts`.
+
+### 7. Fire-and-forget directives are dropped in an own-socket scope
+`NannosCore.bindClientActions` listens on `core.transport`, but a scope with
+`customHeaders`/`playground` (console's sub-agent playground) runs its chat on
+its OWN `TransportClient` (`panel/engine.tsx`), which the core binding never
+sees. `navigate`/`highlight` therefore no-op there; the round-trip kinds
+(`apply`/`read_current_page`) are unaffected because they travel as approval
+parts through the chat transport, not the core listener. Harmless while the
+playground registers no on-screen objects — the fix is for the engine to route
+its own socket's client-action events into `core.runClientAction`.
 
 ### 6. shiki grammar fan-out under CRA (cockpit build hygiene)
 The bundled streamdown/shiki stack ships every grammar as a lazy module;
@@ -47,6 +61,16 @@ events, console-backend untouched):
   `{ok:false, reason:'no-result'}`; a reload re-executes via the
   restored-interrupt path. The directive rides the interrupt value only, so the
   resume replay cannot double-execute.
+- **Blocked on arrival by PTC exposure** (fixed 2026-08-26, backend side): with
+  `CODE_INTERPRETER_PTC=1` the embedded sub-agent carries `client_action` on
+  `request.tools`, so the code-interpreter middleware exposed it inside `eval`
+  AND stripped it from the model's bound tool list. Inside `eval` the PTC bridge
+  dispatches from a worker thread in a fresh context, where `get_stream_writer()`
+  is absent and `interrupt()` cannot be raised — so every kind failed and the
+  turn never parked. `client_action` (and `notify_user`, same mechanism) are now
+  in `_PTC_EXCLUDED_TOOL_NAMES` (agent-common `core/graph_utils.py`) and stay
+  natively bound. Symptom to recognise: repeated `Running client_action…`
+  activity lines with nothing in the SDK's client-action log.
 - **#4 `read_current_page`**: a fourth kind on the same round trip. Answered
   SDK-side from the merged page context + host-registered readers
   (`useNannosPageReader(key, () => …)`), sanitized by the ported Gatana read

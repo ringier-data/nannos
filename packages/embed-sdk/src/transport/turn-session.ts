@@ -7,7 +7,14 @@
  */
 import type { AgentResponseData } from '../core/wire';
 import { generateUUID } from '../core/protocol';
-import { approvalCallIds, createDemuxState, demux, type DemuxDone, type DemuxState } from './demux';
+import {
+  approvalPrompt,
+  createDemuxState,
+  demux,
+  type ApprovalPromptKind,
+  type DemuxDone,
+  type DemuxState,
+} from './demux';
 import { sliceFromCodePoint } from './offsets';
 import { textArrival } from './ai-types';
 import type { NannosUIMessageChunk } from './ai-types';
@@ -24,9 +31,10 @@ export interface TurnSessionInit {
   /** Chunks enqueued right after `start` — e.g. the synthetic tool-output
    *  settles + `start-step` that open a HITL-resumed step. */
   initialChunks?: NannosUIMessageChunk[];
-  /** Approval call ids this turn was opened by answering (the HITL-resume
-   *  path). A prompt re-asking only these is a stale replay — see `handle`. */
-  answeredCallIds?: string[];
+  /** The approvals this turn was opened by answering (the HITL-resume path),
+   *  each with the KIND of prompt that was answered. A prompt of the SAME kind
+   *  re-asking only these is a stale replay — see `handle`. */
+  answeredApprovals?: Array<{ id: string; kind: ApprovalPromptKind }>;
 }
 
 export class TurnSession {
@@ -43,8 +51,10 @@ export class TurnSession {
   chunksEmitted = 0;
 
   private controller: ReadableStreamDefaultController<NannosUIMessageChunk> | null = null;
-  /** Approval calls this turn has already answered (empty for a new turn). */
-  private readonly answered: ReadonlySet<string>;
+  /** Approval calls this turn has already answered, by prompt kind (empty for
+   *  a new turn). Keyed by kind because one call id can be prompted TWICE with
+   *  different kinds — see `approvalPrompt`. */
+  private readonly answered: ReadonlyMap<string, ApprovalPromptKind>;
 
   constructor(
     readonly conversationId: string,
@@ -57,7 +67,7 @@ export class TurnSession {
       onSteeringAck?: () => void;
     } = {},
   ) {
-    this.answered = new Set(init.answeredCallIds ?? []);
+    this.answered = new Map((init.answeredApprovals ?? []).map((a) => [a.id, a.kind]));
     this.stream = new ReadableStream<NannosUIMessageChunk>({
       start: (controller) => {
         this.controller = controller;
@@ -88,10 +98,12 @@ export class TurnSession {
     // resume, or a socket rejoin) re-asks a call this turn already answered.
     // Rendering it would duplicate the approval card AND close this stream on
     // `input-required`, dropping the resumed answer on the floor. A prompt
-    // with any unanswered call in it still renders.
+    // with any unanswered call in it still renders — and so does a prompt of a
+    // DIFFERENT kind for the same call: an approved `client_action` tool emits
+    // its round-trip request under the very `_call_id` just approved.
     if (this.answered.size > 0) {
-      const asked = approvalCallIds(data);
-      if (asked && asked.every((id) => this.answered.has(id))) return;
+      const asked = approvalPrompt(data);
+      if (asked && asked.ids.every((id) => this.answered.get(id) === asked.kind)) return;
     }
     const result = demux(this.state, data);
     if (result.steering) {

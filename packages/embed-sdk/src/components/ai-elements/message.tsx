@@ -328,9 +328,22 @@ export const MessageResponse = memo(
     <Streamdown
       className={cn(
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        // Streamdown dresses a table for a wide page: a padded card WITH its own
+        // border wrapped around an already-bordered table, and roomy `px-4 py-2`
+        // cells. In a narrow panel that is mostly whitespace, so the outer card
+        // collapses to nothing (the table keeps its own border) and the cells
+        // get half the padding.
+        "[&_[data-streamdown=table-wrapper]]:my-2 [&_[data-streamdown=table-wrapper]]:gap-1 [&_[data-streamdown=table-wrapper]]:border-0 [&_[data-streamdown=table-wrapper]]:bg-transparent [&_[data-streamdown=table-wrapper]]:p-0",
+        "[&_[data-streamdown=table-header-cell]]:px-2 [&_[data-streamdown=table-header-cell]]:py-1 [&_[data-streamdown=table-cell]]:px-2 [&_[data-streamdown=table-cell]]:py-1",
         className
       )}
       plugins={streamdownPlugins}
+      // Streamdown caps a table at 300px and gives it its own vertical
+      // scrollbar. In a narrow panel that nested scroller fights the thread's
+      // own one, so `0` disables the cap: a table grows to its full height and
+      // the thread scrolls it like any other message content. (The wrapper
+      // keeps `overflow-x-auto`, so a WIDE table still scrolls sideways.)
+      tableMaxHeight={0}
       {...props}
     />
   ),

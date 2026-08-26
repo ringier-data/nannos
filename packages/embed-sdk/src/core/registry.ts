@@ -26,6 +26,13 @@ export class ObjectRegistry {
     return this.objects.get(`${type}:${id}`);
   }
 
+  /** The `type:id` of every registered object — what a directive's target is
+   *  matched against. Unlike `manifest()` this reads no host state, so the dev
+   *  inspector can show it next to an `unknown-target` refusal at any time. */
+  keys(): string[] {
+    return [...this.objects.keys()];
+  }
+
   /** Compact index pushed with each turn — progressive disclosure: no schema, no state. */
   manifest(): ManifestEntry[] {
     return [...this.objects.values()].map((o) => {

@@ -29,6 +29,7 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command
 from langgraph.typing import ContextT
 
+from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
 logger = logging.getLogger(__name__)
@@ -36,8 +37,10 @@ logger = logging.getLogger(__name__)
 # Custom-event key used for stream_writer emissions.
 TOOL_STATUS_EVENT = "tool_status"
 
-# Tools that should never emit status (internal schema tools).
-_SUPPRESSED_TOOLS = frozenset({"FinalResponseSchema", "SubAgentResponseSchema"})
+# Tools that should never emit status (internal schema tools), plus ``notify_user``:
+# its whole output IS an activity line (the note itself), so a "Using notify_user…"
+# label lands directly above the note and says nothing the note does not.
+_SUPPRESSED_TOOLS = frozenset({"FinalResponseSchema", "SubAgentResponseSchema", NOTIFY_USER_TOOL_NAME})
 
 # Matches ``tools.<camelCaseName>(`` calls inside a PTC ``eval`` snippet — the
 # dot-notation form the PTC prompt instructs the model to use.

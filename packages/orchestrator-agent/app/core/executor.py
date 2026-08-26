@@ -1224,7 +1224,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             if not _ext_active(ACTIVITY_LOG_EXTENSION):
                 return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
             source = metadata.get("source")
-            logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, content: {content[:50]}")
+            # "note" marks a mid-turn note the agent wrote for the user (notify_user);
+            # ordinary tool/delegation lines carry no kind.
+            kind = metadata.get("kind")
+            logger.info(
+                f"[ACTIVITY_LOG] Emitting status update: source={source}, kind={kind}, content: {content[:50]}"
+            )
             await updater.update_status(
                 TaskState.TASK_STATE_WORKING,
                 new_activity_log_message(
@@ -1232,6 +1237,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                     source=source,
+                    kind=kind,
                 ),
             )
             return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags

@@ -5,6 +5,7 @@ import {
   type ClientActionDeps,
   type ClientActionResult,
 } from './client-action';
+import { ClientActionLog } from './client-action-log';
 import { ObjectRegistry } from './registry';
 import type { NannosAuth, NannosConfig, NannosErrorEvent, NannosStatus, ObjectHandle, RegisterInput } from './types';
 
@@ -19,7 +20,17 @@ export * from './wire';
 export { TransportClient, type TransportState, type IoFactory } from './client';
 import type { IoFactory } from './client';
 export { ObjectRegistry } from './registry';
-export { executeClientAction, extractClientActionDirective } from './client-action';
+export {
+  directiveFromToolArgs,
+  executeClientAction,
+  extractClientActionDirective,
+} from './client-action';
+export {
+  ClientActionLog,
+  type ClientActionLogEntry,
+  type ClientActionOutcome,
+  type ClientActionPath,
+} from './client-action-log';
 export { createPkceAuth, handleAuthCallback, type PkceAuth, type PkceAuthConfig } from './auth';
 export {
   zodFormRegistration,
@@ -51,6 +62,8 @@ interface BackendConfig {
 
 export class NannosCore {
   readonly registry = new ObjectRegistry();
+  /** What every directive did — read by the dev inspector, never by the agent. */
+  readonly clientActions = new ClientActionLog();
   readonly transport: TransportClient;
   private backendConfigPromise: Promise<BackendConfig | null> | null = null;
   private subAgentNamePromise: Promise<string | null> | null = null;
@@ -276,11 +289,17 @@ export class NannosCore {
       // executeClientAction then validates the directive itself.
       const directive = extractClientActionDirective(data);
       if (directive == null) return;
-      void executeClientAction(directive, { registry: this.registry, ...deps }).catch((err) => {
-        // An apply/highlight/navigate handler threw — surface it (rejections that
-        // don't throw are already reported via onApplyResult).
-        this.emitError({ type: 'apply', message: 'client-action handler threw', cause: err });
-      });
+      // Logged before execution: this path leaves NO trace in the thread, so the
+      // dev inspector is the only place a navigate/highlight is ever visible.
+      const logged = this.clientActions.start('fire-and-forget', directive, this.registry.keys());
+      void executeClientAction(directive, { registry: this.registry, ...deps })
+        .then((result) => this.clientActions.settle(logged, result))
+        .catch((err) => {
+          this.clientActions.fail(logged, err);
+          // An apply/highlight/navigate handler threw — surface it (rejections that
+          // don't throw are already reported via onApplyResult).
+          this.emitError({ type: 'apply', message: 'client-action handler threw', cause: err });
+        });
     });
     return () => {
       this.clientActionBindings--;
@@ -307,12 +326,16 @@ export class NannosCore {
    * `{ok:false}` result the agent can read).
    */
   async runClientAction(directive: unknown): Promise<ClientActionResult> {
+    const logged = this.clientActions.start('round-trip', directive, this.registry.keys());
     try {
-      return await executeClientAction(directive, {
+      const result = await executeClientAction(directive, {
         registry: this.registry,
         ...(this.clientActionDeps ?? {}),
       });
+      this.clientActions.settle(logged, result);
+      return result;
     } catch (err) {
+      this.clientActions.fail(logged, err);
       this.emitError({ type: 'apply', message: 'client-action handler threw', cause: err });
       return { ok: false, reason: 'invalid' };
     }

@@ -133,6 +133,66 @@ class TestActivityLogExtensionFiltering:
         )
         assert result[0] is True  # preserved
 
+    @pytest.mark.asyncio
+    async def test_note_kind_reaches_the_message_metadata(self, executor, updater, task):
+        """A mid-turn note (notify_user) is an activity-log line marked kind='note',
+        and it must leave the task in WORKING — it does not end the turn."""
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_WORKING,
+            content="Understood — pulling last week's numbers.",
+            metadata={"activity_log": True, "kind": "note"},
+        )
+        result = await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=False,
+            active_extensions={ACTIVITY_LOG_EXTENSION},
+        )
+        updater.update_status.assert_awaited_once()
+        state, msg = updater.update_status.call_args[0][:2]
+        assert state == TaskState.TASK_STATE_WORKING
+        assert ACTIVITY_LOG_EXTENSION in msg.extensions
+        assert msg.metadata["kind"] == "note"
+        assert msg.parts[0].text == "Understood — pulling last week's numbers."
+        assert result[0] is False  # streaming artifact untouched
+
+    @pytest.mark.asyncio
+    async def test_mechanical_line_carries_no_kind(self, executor, updater, task):
+        """Ordinary tool/delegation lines must stay unmarked, so a client can tell them
+        apart from the agent's own words."""
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_WORKING,
+            content="Using tool X…",
+            metadata={"activity_log": True},
+        )
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=False,
+            active_extensions={ACTIVITY_LOG_EXTENSION},
+        )
+        msg = updater.update_status.call_args[0][1]
+        assert "kind" not in msg.metadata
+
+    @pytest.mark.asyncio
+    async def test_note_suppressed_without_the_extension(self, executor, updater, task):
+        """Notes ride the activity-log extension: no header, no note."""
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_WORKING,
+            content="Understood — starting now.",
+            metadata={"activity_log": True, "kind": "note"},
+        )
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=False,
+            active_extensions=None,
+        )
+        updater.update_status.assert_not_called()
+
 
 # ===========================================================================
 # Work Plan extension filtering

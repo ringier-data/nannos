@@ -8,6 +8,8 @@ import type { AgentResponseData } from '../core/wire';
 import { CLIENT_ACTION_EXT } from '../core/extensions';
 import { decodeApproval, encodeApproval } from './approval-codec';
 import { createDemuxState, demux } from './demux';
+import { directiveFromToolArgs } from '../core/client-action';
+import { clientActionDirective } from '../core/schemas';
 import { findPendingInterrupt, type RestMessageRow } from './index';
 
 const RESULT = { ok: true, applied: ['budget'], rejected: [{ field: 'type', reason: 'bad enum' }] };
@@ -43,7 +45,12 @@ describe('demux: awaited client-action request', () => {
     const input = (result.chunks[1] as { input: Record<string, unknown> }).input;
     expect(input._clientActionRequest).toBe(true);
     expect((input.directive as { kind: string }).kind).toBe('apply');
-    expect((result.chunks[2] as { approvalId: string }).approvalId).toBe('call-9');
+    // Its own part id: the risk gate for this very call may already own a
+    // settled part under the raw `call-9` (see `clientActionPartId`).
+    expect((result.chunks[2] as { approvalId: string }).approvalId).toBe('call-9#client-action');
+    expect((result.chunks[0] as { toolCallId: string }).toolCallId).toBe('call-9#client-action');
+    // …and the decision still goes back on the wire under the RAW id.
+    expect(decodeApproval('call-9#client-action', { approved: true }).id).toBe('call-9');
   });
 
   it('fire-and-forget directives still produce NO chunks (the core executes them)', () => {
@@ -159,7 +166,7 @@ describe('history restore: a parked request self-heals on reload', () => {
         args: {
           directive: { kind: 'apply' },
           _clientActionRequest: true,
-          _call_id: 'call-9',
+          _call_id: 'call-9#client-action',
         },
       },
     ]);
@@ -173,5 +180,54 @@ describe('history restore: a parked request self-heals on reload', () => {
       raw_payload: JSON.stringify({ status: { state: 'completed' } }),
     };
     expect(findPendingInterrupt([requestRow('2026-08-26T10:00:00Z'), resolvedRow])).toBeNull();
+  });
+});
+
+describe('directiveFromToolArgs: one pause instead of two', () => {
+  // The card carries the agent's FLAT tool args; the wire directive is nested.
+  // Building one from the other is what lets the host execute on approve and
+  // answer with the result, so the agent resumes ONCE.
+  const gateArgs = {
+    _call_id: 'tooluse_x',
+    _risk_metadata: { score: 0.9 },
+    _summary: 'ignored',
+    kind: 'apply',
+    target_type: 'Campaign',
+    target_id: 'new',
+    values: { name: 'Test Campaign 001', budget: '25000' },
+    confirm: true,
+  };
+
+  it('nests the target and drops the card-only keys', () => {
+    expect(directiveFromToolArgs(gateArgs)).toEqual({
+      kind: 'apply',
+      target: { type: 'Campaign', id: 'new' },
+      values: { name: 'Test Campaign 001', budget: '25000' },
+    });
+  });
+
+  it('what it builds passes the directive schema the executor validates', () => {
+    expect(clientActionDirective.safeParse(directiveFromToolArgs(gateArgs)).success).toBe(true);
+  });
+
+  it('carries highlight/navigate/read_current_page too', () => {
+    expect(
+      directiveFromToolArgs({ kind: 'highlight', target_type: 'Campaign', target_id: '7', field: 'budget' }),
+    ).toEqual({ kind: 'highlight', target: { type: 'Campaign', id: '7' }, field: 'budget' });
+    expect(directiveFromToolArgs({ kind: 'navigate', to: '/campaigns/7' })).toEqual({
+      kind: 'navigate',
+      to: '/campaigns/7',
+    });
+    expect(directiveFromToolArgs({ kind: 'read_current_page' })).toEqual({ kind: 'read_current_page' });
+  });
+
+  it('returns null rather than guessing — the round trip then answers', () => {
+    // Each of these must fall back to a plain approve, never a wrong directive.
+    expect(directiveFromToolArgs({ kind: 'apply', values: {} })).toBeNull(); // no target
+    expect(directiveFromToolArgs({ kind: 'navigate' })).toBeNull(); // no path
+    expect(directiveFromToolArgs({ kind: 'refresh', target_type: 'X', target_id: '1' })).toBeNull();
+    expect(directiveFromToolArgs({ target_type: 'X', target_id: '1' })).toBeNull(); // no kind
+    expect(directiveFromToolArgs(null)).toBeNull();
+    expect(directiveFromToolArgs('nope')).toBeNull();
   });
 });

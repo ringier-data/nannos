@@ -63,6 +63,7 @@ export interface NannosStrings {
   'context.label': string;
 
   // HITL approval card
+  /** Card heading; `{toolName}` is the tool title(s) awaiting approval. */
   'hitl.title': string;
   'hitl.approve': string;
   'hitl.approveAll': string;
@@ -75,6 +76,25 @@ export interface NannosStrings {
   'hitl.riskHigh': string;
   'hitl.riskMedium': string;
   'hitl.riskLow': string;
+  /** Column headers of the `apply` approval's field diff (field → current → new). */
+  'hitl.diff.field': string;
+  'hitl.diff.current': string;
+  'hitl.diff.new': string;
+  /** Self-evident `client_action` kinds, described by the SDK instead of the
+   *  agent — a closed enum needs no LLM to explain it, and this way the
+   *  sentence is in the user's language. */
+  'hitl.clientAction.apply': string;
+  'hitl.clientAction.highlight': string;
+  'hitl.clientAction.navigate': string;
+  'hitl.clientAction.readCurrentPage': string;
+
+  // Apply mode — how much the assistant may do to a form on its own
+  'applyMode.heading': string;
+  'applyMode.manual': string;
+  'applyMode.allowEdits': string;
+  'applyMode.manualHint': string;
+  'applyMode.allowEditsHint': string;
+  'applyMode.label': string;
 
   // Secondary-authorization prompt (a tool needs the user's consent)
   'auth.title': string;
@@ -82,6 +102,9 @@ export interface NannosStrings {
   'auth.bodyTool': string;
   'auth.action': string;
   'auth.retryHint': string;
+  'auth.doneAction': string;
+  'auth.retryAction': string;
+  'auth.doneChip': string;
 
   // Working / timeline blocks
   'working.title': string;
@@ -160,11 +183,17 @@ export const nannosStringKeys = [
   'hitl.riskHigh',
   'hitl.riskMedium',
   'hitl.riskLow',
+  'hitl.diff.field',
+  'hitl.diff.current',
+  'hitl.diff.new',
   'auth.title',
   'auth.body',
   'auth.bodyTool',
   'auth.action',
   'auth.retryHint',
+  'auth.doneAction',
+  'auth.retryAction',
+  'auth.doneChip',
   'working.title',
   'thinking.title',
   'feedback.helpful',

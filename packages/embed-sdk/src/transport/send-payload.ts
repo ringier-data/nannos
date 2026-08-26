@@ -28,9 +28,18 @@ export interface SendContext {
   playgroundSubagentName?: string;
 }
 
+/** One answered approval: the UI PART it came from, and the decision the
+ *  backend gets. The two ids differ for a client-action request, whose part is
+ *  suffixed (`clientActionPartId`) while the wire keeps the raw call id — so
+ *  they are carried together rather than re-derived from the payload. */
+export interface AnsweredApproval {
+  partId: string;
+  decision: Decision;
+}
+
 export type SendClassification =
   | { kind: 'new-turn'; userMessage: NannosUIMessage }
-  | { kind: 'hitl-resume'; decisions: Decision[] }
+  | { kind: 'hitl-resume'; answered: AnsweredApproval[] }
   | { kind: 'empty' };
 
 /**
@@ -43,16 +52,20 @@ export function classifySend(messages: NannosUIMessage[]): SendClassification {
   if (!last) return { kind: 'empty' };
   if (last.role === 'user') return { kind: 'new-turn', userMessage: last };
   if (last.role === 'assistant') {
-    const decisions: Decision[] = [];
+    const answered: AnsweredApproval[] = [];
     for (const part of last.parts) {
       if (part.type !== 'dynamic-tool') continue;
       if (part.state !== 'approval-responded') continue;
       const approval = part.approval as { id: string; approved: boolean; reason?: string };
-      decisions.push(
-        decodeApproval(approval.id, { approved: approval.approved, reason: approval.reason }),
-      );
+      answered.push({
+        partId: approval.id,
+        decision: decodeApproval(approval.id, {
+          approved: approval.approved,
+          reason: approval.reason,
+        }),
+      });
     }
-    if (decisions.length > 0) return { kind: 'hitl-resume', decisions };
+    if (answered.length > 0) return { kind: 'hitl-resume', answered };
   }
   return { kind: 'empty' };
 }

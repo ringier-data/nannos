@@ -46,6 +46,25 @@ const activityRow = (i: number, text: string, source?: string): RestMessageRow =
   }),
 });
 
+/** A mid-turn note is an activity row whose message metadata carries kind='note'. */
+const noteRow = (i: number, text: string): RestMessageRow => ({
+  id: `note${i}`,
+  role: 'agent',
+  kind: 'status-update',
+  state: 'working',
+  parts: [{ kind: 'text', text }],
+  created_at: t(i),
+  raw_payload: JSON.stringify({
+    status: {
+      message: {
+        extensions: [ACTIVITY_LOG_EXT],
+        parts: [{ kind: 'text', text }],
+        metadata: { kind: 'note' },
+      },
+    },
+  }),
+});
+
 const thoughtRow = (i: number, agent: string, text: string): RestMessageRow => ({
   id: `th${i}`,
   role: 'agent',
@@ -110,6 +129,24 @@ describe('rowsToUIMessages', () => {
     // The answer keeps the row's time, so a reloaded turn reads as the same
     // dev-mode timeline as the live one.
     expect(textArrivalTs(first.parts[2])).toBe(new Date(t(3)).getTime());
+  });
+
+  it('keeps a mid-turn note apart from a tool line across a reload', () => {
+    // The kind marker is the only thing separating the two on the wire; lose it
+    // here and a reloaded turn shows the agent's own words as machine chatter.
+    const messages = rowsToUIMessages([
+      userRow(0, 'check campaign 456'),
+      noteRow(1, 'Understood — running a health check on campaign 456.'),
+      activityRow(2, 'Running search…'),
+      finalRow(3, 'All good.'),
+    ]);
+    const parts = messages[1].parts as Array<{ type: string; data?: { text: string; kind?: string } }>;
+    expect(parts.map((p) => p.type)).toEqual(['data-activity', 'data-activity', 'text']);
+    expect(parts[0].data).toMatchObject({
+      text: 'Understood — running a health check on campaign 456.',
+      kind: 'note',
+    });
+    expect(parts[1].data?.kind).toBeUndefined();
   });
 
   it('restores a persisted context chip (injectedDisplayText) as display metadata', () => {
@@ -185,6 +222,23 @@ describe('findPendingInterrupt + appendRestoredInterrupt', () => {
     expect(tool).toMatchObject({ state: 'approval-requested', toolCallId: 'call-9' });
     expect(tool.approval.id).toBe('call-9');
     expect(last.metadata?.hitl?.reviewConfigs).toHaveLength(1);
+  });
+
+  it('the risk-gate status text never renders — the card speaks for it', () => {
+    const RISK = "Tool 'client_action' has risk score 0.90 (threshold: 0.80)";
+    // What the REST endpoint really returns: the gate's text is also mirrored
+    // into the row's own `content`/`parts` columns.
+    const riskRow = { ...hitlRow(1, 'call-9'), content: RISK, parts: [{ kind: 'text', text: RISK }] };
+
+    // Still open → the approval card, and no text part.
+    const open = [userRow(0, 'create the campaign'), riskRow];
+    const pending = rowsToUIMessages(open);
+    expect(pending.flatMap((m) => m.parts).some((p) => p.type === 'text' && p.text.includes('risk score'))).toBe(false);
+
+    // Answered → the row leaves no trace at all.
+    const answered = rowsToUIMessages([...open, finalRow(2, 'Campaign created.')]);
+    const texts = answered.flatMap((m) => m.parts).filter((p) => p.type === 'text') as Array<{ text: string }>;
+    expect(texts.map((p) => p.text)).toEqual(['create the campaign', 'Campaign created.']);
   });
 
   it('an interrupt resolved by a LATER status is not restored', () => {

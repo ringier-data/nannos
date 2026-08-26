@@ -46,6 +46,7 @@ export {
 } from './components/conversation-history';
 export { ConnectionStatus, type ConnectionStatusProps } from './components/connection-status';
 export { ApprovalCard, type ApprovalCardProps } from './components/approval-card';
+export { ApplyModeSwitch, type ApplyModeSwitchProps } from './components/apply-mode-switch';
 export { WorkingBlock, type WorkingBlockProps } from './components/working-block';
 export { ContextChip, type ContextChipProps } from './components/context-chip';
 export {
@@ -59,6 +60,14 @@ export {
   resolveDevMode,
   type DevModeValue,
 } from './dev-mode';
+export {
+  ApplyModeProvider,
+  useApplyMode,
+  useApplyModeControls,
+  readStoredApplyMode,
+  type ApplyMode,
+  type ApplyModeValue,
+} from './apply-mode';
 export {
   MessageFeedback,
   ConversationFeedbackProvider,

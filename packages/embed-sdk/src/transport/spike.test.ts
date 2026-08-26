@@ -18,7 +18,13 @@ import {
   textArrivalTs,
   type NannosUIMessage,
 } from './ai-types';
-import { HITL_EXT, INTERMEDIATE_OUTPUT_EXT, WORK_PLAN_EXT, ACTIVITY_LOG_EXT } from '../core/extensions';
+import {
+  HITL_EXT,
+  INTERMEDIATE_OUTPUT_EXT,
+  WORK_PLAN_EXT,
+  ACTIVITY_LOG_EXT,
+  CLIENT_ACTION_EXT,
+} from '../core/extensions';
 import type { AgentResponseData, ConversationSnapshotData, SendMessagePayload } from '../core/wire';
 import type { TransportState } from '../core/client';
 
@@ -140,6 +146,37 @@ function hitlInterrupt(actions: Array<{ name: string; callId: string }>): AgentR
   } as AgentResponseData;
 }
 
+/** The awaited round-trip request the `client_action` tool emits after its
+ *  risk gate cleared — `id` IS the approved tool call's `_call_id`. */
+function clientActionRequest(callId: string): AgentResponseData {
+  return {
+    contextId: CONV,
+    kind: 'status-update',
+    role: 'agent',
+    status: {
+      state: 'input-required',
+      message: {
+        extensions: [CLIENT_ACTION_EXT],
+        parts: [
+          {
+            kind: 'data',
+            data: {
+              request: {
+                id: callId,
+                directive: {
+                  kind: 'apply',
+                  target: { type: 'Campaign', id: 'new' },
+                  values: { name: 'Test Campaign 001' },
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  } as AgentResponseData;
+}
+
 const lastAssistant = (chat: Chat<NannosUIMessage>) =>
   [...chat.messages].reverse().find((m) => m.role === 'assistant');
 
@@ -179,6 +216,12 @@ describe('S1 — basic turn', () => {
     expect(msg.parts.some((p) => p.type === 'data-activity')).toBe(true);
     expect(msg.parts.some((p) => p.type === 'data-workplan')).toBe(true);
 
+    // A tool line carries no kind; only a mid-turn note does (next test).
+    const firstActivity = msg.parts.find((p) => p.type === 'data-activity') as {
+      data: { kind?: string };
+    };
+    expect(firstActivity.data.kind).toBeUndefined();
+
     // The answer carries its arrival time, so dev mode can time it the way it
     // times the activity line above it — and never earlier than that line.
     const activityTs = (msg.parts.find((p) => p.type === 'data-activity') as { data: { ts: number } })
@@ -186,6 +229,45 @@ describe('S1 — basic turn', () => {
     const answerTs = textArrivalTs(msg.parts.find((p) => p.type === 'text')!);
     expect(answerTs).toBeTypeOf('number');
     expect(answerTs!).toBeGreaterThanOrEqual(activityTs);
+  });
+
+  it('marks a mid-turn note so the thread can render it as speech', async () => {
+    const { wire, chat } = setup();
+    void chat.sendMessage({ text: 'check campaign 456' });
+    await vi.waitFor(() => expect(wire.sent).toHaveLength(1));
+
+    // Same extension as a tool line — metadata.kind is the whole difference.
+    wire.emit({
+      contextId: CONV,
+      kind: 'status-update',
+      status: {
+        message: {
+          extensions: [ACTIVITY_LOG_EXT],
+          parts: [{ kind: 'text', text: 'Understood — running a health check.' }],
+          metadata: { kind: 'note' },
+        },
+      },
+    } as AgentResponseData);
+    // An unknown kind from a newer agent must not reach the renderer.
+    wire.emit({
+      contextId: CONV,
+      kind: 'status-update',
+      status: {
+        message: {
+          extensions: [ACTIVITY_LOG_EXT],
+          parts: [{ kind: 'text', text: 'Running search…' }],
+          metadata: { kind: 'something-new' },
+        },
+      },
+    } as AgentResponseData);
+    wire.emit(terminal());
+
+    await vi.waitFor(() => expect(chat.status).toBe('ready'));
+    const lines = lastAssistant(chat)!.parts.filter((p) => p.type === 'data-activity') as Array<{
+      data: { text: string; kind?: string };
+    }>;
+    expect(lines.map((l) => l.data.kind)).toEqual(['note', undefined]);
+    expect(lines[0].data.text).toBe('Understood — running a health check.');
   });
 
   it('sub-agent thoughts reconcile in place and close when streaming starts', async () => {
@@ -391,6 +473,125 @@ describe('S3 — HITL round-trip (native tool approval)', () => {
     expect(wire.sent[1].dataParts).toEqual([
       { decisions: [{ id: 'call-a', type: 'approve' }, { id: 'call-b', type: 'reject' }] },
     ]);
+  });
+
+  it('one pause: an approved client_action answered WITH its result settles the gate part itself', async () => {
+    // The merged path. `useNannosChat.respond` runs the directive at approve-time
+    // and sends the outcome on the decision, so the agent resumes ONCE. The
+    // result rides a decision that answered the RISK GATE — its part carries no
+    // `#client-action` suffix, and settling the suffixed one instead would leave
+    // the card stuck on "approval-responded" forever.
+    const { wire, chat } = setup({ sendAutomatically: true });
+    void chat.sendMessage({ text: 'fill out the form' });
+    await vi.waitFor(() => expect(wire.sent).toHaveLength(1));
+
+    wire.emit(hitlInterrupt([{ name: 'client_action', callId: 'tooluse_merged' }]));
+    await vi.waitFor(() => expect(chat.status).toBe('ready'));
+
+    const applied = { ok: true, applied: ['name', 'budget'], rejected: [] };
+    await chat.addToolApprovalResponse({
+      id: 'tooluse_merged',
+      approved: true,
+      reason: JSON.stringify({ v: 1, clientActionResult: applied }),
+    });
+
+    await vi.waitFor(() => expect(wire.sent).toHaveLength(2));
+    // ONE resume, carrying the result the backend answers the tool call with.
+    expect(wire.sent[1].dataParts).toEqual([
+      { decisions: [{ id: 'tooluse_merged', type: 'approve', client_action_result: applied }] },
+    ]);
+
+    wire.emit(streamChunk('Filled 2 fields.', 16));
+    wire.emit(terminal());
+    await vi.waitFor(() => expect(chat.status).toBe('ready'));
+
+    const assistants = chat.messages.filter((m) => m.role === 'assistant');
+    expect(assistants).toHaveLength(1);
+    const tools = assistants[0].parts.filter((p) => p.type === 'dynamic-tool') as Array<{
+      state: string;
+      toolCallId: string;
+      output?: { result?: unknown };
+    }>;
+    // Exactly one part — the gate — settled, showing what the browser did.
+    expect(tools).toHaveLength(1);
+    expect(tools[0].toolCallId).toBe('tooluse_merged');
+    expect(tools[0].state).toBe('output-available');
+    expect(tools[0].output?.result).toEqual(applied);
+    expect(textOf(assistants[0])).toContain('Filled 2 fields.');
+    expect(wire.sent).toHaveLength(2); // no third send
+  });
+
+  it('a risk-gated client_action: the round-trip request under the APPROVED call id still renders', async () => {
+    // The reproduction (from a real session): `client_action` scored 0.9, so the
+    // human risk gate asked first. The user approved, the tool ran — and its
+    // round-trip request carries the injected `tool_call_id`, which IS the
+    // `_call_id` just answered. The stale-replay guard matched on the id alone
+    // and dropped it: nothing was applied to the form and the turn parked with
+    // no card, no answer, no error ("nothing happened").
+    const { wire, chat } = setup({ sendAutomatically: true });
+    void chat.sendMessage({ text: 'fill out the form' });
+    await vi.waitFor(() => expect(wire.sent).toHaveLength(1));
+
+    wire.emit(hitlInterrupt([{ name: 'client_action', callId: 'tooluse_WQykvb' }]));
+    await vi.waitFor(() => expect(chat.status).toBe('ready'));
+    await chat.addToolApprovalResponse({ id: 'tooluse_WQykvb', approved: true });
+    await vi.waitFor(() => expect(wire.sent).toHaveLength(2));
+
+    // Same id, DIFFERENT prompt kind — this is a new request, not a replay.
+    wire.emit(clientActionRequest('tooluse_WQykvb'));
+
+    // Two parts now: the settled risk gate, and the request as its own part.
+    await vi.waitFor(() => {
+      const tools = lastAssistant(chat)!.parts.filter((p) => p.type === 'dynamic-tool') as Array<{
+        state: string;
+        toolCallId: string;
+        approval?: { id: string };
+        input: { _clientActionRequest?: boolean; directive?: { kind?: string } };
+      }>;
+      expect(tools).toHaveLength(2);
+      expect(tools[0].state).toBe('output-available');
+      expect(tools[1].state).toBe('approval-requested');
+      expect(tools[1].toolCallId).toBe('tooluse_WQykvb#client-action');
+      expect(tools[1].input._clientActionRequest).toBe(true);
+      expect(tools[1].input.directive?.kind).toBe('apply');
+    });
+
+    // The host answers with what the browser did; the turn resumes once more.
+    await chat.addToolApprovalResponse({
+      id: 'tooluse_WQykvb#client-action',
+      approved: true,
+      reason: JSON.stringify({ v: 1, clientActionResult: { ok: true, applied: ['name'] } }),
+    });
+    await vi.waitFor(() => expect(wire.sent).toHaveLength(3));
+    expect(wire.sent[2].dataParts).toEqual([
+      {
+        decisions: [
+          {
+            id: 'tooluse_WQykvb',
+            type: 'approve',
+            client_action_result: { ok: true, applied: ['name'] },
+          },
+        ],
+      },
+    ]);
+
+    // And THAT resume does mark the request answered: a genuine replay of it
+    // (a raced subscribe / socket rejoin) is still dropped.
+    wire.emit(clientActionRequest('tooluse_WQykvb'));
+    wire.emit(streamChunk('Filled the campaign form.', 25));
+    wire.emit(terminal());
+    await vi.waitFor(() => expect(chat.status).toBe('ready'));
+    const assistants = chat.messages.filter((m) => m.role === 'assistant');
+    expect(assistants).toHaveLength(1);
+    const tools = assistants[0].parts.filter((p) => p.type === 'dynamic-tool') as Array<{
+      state: string;
+      output?: { result?: unknown };
+    }>;
+    expect(tools).toHaveLength(2); // the replay added nothing
+    expect(tools[1].state).toBe('output-available');
+    expect(tools[1].output?.result).toEqual({ ok: true, applied: ['name'] });
+    expect(textOf(assistants[0])).toContain('Filled the campaign form.');
+    expect(wire.sent).toHaveLength(3); // no fourth resume
   });
 });
 

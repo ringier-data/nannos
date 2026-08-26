@@ -32,6 +32,11 @@ from agent_common.backends.attachments_store import (
     reset_current_attachments_backend,
     set_current_attachments_backend,
 )
+from agent_common.core.notify_user_tool import (
+    NOTE_KIND,
+    NOTIFY_USER_TOOL_NAME,
+    USER_NOTE_EVENT,
+)
 from agent_common.core.stream_watchdog import StreamStallError, watch_stream_with_resume
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.middleware.tool_status import TOOL_STATUS_EVENT
@@ -83,6 +88,7 @@ _ACTIVITY_LOG_EXCLUDED_TOOLS: frozenset[str] = frozenset(
         "SubAgentResponseSchema",
         "task",
         "write_todos",
+        NOTIFY_USER_TOOL_NAME,
         PTC_CODE_INTERPRETER_TOOL_NAME,
     }
 )
@@ -1213,6 +1219,21 @@ class OrchestratorDeepAgent:
                             )
                         continue  # Process next event
 
+                    elif event_type == USER_NOTE_EVENT:
+                        # MID-TURN NOTE from the notify_user tool: the model's own words
+                        # for the user, emitted while the task stays WORKING. Rides the
+                        # activity-log channel (every client already renders it) with
+                        # ``kind="note"`` so a UI can style it apart from a tool label.
+                        note = event_data.get("message", "")
+                        if note:
+                            logger.info(f"[ORCHESTRATOR] Mid-turn note: {note}")
+                            yield AgentStreamResponse(
+                                state=TaskState.TASK_STATE_WORKING,
+                                content=note,
+                                metadata={"activity_log": True, "kind": NOTE_KIND},
+                            )
+                        continue  # Process next event
+
                     elif event_type == "status_history":
                         # ACTIVITY LOG from tool calls (orchestrator or sub-agents via middleware)
                         status_msg = event_data.get("message", "")
@@ -1509,10 +1530,15 @@ class OrchestratorDeepAgent:
                         )
                         continue
                     if isinstance(meta, ActivityLogMeta) or ev.status_text:
+                        activity_meta: dict[str, Any] = {"activity_log": True}
+                        # A mid-turn note (notify_user) is an activity-log line with a
+                        # kind marker; ordinary tool/delegation lines carry no kind.
+                        if isinstance(meta, ActivityLogMeta) and meta.kind:
+                            activity_meta["kind"] = meta.kind
                         yield AgentStreamResponse(
                             state=TaskState.TASK_STATE_WORKING,
                             content=ev.status_text or "",
-                            metadata={"activity_log": True},
+                            metadata=activity_meta,
                         )
                         continue
                     # Terminal result (no event_metadata, no status_text): the final answer.

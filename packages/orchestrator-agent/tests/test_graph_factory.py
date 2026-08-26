@@ -13,6 +13,7 @@ Graph creation with actual models should be tested in integration tests.
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
@@ -279,6 +280,29 @@ class TestStaticTools:
         assert "generate_presigned_url" in tool_names
         assert "get_current_time" in tool_names
         assert "copy_file" in tool_names
+
+    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
+    def test_notify_user_is_opt_in_and_stays_out_of_the_cache(self, mock_pg_store, _mock_creds, mock_config):
+        """The cached list also feeds ``extra_static_ptc_tools`` (the tools reached through
+        ``eval``). notify_user must stay OUT of it: a progress note has to be natively bound
+        so the model can emit it in the same step as its first real tool call."""
+        factory = GraphFactory(config=mock_config)
+
+        assert NOTIFY_USER_TOOL_NAME not in [t.name for t in factory.get_static_tools()]
+
+        with_notify = factory.get_static_tools(with_notify_user=True)
+        assert NOTIFY_USER_TOOL_NAME in [t.name for t in with_notify]
+        # The extra must not leak back into the shared cache.
+        assert NOTIFY_USER_TOOL_NAME not in [t.name for t in factory.get_static_tools()]
+
+    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
+    def test_notify_user_composes_with_the_response_tool(self, mock_pg_store, _mock_creds, mock_config):
+        factory = GraphFactory(config=mock_config)
+        names = [t.name for t in factory.get_static_tools(with_response_tool=True, with_notify_user=True)]
+        assert names.count(NOTIFY_USER_TOOL_NAME) == 1
+        assert names.count("FinalResponseSchema") == 1
 
 
 class TestStoreSelfHeal:

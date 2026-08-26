@@ -274,3 +274,64 @@ def test_context_registry_not_harvested_when_flag_off():
     req = _RegistryReq(tools=[], tool_registry={"gdrive_copy_file": _tool("gdrive_copy_file")})
     names = {t.name for t in mw._collect_ptc_tools(req)}
     assert names == {"read_file"}, f"registry must not be exposed when flag off; got {names}"
+
+
+# --- User-facing tools must stay natively bound -----------------------------------
+# ``client_action`` and ``notify_user`` reach the USER through the LangGraph stream
+# writer (navigate/highlight, notes) or ``interrupt()`` (the awaited apply /
+# read_current_page round trip). The PTC bridge dispatches from a worker thread in a
+# fresh context, so inside ``eval`` the writer is absent and ``interrupt()`` cannot be
+# raised — and because every PTC-exposed tool is stripped from the model's bound list,
+# exposing them left NO working path to call them at all.
+
+
+@pytest.mark.parametrize("tool_name", ["client_action", "notify_user"])
+def test_user_facing_tools_never_exposed_via_request_tools(tool_name):
+    """The sub-agent path (embedded domain agent) carries these on request.tools."""
+    mw = _mw(supports_execution=False)
+    names = {t.name for t in mw._collect_ptc_tools(_req(tools=[_tool(tool_name), _tool("mcp_a")], state={}))}
+    assert tool_name not in names, f"{tool_name} leaked into the PTC namespace; got {names}"
+    assert "mcp_a" in names
+
+
+@pytest.mark.parametrize("tool_name", ["client_action", "notify_user"])
+def test_user_facing_tools_never_exposed_on_resume_baseline(tool_name):
+    """The interrupt-resume path rebuilds from broaden_baseline_tools, not request.tools."""
+    mw = _mw(supports_execution=False, baseline=[_tool(tool_name), _tool("mcp_a")])
+    names = {t.name for t in mw._collect_ptc_tools(_req(tools=[], state={}))}
+    assert tool_name not in names, f"{tool_name} leaked in on resume; got {names}"
+    assert "mcp_a" in names
+
+
+@pytest.mark.parametrize("tool_name", ["client_action", "notify_user"])
+def test_user_facing_tools_never_exposed_from_context_registry(tool_name):
+    """The orchestrator path harvests the per-user tool_registry from the context."""
+    mw = gu._PTCToleranceCodeInterpreterMiddleware(
+        static_ptc_tools=[_tool("read_file")],
+        ptc_enabled=True,
+        broaden_exposure=False,
+        expose_context_registry=True,
+        backend_supports_execution=False,
+    )
+    registry = {tool_name: _tool(tool_name), "mcp_a": _tool("mcp_a")}
+    request = _req(
+        tools=[],
+        state={},
+        runtime=SimpleNamespace(
+            context=SimpleNamespace(tool_registry=registry, whitelisted_tool_names={tool_name, "mcp_a"})
+        ),
+    )
+    names = {t.name for t in mw._collect_ptc_tools(request)}
+    # `mcp_a` proves the harvest actually ran — without it the assertion below
+    # would also pass on an empty (short-circuited) registry read.
+    assert "mcp_a" in names, f"context registry was not harvested at all; got {names}"
+    assert tool_name not in names, f"{tool_name} leaked in from the registry; got {names}"
+
+
+@pytest.mark.parametrize("tool_name", ["client_action", "notify_user"])
+def test_user_facing_tools_stay_bound_to_the_model(tool_name):
+    """Not exposed ⇒ not hidden: the model can still call them the normal way."""
+    mw = _mw(supports_execution=False)
+    request = _req(tools=[_tool(tool_name), _tool("mcp_a")], state={})
+    _, hidden = mw._ptc_prompt_and_hidden(request)
+    assert tool_name not in hidden, f"{tool_name} stripped from the bound tool list; hidden={hidden}"

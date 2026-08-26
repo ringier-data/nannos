@@ -4,8 +4,8 @@
  * seeding, keyset pagination, steering (send-while-streaming), the HITL
  * interrupt surface, and the seeded-prompt drain.
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { generateUUID } from '../../core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { directiveFromToolArgs, generateUUID } from '../../core';
 import { useChat } from '@ai-sdk/react';
 import {
   appendRestoredInterrupt,
@@ -19,9 +19,14 @@ import {
 } from '../../transport';
 import { useAssistant } from '../../react';
 import { useChatEngine } from '../engine';
+import { CLIENT_ACTION_TOOL, clientActionKind } from '../tool-title';
+import { useApplyMode } from '../apply-mode';
 import { useConversations } from './use-conversations';
 
 const MESSAGE_PAGE_SIZE = 100;
+
+/** Shared empty set — a fresh one per render would re-run every dependent memo. */
+const EMPTY_IDS: ReadonlySet<string> = new Set();
 
 export interface PendingApproval {
   toolCallId: string;
@@ -62,6 +67,7 @@ export interface UseNannosChatValue {
 export function useNannosChat(conversationIdOverride?: string): UseNannosChatValue {
   const engine = useChatEngine();
   const assistant = useAssistant();
+  const applyMode = useApplyMode();
   const { activeConversationId } = useConversations();
 
   // A surface with no active conversation starts one: the id is minted during
@@ -170,13 +176,6 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
     [conversationId, engine, isReadOnly, sendMessage, setMessages, status],
   );
 
-  const respond = useCallback(
-    async (approvalId: string, approved: boolean, reason?: string) => {
-      await addToolApprovalResponse({ id: approvalId, approved, ...(reason && { reason }) });
-    },
-    [addToolApprovalResponse],
-  );
-
   // --- derived interrupt + workplan surfaces -----------------------------------
   const lastAssistant = useMemo(
     () => [...messages].reverse().find((m) => m.role === 'assistant'),
@@ -202,6 +201,90 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         approvalId: (p as { approval?: { id: string } }).approval?.id ?? p.toolCallId,
       }));
   }, [lastAssistant]);
+
+  // --- apply mode: 'allow-edits' answers a form fill for the user -------------
+  // Only a `client_action` of kind `apply` — the write into a registered form.
+  // An unknown kind keeps its card: the agent scores those to interrupt as a
+  // fail-safe, and honouring that is the point of the fail-safe.
+  //
+  // `failedAutoApply` is the escape hatch. These entries are hidden from the
+  // card while the panel answers them, so a throw on the way out would hide a
+  // pending approval forever and park the turn. On failure the id comes back
+  // and the human sees the card, exactly as in manual mode.
+  const [failedAutoApply, setFailedAutoApply] = useState<ReadonlySet<string>>(EMPTY_IDS);
+  const autoApplyIds = useMemo<ReadonlySet<string>>(() => {
+    if (applyMode !== 'allow-edits' || isReadOnly) return EMPTY_IDS;
+    const ids = new Set<string>();
+    for (const p of interruptPending) {
+      if (p.toolName !== CLIENT_ACTION_TOOL) continue;
+      if (clientActionKind(p.input) !== 'apply') continue;
+      if (failedAutoApply.has(p.approvalId)) continue;
+      ids.add(p.approvalId);
+    }
+    return ids;
+  }, [applyMode, failedAutoApply, interruptPending, isReadOnly]);
+
+  // What a HUMAN is asked about. The panel's own answers never render a card.
+  const visiblePending = useMemo<PendingApproval[]>(
+    () =>
+      autoApplyIds.size === 0
+        ? interruptPending
+        : interruptPending.filter((p) => !autoApplyIds.has(p.approvalId)),
+    [autoApplyIds, interruptPending],
+  );
+
+  // --- approval response ------------------------------------------------------
+  // ONE pause for an approved `client_action`: the directive is already fully
+  // described by the card's own args, so run it HERE, the moment the user
+  // approves, and send the outcome on the decision. The agent then resumes once,
+  // with the result in hand — instead of resuming to run the tool, interrupting
+  // a second time for the browser's answer, and resuming again. Each of those
+  // pauses is a full A2A resume, and the first also replays the model node.
+  //
+  // Every other path is untouched, and this one degrades safely: a directive we
+  // cannot build, or a run that throws, falls through to a plain approve — the
+  // tool then interrupts for the result and the round trip below handles it, as
+  // it must anyway for an agent that predates this shortcut.
+  const respond = useCallback(
+    async (approvalId: string, approved: boolean, reason?: string) => {
+      const pending = interruptPending.find((p) => p.approvalId === approvalId);
+      if (approved && !reason && pending?.toolName === CLIENT_ACTION_TOOL) {
+        const directive = directiveFromToolArgs(pending.input);
+        if (directive) {
+          try {
+            const result = await engine.core.runClientAction(directive);
+            await addToolApprovalResponse({
+              id: approvalId,
+              ...encodeApproval({
+                type: 'approve',
+                client_action_result: result as unknown as Record<string, unknown>,
+              }),
+            });
+            return;
+          } catch {
+            // Fall through to a plain approve — the tool asks for itself.
+          }
+        }
+      }
+      await addToolApprovalResponse({ id: approvalId, approved, ...(reason && { reason }) });
+    },
+    [addToolApprovalResponse, engine, interruptPending],
+  );
+
+  // Fire the answers the mode implies. One attempt per approval id (the ref),
+  // so a re-render while the response is in flight cannot double-apply. The
+  // effect runs right after the render that hid the card, so nothing flashes.
+  const autoAppliedRef = useRef(new Set<string>());
+  useEffect(() => {
+    for (const approvalId of autoApplyIds) {
+      if (autoAppliedRef.current.has(approvalId)) continue;
+      autoAppliedRef.current.add(approvalId);
+      void respond(approvalId, true).catch(() => {
+        // Could not answer for the user — give the approval back to them.
+        setFailedAutoApply((prev) => new Set(prev).add(approvalId));
+      });
+    }
+  }, [autoApplyIds, respond]);
 
   // --- client-action auto-settle (the awaited round trip) ----------------------
   // The paused `client_action` tool sent a directive and awaits its RESULT:
@@ -287,7 +370,7 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
     send,
     stop,
     interrupt: {
-      pending: interruptPending,
+      pending: visiblePending,
       reason: lastAssistant?.metadata?.hitl?.reason,
       reviewConfigs: lastAssistant?.metadata?.hitl?.reviewConfigs ?? [],
       respond,
