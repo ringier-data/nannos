@@ -210,3 +210,71 @@ def test_get_conversations_unfiltered_includes_embedded():
 
     assert resp.status_code == 200
     assert {c["conversation_id"] for c in resp.json()["conversations"]} == {"app42", "console-conv"}
+
+
+def test_delete_conversation_soft_deletes_and_returns_204():
+    """DELETE archives the conversation — the row and its messages survive, it
+    just stops being listed."""
+    mock_service = MagicMock()
+    mock_service.archive_conversation = AsyncMock(return_value=True)
+    app.state.conversation_service = mock_service
+
+    resp = client.delete("/api/v1/conversations/conv1")
+
+    assert resp.status_code == 204
+    mock_service.archive_conversation.assert_awaited_once_with(
+        conversation_id="conv1", user_id="test-user-id"
+    )
+
+
+def test_delete_conversation_missing_or_not_yours_is_404():
+    """Ownership is enforced inside the UPDATE, so someone else's conversation
+    is indistinguishable from a missing one — nothing leaks about whose it is."""
+    mock_service = MagicMock()
+    mock_service.archive_conversation = AsyncMock(return_value=False)
+    app.state.conversation_service = mock_service
+
+    resp = client.delete("/api/v1/conversations/someone-elses")
+
+    assert resp.status_code == 404
+
+
+def test_rename_conversation_returns_204():
+    """PATCH stores the new name; the marker that protects it lives in the
+    service, not here."""
+    mock_service = MagicMock()
+    mock_service.rename_conversation = AsyncMock(return_value=True)
+    app.state.conversation_service = mock_service
+
+    resp = client.patch("/api/v1/conversations/conv1", json={"title": "  Q3   pacing  "})
+
+    assert resp.status_code == 204
+    # Whitespace is collapsed before it reaches the database.
+    mock_service.rename_conversation.assert_awaited_once_with(
+        conversation_id="conv1", user_id="test-user-id", title="Q3 pacing"
+    )
+
+
+def test_rename_conversation_missing_or_not_yours_is_404():
+    """Same as delete: ownership is enforced in the UPDATE, so nothing leaks."""
+    mock_service = MagicMock()
+    mock_service.rename_conversation = AsyncMock(return_value=False)
+    app.state.conversation_service = mock_service
+
+    resp = client.patch("/api/v1/conversations/someone-elses", json={"title": "Mine now"})
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("title", ["", "   ", "x" * 61])
+def test_rename_conversation_rejects_unusable_names(title):
+    """A blank name has no way back to the generated one, and an essay does not
+    fit a list row — both are refused before the database sees them."""
+    mock_service = MagicMock()
+    mock_service.rename_conversation = AsyncMock(return_value=True)
+    app.state.conversation_service = mock_service
+
+    resp = client.patch("/api/v1/conversations/conv1", json={"title": title})
+
+    assert resp.status_code == 422
+    mock_service.rename_conversation.assert_not_awaited()

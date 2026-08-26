@@ -34,10 +34,17 @@ export const navigateDirective = z.object({
   to: z.string(),
 });
 
+/** The awaited pull: the agent asks what the user currently sees. Answered from
+ *  the merged page context + host-registered readers, through `sanitizeReadResult`. */
+export const readCurrentPageDirective = z.object({
+  kind: z.literal('read_current_page'),
+});
+
 export const clientActionDirective = z.discriminatedUnion('kind', [
   applyDirective,
   highlightDirective,
   navigateDirective,
+  readCurrentPageDirective,
 ]);
 
 export type ClientActionDirective = z.infer<typeof clientActionDirective>;

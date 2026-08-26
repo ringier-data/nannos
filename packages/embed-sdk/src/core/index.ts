@@ -1,9 +1,17 @@
 import { TransportClient } from './client';
-import { executeClientAction, extractClientActionDirective, type ClientActionDeps } from './client-action';
+import {
+  executeClientAction,
+  extractClientActionDirective,
+  type ClientActionDeps,
+  type ClientActionResult,
+} from './client-action';
 import { ObjectRegistry } from './registry';
 import type { NannosAuth, NannosConfig, NannosErrorEvent, NannosStatus, ObjectHandle, RegisterInput } from './types';
 
 export * from './types';
+export * from './page-context';
+export * from './page-read';
+export * from './screen-outline';
 export * from './schemas';
 export * from './extensions';
 export * from './protocol';
@@ -24,49 +32,31 @@ export {
 } from './zod-form';
 
 /**
- * How a host-injected prompt (`open(prompt)` / `sendPrompt`) is presented in
- * the chat. Pick by who authored the text:
- * - no `displayText`: the full prompt renders verbatim as a normal user bubble
- *   — right when the text is genuinely the user's (the host relays something
- *   they typed or dictated).
- * - `displayText`: the full prompt is SENT, but the chat shows only this short
- *   human-readable label as a muted "context" entry, expandable to the raw
- *   prompt — right for host-authored instrumentation prompts a user never
- *   wrote (rendering those as user speech is confusing; hiding them entirely
- *   makes the agent's reply appear out of nowhere).
- * - `contextKey`: identifies the page context the prompt is about (e.g.
- *   `campaign:123`). The widget continues the active conversation only if it
- *   was started under the SAME key; otherwise it starts a fresh conversation —
- *   so a prompt about campaign B never lands in (and gets polluted by) a chat
- *   about campaign A. Omit it to always continue the active conversation.
+ * The headless core. Framework-free: connection + protocol + object registry.
+ * Panel/UI state (open, seeded prompts) lives in the React provider; the chat
+ * engine in `../transport`.
  */
-export interface InjectedPromptOptions {
-  displayText?: string;
-  contextKey?: string;
+/**
+ * LangSmith's EU web app — where a trace deep-link is opened. The console
+ * hardcodes this same origin in its own trace links; the backend's
+ * `LANGSMITH_ENDPOINT` is the API host, not the UI, so it cannot be reused here.
+ */
+const LANGSMITH_APP_URL = 'https://eu.smith.langchain.com';
+
+/** The subset of `{backendUrl}/api/v1/config` this SDK reads. */
+interface BackendConfig {
+  orchestratorUrl?: string;
+  langsmith?: { organizationId?: string; projectId?: string };
 }
 
-/**
- * The headless core. Framework-free: a host can use this alone and render its
- * own UI, or feed it to the React UI kit (`mount`, see package root entry).
- */
 export class NannosCore {
   readonly registry = new ObjectRegistry();
   readonly transport: TransportClient;
-  private readonly promptListeners = new Set<(text: string, opts?: InjectedPromptOptions) => void>();
-  private bufferedPrompt: { text: string; opts?: InjectedPromptOptions } | null = null;
-  private opened = false;
-  private readonly openListeners = new Set<(open: boolean) => void>();
-  private agentUrlPromise: Promise<string | null> | null = null;
+  private backendConfigPromise: Promise<BackendConfig | null> | null = null;
   private subAgentNamePromise: Promise<string | null> | null = null;
 
   /** Self-login strategy (PKCE), if the host chose the `auth` path. */
   readonly auth: NannosAuth | null;
-  /** Set true by <NannosProvider> when it owns this core's connection lifecycle
-   *  (connect on mount, reauth on login). Only then does the mounted widget's
-   *  SocketProvider REUSE `this.transport` instead of creating its own — so a bare
-   *  core (e.g. the console via HostAdapterProvider, no NannosProvider) keeps the
-   *  original per-provider-transport behavior untouched. */
-  transportManagedExternally = false;
   private connectAttempted = false;
   private authErrored = false;
   private lastStatus: NannosStatus = 'disconnected';
@@ -207,48 +197,10 @@ export class NannosCore {
     this.emitStatus();
   }
 
-  // --- Imperative panel control -----------------------------------------
-  // So a host's OWN launcher (a button next to a form, a menu item) can open
-  // the widget and optionally inject a prompt — no window CustomEvent bus. The
-  // widget mirrors this state via `onOpenChange`; its built-in launcher calls
-  // `toggle()`. Single source of truth = the core, so every trigger agrees.
-
-  /** Is the widget panel currently open. */
-  get isOpen(): boolean {
-    return this.opened;
-  }
-
-  private setOpen(next: boolean) {
-    if (this.opened === next) return;
-    this.opened = next;
-    for (const l of this.openListeners) l(next);
-  }
-
-  /** Open the panel. With `prompt`, also injects it (see `sendPrompt`) so a
-   *  custom trigger can "open with this question" in one call. See
-   *  `InjectedPromptOptions` for how the prompt is presented in the chat. */
-  open(prompt?: string, opts?: InjectedPromptOptions) {
-    this.setOpen(true);
-    if (prompt !== undefined) this.sendPrompt(prompt, opts);
-  }
-
-  /** Close the panel. */
-  close() {
-    this.setOpen(false);
-  }
-
-  /** Flip open/closed (what the widget's built-in launcher calls). */
-  toggle() {
-    this.setOpen(!this.opened);
-  }
-
-  /** Subscribe to open/closed changes; fires immediately with the current state.
-   *  Returns an unsubscribe fn. The widget uses this to mirror core state. */
-  onOpenChange(cb: (open: boolean) => void): () => void {
-    this.openListeners.add(cb);
-    cb(this.opened);
-    return () => this.openListeners.delete(cb);
-  }
+  // NOTE (v2): panel open-state (open/close/toggle/onOpenChange) and injected-
+  // prompt buffering (sendPrompt/onPrompt) moved OFF the core into the React
+  // provider — the SDK renders in ONE React tree now, so UI state is plain
+  // React state. The core is connection + protocol + registry only.
 
   /**
    * Resolve the orchestrator (agent) URL from `backendUrl` — the embedder only
@@ -259,13 +211,36 @@ export class NannosCore {
    */
   resolveAgentUrl(fetcher: (path: string) => Promise<Response>): Promise<string | null> {
     if (!this.config.backendUrl) return Promise.resolve(null);
-    if (!this.agentUrlPromise) {
-      this.agentUrlPromise = fetcher('/api/v1/config')
-        .then((r) => (r.ok ? (r.json() as Promise<{ orchestratorUrl?: string }>) : null))
-        .then((cfg) => cfg?.orchestratorUrl ?? null)
+    return this.fetchBackendConfig(fetcher).then((cfg) => cfg?.orchestratorUrl ?? null);
+  }
+
+  /** `{backendUrl}/api/v1/config` — fetched once, shared by the resolvers below. */
+  private fetchBackendConfig(fetcher: (path: string) => Promise<Response>): Promise<BackendConfig | null> {
+    if (!this.backendConfigPromise) {
+      this.backendConfigPromise = fetcher('/api/v1/config')
+        .then((r) => (r.ok ? (r.json() as Promise<BackendConfig>) : null))
         .catch(() => null);
     }
-    return this.agentUrlPromise;
+    return this.backendConfigPromise;
+  }
+
+  /**
+   * LangSmith trace URL for a conversation, derived from the console-backend's
+   * `langsmith.{organizationId,projectId}` — so any host gets the dev-mode trace
+   * link without wiring `adapter.links.trace` itself. Null when the backend has
+   * no ids configured (LANGSMITH_ORGANIZATION_ID / LANGSMITH_PROJECT_ID unset),
+   * so the caller renders NO link rather than one with empty path segments.
+   */
+  resolveTraceUrl(
+    fetcher: (path: string) => Promise<Response>,
+    conversationId: string,
+  ): Promise<string | null> {
+    return this.fetchBackendConfig(fetcher).then((cfg) => {
+      const org = cfg?.langsmith?.organizationId;
+      const project = cfg?.langsmith?.projectId;
+      if (!org || !project) return null;
+      return `${LANGSMITH_APP_URL}/o/${org}/projects/p/${project}/t/${encodeURIComponent(conversationId)}`;
+    });
   }
 
   /**
@@ -287,33 +262,6 @@ export class NannosCore {
     return this.subAgentNamePromise;
   }
 
-  /**
-   * Inject a prompt into the widget programmatically (e.g. a suggested query
-   * the host offers next to a form). The widget sends it once connected.
-   * Buffers the prompt if the widget hasn't mounted/subscribed yet (first open),
-   * so a click that also opens the widget doesn't lose the prompt. See
-   * `InjectedPromptOptions` for how the prompt is presented in the chat.
-   */
-  sendPrompt(text: string, opts?: InjectedPromptOptions) {
-    if (this.promptListeners.size > 0) {
-      for (const l of this.promptListeners) l(text, opts);
-    } else {
-      this.bufferedPrompt = { text, opts };
-    }
-  }
-
-  /** Subscribe to injected prompts (the widget's ChatContext). Drains any
-   *  buffered prompt. */
-  onPrompt(cb: (text: string, opts?: InjectedPromptOptions) => void): () => void {
-    this.promptListeners.add(cb);
-    if (this.bufferedPrompt !== null) {
-      const b = this.bufferedPrompt;
-      this.bufferedPrompt = null;
-      cb(b.text, b.opts);
-    }
-    return () => this.promptListeners.delete(cb);
-  }
-
   register<TState>(input: RegisterInput<TState>): ObjectHandle {
     return this.registry.register(input);
   }
@@ -321,6 +269,7 @@ export class NannosCore {
   /** Wire the inbound client-action directives to host hooks (confirm/navigate/highlight). */
   bindClientActions(deps: Omit<ClientActionDeps, 'registry'>) {
     this.clientActionBindings++;
+    this.clientActionDeps = deps;
     const off = this.transport.onAgentResponse((data) => {
       // Directives ride status-update events, nested in a DataPart — unwrap the
       // envelope first (also skips streaming chunks cheaply); the Zod guard inside
@@ -340,6 +289,7 @@ export class NannosCore {
   }
 
   private clientActionBindings = 0;
+  private clientActionDeps: Omit<ClientActionDeps, 'registry'> | null = null;
 
   /** True while a `bindClientActions` subscription is live (e.g. <NannosProvider>
    *  with `navigate`/`highlight`). The mounted widget checks this so a directive
@@ -347,6 +297,25 @@ export class NannosCore {
    *  adapter-routing demux. */
   get clientActionsBound(): boolean {
     return this.clientActionBindings > 0;
+  }
+
+  /**
+   * Execute one directive imperatively against the registry + the host hooks
+   * last bound via `bindClientActions` — the ROUND-TRIP path: the chat layer
+   * runs an awaited `client_action` request through this and resumes the turn
+   * with the returned result. Never throws (a thrown handler becomes an
+   * `{ok:false}` result the agent can read).
+   */
+  async runClientAction(directive: unknown): Promise<ClientActionResult> {
+    try {
+      return await executeClientAction(directive, {
+        registry: this.registry,
+        ...(this.clientActionDeps ?? {}),
+      });
+    } catch (err) {
+      this.emitError({ type: 'apply', message: 'client-action handler threw', cause: err });
+      return { ok: false, reason: 'invalid' };
+    }
   }
 
   manifest() {

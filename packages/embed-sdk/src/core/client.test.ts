@@ -7,7 +7,7 @@ import { CLIENT_ACTION_EXT } from './extensions';
 class FakeSocket {
   connected = false;
   handlers = new Map<string, Array<(data?: unknown) => void>>();
-  emitted: Array<{ event: string; payload: unknown }> = [];
+  emitted: Array<{ event: string; payload: unknown; ack?: (raw?: unknown) => void }> = [];
 
   on(event: string, cb: (data?: unknown) => void) {
     const list = this.handlers.get(event) ?? [];
@@ -15,9 +15,14 @@ class FakeSocket {
     this.handlers.set(event, list);
     return this;
   }
-  emit(event: string, payload?: unknown) {
-    this.emitted.push({ event, payload });
+  emit(event: string, payload?: unknown, ack?: (raw?: unknown) => void) {
+    this.emitted.push({ event, payload, ...(ack && { ack }) });
     return this;
+  }
+  /** Test helper: answer the last emit that asked for an ack. */
+  ackLast(raw?: unknown) {
+    const call = [...this.emitted].reverse().find((e) => e.ack);
+    call?.ack?.(raw);
   }
   connectCount = 0;
   connect() {
@@ -101,6 +106,40 @@ describe('TransportClient messaging and state', () => {
     expect(client.sendMessage(payload)).toBe(true);
     expect(client.cancelTask('c')).toBe(true);
     expect(fake.emitted.map((e) => e.event)).toEqual(['send_message', 'cancel_task']);
+  });
+
+  it('reads the subscribe_conversation ack: success carries inFlight, error means rejected', async () => {
+    const { client, fake } = makeClient();
+    await client.connect();
+    fake.connected = true;
+    const seen: Array<{ ok: boolean; inFlight: boolean } | null> = [];
+
+    client.subscribeConversation('c1', (ack) => seen.push(ack));
+    fake.ackLast({ status: 'success', subscribed: true, inFlight: true });
+    client.subscribeConversation('c2', (ack) => seen.push(ack));
+    fake.ackLast({ status: 'success', subscribed: true, inFlight: false });
+    // A conversation the backend has never persisted: the join is rejected.
+    client.subscribeConversation('c3', (ack) => seen.push(ack));
+    fake.ackLast({ status: 'error', error: 'Conversation not found' });
+    // Unreadable reply (older backend / unauthenticated emit) → null, so the
+    // caller keeps waiting for the snapshot instead of assuming an answer.
+    client.subscribeConversation('c4', (ack) => seen.push(ack));
+    fake.ackLast(undefined);
+
+    expect(seen).toEqual([
+      { ok: true, inFlight: true },
+      { ok: true, inFlight: false },
+      { ok: false, inFlight: false },
+      null,
+    ]);
+  });
+
+  it('subscribes without an ack callback when the caller does not want one', async () => {
+    const { client, fake } = makeClient();
+    await client.connect();
+    fake.connected = true;
+    client.subscribeConversation('c1');
+    expect(fake.emitted.at(-1)?.ack).toBeUndefined();
   });
 
   it('fans agent_response out to subscribers and supports unsubscribe', async () => {
@@ -293,26 +332,18 @@ describe('NannosCore.bindClientActions', () => {
   });
 });
 
-describe('NannosCore.sendPrompt', () => {
-  it('delivers presentation opts to live listeners', () => {
-    const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
-    const seen: Array<[string, unknown]> = [];
-    core.onPrompt((text, opts) => seen.push([text, opts]));
-    core.sendPrompt('full instrumentation prompt', { displayText: 'Suggest actions' });
-    expect(seen).toEqual([['full instrumentation prompt', { displayText: 'Suggest actions' }]]);
-  });
-
-  it('buffers the prompt WITH its opts until the widget subscribes (open-then-mount)', () => {
-    const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
-    core.open('full instrumentation prompt', { displayText: 'Suggest actions', contextKey: 'campaign:1' });
-    const seen: Array<[string, unknown]> = [];
-    core.onPrompt((text, opts) => seen.push([text, opts]));
-    expect(seen).toEqual([
-      ['full instrumentation prompt', { displayText: 'Suggest actions', contextKey: 'campaign:1' }],
+describe('TransportClient server error event', () => {
+  it("forwards the backend's `error` emit (e.g. socket-auth failure) to onError", async () => {
+    // Previously never subscribed: an unauthenticated socket surfaced only as
+    // a stuck "Disconnected" with no diagnosable signal.
+    const fake = new FakeSocket();
+    const client = new TransportClient({}, () => fake as unknown as Socket);
+    const errors: unknown[] = [];
+    client.onError((e) => errors.push(e));
+    await client.connect();
+    fake.fire('error', { message: 'authentication failed' });
+    expect(errors).toEqual([
+      expect.objectContaining({ type: 'connection', message: 'authentication failed' }),
     ]);
-    // Drained once — a second subscriber must not replay it.
-    const second: unknown[] = [];
-    core.onPrompt((text) => second.push(text));
-    expect(second).toEqual([]);
   });
 });

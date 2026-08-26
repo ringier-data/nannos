@@ -1,7 +1,7 @@
 import * as React from "react"
 import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area"
 
-import { cn } from "@/lib/utils"
+import { cn } from "../../lib/utils"
 
 // forwardRef so a parent (e.g. ChatApp's auto-scroll effect) can reach the DOM
 // node and query the viewport. Without this, a plain function component silently

@@ -11,6 +11,7 @@ from unittest.mock import patch
 from agent_common.middleware.client_objects_middleware import (
     ClientObjectsMiddleware,
     render_client_objects_block,
+    render_current_page_block,
 )
 from agent_common.middleware.utils import (
     append_to_last_human_message,
@@ -20,6 +21,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 MANIFEST = [{"type": "form", "id": "f1", "scope": "page", "fields": ["name"]}]
+PAGE = {"key": "/campaigns/7", "title": "Campaign 7", "view": {"tab": "targetings"}}
 
 
 def _make_request(messages, system_message=None):
@@ -121,6 +123,86 @@ class TestClientObjectsMiddleware:
         ):
             out = mw._apply(request)
         assert "<client_objects>" in str(out.system_message.content)
+
+
+class TestCurrentPage:
+    def test_renders_all_declared_fields(self):
+        block = render_current_page_block(
+            {
+                "key": "/campaigns/7",
+                "title": "Campaign 7 – Targetings",
+                "breadcrumbs": ["Campaigns", "Campaign 7", "Targetings"],
+                "entity": {"type": "Campaign", "id": "7", "name": "Summer"},
+                "view": {"tab": "targetings", "status": "active"},
+                "visible": ["Geo CH", "Age 18-35"],
+            }
+        )
+        assert block.startswith("<current_page>")
+        assert "- path: /campaigns/7" in block
+        assert "- title: Campaign 7 – Targetings" in block
+        assert "- breadcrumbs: Campaigns > Campaign 7 > Targetings" in block
+        assert "- on-screen entity: Campaign id=7 name='Summer'" in block
+        assert '"tab": "targetings"' in block
+        assert "- visible items: Geo CH, Age 18-35" in block
+
+    def test_key_is_required_and_dict_shape_enforced(self):
+        assert render_current_page_block(None) is None
+        assert render_current_page_block({}) is None
+        assert render_current_page_block({"title": "no key"}) is None
+        assert render_current_page_block(["not", "a", "dict"]) is None
+        # Key alone is enough.
+        assert "- path: /home" in render_current_page_block({"key": "/home"})
+
+    def test_incomplete_entity_and_empty_collections_are_skipped(self):
+        block = render_current_page_block(
+            {"key": "/x", "entity": {"type": "Campaign"}, "view": {}, "visible": [], "breadcrumbs": []}
+        )
+        assert "entity" not in block
+        assert "view state" not in block
+        assert "visible items" not in block
+        assert "breadcrumbs" not in block
+
+    def test_middleware_injects_page_before_manifest_on_last_human_message(self):
+        request = _make_request(
+            [HumanMessage(content="what is on this page?")],
+            system_message=SystemMessage(content="sys"),
+        )
+        mw = ClientObjectsMiddleware()
+        with (
+            patch(
+                "agent_common.middleware.client_objects_middleware._client_objects_from_config",
+                return_value=MANIFEST,
+            ),
+            patch(
+                "agent_common.middleware.client_objects_middleware._page_context_from_config",
+                return_value=PAGE,
+            ),
+        ):
+            out = mw._apply(request)
+
+        content = out.messages[0].content
+        assert "<current_page>" in content
+        assert "<client_objects>" in content
+        assert content.index("<current_page>") < content.index("<client_objects>")
+        # System prompt stays byte-stable.
+        assert out.system_message.content == "sys"
+
+    def test_page_context_alone_still_injects(self):
+        request = _make_request([HumanMessage(content="hi")])
+        mw = ClientObjectsMiddleware()
+        with (
+            patch(
+                "agent_common.middleware.client_objects_middleware._client_objects_from_config",
+                return_value=None,
+            ),
+            patch(
+                "agent_common.middleware.client_objects_middleware._page_context_from_config",
+                return_value=PAGE,
+            ),
+        ):
+            out = mw._apply(request)
+        assert "<current_page>" in out.messages[0].content
+        assert "<client_objects>" not in out.messages[0].content
 
 
 class TestRenderAndSystemHelper:

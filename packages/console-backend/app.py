@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from fastapi_mcp import FastApiMCP
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from opentelemetry import trace as otel_trace
 from rcplus_alloy_common.logging import (
     configure_existing_logger,
     configure_logger,
@@ -92,6 +94,7 @@ from console_backend.routers.voice_agent_router import router as voice_agent_rou
 from console_backend.routers.web_search_mcp_tools import router as web_search_mcp_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
+from console_backend.services.conversation_summary import maybe_summarize_conversation
 from console_backend.services.messages_service import MessagesService, _parse_task_state
 from console_backend.services.socket_notification_manager import SocketNotificationManager
 from console_backend.utils.connection_pool import connection_pool
@@ -599,6 +602,74 @@ active_tasks: dict[str, ActiveTaskInfo] = {}
 # Intermediate output (with urn:nannos:a2a:intermediate-output:1.0 extensions) are NOT accumulated.
 _streaming_buffers: dict[str, str] = {}
 
+# Detached work that must outlive the turn that started it (conversation titling).
+# asyncio keeps no strong reference to a bare create_task, so a task can be
+# garbage-collected mid-flight; holding it here until it completes is the fix.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro, *, name: str) -> None:
+    """Run a coroutine detached from the caller, keeping it alive to completion."""
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+# Conversations whose titling task is running right now (see the trigger).
+_titling_in_flight: set[str] = set()
+
+
+async def _title_conversation(conversation_id: str, user_id: str, answer: str) -> None:
+    """Name a conversation after the answer just given — detached from the turn."""
+    try:
+        await maybe_summarize_conversation(
+            sio.app_instance.state.conversation_service,  # type: ignore[attr-defined]
+            conversation_id,
+            user_id,
+            answer=answer,
+            # The socket session's user_id IS the OIDC sub, which is what the
+            # gateway attributes spend by.
+            user_sub=user_id,
+            on_stored=_conversation_title_notifier(conversation_id),
+        )
+    finally:
+        _titling_in_flight.discard(conversation_id)
+
+
+def _answer_text_of(response_data: dict[str, Any]) -> str:
+    """The assistant text carried by a turn-ending event, or ''.
+
+    Covers the shape the streaming buffer does not: a final answer riding a
+    status message (`status.message.parts`), which is how a fallback answer and a
+    non-streamed reply arrive.
+    """
+    status = response_data.get("status")
+    message = status.get("message") if isinstance(status, dict) else None
+    parts = message.get("parts") if isinstance(message, dict) else None
+    if not isinstance(parts, list):
+        return ""
+    return "\n".join(
+        part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)
+    ).strip()
+
+
+def _conversation_title_notifier(conversation_id: str):
+    """Push a freshly written title/summary to everyone viewing the conversation.
+
+    The name lands a second or two after the answer, so without this push the
+    panel would keep showing the first-message placeholder until its next list
+    load. Room-targeted, so other tabs and surfaces update too.
+    """
+
+    async def notify(title: str, summary: str) -> None:
+        await sio.emit(
+            SocketEvents.CONVERSATION_UPDATED,
+            {"conversationId": conversation_id, "title": title, "summary": summary},
+            to=_conversation_room(conversation_id),
+        )
+
+    return notify
+
 # Buffer for accumulating intermediate-output chunks (sub-agent thoughts) per conversation.
 # Keyed by "{context_id}:{agent_name}". Persisted when the conversation turn ends
 # (terminal status or main artifact last_chunk) so reasoning blocks survive page reload.
@@ -614,6 +685,44 @@ _intermediate_buffer_ts: dict[str, datetime] = {}
 # while it was disconnected — otherwise the turn would hang waiting on input the user
 # never saw. Value is the raw agent_response payload of the prompt event.
 _pending_interactions: dict[str, dict[str, Any]] = {}
+
+
+_tracer = otel_trace.get_tracer("console-backend.chat")
+
+
+def _traced_chat_message(handler):  # type: ignore[no-untyped-def]
+    """Start a NEW trace for every incoming chat message.
+
+    Messages arrive as events on one long-lived socket.io connection, which HTTP
+    auto-instrumentation cannot see — without this, a turn is invisible and the
+    orchestrator's spans hang in a trace of their own. The span is a fresh root
+    on purpose: parenting to the connection would merge every message of a
+    session into one giant trace. It stays current for the whole handler (which
+    awaits the full turn), so the auto-instrumented httpx call to the
+    orchestrator becomes a child and carries the trace context downstream.
+    Without the injected OTel agent (local dev, tests) this is a no-op.
+    """
+
+    @functools.wraps(handler)
+    async def wrapper(sid: str, json_data: dict[str, Any]) -> Any:
+        no_parent = otel_trace.set_span_in_context(otel_trace.INVALID_SPAN)
+        # Attributes must be set at span CREATION: the sampler only sees these,
+        # not ones added later. "nannos.chat" is the hook for the X-Ray sampling
+        # rule that keeps every chat turn (the default rule keeps only ~5%, and
+        # an unsampled root drops the orchestrator's whole trace with it).
+        attributes: dict[str, str] = {"nannos.chat": "true"}
+        if isinstance(json_data, dict):
+            attributes["nannos.conversation_id"] = str(json_data.get("conversationId", ""))
+            attributes["nannos.message_id"] = str(json_data.get("id", ""))
+        with _tracer.start_as_current_span(
+            handler.__name__.removeprefix("handle_"),
+            context=no_parent,
+            kind=otel_trace.SpanKind.SERVER,
+            attributes=attributes,
+        ):
+            return await handler(sid, json_data)
+
+    return wrapper
 
 
 def _conversation_room(conversation_id: str) -> str:
@@ -1077,6 +1186,23 @@ async def _process_a2a_response(
                         conversation_id=effective_context_id,
                         user_id=user_id,
                     )
+
+                # ── Name the conversation after what it is about ──
+                # The answer text is taken from THIS event, not read back from the
+                # database: whichever way the turn ended, we already have it here.
+                # 'input-required' is not an ending — the turn paused for an approval
+                # and has no answer yet, so a later completed turn titles it instead.
+                if is_turn_ending and status_state != "input-required":
+                    answer_text = (accumulated or "").strip() or _answer_text_of(response_data)
+                    # A turn can end twice on the wire (a last_chunk artifact, then a
+                    # completed status). The DB flag stops the second RUN; this set stops
+                    # a second concurrent gateway CALL before the first has written.
+                    if answer_text and effective_context_id not in _titling_in_flight:
+                        _titling_in_flight.add(effective_context_id)
+                        _spawn_background(
+                            _title_conversation(effective_context_id, user_id, answer_text),
+                            name=f"title:{effective_context_id}",
+                        )
         except Exception as db_error:
             # Log but don't fail the response if DB write fails
             logger.error(f"Failed to save agent response to DynamoDB: {db_error}", exc_info=True)
@@ -1858,6 +1984,7 @@ async def _send_steering_message_to_agent(
 
 @sio.on(SocketEvents.SEND_MESSAGE)  # type: ignore
 @require_socket_auth(sio)
+@_traced_chat_message
 async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
     """Handle the 'send_message' socket.io event.
 
@@ -1926,6 +2053,7 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
 
         if socket_session.user_id:
             metadata["user_id"] = socket_session.user_id
+            otel_trace.get_current_span().set_attribute("enduser.id", socket_session.user_id)
         else:
             error_response = create_error_response(
                 SocketError.SESSION_NOT_FOUND,
@@ -1972,6 +2100,9 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         # conversation on creation so the console can label it and render it
         # read-only (its turns assume a live host page with registered objects).
         embedded_sub_agent_id = metadata.get("executeOnlySubAgentId") or metadata.get("subAgentId")
+        # Where the conversation STARTED (embed SDK metadata.pageContext) — stamped on
+        # creation only, so the list can say "this one began on campaign 123".
+        page_context = metadata.get("pageContext") if isinstance(metadata, dict) else None
         try:
             await conversation_service.get_or_create_conversation(
                 conversation_id=context_id,
@@ -1980,6 +2111,7 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
                 message=message_text,
                 sub_agent_config_hash=sub_agent_config_hash,
                 embedded_sub_agent_id=str(embedded_sub_agent_id) if embedded_sub_agent_id is not None else None,
+                page_context=page_context if isinstance(page_context, dict) else None,
             )
         except (ConversationOwnershipError, IntegrityError):
             logger.warning(

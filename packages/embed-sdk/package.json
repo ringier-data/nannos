@@ -1,7 +1,7 @@
 {
   "name": "@nannos/embed-sdk",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Embeddable Nannos: headless core (protocol + object registration + client-action) and a styleable React UI kit, distributed as a Shadow-DOM web component.",
   "exports": {
@@ -16,24 +16,39 @@
     "./react": {
       "types": "./dist/react/index.d.ts",
       "import": "./dist/react/index.js"
-    }
+    },
+    "./transport": {
+      "types": "./dist/transport/index.d.ts",
+      "import": "./dist/transport/index.js"
+    },
+    "./panel": {
+      "types": "./dist/panel/index.d.ts",
+      "import": "./dist/panel/index.js"
+    },
+    "./styles.css": "./dist/styles.css",
+    "./package.json": "./package.json"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "rm -rf dist && vite build && tsc",
-    "build:watch": "vite build --watch",
-    "typecheck": "tsc --noEmit",
+    "build": "rm -rf dist && vite build && tsc && tailwindcss -i src/styles/theme.css -o dist/styles.css --minify",
+    "build:watch": "tsc --watch --preserveWatchOutput & vite build --watch",
+    "dev:link": "tsc --watch --preserveWatchOutput & tailwindcss -i src/styles/theme.css -o dist/styles.css --watch",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.dev.json",
     "test": "vitest run",
     "lint": "eslint ."
   },
   "dependencies": {
+    "@ai-sdk/react": "4.0.82",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-collapsible": "^1.1.12",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-hover-card": "^1.1.23",
     "@radix-ui/react-label": "^2.1.8",
     "@radix-ui/react-popover": "^1.1.15",
     "@radix-ui/react-progress": "^1.1.8",
@@ -43,14 +58,23 @@
     "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-switch": "^1.2.6",
     "@radix-ui/react-tooltip": "^1.2.8",
+    "@radix-ui/react-use-controllable-state": "^1.2.3",
+    "@streamdown/cjk": "^1.0.3",
+    "@streamdown/code": "^1.1.1",
+    "@streamdown/math": "^1.0.2",
+    "@streamdown/mermaid": "^1.0.2",
+    "ai": "7.0.79",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
     "lucide-react": "^0.555.0",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
+    "motion": "^13.1.1",
+    "nanoid": "^3.3.12",
+    "shiki": "^4.4.3",
     "socket.io-client": "^4.8.1",
-    "sonner": "^2.0.7",
+    "streamdown": "^2.6.0",
     "tailwind-merge": "^3.4.0",
+    "use-stick-to-bottom": "^1.1.6",
     "uuid": "^13.0.0"
   },
   "peerDependencies": {
@@ -59,17 +83,22 @@
     "zod": "^4"
   },
   "devDependencies": {
-    "@r2wc/react-to-web-component": "^2.0.4",
+    "@tailwindcss/cli": "^4.3.3",
     "@tailwindcss/vite": "^4.1.17",
-    "tailwindcss": "^4.1.17",
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "happy-dom": "^20.11.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "tailwindcss": "^4.1.17",
     "typescript": "~5.9.3",
     "vite": "^7.2.4",
     "vitest": "^3.0.0",
     "zod": "^4.1.12"
-  }
+  },
+  "sideEffects": [
+    "**/*.css"
+  ]
 }

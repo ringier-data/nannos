@@ -38,14 +38,36 @@ const V1_TASK_STATE: Record<string, string> = {
 };
 
 /**
- * Get normalized task state from status object or string.
- * Accepts both A2A v1.0 (`TASK_STATE_*`) and legacy v0.3 (`completed`) forms.
+ * The same enum by its protobuf INT value — what console-backend's REST rows
+ * carry (`Message.state: int`, message.py). The socket path sends the
+ * `TASK_STATE_*` string; history restore gets the number.
  */
-export function getTaskState(status: string | { state?: string; message?: string } | undefined | null): string {
+const V1_TASK_STATE_BY_INT: Record<number, string> = {
+  0: 'unknown',
+  1: 'submitted',
+  2: 'working',
+  3: 'completed',
+  4: 'failed',
+  5: 'canceled',
+  6: 'input-required',
+  7: 'rejected',
+  8: 'auth-required',
+};
+
+/**
+ * Get normalized task state from status object, string, or protobuf int.
+ * Accepts A2A v1.0 names (`TASK_STATE_*`), their int enum values (REST rows),
+ * and legacy v0.3 short forms (`completed`).
+ */
+export function getTaskState(
+  status: string | number | { state?: string | number; message?: string } | undefined | null,
+): string {
   let raw: string | undefined;
-  if (!status) return 'unknown';
+  if (status === undefined || status === null || status === '') return 'unknown';
+  if (typeof status === 'number') return V1_TASK_STATE_BY_INT[status] ?? 'unknown';
   if (typeof status === 'string') raw = status;
   else if (typeof status === 'object') {
+    if (typeof status.state === 'number') return V1_TASK_STATE_BY_INT[status.state] ?? 'unknown';
     if (typeof status.state === 'string') raw = status.state;
     else if (typeof status.message === 'string') raw = status.message;
   }

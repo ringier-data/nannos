@@ -1,0 +1,92 @@
+import type { NannosStrings } from './keys';
+
+/** French, formal address (vouvoiement). */
+export const fr: NannosStrings = {
+  'panel.title': 'Assistant',
+  'panel.close': 'Fermer',
+  'panel.pin': 'Épingler le panneau',
+  'panel.unpin': 'Détacher le panneau',
+  'panel.newChat': 'Nouvelle discussion',
+  'panel.history': 'Historique',
+  'panel.settings': 'Paramètres',
+
+  'composer.placeholder': 'Écrivez à l’assistant…',
+  'composer.placeholderStreaming': 'Répondez pour orienter la réponse en cours…',
+  'composer.send': 'Envoyer',
+  'composer.stop': 'Arrêter',
+  'composer.attach': 'Joindre des fichiers',
+  'composer.record': 'Enregistrer un audio',
+  'composer.recordStop': 'Arrêter l’enregistrement',
+  'composer.recordPermission':
+    'L’accès au microphone a été refusé. Autorisez l’accès pour enregistrer un audio.',
+  'composer.recordError': 'Impossible d’enregistrer l’audio',
+  'composer.readOnly':
+    'Cette conversation appartient à une autre surface et est en lecture seule ici.',
+
+  'status.connected': 'Connecté',
+  'status.connecting': 'Connexion…',
+  'status.disconnected': 'Déconnecté',
+  'status.unauthenticated': 'Non connecté',
+  'status.signIn': 'Se connecter',
+  'status.error': 'Erreur de connexion',
+
+  'thread.emptyTitle': 'Comment puis-je vous aider ?',
+  'thread.emptyHint': 'Posez une question ou choisissez une suggestion.',
+  'thread.continueTitle': 'Reprenez où vous en étiez',
+  'thread.loadOlder': 'Charger les messages précédents',
+  'thread.error': 'Une erreur est survenue',
+  'thread.newConversation': 'Nouvelle conversation',
+  'conversations.title': 'Conversations',
+  'conversations.search': 'Rechercher une conversation…',
+  'conversations.empty': 'Aucune conversation pour le moment.',
+  'conversations.noMatches': 'Aucune conversation ne correspond à votre recherche.',
+  'conversations.rename': 'Renommer la conversation',
+  'conversations.renameLabel': 'Nom de la conversation',
+  'conversations.renameError': 'Impossible de renommer la conversation',
+  'conversations.delete': 'Supprimer la conversation',
+  'conversations.deleteTitle': 'Supprimer la conversation\u202f?',
+  'conversations.deleteBody': '«\u202f{title}\u202f» sera retirée de votre historique.',
+  'conversations.deleteConfirm': 'Supprimer',
+  'conversations.deleteCancel': 'Annuler',
+  'conversations.deleteError': 'Impossible de supprimer la conversation',
+
+  'context.label': 'Contexte : {label}',
+
+  'hitl.title': 'Confirmation requise',
+  'hitl.approve': 'Approuver',
+  'hitl.approveAll': 'Tout approuver',
+  'hitl.rejectAll': 'Tout refuser',
+  'hitl.reject': 'Refuser',
+  'hitl.requestChanges': 'Demander des modifications',
+  'hitl.reasonPlaceholder': 'Indiquez à l’assistant ce qu’il doit changer…',
+  'hitl.risk': 'Risque : {level} ({percent} %)',
+  'hitl.riskCritical': 'Critique',
+  'hitl.riskHigh': 'Élevé',
+  'hitl.riskMedium': 'Moyen',
+  'hitl.riskLow': 'Faible',
+
+  'auth.title': 'Autorisation requise',
+  'auth.body': 'L’assistant a besoin de votre autorisation pour continuer.',
+  'auth.bodyTool': 'L’assistant a besoin de votre autorisation pour utiliser {tool}.',
+  'auth.action': 'Autoriser',
+  'auth.retryHint': 'Envoyez ensuite votre message à nouveau.',
+
+  'working.title': 'Traitement…',
+  'thinking.title': '{agent} réfléchit',
+
+  'feedback.helpful': 'Utile',
+  'feedback.notHelpful': 'Pas utile',
+  'feedback.prompt': 'La réponse vous a-t-elle aidé ?',
+  'report.title': 'Signaler un problème',
+  'report.description':
+    'Décrivez le problème rencontré. Notre équipe l’examinera à l’aide du contexte de la conversation.',
+  'report.placeholder': 'Qu’est-ce qui s’est mal passé ?',
+  'report.submit': 'Envoyer le signalement',
+  'report.cancel': 'Annuler',
+  'report.success': 'Problème signalé',
+  'report.error': 'Impossible d’envoyer le signalement',
+
+  'attachments.uploading': 'Téléversement…',
+  'attachments.failed': 'Échec du téléversement',
+  'attachments.remove': 'Supprimer la pièce jointe',
+};

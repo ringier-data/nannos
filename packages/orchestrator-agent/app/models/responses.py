@@ -37,6 +37,14 @@ class AgentStreamResponse(BaseAgentStreamResponse):
     review_configs: Optional[List[ReviewConfig]] = Field(
         default=None, description="Review policies specifying allowed decisions per action"
     )
+    client_action_request: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Embedded Nannos: a client-action awaiting its RESULT from the embedding "
+            "client ({id, directive}). Emitted as input_required with the client-action "
+            "extension; the SDK executes the directive and auto-resumes with the result."
+        ),
+    )
 
     @classmethod
     def auth_required(
@@ -111,6 +119,20 @@ class AgentStreamResponse(BaseAgentStreamResponse):
                 auth_url=value.get("auth_url", ""),
                 error_code=value.get("error_code", ""),
                 **extras,
+            )
+
+        # Client-action round trip (Embedded Nannos): the client_action tool
+        # paused awaiting the browser's result. Not a human decision — the SDK
+        # executes the directive and resumes automatically.
+        client_action_request = value.get("client_action_request")
+        if isinstance(client_action_request, dict) and client_action_request.get("directive"):
+            kind = (client_action_request.get("directive") or {}).get("kind", "client action")
+            return cls(
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                content=f"Waiting for the application to execute '{kind}' and report its result.",
+                interrupt_reason="client_action_result",
+                pending_nodes=pending_nodes,
+                client_action_request=client_action_request,
             )
 
         action_requests = value.get("action_requests")

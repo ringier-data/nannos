@@ -45,6 +45,7 @@ from .a2a_extensions import (
     WORK_PLAN_EXTENSION,
     new_activity_log_message,
     new_client_action_message,
+    new_client_action_request_message,
     new_feedback_request_message,
     new_hitl_interrupt_message,
     new_work_plan_message,
@@ -197,6 +198,31 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 resume_map[intr.id] = {"decisions": per}
                 tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
                 logger.info(f"Resuming HITL interrupt {intr.id} for tools {tool_names} with {len(per)} decision(s)")
+            elif isinstance(intr_value, dict) and "client_action_request" in intr_value:
+                # Client-action round trip: resume the paused client_action tool
+                # with the browser's result, matched by the request id the SDK
+                # echoed on its decision. A resume WITHOUT a result (the user
+                # typed a message while the turn was parked, or the request id
+                # got lost) hands the tool an explicit no-result so it reports
+                # honestly instead of assuming success.
+                request = intr_value.get("client_action_request") or {}
+                decision = decisions_by_id.get(request.get("id"))
+                if not isinstance(decision, dict) or "client_action_result" not in decision:
+                    # Id-less fallback: a single result-bearing decision still resolves.
+                    decision = next(
+                        (d for d in hitl_decisions if isinstance(d, dict) and "client_action_result" in d),
+                        None,
+                    )
+                result = decision.get("client_action_result") if isinstance(decision, dict) else None
+                resume_map[intr.id] = (
+                    result
+                    if isinstance(result, dict)
+                    else {"ok": False, "reason": "no-result"}
+                )
+                logger.info(
+                    f"Resuming client-action interrupt {intr.id} "
+                    f"({'with result' if isinstance(result, dict) else 'WITHOUT result'})"
+                )
             else:
                 resume_map[intr.id] = query
                 logger.info(f"Resuming non-HITL interrupt {intr.id}")
@@ -217,6 +243,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         enable_thinking: bool | None = None,
         thinking_level: str | None = None,
         client_objects: list | None = None,
+        page_context: dict | None = None,
     ) -> UserConfig:
         """Build complete UserConfig with all data and discovered capabilities.
 
@@ -261,6 +288,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             user_system_role=user.system_role,
             tool_bypass_rules=user.tool_bypass_rules,
             client_objects=client_objects,
+            page_context=page_context,
         )
 
         # Discover capabilities (tools and sub-agents), memoized per-user to avoid
@@ -544,6 +572,23 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if client_objects:
             logger.info(f"[CLIENT-OBJECTS] Manifest received: {client_objects}")
 
+        # Embedded Nannos: the page the user is CURRENTLY on ({key, label?,
+        # description?, data?}), published by the host on navigation and sent
+        # with every turn. Same protobuf-Struct unwrap caveat as the manifest.
+        raw_page_context = request_metadata.get("pageContext")
+        page_context: dict | None = None
+        if raw_page_context is not None:
+            if hasattr(raw_page_context, "DESCRIPTOR"):
+                from google.protobuf.json_format import MessageToDict
+
+                converted_page = MessageToDict(raw_page_context)
+                if isinstance(converted_page, dict) and converted_page:
+                    page_context = converted_page
+            elif isinstance(raw_page_context, dict) and raw_page_context:
+                page_context = raw_page_context
+        if page_context:
+            logger.info(f"[PAGE-CONTEXT] Current page received: {page_context}")
+
         # Embedded Nannos (execute-only, ADR-0004): the console-backend maps the
         # embedding app-id → a scoped domain sub-agent and passes its id here. When
         # present we run THAT sub-agent as the top-level graph — bypassing the routing
@@ -669,6 +714,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 enable_thinking=enable_thinking,
                 thinking_level=thinking_level,
                 client_objects=client_objects,
+                page_context=page_context,
             )
 
             # Extract message parts for multimodal support (text + files)
@@ -848,9 +894,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     f"conversation:{task.context_id}",
                 ],
             }
-            # ClientObjectsMiddleware reads the on-screen manifest from config metadata.
+            # ClientObjectsMiddleware reads the on-screen manifest AND the
+            # current page from config metadata.
             if embedded_runnable is not None and client_objects:
                 config["metadata"]["client_objects"] = client_objects
+            if embedded_runnable is not None and page_context:
+                config["metadata"]["page_context"] = page_context
 
             current_state = await graph.aget_state(config)  # type: ignore
 
@@ -1308,7 +1357,28 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         elif state == TaskState.TASK_STATE_INPUT_REQUIRED:
             # User input required - leave task in input_required state
             action_requests = item.action_requests
-            if action_requests and _ext_active(HUMAN_IN_THE_LOOP_EXTENSION):
+            client_action_request = getattr(item, "client_action_request", None)
+            if client_action_request and _ext_active(CLIENT_ACTION_EXTENSION):
+                # Client-action round trip: the tool paused awaiting the browser's
+                # result. Same stream-sealing rule as HITL — a turn that streamed
+                # tokens before pausing must not leave the artifact open.
+                if first_chunk_sent:
+                    await updater.add_artifact(
+                        [Part(text="")],
+                        artifact_id=streaming_artifact_id,
+                        append=True,
+                        last_chunk=True,
+                        metadata={},
+                    )
+                await updater.update_status(
+                    TaskState.TASK_STATE_INPUT_REQUIRED,
+                    new_client_action_request_message(
+                        client_action_request,
+                        context_id=task.context_id,
+                        task_id=task.id,
+                    ),
+                )
+            elif action_requests and _ext_active(HUMAN_IN_THE_LOOP_EXTENSION):
                 # Structured HITL interrupt via extension — any A2A client can respond
                 # review_configs are provided by the ConditionalHumanInTheLoopMiddleware
                 review_configs = item.review_configs or [

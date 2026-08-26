@@ -43,9 +43,14 @@ so "the brain" is that sub-agent's config.
 Mechanics are in [`README.md`](./README.md) — don't duplicate here. In short:
 
 - Wrap the app in `<NannosProvider config={{ backendUrl, subAgentId, getToken|auth }}>`.
-- Drop in `<NannosWidget core={useNannos()} accent="#yourbrand" />`.
+- Render `<AssistantPanel />` (from `@nannos/embed-sdk/panel`, lazy-loaded) in a
+  host-owned container — docked, overlay, or full-page — and give the host its
+  own trigger(s) calling `useAssistant().open()`. Brand it via
+  `styles={[themeSheet({ accent: '…' })]}` (typed token knobs — see the
+  README's Restyling section).
 - For each client object in the Step 2 plan, register it with
-  `useNannosZodForm({ form, type, id, scope, schema })` — `type` names the
+  `useNannosForm({ form, type, id })` (registry-derived scope/label; or the
+  low-level `useNannosZodForm`) — `type` names the
   ontology entity it projects (`Customer`, `Order`, `Campaign`), and the
   **schema is the agent-settable contract** (drives the manifest, per-field
   validation, and the state the agent reads).

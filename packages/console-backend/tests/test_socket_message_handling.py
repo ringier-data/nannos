@@ -261,6 +261,114 @@ async def test_first_artifact_chunk_is_accumulated_not_persisted_standalone():
         mock_sio.app_instance.state.messages_service.save_agent_response.assert_not_called()
 
 
+async def _drive_turn_end(event_kind: str):
+    """Run one turn-ending response through the real handler; return the spawned tasks.
+
+    The titling trigger has to fire whichever way a turn ends, so this drives both
+    shapes: a streamed artifact carrying last_chunk, and a completed status message
+    (the fallback-answer path, which saves through save_agent_response instead).
+    """
+    from a2a.types import (
+        Artifact,
+        Message,
+        Part,
+        StreamResponse,
+        Task,
+        TaskArtifactUpdateEvent,
+        TaskState,
+        TaskStatus,
+        TaskStatusUpdateEvent,
+    )
+
+    import app as app_module
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+    mock_sio.app_instance.state.messages_service.insert_message = AsyncMock(
+        return_value=MagicMock(message_id="m1")
+    )
+
+    if event_kind == "artifact":
+        # A streamed answer: the buffer is flushed and saved on last_chunk.
+        app_module._streaming_buffers["conv-title"] = "Its daily cap was lowered."
+        event = StreamResponse(
+            artifact_update=TaskArtifactUpdateEvent(
+                task_id="t1",
+                context_id="conv-title",
+                artifact=Artifact(artifact_id="a1", parts=[Part(text=" Done.")]),
+                append=True,
+                last_chunk=True,
+            )
+        )
+    else:
+        # A non-streamed final answer riding a completed status.
+        event = StreamResponse(
+            status_update=TaskStatusUpdateEvent(
+                task_id="t1",
+                context_id="conv-title",
+                status=TaskStatus(
+                    state=TaskState.TASK_STATE_COMPLETED,
+                    message=Message(message_id="m1", parts=[Part(text="The full answer.")]),
+                ),
+            )
+        )
+
+    spawned = []
+    # Stub the summarizer itself, so the assertion covers the whole path from the
+    # wire event to the text handed over — which is the point of the change: the
+    # answer comes from this event, not from a read-back of the messages table.
+    summarize = AsyncMock(return_value=False)
+    with (
+        patch("app.sio", mock_sio),
+        patch("app._spawn_background", side_effect=lambda coro, name: spawned.append((name, coro))),
+        patch("app.maybe_summarize_conversation", summarize),
+    ):
+        await app_module._process_a2a_response(
+            client_event=event,
+            sid="sid",
+            request_id="req-title",
+            context_id="conv-title",
+            user_id="user-1",
+        )
+        for _, coro in spawned:
+            await coro  # the detached task, run inline
+    app_module._streaming_buffers.pop("conv-title", None)
+    app_module._titling_in_flight.discard("conv-title")
+    answers = [call.kwargs["answer"] for call in summarize.await_args_list]
+    return spawned, answers
+
+
+@pytest.mark.asyncio
+async def test_titling_gets_the_streamed_answer_when_a_turn_ends():
+    spawned, titled = await _drive_turn_end("artifact")
+    assert [name for name, _ in spawned] == ["title:conv-title"]
+    # The flushed buffer, not a database read.
+    assert titled == ["Its daily cap was lowered. Done."]
+
+
+@pytest.mark.asyncio
+async def test_titling_gets_an_answer_that_rides_a_completed_status():
+    """The regression: this shape used to schedule nothing at all, because the
+    trigger sat inside the streamed-artifact branch."""
+    spawned, titled = await _drive_turn_end("status")
+    assert [name for name, _ in spawned] == ["title:conv-title"]
+    assert titled == ["The full answer."]
+
+
+@pytest.mark.asyncio
+async def test_titling_is_not_scheduled_twice_for_one_turn():
+    import app as app_module
+
+    app_module._titling_in_flight.add("conv-title")
+    try:
+        spawned, _ = await _drive_turn_end("artifact")
+        assert spawned == []
+    finally:
+        app_module._titling_in_flight.discard("conv-title")
+
+
 @pytest.mark.asyncio
 async def test_conversation_title_with_unicode_characters():
     """Test that conversation title handles Unicode characters correctly."""

@@ -1,0 +1,92 @@
+import type { NannosStrings } from './keys';
+
+/** Italian, informal address (tu) — common register for product UI. */
+export const it: NannosStrings = {
+  'panel.title': 'Assistente',
+  'panel.close': 'Chiudi',
+  'panel.pin': 'Fissa il pannello',
+  'panel.unpin': 'Sblocca il pannello',
+  'panel.newChat': 'Nuova chat',
+  'panel.history': 'Cronologia',
+  'panel.settings': 'Impostazioni',
+
+  'composer.placeholder': 'Scrivi all’assistente…',
+  'composer.placeholderStreaming': 'Rispondi per orientare la risposta in corso…',
+  'composer.send': 'Invia',
+  'composer.stop': 'Interrompi',
+  'composer.attach': 'Allega file',
+  'composer.record': 'Registra audio',
+  'composer.recordStop': 'Interrompi la registrazione',
+  'composer.recordPermission':
+    'L’accesso al microfono è stato negato. Consenti l’accesso per registrare l’audio.',
+  'composer.recordError': 'Non è stato possibile registrare l’audio',
+  'composer.readOnly':
+    'Questa conversazione appartiene a un’altra interfaccia ed è di sola lettura qui.',
+
+  'status.connected': 'Connesso',
+  'status.connecting': 'Connessione…',
+  'status.disconnected': 'Non connesso',
+  'status.unauthenticated': 'Accesso non effettuato',
+  'status.signIn': 'Accedi',
+  'status.error': 'Errore di connessione',
+
+  'thread.emptyTitle': 'Come posso aiutarti?',
+  'thread.emptyHint': 'Fai una domanda o scegli un suggerimento.',
+  'thread.continueTitle': 'Riprendi da dove hai lasciato',
+  'thread.loadOlder': 'Carica i messaggi precedenti',
+  'thread.error': 'Qualcosa è andato storto',
+  'thread.newConversation': 'Nuova conversazione',
+  'conversations.title': 'Conversazioni',
+  'conversations.search': 'Cerca conversazioni…',
+  'conversations.empty': 'Nessuna conversazione.',
+  'conversations.noMatches': 'Nessuna conversazione corrisponde alla ricerca.',
+  'conversations.rename': 'Rinomina conversazione',
+  'conversations.renameLabel': 'Nome della conversazione',
+  'conversations.renameError': 'Impossibile rinominare la conversazione',
+  'conversations.delete': 'Elimina conversazione',
+  'conversations.deleteTitle': 'Eliminare la conversazione?',
+  'conversations.deleteBody': '«{title}» sarà rimossa dalla cronologia.',
+  'conversations.deleteConfirm': 'Elimina',
+  'conversations.deleteCancel': 'Annulla',
+  'conversations.deleteError': 'Impossibile eliminare la conversazione',
+
+  'context.label': 'Contesto: {label}',
+
+  'hitl.title': 'Conferma necessaria',
+  'hitl.approve': 'Approva',
+  'hitl.approveAll': 'Approva tutto',
+  'hitl.rejectAll': 'Rifiuta tutto',
+  'hitl.reject': 'Rifiuta',
+  'hitl.requestChanges': 'Richiedi modifiche',
+  'hitl.reasonPlaceholder': 'Indica all’assistente che cosa cambiare…',
+  'hitl.risk': 'Rischio: {level} ({percent} %)',
+  'hitl.riskCritical': 'Critico',
+  'hitl.riskHigh': 'Alto',
+  'hitl.riskMedium': 'Medio',
+  'hitl.riskLow': 'Basso',
+
+  'auth.title': 'Autorizzazione necessaria',
+  'auth.body': 'L’assistente ha bisogno della tua autorizzazione per continuare.',
+  'auth.bodyTool': 'L’assistente ha bisogno della tua autorizzazione per usare {tool}.',
+  'auth.action': 'Autorizza',
+  'auth.retryHint': 'Al termine, invia di nuovo il tuo messaggio.',
+
+  'working.title': 'Elaborazione…',
+  'thinking.title': '{agent} sta ragionando',
+
+  'feedback.helpful': 'Utile',
+  'feedback.notHelpful': 'Non utile',
+  'feedback.prompt': 'La risposta ti è stata utile?',
+  'report.title': 'Segnala un problema',
+  'report.description':
+    'Descrivi il problema riscontrato. Il nostro team lo esaminerà usando il contesto della conversazione.',
+  'report.placeholder': 'Che cosa non ha funzionato?',
+  'report.submit': 'Invia la segnalazione',
+  'report.cancel': 'Annulla',
+  'report.success': 'Problema segnalato',
+  'report.error': 'Non è stato possibile inviare la segnalazione',
+
+  'attachments.uploading': 'Caricamento…',
+  'attachments.failed': 'Caricamento non riuscito',
+  'attachments.remove': 'Rimuovi allegato',
+};

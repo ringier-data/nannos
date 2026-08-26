@@ -24,6 +24,10 @@ class SocketEvents:
     SUBSCRIBE_CONVERSATION = "subscribe_conversation"
     UNSUBSCRIBE_CONVERSATION = "unsubscribe_conversation"
     CONVERSATION_SNAPSHOT = "conversation_snapshot"
+    # The conversation ITSELF changed (not its messages): today the written title
+    # and summary that land shortly after the first exchange. Pushed to the
+    # conversation's room so every viewer's list and header update in place.
+    CONVERSATION_UPDATED = "conversation_updated"
 
     # Debugging
     DEBUG_LOG = "debug_log"

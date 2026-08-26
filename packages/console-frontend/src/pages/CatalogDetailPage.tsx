@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -47,7 +47,7 @@ import { CatalogPermissionsDialog } from '@/components/catalogs/CatalogPermissio
 import { GoogleDriveConnect } from '@/components/catalogs/GoogleDriveConnect';
 import { SourceManager } from '@/components/catalogs/SourceManager';
 import { useAuth } from '@/contexts/AuthContext';
-import { useSocket } from '@/components/chat/contexts/SocketContext';
+import { useSocketEvent } from '@nannos/embed-sdk/panel';
 import { getErrorMessage } from '@/lib/utils';
 
 export function CatalogDetailPage() {
@@ -55,7 +55,6 @@ export function CatalogDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user, adminMode } = useAuth();
-  const { onEvent } = useSocket();
   const { embeddingConfigured } = useEmbeddingConfigured();
 
   const [showEditDialog, setShowEditDialog] = useState(false);
@@ -84,12 +83,13 @@ export function CatalogDetailPage() {
   const syncActive = syncStatus?.status != null &&
     ['running', 'pending', 'paused', 'cancelling', 'reindexing'].includes(syncStatus.status);
 
-  // Push-based sync status updates via Socket.IO
-  useEffect(() => {
-    const syncStatusKey = getCatalogSyncStatusQueryKey({ path: { catalog_id: id! } });
-    const filesKey = listCatalogFilesQueryKey({ path: { catalog_id: id! } });
-    const catalogKey = getCatalogQueryKey({ path: { catalog_id: id! } });
-    return onEvent('catalog_sync_progress', (raw) => {
+  // Push-based sync status updates via Socket.IO (the shared chat-scope socket;
+  // the callback rides a ref inside useSocketEvent, so the closure stays fresh).
+  useSocketEvent('catalog_sync_progress', (raw) => {
+    {
+      const syncStatusKey = getCatalogSyncStatusQueryKey({ path: { catalog_id: id! } });
+      const filesKey = listCatalogFilesQueryKey({ path: { catalog_id: id! } });
+      const catalogKey = getCatalogQueryKey({ path: { catalog_id: id! } });
       const data = raw as { catalog_id: string; job_id: string; [key: string]: unknown };
       if (data.catalog_id !== id) return;
       // Merge incremental fields into the cached sync status
@@ -115,8 +115,8 @@ export function CatalogDetailPage() {
       if (typeof data.total_files === 'number' && data.total_files > 0) {
         queryClient.invalidateQueries({ queryKey: filesKey });
       }
-    });
-  }, [id, onEvent, queryClient]);
+    }
+  });
 
   const invalidateSyncStatus = () => {
     queryClient.invalidateQueries({ queryKey: getCatalogSyncStatusQueryKey({ path: { catalog_id: id! } }) });

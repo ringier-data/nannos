@@ -379,6 +379,12 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         if not action_requests:
             return None
 
+        # Attach a plain-language summary to each action request so the client
+        # can show non-technical users what the tool would do. Display-only
+        # (rides in args like _risk_metadata) and best-effort: on failure the
+        # client falls back to rendering the raw args.
+        await self._attach_summaries(action_requests, runtime)
+
         # Create single HITLRequest with all actions and configs
         hitl_request = HITLRequest(
             action_requests=action_requests,
@@ -444,6 +450,22 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         last_ai_msg.tool_calls = revised_tool_calls
 
         return {"messages": [last_ai_msg, *artificial_tool_messages]}
+
+    async def _attach_summaries(self, action_requests: list[ActionRequest], runtime: Runtime[ContextT]) -> None:
+        """Stamp a plain-language ``_summary`` into each action request's args.
+
+        Makes one batched fast-LLM call for the whole interrupt (in the user's
+        language from runtime context). Best-effort: any failure leaves the
+        action requests untouched.
+        """
+        from agent_common.core.tool_call_summarizer import attach_summaries
+
+        context: Any = getattr(runtime, "context", None)
+        await attach_summaries(
+            action_requests,
+            language=getattr(context, "language", None) or "en",
+            describe=lambda name: getattr(self._get_tool_instance(name, context), "description", None) or "",
+        )
 
     # ------------------------------------------------------------------
     # Helper methods for dynamic risk scoring
