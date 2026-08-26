@@ -10,7 +10,7 @@
  *   row 0 — attachments (absent while nothing is attached);
  *   row 1 — the textarea, with the mic as its only trailing button;
  *   row 2 — attach (left) · current context (stretches, text left-aligned) ·
- *           stop/send (right).
+ *           apply mode · stop/send (right).
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ChangeEvent, DragEvent, ClipboardEvent, KeyboardEvent } from 'react';
@@ -24,6 +24,7 @@ import { format, useAssistant, useStrings } from '../../react';
 import { useChatEngineOptional } from '../engine';
 import { useAttachments } from '../hooks/use-attachments';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
+import { ApplyModeSwitch } from './apply-mode-switch';
 import { AudioRecorderButton } from './audio-recorder';
 
 export interface ComposerProps {
@@ -217,10 +218,14 @@ export function Composer({ chat, className }: ComposerProps) {
           <AudioRecorderButton disabled={isReadOnly} onRecorded={(file) => addFiles([file])} />
         </div>
 
-        {/* Row 2 — attach · context · send. */}
+        {/* Row 2 — attach · context · apply mode · send. `relative` anchors the
+            apply-mode menu, which hangs ABOVE this row: positioning against the
+            row (rather than portalling) keeps it inside the shadow root and
+            bounds its width to the panel. The composer box has no overflow clip,
+            so it is free to overhang upward. */}
         <div
           data-slot="nannos-composer-actions"
-          className="flex items-center gap-1 border-t p-1"
+          className="relative flex items-center gap-1 border-t p-1"
         >
           <input ref={fileInputRef} type="file" multiple hidden onChange={handleFilePick} />
           <Button
@@ -252,6 +257,11 @@ export function Composer({ chat, className }: ComposerProps) {
               </span>
             )}
           </div>
+
+          {/* Directly left of send: whether a form fill asks first is answered
+              where the user is when they ask for one. Absent when the host
+              fixed the mode. */}
+          <ApplyModeSwitch />
 
           {/* One button, never both: a running turn offers STOP until the user
               starts typing — from that moment the only useful action is to

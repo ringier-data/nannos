@@ -25,6 +25,7 @@ from langsmith import traceable
 from pydantic import BaseModel, Field
 
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
+from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.tool_risk_cache import ParamRiskProfile, ToolRiskCache, ToolRiskEntry
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,21 @@ async def score_tool_risk(
     # actions (the SDK no longer has its own approval card). Score it deterministically
     # by `kind` — never via the LLM/cache — so an ``apply`` (writes into the user's form)
     # always interrupts for approval while ``highlight``/``navigate`` (benign) never do.
+    # notify_user only writes one sentence onto the user's own screen: it touches no
+    # backend, returns no data to the model, and cannot be made risky by its args.
+    # Score it deterministically at 0 so an approval card can never appear in front of
+    # a progress note — and so the LLM scorer is never paid for it.
+    if tool_name == NOTIFY_USER_TOOL_NAME:
+        now = datetime.now(timezone.utc)
+        return 0.0, ToolRiskEntry(
+            base_score=0.0,
+            risk_factors={},
+            allowed_actions=["approve", "reject"],
+            schema_hash="",
+            updated_at=now,
+            last_accessed_at=now,
+        )
+
     if tool_name == CLIENT_ACTION_TOOL_NAME:
         kind = (args or {}).get("kind")
         score = _CLIENT_ACTION_KIND_SCORES.get(kind, _CLIENT_ACTION_DEFAULT_SCORE)

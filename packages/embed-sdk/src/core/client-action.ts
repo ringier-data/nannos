@@ -102,6 +102,48 @@ export async function executeClientAction(
 }
 
 /**
+ * Build a wire directive from the agent's RAW TOOL ARGS — the flat, snake_case
+ * shape the risk-gate approval card receives (`{ kind, target_type, target_id,
+ * values, field, to }`), not the nested `{ target: { type, id } }` the directive
+ * union uses.
+ *
+ * This is what lets ONE pause cover an approved `client_action`: the host runs
+ * the directive the moment the user approves the card and returns the outcome on
+ * the decision itself, instead of the agent resuming only to interrupt again for
+ * the result. It mirrors `_client_action_handler` in `client_action_tool.py`;
+ * `clientActionDirective` still validates the result, so a mismatch degrades to
+ * `null` (the caller then approves plainly and the old two-pause path runs).
+ */
+export function directiveFromToolArgs(args: unknown): unknown | null {
+  const a = args as Record<string, unknown> | null | undefined;
+  const kind = a?.kind;
+  if (typeof kind !== 'string') return null;
+  const targetType = a?.target_type;
+  const targetId = a?.target_id;
+  const target =
+    typeof targetType === 'string' && typeof targetId === 'string'
+      ? { type: targetType, id: targetId }
+      : null;
+
+  switch (kind) {
+    case 'apply':
+      if (!target) return null;
+      return { kind, target, values: a?.values ?? {} };
+    case 'highlight':
+      if (!target) return null;
+      return { kind, target, ...(typeof a?.field === 'string' && { field: a.field }) };
+    case 'navigate':
+      return typeof a?.to === 'string' ? { kind, to: a.to } : null;
+    case 'read_current_page':
+      return { kind };
+    default:
+      // An unknown kind is the agent's, not ours, to interpret: hand it back to
+      // the round trip rather than guessing a directive shape for it.
+      return null;
+  }
+}
+
+/**
  * Unwrap a client-action directive from a raw `agent_response` event. Directives
  * ride status-update events tagged with `CLIENT_ACTION_EXT`, nested at
  * `status.message.parts[].data.directive` — they never appear at the top level.

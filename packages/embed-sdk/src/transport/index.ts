@@ -19,7 +19,9 @@ export {
 export { encodeApproval, decodeApproval, type Decision, type ApprovalResponse } from './approval-codec';
 export { sliceFromCodePoint, codePointLength } from './offsets';
 export { ConnectionStore, type ConnectionSnapshot } from './connection-store';
-export { WireLog, labelAgentEvent, type WireLogEntry } from './wire-log';
+export { WireLog, labelAgentEvent, type WireLogEntry, type ReplayEntry } from './wire-log';
+export { WireStore } from './wire-store';
+export { fetchWireHistory } from './wire-history';
 export {
   ConversationsStore,
   MAX_CONVERSATION_TITLE,

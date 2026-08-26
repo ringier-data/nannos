@@ -10,6 +10,7 @@ import { Switch } from '../components/ui/switch';
 import { cn } from '../lib/utils';
 import { useAssistant, useStrings, type NannosHostAdapter } from '../react';
 import { NannosChatScope, type PlaygroundMode } from './engine';
+import { ApplyModeProvider, type ApplyMode } from './apply-mode';
 import { ShadowPortal } from './shadow-portal';
 import { useConversations } from './hooks/use-conversations';
 import { useNannosChat } from './hooks/use-nannos-chat';
@@ -55,6 +56,13 @@ export interface AssistantPanelProps {
    * `localStorage['nannos:dev'] = '1'` enables it without a rebuild.
    */
   devMode?: boolean;
+  /**
+   * How much the assistant may do to a form on its own — see `apply-mode.tsx`.
+   * `'manual'` asks before every fill; `'allow-edits'` lets the panel answer
+   * for the user. Set → the host decides and the header shows no control;
+   * unset → the viewer chooses, remembered in this browser.
+   */
+  applyMode?: ApplyMode;
 }
 
 /** Dev-only (English on purpose): flips the dev chrome off to preview the
@@ -222,20 +230,23 @@ export function AssistantPanel({
   playground,
   adapter,
   devMode,
+  applyMode,
 }: AssistantPanelProps) {
   const content = <PanelContent header={header} showConversationList={showConversationList} />;
 
   return (
     <DevModeProvider enabled={resolveDevMode(devMode)}>
-      <NannosChatScope customHeaders={customHeaders} playground={playground} adapter={adapter}>
-        {shadow ? (
-          <ShadowPortal hostClassName={hostClassName} styles={styles} className={className}>
-            {content}
-          </ShadowPortal>
-        ) : (
-          <div className={cn('nannos-chat flex h-full w-full flex-col', className)}>{content}</div>
-        )}
-      </NannosChatScope>
+      <ApplyModeProvider mode={applyMode}>
+        <NannosChatScope customHeaders={customHeaders} playground={playground} adapter={adapter}>
+          {shadow ? (
+            <ShadowPortal hostClassName={hostClassName} styles={styles} className={className}>
+              {content}
+            </ShadowPortal>
+          ) : (
+            <div className={cn('nannos-chat flex h-full w-full flex-col', className)}>{content}</div>
+          )}
+        </NannosChatScope>
+      </ApplyModeProvider>
     </DevModeProvider>
   );
 }

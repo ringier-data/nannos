@@ -165,6 +165,58 @@ class TestDynamicLocalAgentRunnable:
         # And it is accepted on a TaskUpdate's event_metadata union.
         assert TaskUpdate(event_metadata=meta).event_metadata is meta
 
+    # --- Mid-turn notes (notify_user) ---
+
+    @pytest.mark.asyncio
+    async def test_user_note_event_becomes_an_activity_log_line_marked_note(self, basic_config, mock_model):
+        """A notify_user note reaches the client as an activity-log line carrying
+        kind='note', so the execute-only adapter can style the agent's own words apart
+        from a mechanical tool label. It is NOT a terminal event — the turn continues."""
+        from agent_common.a2a.stream_events import ActivityLogMeta
+        from agent_common.core.notify_user_tool import USER_NOTE_EVENT
+
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+
+        mock_graph = AsyncMock()
+        mock_graph.with_config = MagicMock(return_value=mock_graph)
+
+        async def note_stream(*args, **kwargs):
+            yield {"type": "custom", "ns": (), "data": (USER_NOTE_EVENT, {"message": "Understood — starting now."})}
+            # An empty note must be dropped rather than shown as a blank line.
+            yield {"type": "custom", "ns": (), "data": (USER_NOTE_EVENT, {"message": ""})}
+
+        mock_graph.astream = note_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
+
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
+
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.retrieve_final_state", return_value=final_state),
+        ):
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do the thing.")]),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
+
+        notes = [
+            e
+            for e in events
+            if isinstance(e, TaskUpdate) and isinstance(e.event_metadata, ActivityLogMeta) and e.event_metadata.kind
+        ]
+        assert len(notes) == 1
+        assert notes[0].status_text == "Understood — starting now."
+        assert notes[0].event_metadata.kind == "note"
+        assert not notes[0].data.is_complete  # a note never ends the turn
+
     def test_inherits_orchestrator_tools(self, basic_config, mock_model):
         """Test that no tool is inherited when no MCP tools specified."""
 

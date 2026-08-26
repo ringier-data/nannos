@@ -15,12 +15,31 @@ const ScrollArea = React.forwardRef<
     <ScrollAreaPrimitive.Root
       ref={ref}
       data-slot="scroll-area"
-      className={cn("relative", className)}
+      className={cn("relative flex flex-col", className)}
       {...props}
     >
+      {/* Sized by flex, not `h-full`: a percentage height fails inside a flex
+          chain constrained only by `max-height` (the history popover) — Chrome
+          resolves it against the UNCLAMPED content height, so the viewport
+          overflows its box and can't scroll. `flex-1` tracks the root's real
+          height either way, and in an auto-height root (queue, suggestions) it
+          still collapses to content. The scrollbar and corner are absolutely
+          positioned, so the flex root doesn't move them.
+
+          `[&>div]:block!` undoes the wrapper Radix puts around the children
+          with an inline `display: table` (hence the `!`, which an inline style
+          only loses to). A CSS table is sized by its MIN-CONTENT, and the
+          min-content of a `truncate` row is the whole untruncated line — so
+          rows grew WIDER than the viewport instead of truncating, pushing
+          everything on their right edge (the conversation list's timestamp and
+          its floating rename/delete buttons) out of sight, with no horizontal
+          scrollbar to reach them. As a block it is simply the viewport's width
+          and the children truncate again. Horizontal scrolling still works
+          where it is wanted (`<Suggestions>`): its `w-max` row overflows the
+          block and the viewport scrolls it. */}
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="focus-visible:ring-ring/50 size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:outline-1"
+        className="focus-visible:ring-ring/50 min-h-0 w-full flex-1 rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:outline-1 [&>div]:block!"
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

@@ -106,9 +106,12 @@ class TaskResponseData(BaseModel):
 
 
 class ActivityLogMeta(BaseModel):
-    """Marker metadata for activity-log (tool-call / delegation) events."""
+    """Marker metadata for activity-log (tool-call / delegation / note) events."""
 
     activity_log: Literal[True] = True
+    kind: Optional[str] = None
+    """``"note"`` for a mid-turn note the agent wrote for the user (``notify_user``);
+    ``None`` for the ordinary mechanical line (a tool ran, work was delegated)."""
 
 
 class WorkPlanMeta(BaseModel):

@@ -9,7 +9,7 @@
  * answered one leaves nothing behind (dev mode aside) — the tool's own activity
  * lines already tell that story.
  */
-import { BugIcon, ChevronDownIcon, FileIcon, FileTextIcon, ImageIcon } from 'lucide-react';
+import { BugIcon, ChevronDownIcon, FileIcon, FileTextIcon, ImageIcon, MessageCircleDashedIcon } from 'lucide-react';
 import {
   Conversation,
   ConversationContent,
@@ -31,6 +31,7 @@ import { useStrings } from '../../react';
 import { textArrivalTs } from '../../transport';
 import type { NannosUIMessage } from '../../transport';
 import { useDevMode } from '../dev-mode';
+import { toolPartTitle } from '../tool-title';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
 import { AuthRequiredCard } from './auth-required-card';
 import { ContextChip } from './context-chip';
@@ -121,7 +122,7 @@ function DevTimestamp({ ts }: { ts?: number }) {
   );
 }
 
-function AssistantPart({ part }: { part: MessagePart }) {
+function AssistantPart({ part, send }: { part: MessagePart; send: UseNannosChatValue['send'] }) {
   const devMode = useDevMode();
 
   if (part.type === 'text') {
@@ -137,8 +138,29 @@ function AssistantPart({ part }: { part: MessagePart }) {
   }
 
   if (part.type === 'data-activity') {
+    // A mid-turn note is the agent SPEAKING while it works (`notify_user`), not a
+    // machine label. It reads at answer size against an accent rule, so the eye
+    // separates "understood, doing X" from the grey stream of tool lines around
+    // it — and still stays in the timeline, where its order among those lines is
+    // the whole point. Everything else keeps the muted micro-line.
+    if (part.data.kind === 'note') {
+      return (
+        <div
+          data-slot="nannos-agent-note"
+          className="border-primary/40 text-foreground border-l-2 py-0.5 pl-2.5 text-sm"
+        >
+          {devMode && (
+            <>
+              <DevTimestamp ts={part.data.ts} />{' '}
+            </>
+          )}
+          {part.data.source && <span className="font-medium">{part.data.source} › </span>}
+          {part.data.text}
+        </div>
+      );
+    }
     return (
-      <div className="text-muted-foreground text-xs">
+      <div data-slot="nannos-activity" className="text-muted-foreground text-xs">
         {devMode && (
           <>
             <DevTimestamp ts={part.data.ts} />{' '}
@@ -167,7 +189,7 @@ function AssistantPart({ part }: { part: MessagePart }) {
   }
 
   if (part.type === 'data-auth-required') {
-    return <AuthRequiredCard data={part.data} />;
+    return <AuthRequiredCard data={part.data} send={send} />;
   }
 
   if (part.type === 'data-workplan') {
@@ -193,7 +215,12 @@ function AssistantPart({ part }: { part: MessagePart }) {
           <BugIcon aria-hidden="true" className="size-3 shrink-0" /> dev only
         </span>
         <Tool data-slot="nannos-tool">
-          <ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} />
+          <ToolHeader
+            type="dynamic-tool"
+            state={part.state}
+            toolName={part.toolName}
+            title={toolPartTitle(part.toolName, part.input)}
+          />
           <ToolContent>
             {part.input !== undefined && <ToolInput input={part.input} />}
             <ToolOutput output={part.output} errorText={part.errorText} />
@@ -236,11 +263,14 @@ function ThreadMessage({
   message,
   conversationId,
   showActions,
+  send,
 }: {
   message: NannosUIMessage;
   conversationId: string;
   /** False while this is the streaming last message of a busy turn. */
   showActions: boolean;
+  /** Reaches the authorization card, whose confirm button sends a turn. */
+  send: UseNannosChatValue['send'];
 }) {
   if (message.role === 'user') {
     if (message.metadata?.display) return <ContextChip message={message} />;
@@ -250,7 +280,7 @@ function ThreadMessage({
     return (
       <div className="group/nannos-message flex w-full flex-col gap-2">
         {message.parts.map((part, index) => (
-          <AssistantPart key={`${message.id}-${index}`} part={part} />
+          <AssistantPart key={`${message.id}-${index}`} part={part} send={send} />
         ))}
         {showActions && <AssistantActions conversationId={conversationId} message={message} />}
       </div>
@@ -311,6 +341,7 @@ export function Thread({ chat, className, showContinue = true }: ThreadProps) {
                 message={message}
                 conversationId={chat.conversationId}
                 showActions={!(chat.isBusy && index === chat.messages.length - 1)}
+                send={chat.send}
               />
             ))}
           </ConversationFeedbackProvider>

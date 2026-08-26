@@ -12,7 +12,7 @@ import pytest
 
 from agent_common.core.client_action_tool import (
     _client_action_handler,
-    _render_client_action_result,
+    render_client_action_result,
 )
 
 MODULE = "agent_common.core.client_action_tool"
@@ -128,5 +128,5 @@ class TestFireAndForgetUnchanged:
 
 class TestResultRendering:
     def test_non_dict_result_never_reads_as_success(self):
-        assert "do not assume" in _render_client_action_result("apply", None).lower()
-        assert "do not assume" in _render_client_action_result("apply", "weird").lower()
+        assert "do not assume" in render_client_action_result("apply", None).lower()
+        assert "do not assume" in render_client_action_result("apply", "weird").lower()

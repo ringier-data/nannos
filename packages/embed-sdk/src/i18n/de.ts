@@ -10,7 +10,7 @@ export const de: NannosStrings = {
   'panel.history': 'Verlauf',
   'panel.settings': 'Einstellungen',
 
-  'composer.placeholder': 'Nachricht an den Assistenten…',
+  'composer.placeholder': 'Nachricht an Nannos…',
   'composer.placeholderStreaming': 'Antworten, um die laufende Antwort zu lenken…',
   'composer.send': 'Senden',
   'composer.stop': 'Stoppen',
@@ -51,7 +51,7 @@ export const de: NannosStrings = {
 
   'context.label': 'Kontext: {label}',
 
-  'hitl.title': 'Bestätigung erforderlich',
+  'hitl.title': 'Bestätigung erforderlich für {toolName}',
   'hitl.approve': 'Bestätigen',
   'hitl.approveAll': 'Alle bestätigen',
   'hitl.rejectAll': 'Alle ablehnen',
@@ -63,12 +63,30 @@ export const de: NannosStrings = {
   'hitl.riskHigh': 'Hoch',
   'hitl.riskMedium': 'Mittel',
   'hitl.riskLow': 'Niedrig',
+  'hitl.diff.field': 'Feld',
+  'hitl.diff.current': 'Aktuell',
+  'hitl.diff.new': 'Neu',
+  'hitl.clientAction.apply': 'Füllt ein Formular auf dieser Seite aus.',
+  'hitl.clientAction.highlight': 'Zeigt auf etwas auf dieser Seite.',
+  'hitl.clientAction.navigate': 'Öffnet eine andere Seite in dieser App.',
+  'hitl.clientAction.readCurrentPage': 'Liest, was auf dieser Seite steht.',
+
+  'applyMode.heading': 'Modi',
+  'applyMode.manual': 'Manuell',
+  'applyMode.allowEdits': 'Änderungen erlauben',
+  'applyMode.manualHint': 'Nannos fragt nach, bevor es ein Formular ausfüllt',
+  'applyMode.allowEditsHint':
+    'Nannos füllt Formulare ohne Rückfrage aus. Sie prüfen und speichern weiterhin selbst',
+  'applyMode.label': 'Ändern, wie Nannos Formulare ausfüllt',
 
   'auth.title': 'Freigabe erforderlich',
-  'auth.body': 'Der Assistent benötigt Ihre Freigabe, um fortzufahren.',
-  'auth.bodyTool': 'Der Assistent benötigt Ihre Freigabe für {tool}.',
+  'auth.body': 'Nannos benötigt Ihre Freigabe, um fortzufahren.',
+  'auth.bodyTool': 'Nannos benötigt Ihre Freigabe für {tool}.',
   'auth.action': 'Freigeben',
-  'auth.retryHint': 'Senden Sie Ihre Nachricht danach noch einmal.',
+  'auth.retryHint': 'Schliessen Sie die Freigabe im neuen Fenster ab und fahren Sie dann hier fort.',
+  'auth.doneAction': 'Fertig, weiter',
+  'auth.retryAction': 'Erneut freigeben',
+  'auth.doneChip': 'Freigabe erteilt',
 
   'working.title': 'Arbeitet…',
   'thinking.title': '{agent} denkt nach',

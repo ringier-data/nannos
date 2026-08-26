@@ -52,7 +52,7 @@ export const fr: NannosStrings = {
 
   'context.label': 'Contexte : {label}',
 
-  'hitl.title': 'Confirmation requise',
+  'hitl.title': 'Confirmation requise pour {toolName}',
   'hitl.approve': 'Approuver',
   'hitl.approveAll': 'Tout approuver',
   'hitl.rejectAll': 'Tout refuser',
@@ -64,12 +64,30 @@ export const fr: NannosStrings = {
   'hitl.riskHigh': 'Élevé',
   'hitl.riskMedium': 'Moyen',
   'hitl.riskLow': 'Faible',
+  'hitl.diff.field': 'Champ',
+  'hitl.diff.current': 'Actuel',
+  'hitl.diff.new': 'Nouveau',
+  'hitl.clientAction.apply': 'Remplit un formulaire sur cette page.',
+  'hitl.clientAction.highlight': 'Montre un élément de cette page.',
+  'hitl.clientAction.navigate': 'Ouvre une autre page de cette application.',
+  'hitl.clientAction.readCurrentPage': 'Lit ce qui se trouve sur cette page.',
+
+  'applyMode.heading': 'Modes',
+  'applyMode.manual': 'Manuel',
+  'applyMode.allowEdits': 'Autoriser les modifications',
+  'applyMode.manualHint': 'L’assistant demande votre accord avant de remplir un formulaire',
+  'applyMode.allowEditsHint':
+    'L’assistant remplit les formulaires sans demander. Vous vérifiez et enregistrez vous-même',
+  'applyMode.label': 'Changer la façon dont l’assistant remplit les formulaires',
 
   'auth.title': 'Autorisation requise',
   'auth.body': 'L’assistant a besoin de votre autorisation pour continuer.',
   'auth.bodyTool': 'L’assistant a besoin de votre autorisation pour utiliser {tool}.',
   'auth.action': 'Autoriser',
-  'auth.retryHint': 'Envoyez ensuite votre message à nouveau.',
+  'auth.retryHint': 'Terminez l’autorisation dans la nouvelle fenêtre, puis continuez ici.',
+  'auth.doneAction': 'Terminé, continuer',
+  'auth.retryAction': 'Autoriser à nouveau',
+  'auth.doneChip': 'Autorisation accordée',
 
   'working.title': 'Traitement…',
   'thinking.title': '{agent} réfléchit',

@@ -73,8 +73,8 @@ export const Confirmation = ({
 
   return (
     <ConfirmationContext.Provider value={contextValue}>
-      <Alert
-        className={cn("flex flex-col gap-1.5 rounded-md px-2.5 py-2", className)}
+      <div
+        className={cn("flex flex-col gap-1.5 py-2", className)}
         {...props}
       />
     </ConfirmationContext.Provider>

@@ -26,6 +26,7 @@ import {
   textOfUserMessage,
   type SendContext,
 } from './send-payload';
+import { isClientActionPartId } from './approval-codec';
 import { TurnSession, type TurnFinishReason, type TurnSessionInit } from './turn-session';
 import { labelAgentEvent, type WireLog } from './wire-log';
 
@@ -161,7 +162,7 @@ export class A2AChatTransport implements ChatTransport<NannosUIMessage> {
         : buildHitlResumePayload({
             messageId: sendId,
             conversationId: chatId,
-            decisions: classified.decisions,
+            decisions: classified.answered.map((a) => a.decision),
             ctx,
           });
 
@@ -182,30 +183,38 @@ export class A2AChatTransport implements ChatTransport<NannosUIMessage> {
         ? this.createSession(chatId, { startMessageId: assistantMessageId })
         : this.createSession(chatId, {
             startMessageId: null,
-            // What this turn has already answered — a stale prompt replay for
-            // these calls is dropped instead of re-rendered.
-            answeredCallIds: classified.decisions
-              .map((d) => d.id)
-              .filter((id): id is string => !!id),
+            // What this turn has already answered — a stale prompt replay of
+            // the SAME kind for these calls is dropped instead of re-rendered.
+            // The PART id says which kind was answered: only a client-action
+            // request's part carries the suffix. It cannot be read off the
+            // payload — an approved risk gate now also carries a result, since
+            // the host runs the directive at approve-time.
+            answeredApprovals: classified.answered
+              .filter((a) => !!a.decision.id)
+              .map((a) => ({
+                id: a.decision.id!,
+                kind: isClientActionPartId(a.partId) ? ('client-action' as const) : ('hitl' as const),
+              })),
             initialChunks: [
-              ...classified.decisions
-                .filter((d) => d.id != null)
-                .map((d): NannosUIMessageChunk =>
-                  d.type === 'approve'
-                    ? {
-                        type: 'tool-output-available',
-                        toolCallId: d.id!,
-                        output: {
-                          approved: true,
-                          ...(d.bypass && { bypass: true }),
-                          // Client-action round trip: the settled part shows WHAT
-                          // the browser actually did (applied/rejected fields).
-                          ...(d.client_action_result && { result: d.client_action_result }),
-                        },
-                        dynamic: true,
-                      }
-                    : { type: 'tool-output-denied', toolCallId: d.id! },
-                ),
+              // Settle the part the answer actually came from, by its own id.
+              ...classified.answered.map(({ partId, decision }): NannosUIMessageChunk =>
+                decision.type === 'approve'
+                  ? {
+                      type: 'tool-output-available',
+                      toolCallId: partId,
+                      output: {
+                        approved: true,
+                        ...(decision.bypass && { bypass: true }),
+                        // The settled part shows WHAT the browser actually did
+                        // (applied / rejected fields), whichever path ran it.
+                        ...(decision.client_action_result && {
+                          result: decision.client_action_result,
+                        }),
+                      },
+                      dynamic: true,
+                    }
+                  : { type: 'tool-output-denied', toolCallId: partId },
+              ),
               { type: 'start-step' },
             ],
           });

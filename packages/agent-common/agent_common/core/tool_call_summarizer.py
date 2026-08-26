@@ -10,6 +10,13 @@ The summary is display-only: the middleware stamps it into the action
 request's args as ``_summary`` (next to ``_call_id``/``_risk_metadata``),
 and the embed-sdk approval card renders it. Failures never block the
 interrupt — callers get ``None`` and show the raw args as before.
+
+Every caller runs this immediately BEFORE ``interrupt()``, and LangGraph
+re-executes a resumed task from the top — so a naive call is paid twice: once
+to draw the card, and once on the resume, for a sentence that can no longer be
+shown to anyone. ``attach_summaries`` therefore skips itself while a resume is
+pending (see ``_resume_pending``). Measured on an embedded ``client_action``
+apply: the wasted call sat in front of the form write for 15.6 s.
 """
 
 from __future__ import annotations
@@ -22,10 +29,20 @@ from typing import Any
 from langsmith import traceable
 from pydantic import BaseModel, Field
 
+from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
+
 logger = logging.getLogger(__name__)
 
 # Keys stamped by the middleware for the client; meaningless to the LLM.
 _INTERNAL_ARG_KEYS = frozenset({"_call_id", "_risk_metadata", "_summary", "reason"})
+
+# Tools whose own arguments already say what they do, in a fixed vocabulary the
+# client can render itself — and better, because it renders in the user's
+# language without a translation round trip. ``client_action`` is the case:
+# ``kind`` is one of four literals ("apply" = fills out a form on the page), and
+# the embed SDK maps each to a localized sentence. Paying a fast-LLM call to
+# rewrite a closed enum bought nothing and cost 3.35 s in front of the card.
+_SELF_EVIDENT_TOOLS = frozenset({CLIENT_ACTION_TOOL_NAME})
 
 # Keep the prompt bounded even if a tool call carries a huge payload.
 _MAX_VALUE_CHARS = 300
@@ -121,6 +138,34 @@ async def summarize_action_requests(
     return [summary.strip() for summary in result.summaries]
 
 
+def _resume_pending() -> bool:
+    """True when the next ``interrupt()`` in this task will RETURN, not pause.
+
+    A resumed LangGraph task replays from the top of the node, so everything in
+    front of its ``interrupt()`` runs a second time. On that pass the interrupt
+    value is discarded (``interrupt`` hands back the stored decision instead of
+    raising), which makes any summary computed for it pure waste — and it sits
+    on the critical path between the user's click and the tool actually running.
+
+    Read-only probe of the same scratchpad ``interrupt()`` itself reads
+    (``langgraph.types.interrupt``): a recorded ``resume`` value, or a queued
+    null-resume peeked WITHOUT consuming it. Private LangGraph internals, so any
+    failure answers "not resuming" and we summarize exactly as before.
+    """
+    try:
+        from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
+        from langgraph.config import get_config
+
+        scratchpad = get_config()["configurable"][CONFIG_KEY_SCRATCHPAD]
+        if scratchpad.resume:
+            return True
+        # consume=False — taking the value here would starve the real interrupt.
+        return scratchpad.get_null_resume(False) is not None
+    except Exception:  # noqa: BLE001 — best-effort probe; never block the interrupt
+        logger.debug("Resume probe unavailable; summarizing as usual", exc_info=True)
+        return False
+
+
 async def attach_summaries(
     action_requests: list[Any],
     *,
@@ -140,8 +185,23 @@ async def attach_summaries(
         language: ISO 639-1 code of the user's preferred language.
         describe: Optional tool-name -> description lookup for grounding.
     """
+    if _resume_pending():
+        # Replay of a resumed task: the card was drawn (and answered) on the
+        # first pass. Summarizing again would only delay the resumed tool.
+        logger.debug("Skipping tool-call summaries: interrupt is resuming")
+        return
+
+    # Only the requests that actually need prose reach the model. A batch that is
+    # entirely self-evident (the embedded case: one `client_action`) skips the
+    # call altogether; a mixed batch still summarizes the rest, and the
+    # self-evident ones keep their args untouched for the client to render.
+    needs_prose = [r for r in action_requests if r["name"] not in _SELF_EVIDENT_TOOLS]
+    if not needs_prose:
+        logger.debug("Skipping tool-call summaries: every request is self-evident")
+        return
+
     calls: list[tuple[str, dict[str, Any], str]] = []
-    for action_request in action_requests:
+    for action_request in needs_prose:
         tool_name = action_request["name"]
         description = ""
         if describe is not None:
@@ -155,6 +215,6 @@ async def attach_summaries(
     if summaries is None:
         return
 
-    for action_request, summary in zip(action_requests, summaries):
+    for action_request, summary in zip(needs_prose, summaries):
         if summary:
             action_request["args"] = {**action_request.get("args", {}), "_summary": summary}

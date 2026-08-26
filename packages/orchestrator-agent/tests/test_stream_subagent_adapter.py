@@ -95,6 +95,27 @@ async def test_maps_work_plan_client_action_and_activity_log():
     assert items[1].metadata["client_action"] == directive
     assert items[2].metadata["activity_log"] is True
     assert items[2].content == "Using cockpit_api…"
+    # A mechanical line carries no kind — only a notify_user note does (below).
+    assert "kind" not in items[2].metadata
+
+
+@pytest.mark.asyncio
+async def test_maps_mid_turn_note_with_its_kind_marker():
+    """A notify_user note rides the activity-log channel with kind='note', so clients
+    can style the agent's own words apart from a tool label. The task stays WORKING."""
+    runnable = _FakeRunnable(
+        events=[
+            TaskUpdate(
+                status_text="Understood — I'll pull last week's numbers first.",
+                event_metadata=ActivityLogMeta(kind="note"),
+            )
+        ]
+    )
+    items = await _collect(_agent(), runnable)
+    assert len(items) == 1
+    assert items[0].state == TaskState.TASK_STATE_WORKING
+    assert items[0].metadata == {"activity_log": True, "kind": "note"}
+    assert items[0].content == "Understood — I'll pull last week's numbers first."
 
 
 @pytest.mark.asyncio

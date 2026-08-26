@@ -71,7 +71,9 @@ from typing_extensions import NotRequired
 from agent_common.backends.attachments_store import ContextScopedAttachmentsBackend
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
+from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
 from agent_common.core.model_factory import is_gemini_model
+from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.ptc_discovery import (
     PTC_DESCRIBE_TOOL_NAME,
     PTC_SEARCH_TOOL_NAME,
@@ -298,6 +300,21 @@ _PTC_SANDBOX_TOOLS: frozenset[str] = frozenset({"execute"})
 #   - ``write_todos``: planning/UI tool whose effect is the work-plan stream.
 #   - ``FinalResponseSchema`` / ``SubAgentResponseSchema``: structured-response
 #     schema "tools" — not executable; selecting them terminates the turn.
+#   - ``client_action`` / ``notify_user``: both reach the USER, not a backend, and
+#     both do it through machinery the PTC bridge cannot provide. The bridge
+#     dispatches tools via ``asyncio.run_coroutine_threadsafe`` from a worker
+#     thread, which runs them in a FRESH context (the reason ptc_guard keeps its
+#     approval collector in a module dict rather than a ContextVar). So inside
+#     ``eval``: ``get_stream_writer()`` finds no writer, which kills
+#     ``notify_user`` and ``client_action``'s fire-and-forget kinds
+#     (navigate/highlight); and ``interrupt()`` cannot be raised cleanly, which
+#     kills the awaited round trip (``apply``/``read_current_page``) — the turn
+#     never parks, so the browser is never asked and never answers. Since every
+#     PTC-exposed tool is also STRIPPED from the model's bound list, exposing
+#     these made them unreachable by any working path: the model could only call
+#     them from inside ``eval``, where they always fail. Excluding them keeps
+#     them natively bound and running through ``ToolNode``, where both the stream
+#     writer and ``interrupt()`` work.
 # The PTC self tool (``eval``) is always auto-excluded by ``filter_tools_for_ptc``.
 _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -305,6 +322,8 @@ _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
         "write_todos",
         "FinalResponseSchema",
         "SubAgentResponseSchema",
+        CLIENT_ACTION_TOOL_NAME,
+        NOTIFY_USER_TOOL_NAME,
     }
 )
 

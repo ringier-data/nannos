@@ -91,6 +91,7 @@ from agent_common.core.graph_utils import (
 )
 from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.core.catalogue_ingest import fetch_catalogue_mcp
+from agent_common.core.notify_user_tool import NOTE_KIND, USER_NOTE_EVENT
 from agent_common.core.token_provider import UserTokenProvider, bearer_interceptor
 from agent_common.core.tool_catalog import TOOL_CATALOG_PROMPT_ADDENDUM, ToolCatalogMiddleware
 from agent_common.core.tool_catalogue import make_lazy_tool
@@ -1393,8 +1394,13 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # sub-agents don't get an unused tool.
         if self.client_action_enabled:
             from agent_common.core.client_action_tool import create_client_action_tool
+            from agent_common.core.notify_user_tool import create_notify_user_tool
 
-            tools = [*tools, create_client_action_tool()]
+            # notify_user comes with it: as the embedded entrypoint this agent talks to
+            # the user directly (no orchestrator turn in front of it), so it needs its
+            # own way to say "understood, doing X" while it works. Delegated sub-agents
+            # are already narrated by the orchestrator's delegation activity lines.
+            tools = [*tools, create_client_action_tool(), create_notify_user_tool()]
 
         # Cache intermediate state for _build_graph() (used by both paths)
         self._cached_tools = tools
@@ -1839,6 +1845,16 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                             if event_type == "client_action" and payload.get("directive"):
                                 yield TaskUpdate(
                                     event_metadata=ClientActionMeta(client_action=payload["directive"]),
+                                )
+                                continue
+                            # Mid-turn note from the notify_user tool: the agent's own
+                            # words for the user, carried on the activity-log channel
+                            # with a kind marker so a client can style it apart from a
+                            # mechanical tool line. The task stays WORKING.
+                            if event_type == USER_NOTE_EVENT and payload.get("message"):
+                                yield TaskUpdate(
+                                    status_text=payload["message"],
+                                    event_metadata=ActivityLogMeta(kind=NOTE_KIND),
                                 )
                                 continue
                             status = payload.get("status")

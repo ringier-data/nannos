@@ -15,6 +15,7 @@ import { createNannos } from '../core';
 import { NannosProvider, useAssistant, type AssistantValue, type NannosHostAdapter } from '../react';
 import type { NannosUIMessage } from '../transport';
 import { NannosChatScope, useChatEngine, type ChatEngine } from './engine';
+import { ApplyModeProvider, type ApplyMode } from './apply-mode';
 import { useNannosChat, type UseNannosChatValue } from './hooks/use-nannos-chat';
 
 /** Socket fake mirroring connection-store.test.ts: handlers by name, emits captured. */
@@ -298,5 +299,184 @@ describe('client-action round trip (awaited apply)', () => {
 
     // Machine-answered: at no point was a human approval surfaced.
     expect(chatValue!.interrupt.pending).toHaveLength(0);
+  });
+});
+
+describe('apply mode: the risk-gated fill', () => {
+  /** A registry the agent can write into, plus a mounted chat surface in `mode`. */
+  function mountWithMode(mode: ApplyMode | undefined, conversationId: string) {
+    const sockets: FakeSocket[] = [];
+    const applied: Array<Record<string, unknown>> = [];
+    const core = createNannos({}, () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket as unknown as Socket;
+    });
+    core.register({
+      type: 'Campaign',
+      id: 'new',
+      scope: 'create',
+      fields: ['name', 'budget'],
+      getState: () => ({}),
+      apply: (values) => {
+        applied.push(values as Record<string, unknown>);
+        return { applied: ['name', 'budget'], rejected: [] };
+      },
+    });
+
+    let chatValue: UseNannosChatValue | null = null;
+    function Probe() {
+      chatValue = useNannosChat(conversationId);
+      return null;
+    }
+    render(
+      <StrictMode>
+        <NannosProvider core={core}>
+          <ApplyModeProvider mode={mode}>
+            <NannosChatScope adapter={ADAPTER}>
+              <Probe />
+            </NannosChatScope>
+          </ApplyModeProvider>
+        </NannosProvider>
+      </StrictMode>,
+    );
+    return {
+      socket: () => sockets[sockets.length - 1]!,
+      chat: () => chatValue!,
+      applied,
+      sends: () => sockets[sockets.length - 1]!.emitted.filter(([e]) => e === 'send_message'),
+    };
+  }
+
+  /** The risk gate the agent raises for a `client_action` apply: FLAT tool args. */
+  function gate(contextId: string, callId = 'tooluse_1') {
+    return {
+      kind: 'status-update',
+      contextId,
+      status: {
+        state: 'input-required',
+        message: {
+          extensions: ['urn:nannos:a2a:human-in-the-loop:1.0'],
+          parts: [
+            { kind: 'text', text: 'Tool needs approval' },
+            {
+              kind: 'data',
+              data: {
+                action_requests: [
+                  {
+                    name: 'client_action',
+                    args: {
+                      _call_id: callId,
+                      _risk_metadata: { source: 'risk_score', score: 0.9 },
+                      kind: 'apply',
+                      target_type: 'Campaign',
+                      target_id: 'new',
+                      values: { name: 'Test Campaign 001', budget: '25000' },
+                    },
+                  },
+                ],
+                review_configs: [
+                  { action_name: 'client_action', allowed_decisions: ['approve', 'reject'] },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  it('manual: the fill waits for a human and touches nothing until then', async () => {
+    const h = mountWithMode('manual', 'conv-manual');
+    await handshake(h.socket());
+    await act(async () => {
+      h.chat().send('fill out the form');
+    });
+    await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
+
+    await act(async () => {
+      h.socket().fire('agent_response', gate('conv-manual'));
+    });
+
+    // The card is up, the form is untouched, and no resume went out.
+    await vi.waitFor(() => expect(h.chat().interrupt.pending).toHaveLength(1));
+    expect(h.chat().interrupt.pending[0].toolName).toBe('client_action');
+    expect(h.applied).toHaveLength(0);
+    expect(h.sends()).toHaveLength(1);
+  });
+
+  it('allow-edits: the panel answers, the form is written, ONE resume carries the result', async () => {
+    const h = mountWithMode('allow-edits', 'conv-allow');
+    await handshake(h.socket());
+    await act(async () => {
+      h.chat().send('fill out the form');
+    });
+    await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
+
+    await act(async () => {
+      h.socket().fire('agent_response', gate('conv-allow'));
+    });
+
+    // The values reached the registered form, unwrapped from the flat tool args.
+    await vi.waitFor(() => expect(h.applied).toHaveLength(1));
+    expect(h.applied[0]).toEqual({ name: 'Test Campaign 001', budget: '25000' });
+
+    // Exactly one resume, and it already carries what the browser did — so the
+    // agent never has to interrupt a second time to ask.
+    await vi.waitFor(() => expect(h.sends()).toHaveLength(2));
+    const resume = h.sends()[1][1] as {
+      dataParts?: Array<{ decisions?: Array<Record<string, unknown>> }>;
+    };
+    expect(resume.dataParts?.[0]?.decisions?.[0]).toMatchObject({
+      id: 'tooluse_1',
+      type: 'approve',
+      client_action_result: { ok: true, applied: ['name', 'budget'], rejected: [] },
+    });
+
+    // No card ever rendered — not even for a frame.
+    expect(h.chat().interrupt.pending).toHaveLength(0);
+  });
+
+  it('allow-edits does not answer a gate that is not an apply', async () => {
+    // Unknown/other kinds are scored to interrupt as a fail-safe. Honouring that
+    // is the point: only a form fill is covered by this mode.
+    const h = mountWithMode('allow-edits', 'conv-other');
+    await handshake(h.socket());
+    await act(async () => {
+      h.chat().send('do something risky');
+    });
+    await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
+
+    const other = gate('conv-other', 'tooluse_2');
+    const args = other.status.message.parts[1].data!.action_requests[0].args as Record<string, unknown>;
+    args.kind = 'refresh';
+
+    await act(async () => {
+      h.socket().fire('agent_response', other);
+    });
+
+    await vi.waitFor(() => expect(h.chat().interrupt.pending).toHaveLength(1));
+    expect(h.applied).toHaveLength(0);
+    expect(h.sends()).toHaveLength(1);
+  });
+
+  it('allow-edits leaves a non-client_action approval to the human', async () => {
+    const h = mountWithMode('allow-edits', 'conv-tool');
+    await handshake(h.socket());
+    await act(async () => {
+      h.chat().send('delete everything');
+    });
+    await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
+
+    const other = gate('conv-tool', 'tooluse_3');
+    other.status.message.parts[1].data!.action_requests[0].name = 'delete_campaign';
+
+    await act(async () => {
+      h.socket().fire('agent_response', other);
+    });
+
+    await vi.waitFor(() => expect(h.chat().interrupt.pending).toHaveLength(1));
+    expect(h.chat().interrupt.pending[0].toolName).toBe('delete_campaign');
+    expect(h.sends()).toHaveLength(1);
   });
 });

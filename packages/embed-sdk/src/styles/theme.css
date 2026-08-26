@@ -1,5 +1,10 @@
 @import 'tailwindcss';
-@source '../../../../node_modules/streamdown/dist/index.js';
+/* The whole dist, not just index.js: streamdown splits its UI into chunks
+   (table/code controls, dropdown menus live in chunk-*.js), and a class that
+   only appears in a chunk would otherwise be missing from the compiled sheet —
+   e.g. the table dropdowns lost `absolute top-full right-0` and rendered in
+   flow, overflowing the panel. */
+@source '../../../../node_modules/streamdown/dist';
 
 @custom-variant dark (&:is(.dark *));
 

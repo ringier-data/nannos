@@ -10,7 +10,7 @@ export const en: NannosStrings = {
   'panel.history': 'History',
   'panel.settings': 'Settings',
 
-  'composer.placeholder': 'Message the assistant…',
+  'composer.placeholder': 'Message Nannos…',
   'composer.placeholderStreaming': 'Reply to steer the running answer…',
   'composer.send': 'Send',
   'composer.stop': 'Stop',
@@ -50,7 +50,7 @@ export const en: NannosStrings = {
 
   'context.label': 'Context: {label}',
 
-  'hitl.title': 'Approval needed',
+  'hitl.title': 'Approval needed for {toolName}',
   'hitl.approve': 'Approve',
   'hitl.approveAll': 'Approve all',
   'hitl.rejectAll': 'Reject all',
@@ -62,12 +62,30 @@ export const en: NannosStrings = {
   'hitl.riskHigh': 'High',
   'hitl.riskMedium': 'Medium',
   'hitl.riskLow': 'Low',
+  'hitl.diff.field': 'Field',
+  'hitl.diff.current': 'Current',
+  'hitl.diff.new': 'New',
+  'hitl.clientAction.apply': 'Fills out a form on this page.',
+  'hitl.clientAction.highlight': 'Points at something on this page.',
+  'hitl.clientAction.navigate': 'Opens another page in this app.',
+  'hitl.clientAction.readCurrentPage': 'Reads what is on this page.',
+
+  'applyMode.heading': 'Modes',
+  'applyMode.manual': 'Manual',
+  'applyMode.allowEdits': 'Allow edits',
+  'applyMode.manualHint': 'Nannos asks for approval before it fills in a form',
+  'applyMode.allowEditsHint':
+    'Nannos will fill in forms without asking.',
+  'applyMode.label': 'Change how Nannos fills in forms',
 
   'auth.title': 'Authorization needed',
-  'auth.body': 'The assistant needs your permission before it can continue.',
-  'auth.bodyTool': 'The assistant needs your permission to use {tool}.',
+  'auth.body': 'Nannos needs your permission before it can continue.',
+  'auth.bodyTool': 'Nannos needs your permission to use {tool}.',
   'auth.action': 'Authorize',
-  'auth.retryHint': 'When you are done, send your message again.',
+  'auth.retryHint': 'Complete the authorization in the new window, then continue here.',
+  'auth.doneAction': 'Done, continue',
+  'auth.retryAction': 'Re-authorize',
+  'auth.doneChip': 'Authorization complete',
 
   'working.title': 'Working…',
   'thinking.title': '{agent} is thinking',

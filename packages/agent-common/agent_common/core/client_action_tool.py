@@ -72,8 +72,15 @@ class ClientActionInput(BaseModel):
     tool_call_id: Annotated[str, InjectedToolCallId] = Field(default="")
 
 
-def _render_client_action_result(kind: str, result: Any) -> str:
-    """Render the client's result payload into honest prose for the model."""
+def render_client_action_result(kind: str, result: Any) -> str:
+    """Render the client's result payload into honest prose for the model.
+
+    Public because the HITL middleware needs it too: when the browser executes an
+    approved directive at approve-time and returns the outcome on the decision,
+    the middleware answers the tool call with this same prose instead of letting
+    the tool interrupt for a result it already has
+    (``conditional_hitl._client_action_tool_message``).
+    """
     if not isinstance(result, dict):
         return f"The client returned no usable result for '{kind}'; do not assume it succeeded."
     if not result.get("ok"):
@@ -153,7 +160,7 @@ async def _client_action_handler(
         logger.info(f"[CLIENT-ACTION] Awaiting result for directive: {directive}")
         result = interrupt({"client_action_request": {"id": tool_call_id, "directive": directive}})
         logger.info(f"[CLIENT-ACTION] Result received: {result}")
-        return _render_client_action_result(kind, result)
+        return render_client_action_result(kind, result)
 
     try:
         writer = get_stream_writer()
