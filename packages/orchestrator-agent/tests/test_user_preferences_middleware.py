@@ -408,3 +408,35 @@ class TestClientObjectsInjection:
         out = middleware._apply(request, ctx)
         assert out.messages[0].content == "do it"
         assert "<client_objects>" not in str(out.messages[0].content)
+
+    def test_page_context_rides_human_message_before_manifest(self, middleware):
+        """<current_page> follows the same volatile-context rule as the manifest,
+        and precedes it (the page frames the objects on it)."""
+        from langchain_core.messages import HumanMessage
+
+        ctx = self._context(
+            client_objects=self.MANIFEST,
+            page_context={"key": "/campaigns/7", "title": "Campaign 7"},
+        )
+        request = self._request(
+            ctx, [HumanMessage(content="what is here?")], system_message=SystemMessage(content="sys")
+        )
+        out = middleware._apply(request, ctx)
+
+        content = str(out.messages[0].content)
+        assert "<current_page>" in content
+        assert "- path: /campaigns/7" in content
+        assert content.index("<current_page>") < content.index("<client_objects>")
+        assert "<current_page>" not in str(out.system_message.content)
+
+    def test_page_context_alone_still_rides_human_message(self, middleware):
+        from langchain_core.messages import HumanMessage
+
+        ctx = self._context(page_context={"key": "/customers/42"})
+        request = self._request(
+            ctx, [HumanMessage(content="hi")], system_message=SystemMessage(content="sys")
+        )
+        out = middleware._apply(request, ctx)
+        content = str(out.messages[0].content)
+        assert "<current_page>" in content
+        assert "<client_objects>" not in content

@@ -8,6 +8,9 @@
    so without this @source any utility used only by the SDK (flex-row-reverse
    on user rows, max-w-[85%] bubbles, …) is silently absent here. */
 @source '../../embed-sdk/src';
+/* streamdown (the SDK's markdown renderer) emits its own utility classes from
+   its dist — scan it too, or SDK message rendering silently loses styles. */
+@source '../../../node_modules/streamdown/dist/index.js';
 
 @custom-variant dark (&:is(.dark *));
 

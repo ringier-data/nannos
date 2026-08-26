@@ -241,6 +241,34 @@ def new_client_action_message(
     )
 
 
+def new_client_action_request_message(
+    request: dict,
+    context_id: str | None = None,
+    task_id: str | None = None,
+) -> Message:
+    """Build a Message carrying a client-action REQUEST awaiting a result.
+
+    Distinct from ``new_client_action_message`` (fire-and-forget ``{"directive"}``):
+    this one is emitted with the ``input_required`` task state and carries
+    ``{"request": {"id", "directive"}}``. The Embed SDK executes the directive and
+    resumes the turn with a ``{"decisions": [{"id", "type": "approve",
+    "client_action_result": {...}}]}`` DataPart — the same channel HITL uses.
+    """
+    return Message(
+        role=Role.ROLE_AGENT,
+        parts=[
+            Part(
+                data=ParseDict({"request": request}, Value()),
+                metadata={"media_type": "application/json"},
+            )
+        ],
+        message_id=str(uuid.uuid4()),
+        context_id=context_id or "",
+        task_id=task_id or "",
+        extensions=[CLIENT_ACTION_EXTENSION],
+    )
+
+
 def new_feedback_request_message(
     context_id: str | None = None,
     task_id: str | None = None,

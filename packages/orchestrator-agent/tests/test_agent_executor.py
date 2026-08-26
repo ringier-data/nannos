@@ -612,6 +612,79 @@ class TestAgentExecutorStreamHandling:
         # stream termination is inferred from the terminal task state, not an explicit flag.
         assert status_call[1].get("final") is not True
 
+    async def test_handle_stream_item_input_required_client_action_request(self, dynamodb_table):
+        """A client-action round trip pauses as input_required carrying the
+        {"request": {id, directive}} DataPart under the client-action extension —
+        NOT the HITL message, and NOT the generic text fallback."""
+        from app.core.a2a_extensions import CLIENT_ACTION_EXTENSION
+        from app.models.responses import AgentStreamResponse
+        from google.protobuf.json_format import MessageToDict
+
+        executor = OrchestratorDeepAgentExecutor()
+
+        updater = Mock()
+        updater.update_status = AsyncMock()
+        updater.add_artifact = AsyncMock()
+
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        request = {"id": "call-1", "directive": {"kind": "apply", "target": {"type": "Campaign", "id": "7"}}}
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
+            content="Waiting for the application…",
+            client_action_request=request,
+        )
+
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-1",
+            active_extensions={CLIENT_ACTION_EXTENSION},
+        )
+
+        updater.add_artifact.assert_not_called()  # nothing streamed → nothing to seal
+        updater.update_status.assert_called_once()
+        state_arg, msg = updater.update_status.call_args[0]
+        assert state_arg == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert CLIENT_ACTION_EXTENSION in list(msg.extensions)
+        data = MessageToDict(msg.parts[0].data)
+        assert data == {"request": request}
+
+    async def test_handle_stream_item_client_action_request_seals_open_artifact(self, dynamodb_table):
+        """Tokens streamed before the pause: the artifact is closed first (the
+        same rule as HITL), so the client's stream never dangles."""
+        from app.core.a2a_extensions import CLIENT_ACTION_EXTENSION
+        from app.models.responses import AgentStreamResponse
+
+        executor = OrchestratorDeepAgentExecutor()
+        updater = Mock()
+        updater.update_status = AsyncMock()
+        updater.add_artifact = AsyncMock()
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
+            content="Waiting…",
+            client_action_request={"id": "call-1", "directive": {"kind": "apply"}},
+        )
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-1",
+            first_chunk_sent=True,
+            active_extensions={CLIENT_ACTION_EXTENSION},
+        )
+        updater.add_artifact.assert_called_once()
+        assert updater.add_artifact.call_args[1]["last_chunk"] is True
+
     async def test_handle_stream_item_input_required_hitl_path_unchanged(self, dynamodb_table):
         """HITL action_requests interrupts still emit the structured HITL message
         via new_hitl_interrupt_message (no artifact-fallback, no final_answer_source).
@@ -795,6 +868,55 @@ class TestExtractHitlDecisions:
 
         passed = resume_map["d" * 32]["decisions"]
         assert [d["type"] for d in passed] == ["approve", "reject"]
+
+    def test_from_interrupt_maps_client_action_request(self, dynamodb_table):
+        """The tool's interrupt value dispatches to input_required carrying the
+        request — not the HITL card, not the generic passthrough."""
+        from app.models.responses import AgentStreamResponse
+
+        request = {"id": "c1", "directive": {"kind": "apply"}}
+        item = AgentStreamResponse.from_interrupt({"client_action_request": request})
+        assert item.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert item.client_action_request == request
+        assert item.interrupt_reason == "client_action_result"
+        assert not item.action_requests
+
+    def test_client_action_interrupt_resumes_with_matched_result(self, dynamodb_table):
+        """A client-action interrupt resumes with the result of the decision whose
+        id matches the request id — not with decisions, not with the query."""
+        intr = self._interrupt(
+            "e" * 32,
+            value={"client_action_request": {"id": "call-1", "directive": {"kind": "apply"}}},
+        )
+        decisions = [
+            {"id": "other", "type": "approve"},
+            {"id": "call-1", "type": "approve", "client_action_result": {"ok": True, "applied": ["budget"]}},
+        ]
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        assert resume_map["e" * 32] == {"ok": True, "applied": ["budget"]}
+
+    def test_client_action_interrupt_without_result_resumes_no_result(self, dynamodb_table):
+        """A plain user message while parked (default reject decision, no result)
+        must hand the tool an explicit no-result — never an assumed success."""
+        intr = self._interrupt(
+            "f" * 32,
+            value={"client_action_request": {"id": "call-1", "directive": {"kind": "apply"}}},
+        )
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], [{"type": "reject"}], query="user typed something"
+        )
+        assert resume_map["f" * 32] == {"ok": False, "reason": "no-result"}
+
+    def test_client_action_interrupt_idless_fallback_takes_single_result(self, dynamodb_table):
+        """A result-bearing decision without a matching id still resolves when it
+        is the only one (belt for clients that lost the call id)."""
+        intr = self._interrupt(
+            "1" * 32,
+            value={"client_action_request": {"id": "", "directive": {"kind": "apply"}}},
+        )
+        decisions = [{"type": "approve", "client_action_result": {"ok": False, "reason": "unknown-target"}}]
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        assert resume_map["1" * 32] == {"ok": False, "reason": "unknown-target"}
 
     def test_multiple_pending_interrupts_each_keyed_and_replicated(self, dynamodb_table):
         """The migration's core case: >1 co-pending interrupt → id-keyed map.

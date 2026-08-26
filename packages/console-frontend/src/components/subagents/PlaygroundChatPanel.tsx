@@ -1,18 +1,17 @@
-import { useEffect, useRef } from 'react';
 import { MessageSquare, Plus, PanelRightOpen, FlaskConical, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
-  useChat,
+  ApprovalCard,
+  Composer,
   ConnectionStatus,
-  MessageList,
-  ChatInput,
+  Thread,
   WorkingBlock,
-  InterruptConfirmCard,
-  formatTimestamp,
-} from '@/components/chat';
+  useConversations,
+  useNannosChat,
+} from '@nannos/embed-sdk/panel';
 
 interface PlaygroundChatPanelProps {
   /** Whether the conversation-list middle panel is visible */
@@ -30,15 +29,27 @@ interface PlaygroundChatPanelProps {
   isViewingHistoricalVersion: boolean;
 }
 
+const relativeTime = (iso: string): string => {
+  const diffMs = new Date(iso).getTime() - Date.now();
+  if (Number.isNaN(diffMs)) return '';
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+  const minutes = Math.round(diffMs / 60_000);
+  if (Math.abs(minutes) < 60) return rtf.format(minutes, 'minute');
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return rtf.format(hours, 'hour');
+  return rtf.format(Math.round(hours / 24), 'day');
+};
+
 /**
- * Playground chat, rendered on top of the shared chat stack (ChatProvider +
- * MessageList + ChatInput). Behaves identically to the main chat — streaming,
- * timeline, sub-agent thoughts, HITL approvals, file upload and steering — while
- * keeping the playground's conversation list and version-history layout.
+ * Playground chat, recomposed from the embed-sdk v2 panel primitives (Thread /
+ * Composer / ApprovalCard / WorkingBlock over `useNannosChat`). Behaves like
+ * the main chat — streaming, timeline, sub-agent thoughts, HITL approvals,
+ * file upload and steering — while keeping the playground's conversation list
+ * and version-history layout.
  *
- * Must be rendered inside a playground-scoped SocketProvider/ChatProvider (see
- * ChatProviders in @/components/chat) so it reads playground conversations and
- * tags messages with the sub-agent config hash.
+ * Must be rendered inside a playground-scoped `<NannosChatScope>` (see
+ * SubAgentDetailPage) so it reads playground conversations and tags messages
+ * with the sub-agent config hash.
  */
 export function PlaygroundChatPanel({
   showConversationList,
@@ -50,37 +61,11 @@ export function PlaygroundChatPanel({
   viewedVersionLabel,
   isViewingHistoricalVersion,
 }: PlaygroundChatPanelProps) {
-  const {
-    conversations,
-    activeConversationId,
-    createConversation,
-    selectConversation,
-    messages,
-    isWaiting,
-    isLoadingMessages,
-    liveWorkingSteps,
-  } = useChat();
-
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const { conversations, activeConversationId, createConversation, selectConversation } =
+    useConversations();
+  const chat = useNannosChat();
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
-
-  // Auto-scroll to the bottom as messages arrive or stream in (mirrors ChatApp).
-  useEffect(() => {
-    const scrollToBottom = () => {
-      const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-      if (viewport) viewport.scrollTop = viewport.scrollHeight;
-    };
-    scrollToBottom();
-
-    const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    if (!viewport) return;
-    const observer = new MutationObserver(() => {
-      if (isWaiting) scrollToBottom();
-    });
-    observer.observe(viewport, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
-  }, [messages, isWaiting, liveWorkingSteps]);
 
   return (
     <>
@@ -89,7 +74,7 @@ export function PlaygroundChatPanel({
         <div className="w-56 flex flex-col rounded-lg border border-border bg-muted/30 overflow-hidden flex-shrink-0">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
             <h3 className="text-sm font-semibold">Conversations</h3>
-            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={createConversation}>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => createConversation()}>
               <Plus className="h-4 w-4" />
             </Button>
           </div>
@@ -135,9 +120,9 @@ export function PlaygroundChatPanel({
                           <Loader2 className="w-3.5 h-3.5 text-green-500 animate-spin shrink-0" />
                         )}
                       </div>
-                      {formatTimestamp(conv.timestamp) && (
+                      {relativeTime(conv.updatedAt) && (
                         <span className="text-xs text-muted-foreground block">
-                          {formatTimestamp(conv.timestamp)}
+                          {relativeTime(conv.updatedAt)}
                         </span>
                       )}
                     </div>
@@ -175,7 +160,7 @@ export function PlaygroundChatPanel({
             <ConnectionStatus />
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={createConversation}>
+                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => createConversation()}>
                   <Plus className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
@@ -194,8 +179,8 @@ export function PlaygroundChatPanel({
           </div>
         </div>
 
-        {/* Messages */}
-        {messages.length === 0 && !isWaiting && !isLoadingMessages ? (
+        {/* Messages (Thread owns scrolling, streaming, empty/error states) */}
+        {chat.messages.length === 0 && !chat.isBusy ? (
           <div className="flex-1 min-h-0 flex flex-col items-center justify-center py-12 text-center">
             <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
               <FlaskConical className="h-6 w-6 text-muted-foreground" />
@@ -208,23 +193,21 @@ export function PlaygroundChatPanel({
             </div>
           </div>
         ) : (
-          <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
-            <MessageList />
-          </ScrollArea>
+          <Thread chat={chat} className="flex-1 min-h-0" />
         )}
 
         {/* Sticky live todos — shown while a response is in-flight */}
-        {liveWorkingSteps.length > 0 && (
+        {chat.isBusy && chat.workingSteps.length > 0 && (
           <div className="px-4 py-2 border-t border-border bg-muted/20 shrink-0">
-            <WorkingBlock steps={liveWorkingSteps} complete={!isWaiting} />
+            <WorkingBlock todos={chat.workingSteps} />
           </div>
         )}
 
         {/* HITL interrupt confirmation card */}
-        <InterruptConfirmCard />
+        {chat.interrupt.pending.length > 0 && <ApprovalCard interrupt={chat.interrupt} />}
 
-        {/* Input (handles impersonation guard, file upload, steering) */}
-        <ChatInput />
+        {/* Input (file upload, steering, read-only guard) */}
+        <Composer chat={chat} />
       </div>
     </>
   );

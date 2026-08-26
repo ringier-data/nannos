@@ -1069,7 +1069,20 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 # resume by interrupt id, so each interrupt() returns exactly its own
                 # decisions — no cross-eval bleed from LangGraph's multi-interrupt resume.
                 # Any count mismatch here is therefore a genuine bug, not a resume artefact.
-                decisions = interrupt(self._build_ptc_hitl_request(pending))["decisions"]
+                hitl_request = self._build_ptc_hitl_request(pending)
+                # Same plain-language summaries the normal HITL path stamps
+                # (see ConditionalHumanInTheLoopMiddleware._attach_summaries).
+                # Best-effort: on failure the client shows raw args.
+                from agent_common.core.tool_call_summarizer import attach_summaries
+
+                ptc_tools = self._ptc_tools_by_thread.get(thread_id) or ()
+                descriptions = {t.name: t.description or "" for t in ptc_tools}
+                await attach_summaries(
+                    hitl_request["action_requests"],
+                    language=getattr(context, "language", None) or "en",
+                    describe=lambda name: descriptions.get(name, ""),
+                )
+                decisions = interrupt(hitl_request)["decisions"]
                 if (n := len(decisions)) != (m := len(pending)):
                     msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
                     raise ValueError(msg)

@@ -300,6 +300,9 @@ _CLIENT_ACTION_KIND_SCORES: dict[str | None, float] = {
     "invalidate": 0.9,
     "highlight": 0.1,
     "navigate": 0.1,
+    # Read-only by construction: the SDK answers from host-registered readers
+    # through the same sanitizer as the page snapshot (deny list + caps).
+    "read_current_page": 0.1,
 }
 _CLIENT_ACTION_DEFAULT_SCORE = 0.9  # unknown kind → gate (fail safe)
 

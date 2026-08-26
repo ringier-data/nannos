@@ -21,8 +21,7 @@ import { mainNavItems, groupManagerNavItems, adminNavItems } from '@/config/navi
 import { NotificationInbox } from '@/components/notifications/NotificationInbox';
 import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 import { SchedulerNotifications } from '@/components/SchedulerNotifications';
-import { SocketProvider, ChatProvider } from '@/components/chat/contexts';
-import { ConsoleHostAdapterProvider } from '@/components/chat';
+import { ConsoleNannosProvider } from '@/components/nannos/ConsoleNannosProvider';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -32,9 +31,7 @@ export function DashboardLayout() {
   };
 
   return (
-    <ConsoleHostAdapterProvider>
-    <SocketProvider socketPath="/api/v1/socket.io">
-    <ChatProvider>
+    <ConsoleNannosProvider>
       <SidebarProvider>
         <SchedulerNotifications />
         <Sidebar>
@@ -131,9 +128,7 @@ export function DashboardLayout() {
           <Outlet />
         </main>
       </SidebarInset>
-    </SidebarProvider>
-    </ChatProvider>
-    </SocketProvider>
-    </ConsoleHostAdapterProvider>
+      </SidebarProvider>
+    </ConsoleNannosProvider>
   );
 }

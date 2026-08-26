@@ -601,6 +601,7 @@ def build_runtime_context(
         client_user_handle=user_config.client_user_handle,
         custom_prompt=user_config.custom_prompt,
         client_objects=user_config.client_objects,
+        page_context=user_config.page_context,
         groups=user_config.groups,
         tool_registry=tool_registry,
         subagent_registry=subagent_registry,

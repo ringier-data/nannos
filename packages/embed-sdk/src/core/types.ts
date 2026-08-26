@@ -158,5 +158,8 @@ export interface NannosConfig {
    *  <client_objects>, no routing turn). The orchestrator validates the id against
    *  the authenticated user's accessible sub-agents — a wrong/inaccessible id fails
    *  closed, so the client declaring it is safe (identity is the hard boundary). */
-  subAgentId?: number;
+  // string | number: hosts read this from env vars (always strings) — the
+  // orchestrator validates the id against the signed-in user's accessible
+  // sub-agents either way (identity is the boundary, not the client's claim).
+  subAgentId?: string | number;
 }

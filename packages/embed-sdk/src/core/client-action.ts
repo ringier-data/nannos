@@ -1,6 +1,7 @@
 import type { ObjectRegistry } from './registry';
 import type { ApplyResult } from './types';
 import { clientActionDirective } from './schemas';
+import { sanitizeReadResult, sanitizeReadResultWithScreen } from './page-read';
 import { CLIENT_ACTION_EXT } from './extensions';
 
 export interface ClientActionDeps {
@@ -19,11 +20,19 @@ export interface ClientActionDeps {
    *  A host that wires nothing leaves the user with a part-filled form and no
    *  indication of it. */
   onApplyResult?: (target: { type: string; id: string }, result: ApplyResult) => void;
+  /** Answers `read_current_page`: the raw "what does the user see" object (the
+   *  provider assembles it from the merged page context + registered readers).
+   *  Sanitized HERE (`sanitizeReadResult`) before anything leaves the browser. */
+  readCurrentPage?: () => unknown | Promise<unknown>;
+  /** The rendered page as a markdown outline within a budget (the DOM walk,
+   *  `snapshotScreenOutline`). When present, every read carries it under the
+   *  reserved `screen` key, sized to the budget the readers left. */
+  screenOutline?: (maxChars: number) => string;
 }
 
 export type ClientActionResult =
-  | { ok: true; applied?: string[]; rejected?: ApplyResult['rejected'] }
-  | { ok: false; reason: 'invalid' | 'unknown-target' };
+  | { ok: true; applied?: string[]; rejected?: ApplyResult['rejected']; content?: string }
+  | { ok: false; reason: 'invalid' | 'unknown-target' | 'unsupported' };
 
 /**
  * Sandboxed executor of `urn:nannos:a2a:client-action` directives. It runs ONLY
@@ -79,6 +88,15 @@ export async function executeClientAction(
     case 'navigate': {
       deps.navigate?.(directive.to);
       return { ok: true };
+    }
+    case 'read_current_page': {
+      // The outline alone can answer — a host with no readers still has a screen.
+      if (!deps.readCurrentPage && !deps.screenOutline) return { ok: false, reason: 'unsupported' };
+      const raw = deps.readCurrentPage ? await deps.readCurrentPage() : {};
+      const content = deps.screenOutline
+        ? sanitizeReadResultWithScreen(raw, deps.screenOutline)
+        : sanitizeReadResult(raw);
+      return { ok: true, content };
     }
   }
 }

@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 import uuid6
 from sqlalchemy import text
@@ -66,10 +67,14 @@ class ConversationService:
             search: Optional case-insensitive substring to filter conversations by title
 
         Returns:
-            List of conversations ordered by last_message_at (newest first)
+            List of ACTIVE conversations ordered by last_message_at (newest first).
+            Soft-deleted ('archived') conversations are excluded.
         """
         try:
-            conditions = ["user_id = :user_id"]
+            # 'archived' is the soft-delete marker written by archive_conversation:
+            # the row and its messages stay, but the user has removed it from
+            # their history, so it must never come back in the list.
+            conditions = ["user_id = :user_id", "status <> 'archived'"]
             params: dict[str, object] = {"user_id": user_id, "limit": limit}
 
             if search and search.strip():
@@ -107,7 +112,7 @@ class ConversationService:
         user_id: str,
         title: str = "",
         agent_url: str = "",
-        metadata: dict[str, str] | None = None,
+        metadata: dict[str, Any] | None = None,
         conversation_id: str | None = None,
         status: str = "active",
         sub_agent_config_hash: str | None = None,
@@ -183,6 +188,7 @@ class ConversationService:
         message: str | None = None,
         sub_agent_config_hash: str | None = None,
         embedded_sub_agent_id: str | None = None,
+        page_context: dict[str, Any] | None = None,
     ) -> Conversation:
         """Ensure a conversation exists, creating it if necessary.
 
@@ -196,6 +202,10 @@ class ConversationService:
                 embedded widget (execute-only sub-agent). Stamped into metadata so
                 the console can label it and render it read-only — its turns assume
                 a live host page (registered client objects, scoped agent).
+            page_context: The sending page's context (embed SDK `metadata.pageContext`).
+                Its stable slice is stamped into metadata ON CREATION ONLY — "this
+                conversation started on campaign 123" is a fact about the
+                conversation, so later sends from other pages must not rewrite it.
 
         Returns:
             The existing or newly created conversation
@@ -218,18 +228,147 @@ class ConversationService:
                 # Use first 100 characters of message as title
                 title = message[:100] if message else ""
 
+            metadata: dict[str, Any] = {}
+            if embedded_sub_agent_id:
+                metadata["embedded_sub_agent_id"] = embedded_sub_agent_id
+            origin = conversation_page_context(page_context)
+            if origin:
+                metadata["page_context"] = origin
+
             # Create new conversation
             conversation = await self.insert_conversation(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 agent_url=agent_url,
                 title=title,
-                metadata={"embedded_sub_agent_id": embedded_sub_agent_id} if embedded_sub_agent_id else {},
+                metadata=metadata,
                 sub_agent_config_hash=sub_agent_config_hash,
             )
             logger.info(f"Created new conversation: {conversation_id} with title: {title[:50]}")
 
         return conversation
+
+    async def update_summary(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        title: str,
+        summary: str,
+        title_source: str = "llm",
+    ) -> bool:
+        """Store an LLM-written title and one-line summary on a conversation.
+
+        Metadata is MERGED (`||`), never replaced: `page_context` and
+        `embedded_sub_agent_id` were stamped at creation and must survive. The
+        `title_source` marker is what stops the generator running twice.
+
+        `title_source` stays a parameter because of the one case where the model
+        writes a summary for a conversation the USER has already named: the
+        caller passes 'user' back so the name keeps its protection (see
+        `rename_conversation` and conversation_summary.py).
+
+        Returns False when the row does not exist or belongs to another user.
+        """
+        patch = {"summary": summary, "title_source": title_source}
+        try:
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    text(
+                        "UPDATE conversations "
+                        "SET title = :title, last_updated = :now, "
+                        "    metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb) "
+                        "WHERE conversation_id = :conversation_id AND user_id = :user_id"
+                    ),
+                    {
+                        "title": title,
+                        "now": datetime.now(tz=timezone.utc),
+                        "patch": _json_dumps(patch),
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                    },
+                )
+                await db.commit()
+            return (result.rowcount or 0) > 0
+        except Exception as e:
+            logger.warning(f"Failed to store summary for conversation {conversation_id}: {e}")
+            return False
+
+    async def rename_conversation(self, conversation_id: str, user_id: str, *, title: str) -> bool:
+        """Give a conversation the name the user typed.
+
+        The `title_source` marker becomes 'user', which the background titler
+        reads as "this one is named, leave the name alone" — without it the next
+        completed turn would replace the user's name with a written one. The
+        conversation still gets a summary if it has none yet; only the title is
+        protected (conversation_summary.py).
+
+        Metadata is MERGED (`||`), never replaced — same reason as
+        `update_summary`.
+
+        Ownership lives in the WHERE clause, not in a prior read: a conversation
+        belonging to another user simply matches nothing.
+
+        Returns False when the row does not exist or belongs to another user.
+        """
+        patch = {"title_source": "user"}
+        try:
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    text(
+                        "UPDATE conversations "
+                        "SET title = :title, last_updated = :now, "
+                        "    metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb) "
+                        "WHERE conversation_id = :conversation_id AND user_id = :user_id"
+                    ),
+                    {
+                        "title": title,
+                        # NOT last_message_at: renaming is not activity, and that
+                        # column is what orders the list.
+                        "now": datetime.now(tz=timezone.utc),
+                        "patch": _json_dumps(patch),
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                    },
+                )
+                await db.commit()
+            return (result.rowcount or 0) > 0
+        except Exception as e:
+            logger.error(f"Failed to rename conversation {conversation_id}: {e}")
+            return False
+
+    async def archive_conversation(self, conversation_id: str, user_id: str) -> bool:
+        """Soft-delete a conversation: remove it from the user's history.
+
+        The row and its messages stay put — only `status` flips to 'archived',
+        which `get_conversations_by_user_id` filters out. Nothing else is
+        touched, so feedback and usage rows keep pointing at a live row.
+
+        Ownership is enforced by the WHERE clause, not by a prior read: a
+        conversation belonging to another user simply matches nothing.
+
+        Returns False when the row does not exist, belongs to another user, or
+        was already archived.
+        """
+        try:
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    text(
+                        "UPDATE conversations SET status = 'archived', last_updated = :now "
+                        "WHERE conversation_id = :conversation_id AND user_id = :user_id "
+                        "AND status <> 'archived'"
+                    ),
+                    {
+                        "now": datetime.now(tz=timezone.utc),
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                    },
+                )
+                await db.commit()
+            return (result.rowcount or 0) > 0
+        except Exception as e:
+            logger.error(f"Failed to archive conversation {conversation_id}: {e}")
+            return False
 
     @staticmethod
     def _row_to_conversation(row) -> Conversation:
@@ -253,3 +392,39 @@ def _json_dumps(obj) -> str:
     import json
 
     return json.dumps(obj, default=str)
+
+
+def conversation_page_context(page_context: Any) -> dict[str, Any] | None:
+    """The slice of a send's page context that still describes the CONVERSATION.
+
+    A send carries the live page: route, title, the entity on screen, but also the
+    open tab, the visible rows, the breadcrumb trail. Only the first three still
+    mean anything a week later — the rest belongs to that one prompt. Everything
+    is re-capped here rather than trusted: the caps are the client's, and the
+    client is a browser.
+
+    Returns None when nothing usable is left, so no empty object is stored.
+    """
+    if not isinstance(page_context, dict):
+        return None
+
+    origin: dict[str, Any] = {}
+    key = page_context.get("key")
+    if isinstance(key, str) and key.strip():
+        origin["key"] = key.strip()[:500]
+    title = page_context.get("title")
+    if isinstance(title, str) and title.strip():
+        origin["title"] = title.strip()[:160]
+
+    entity = page_context.get("entity")
+    if isinstance(entity, dict):
+        fields = {}
+        for field in ("type", "id", "name"):
+            value = entity.get(field)
+            if isinstance(value, (str, int)) and str(value).strip():
+                fields[field] = str(value).strip()[:200]
+        # A type without an id (or the reverse) names nothing — keep neither.
+        if fields.get("type") and fields.get("id"):
+            origin["entity"] = fields
+
+    return origin or None

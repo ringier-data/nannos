@@ -1,11 +1,14 @@
 import { io, type Socket } from 'socket.io-client';
+import { parseSubscribeAck } from './wire';
 import type {
   AgentInfo,
   AgentResponseData,
   ClientInitializedData,
   ConversationSnapshotData,
+  ConversationUpdatedData,
   SendMessagePayload,
   Settings,
+  SubscribeAck,
 } from './wire';
 import type { NannosConfig, NannosErrorEvent } from './types';
 
@@ -146,6 +149,16 @@ export class TransportClient {
     socket.on('connect_error', (err: Error) =>
       this.emitError({ type: 'connection', message: err?.message || 'socket connect_error', cause: err }),
     );
+    // The backend emits `error` (e.g. socket-auth failure) — previously never
+    // subscribed, so an unauthenticated socket surfaced only as a stuck
+    // "Disconnected". Forward it to the host's error channel.
+    socket.on('error', (data: { message?: string } | undefined) =>
+      this.emitError({
+        type: 'connection',
+        message: data?.message || 'server error on socket',
+        detail: data,
+      }),
+    );
     socket.on('disconnect', () =>
       this.setState({ socketConnected: false, initialized: false, agentInfo: null }),
     );
@@ -174,6 +187,9 @@ export class TransportClient {
         for (const l of this.responseListeners) l(data.pendingHitl);
       }
       for (const l of this.snapshotListeners) l(data);
+    });
+    socket.on('conversation_updated', (data: ConversationUpdatedData) => {
+      for (const l of this.conversationUpdatedListeners) l(data);
     });
     for (const event of this.extraListeners.keys()) this.attachExtraHandler(socket, event);
 
@@ -225,9 +241,25 @@ export class TransportClient {
     return true;
   }
 
-  /** Join a conversation's room (multi-replica); server replies with a `conversation_snapshot`. */
-  subscribeConversation(conversationId: string): boolean {
+  /**
+   * Join a conversation's room (multi-replica); the server replies with a
+   * `conversation_snapshot` event AND acks this emit with `{subscribed,
+   * inFlight}` — or an error when the conversation is unknown to it. Pass `ack`
+   * to read that return value: it is the only answer a never-persisted
+   * conversation produces, since the rejected join emits no snapshot.
+   * `ack` receives `null` when the reply cannot be read (older backend).
+   */
+  subscribeConversation(
+    conversationId: string,
+    ack?: (result: SubscribeAck | null) => void,
+  ): boolean {
     if (!this.socket?.connected) return false;
+    if (ack) {
+      this.socket.emit('subscribe_conversation', { conversationId }, (raw: unknown) =>
+        ack(parseSubscribeAck(raw)),
+      );
+      return true;
+    }
     this.socket.emit('subscribe_conversation', { conversationId });
     return true;
   }
@@ -245,6 +277,16 @@ export class TransportClient {
   }
 
   private readonly snapshotListeners = new Set<(data: ConversationSnapshotData) => void>();
+
+  /** Subscribe to conversation-level updates (written title/summary). */
+  onConversationUpdated(cb: (data: ConversationUpdatedData) => void): () => void {
+    this.conversationUpdatedListeners.add(cb);
+    return () => this.conversationUpdatedListeners.delete(cb);
+  }
+
+  private readonly conversationUpdatedListeners = new Set<
+    (data: ConversationUpdatedData) => void
+  >();
 
   /** Subscribe to agent responses (carries all A2A-extension directives). */
   onAgentResponse(cb: (data: AgentResponseData) => void): () => void {

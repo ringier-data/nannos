@@ -89,7 +89,7 @@ import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinition,
 import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
-import { ChatProviders } from '@/components/chat';
+import { NannosChatScope } from '@nannos/embed-sdk/panel';
 import { PlaygroundChatPanel } from '@/components/subagents/PlaygroundChatPanel';
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { SkillRegistryBrowseDialog } from '@/components/skills/SkillRegistryBrowseDialog';
@@ -2290,11 +2290,10 @@ export function SubAgentDetailPage() {
 
         {/* Middle + Right Panels - Playground Chat (shared chat stack) */}
         {playgroundConfigHash ? (
-          <ChatProviders
+          <NannosChatScope
             key={playgroundConfigHash}
-            socketPath="/api/v1/socket.io"
             customHeaders={{ 'X-Playground-SubAgentConfig-Hash': playgroundConfigHash }}
-            playgroundMode={{ subAgentConfigHash: playgroundConfigHash, subAgentName: subAgent.name }}
+            playground={{ subAgentConfigHash: playgroundConfigHash, subAgentName: subAgent.name }}
           >
             <PlaygroundChatPanel
               showConversationList={showConversationList}
@@ -2306,7 +2305,7 @@ export function SubAgentDetailPage() {
               viewedVersionLabel={getVersionLabel(viewedVersion?.version)}
               isViewingHistoricalVersion={isViewingHistoricalVersion}
             />
-          </ChatProviders>
+          </NannosChatScope>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center rounded-lg border border-border bg-muted/30 min-w-0">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />

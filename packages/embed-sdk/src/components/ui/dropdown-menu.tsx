@@ -2,8 +2,8 @@ import * as React from "react"
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"
 import { CheckIcon, ChevronRightIcon, CircleIcon } from "lucide-react"
 
-import { cn } from "@/lib/utils"
-import { usePortalContainer } from "@/lib/portal-container"
+import { cn } from "../../lib/utils"
+import { usePortalContainer } from "../../lib/portal-container"
 
 function DropdownMenu({
   ...props

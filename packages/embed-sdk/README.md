@@ -1,529 +1,387 @@
 # @nannos/embed-sdk
 
-Embed the Nannos assistant into any web app. You get three things:
+Embed the Nannos assistant into any React app. You get three things:
 
-1. **A chat widget** (Shadow-DOM isolated, styleable) your users talk to.
-2. **In-form actions** — the agent fills/updates the form the user is looking at
-   (`apply`), points at fields (`highlight`), or moves them (`navigate`), through
-   *your* form layer, gated by human approval.
-3. **Headless tools** — the same agent can read/write your backend via MCP when
-   the answer isn't on screen.
+1. **A chat panel** (Shadow-DOM isolated, restylable) your users talk to —
+   docked beside the page or dropped into any container you own.
+2. **In-form actions** — the agent fills/updates the form the user is looking
+   at (`apply`), points at fields (`highlight`), moves them (`navigate`), or
+   reads what they see (`read_current_page`), through *your* form layer, gated
+   by human approval. `apply` and `read_current_page` are ROUND TRIPS: the turn
+   pauses until the browser reports what actually happened (which fields
+   landed vs. were rejected; the sanitized page snapshot), so the agent never
+   assumes success.
+3. **Headless tools** — the same agent can read/write your backend via MCP
+   when the answer isn't on screen.
 
-Two integration surfaces:
+**v2.** This is the ground-up rewrite: ONE React tree (no `mount()`, no second
+root — context flows into the panel), a headless-first API (the host owns all
+chrome: launcher, placement, pin/dock), and the chat state machine runs on the
+[Vercel AI SDK](https://ai-sdk.dev) (`useChat` over a custom
+`A2AChatTransport` that bridges the Nannos A2A-over-socket.io protocol).
+`ai`/`@ai-sdk/react` are exact-pinned, bundled dependencies — hosts never
+install or version-manage them.
 
-- **`@nannos/embed-sdk/core`** — framework-free (vanilla TS + Zod). Transport,
-  ontology-object registration, client-action execution, PKCE auth.
-- **`@nannos/embed-sdk/react`** — React bindings (`useNannosZodForm`).
-- **`@nannos/embed-sdk`** — the above + the React chat UI kit and `mount()`.
+## Package map
 
-> **DX status.** The core + form instrumentation are solid. The *drop-in* React
-> layer (a `<NannosProvider>`/`<NannosWidget>`) isn't built yet — today you wire a
-> few pieces by hand (create+share a core, mount, auth). See
-> [Rough edges & the road to drop-in](#rough-edges--the-road-to-drop-in) — that
-> section is the honest gap list, and PRs there are the priority.
-
-## Install
-
-```bash
-npm i @nannos/embed-sdk
-```
-
-Peer dependencies you must already have:
-
-| peer | range | why |
+| entry | what | weight |
 |---|---|---|
-| `react`, `react-dom` | `>=18` | the widget + `useNannosZodForm` |
-| `zod` | `^4` | schemas are validated/introspected with the host's Zod (shared instance) |
+| `@nannos/embed-sdk` | core + React layer (provider, hooks, adapter) — what page code imports | light |
+| `@nannos/embed-sdk/core` | framework-free kernel: socket transport, object registry, client-actions, zod-form, PKCE auth | light |
+| `@nannos/embed-sdk/react` | same React layer as the root, explicitly | light |
+| `@nannos/embed-sdk/transport` | framework-free chat engine: `A2AChatTransport`, message model, stores | light |
+| `@nannos/embed-sdk/panel` | the chat UI: `<AssistantPanel>`, `<ShadowPortal>`, blocks, hooks, vendored AI Elements | **heavy — lazy-load it** |
+| `@nannos/embed-sdk/styles.css` | the compiled sheet (light-DOM hosts that don't scan the source) | — |
 
-## Quick start (a generic app)
-
-Say your app has an **Invoice** edit form (react-hook-form) and you want the
-assistant to fill it.
-
-### 1. Wrap your app in `<NannosProvider>` + drop in `<NannosWidget>`
-
-The provider owns one shared core (creation, connect/disconnect, and
-`navigate`/`highlight` wiring). `<NannosWidget>` is a floating launcher + panel;
-pass it the shared core via `useNannos()`.
+The build is `preserveModules`: one dist file per module, every shared module
+exists exactly once across entries (the provider context is a singleton — no
+cross-entry footguns), and hosts code-split at module granularity. The panel
+entry is the intended lazy boundary:
 
 ```tsx
-import { NannosProvider, useNannos } from '@nannos/embed-sdk/react';
-import { NannosWidget } from '@nannos/embed-sdk';
-
-function AssistantMount() {
-  return <NannosWidget core={useNannos()} />;
-}
-
-export function Root() {
-  return (
-    <NannosProvider
-      config={{
-        backendUrl: 'https://console.your-nannos.example',
-        getToken: () => auth.getAccessToken(), // see Auth below
-        subAgentId: 42,                          // which scoped agent runs (see below)
-      }}
-      navigate={(to) => router.push(to)}         // for `navigate` client-actions
-    >
-      <App />
-      <AssistantMount />
-    </NannosProvider>
-  );
-}
+const AssistantPanel = React.lazy(() =>
+  import('@nannos/embed-sdk/panel').then((m) => ({ default: m.AssistantPanel })),
+);
 ```
 
-### 2. Register the form
+## Quick start
 
-Anywhere under the provider, one hook binds a form. No `core`, no lifecycle:
-
-```tsx
-import { useNannosZodForm } from '@nannos/embed-sdk/react';
-import { z } from 'zod';
-
-const invoiceSchema = z.object({
-  customerName: z.string().describe('Billed customer'),
-  amount: z.coerce.string().describe('Total, numeric string e.g. "1990"'),
-  status: z.enum(['draft', 'sent', 'paid']).describe('Invoice status'),
-});
-
-function InvoiceForm() {
-  const form = useForm<InvoiceInputs>();
-  useNannosZodForm({
-    form,                       // react-hook-form (or any getValues/setValue pair)
-    type: 'Invoice',
-    id: invoiceId ?? 'new',
-    scope: invoiceId ? 'update' : 'create',
-    schema: invoiceSchema,      // SDK derives field list, validation, fieldSpecs, getState
-    includeValues: true,        // send current values so the agent works from real state
-  });
-  // ...render your form...
-}
-```
-
-That's the whole in-form loop. When the user asks the agent to fill the invoice,
-it proposes values, the user approves (a tool-call HITL card in the widget), and
-the SDK writes them through your `setValue` — validated per-field against the
-schema. The human still saves. `navigate`/`highlight` come from the provider props;
-`apply` needs nothing extra (it goes through the registered handle).
-
-Validation is **per field**, so a value the agent guessed wrong is skipped while
-the rest land. Wire **`onApplyResult`** to say so — it fires only when a field was
-rejected, and it is the only place that surfaces: the agent gets no ack, so it
-reports the apply as done either way, and an unwired host leaves the user with a
-part-filled form that looks complete.
+### 1. Provider at the app root
 
 ```tsx
-<NannosProvider
-  config={…}
-  onApplyResult={(target, { rejected }) =>
-    toast.warning(`Couldn't fill: ${rejected.map((r) => r.field).join(', ')}`)
-  }
-/>
-```
-
-Wire client-action hooks (`navigate`, `highlight`, `onApplyResult`) either all on
-the provider or all on `adapter.routing` — never a mix. A provider-level binding
-deliberately suppresses the widget's own dispatch so a directive runs once, which
-means hooks left on the adapter stop firing. The provider is the better home: its
-binding lives as long as the provider, while the widget's only runs while the chat
-panel is mounted.
-
-> **Custom layout?** Skip `<NannosWidget>` and call `mount(useNannos()!, el)` into
-> your own sized container (a definite height/width — the widget fills it).
->
-> **Import from the same layer:** get `NannosProvider`/`useNannos`/`useNannosZodForm`
-> from `@nannos/embed-sdk/react` and `NannosWidget` from `@nannos/embed-sdk`. The
-> widget takes `core` explicitly, so nothing depends on the provider context
-> crossing entry points.
-
-## Auth
-
-The socket connects with the end user's token (on-behalf-of — the agent acts as
-the user, never with more rights). Two paths — pick by whether your host can hand
-over a token. **`getToken` and `auth` are mutually exclusive** (if both are set,
-`getToken` wins and `auth` is ignored with a warning).
-
-### A. Host-token — recommended when you can federate
-
-If your app already has an SSO session, hand over its on-behalf-of token. This is
-the true zero-login drop-in: no second login, no popup, no gesture. The built-in
-`<NannosWidget>` launcher just works.
-
-```tsx
-<NannosProvider config={{ backendUrl, subAgentId, getToken: () => auth.getAccessToken() }}>
-```
-
-`getToken` is called on every (re)connect, so refresh is transparent (return a
-fresh/cached token synchronously or as a Promise). See ADR-0002 for the token model.
-
-### B. Self-login (PKCE) — the generic fallback
-
-When the host can't federate, let the widget sign the user into Nannos directly.
-Pass `auth={pkce(...)}` — the provider owns it:
-
-```tsx
-import { NannosProvider, pkce, NannosAuthCallback } from '@nannos/embed-sdk/react';
+import { NannosProvider } from '@nannos/embed-sdk/react';
 
 <NannosProvider
-  config={{ backendUrl, subAgentId }}
-  auth={pkce({
-    issuer: 'https://login.your-nannos.example/realms/nannos',
-    clientId: 'nannos-embedded',
-    redirectUri: `${location.origin}/nannos-auth-callback`, // a route you serve (see below)
-  })}
-  navigate={router.push}
+  config={{
+    backendUrl: 'https://console.your-nannos.example', // omit for same-origin console usage
+    getToken: () => auth.getAccessToken(),             // or `auth={pkce({...})}` — see Auth
+    subAgentId: process.env.MY_SUB_AGENT_ID,           // string|number; execute-only scoped agent
+  }}
+  navigate={(to) => router.push(to)}   // client-action `navigate`
+  highlight={myHighlight}              // client-action `highlight` (host DOM knowledge)
+  onApplyResult={(t, {rejected}) => rejected.length && toast.warn(...)}
+  onError={(e) => Sentry.addBreadcrumb({ category: 'nannos', message: `${e.type}: ${e.message}` })}
+  strings={myStringOverrides}          // i18n — see below
 >
   <App />
-  <NannosWidget core={useNannos()} />   {/* built-in launcher handles login */}
+  <MyPanelSurface />                   {/* host-owned container, see step 2 */}
 </NannosProvider>
 ```
 
-**How it behaves** (this is what makes the built-in launcher work for PKCE):
-
-- **Connect-on-mount is silent.** The provider connects using the strategy's
-  *silent* token (cache → refresh → null). It **never** pops a login on mount. A
-  null token yields a distinguishable `unauthenticated` status (see below), not an
-  opaque "disconnected."
-- **Login is gated behind the launcher click.** When the launcher is clicked and
-  the strategy isn't authenticated, the widget runs `login()` *inside that gesture*
-  (so the popup isn't blocked), then opens and connects. Every reconnect after that
-  refreshes silently.
-- **`logout()`** is on the core (`useNannos().logout()`): drops the token,
-  disconnects, returns to `unauthenticated`.
-
-> **⚠️ Popups need a gesture — inherent to browsers, not fixable in the SDK.**
-> `useNannos().open(prompt)` (or `.login()`) triggers first-login fine when called
-> from a **real user event** (a click on your own "Ask AI" button). Called from a
-> **non-gesture context** (a route effect, an auto-suggest on page load) the popup
-> is blocked. For custom triggers, call from the click handler; check
-> `core.needsLogin()` if you want to branch.
-
-**The callback route.** PKCE redirects to `redirectUri`, which must be a real route
-you serve and register with the IdP. The redirect *logic* is SDK-owned — mount
-`<NannosAuthCallback />` there (or call `handleAuthCallback()` from `/core` in a
-plain page); you no longer hand-write the postMessage glue:
-
-```tsx
-<Route path="/nannos-auth-callback" element={<NannosAuthCallback />} />
-```
-
-### Connection status
-
-`useNannosStatus()` returns `connecting | connected | disconnected | unauthenticated
-| authError` for host-rendered chrome (a badge, a "sign in" prompt). It separates
-`unauthenticated` (the fix is `login()`) from `disconnected` (network) — the opaque
-merge of the two is the classic embed debugging trap.
-
-```tsx
-const status = useNannosStatus();
-if (status === 'unauthenticated') return <SignInHint />;
-```
-
-> **Agent URL is auto-resolved.** You only supply `backendUrl`; the SDK discovers the
-> orchestrator URL from `{backendUrl}/api/v1/config` on connect. Set
-> `adapter.defaults.agentUrl` only to override it.
-
-## Registering on-screen objects
-
-`useNannosZodForm` is the React happy path. Under it:
-
-- **`zodFormRegistration({ schema, adapter, overrides, … })`** (from `/core`) —
-  framework-free. Returns a `RegisterInput` for `core.register(...)`. Give it a
-  `FormAdapter` (`{ get(field), set(field,value), snapshot() }`) for your form lib.
-- **`overrides`** — a `FieldBridge` (`{ read, write }`) per field that has no clean
-  1:1 form key (e.g. two ISO date fields ↔ a single `[start, end]` tuple). The SDK
-  routes those through the bridge and everything else through `adapter.set`.
-- **Manual `core.register({...})`** — full control: supply your own `getState` +
-  `apply` (+ optional `fieldSpecs`).
-- **Fields-only (no schema)** — `core.register({ type, id, scope, fields: ['a','b'],
-  getState, apply })`. Zero schema, but the agent gets no types/enums/validation
-  (it guesses values). Fine for trivial cases; the schema is what makes it reliable.
-
-**Data minimization.** `getState`/`includeValues` are bounded to the schema
-contract — the declared fields plus bridge reads, never the raw `form.getValues()`.
-Undeclared form fields and non-plain values (e.g. the `[Moment, Moment]` tuple
-behind a bridged date) don't cross the boundary; the agent sees only what you
-declared.
-
-**Rejected fields aren't silent.** `apply` validates each field independently and
-returns `{ applied, rejected }`. A value that fails the schema is skipped (it can't
-block the good fields) but reported — wire `bindClientActions({ onApplyResult })` to
-show "couldn't apply X"; absent a handler, rejections are `console.warn`'d.
-
-## Injected prompts (custom triggers)
-
-`useNannos().open(prompt)` / `core.sendPrompt(prompt)` open the panel and send a
-prompt from your own trigger (an "Ask AI" button, a page-load suggestion). How the
-prompt is *presented* in the chat is a separate choice — pick by who authored it:
+The provider owns the connection AND the panel state the host reads:
 
 ```ts
-core.open(text)                                    // full text as a user bubble
-core.open(text, { displayText: 'Suggest what I can do here' })   // context chip
-core.open(text, { displayText: '…', contextKey: `campaign:${id}` })  // + fresh-chat scoping
+const {
+  isAvailable, status, isOpen,
+  open, close, toggle,                 // open(prompt?, {sendOnOpen?, displayText?, contextKey?})
+  isPinned, togglePinned,
+  panelWidth, setPanelWidth,           // + NANNOS_PANEL_WIDTH_VAR / clampPanelWidth for docked layouts
+  seededPrompt, clearSeededPrompt,
+  core,                                // escape hatch: registry, transport, login/logout
+} = useAssistant();
 ```
 
-- **Default** — renders as a normal user bubble. Right when the text is genuinely
-  the user's (the host relays something they typed or dictated).
-- **`displayText`** — the full prompt is still sent, but the chat shows only this
-  short label as a muted, centered "context" entry, expandable to the raw prompt.
-  Use this for host-authored prompts (a suggestion menu, an instrumentation prompt
-  like "on open, proactively suggest actions for the on-screen campaign") —
-  rendering a page-authored meta-prompt as if the user typed it is confusing, and
-  hiding it entirely leaves the user wondering why the agent is talking. The label
-  persists with the message, so a reload re-renders the chip, not the raw prompt.
-- **`contextKey`** — identifies the page context the prompt is about (an entity
-  key like `campaign:123`, or the pathname). The widget continues the active
-  conversation only if it was started under the same key, and starts a fresh one
-  otherwise — so a prompt about campaign B never lands in (and gets polluted by)
-  a resumed chat about campaign A. Omit it to always continue the active
-  conversation. The key survives reloads alongside the session-resume record.
+- **`open(prompt)` DRAFTS by default** — the prompt lands in the composer for
+  the user to read and send. `sendOnOpen: true` sends immediately (for triggers
+  that already carry the user's decision); `displayText` renders host-authored
+  prompts as a muted context chip; `contextKey` starts a fresh conversation
+  when the page context changed (`campaign:B` never lands in a chat about
+  `campaign:A`).
+- **`open()` is gesture-safe**: call it from a real click and the PKCE
+  first-login popup runs inside that gesture — never popup-blocked.
+- **Pin/width/open state persists** (`localStorage`/`sessionStorage` under
+  `storagePrefix`); the pinned width is published as the CSS variable
+  `--nannos-panel-width` on the root element, so a docked layout is one line:
+  `margin-right: var(--nannos-panel-width, 0px)`.
+- **Cmd/Ctrl+J** toggles the panel (`shortcut={false}` to disable).
+- Outside a provider `useAssistant()` returns a stable no-op value — pages
+  with "Ask AI" affordances render fine without the integration mounted.
 
-## Which sub-agent runs
-
-`subAgentId` in the config selects the scoped domain agent that handles the
-conversation (execute-only). It's sent with each turn; the orchestrator validates
-it against the signed-in user's accessible agents, so it's safe from the client —
-identity is the boundary. Omit it to use the routing orchestrator.
-
-## Config reference
-
-`createNannos(config)`:
-
-| field | required | notes |
-|---|---|---|
-| `backendUrl` | yes¹ | console-backend origin |
-| `getToken` | yes¹ ² | `() => string \| Promise<string>` host-token (on-behalf-of) |
-| `auth` | ² | self-login strategy (`pkce({...})`); mutually exclusive with `getToken` |
-| `subAgentId` | no | scoped execute-only agent id |
-| `socketPath` | no | default `/api/v1/socket.io` |
-| `customHeaders` | no | extra headers on `initialize_client` |
-| `initTimeoutMs` | no | handshake timeout (default 15s) |
-
-¹ omit `backendUrl`/token only for same-origin console usage (cookie auth).
-² supply exactly one of `getToken` (recommended) or `auth` — see Auth above.
-
-## Header label
-
-The chat header auto-resolves the scoped sub-agent's name (from `subAgentId`, via
-`GET {backendUrl}/api/v1/sub-agents/{id}`) — so an execute-only embed reads as e.g.
-"cockpit-assistant", not the orchestrator's A2A card name. Override it with a
-friendlier label via the adapter:
-
-```ts
-const adapter: NannosHostAdapter = { agentName: 'Alloy AI Assistant', routing: { … } };
-```
-
-Precedence: `adapter.agentName` → resolved sub-agent name → A2A handshake name → `"A2A Assistant"`.
-
-## Deploying in a host app
-
-Practical concerns for shipping the widget inside a real host. Some are shipped,
-some are documented gaps — called out so they don't surprise you in staging.
-
-### Bundle size & lazy-loading
-
-Two entry points with very different footprints:
-
-- **`@nannos/embed-sdk/core`** — the lean headless path (~97 KB / ~27 KB gzipped):
-  transport, registry, client-actions, zod-form, auth. No React UI, no Radix, no
-  markdown renderer. Use this if you render your own UI.
-- **`@nannos/embed-sdk`** (root, includes the widget) — ~788 KB / ~194 KB gzipped.
-  It carries a full UI-primitive set (13 `@radix-ui/*`), `react-markdown`, and
-  `socket.io-client`. For an MUI host that's a second component system in the bundle.
-
-The widget already **defers `createRoot` until the panel opens**, but the JS still
-lands in your main chunk unless you split it. Recommended: **dynamic-import the
-widget entry behind the launcher** so it's a separate async chunk:
+### 2. The panel, in a container you own
 
 ```tsx
-const NannosWidget = React.lazy(() =>
-  import('@nannos/embed-sdk').then((m) => ({ default: m.NannosWidget })),
-);
-// render <Suspense><NannosWidget core={useNannos()} /></Suspense> only once opened,
-// or gate the import on a lightweight launcher you own.
+import { AssistantPanel } from '@nannos/embed-sdk/panel';
+
+// Shadow-DOM isolated (default) — for embedding into a foreign design system:
+<div style={{ position: 'fixed', top: 0, right: 0, height: '100vh', width: panelWidth }}>
+  <AssistantPanel />
+</div>
+
+// Light-DOM — for a host that shares the SDK's Tailwind tokens (the console):
+<AssistantPanel shadow={false} showConversationList header={false} />
 ```
 
-`@nannos/embed-sdk/core` and `/react` (the provider/hooks) are small enough to stay
-in the main chunk; only the root widget entry is worth splitting.
+`<AssistantPanel>` fills its container. Props: `shadow` (default true),
+`hostClassName` (e.g. `'dark'` — dark mode keys off the shadow host element),
+`styles` (host override sheets — see Restyling), `header` (`false`, or your
+own node), `showConversationList`, and `customHeaders`/`playground` for scoped
+surfaces. There is NO built-in launcher — the host owns every trigger.
 
-### CSP & origins
+**Conversation history** comes in two shapes, and you get one of them either
+way:
 
-The SDK opens these network/DOM channels — an enterprise host with a strict
-Content-Security-Policy must allowlist them:
+- `showConversationList` — the list as a permanent sidebar. For a wide surface
+  (the console's full-page chat).
+- Default — the header's history button drops the same list as a popover in the
+  thread's top-right corner, leaving the conversation visible behind it. For a
+  narrow embedded panel, where a sidebar does not fit. Picking a conversation
+  closes it; so does Escape, or a click outside.
+
+The header names the **conversation**, not the agent — that is what changes as
+the user moves between chats. An unnamed one reads as `thread.newConversation`
+from the strings table, so it translates; `panel.title` now names the panel
+region instead. A host that wants its agent's name on screen owns that chrome:
+pass your own `header`, and read `useChatEngine().adapter.agentName`.
+
+A host that replaces `header` keeps the overlay by driving it itself:
+`useConversationHistory()` returns `{ available, isOpen, open, close, toggle }`.
+
+Each row shows what the conversation is **about**, not what was typed first: the
+backend writes a short title plus a one-sentence summary after the first
+exchange completes, and stamps the page the conversation started on
+(`metadata.page_context`, taken from the `pageContext` your host publishes). The
+row renders that origin as `Campaign Summer sale`, with the route as its
+tooltip. Rows written before this — or still on their first turn — fall back to
+the streamed last message and show no origin.
+
+The list is the newest 50 conversations — the backend's ceiling, and it has no
+cursor to page past it. Search filters by title server-side, which is how you
+reach anything older.
+
+### 3. Register forms (the in-form loop)
+
+Declare your object types once, derive everything at the call site:
+
+```ts
+import { createNannosForm, type ObjectTypeRegistry } from '@nannos/embed-sdk/react';
+
+const types: ObjectTypeRegistry = {
+  Invoice: { schema: invoiceSchema, singular: 'Invoice', idShape: 'simple-numeric',
+             highlightLabels: { dueDate: 'Due date' } },
+};
+export const useNannosForm = createNannosForm(types);
+
+// per form — id/scope/label derived from the registry + route id:
+useNannosForm({ form, type: 'Invoice', id: invoiceId });
+```
+
+(`useNannosZodForm` remains the low-level hook; `useObjectStateAdapter` binds
+non-form state containers.) Validation is per field: a value the agent guessed
+wrong is skipped while the rest land — wire `onApplyResult` to surface it.
+
+### 4. Publish the current page (live context)
+
+Tell the assistant where the user is NOW. The router only gives a path and a
+page title only gives a display name — neither resolves "this campaign" to an
+id the agent's tools accept, nor says which tab is open. Pages fill that gap
+in LAYERS (the Gatana pattern):
+
+```tsx
+import { useAssistant, useNannosPageContext } from '@nannos/embed-sdk/react';
+
+// BASE layer — a bridge watching your router:
+useAssistant().setPageContext({ key: location.pathname, title: pageTitle });
+
+// a details page layers the thing on screen on top:
+useNannosPageContext({ entity: { type: 'Campaign', id, name } });
+
+// a tab or dialog inside it layers its view state:
+useNannosPageContext({ view: { tab: 'targetings' }, visible: rowNames });
+```
+
+Fields (`NannosPageContext`): `key` (page identity — required somewhere in the
+stack), `title`, `breadcrumbs`, `entity {type, id, name?}`, `view` (active
+tab/filter/selection — scalars only), `visible` (names on screen, so "the
+second one" resolves). Layers merge in mount order — later wins, `view` merges
+key by key — then the snapshot is SANITIZED: per-field caps, a secret-key deny
+list (`token`, `password`, `apiKey`, …), and a ~2k whole-payload ceiling that
+sheds `visible`, then `view`, first. Everything here reaches a model — declare
+named fields; never spread a fetched object in.
+
+What it does:
+
+- the composer's context chip follows navigation (hosts that publish nothing
+  keep the old behavior: the chip shows the key the conversation was opened
+  under, frozen for its life);
+- every send — new turn, steer, HITL resume — carries the merged snapshot as
+  `metadata.pageContext`; the orchestrator renders it as a `<current_page>`
+  block on the last human message (next to `<client_objects>`, keeping the
+  cached system prefix stable), so "this page / here / this campaign" resolves;
+- `open(prompt)` defaults its conversation-scoping `contextKey` to the live
+  `key`, so an un-keyed "Ask AI" trigger scopes to the page it was pressed on.
+
+**The pull half — page readers.** The snapshot above rides every send, so it
+stays small. When the agent needs MORE (`client_action` kind
+`read_current_page`), it asks — the turn pauses, the SDK answers, the turn
+resumes — and pages answer through registered readers:
+
+```tsx
+import { useNannosPageReader } from '@nannos/embed-sdk/react';
+
+useNannosPageReader('lineItems', () => rows.map(({ id, name, state }) => ({ id, name, state })));
+useNannosPageReader('unsavedForm', () => form.getValues());
+```
+
+`key` names the field in the agent's answer; the read is asked once, on
+demand, and sanitized before it leaves the browser (the same secret deny list
+at every depth, plus size caps that truncate rather than refuse —
+core/page-read.ts). Declare named slices — never hand over a whole fetched
+object.
+
+**The screen outline.** Every read ALSO carries the rendered page as a
+markdown outline, under the reserved `screen` key — a visibility-respecting
+DOM walk (core/screen-outline.ts: headings give levels; real tables AND ARIA
+grids like MUI X DataGrid become markdown tables; form controls read as their
+value, passwords never; hidden/unmounted content contributes nothing). So a
+page with no readers still answers with what the user actually sees. The
+outline takes the budget the readers leave (floor 1.5k / ceiling 7k chars) and
+is the part that gets cut if the total lands over the 10k cap. Steer it with
+two attributes and one marker:
+
+- `data-nannos-ignore` — drop an element and everything under it (host chrome,
+  internal nav). The SDK panel is excluded already (shadow boundary).
+- `data-nannos-redact` — replace an element's content with `[redacted]`; put
+  it on anything that renders a secret's value.
+- `data-nannos-read-root` — mark the region worth reading (default: `<main>`,
+  else `<body>`).
+
+Open dialogs and toasts (sonner, `role="alert"`) are reported even though they
+portal outside the root. Set `screenOutline={false}` on the provider to send
+only page context + readers.
+
+## Auth
+
+Unchanged from v1 (ADR-0002): supply exactly one of
+
+- **`getToken`** (host-token, recommended): called on every (re)connect;
+  refresh is transparent. The socket AND every REST leg share it.
+- **`auth: pkce({ issuer, clientId, redirectUri })`** (self-login fallback):
+  connect-on-mount is silent (never pops a login); interactive login runs
+  inside `useAssistant().open()`'s gesture. Serve `redirectUri` yourself and
+  mount `<NannosAuthCallback />` there (or a static HTML page doing the
+  postMessage — see the cockpit's `public/nannos-auth-callback.html`).
+
+`useNannosStatus()` separates `unauthenticated` (fix = login) from
+`disconnected` (network) — plus `connecting | connected | authError`.
+
+## The chat engine (what's under the panel)
+
+- **`A2AChatTransport`** implements the AI SDK's `ChatTransport`: one shared
+  socket feeds per-conversation `UIMessage` chunk streams. Typed parts carry
+  the A2A extras: `data-workplan`, `data-agent-thought`, `data-activity`
+  (persisted), `data-task`, `data-feedback-request` (transient).
+- **HITL is native tool approval**: an `input-required` interrupt becomes
+  `approval-requested` dynamic-tool parts (risk badges from `_risk_metadata`,
+  buttons gated by `review_configs`); `addToolApprovalResponse` + the AI SDK's
+  `sendAutomaticallyWhen` produce exactly ONE resume send with the batched
+  decisions, re-attaching the execute-only directive and the client-object
+  manifest.
+- **Streaming offsets are code points** (Python `len`), never `.length` —
+  reconnect/replay dedupe survives emoji.
+- **Steering**: sending while a turn streams routes into the RUNNING turn
+  (never interrupts it); reload-mid-turn resumes via the conversation
+  snapshot, including a pending approval card.
+
+Recomposition (the console's playground is the reference):
+
+```tsx
+import { NannosChatScope, useNannosChat, useConversations,
+         Thread, Composer, ApprovalCard, WorkingBlock } from '@nannos/embed-sdk/panel';
+
+<NannosChatScope customHeaders={{ 'X-Playground-SubAgentConfig-Hash': hash }}
+                 playground={{ subAgentConfigHash: hash, subAgentName: name }}>
+  <MyLayout/>   {/* inside: const chat = useNannosChat(); <Thread chat={chat}/> ... */}
+</NannosChatScope>
+```
+
+A default `<NannosChatScope>` mounted at the host's layout keeps streaming,
+unread counts and reply toasts alive across navigation; `<AssistantPanel>`
+reuses a surrounding scope instead of creating a second one.
+`useSocketEvent(name, cb)` is the escape hatch for non-chat server events.
+
+## i18n
+
+All chrome strings come from a flat table (`NannosStrings`, English defaults).
+Hosts override any subset:
+
+```ts
+import { nannosStringKeys, type NannosStrings } from '@nannos/embed-sdk/react';
+const strings = Object.fromEntries(nannosStringKeys.map((k) => [k, t(`nannos.sdk.${k}`)]));
+<NannosProvider strings={strings} …>
+```
+
+Placeholders are single-brace (`{label}`) so they pass through i18next
+untouched. The cockpit ships en+de this way.
+
+## Restyling (the host theming contract)
+
+1. **`themeSheet()`** (recommended): a typed builder for the override sheet —
+   the `NannosTheme` interface IS the list of what you can change (autocomplete
+   + JSDoc per token), and it handles dark mode's specificity correctly:
+
+   ```tsx
+   import { themeSheet } from '@nannos/embed-sdk/react'; // eager-safe (also on /panel)
+
+   const BRAND = themeSheet({ accent: '#bb448b', accentForeground: '#fff' });
+   <AssistantPanel styles={[BRAND]} />
+   ```
+
+   The first argument applies in both color schemes (it beats the SDK's
+   built-in dark palette); the second refines tokens for dark mode only:
+   `themeSheet({ accent }, { background: '#111' })`.
+2. **Token knobs** (what `themeSheet` writes for you): `--nannos-accent`,
+   `--nannos-accent-foreground`, `--nannos-radius` derive
+   `--primary`/`--ring`/`--radius` — one variable re-brands the palette. Every
+   shadcn token on `:host` (see `theme.css`) can also be overridden directly.
+   Raw-CSS gotcha: the SDK's `:host(.dark)` block outranks a plain `:host`
+   override once `dark` is stamped — repeat overrides under `:host(.dark)`
+   (or use `themeSheet`, which does).
+3. **Override sheets**: `ShadowPortal`/`AssistantPanel` `styles={[css]}` are
+   adopted AFTER the SDK sheet — cascade wins, full restyles possible.
+4. **Stable selectors**: interactive blocks carry `data-slot="nannos-…"`.
+5. **Light-DOM mode** (`shadow={false}`): host CSS applies natively (`:host`
+   sheets from `themeSheet` do NOT — it's shadow-only); the host's Tailwind
+   build must scan the SDK source
+   (`@source '../../embed-sdk/src'` + the streamdown dist — see the console's
+   `index.css`).
+6. Dark mode: put `dark` on `hostClassName` (shadow) or a `.dark` ancestor
+   (light DOM).
+
+## CSP & origins
 
 | What | Directive | Origin |
 |---|---|---|
 | socket.io (polling + websocket) | `connect-src` | `{backendUrl}` **and** its `wss:`/`ws:` |
-| config discovery + REST legs (feedback, upload, sub-agent name) | `connect-src` | `{backendUrl}` |
-| PKCE login popup → OIDC | `connect-src` (discovery/token fetch) | the `issuer` origin |
-| PKCE popup window | (popup, not framed) | the `issuer` origin — no `frame-src` needed |
-| callback `postMessage` | — | the `redirectUri` origin talks back to the app origin (same-origin by default) |
-| Shadow-DOM styles (`adoptedStyleSheets`) | none | no `style-src` entry needed (constructed sheet, not injected `<style>`) |
+| config discovery + REST legs | `connect-src` | `{backendUrl}` |
+| PKCE login popup → OIDC | `connect-src` | the `issuer` origin |
+| Shadow-DOM styles | none | constructed sheets (`adoptedStyleSheets`), no `style-src` needed |
 
-Host-token path (`getToken`) needs only the `{backendUrl}` `connect-src` entries.
+Remote backends must allowlist the host origin (`EMBED_ALLOWED_ORIGINS`).
 
-### Host theming
+## Development
 
-- **Launcher color:** `<NannosWidget accent="#4D418D" />` — set your brand color so
-  the widget doesn't read as a third-party bolt-on. ✅ shipped.
-- **Panel design tokens:** the shadow DOM declares `--nannos-radius` and
-  `--nannos-accent` on `:host`; the shadcn tokens (`--background`, `--primary`, …)
-  drive the chat surface. **Known gap:** there's no first-class prop yet to
-  restyle those from the host — deeper token theming (brand-mapped `--primary`,
-  surfaces) is planned. Today, launcher color + `agentName` cover most of the
-  "feels native" gap.
+- `npm run dev` → the harness at `localhost:3000` (proxied to a local
+  console-backend on 5001): env switcher (local/stg/prod + token paste), the
+  real panel in shadow/light/dark/restyle modes, and a raw-transport view for
+  wire debugging.
+- `npm test` (vitest): kernel + transport (incl. the S1–S5 AI-SDK integration
+  gates run against a scripted wire), stores, provider, i18n.
+- `npm run build`: preserveModules ESM + d.ts + `dist/styles.css`.
+- `scripts/vendor-ai-elements.mjs` re-vendors the AI Elements set (codemod
+  applied automatically; keep local patches minimal).
 
-### Localization (known gap)
+Integration planning (ontology → client objects → tools → brain) lives in
+[`INTEGRATION-PLAYBOOK.md`](./INTEGRATION-PLAYBOOK.md). Known gaps and their
+history: [`PENDING.md`](./PENDING.md).
 
-The widget chrome is currently **English-only** — UI strings are hardcoded and
-there's no `locale`/messages prop. A localized host gets an English assistant
-panel. **Planned:** a string-override seam (host passes its active language + a
-messages map, or overrides the SDK's string table) scoped to the compact embed's
-~20 visible strings. Track this before rolling out to non-English tenants.
+## Migrating from v1
 
-### Errors & telemetry
-
-Two seams:
-
-- **`useNannosStatus()`** — coarse connection state (`connecting | connected |
-  disconnected | unauthenticated | authError`) for host chrome.
-- **`onError`** on `<NannosProvider>` — forwards SDK-internal failures to your
-  monitoring (Sentry etc.):
-
-  ```tsx
-  <NannosProvider config={…} onError={(e) => Sentry.captureException(e.cause ?? new Error(e.message), {
-    tags: { nannos_error: e.type }, extra: e.detail,
-  })}>
-  ```
-
-  Event shape: `{ type: 'connection' | 'init' | 'auth' | 'apply', message, cause?, detail? }`
-  — socket `connect_error` (`connection`), `initialize_client` reject/timeout
-  (`init`), `getToken()`/interactive-login failure (`auth`), and a client-action
-  handler that threw (`apply`). These are diagnostics; the SDK still degrades
-  gracefully (status flips, retries). Headless hosts subscribe via `core.onError(cb)`.
-
-  Per-field apply *rejections* (a value that failed validation, not a thrown
-  error) come through `bindClientActions({ onApplyResult })` instead.
-
----
-
-## Rough edges & the road to drop-in
-
-Honest assessment from writing this guide. The **core API is right**, and the
-React integration layer (`@nannos/embed-sdk/react` + `<NannosWidget>`) closes
-most of the gap to "almost no-config drop-in". What's **shipped** vs. what's
-**still config**:
-
-**Resolved by the React layer:**
-
-1. ✅ **Core creation + sharing** — `<NannosProvider>` owns one core in context;
-   `useNannosZodForm`/`useNannos()` read it. No hand-rolled singleton, no
-   "second core → empty registry" footgun.
-
-2. ✅ **Mounting + sizing** — `<NannosWidget core={useNannos()} />` renders a
-   floating launcher + panel; no `mount`, no container sizing. (Bespoke layout
-   still available via `mount()`.)
-
-3. ✅ **`connect()` lifecycle** — the provider connects on mount and disconnects
-   on unmount.
-
-4. ✅ **`navigate`/`highlight`** — provider props (`navigate={router.push}`),
-   folded in instead of a separate `bindClientActions` call.
-
-5. ✅ **`useNannosZodForm` needs no `core`** — it reads context:
-   `useNannosZodForm({ form, type, id, scope, schema })`.
-
-6. ✅ **Imperative handle for custom triggers** — `useNannos()` returns the core,
-   which now carries `open(prompt?)`, `close()`, `toggle()`, `sendPrompt()`. A
-   host's own launcher ("Ask AI" next to a form) opens the panel and injects a
-   prompt in one call — no `window` CustomEvent bus. `<NannosWidget>` mirrors the
-   same core state, so every trigger agrees.
-
-7. ✅ **Agent-URL discovery** — the SDK resolves the orchestrator URL from
-   `{backendUrl}/api/v1/config` on connect; the embedder only supplies `backendUrl`.
-
-8. ✅ **Auth path + PKCE gesture** — `<NannosProvider auth={pkce({issuer, clientId})}>`.
-   Connect-on-mount is silent (never pops a login); the widget launcher runs
-   `login()` inside its click, so the built-in launcher works for PKCE with zero
-   custom auth code. `handleAuthCallback()` / `<NannosAuthCallback>` own the
-   redirect-page logic (you still register + serve the route). Host-token
-   (`getToken`) stays the recommended zero-login path.
-
-9. ✅ **Connection status** — `useNannosStatus()` surfaces `connecting | connected
-   | disconnected | unauthenticated | authError`; `unauthenticated` is distinct from
-   a network drop.
-
-10. ✅ **Data minimization** — `getState`/`includeValues` project to the schema
-    contract; the raw form snapshot (undeclared fields, `[Moment,…]` tuples) no
-    longer leaks past the boundary.
-
-11. ✅ **Rejected fields surfaced** — `apply` returns `{ applied, rejected }`;
-    `onApplyResult` (or a `console.warn` fallback) makes a dropped value visible.
-
-12. ✅ **Reactive `enabled`** — a runtime flag (LaunchDarkly etc.) can flip the
-    assistant on/off; the core is created once when first enabled (no fetch/popup
-    while disabled). `config`/`auth` are captured at creation — change them by
-    remounting the provider with a `key`.
-
-13. ✅ **Form re-registration** — `useNannosZodForm` re-registers on a schema/bridge
-    SHAPE signature (field names + bridge keys), so an inline-built `overrides` isn't
-    silently stale when a field is added/removed. (Changing a bridge *body* with the
-    same keys still needs a stable reference — documented at the call site.)
-
-14. ✅ **StrictMode-safe** — `disconnect()` nulls the socket, so React's
-    mount→unmount→mount double-invoke reconnects cleanly (regression-tested).
-
-**Still open:**
-
-15. **Callback route still needs host wiring.** `redirectUri` must be a route you
-    serve and register with the IdP — the SDK owns the *logic* (`<NannosAuthCallback>`),
-    not the hosting. A fully SDK-hosted default would need Nannos-origin infra.
-
-16. **`subAgentId` coercion + dev `staticToken`** — minor ergonomics from the field
-    report (env vars are strings; a dev-only static token with a clear "no token"
-    error). Not yet.
-
-17. **Agent self-correction on rejects** — `apply` now reports rejected fields to
-    the host, but they aren't yet fed back to the agent as a tool-result so it can
-    retry. That's a protocol round-trip (client_action ack), tracked separately.
-
-18. **Cross-entry-point discipline** — `<NannosWidget>` deliberately takes `core`
-   as a prop (from `useNannos()`) rather than reading context, because vite's
-   multi-entry lib build inlines shared modules and would duplicate the provider
-   context across `/react` and the root entry. Import provider/hooks from
-   `@nannos/embed-sdk/react`, widget from the root. Documented, but a sharper
-   packaging (single context chunk) would remove the footgun entirely.
-
-19. **Localization** — the widget chrome is English-only (hardcoded strings, no
-    `locale`/messages prop). A blocker for localized multi-tenant hosts. Planned:
-    a string-override seam scoped to the compact embed's ~20 visible strings. See
-    "Deploying in a host app › Localization".
-
-20. **Deep host theming** — launcher `accent` is a prop (shipped), but there's no
-    first-class way to brand the panel's shadcn tokens (`--primary`, surfaces).
-    Planned. See "Deploying in a host app › Host theming".
-
-21. ✅ **Error/telemetry seam** — `<NannosProvider onError={…}>` (and
-    `core.onError()` for headless) forwards connection/init/auth/apply failures to
-    host monitoring; `useNannosStatus()` covers connection state. See "Deploying in
-    a host app › Errors & telemetry".
-
-**The drop-in shape — now real for both auth paths:**
-
-```tsx
-// once, at the app root
-<NannosProvider
-  config={{ backendUrl: 'https://console.your-nannos.example', subAgentId: 42 }}
-  auth={pkce({ issuer, clientId: 'nannos-embedded', redirectUri })}  // or config.getToken
-  navigate={router.push}
->
-  <App />
-  <AssistantMount />         {/* <NannosWidget core={useNannos()} /> */}
-</NannosProvider>
-
-// per form — no core, no mount, no lifecycle
-useNannosZodForm({ form, type: 'Invoice', id, scope, schema });
-```
-
-Irreducible config even then: `backendUrl`, an auth path (`getToken` or `auth`), and
-(optionally) `subAgentId`. Everything else — core creation/sharing, connect, mount, sizing,
-adapter, field derivation, HITL — is handled by the SDK.
+| v1 | v2 |
+|---|---|
+| `<NannosWidget core={useNannos()} …/>` | host-owned trigger + `<AssistantPanel>` in a host container |
+| `mount(core, el)` / `defineElement()` | `<ShadowPortal>` (same isolation, one React tree) — web component dropped |
+| `useNannos()` / `core.open/close/toggle/onOpenChange` | `useAssistant()` (open/close/pin/width/seeding live here) |
+| `core.sendPrompt(text, opts)` | `useAssistant().open(text, opts)` — drafts by default, `sendOnOpen: true` for the old send-now behavior |
+| `adapter.routing.{navigate,highlight,onApplyResult,…}` | provider props only; `adapter.chatSurface` keeps `isVisible`/`bringIntoView` |
+| `ChatProviders`/`SocketProvider`/`ChatProvider` | `<NannosChatScope>` (+ `playground`/`customHeaders`) |
+| `MessageList`/`ChatInput`/`ConnectionStatus`/`InterruptConfirmCard` | `Thread`/`Composer`/`ConnectionStatus`/`ApprovalCard` from `/panel` |

@@ -111,6 +111,11 @@ class GraphRuntimeContext:
     the `client_action` tool is registered and a <client_objects> section is
     injected into the system prompt."""
 
+    page_context: Optional[dict] = None
+    """The page the user is currently on in the embedding app ({key, label?,
+    description?, data?}), published on navigation and sent with every turn.
+    Rendered as a <current_page> section next to <client_objects>."""
+
     groups: list[str] = field(default_factory=list)
     """User's group memberships (Keycloak group paths).
     
@@ -254,6 +259,10 @@ class UserConfig(BaseModel):
     client_objects: Optional[list] = Field(
         default=None,
         description="Per-turn manifest of on-screen ontology objects from the embedding client (Embedded Nannos)",
+    )
+    page_context: Optional[dict] = Field(
+        default=None,
+        description="The page the user is currently on in the embedding client ({key, label?, description?, data?})",
     )
     sub_agent_config_hash: Optional[str] = Field(
         default=None,

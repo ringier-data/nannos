@@ -7,9 +7,11 @@ Data is lost on process restart.
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from ..exceptions import ConversationOwnershipError
 from ..models.conversation import Conversation
+from .conversation_service import conversation_page_context
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,7 @@ class InMemoryConversationService:
         user_id: str,
         title: str = "",
         agent_url: str = "",
-        metadata: dict[str, str] | None = None,
+        metadata: dict[str, Any] | None = None,
         conversation_id: str | None = None,
         status: str = "active",
         sub_agent_config_hash: str | None = None,
@@ -101,16 +103,64 @@ class InMemoryConversationService:
         message: str | None = None,
         sub_agent_config_hash: str | None = None,
         embedded_sub_agent_id: str | None = None,
+        page_context: dict[str, Any] | None = None,
     ) -> Conversation:
         existing = await self.get_conversation(conversation_id, user_id)
         if existing:
             return existing
         title = (message[:50] + "...") if message and len(message) > 50 else (message or "")
+        metadata: dict[str, Any] = {}
+        if embedded_sub_agent_id:
+            metadata["embedded_sub_agent_id"] = embedded_sub_agent_id
+        origin = conversation_page_context(page_context)
+        if origin:
+            metadata["page_context"] = origin
         return await self.insert_conversation(
             user_id=user_id,
             title=title,
             agent_url=agent_url,
             conversation_id=conversation_id,
             sub_agent_config_hash=sub_agent_config_hash,
-            metadata={"embedded_sub_agent_id": embedded_sub_agent_id} if embedded_sub_agent_id else None,
+            metadata=metadata or None,
         )
+
+    async def archive_conversation(self, conversation_id: str, user_id: str) -> bool:
+        """Mirror of ConversationService.archive_conversation — soft delete.
+
+        The list already skips anything that is not 'active', so flipping the
+        status is all it takes here.
+        """
+        conv = await self.get_conversation(conversation_id, user_id)
+        if not conv or conv.status == "archived":
+            return False
+        conv.status = "archived"
+        conv.last_updated = datetime.now(timezone.utc)
+        return True
+
+    async def rename_conversation(self, conversation_id: str, user_id: str, *, title: str) -> bool:
+        """Mirror of ConversationService.rename_conversation — the user's name wins."""
+        conv = await self.get_conversation(conversation_id, user_id)
+        if not conv:
+            return False
+        conv.title = title
+        conv.metadata = {**conv.metadata, "title_source": "user"}
+        conv.last_updated = datetime.now(timezone.utc)
+        return True
+
+    async def update_summary(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        title: str,
+        summary: str,
+        title_source: str = "llm",
+    ) -> bool:
+        """Mirror of ConversationService.update_summary — merges, never replaces."""
+        conv = await self.get_conversation(conversation_id, user_id)
+        if not conv:
+            return False
+        conv.title = title
+        conv.metadata = {**conv.metadata, "summary": summary, "title_source": title_source}
+        conv.last_updated = datetime.now(timezone.utc)
+        return True
