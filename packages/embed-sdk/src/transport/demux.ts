@@ -19,6 +19,7 @@ import {
 } from '../core/protocol';
 import {
   ACTIVITY_LOG_EXT,
+  ACTIVITY_LOG_KINDS,
   CLIENT_ACTION_EXT,
   FEEDBACK_REQUEST_EXT,
   HITL_EXT,
@@ -477,7 +478,7 @@ export function demux(state: DemuxState, data: AgentResponseData, wireId?: strin
         // A mid-turn note (notify_user) rides the same extension with kind='note'.
         // Unknown kinds are dropped: an older/newer agent must not make the line
         // render as something this build has no styling for.
-        const isNote = meta?.kind === 'note';
+        const isNote = meta?.kind === ACTIVITY_LOG_KINDS[0];
         state.activitySeq += 1;
         const activity = {
           text,
