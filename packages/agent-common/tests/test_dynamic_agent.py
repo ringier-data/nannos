@@ -116,6 +116,71 @@ class TestDynamicLocalAgentRunnable:
         runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
         assert runnable.client_action_enabled is True
 
+    @pytest.mark.asyncio
+    async def test_notify_user_guidance_in_prompt_when_embedded_entrypoint(self, mock_model):
+        """The embedded entrypoint gets the notify_user tool AND the guidance for it."""
+        from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="cockpit",
+            description="Embedded cockpit agent",
+            system_prompt="You are the cockpit assistant.",
+            embedded_entrypoint=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=MagicMock()):
+            await runnable._ensure_agent()
+
+        prompt = runnable._cached_system_prompt
+        assert "<keep_the_user_informed>" in prompt
+        assert NOTIFY_USER_TOOL_NAME in prompt
+        # A greeting must never trigger a note, and the note must never carry the answer.
+        assert "'hello'" in prompt
+        assert any(t.name == NOTIFY_USER_TOOL_NAME for t in runnable._cached_tools)
+
+    @pytest.mark.asyncio
+    async def test_notify_user_guidance_absent_for_delegated_subagent(self, basic_config, mock_model):
+        """An ordinary sub-agent has no notify_user tool, so it must not be told to call one."""
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=MagicMock()):
+            await runnable._ensure_agent()
+
+        assert "<keep_the_user_informed>" not in runnable._cached_system_prompt
+        assert not any(t.name == "notify_user" for t in runnable._cached_tools)
+
+    @pytest.mark.asyncio
+    async def test_notify_user_does_not_ride_on_client_action(self, mock_model):
+        """The two capabilities are independent gates, not one flag doing double duty.
+
+        ``client_action_enabled`` means "may drive on-screen objects"; only
+        ``embedded_entrypoint`` means "faces the user, so it narrates". An agent with
+        just the former must get client_action and NOT notify_user.
+        """
+        from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
+        from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="screen-only",
+            description="Drives on-screen objects but is delegated to",
+            system_prompt="You are a screen driver.",
+            client_action_enabled=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=MagicMock()):
+            await runnable._ensure_agent()
+
+        names = [t.name for t in runnable._cached_tools]
+        assert CLIENT_ACTION_TOOL_NAME in names
+        assert NOTIFY_USER_TOOL_NAME not in names
+        assert "<keep_the_user_informed>" not in runnable._cached_system_prompt
+
+    def test_embedded_entrypoint_disabled_by_default(self, basic_config, mock_model):
+        """Delegated sub-agents are not the entrypoint."""
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        assert runnable.embedded_entrypoint is False
+
     def _prime_cached_state(self, runnable):
         runnable._cached_tools = []
         runnable._cached_system_prompt = "p"

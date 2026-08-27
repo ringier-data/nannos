@@ -792,13 +792,19 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 )
                 embedded_runnable = ecache.get(ekey)
                 if embedded_runnable is None:
-                    # Mark as the embedded entrypoint (adds the client_action tool +
-                    # <client_objects> rendering) and isolate to just this agent —
-                    # execute-only means no routing and no peer sub-agents. Copy first:
-                    # the config instance is shared by reference with the per-user cache,
-                    # so an in-place mutation would leak the embedded-only flag into
-                    # subsequent non-embedded turns for this user.
-                    embedded_target = embedded_target.model_copy(update={"client_action_enabled": True})
+                    # Mark as the embedded entrypoint and isolate to just this agent —
+                    # execute-only means no routing and no peer sub-agents. Two distinct
+                    # flags, deliberately: ``embedded_entrypoint`` says this agent IS the
+                    # top-level graph and so owns talking to the user (notify_user), while
+                    # ``client_action_enabled`` says it may drive on-screen objects
+                    # (client_action + <client_objects>). Both are true for an embed today;
+                    # a future user-facing surface without on-screen objects would set only
+                    # the first. Copy first: the config instance is shared by reference with
+                    # the per-user cache, so an in-place mutation would leak the
+                    # embedded-only flags into subsequent non-embedded turns for this user.
+                    embedded_target = embedded_target.model_copy(
+                        update={"embedded_entrypoint": True, "client_action_enabled": True}
+                    )
                     user_config.local_subagents = [embedded_target]
                     runtime_context = self.agent.build_runtime_context(
                         user_config, sandbox_pool=self.agent.sandbox_pool

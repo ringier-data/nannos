@@ -358,12 +358,19 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         )
         self.sandbox_pool = sandbox_pool
         self.extra_middlewares = extra_middlewares
-        # Embedded Nannos: when this sub-agent is a scoped domain agent (the
-        # embedded entrypoint), it also carries the on-screen manifest renderer
-        # (<client_objects>) and the client_action tool. Off by default so
-        # ordinary/scheduled LOCAL sub-agents are unaffected. Safe getattr default
-        # until the config model carries the flag.
+        # Embedded Nannos (ADR-0004): two independent capabilities of a scoped domain
+        # agent, both off by default so ordinary/scheduled LOCAL sub-agents are
+        # unaffected. Keep them apart — one is about the screen, the other about who
+        # the agent is speaking to:
+        #   client_action_enabled — may drive on-screen objects: the client_action tool
+        #     and the <client_objects> manifest renderer.
+        #   embedded_entrypoint   — IS the top-level graph for the turn, with no
+        #     orchestrator in front of it, so it owns talking to the user: the
+        #     notify_user tool and its prompt guidance.
+        # The execute-only invocation sets both; a future user-facing surface with no
+        # on-screen objects would set only the second.
         self.client_action_enabled = bool(getattr(config, "client_action_enabled", False))
+        self.embedded_entrypoint = bool(getattr(config, "embedded_entrypoint", False))
         self.inject_all_tools = inject_all_tools
         self.tool_catalog = tool_catalog
         # Already-authenticated tools the embedding orchestrator discovered for this same
@@ -1351,6 +1358,17 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             system_prompt += tool_availability_addendum
             logger.debug(f"Added MCP tool-availability warning to {self.name} system prompt")
 
+        # Embedded entrypoint: this agent faces the user with no orchestrator turn in
+        # front of it, so it also owns the mid-turn narration. Gated on the same flag
+        # that binds the tool below — instructing an agent to call a tool it does not
+        # have would be worse than saying nothing. A sub-agent delegated via 'task' is
+        # narrated by the orchestrator and gets neither.
+        if self.embedded_entrypoint:
+            from agent_common.core.notify_user_tool import NOTIFY_USER_PROMPT_ADDENDUM
+
+            system_prompt += NOTIFY_USER_PROMPT_ADDENDUM
+            logger.debug(f"Added notify_user guidance to {self.name} system prompt")
+
         # Get provider-specific response_format strategy (may mutate tools list for Bedrock/Anthropic+thinking)
         response_format = get_response_format(
             model_type=self.get_model_type(),
@@ -1394,13 +1412,19 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # sub-agents don't get an unused tool.
         if self.client_action_enabled:
             from agent_common.core.client_action_tool import create_client_action_tool
+
+            tools = [*tools, create_client_action_tool()]
+
+        # The embedded entrypoint talks to the user directly (no orchestrator turn in
+        # front of it), so it needs its own way to say "understood, doing X" while it
+        # works. Delegated sub-agents are narrated by the orchestrator's delegation
+        # activity lines instead, and the orchestrator has its own notify_user. Keyed on
+        # the entrypoint flag, NOT on client_action_enabled: a mid-turn note is
+        # transport-agnostic and has nothing to do with driving on-screen objects.
+        if self.embedded_entrypoint:
             from agent_common.core.notify_user_tool import create_notify_user_tool
 
-            # notify_user comes with it: as the embedded entrypoint this agent talks to
-            # the user directly (no orchestrator turn in front of it), so it needs its
-            # own way to say "understood, doing X" while it works. Delegated sub-agents
-            # are already narrated by the orchestrator's delegation activity lines.
-            tools = [*tools, create_client_action_tool(), create_notify_user_tool()]
+            tools = [*tools, create_notify_user_tool()]
 
         # Cache intermediate state for _build_graph() (used by both paths)
         self._cached_tools = tools
