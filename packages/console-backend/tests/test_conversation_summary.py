@@ -128,7 +128,7 @@ async def test_titles_a_conversation_and_stores_both_fields(monkeypatch):
     prompt = gateway.await_args.args[0]
     assert "Why is campaign 42 und" in prompt
     assert "daily cap was lowered" in prompt
-    assert gateway.await_args.kwargs["metadata"] == {"user_sub": "user-1"}
+    assert gateway.await_args.kwargs["metadata"] == {"user_sub": "user-1", "conversation_id": "conv-1"}
 
 
 @pytest.mark.asyncio

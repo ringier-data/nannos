@@ -146,7 +146,13 @@ def usable_answer(text: str | None) -> str:
     return cleaned[:MAX_INPUT_CHARS]
 
 
-async def generate_summary(user_text: str, assistant_text: str, *, user_sub: str | None = None) -> tuple[str, str] | None:
+async def generate_summary(
+    user_text: str,
+    assistant_text: str,
+    *,
+    user_sub: str | None = None,
+    conversation_id: str | None = None,
+) -> tuple[str, str] | None:
     """Ask the model for (title, summary). None on any failure — callers skip."""
     model = await resolve_summary_model()
     if not model:
@@ -174,8 +180,11 @@ async def generate_summary(user_text: str, assistant_text: str, *, user_sub: str
             # text, and 200 left the JSON truncated or empty. An unused ceiling is
             # free (billing is per generated token, and the timeout bounds latency).
             max_tokens=4000,
-            # The gateway attributes cost by OIDC subject; without it nothing is logged.
-            metadata={"user_sub": user_sub} if user_sub else None,
+            # The gateway attributes cost by OIDC subject; without it nothing is
+            # logged. conversation_id lands the row on the conversation it names,
+            # so per-conversation cost views include this call rather than
+            # showing it as an orphan under the user. None values are dropped.
+            metadata={"user_sub": user_sub, "conversation_id": conversation_id} if user_sub else None,
             timeout=20.0,
         )
     except Exception as e:
@@ -248,7 +257,7 @@ async def maybe_summarize_conversation(
             )
             return False
 
-        generated = await generate_summary(question, reply, user_sub=user_sub)
+        generated = await generate_summary(question, reply, user_sub=user_sub, conversation_id=conversation_id)
         if not generated:
             return False
 
