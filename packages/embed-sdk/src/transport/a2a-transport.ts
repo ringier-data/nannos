@@ -413,7 +413,7 @@ export class A2AChatTransport implements ChatTransport<NannosUIMessage> {
     const conversationId =
       data.contextId ?? (data.id ? this.pendingSendIds.get(data.id) : undefined);
     // Logged before routing, so even unroutable late echoes are inspectable.
-    this.deps.wireLog?.push({
+    const wireId = this.deps.wireLog?.push({
       dir: 'in',
       ...(conversationId && { conversationId }),
       label: labelAgentEvent(data),
@@ -422,7 +422,7 @@ export class A2AChatTransport implements ChatTransport<NannosUIMessage> {
     if (!conversationId) return;
     const session = this.sessions.get(conversationId);
     if (!session) return; // late echo after finish, or a turn another surface owns
-    session.handle(data);
+    session.handle(data, wireId);
   }
 
   private handleSnapshot(snap: ConversationSnapshotData): void {

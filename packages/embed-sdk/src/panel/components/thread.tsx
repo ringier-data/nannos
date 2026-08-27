@@ -9,6 +9,7 @@
  * answered one leaves nothing behind (dev mode aside) — the tool's own activity
  * lines already tell that story.
  */
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { BugIcon, ChevronDownIcon, FileIcon, FileTextIcon, ImageIcon, MessageCircleDashedIcon } from 'lucide-react';
 import {
   Conversation,
@@ -28,8 +29,10 @@ import { Alert, AlertDescription, AlertTitle } from '../../components/ui/alert';
 import { Button } from '../../components/ui/button';
 import { cn } from '../../lib/utils';
 import { useStrings } from '../../react';
-import { textArrivalTs } from '../../transport';
-import type { NannosUIMessage } from '../../transport';
+import { fetchWireHistory, textArrivalTs, textWire, textWireId } from '../../transport';
+import type { NannosUIMessage, WireLogEntry } from '../../transport';
+import { YamlView } from './yaml-view';
+import { useChatEngineOptional } from '../engine';
 import { useDevMode } from '../dev-mode';
 import { toolPartTitle } from '../tool-title';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
@@ -122,9 +125,283 @@ function DevTimestamp({ ts }: { ts?: number }) {
   );
 }
 
-function AssistantPart({ part, send }: { part: MessagePart; send: UseNannosChatValue['send'] }) {
-  const devMode = useDevMode();
+/**
+ * Dev only: what a rendered part WAS on the wire. The demux stamps each part
+ * with the wire log's label of the raw event that produced it (`data.wire`,
+ * or `textArrival` metadata for text) — REAL values: kind, task state,
+ * extension short names. A part restored from history carries no stamp and
+ * falls back to the one label its shape guarantees.
+ */
+function wireLabel(part: MessagePart): string {
+  switch (part.type) {
+    case 'text':
+      return textWire(part) ?? 'text';
+    case 'data-activity':
+      return part.data.wire ?? (part.data.kind === 'note' ? 'activity-log · note' : 'activity-log');
+    case 'data-agent-thought':
+      return part.data.wire ?? 'intermediate-output';
+    case 'data-workplan':
+      return part.data.wire ?? 'work-plan';
+    case 'data-auth-required':
+      return part.data.wire ?? 'auth-required';
+    case 'dynamic-tool': {
+      // Not stamped (tool chunks carry no metadata slot), but exact anyway:
+      // these parts only ever come from an input-required status (demux.ts).
+      const isClientAction = (part.input as { _clientActionRequest?: boolean } | undefined)
+        ?._clientActionRequest;
+      return isClientAction
+        ? 'status-update · input-required · client-action'
+        : `status-update · input-required · hitl · ${part.state}`;
+    }
+    case 'file':
+      return 'file';
+    default:
+      return part.type;
+  }
+}
 
+/** The wire-log entry id stamped onto a part — the key back to its raw event. */
+function wireIdOf(part: MessagePart): string | undefined {
+  switch (part.type) {
+    case 'text':
+      return textWireId(part);
+    case 'data-activity':
+    case 'data-agent-thought':
+    case 'data-workplan':
+    case 'data-auth-required':
+      return part.data.wireId;
+    default:
+      return undefined;
+  }
+}
+
+const devWirePre =
+  'max-h-56 overflow-auto px-2 font-mono text-[10px] leading-snug text-foreground';
+const devWireHint = 'pl-2 font-bold text-[10px] text-amber-700 dark:text-amber-500';
+
+/**
+ * Content + time to MATCH a history-restored part (no stamped id) to its wire
+ * event once the log holds the record — this browser's own, or the backend's
+ * after "load from server". Workplan and tool parts return nothing: snapshots
+ * update in place, so no single event owns the final state.
+ */
+function sourceNeedle(part: MessagePart): { text: string; ts?: number } | undefined {
+  switch (part.type) {
+    case 'text':
+      return { text: part.text, ts: textArrivalTs(part) };
+    case 'data-activity':
+      return { text: part.data.text, ts: part.data.ts };
+    case 'data-agent-thought':
+      return { text: part.data.text, ts: part.data.startedAt };
+    case 'data-auth-required':
+      return part.data.message ? { text: part.data.message } : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** Pulls the backend's wire record right where the missing event is felt —
+ *  the replay lands in the shared log, and the open expansion above rerenders
+ *  with the match. Same fetch the inspector's wire tab uses. */
+function DevWireLoadButton({ conversationId }: { conversationId: string }) {
+  const engine = useChatEngineOptional();
+  const [state, setState] = useState<'idle' | 'loading' | 'failed'>('idle');
+  if (!engine) return null;
+  return (
+    <button
+      type="button"
+      disabled={state === 'loading'}
+      className="self-start rounded border border-amber-500/50 bg-amber-500/5 px-1.5 py-0.5 font-mono text-[10px] text-amber-700 hover:bg-amber-500/15 disabled:opacity-50 dark:text-amber-500"
+      onClick={() => {
+        setState('loading');
+        void fetchWireHistory(engine.adapter.api.fetch, conversationId).then((entries) => {
+          if (!entries) {
+            setState('failed');
+            return;
+          }
+          engine.wireLog.replay(conversationId, entries);
+          setState('idle');
+        });
+      }}
+    >
+      {state === 'loading'
+        ? 'loading…'
+        : state === 'failed'
+          ? 'load failed — retry'
+          : 'load the backend record'}
+    </button>
+  );
+}
+
+/**
+ * The expanded badge body: the raw SOURCE EVENT and, under it, the UI part
+ * the SDK distilled from it. The event is found by the id the demux stamped —
+ * or, for a history-restored part with no stamp, MATCHED by content and time
+ * against whatever the wire log holds. Subscribed to the log, so a record
+ * loaded from the backend (here or in the inspector) fills the gap live.
+ * Mounted only while open — closed badges cost no subscription.
+ */
+function DevWireExpansion({
+  payload,
+  wireId,
+  needle,
+  dir,
+  conversationId,
+}: {
+  payload: unknown;
+  wireId?: string;
+  needle?: { text: string; ts?: number };
+  dir: 'in' | 'out';
+  conversationId: string;
+}) {
+  const engine = useChatEngineOptional();
+  const noEntries = useMemo<WireLogEntry[]>(() => [], []);
+  useSyncExternalStore(
+    engine?.wireLog.subscribe ?? (() => () => {}),
+    engine?.wireLog.getSnapshot ?? (() => noEntries),
+  );
+  // Exact first: the stamped id — a live client id, or the `srv:` row id the
+  // history mapper shares with the server replay. Content matching remains
+  // the fallback (a live id evicted from the ring buffer, older rows with no
+  // id). Either can start unresolved and fill in when a record loads.
+  const stamped = wireId ? engine?.wireLog.find(wireId) : undefined;
+  const matched =
+    !stamped && needle
+      ? engine?.wireLog.findSource(conversationId, needle.text, needle.ts, dir)
+      : undefined;
+  const entry = stamped ?? matched;
+  const canLoad = wireId?.startsWith('srv:') || needle !== undefined;
+  return (
+    <div className="m-2 mt-1 flex min-w-0 flex-col gap-1 rounded-md border bg-background p-1">
+      <div className="border rounded-md">
+      {entry ? (
+        <>
+          <span className={devWireHint}>
+            source event · {entry.label}
+            {entry.source && ` · ${entry.source}`}
+            {matched && ' · matched by content'}
+          </span>
+          <YamlView value={entry.payload} className={devWirePre} />
+        </>
+      ) : canLoad ? (
+        <>
+          <span className={devWireHint}>source event not in the wire log yet</span>
+          <DevWireLoadButton conversationId={conversationId} />
+        </>
+      ) : wireId ? (
+        <span className={devWireHint}>
+          source event no longer in the wire log (capacity) — see the dev inspector&apos;s wire tab
+        </span>
+      ) : null}
+      </div>
+      <div className="border rounded-md">
+      <span className={devWireHint}>ui part</span>
+      <YamlView value={payload} className={devWirePre} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Dev only: rides on the SAME ROW as the part it describes — a small amber
+ * badge naming the wire event behind the part. Hovering the badge (and the
+ * whole time it is expanded) paints the part's row `bg-accent`, so the eye
+ * knows exactly which rendered content the label talks about.
+ */
+function DevWirePart({
+  label,
+  payload,
+  wireId,
+  needle,
+  dir = 'in',
+  conversationId,
+  children,
+}: {
+  label: string;
+  payload: unknown;
+  /** Wire-log entry of the source event; absent on history restores and sends. */
+  wireId?: string;
+  /** Content fallback for the source lookup when no id was stamped. */
+  needle?: { text: string; ts?: number };
+  /** 'in' for agent events; 'out' to match a user message to its send. */
+  dir?: 'in' | 'out';
+  conversationId: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  // Most specific first: the wire log says 'status-update · working ·
+  // activity-log'; the badge reads better as 'activity-log · working ·
+  // status-update' — and never truncates, the whole label IS the feature.
+  const badgeLabel = label.split(' · ').reverse().join(' · ');
+  return (
+    <div
+      data-slot="nannos-dev-wire"
+      className={cn(
+        'flex w-full min-w-0 flex-col rounded-md transition-colors',
+        'has-[[data-slot=nannos-dev-wire-toggle]:hover]:bg-accent',
+        open && 'bg-accent',
+      )}
+    >
+      <div className="flex w-full min-w-0 items-start gap-1.5">
+        <div className="min-w-0 flex-1">{children}</div>
+        <button
+          data-slot="nannos-dev-wire-toggle"
+          type="button"
+          aria-expanded={open}
+          title="Wire detail — click for the raw source event"
+          onClick={() => setOpen((v) => !v)}
+          className="inline-flex shrink-0 items-center gap-0.5 rounded border border-amber-500/50 bg-amber-500/5 px-1 py-px text-left font-mono text-[10px] text-amber-700 hover:bg-amber-500/15 dark:text-amber-500"
+        >
+          <span>{badgeLabel}</span>
+          <ChevronDownIcon
+            aria-hidden="true"
+            className={cn('size-2.5 shrink-0 transition-transform', open && 'rotate-180')}
+          />
+        </button>
+      </div>
+      {open && (
+        <DevWireExpansion
+          payload={payload}
+          wireId={wireId}
+          needle={needle}
+          dir={dir}
+          conversationId={conversationId}
+        />
+      )}
+    </div>
+  );
+}
+
+function AssistantPart({
+  part,
+  send,
+  conversationId,
+}: {
+  part: MessagePart;
+  send: UseNannosChatValue['send'];
+  conversationId: string;
+}) {
+  const devMode = useDevMode();
+  const rendered = renderAssistantPart(part, send, devMode);
+  if (rendered === null || !devMode) return rendered;
+  return (
+    <DevWirePart
+      label={wireLabel(part)}
+      payload={part}
+      wireId={wireIdOf(part)}
+      needle={sourceNeedle(part)}
+      conversationId={conversationId}
+    >
+      {rendered}
+    </DevWirePart>
+  );
+}
+
+function renderAssistantPart(
+  part: MessagePart,
+  send: UseNannosChatValue['send'],
+  devMode: boolean,
+): ReactNode | null {
   if (part.type === 'text') {
     if (!part.text) return null;
     return (
@@ -272,15 +549,42 @@ function ThreadMessage({
   /** Reaches the authorization card, whose confirm button sends a turn. */
   send: UseNannosChatValue['send'];
 }) {
+  const devMode = useDevMode();
   if (message.role === 'user') {
-    if (message.metadata?.display) return <ContextChip message={message} />;
-    return <UserMessage message={message} />;
+    const rendered = message.metadata?.display ? (
+      <ContextChip message={message} />
+    ) : (
+      <UserMessage message={message} />
+    );
+    if (!devMode) return rendered;
+    // The badge wraps even a message whose bubble renders nothing (a HITL
+    // resume row, say) — dev mode is exactly where the invisible send should
+    // still leave a trace.
+    const userText = message.parts.find(
+      (part): part is Extract<MessagePart, { type: 'text' }> => part.type === 'text',
+    )?.text;
+    return (
+      <DevWirePart
+        label={message.metadata?.display ? 'message · user · context' : 'message · user'}
+        payload={{ id: message.id, parts: message.parts, metadata: message.metadata }}
+        needle={userText ? { text: userText } : undefined}
+        dir="out"
+        conversationId={conversationId}
+      >
+        {rendered}
+      </DevWirePart>
+    );
   }
   if (message.role === 'assistant') {
     return (
       <div className="group/nannos-message flex w-full flex-col gap-2">
         {message.parts.map((part, index) => (
-          <AssistantPart key={`${message.id}-${index}`} part={part} send={send} />
+          <AssistantPart
+            key={`${message.id}-${index}`}
+            part={part}
+            send={send}
+            conversationId={conversationId}
+          />
         ))}
         {showActions && <AssistantActions conversationId={conversationId} message={message} />}
       </div>
