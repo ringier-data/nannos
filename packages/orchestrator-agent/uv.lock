@@ -48,6 +48,7 @@ dependencies = [
     { name = "langsmith" },
     { name = "nltk" },
     { name = "object-storage" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
     { name = "ringier-a2a-sdk" },
 ]
@@ -97,6 +98,7 @@ requires-dist = [
     { name = "nltk", specifier = ">=3.9.3" },
     { name = "nltk", marker = "extra == 'docstore'", specifier = ">=3.9.0" },
     { name = "object-storage", editable = "../object-storage" },
+    { name = "opentelemetry-api", specifier = ">=1.27.0" },
     { name = "psycopg", marker = "extra == 'docstore'", specifier = ">=3.2.0" },
     { name = "psycopg-binary", marker = "extra == 'docstore'", specifier = ">=3.2.0" },
     { name = "psycopg-pool", marker = "extra == 'docstore'", specifier = ">=3.2.0" },
@@ -109,6 +111,7 @@ provides-extras = ["openai", "google", "anthropic", "foundry", "docstore", "sand
 dev = [
     { name = "aiobotocore", specifier = ">=2.15.0" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=2.0.11" },
+    { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
     { name = "psycopg", specifier = ">=3.2.0" },
     { name = "psycopg-binary", specifier = ">=3.2.0" },
     { name = "pytest", specifier = ">=8.4.2" },
@@ -1725,6 +1728,18 @@ wheels = [
 ]
 
 [[package]]
+name = "opentelemetry-api"
+version = "1.44.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ee/8b/aa9e2d8b8dfa7c946f7dec5d1f8f6ba8eca062f43509a06bdb5ce93d26c0/opentelemetry_api-1.44.0.tar.gz", hash = "sha256:67647e5e9566edcf421166fdf022b3537f818635daa852b289e34604dc6fb33a", size = 72406, upload-time = "2026-07-16T15:25:32.678Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/6f/a04e900f465ff3221ccc395522503e2d10e79fa21f2723c8e177aae1e0d1/opentelemetry_api-1.44.0-py3-none-any.whl", hash = "sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef", size = 60018, upload-time = "2026-07-16T15:25:11.657Z" },
+]
+
+[[package]]
 name = "orchestrator-agent-a2a-server"
 version = "1.7.3"
 source = { virtual = "." }
@@ -2560,6 +2575,7 @@ dependencies = [
     { name = "authlib" },
     { name = "cryptography" },
     { name = "httpx" },
+    { name = "opentelemetry-api" },
     { name = "pyjwt" },
     { name = "sqlalchemy" },
     { name = "starlette" },
@@ -2592,6 +2608,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-aws", marker = "extra == 'langgraph'", specifier = ">=0.1.4" },
     { name = "langgraph-checkpoint-aws", marker = "extra == 'langgraph-google'", specifier = ">=0.1.4" },
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'langgraph'", specifier = ">=3.1.0" },
+    { name = "opentelemetry-api", specifier = ">=1.27.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'langgraph'", specifier = ">=3.1.0" },
     { name = "psycopg-pool", marker = "extra == 'langgraph'", specifier = ">=3.1.0" },
     { name = "pyjwt", specifier = ">=2.10.1" },
@@ -2610,6 +2627,7 @@ dev = [
     { name = "langchain-quickjs", specifier = ">=0.3.2,<0.4" },
     { name = "langgraph", specifier = ">=1.1.0" },
     { name = "langgraph-checkpoint-aws", specifier = ">=0.1.4" },
+    { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-cov", specifier = ">=4.1.0" },

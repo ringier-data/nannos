@@ -13,6 +13,10 @@ dependencies = [
     "cryptography>=43.0.0",
     "authlib>=1.6.5",
     "sqlalchemy>=2.0.51",
+    # OTel API only (never the SDK): a library records against whatever provider
+    # the host installs. In the cluster that is the injected auto-instrumentation
+    # agent; with no provider the API is a no-op.
+    "opentelemetry-api>=1.27.0",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +55,8 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
+    # In-memory span exporter, to assert on recorded spans.
+    "opentelemetry-sdk>=1.27.0",
     # Include langgraph dependencies for comprehensive testing
     "langchain>=0.3.18",
     "langchain-aws>=1.4.3",

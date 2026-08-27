@@ -128,8 +128,12 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
   const seededPrompt = assistant.seededPrompt;
   useEffect(() => {
     if (!seededPrompt?.sendOnOpen || isReadOnly) return;
-    // A keyed prompt about a DIFFERENT page context starts a fresh conversation.
-    const target = engine.conversations.resolveTarget(seededPrompt.contextKey);
+    // A keyed prompt about a DIFFERENT page context starts a fresh conversation;
+    // `newConversation` starts one regardless (idempotent: a fresh-but-blank
+    // active target is reused, so the re-render after retargeting settles here).
+    const target = engine.conversations.resolveTarget(seededPrompt.contextKey, {
+      fresh: seededPrompt.newConversation,
+    });
     if (target !== conversationId) return; // re-render picks up the new target
     assistant.clearSeededPrompt();
     void sendMessage({

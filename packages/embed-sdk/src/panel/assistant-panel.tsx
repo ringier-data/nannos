@@ -116,20 +116,6 @@ function PanelHeader() {
           {assistant.isPinned ? <PinOffIcon /> : <PinIcon />}
         </Button>
       )}
-      {history.available && (
-        <Button
-          data-slot="nannos-panel-history"
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={strings['panel.history']}
-          aria-haspopup="dialog"
-          aria-expanded={history.isOpen}
-          onClick={history.toggle}
-        >
-          <HistoryIcon />
-        </Button>
-      )}
       <Button
         data-slot="nannos-panel-new-chat"
         type="button"
@@ -144,6 +130,20 @@ function PanelHeader() {
       >
         <MessageCirclePlusIcon />
       </Button>
+      {history.available && (
+        <Button
+          data-slot="nannos-panel-history"
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={strings['panel.history']}
+          aria-haspopup="dialog"
+          aria-expanded={history.isOpen}
+          onClick={history.toggle}
+        >
+          <HistoryIcon />
+        </Button>
+      )}
       <Button
         data-slot="nannos-panel-close"
         type="button"

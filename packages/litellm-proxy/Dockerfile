@@ -23,7 +23,18 @@ WORKDIR /app
 # logger must live next to the (runtime-mounted) config at /etc/litellm.
 COPY custom_logger.py /etc/litellm/custom_logger.py
 
-# So `callbacks: custom_logger.proxy_handler_instance` resolves.
+# Trace-export filter, shared with the other services. Copied as a single file
+# rather than installing the SDK: this image has no Python build, and the module
+# is written with no intra-package imports for exactly this reason. custom_logger
+# imports it at proxy startup.
+#
+# Why the proxy needs it: streaming a completion back to a caller costs one OTel
+# span per forwarded chunk (116 of them for a single call, measured), which
+# swamps every trace that crosses the gateway.
+COPY --from=ringier-a2a-sdk ringier_a2a_sdk/telemetry/span_filter.py /etc/litellm/nannos_span_filter.py
+
+# So `callbacks: custom_logger.proxy_handler_instance` resolves — and so
+# `import nannos_span_filter` does.
 ENV PYTHONPATH=/etc/litellm
 
 EXPOSE 4000

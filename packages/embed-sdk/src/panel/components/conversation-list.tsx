@@ -270,6 +270,10 @@ export function ConversationList({
                         reserves no space for them and a long name gets the full
                         width. Each button carries its own surface rather than
                         sharing one bar, so they read as two separate controls.
+                        The surface is PINNED across hover: `ghost` would swap
+                        it for `bg-accent` (translucent in dark mode), which lets
+                        the row's own text show through the button. Hover is
+                        signalled by the icon colour instead.
                         Faded out until the row is hovered or a button in here
                         has focus — never `hidden`, so they stay tabbable
                         and readable by screen readers. On a touch screen there
@@ -286,7 +290,7 @@ export function ConversationList({
                         size="icon-sm"
                         aria-label={format(strings['conversations.rename'], { title })}
                         title={strings['conversations.rename']}
-                        className="size-7 rounded-md border bg-popover text-muted-foreground shadow-md hover:text-foreground"
+                        className="size-7 rounded-md border bg-popover text-muted-foreground shadow-md hover:bg-popover hover:text-foreground dark:hover:bg-popover"
                         onClick={() => startRename(conversation)}
                       >
                         <PencilIcon className="size-4" />
@@ -298,7 +302,7 @@ export function ConversationList({
                         size="icon-sm"
                         aria-label={format(strings['conversations.delete'], { title })}
                         title={strings['conversations.delete']}
-                        className="size-7 rounded-md border bg-popover text-muted-foreground shadow-md hover:text-destructive"
+                        className="size-7 rounded-md border bg-popover text-muted-foreground shadow-md hover:bg-popover hover:text-destructive dark:hover:bg-popover"
                         onClick={() => setPendingDelete(conversation)}
                       >
                         <Trash2Icon className="size-4" />

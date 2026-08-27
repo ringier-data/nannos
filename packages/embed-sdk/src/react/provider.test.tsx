@@ -82,6 +82,7 @@ describe('open/pin/width state machine + persistence', () => {
       text: 'draft me',
       displayText: 'Chip',
       sendOnOpen: false, // DRAFT by default
+      newConversation: false, // CONTINUE by default
     });
 
     act(() => result.current.close());
@@ -89,13 +90,16 @@ describe('open/pin/width state machine + persistence', () => {
     expect(result.current.seededPrompt).toBeNull();
   });
 
-  it('sendOnOpen and contextKey ride the seed explicitly', () => {
+  it('sendOnOpen, contextKey and newConversation ride the seed explicitly', () => {
     const { result } = renderHook(() => useAssistant(), { wrapper: wrapper() });
-    act(() => result.current.open('do it', { sendOnOpen: true, contextKey: 'campaign:7' }));
+    act(() =>
+      result.current.open('do it', { sendOnOpen: true, contextKey: 'campaign:7', newConversation: true }),
+    );
     expect(result.current.seededPrompt).toMatchObject({
       text: 'do it',
       sendOnOpen: true,
       contextKey: 'campaign:7',
+      newConversation: true,
     });
   });
 

@@ -274,6 +274,19 @@ describe('ConversationsStore', () => {
     expect(store.activeId).toBe(b);
   });
 
+  it('resolveTarget fresh: always a new conversation, except a still-blank active one', async () => {
+    const { fetch } = fetchReturning([]);
+    const store = new ConversationsStore({ fetch });
+    const a = store.create('campaign:A');
+    // Blank active → reused, so a re-rendering drain effect settles instead of looping.
+    expect(store.resolveTarget('campaign:A', { fresh: true })).toBe(a);
+    store.noteTitle(a, 'How is it performing?');
+    // Written to → same key no longer continues; fresh means fresh.
+    const b = store.resolveTarget('campaign:A', { fresh: true });
+    expect(b).not.toBe(a);
+    expect(store.activeId).toBe(b);
+  });
+
   it('read-only for conversations owned by ANOTHER embedded surface', async () => {
     const { fetch } = fetchReturning([
       serverConv('mine', { metadata: { embedded_sub_agent_id: 42 } }),

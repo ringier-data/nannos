@@ -132,6 +132,22 @@ async def test_titles_a_conversation_and_stores_both_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_asks_for_no_thinking_but_keeps_the_token_headroom(monkeypatch):
+    """Titling pays for thinking tokens on every new conversation and gains nothing
+    from them, so it asks for thinking off. The high max_tokens stays as the fallback
+    for a model that ignores that: an unused ceiling costs nothing, a truncated one
+    costs the title."""
+    conversation_service = fake_services()
+    monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
+    gateway = AsyncMock(return_value='{"title": "T", "summary": "S"}')
+    monkeypatch.setattr(cs, "gateway_chat", gateway)
+
+    assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
+    assert gateway.await_args.kwargs["reasoning_effort"] == "none"
+    assert gateway.await_args.kwargs["max_tokens"] >= 4000
+
+
+@pytest.mark.asyncio
 async def test_notifies_viewers_once_the_name_is_stored(monkeypatch):
     conversation_service = fake_services()
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))

@@ -425,13 +425,34 @@ export class ConversationsStore {
    * Resolve the conversation a (possibly keyed) prompt should land in:
    * same key → continue the active conversation; different/new key → fresh.
    * (ChatContext.tsx:1921-1938 semantics.)
+   *
+   * `fresh` (an `open({newConversation: true})` seed) always lands in a NEW
+   * conversation — except when the active one is still blank (local-only, no
+   * title, no message): that IS a new conversation, and creating another would
+   * both litter the list and, called again from a re-rendering effect, loop.
    */
-  resolveTarget(contextKey?: string): string {
+  resolveTarget(contextKey?: string, opts?: { fresh?: boolean }): string {
     const activeId = this.snapshot.activeId;
+    if (opts?.fresh) {
+      if (activeId && this.isBlank(activeId)) {
+        if (contextKey) this.contextKeys.set(activeId, contextKey);
+        return activeId;
+      }
+      return this.create(contextKey);
+    }
     if (!activeId) return this.create(contextKey);
     if (contextKey === undefined) return activeId;
     const activeKey = this.contextKeys.get(activeId);
     return activeKey === contextKey ? activeId : this.create(contextKey);
+  }
+
+  /** Created in this browser and never written to — same placeholder test the
+   *  auto-adopt path uses in `select()`. */
+  private isBlank(id: string): boolean {
+    return (
+      this.localOnly.has(id) &&
+      this.snapshot.items.some((c) => c.id === id && !c.title && !c.lastMessage)
+    );
   }
 
   /** True while this conversation exists only in this browser — created here
