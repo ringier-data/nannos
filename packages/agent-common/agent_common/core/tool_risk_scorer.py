@@ -267,12 +267,17 @@ async def _score_tool_via_llm(
         f"Assess the risk level of this tool."
     )
 
-    result: ToolRiskOutput = await structured_model.ainvoke(
-        [
-            {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-    )
+    # Side-channel call (not through the agent middleware stack): attribute the
+    # gateway spend from the run config's tags, like GatewayAttributionMiddleware.
+    from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
+
+    with run_config_attribution_scope():
+        result: ToolRiskOutput = await structured_model.ainvoke(
+            [
+                {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
 
     # Convert LLM output to ToolRiskEntry
     risk_factors: dict[str, ParamRiskProfile] = {}

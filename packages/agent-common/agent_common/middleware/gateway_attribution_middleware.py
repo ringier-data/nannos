@@ -30,8 +30,9 @@ async-generator restore hazard.
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -39,22 +40,46 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResp
 logger = logging.getLogger(__name__)
 
 
+def attribution_fields_from_run_config() -> dict[str, Any]:
+    """Attribution fields parsed from the active LangGraph run config's tags.
+
+    ``get_config()`` reads the RunnableConfig active for the current runnable
+    context; its ``tags`` carry the attribution scheme. Guarded defensively —
+    outside a runnable context it raises, and a missing/edge config must never
+    break the caller. Returns ``{}`` when nothing can be derived.
+    """
+    from langgraph.config import get_config
+    from ringier_a2a_sdk.cost_tracking.attribution import parse_attribution_tags
+
+    try:
+        cfg = get_config()
+    except Exception:
+        return {}
+    return parse_attribution_tags((cfg or {}).get("tags"))
+
+
+@contextlib.contextmanager
+def run_config_attribution_scope() -> Iterator[None]:
+    """Set gateway cost-attribution ContextVars from the active run config's tags
+    for the duration of the block, restoring the caller's values afterwards.
+
+    For side-channel model calls that do NOT flow through the agent middleware
+    stack (HITL tool-call summaries, LLM tool-risk scoring) but still run inside
+    the graph's runnable context. Without this they inherit whatever the dispatch
+    boundary set — misattributing an in-process sub-agent's spend to the
+    orchestrator. Same mechanism as ``GatewayAttributionMiddleware``.
+    """
+    from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
+
+    with attribution_scope(**attribution_fields_from_run_config()):
+        yield
+
+
 class GatewayAttributionMiddleware(AgentMiddleware):
     """Set gateway cost-attribution ContextVars from the model call's own tags."""
 
     def _attribution_fields(self) -> dict[str, Any]:
-        # get_config() reads the RunnableConfig active for this model call; its
-        # ``tags`` carry the attribution scheme. Guard defensively — outside a
-        # runnable context it raises, and a missing/edge config must not break the
-        # model call.
-        from langgraph.config import get_config
-        from ringier_a2a_sdk.cost_tracking.attribution import parse_attribution_tags
-
-        try:
-            cfg = get_config()
-        except Exception:
-            return {}
-        return parse_attribution_tags((cfg or {}).get("tags"))
+        return attribution_fields_from_run_config()
 
     def wrap_model_call(
         self,

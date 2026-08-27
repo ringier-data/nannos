@@ -136,3 +136,40 @@ class TestSelfEvidentTools:
         assert summarize.await_args.args[0] == [("send_email", {"to": "sales@example.com"}, "")]
         assert "_summary" not in requests[0]["args"]
         assert requests[1]["args"]["_summary"] == "Sends an email to sales."
+
+
+class TestSummarizerCostAttribution:
+    async def test_model_call_runs_inside_run_config_attribution_scope(self):
+        """The summarizer bypasses the middleware stack, so it must stamp gateway
+        attribution from the run config's tags itself (sub-agent spend ≠ orchestrator)."""
+        from langchain_core.runnables import RunnableLambda
+        from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_id
+
+        from agent_common.core import tool_call_summarizer as tcs
+
+        seen: dict = {}
+
+        class _FakeStructured:
+            async def ainvoke(self, _msgs):
+                seen["sub_agent_id"] = current_sub_agent_id.get()
+                return tcs.ToolCallSummaries(summaries=["lists the folder"])
+
+        class _FakeModel:
+            def with_structured_output(self, _schema):
+                return _FakeStructured()
+
+        async def run(_: object):
+            return await tcs.summarize_action_requests([("ls", {"path": "/x"}, "list files")])
+
+        prev = current_sub_agent_id.set(None)
+        try:
+            with (
+                patch("agent_common.core.model_factory.create_model", return_value=_FakeModel()),
+                patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+            ):
+                out = await RunnableLambda(run).ainvoke(None, config={"tags": ["sub_agent:42"]})
+            assert out == ["lists the folder"]
+            assert seen["sub_agent_id"] == 42
+            assert current_sub_agent_id.get() is None
+        finally:
+            current_sub_agent_id.reset(prev)
