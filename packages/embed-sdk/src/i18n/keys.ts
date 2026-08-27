@@ -126,6 +126,22 @@ export interface NannosStrings {
   'attachments.uploading': string;
   'attachments.failed': string;
   'attachments.remove': string;
+
+  // Per-message actions, export, send mode
+  'message.copy': string;
+  'message.copied': string;
+  'message.copyFailed': string;
+  'message.download': string;
+  'panel.export': string;
+  'export.truncated': string;
+  'export.user': string;
+  'export.assistant': string;
+  'sendMode.heading': string;
+  'sendMode.steer': string;
+  'sendMode.stopAndSend': string;
+  'sendMode.steerHint': string;
+  'sendMode.stopAndSendHint': string;
+  'sendMode.label': string;
 }
 
 /** Every key, for hosts building their override map mechanically. */
@@ -209,4 +225,18 @@ export const nannosStringKeys = [
   'attachments.uploading',
   'attachments.failed',
   'attachments.remove',
+  'message.copy',
+  'message.copied',
+  'message.copyFailed',
+  'message.download',
+  'panel.export',
+  'export.truncated',
+  'export.user',
+  'export.assistant',
+  'sendMode.heading',
+  'sendMode.steer',
+  'sendMode.stopAndSend',
+  'sendMode.steerHint',
+  'sendMode.stopAndSendHint',
+  'sendMode.label',
 ] as const satisfies readonly (keyof NannosStrings)[];

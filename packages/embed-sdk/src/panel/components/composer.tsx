@@ -2,8 +2,9 @@
  * The input: a textarea + button composition over the ui primitives (the
  * vendored prompt-input carries its own attachment pipeline, which would fight
  * `useAttachments`' REST-upload flow). Enter sends — and while a turn is
- * streaming, sending STEERS (`chat.send` handles that), so the input never
- * locks. Files arrive via the picker, drag-drop, or a pasted image. A seeded
+ * streaming, sending STEERS by default (`chat.send` handles that) — or, in the
+ * viewer's chosen send mode, stops the turn and starts over — so the input
+ * never locks. Files arrive via the picker, drag-drop, or a pasted image. A seeded
  * prompt with `sendOnOpen: false` lands here as an editable draft.
  *
  * The box stacks three rows inside ONE border:
@@ -25,6 +26,8 @@ import { useChatEngineOptional } from '../engine';
 import { useAttachments } from '../hooks/use-attachments';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
 import { ApplyModeSwitch } from './apply-mode-switch';
+import { SendModeSwitch } from './send-mode-switch';
+import { useSendMode } from '../send-mode';
 import { AudioRecorderButton } from './audio-recorder';
 
 export interface ComposerProps {
@@ -37,6 +40,7 @@ export function Composer({ chat, className }: ComposerProps) {
   const assistant = useAssistant();
   const attachments = useAttachments();
   const engine = useChatEngineOptional();
+  const { mode: sendMode } = useSendMode();
   const [text, setText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -105,7 +109,11 @@ export function Composer({ chat, className }: ComposerProps) {
   const submit = () => {
     const value = text.trim();
     if (!value || isReadOnly || hasUploading) return;
-    chat.send(value, { files: attachments.readyFiles() });
+    chat.send(value, {
+      files: attachments.readyFiles(),
+      // Only meaningful while a turn runs; a plain send otherwise.
+      interrupt: chat.isBusy && sendMode === 'stop-and-send',
+    });
     attachments.clear();
     setText('');
   };
@@ -268,6 +276,11 @@ export function Composer({ chat, className }: ComposerProps) {
               fixed the mode, or when no client object is registered — with
               nothing to apply into, there is no choice to make. */}
           <ApplyModeSwitch />
+
+          {/* While a turn runs, what the NEXT send does to it — steer it, or
+              stop it and start over. Gone when nothing runs: both are then the
+              same plain send. */}
+          {chat.isBusy && <SendModeSwitch />}
 
           {/* One button, never both: a running turn offers STOP until the user
               starts typing — from that moment the only useful action is to

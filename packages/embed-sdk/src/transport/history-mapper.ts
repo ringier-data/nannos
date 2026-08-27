@@ -297,6 +297,27 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
     // Protocol task rows never render.
     if (row.kind === 'task') continue;
 
+    // Files the AGENT produced (a generated report, an image) ride the row's
+    // parts next to its text. They are the turn's deliverable, so they stay
+    // with it — as `file` parts the thread renders as download links.
+    if (Array.isArray(row.parts)) {
+      for (const p of row.parts as unknown[]) {
+        const file = getFileInfo(p);
+        if (!file) continue;
+        const duplicate = assistantParts.some(
+          (part) => part.type === 'file' && part.url === file.uri,
+        );
+        if (duplicate) continue;
+        assistantParts.push({
+          type: 'file',
+          url: file.uri,
+          mediaType: file.mimeType ?? 'application/octet-stream',
+          filename: file.name,
+        });
+        assistantId = rowId(row, `hist-a-${index}`);
+      }
+    }
+
     // Displayable agent text → the turn's text part; the row's id becomes the
     // assistant message id (matches the live path, which finalizes under the
     // persisted DB id).
