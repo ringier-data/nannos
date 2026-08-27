@@ -91,7 +91,7 @@ export function ReportIssueButton({ conversationId, messageId, className }: Repo
             <FlagIcon className="size-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{strings['report.title']}</TooltipContent>
+        <TooltipContent side="bottom">{strings['report.title']}</TooltipContent>
       </Tooltip>
 
       <DialogContent data-slot="nannos-report-issue-dialog">
