@@ -172,9 +172,20 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
     client_action_enabled: bool = Field(
         default=False,
         description=(
-            "Embedded Nannos: when true this sub-agent is the embedded entrypoint — it gets the "
+            "Embedded Nannos: when true this sub-agent drives on-screen objects — it gets the "
             "client_action tool (apply/highlight/navigate) and renders <client_objects>. Set by the "
             "embedded-mode invocation, not persisted per-agent."
+        ),
+    )
+    embedded_entrypoint: bool = Field(
+        default=False,
+        description=(
+            "Embedded Nannos (ADR-0004): when true this sub-agent runs as the embedded entrypoint "
+            "— the top-level graph for the turn, with no orchestrator turn in front of it. It "
+            "therefore owns direct communication with the user: it gets the notify_user tool and "
+            "the guidance for it. A sub-agent delegated via 'task' is narrated by the "
+            "orchestrator instead and leaves this false. Set by the execute-only invocation "
+            "(a turn carrying executeOnlySubAgentId), not persisted per-agent."
         ),
     )
     effective_permission: Optional[Literal["owner", "write", "read"]] = Field(

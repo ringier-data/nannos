@@ -14,8 +14,7 @@ Embed the Nannos assistant into any React app. You get three things:
 3. **Headless tools** — the same agent can read/write your backend via MCP
    when the answer isn't on screen.
 
-**v2.** This is the ground-up rewrite: ONE React tree (no `mount()`, no second
-root — context flows into the panel), a headless-first API (the host owns all
+ONE React tree (no `mount()`, no second root — context flows into the panel), a headless-first API (the host owns all
 chrome: launcher, placement, pin/dock), and the chat state machine runs on the
 [Vercel AI SDK](https://ai-sdk.dev) (`useChat` over a custom
 `A2AChatTransport` that bridges the Nannos A2A-over-socket.io protocol).
@@ -373,15 +372,3 @@ Remote backends must allowlist the host origin (`EMBED_ALLOWED_ORIGINS`).
 Integration planning (ontology → client objects → tools → brain) lives in
 [`INTEGRATION-PLAYBOOK.md`](./INTEGRATION-PLAYBOOK.md). Known gaps and their
 history: [`PENDING.md`](./PENDING.md).
-
-## Migrating from v1
-
-| v1 | v2 |
-|---|---|
-| `<NannosWidget core={useNannos()} …/>` | host-owned trigger + `<AssistantPanel>` in a host container |
-| `mount(core, el)` / `defineElement()` | `<ShadowPortal>` (same isolation, one React tree) — web component dropped |
-| `useNannos()` / `core.open/close/toggle/onOpenChange` | `useAssistant()` (open/close/pin/width/seeding live here) |
-| `core.sendPrompt(text, opts)` | `useAssistant().open(text, opts)` — drafts by default, `sendOnOpen: true` for the old send-now behavior |
-| `adapter.routing.{navigate,highlight,onApplyResult,…}` | provider props only; `adapter.chatSurface` keeps `isVisible`/`bringIntoView` |
-| `ChatProviders`/`SocketProvider`/`ChatProvider` | `<NannosChatScope>` (+ `playground`/`customHeaders`) |
-| `MessageList`/`ChatInput`/`ConnectionStatus`/`InterruptConfirmCard` | `Thread`/`Composer`/`ConnectionStatus`/`ApprovalCard` from `/panel` |

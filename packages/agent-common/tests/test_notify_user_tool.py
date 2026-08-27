@@ -94,6 +94,36 @@ class TestToolSurface:
         assert "does not end it" in desc
         assert "answer" in desc  # tells the model not to put the answer here
 
+    def test_description_rules_out_the_trivial_turn(self):
+        """A greeting must not produce a note.
+
+        The prompt block says so, but the tool description is what the model reads at
+        the moment it decides, so the gate has to be here too. Observed failure this
+        guards: a "hi" answered with the note "This is just a greeting, no action
+        needed." — three seconds of latency added to say nothing.
+        """
+        desc = create_notify_user_tool().description.lower()
+        assert "greeting" in desc
+        assert "at least one tool call" in desc
+        assert "no action is needed" in desc
+
+    def test_prompt_addendum_gates_on_a_tool_call_and_names_the_greeting_case(self):
+        """The addendum must carry the binary gate, not just general advice.
+
+        Guards the observed regression: the model narrated its decision not to act
+        ("This is just a greeting, no action needed.") instead of simply answering.
+        """
+        from agent_common.core.notify_user_tool import NOTIFY_USER_PROMPT_ADDENDUM as addendum
+
+        assert "does answering require at least one tool call?" in addendum
+        assert "NO → do not call it" in addendum
+        # The exact anti-pattern is spelled out, so the model cannot read the rule as
+        # "announce that no action is needed".
+        assert "no action needed" in addendum
+        assert "'hi', 'hello'" in addendum
+        # And the note must never become a reasoning log.
+        assert "not a log of your decisions" in addendum
+
     def test_note_kind_marker(self):
         assert NOTE_KIND == "note"
 

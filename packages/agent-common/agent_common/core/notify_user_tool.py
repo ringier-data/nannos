@@ -44,6 +44,53 @@ NOTE_KIND = "note"
 MAX_NOTE_CHARS = 400
 
 
+NOTIFY_USER_PROMPT_ADDENDUM = (
+    "\n\n<keep_the_user_informed>\n"
+    "You speak to the user directly. While you work they see only mechanical tool "
+    "labels, so they cannot tell whether you understood them. The 'notify_user' tool is "
+    "the channel for that: one or two short sentences, in the user's language, saying "
+    "what you understood and what you will do first. The turn CONTINUES — the note does "
+    "not end the turn, does not ask anything, and returns nothing you need.\n"
+    "\n"
+    "The point is perceived speed. When a request needs tools or research the answer is "
+    "far away, and a note answers the user's real first question — 'did it understand "
+    "me?' — within a second. When the answer is already close, a note only pushes it "
+    "further away.\n"
+    "\n"
+    "So before calling it, apply this test: does answering require at least one tool "
+    "call?\n"
+    "- NO → do not call it. Just answer.\n"
+    "- YES → call it, in the SAME step as your first real tool call (both in one step, "
+    "in parallel), so the work never waits on the note.\n"
+    "\n"
+    "Call it again before a step that will take a while, and again when your plan "
+    "changes — a tool failed, you switch approach, the request turns out to be "
+    "something else. Keep them few and never repeat the same text. Call it when one or more tool call guides you to a new path.\n"
+    "\n"
+    "NEVER call it:\n"
+    "- When the user only greets you or makes small talk — 'hi', 'hello', 'thanks', "
+    "'ok'. Answer them and stop.\n"
+    "- To report that no note is needed. A note reading 'this is just a greeting, no "
+    "action needed' is the exact mistake this rule exists to prevent: it delays the "
+    "one-line answer it sits in front of and tells the user nothing.\n"
+    "- For anything you can answer in the same step without a tool call. A note in "
+    "front of an immediate answer says the same thing twice.\n"
+    "- To carry the answer. The answer belongs in your final structured response ONLY.\n"
+    "- To ask a question. Nothing comes back from a note; a question means the task "
+    "state 'input_required'.\n"
+    "- To narrate your reasoning or your tool calls. The note is for the user, not a "
+    "log of your decisions.\n"
+    "</keep_the_user_informed>"
+)
+"""System-prompt guidance for ``notify_user``, appended by every agent that binds it.
+
+Kept next to the tool so the instruction and the tool cannot drift apart. The
+orchestrator carries its own variant inside ``SYSTEM_INSTRUCTION`` because its
+dynamics differ (it narrates delegation via ``task``); this one is written for an
+agent that faces the user with no orchestrator turn in front of it.
+"""
+
+
 class NotifyUserInput(BaseModel):
     """Arguments for a mid-turn note."""
 
@@ -86,12 +133,15 @@ def create_notify_user_tool() -> StructuredTool:
         name=NOTIFY_USER_TOOL_NAME,
         description=(
             "Tell the user, in one or two short sentences, what you understood and what "
-            "you are about to do. The turn continues — this does NOT end it and does NOT "
-            "ask a question. Call it once at the start of any request that needs more than "
-            "an immediate reply (best in the SAME step as your first real tool call, so no "
-            "time is lost), again before a long step, and again if your plan changes. "
-            "Never put the answer here: the answer belongs in your final structured "
-            "response only."
+            "you are about to do, while you keep working. The turn continues — this does "
+            "NOT end it and does NOT ask a question. "
+            "Call it ONLY when answering will take at least one tool call, and then in the "
+            "SAME step as that first tool call so no time is lost; again before a long "
+            "step, and again if your plan changes. "
+            "Do NOT call it for a greeting or small talk, and do NOT call it for anything "
+            "you can answer right away — there, just answer. Never call it to say that no "
+            "action is needed. Never put the answer here: the answer belongs in your final "
+            "structured response only."
         ),
         args_schema=NotifyUserInput,
     )
