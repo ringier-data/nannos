@@ -163,7 +163,7 @@ function FeedbackButton({
           <Icon className="size-3.5" fill={active ? 'currentColor' : 'none'} />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
+      <TooltipContent side="bottom">{label}</TooltipContent>
     </Tooltip>
   );
 }

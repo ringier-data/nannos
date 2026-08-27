@@ -162,7 +162,7 @@ function CopyMessageButton({ text, className }: { text: string; className?: stri
           )}
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
+      <TooltipContent side="bottom">{label}</TooltipContent>
     </Tooltip>
   );
 }
