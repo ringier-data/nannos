@@ -46,9 +46,6 @@ PTC_DESCRIBE_TOOL_NAME = "describe"
 
 _DISCOVERY_TOOL_NAMES = frozenset({PTC_SEARCH_TOOL_NAME, PTC_DESCRIBE_TOOL_NAME})
 
-# How many matches ``search`` returns per page by default.
-_DEFAULT_TOP_K = DEFAULT_LIMIT
-
 
 class _SearchArgs(BaseModel):
     query: Annotated[
@@ -85,24 +82,19 @@ def _build_entries(catalog: Sequence[BaseTool]) -> list[dict[str, Any]]:
             continue
         seen.add(tool.name)
         entry = make_entry(name=tool.name, callable_name=camel, description=tool.description)
-        entry["camel"] = camel
         entry["tool"] = tool
         entries.append(entry)
     return entries
 
 
-def build_discovery_tools(
-    catalog: Sequence[BaseTool],
-    *,
-    top_k: int = _DEFAULT_TOP_K,
-) -> list[BaseTool]:
+def build_discovery_tools(catalog: Sequence[BaseTool]) -> list[BaseTool]:
     """Build the ``search`` and ``describe`` tools bound to ``catalog``.
 
     Returned tools are plain (unguarded) ``StructuredTool``s suitable for the PTC
     exposed set. They are read-only and introspect ``catalog`` only.
     """
     entries = _build_entries(catalog)
-    by_camel = {e["camel"]: e for e in entries}
+    by_camel = {e["callable"]: e for e in entries}
     by_name = {e["name"]: e for e in entries}
 
     async def _search(query: str, limit: int | None = None, offset: int | None = None) -> SearchResult:
@@ -110,7 +102,7 @@ def build_discovery_tools(
             rank(entries, query),
             query=query,
             offset=offset,
-            limit=top_k if limit is None else limit,
+            limit=limit,
             search_tool_name=f"tools.{PTC_SEARCH_TOOL_NAME}",
         )
 
@@ -126,7 +118,7 @@ def build_discovery_tools(
         description=(
             "Find agent tools by intent. Returns { matches: [{ name, description }], "
             "total_matches, shown, truncated, next_offset, hint } — `matches` is ONE PAGE "
-            f"(default {top_k}, max {MAX_LIMIT}) of all tools that matched, ranked by relevance; "
+            f"(default {DEFAULT_LIMIT}, max {MAX_LIMIT}) of all tools that matched, ranked by relevance; "
             "if `truncated` is true more matches exist: call again with `offset: next_offset` "
             "or narrow the query. `name` is the identifier to call as `tools.<name>(...)`. "
             "Use this to discover tools that are not listed in this prompt, then `describe` "

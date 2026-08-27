@@ -64,10 +64,6 @@ CATALOG_CALL_TOOL_NAME = "call_tool"
 
 _META_TOOL_NAMES = frozenset({CATALOG_SEARCH_TOOL_NAME, CATALOG_DESCRIBE_TOOL_NAME, CATALOG_CALL_TOOL_NAME})
 
-# How many matches ``search_tools`` returns (and how many suggestions an unknown
-# ``call_tool`` name gets).
-_DEFAULT_TOP_K = DEFAULT_LIMIT
-
 
 class _SearchToolsArgs(BaseModel):
     query: Annotated[
@@ -137,15 +133,13 @@ class ToolCatalogMiddleware(AgentMiddleware):
     description line for search ranking.
     """
 
-    def __init__(self, catalog: Mapping[str, BaseTool], *, top_k: int = _DEFAULT_TOP_K) -> None:
+    def __init__(self, catalog: Mapping[str, BaseTool]) -> None:
         super().__init__()
         self._catalog = catalog
         self._entries = _build_entries(catalog)
-        self._top_k = top_k
         self.tools = self._build_meta_tools()
 
     def _build_meta_tools(self) -> list[BaseTool]:
-        top_k = self._top_k
         entries = self._entries
         catalog = self._catalog
 
@@ -154,7 +148,7 @@ class ToolCatalogMiddleware(AgentMiddleware):
                 rank(entries, query),
                 query=query,
                 offset=offset,
-                limit=top_k if limit is None else limit,
+                limit=limit,
                 search_tool_name=CATALOG_SEARCH_TOOL_NAME,
             )
 
@@ -179,7 +173,7 @@ class ToolCatalogMiddleware(AgentMiddleware):
             description=(
                 "Find available tools by intent. Returns {matches: [{name, description}], "
                 "total_matches, shown, truncated, next_offset, hint} — matches is ONE PAGE "
-                f"(default {top_k}, max {MAX_LIMIT}) of all tools that matched, ranked by relevance; "
+                f"(default {DEFAULT_LIMIT}, max {MAX_LIMIT}) of all tools that matched, ranked by relevance; "
                 "if truncated is true more matches exist: call again with offset=next_offset or "
                 "narrow the query. Use this to discover tools from the catalog (they are not "
                 "listed in this prompt), then describe_tool the one you want before calling it."

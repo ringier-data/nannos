@@ -43,6 +43,8 @@ from typing import Any, Literal, cast
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import PrivateAttr
 
+from agent_common.core.tool_search import first_line
+
 logger = logging.getLogger(__name__)
 
 CatalogueSource = Literal["stateless", "mcp"]
@@ -67,8 +69,7 @@ class ToolCard:
 
     @property
     def first_line(self) -> str:
-        stripped = self.description.strip()
-        return stripped.splitlines()[0] if stripped else ""
+        return first_line(self.description)
 
 
 @dataclass(slots=True)

@@ -89,10 +89,12 @@ class TestMetaTools:
         search = _meta_tool(middleware, CATALOG_SEARCH_TOOL_NAME)
         page1 = await search.coroutine(query="campaign", limit=1)
         assert page1["shown"] == 1
-        if page1["total_matches"] > 1:
-            assert page1["truncated"] is True
-            page2 = await search.coroutine(query="campaign", limit=1, offset=page1["next_offset"])
-            assert page2["matches"][0]["name"] != page1["matches"][0]["name"]
+        assert page1["total_matches"] == 2
+        assert page1["truncated"] is True
+        assert page1["next_offset"] == 1
+        page2 = await search.coroutine(query="campaign", limit=1, offset=page1["next_offset"])
+        assert page2["matches"][0]["name"] != page1["matches"][0]["name"]
+        assert page2["truncated"] is False
 
     @pytest.mark.asyncio
     async def test_describe_returns_parameters_schema(self, middleware):

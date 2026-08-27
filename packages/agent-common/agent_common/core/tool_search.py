@@ -26,6 +26,17 @@ MAX_LIMIT = 50
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Function words that appear in nearly every tool description. They never count as a
+# match on their own: with the full description indexed, "list campaigns for an
+# advertiser" would otherwise match the whole catalogue on ``for``/``an`` and report
+# ``truncated=True`` for every query — the very confusion the paged result exists to remove.
+_STOP_WORDS = frozenset(
+    "a an and are as at be by for from in into is it its of on or that the this to via with your".split()
+)
+# Tokens shorter than this only count as a whole word of the *name* (e.g. ``ad``, ``id``),
+# never as a substring anywhere.
+_MIN_DESC_TOKEN_LEN = 3
+
 
 class SearchMatch(TypedDict):
     name: str
@@ -83,12 +94,18 @@ def _score(entry: dict[str, Any], tokens: list[str]) -> tuple[int, int, int] | N
     2. number of distinct query tokens that matched at all (breadth beats one
        token repeated);
     3. number of whole-word hits (``repo`` in ``repo`` beats ``repo`` in ``report``).
+
+    Stop words and very short tokens only match as a whole word of the name, so they
+    cannot turn the whole catalogue into "matches".
     """
     weighted = matched = whole = 0
     for tok in tokens:
+        name_only = tok in _STOP_WORDS or len(tok) < _MIN_DESC_TOKEN_LEN
         if tok in entry["name_words"]:
             weighted += 3
             whole += 1
+        elif name_only:
+            continue
         elif tok in entry["name_haystack"]:
             weighted += 2
         elif tok in entry["words"]:
@@ -153,7 +170,7 @@ def build_page(
             result["hint"] = "Query contained no searchable words; use a few plain words describing the action."
         else:
             result["hint"] = (
-                f"No tool matched any of {tokens}. Try different or fewer words "
+                f"No tool matched any of: {' '.join(tokens)}. Try different or fewer words "
                 "(e.g. the object name alone) — the catalog may use other terminology."
             )
     elif start >= total:
@@ -161,7 +178,8 @@ def build_page(
     elif truncated:
         result["hint"] = (
             f"Showing {start + 1}-{end} of {total} matches. If the tool you need is not here, "
-            f"call {search_tool_name} again with offset={end}, or narrow the query."
+            f"call {search_tool_name} again with the same query and offset {end} (next_offset), "
+            "or narrow the query."
         )
     else:
         result["hint"] = f"All {total} matching tools shown; no more results for this query."

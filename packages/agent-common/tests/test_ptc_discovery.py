@@ -71,14 +71,14 @@ async def test_search_no_match_returns_empty_with_hint(catalog):
 async def test_search_reports_truncation_and_pages():
     """A capped page must say so and hand the model an offset to continue with."""
     catalog = [_tool(f"github_get_issue_{i}", f"Get issue variant {i}.") for i in range(25)]
-    search, _ = build_discovery_tools(catalog, top_k=10)
+    search, _ = build_discovery_tools(catalog)
 
     page1 = await search.arun({"query": "issue"})
     assert page1["shown"] == 10
     assert page1["total_matches"] == 25
     assert page1["truncated"] is True
     assert page1["next_offset"] == 10
-    assert "offset=10" in page1["hint"]
+    assert "offset 10" in page1["hint"]
 
     page2 = await search.arun({"query": "issue", "offset": page1["next_offset"]})
     assert page2["offset"] == 10
@@ -112,6 +112,24 @@ async def test_search_whole_word_beats_substring():
     search, _ = build_discovery_tools(catalog)
     hits = (await search.arun({"query": "repo"}))["matches"]
     assert hits[0]["name"] == "githubGetRepo"
+
+
+async def test_stop_words_and_short_tokens_do_not_match_whole_catalog():
+    """'for'/'a'/'an' appear in every description; they must not inflate total_matches."""
+    catalog = [
+        _tool("cockpit_list_campaigns", "List campaigns for an advertiser."),
+        _tool("gam_get_report", "Fetch a report for a network."),
+        _tool("slack_post_message", "Post a message to a channel for the team."),
+        _tool("ad_get", "Get an ad by id."),
+    ]
+    search, _ = build_discovery_tools(catalog)
+    assert (await search.arun({"query": "a"}))["total_matches"] == 0
+    assert (await search.arun({"query": "for an"}))["total_matches"] == 0
+    result = await search.arun({"query": "list campaigns for an advertiser"})
+    assert result["total_matches"] == 1
+    assert result["matches"][0]["name"] == "cockpitListCampaigns"
+    # Short tokens still match through the name tiers.
+    assert (await search.arun({"query": "ad"}))["matches"][0]["name"] == "adGet"
 
 
 async def test_search_matches_words_beyond_first_description_line():
