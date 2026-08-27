@@ -334,8 +334,11 @@ PTC_INLINE_RENDER_THRESHOLD = int(os.getenv("PTC_INLINE_RENDER_THRESHOLD", "40")
 _PTC_DISCOVERY_INSTRUCTION = (
     "Only the core tools above are listed. Many more tools are available but NOT listed "
     "here (to keep this prompt stable). Discover them at runtime:\n"
-    f"- `await tools.{PTC_SEARCH_TOOL_NAME}({{ query: '...' }})` — find tools by intent; "
-    "returns `{ name, description }` matches.\n"
+    f"- `await tools.{PTC_SEARCH_TOOL_NAME}({{ query: '...', limit?, offset? }})` — find tools "
+    "by intent; returns ONE PAGE of ranked `{ name, description }` matches in `matches`, plus "
+    "`total_matches`, `truncated` and `next_offset`. If `truncated` is true the tool you need "
+    "may be on a later page: call again with `offset: next_offset` or narrow the query before "
+    "concluding a tool does not exist.\n"
     f"- `await tools.{PTC_DESCRIBE_TOOL_NAME}({{ name: '...' }})` — get the exact "
     "signature for a tool before calling it.\n"
     f"Always `{PTC_SEARCH_TOOL_NAME}`/`{PTC_DESCRIBE_TOOL_NAME}` a tool you don't see "

@@ -12,7 +12,8 @@ large catalog, mirroring the PTC ``eval`` discovery surface
 (``tools.search``/``tools.describe`` in ``ptc_discovery``) so the agent works the
 same way whether PTC is on or off:
 
-* ``search_tools({query})`` — ranked ``{name, description}`` matches;
+* ``search_tools({query, limit?, offset?})`` — one page of ranked ``{name, description}``
+  matches plus ``total_matches``/``truncated``/``next_offset`` (see ``tool_search``);
 * ``describe_tool({name})`` — one tool's full parameters schema;
 * ``call_tool({name, args})`` — invoke one catalog tool by name.
 
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+
 from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain.agents.middleware.types import AgentMiddleware
@@ -38,6 +39,15 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, Field
+
+from agent_common.core.tool_search import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    SearchResult,
+    build_page,
+    make_entry,
+    rank,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -56,13 +66,22 @@ _META_TOOL_NAMES = frozenset({CATALOG_SEARCH_TOOL_NAME, CATALOG_DESCRIBE_TOOL_NA
 
 # How many matches ``search_tools`` returns (and how many suggestions an unknown
 # ``call_tool`` name gets).
-_DEFAULT_TOP_K = 10
-
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_DEFAULT_TOP_K = DEFAULT_LIMIT
 
 
 class _SearchToolsArgs(BaseModel):
-    query: Annotated[str, Field(description="Natural-language intent, e.g. 'list campaigns for an advertiser'.")]
+    query: Annotated[
+        str,
+        Field(description="Natural-language intent, e.g. 'list campaigns for an advertiser'."),
+    ]
+    limit: Annotated[
+        int | None,
+        Field(description=f"Page size (default {DEFAULT_LIMIT}, max {MAX_LIMIT})."),
+    ] = None
+    offset: Annotated[
+        int | None,
+        Field(description="Skip this many ranked matches; pass the previous result's next_offset to page."),
+    ] = None
 
 
 class _DescribeToolArgs(BaseModel):
@@ -80,56 +99,14 @@ class _CallToolArgs(BaseModel):
     ]
 
 
-def _tokenize(text: str) -> list[str]:
-    return _TOKEN_RE.findall(text.lower())
-
-
-def _first_line(description: str | None) -> str:
-    if not description:
-        return ""
-    stripped = description.strip()
-    return stripped.splitlines()[0] if stripped else ""
-
-
 def _build_entries(catalog: Mapping[str, BaseTool]) -> list[dict[str, Any]]:
     """Precompute searchable entries (metadata only — no schema conversion)."""
     entries: list[dict[str, Any]] = []
     for name, tool in catalog.items():
         if name in _META_TOOL_NAMES or not isinstance(tool, BaseTool):
             continue
-        desc = _first_line(tool.description)
-        entries.append(
-            {
-                "name": name,
-                "desc": desc,
-                "name_haystack": name.lower(),
-                "haystack": f"{name} {desc}".lower(),
-            }
-        )
+        entries.append(make_entry(name=name, callable_name=name, description=tool.description))
     return entries
-
-
-def _rank(entries: list[dict[str, Any]], query: str, top_k: int) -> list[dict[str, Any]]:
-    """Token-overlap ranking: name hits weigh more than description hits.
-
-    Same heuristic as ``ptc_discovery._score`` so PTC-on and PTC-off discovery
-    return comparable results for the same catalog and query.
-    """
-    tokens = _tokenize(query)
-    if not tokens:
-        return []
-    scored = []
-    for entry in entries:
-        score = 0
-        for tok in tokens:
-            if tok in entry["name_haystack"]:
-                score += 2
-            elif tok in entry["haystack"]:
-                score += 1
-        if score > 0:
-            scored.append((entry, score))
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return [entry for entry, _ in scored[:top_k]]
 
 
 def _describe_tool_schema(tool: BaseTool) -> str:
@@ -172,11 +149,14 @@ class ToolCatalogMiddleware(AgentMiddleware):
         entries = self._entries
         catalog = self._catalog
 
-        async def _search(query: str) -> list[dict[str, str]]:
-            hits = _rank(entries, query, top_k)
-            if not hits:
-                return []
-            return [{"name": e["name"], "description": e["desc"]} for e in hits]
+        async def _search(query: str, limit: int | None = None, offset: int | None = None) -> SearchResult:
+            return build_page(
+                rank(entries, query),
+                query=query,
+                offset=offset,
+                limit=top_k if limit is None else limit,
+                search_tool_name=CATALOG_SEARCH_TOOL_NAME,
+            )
 
         async def _describe(name: str) -> str:
             tool = catalog.get(name)
@@ -197,10 +177,12 @@ class ToolCatalogMiddleware(AgentMiddleware):
             coroutine=_search,
             name=CATALOG_SEARCH_TOOL_NAME,
             description=(
-                "Find available tools by intent. Returns up to "
-                f"{top_k} matches as {{name, description}} ranked by relevance. Use this to discover "
-                "tools from the catalog (they are not listed in this prompt), then describe_tool "
-                "the one you want before calling it."
+                "Find available tools by intent. Returns {matches: [{name, description}], "
+                "total_matches, shown, truncated, next_offset, hint} — matches is ONE PAGE "
+                f"(default {top_k}, max {MAX_LIMIT}) of all tools that matched, ranked by relevance; "
+                "if truncated is true more matches exist: call again with offset=next_offset or "
+                "narrow the query. Use this to discover tools from the catalog (they are not "
+                "listed in this prompt), then describe_tool the one you want before calling it."
             ),
             args_schema=_SearchToolsArgs,
         )
@@ -225,7 +207,7 @@ class ToolCatalogMiddleware(AgentMiddleware):
         return [search_tool, describe_tool, call_tool]
 
     def _unknown_tool_message(self, name: str) -> str:
-        suggestions = _rank(self._entries, name, 5)
+        suggestions = rank(self._entries, name)[:5]
         hint = ""
         if suggestions:
             hint = " Similar tools: " + ", ".join(e["name"] for e in suggestions) + "."

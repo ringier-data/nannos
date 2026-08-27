@@ -6,9 +6,11 @@ redesign keeps every tool *callable* (its ``globalThis.tools`` bridge is install
 renders only a stable core into the prompt. The volatile catalog is found at runtime via
 two read-only helpers pinned into the namespace:
 
-* ``tools.search({query})`` — keyword/token ranking over tool name + description,
-  returning ``{name, description}`` for the best matches (``name`` is the camelCase
-  identifier the model calls as ``tools.<name>``);
+* ``tools.search({query, limit?, offset?})`` — keyword/token ranking over tool name +
+  description (shared with ``tool_search``), returning a page of ``{name, description}``
+  matches plus ``total_matches``/``truncated``/``next_offset`` so the model can tell a
+  capped page from an exhaustive one and page on (``name`` is the camelCase identifier
+  the model calls as ``tools.<name>``);
 * ``tools.describe({name})`` — the full ``$ref``-resolved TypeScript signature for one
   tool.
 
@@ -19,7 +21,6 @@ HITL approval flow. They close over the per-turn exposed catalog.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -27,6 +28,14 @@ from langchain_quickjs._prompt import is_valid_js_identifier, to_camel_case
 from pydantic import BaseModel, Field
 
 from agent_common.core.ptc_signatures import render_signature_block
+from agent_common.core.tool_search import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    SearchResult,
+    build_page,
+    make_entry,
+    rank,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -37,29 +46,27 @@ PTC_DESCRIBE_TOOL_NAME = "describe"
 
 _DISCOVERY_TOOL_NAMES = frozenset({PTC_SEARCH_TOOL_NAME, PTC_DESCRIBE_TOOL_NAME})
 
-# How many matches ``search`` returns by default.
-_DEFAULT_TOP_K = 10
-
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# How many matches ``search`` returns per page by default.
+_DEFAULT_TOP_K = DEFAULT_LIMIT
 
 
 class _SearchArgs(BaseModel):
-    query: Annotated[str, Field(description="Natural-language intent, e.g. 'list commits in a repo'.")]
+    query: Annotated[
+        str,
+        Field(description="Natural-language intent, e.g. 'list commits in a repo'."),
+    ]
+    limit: Annotated[
+        int | None,
+        Field(description=f"Page size (default {DEFAULT_LIMIT}, max {MAX_LIMIT})."),
+    ] = None
+    offset: Annotated[
+        int | None,
+        Field(description="Skip this many ranked matches; pass the previous result's `next_offset` to page."),
+    ] = None
 
 
 class _DescribeArgs(BaseModel):
     name: Annotated[str, Field(description="The tool name as called in `tools.<name>` (camelCase).")]
-
-
-def _tokenize(text: str) -> list[str]:
-    return _TOKEN_RE.findall(text.lower())
-
-
-def _first_line(description: str | None) -> str:
-    if not description:
-        return ""
-    stripped = description.strip()
-    return stripped.splitlines()[0] if stripped else ""
 
 
 def _build_entries(catalog: Sequence[BaseTool]) -> list[dict[str, Any]]:
@@ -77,29 +84,11 @@ def _build_entries(catalog: Sequence[BaseTool]) -> list[dict[str, Any]]:
         if not is_valid_js_identifier(camel):
             continue
         seen.add(tool.name)
-        desc = _first_line(tool.description)
-        entries.append(
-            {
-                "camel": camel,
-                "name": tool.name,
-                "desc": desc,
-                "name_haystack": f"{camel} {tool.name}".lower(),
-                "haystack": f"{camel} {tool.name} {desc}".lower(),
-                "tool": tool,
-            }
-        )
+        entry = make_entry(name=tool.name, callable_name=camel, description=tool.description)
+        entry["camel"] = camel
+        entry["tool"] = tool
+        entries.append(entry)
     return entries
-
-
-def _score(entry: dict[str, Any], tokens: list[str]) -> int:
-    """Token-overlap score: name/identifier hits weigh more than description hits."""
-    score = 0
-    for tok in tokens:
-        if tok in entry["name_haystack"]:
-            score += 2
-        elif tok in entry["haystack"]:
-            score += 1
-    return score
 
 
 def build_discovery_tools(
@@ -116,35 +105,32 @@ def build_discovery_tools(
     by_camel = {e["camel"]: e for e in entries}
     by_name = {e["name"]: e for e in entries}
 
-    async def _search(query: str) -> list[dict[str, str]]:
-        tokens = _tokenize(query)
-        if not tokens:
-            return []
-        scored = [(e, _score(e, tokens)) for e in entries]
-        hits = sorted(
-            (pair for pair in scored if pair[1] > 0),
-            key=lambda pair: pair[1],
-            reverse=True,
-        )[:top_k]
-        return [{"name": e["camel"], "description": e["desc"]} for e, _ in hits]
+    async def _search(query: str, limit: int | None = None, offset: int | None = None) -> SearchResult:
+        return build_page(
+            rank(entries, query),
+            query=query,
+            offset=offset,
+            limit=top_k if limit is None else limit,
+            search_tool_name=f"tools.{PTC_SEARCH_TOOL_NAME}",
+        )
 
     async def _describe(name: str) -> str:
         entry = by_camel.get(name) or by_name.get(name) or by_camel.get(to_camel_case(name))
         if entry is None:
-            return (
-                f"No tool named '{name}'. Use tools.search({{ query: '...' }}) "
-                "to find the right tool name first."
-            )
+            return f"No tool named '{name}'. Use tools.search({{ query: '...' }}) to find the right tool name first."
         return render_signature_block(entry["tool"])
 
     search_tool = StructuredTool.from_function(
         coroutine=_search,
         name=PTC_SEARCH_TOOL_NAME,
         description=(
-            "Find agent tools by intent. Returns up to "
-            f"{top_k} matches as {{ name, description }} ranked by relevance; `name` is "
-            "the identifier to call as `tools.<name>(...)`. Use this to discover tools "
-            "that are not listed in this prompt, then `describe` the one you want."
+            "Find agent tools by intent. Returns { matches: [{ name, description }], "
+            "total_matches, shown, truncated, next_offset, hint } — `matches` is ONE PAGE "
+            f"(default {top_k}, max {MAX_LIMIT}) of all tools that matched, ranked by relevance; "
+            "if `truncated` is true more matches exist: call again with `offset: next_offset` "
+            "or narrow the query. `name` is the identifier to call as `tools.<name>(...)`. "
+            "Use this to discover tools that are not listed in this prompt, then `describe` "
+            "the one you want."
         ),
         args_schema=_SearchArgs,
     )

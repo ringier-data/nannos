@@ -43,12 +43,8 @@ def _make_tool(name: str, description: str) -> StructuredTool:
 @pytest.fixture
 def catalog() -> dict[str, StructuredTool]:
     return {
-        "cockpit_get_campaign": _make_tool(
-            "cockpit_get_campaign", "Fetch one Cockpit campaign by id."
-        ),
-        "cockpit_list_campaigns": _make_tool(
-            "cockpit_list_campaigns", "List Cockpit campaigns for an advertiser."
-        ),
+        "cockpit_get_campaign": _make_tool("cockpit_get_campaign", "Fetch one Cockpit campaign by id."),
+        "cockpit_list_campaigns": _make_tool("cockpit_list_campaigns", "List Cockpit campaigns for an advertiser."),
         "gam_get_report": _make_tool("gam_get_report", "Fetch a GAM delivery report."),
     }
 
@@ -73,15 +69,30 @@ class TestMetaTools:
     @pytest.mark.asyncio
     async def test_search_ranks_name_matches_first(self, middleware):
         search = _meta_tool(middleware, CATALOG_SEARCH_TOOL_NAME)
-        hits = await search.coroutine(query="list campaigns")
-        names = [h["name"] for h in hits]
+        result = await search.coroutine(query="list campaigns")
+        names = [h["name"] for h in result["matches"]]
         assert names[0] == "cockpit_list_campaigns"
         assert "gam_get_report" not in names
+        assert result["truncated"] is False
+        assert result["total_matches"] == len(names)
 
     @pytest.mark.asyncio
     async def test_search_empty_query_returns_nothing(self, middleware):
         search = _meta_tool(middleware, CATALOG_SEARCH_TOOL_NAME)
-        assert await search.coroutine(query="???") == []
+        result = await search.coroutine(query="???")
+        assert result["matches"] == []
+        assert result["total_matches"] == 0
+        assert "hint" in result
+
+    @pytest.mark.asyncio
+    async def test_search_pages_with_offset(self, middleware):
+        search = _meta_tool(middleware, CATALOG_SEARCH_TOOL_NAME)
+        page1 = await search.coroutine(query="campaign", limit=1)
+        assert page1["shown"] == 1
+        if page1["total_matches"] > 1:
+            assert page1["truncated"] is True
+            page2 = await search.coroutine(query="campaign", limit=1, offset=page1["next_offset"])
+            assert page2["matches"][0]["name"] != page1["matches"][0]["name"]
 
     @pytest.mark.asyncio
     async def test_describe_returns_parameters_schema(self, middleware):
@@ -103,15 +114,11 @@ class TestMetaTools:
     async def test_call_stub_fails_loudly_without_middleware(self, middleware):
         call = _meta_tool(middleware, CATALOG_CALL_TOOL_NAME)
         with pytest.raises(RuntimeError, match="ToolCatalogMiddleware"):
-            await call.coroutine(
-                name="cockpit_get_campaign", args={"campaign_id": "c1"}
-            )
+            await call.coroutine(name="cockpit_get_campaign", args={"campaign_id": "c1"})
 
 
 def _request(tool_call: dict) -> ToolCallRequest:
-    return ToolCallRequest(
-        tool_call=tool_call, tool=None, state={}, runtime=MagicMock()
-    )
+    return ToolCallRequest(tool_call=tool_call, tool=None, state={}, runtime=MagicMock())
 
 
 class TestCallToolDispatch:
@@ -151,9 +158,7 @@ class TestCallToolDispatch:
 
         async def handler(req):
             assert req is request
-            return ToolMessage(
-                content="12:00", tool_call_id="call-2", name="get_current_time"
-            )
+            return ToolMessage(content="12:00", tool_call_id="call-2", name="get_current_time")
 
         result = await middleware.awrap_tool_call(request, handler)
         assert result.content == "12:00"
@@ -233,9 +238,7 @@ class TestDynamicAgentCatalogMode:
 
     def test_exposed_catalog_excludes_context_gated_tools(self, config, catalog):
         gated = dict(catalog)
-        gated["read_personal_file"] = _make_tool(
-            "read_personal_file", "Read a personal workspace file."
-        )
+        gated["read_personal_file"] = _make_tool("read_personal_file", "Read a personal workspace file.")
         runnable = DynamicLocalAgentRunnable(
             config=config,
             model=MagicMock(),
@@ -281,7 +284,5 @@ class TestDynamicAgentCatalogMode:
     def test_build_graph_server_map_covers_catalog(self, config, monkeypatch):
         tool = _make_tool("cockpit_get_campaign", "Fetch one Cockpit campaign by id.")
         tool.metadata = {"server_name": "alloy-riad-stg"}
-        kwargs = self._build_graph_kwargs(
-            config, {"cockpit_get_campaign": tool}, monkeypatch, ptc_enabled=True
-        )
+        kwargs = self._build_graph_kwargs(config, {"cockpit_get_campaign": tool}, monkeypatch, ptc_enabled=True)
         assert kwargs["tool_server_map"] == {"cockpit_get_campaign": "alloy-riad-stg"}
