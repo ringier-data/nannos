@@ -305,7 +305,31 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
       ? shouldDisplayMessageParts(row.parts as never) || !!text.trim()
       : !!text.trim();
     if (displayable && text.trim()) {
-      assistantParts.push({ type: 'text', text, providerMetadata: textArrival(time, wire, wireId) });
+      // ONE answer, persisted several times: the streamed final (artifact
+      // row), the full agent message, and a terminal status can all carry the
+      // same text, each under its own row id. Live, `emitAuthoritativeText`
+      // reconciles them into one part; mirror that here — a repeat is
+      // dropped (the first row keeps naming the source, as the live path
+      // keeps the streamed part), an EXTENDING text supersedes in place.
+      const lastText = assistantParts
+        .filter((p): p is Extract<Part, { type: 'text' }> => p.type === 'text')
+        .pop();
+      const prev = lastText?.text.trim();
+      const next = text.trim();
+      if (prev !== undefined && lastText && prev.startsWith(next)) {
+        // repeat (equal or shorter): nothing new to show
+      } else if (prev !== undefined && lastText && next.startsWith(prev)) {
+        lastText.text = text;
+        lastText.providerMetadata = textArrival(time, wire, wireId);
+      } else {
+        assistantParts.push({
+          type: 'text',
+          text,
+          providerMetadata: textArrival(time, wire, wireId),
+        });
+      }
+      // Every displayable row still names the turn — the live path finalizes
+      // under the LAST persisted DB id, repeats included.
       assistantId = rowId(row, `hist-a-${index}`);
     }
   }

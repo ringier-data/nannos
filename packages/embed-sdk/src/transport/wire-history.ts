@@ -15,6 +15,7 @@
  * record (wire-store.ts) of a conversation this browser actually ran is the
  * better source; the two merge by timestamp in the log.
  */
+import { getTaskState } from '../core/protocol';
 import type { RestMessageRow } from './history-mapper';
 import { labelAgentEvent, serverWireId, type ReplayEntry } from './wire-log';
 
@@ -26,20 +27,32 @@ function tsOf(row: RestMessageRow): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-function payloadOf(row: RestMessageRow): unknown {
-  if (typeof row.raw_payload === 'string' && row.raw_payload) {
-    try {
-      return JSON.parse(row.raw_payload);
-    } catch {
-      return row.raw_payload;
-    }
+/** The stored wire payload, or `undefined` when the row has none. */
+function storedPayload(row: RestMessageRow): unknown | undefined {
+  if (typeof row.raw_payload !== 'string' || !row.raw_payload) return undefined;
+  try {
+    return JSON.parse(row.raw_payload);
+  } catch {
+    return row.raw_payload;
   }
-  // No stored payload (older rows): the row itself is what the server has.
-  return { '[no raw_payload]': true, row };
+}
+
+/**
+ * Label built from the ROW, for a row the backend stored without a payload.
+ *
+ * `labelAgentEvent` cannot name one: it would read the placeholder below and
+ * answer its catch-all 'event'. That is how a duplicated answer hid in this log
+ * — the assembled-artifact half of the pair read as a nameless "event" while
+ * only its echo said `input_required`, so the log looked like it held one answer
+ * when it held two. The row still knows its own kind and state, so use those.
+ */
+function labelRow(row: RestMessageRow): string {
+  const state = getTaskState(row.state);
+  return [row.kind || 'event', state].filter(Boolean).join(' · ');
 }
 
 function rowToEntry(row: RestMessageRow, conversationId: string): ReplayEntry {
-  const payload = payloadOf(row);
+  const stored = storedPayload(row);
   const out = row.role === 'user';
   return {
     // The row's own id, so a part the history mapper stamped with the same
@@ -48,8 +61,9 @@ function rowToEntry(row: RestMessageRow, conversationId: string): ReplayEntry {
     ts: tsOf(row),
     dir: out ? 'out' : 'in',
     conversationId,
-    label: out ? 'send-message' : labelAgentEvent(payload) || row.kind || 'event',
-    payload,
+    label: out ? 'send-message' : stored ? labelAgentEvent(stored) : labelRow(row),
+    // No stored payload: the row itself is what the server has.
+    payload: stored ?? { '[no raw_payload]': true, row },
     source: 'server',
   };
 }

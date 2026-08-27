@@ -17,6 +17,17 @@
  *     hand-written directive through the same executor, so the host side can
  *     be proven without waiting on an agent (see core/client-action-log.ts).
  *
+ * It also carries dev mode's own ON/OFF switch. That lives HERE rather than in
+ * the panel header because the header is optional (`<AssistantPanel
+ * header={false}>` — the console's chat page does exactly that), and a switch
+ * on a surface that may not exist is no switch at all. The bar is the one piece
+ * of dev chrome that is always on screen while dev mode is available, so it is
+ * the one place the switch can always be found.
+ *
+ * Switched OFF, everything below collapses and the bar alone remains: the exact
+ * end-user view, with one click back. The bar is the price of dev mode being
+ * available at all — hosts turn it off through the `devMode` prop.
+ *
  * Deliberately NOT translated — this is tooling for the integrating developer,
  * never end-user chrome. Enabled via panel/dev-mode.tsx.
  */
@@ -36,6 +47,7 @@ import {
   PlayIcon,
   Trash2Icon,
 } from 'lucide-react';
+import { Switch } from '../../components/ui/switch';
 import { cn } from '../../lib/utils';
 import { YamlView } from './yaml-view';
 import { useAssistant } from '../../react';
@@ -43,6 +55,7 @@ import type { ClientActionLogEntry } from '../../core';
 import { fetchWireHistory, type WireLogEntry } from '../../transport';
 import { useChatEngineOptional } from '../engine';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
+import { useDevModeControls } from '../dev-mode';
 
 /** Log rows and toolbar controls repeat verbatim in both logs; naming them
  *  keeps the two in step and the contrast rules in one place. Secondary text
@@ -573,6 +586,42 @@ function TraceLink({ conversationId, hasMessages }: { conversationId: string; ha
   );
 }
 
+/**
+ * Dev mode's ON/OFF switch. Off previews the exact end-user view — the panel
+ * keeps NO dev chrome except this bar, which has to stay or there would be no
+ * way back.
+ */
+function DevModeSwitch() {
+  const dev = useDevModeControls();
+  return (
+    // A span, not a label: a <label> forwards clicks to the control it wraps,
+    // and this one sits inside a <summary> that would answer them too.
+    // `preventDefault` is what stops the bar toggling — the same guard the
+    // trace link uses, and the only one that works: the <details> toggle is a
+    // default action, which propagation alone does not cancel.
+    <span
+      data-slot="nannos-dev-switch"
+      className="flex shrink-0 items-center"
+      title={
+        dev.active
+          ? 'Dev view on — flip to preview the end-user view'
+          : 'Dev view off — showing the end-user view'
+      }
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      <Switch
+        checked={dev.active}
+        onCheckedChange={dev.setActive}
+        aria-label="Toggle developer view"
+        className="h-3.5 w-6 data-[state=checked]:bg-amber-600 [&_[data-slot=switch-thumb]]:size-3"
+      />
+    </span>
+  );
+}
+
 export interface DevContextInspectorProps {
   chat: UseNannosChatValue;
   className?: string;
@@ -581,6 +630,7 @@ export interface DevContextInspectorProps {
 export function DevContextInspector({ chat, className }: DevContextInspectorProps) {
   const assistant = useAssistant();
   const engine = useChatEngineOptional();
+  const dev = useDevModeControls();
 
   // The manifest lives outside React — re-read it whenever the registry emits.
   const [registryVersion, bumpRegistry] = useReducer((v: number) => v + 1, 0);
@@ -594,8 +644,10 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
 
   // Console handle: dev tooling that a <pre> cannot replace — `__nannos.run(d)`
   // fires a directive from the console, `.clientActions.getSnapshot()` reads the
-  // log, `.objects()` lists what a target can resolve to. Installed only while
-  // dev chrome is mounted, so it never exists for an end user.
+  // log, `.objects()` lists what a target can resolve to. Installed while dev
+  // mode is AVAILABLE (this bar is), including while the developer previews the
+  // end-user view — that preview is about the panel's chrome, not about pulling
+  // the tooling out from under them. It never exists for an end user.
   useEffect(() => {
     if (!engine) return;
     const w = window as unknown as { __nannos?: unknown };
@@ -647,6 +699,31 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
     wire: wireCount,
   };
 
+  // Previewing the end-user view: the bar and nothing else. It cannot go too —
+  // it carries the only switch back. Kept to one line, in the same amber, so it
+  // reads as dev mode idling rather than as panel chrome.
+  if (!dev.active) {
+    return (
+      <div className={cn('px-1.5', className)}>
+        <div
+          data-slot="nannos-dev-inspector"
+          data-inactive="true"
+          className="flex items-center gap-1.5 rounded-lg border border-amber-500/60 bg-amber-500/5 px-2 py-1 text-foreground text-xs"
+        >
+          <BugIcon
+            aria-hidden="true"
+            className="size-3 shrink-0 text-amber-700 dark:text-amber-400"
+          />
+          <span className="font-medium text-amber-800 dark:text-amber-300">dev</span>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">
+            off
+          </span>
+          <DevModeSwitch />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={cn('px-1.5', className)}>
       <details
@@ -668,6 +745,7 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
             </span>
           )}
           <TraceLink conversationId={chat.conversationId} hasMessages={chat.messages.length > 0} />
+          <DevModeSwitch />
           <ChevronDownIcon
             aria-hidden="true"
             className="size-3 shrink-0 transition-transform group-open:rotate-180"
