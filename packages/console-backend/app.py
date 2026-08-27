@@ -609,6 +609,12 @@ active_tasks: dict[str, ActiveTaskInfo] = {}
 # Intermediate output (with urn:nannos:a2a:intermediate-output:1.0 extensions) are NOT accumulated.
 _streaming_buffers: dict[str, str] = {}
 
+# The answer text this turn already persisted from the assembled streaming
+# artifact, keyed by context_id. Read by _repeats_persisted_answer to drop a
+# terminal status that merely re-sends the same answer. Cleared with the rest of
+# the turn state.
+_persisted_answer: dict[str, str] = {}
+
 # Detached work that must outlive the turn that started it (conversation titling).
 # asyncio keeps no strong reference to a bare create_task, so a task can be
 # garbage-collected mid-flight; holding it here until it completes is the fix.
@@ -658,6 +664,40 @@ def _answer_text_of(response_data: dict[str, Any]) -> str:
     return "\n".join(
         part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)
     ).strip()
+
+
+def _repeats_persisted_answer(response_data: dict[str, Any], context_id: str) -> bool:
+    """Whether this status merely re-sends the answer this turn already stored.
+
+    The A2A contract lets a terminal status carry the final answer, and a
+    well-behaved agent leaves it out once the answer has streamed in full (see the
+    orchestrator's _close_streaming_artifact_and_respond). But console-backend
+    talks to agent cards it does not own, so the repeat still arrives — and it used
+    to be stored as a second row under its own id, which made a reloaded
+    conversation show one answer as two bubbles. Drop it here, the same way the
+    live path already drops it on the wire.
+
+    Only a PLAIN-TEXT message can be a repeat. A structured payload (a HITL
+    approval, a client action) carries data parts or extensions that the widget
+    needs to be restored on reload, so it is stored even when its description
+    happens to echo the answer.
+    """
+    stored = _persisted_answer.get(context_id)
+    if not stored or response_data.get("kind") != "status-update":
+        return False
+    status = response_data.get("status")
+    message = status.get("message") if isinstance(status, dict) else None
+    if not isinstance(message, dict) or message.get("extensions"):
+        return False
+    parts = message.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return False
+    if any(not (isinstance(part, dict) and isinstance(part.get("text"), str)) for part in parts):
+        return False
+    echoed = _answer_text_of(response_data)
+    # Equal, or shorter and a prefix: adds nothing that is not already stored. A
+    # text that EXTENDS what was stored is new content and must be kept.
+    return bool(echoed) and stored.startswith(echoed)
 
 
 def _conversation_title_notifier(conversation_id: str):
@@ -837,6 +877,7 @@ def _clear_turn_state(context_id: str, *, preserve_pending_interaction: bool = F
     starts the next turn (handle_send_message) or when a later turn ends without asking.
     """
     _streaming_buffers.pop(context_id, None)
+    _persisted_answer.pop(context_id, None)
     if not preserve_pending_interaction:
         _pending_interactions.pop(context_id, None)
     prefix = f"{context_id}:"
@@ -1001,6 +1042,28 @@ async def _flush_intermediate_buffers(
         )
 
 
+def _assembled_answer_payload(text: str, kind: str, state: str | None) -> str:
+    """A stored payload for an answer the backend ASSEMBLED from stream chunks.
+
+    No single wire frame carries it — each frame held a fragment — so these rows
+    used to be the only ones persisted with an empty `raw_payload`. That made
+    them unnameable in the dev wire log: with nothing to read, it fell back to
+    its catch-all "event", so the assembled answer and its echo did not read as
+    the pair they were. Mirrors the synthetic payload
+    _flush_intermediate_buffers writes for sub-agent thoughts.
+    """
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "artifact": {"parts": [{"kind": "text", "text": text}]},
+        # Marks a payload the backend built, so nobody mistakes it for a frame
+        # the agent actually sent.
+        "assembledByConsole": True,
+    }
+    if state:
+        payload["status"] = {"state": state}
+    return json.dumps(payload)
+
+
 async def _process_a2a_response(
     client_event: Any,
     sid: str,
@@ -1113,7 +1176,12 @@ async def _process_a2a_response(
                 # that (re)subscribes mid-turn can restore a prompt that arrived while it was
                 # disconnected — otherwise the turn hangs on input the user never saw. Kept in
                 # memory keyed by conversation; cleared when the turn ends without asking.
-                if is_feedback_request or status_state == "input-required":
+                #
+                # A message-less input-required is NOT a prompt: it means the agent already
+                # delivered its whole answer as a streamed artifact and merely ended the turn
+                # in that state. Capturing it would make the conversation report itself
+                # in-flight forever and hand a reconnecting client an empty payload to replay.
+                if is_feedback_request or (status_state == "input-required" and status_message):
                     _pending_interactions[effective_context_id] = response_data
 
                 # Orchestrator reply chunks are accumulated into _streaming_buffers earlier
@@ -1183,6 +1251,9 @@ async def _process_a2a_response(
                                     task_id=task_id,
                                     state=TaskState.TASK_STATE_COMPLETED,
                                     kind="artifact-update",
+                                    raw_payload=_assembled_answer_payload(
+                                        accumulated, "artifact-update", status_state
+                                    ),
                                 )
                                 # Inject persisted message_id into response so frontend
                                 # can associate its msg-* placeholder with the real DB ID
@@ -1202,12 +1273,19 @@ async def _process_a2a_response(
                                     task_id=task_id,
                                     state=_parse_task_state(status_state),
                                     kind="status-update",
+                                    raw_payload=_assembled_answer_payload(
+                                        accumulated, "status-update", status_state
+                                    ),
                                 )
                                 response_data["persistedMessageId"] = saved_msg.message_id
                                 # For HITL interrupts (input-required), don't block save_agent_response:
                                 # the HITL event carries action_requests/review_configs/extensions in its
                                 # raw payload that must be persisted so the widget can be restored on reload.
                                 safety_net_saved = status_state != "input-required"
+                            # Whichever branch stored it, remember the text: a terminal
+                            # status that re-sends the same answer is dropped below
+                            # instead of landing as a second copy.
+                            _persisted_answer[effective_context_id] = accumulated.strip()
                         elif is_last_chunk:
                             logger.warning(
                                 f"[STREAMING] last_chunk=True but accumulated content is empty "
@@ -1228,19 +1306,35 @@ async def _process_a2a_response(
                 # ── Persist non-streaming responses ──
                 # Skip: work-plan (transient), artifact chunks (accumulated above),
                 # bare completion signals (no content to save), safety-net (already saved).
-                is_bare_completion_signal = (
+                # A terminal status with no message carries nothing to store. Saving it
+                # anyway produced a junk placeholder row ("Status: TASK_STATE_… at …",
+                # see messages_service._parse_status_update) under a fresh uuid7, so it
+                # was not even idempotent. input-required and auth-required belong here
+                # too: an agent that already streamed its whole answer now ends the turn
+                # on a bare status in those states as well.
+                _TERMINAL_STATES = ("completed", "failed", "canceled", "input-required", "auth-required")
+                is_bare_terminal_signal = (
                     response_data.get("kind") == "status-update"
                     and status_obj
-                    and status_state in ("completed", "failed", "canceled")
+                    and status_state in _TERMINAL_STATES
                     and not status_obj.get("message")
                 )
+                repeats_stored_answer = _repeats_persisted_answer(response_data, effective_context_id)
+                if repeats_stored_answer:
+                    logger.info(
+                        "[STREAMING] Dropping status that repeats the stored answer "
+                        "(state=%s) for context %s",
+                        status_state,
+                        effective_context_id,
+                    )
 
                 if (
                     not is_work_plan
                     and not is_feedback_request
                     and not is_artifact_update
-                    and not is_bare_completion_signal
+                    and not is_bare_terminal_signal
                     and not safety_net_saved
+                    and not repeats_stored_answer
                 ):
                     await messages_service.save_agent_response(
                         response_data=response_data,

@@ -4,7 +4,6 @@ import { NannosProvider, useAssistant, type NannosHostAdapter } from '@nannos/em
 import { NannosChatScope } from '@nannos/embed-sdk/panel';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
-import { NannosDevModeProvider } from '@/components/nannos/NannosDevMode';
 import { config } from '@/config';
 import { getCurrentUserSettingsApiV1AuthMeSettingsGet, createBugReportApiV1BugReportsPost } from '@/api/generated';
 import { listAvailableModels } from '@/api/model-gateway';
@@ -26,10 +25,6 @@ import {
  * impersonation/admin request headers, generated-API user settings + bug
  * reports, and the Model Gateway catalog. The SDK's zero-config REST defaults
  * (same-origin console-backend) cover the rest.
- *
- * It also carries the assistant dev-mode gate (`NannosDevModeProvider`), which
- * sits OUTSIDE the chat page on purpose: the switch that drives it lives in the
- * dashboard sidebar.
  */
 export function ConsoleNannosProvider({ children }: { children: ReactNode }) {
   const { isAdmin, isImpersonating } = useAuth();
@@ -113,12 +108,10 @@ export function ConsoleNannosProvider({ children }: { children: ReactNode }) {
       shortcut={false}
       storagePrefix="console-nannos"
     >
-      <NannosDevModeProvider>
-        <NannosChatScope>
-          <DemoClientActionRegistration />
-          {children}
-        </NannosChatScope>
-      </NannosDevModeProvider>
+      <NannosChatScope>
+        <DemoClientActionRegistration />
+        {children}
+      </NannosChatScope>
     </NannosProvider>
   );
 }

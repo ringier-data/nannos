@@ -251,6 +251,47 @@ describe('findPendingInterrupt + appendRestoredInterrupt', () => {
   });
 });
 
+describe('duplicated answer rows', () => {
+  it('folds the same answer persisted under several rows into ONE text part', () => {
+    const text = 'Hello! How can I help you today?';
+    const sameAnswerRow = (i: number, id: string, kind: string): RestMessageRow => ({
+      id,
+      role: 'agent',
+      kind,
+      content: text,
+      parts: [{ kind: 'text', text }],
+      created_at: t(i),
+    });
+    const messages = rowsToUIMessages([
+      userRow(0, 'hi'),
+      // Streamed final (artifact), full agent message, terminal status: one
+      // answer, three rows, three ids — the thread must show ONE bubble.
+      sameAnswerRow(1, 'art1', 'artifact-update'),
+      sameAnswerRow(2, 'msg1', 'message'),
+      finalRow(3, text),
+    ]);
+    const assistant = messages[messages.length - 1];
+    expect(assistant.role).toBe('assistant');
+    const textParts = assistant.parts.filter((p) => p.type === 'text');
+    expect(textParts).toHaveLength(1);
+    expect((textParts[0] as { text: string }).text).toBe(text);
+    // The LAST persisted row names the turn, matching the live finalize.
+    expect(assistant.id).toBe('a3');
+  });
+
+  it('lets an extending final supersede the shorter streamed text in place', () => {
+    const messages = rowsToUIMessages([
+      userRow(0, 'hi'),
+      finalRow(1, 'The answer'),
+      finalRow(2, 'The answer, with the rest of it.'),
+    ]);
+    const assistant = messages[messages.length - 1];
+    const textParts = assistant.parts.filter((p) => p.type === 'text');
+    expect(textParts).toHaveLength(1);
+    expect((textParts[0] as { text: string }).text).toBe('The answer, with the rest of it.');
+  });
+});
+
 describe('auth-required rows', () => {
   const AUTH_URL = 'https://gatana.nannos.ringier.ch/api/v1/mcp-servers/oauth/gt_7MOP0ckoiO/begin';
   const GATEWAY_TEXT =

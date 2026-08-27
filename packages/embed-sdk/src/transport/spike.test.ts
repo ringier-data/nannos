@@ -231,6 +231,26 @@ describe('S1 — basic turn', () => {
     expect(answerTs!).toBeGreaterThanOrEqual(activityTs);
   });
 
+  it('a fully streamed answer that pauses for input ends on a BARE status: one bubble', async () => {
+    // The orchestrator sends the answer ONCE. Having streamed all of it, it ends
+    // the turn on a message-less `input-required` rather than repeating the text
+    // (executor `_close_streaming_artifact_and_respond`). This turn shape used to
+    // be impossible — the terminal status always echoed the answer — so it is
+    // asserted here: the stream must close cleanly and leave exactly one bubble,
+    // with no empty text part from the message that is no longer there.
+    const { wire, chat } = setup();
+    void chat.sendMessage({ text: 'hello' });
+    await vi.waitFor(() => expect(wire.sent).toHaveLength(1));
+
+    wire.emit(streamChunk('Would you like to set up this campaign?', 38));
+    wire.emit(terminal('input-required'));
+
+    await vi.waitFor(() => expect(chat.status).toBe('ready'));
+    const msg = lastAssistant(chat)!;
+    expect(textOf(msg)).toBe('Would you like to set up this campaign?');
+    expect(msg.parts.filter((p) => p.type === 'text')).toHaveLength(1);
+  });
+
   it('marks a mid-turn note so the thread can render it as speech', async () => {
     const { wire, chat } = setup();
     void chat.sendMessage({ text: 'check campaign 456' });

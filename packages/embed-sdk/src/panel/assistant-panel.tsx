@@ -4,9 +4,8 @@
  * HITL approvals, live work plan, composer and connection footer.
  */
 import type { ReactNode } from 'react';
-import { ActivityIcon, BugIcon, HistoryIcon, MessageCirclePlusIcon, PanelRightCloseIcon, PinIcon, PinOffIcon } from 'lucide-react';
+import { ActivityIcon, HistoryIcon, MessageCirclePlusIcon, PanelRightCloseIcon, PinIcon, PinOffIcon } from 'lucide-react';
 import { Button } from '../components/ui/button';
-import { Switch } from '../components/ui/switch';
 import { cn } from '../lib/utils';
 import { useAssistant, useStrings, type NannosHostAdapter } from '../react';
 import { NannosChatScope, type PlaygroundMode } from './engine';
@@ -17,7 +16,7 @@ import { useNannosChat } from './hooks/use-nannos-chat';
 import { ApprovalCard } from './components/approval-card';
 import { Composer } from './components/composer';
 import { DevContextInspector } from './components/dev-context-inspector';
-import { DevModeProvider, resolveDevMode, useDevMode, useDevModeControls } from './dev-mode';
+import { DevModeProvider, resolveDevMode, useDevModeControls } from './dev-mode';
 import { ConnectionStatus } from './components/connection-status';
 import {
   ConversationHistoryOverlay,
@@ -65,29 +64,6 @@ export interface AssistantPanelProps {
   applyMode?: ApplyMode;
 }
 
-/** Dev-only (English on purpose): flips the dev chrome off to preview the
- *  end-user view. Rendered only while dev mode is AVAILABLE. */
-function DevModeSwitch() {
-  const dev = useDevModeControls();
-  if (!dev.available) return null;
-  return (
-    <label
-      data-slot="nannos-dev-switch"
-      className="flex cursor-pointer select-none items-center gap-1 rounded-md border border-amber-500/50 bg-amber-500/5 px-1.5 py-0.5"
-      title={dev.active ? 'Dev view on — flip to preview the end-user view' : 'Dev view off — showing the end-user view'}
-    >
-      <BugIcon aria-hidden="true" className="size-3 shrink-0 text-amber-600" />
-      <span className="font-medium text-amber-700 text-xs dark:text-amber-500">dev</span>
-      <Switch
-        checked={dev.active}
-        onCheckedChange={dev.setActive}
-        aria-label="Toggle developer view"
-        className="h-3.5 w-6 data-[state=checked]:bg-amber-600 [&_[data-slot=switch-thumb]]:size-3"
-      />
-    </label>
-  );
-}
-
 function PanelHeader({ showNewChat }: { showNewChat: boolean }) {
   const strings = useStrings();
   const assistant = useAssistant();
@@ -103,7 +79,6 @@ function PanelHeader({ showNewChat }: { showNewChat: boolean }) {
   return (
     <div data-slot="nannos-panel-header" className="flex shrink-0 items-center gap-1 border-b px-3 py-2">
       <span className="min-w-0 flex-1 truncate font-medium text-sm">{title}</span>
-      <DevModeSwitch />
       {assistant.isAvailable && assistant.canChangePinMode && (
         <Button
           data-slot="nannos-pin-toggle"
@@ -172,7 +147,10 @@ function PanelMain({
   hasSidebar: boolean;
 }) {
   const chat = useNannosChat();
-  const devMode = useDevMode();
+  // AVAILABLE, not active: the inspector's own bar carries the on/off switch,
+  // so it stays mounted while the developer previews the end-user view — a
+  // header the host may have removed cannot be the only way back.
+  const devAvailable = useDevModeControls().available;
   const strings = useStrings();
   // The sidebar owns both the list and the new-chat button; the narrow panel's
   // header owns both instead.
@@ -204,7 +182,7 @@ function PanelMain({
           {chat.isBusy && chat.workingSteps.length > 0 && (
             <WorkingBlock todos={chat.workingSteps} className="mx-2 mb-2 shrink-0" />
           )}
-          {devMode && <DevContextInspector chat={chat} className="shrink-0" />}
+          {devAvailable && <DevContextInspector chat={chat} className="shrink-0" />}
           <Composer chat={chat} className="shrink-0" />
           <ConversationHistoryOverlay />
         </div>
