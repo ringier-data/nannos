@@ -4,15 +4,24 @@
  * HITL approvals, live work plan, composer and connection footer.
  */
 import type { ReactNode } from 'react';
-import { ActivityIcon, HistoryIcon, MessageCirclePlusIcon, PanelRightCloseIcon, PinIcon, PinOffIcon } from 'lucide-react';
+import {
+  DownloadIcon,
+  HistoryIcon,
+  MessageCirclePlusIcon,
+  PanelRightCloseIcon,
+  PinIcon,
+  PinOffIcon,
+} from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { cn } from '../lib/utils';
 import { useAssistant, useStrings, type NannosHostAdapter } from '../react';
 import { NannosChatScope, type PlaygroundMode } from './engine';
 import { ApplyModeProvider, type ApplyMode } from './apply-mode';
+import { SendModeProvider } from './send-mode';
+import { downloadTextFile, formatTranscript, slugifyFilename } from './transcript';
 import { ShadowPortal } from './shadow-portal';
 import { useConversations } from './hooks/use-conversations';
-import { useNannosChat } from './hooks/use-nannos-chat';
+import { useNannosChat, type UseNannosChatValue } from './hooks/use-nannos-chat';
 import { ApprovalCard } from './components/approval-card';
 import { Composer } from './components/composer';
 import { DevContextInspector } from './components/dev-context-inspector';
@@ -64,7 +73,7 @@ export interface AssistantPanelProps {
   applyMode?: ApplyMode;
 }
 
-function PanelHeader({ showNewChat }: { showNewChat: boolean }) {
+function PanelHeader({ showNewChat, chat }: { showNewChat: boolean; chat: UseNannosChatValue }) {
   const strings = useStrings();
   const assistant = useAssistant();
   const { conversations, activeConversationId, createConversation } = useConversations();
@@ -76,9 +85,36 @@ function PanelHeader({ showNewChat }: { showNewChat: boolean }) {
   const active = conversations.find((c) => c.id === activeConversationId);
   const title = active?.title || strings['thread.newConversation'];
 
+  const exportConversation = () => {
+    // Older pages the user never scrolled back to are genuinely missing; the
+    // transcript says so rather than looking complete.
+    const text = formatTranscript(title, chat.messages, {
+      truncated: chat.hasOlderMessages,
+      labels: {
+        user: strings['export.user'],
+        assistant: strings['export.assistant'],
+        truncated: strings['export.truncated'],
+      },
+    });
+    downloadTextFile(`${slugifyFilename(title)}.txt`, text);
+  };
+
   return (
     <div data-slot="nannos-panel-header" className="flex shrink-0 items-center gap-1 border-b px-3 py-2">
       <span className="min-w-0 flex-1 truncate font-medium text-sm">{title}</span>
+      {chat.messages.length > 0 && (
+        <Button
+          data-slot="nannos-panel-export"
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={strings['panel.export']}
+          title={strings['panel.export']}
+          onClick={exportConversation}
+        >
+          <DownloadIcon />
+        </Button>
+      )}
       {assistant.isAvailable && assistant.canChangePinMode && (
         <Button
           data-slot="nannos-pin-toggle"
@@ -166,7 +202,7 @@ function PanelMain({
         className="flex min-h-0 min-w-0 flex-1 flex-col"
       >
         {header === false ? null : header === undefined ? (
-          <PanelHeader showNewChat={historyAvailable} />
+          <PanelHeader showNewChat={historyAvailable} chat={chat} />
         ) : (
           header
         )}
@@ -229,15 +265,17 @@ export function AssistantPanel({
   return (
     <DevModeProvider enabled={resolveDevMode(devMode)}>
       <ApplyModeProvider mode={applyMode}>
-        <NannosChatScope customHeaders={customHeaders} playground={playground} adapter={adapter}>
-          {shadow ? (
-            <ShadowPortal hostClassName={hostClassName} styles={styles} className={className}>
-              {content}
-            </ShadowPortal>
-          ) : (
-            <div className={cn('nannos-chat flex h-full w-full flex-col', className)}>{content}</div>
-          )}
-        </NannosChatScope>
+        <SendModeProvider>
+          <NannosChatScope customHeaders={customHeaders} playground={playground} adapter={adapter}>
+            {shadow ? (
+              <ShadowPortal hostClassName={hostClassName} styles={styles} className={className}>
+                {content}
+              </ShadowPortal>
+            ) : (
+              <div className={cn('nannos-chat flex h-full w-full flex-col', className)}>{content}</div>
+            )}
+          </NannosChatScope>
+        </SendModeProvider>
       </ApplyModeProvider>
     </DevModeProvider>
   );

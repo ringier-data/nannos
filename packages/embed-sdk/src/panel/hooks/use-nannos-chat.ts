@@ -40,12 +40,17 @@ export interface UseNannosChatValue {
   messages: NannosUIMessage[];
   status: 'submitted' | 'streaming' | 'ready' | 'error';
   error: Error | undefined;
-  /** Send, or STEER when a turn is already running (never interrupts it). */
+  /**
+   * Send, or STEER when a turn is already running. `interrupt: true` cancels
+   * the running turn first and starts a fresh one with this message instead
+   * (the composer's "stop and send" mode).
+   */
   send: (
     text: string,
     opts?: {
       displayText?: string;
       files?: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }>;
+      interrupt?: boolean;
     },
   ) => void;
   stop: () => Promise<void>;
@@ -153,6 +158,23 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         engine.transport.hasActiveTurn(conversationId) ||
         status === 'streaming' ||
         status === 'submitted';
+      const startTurn = () => {
+        engine.conversations.noteTitle(conversationId, opts?.displayText ?? text);
+        void sendMessage({
+          text,
+          metadata: {
+            ...(opts?.displayText && { display: { kind: 'context' as const, label: opts.displayText } }),
+            ...(opts?.files?.length && { attachments: opts.files }),
+          },
+        });
+      };
+      if (active && opts?.interrupt) {
+        // Stop first, then a NEW turn — never a steer into the one being
+        // cancelled. The abort finishes the session synchronously, so once
+        // `stop` settles the transport has no active turn to reroute into.
+        void stop().then(startTurn, startTurn);
+        return;
+      }
       if (active) {
         // Steering: emit into the RUNNING turn; the user bubble is inserted
         // BEFORE the streaming assistant message (which must stay last — the
@@ -168,16 +190,9 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         }
         return;
       }
-      engine.conversations.noteTitle(conversationId, opts?.displayText ?? text);
-      void sendMessage({
-        text,
-        metadata: {
-          ...(opts?.displayText && { display: { kind: 'context' as const, label: opts.displayText } }),
-          ...(opts?.files?.length && { attachments: opts.files }),
-        },
-      });
+      startTurn();
     },
-    [conversationId, engine, isReadOnly, sendMessage, setMessages, status],
+    [conversationId, engine, isReadOnly, sendMessage, setMessages, status, stop],
   );
 
   // --- derived interrupt + workplan surfaces -----------------------------------

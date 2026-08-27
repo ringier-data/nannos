@@ -3,14 +3,25 @@
  * around a per-part renderer. User messages become bubbles (or a context chip
  * when host-injected), assistant messages render their parts in order —
  * markdown text, activity lines, agent thoughts, work plans, tool calls, file
- * chips, and the secondary-authorization prompt. An empty thread leads with
+ * attachments (download links), and the secondary-authorization prompt. Both
+ * roles get a hover-revealed copy button for their readable text. An empty thread leads with
  * `<ContinueCard>` — the way back into the last conversation. Tool parts are
  * skipped here entirely: a pending approval renders as `<ApprovalCard>`, and an
  * answered one leaves nothing behind (dev mode aside) — the tool's own activity
  * lines already tell that story.
  */
-import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { BugIcon, ChevronDownIcon, FileIcon, FileTextIcon, ImageIcon, MessageCircleDashedIcon } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import {
+  BugIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  CopyIcon,
+  DownloadIcon,
+  FileIcon,
+  FileTextIcon,
+  ImageIcon,
+  MessageCircleDashedIcon,
+} from 'lucide-react';
 import {
   Conversation,
   ConversationContent,
@@ -28,13 +39,16 @@ import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '../../comp
 import { Alert, AlertDescription, AlertTitle } from '../../components/ui/alert';
 import { Button } from '../../components/ui/button';
 import { cn } from '../../lib/utils';
-import { useStrings } from '../../react';
+import { writeClipboard } from '../../lib/clipboard';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
+import { format, useStrings } from '../../react';
 import { fetchWireHistory, textArrivalTs, textWire, textWireId } from '../../transport';
 import type { NannosUIMessage, WireLogEntry } from '../../transport';
 import { YamlView } from './yaml-view';
 import { useChatEngineOptional } from '../engine';
 import { useDevMode } from '../dev-mode';
 import { toolPartTitle } from '../tool-title';
+import { messagePlainText } from '../transcript';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
 import { AuthRequiredCard } from './auth-required-card';
 import { ContextChip } from './context-chip';
@@ -56,17 +70,100 @@ export interface ThreadProps {
 
 type MessagePart = NannosUIMessage['parts'][number];
 
-function FileChip({ name, mimeType }: { name: string; mimeType: string }) {
-  const Icon = mimeType.startsWith('image/')
-    ? ImageIcon
-    : mimeType.startsWith('text/')
-      ? FileTextIcon
-      : FileIcon;
-  return (
-    <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-secondary px-2 py-1 text-secondary-foreground text-xs">
+interface AttachmentInfo {
+  name: string;
+  mimeType: string;
+  /** Where the bytes are (a presigned URL the backend hydrates on load). A
+   *  live send before its history reload may carry none. */
+  url?: string;
+}
+
+/**
+ * One attachment. With a URL it is a LINK — `download` for the save-as, a new
+ * tab as the fallback for cross-origin presigned URLs the browser will not
+ * save from directly — and an image also shows itself. Without one it is a
+ * plain chip that names the file.
+ */
+function FileAttachment({ name, mimeType, url }: AttachmentInfo) {
+  const strings = useStrings();
+  const isImage = mimeType.startsWith('image/');
+  const Icon = isImage ? ImageIcon : mimeType.startsWith('text/') ? FileTextIcon : FileIcon;
+  const chip = (
+    <span
+      className={cn(
+        'inline-flex max-w-full items-center gap-1.5 rounded-md border bg-secondary px-2 py-1 text-secondary-foreground text-xs',
+        url && 'hover:bg-secondary/70 hover:underline',
+      )}
+    >
       <Icon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="truncate">{name}</span>
+      {url && <DownloadIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />}
     </span>
+  );
+  if (!url) return chip;
+  return (
+    <span data-slot="nannos-attachment" className="flex max-w-full flex-col items-start gap-1">
+      {isImage && (
+        <a href={url} target="_blank" rel="noopener noreferrer" className="max-w-full">
+          <img src={url} alt={name} className="max-h-64 max-w-full rounded-md border object-contain" />
+        </a>
+      )}
+      <a
+        href={url}
+        download={name}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={format(strings['message.download'], { name })}
+        className="max-w-full"
+      >
+        {chip}
+      </a>
+    </span>
+  );
+}
+
+/** Copy one message's readable text; the icon confirms for a moment. */
+function CopyMessageButton({ text, className }: { text: string; className?: string }) {
+  const strings = useStrings();
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+  }, []);
+  const label =
+    state === 'copied'
+      ? strings['message.copied']
+      : state === 'failed'
+        ? strings['message.copyFailed']
+        : strings['message.copy'];
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          data-slot="nannos-message-copy"
+          data-state-copy={state}
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={label}
+          className={cn('size-6 rounded-sm text-muted-foreground hover:text-foreground', className)}
+          onClick={() => {
+            void writeClipboard(text).then((ok) => {
+              setState(ok ? 'copied' : 'failed');
+              if (timer.current) clearTimeout(timer.current);
+              timer.current = setTimeout(() => setState('idle'), 1500);
+            });
+          }}
+        >
+          {state === 'copied' ? (
+            <CheckIcon className="size-3.5 text-green-600 dark:text-green-400" />
+          ) : (
+            <CopyIcon className="size-3.5" />
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -79,15 +176,17 @@ function UserMessage({ message }: { message: NannosUIMessage }) {
     (part): part is Extract<MessagePart, { type: 'file' }> => part.type === 'file',
   );
   // Live sends carry files as wire metadata only; history carries `file` parts.
-  const files =
+  const files: AttachmentInfo[] =
     fileParts.length > 0
       ? fileParts.map((part) => ({
           name: part.filename ?? part.url,
           mimeType: part.mediaType,
+          url: part.url,
         }))
       : (message.metadata?.attachments ?? []).map((att) => ({
           name: att.name,
           mimeType: att.mimeType,
+          url: att.uri,
         }));
 
   // Nothing to say, nothing to draw: an empty user message (a HITL resume row
@@ -95,18 +194,30 @@ function UserMessage({ message }: { message: NannosUIMessage }) {
   if (!text && files.length === 0) return null;
 
   return (
-    <Message from="user">
-      <MessageContent>
-        {text && <span className="whitespace-pre-wrap break-words">{text}</span>}
-        {files.length > 0 && (
-          <span className="flex flex-wrap gap-1.5">
-            {files.map((file, index) => (
-              <FileChip key={`${file.name}-${index}`} name={file.name} mimeType={file.mimeType} />
-            ))}
-          </span>
-        )}
-      </MessageContent>
-    </Message>
+    <div className="group/nannos-message flex w-full flex-col items-end gap-0.5">
+      <Message from="user">
+        <MessageContent>
+          {text && <span className="whitespace-pre-wrap break-words">{text}</span>}
+          {files.length > 0 && (
+            <span className="flex flex-wrap gap-1.5">
+              {files.map((file, index) => (
+                <FileAttachment key={`${file.name}-${index}`} {...file} />
+              ))}
+            </span>
+          )}
+        </MessageContent>
+      </Message>
+      {/* Hover-revealed, like the assistant's row: the prompt is worth
+          re-using as often as the answer is. */}
+      {text && (
+        <div
+          data-slot="nannos-message-actions"
+          className="flex items-center opacity-0 transition-opacity focus-within:opacity-100 group-hover/nannos-message:opacity-100"
+        >
+          <CopyMessageButton text={text} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -508,7 +619,9 @@ function renderAssistantPart(
   }
 
   if (part.type === 'file') {
-    return <FileChip name={part.filename ?? part.url} mimeType={part.mediaType} />;
+    return (
+      <FileAttachment name={part.filename ?? part.url} mimeType={part.mediaType} url={part.url} />
+    );
   }
 
   // step-start and any unknown part types render nothing.
@@ -525,11 +638,13 @@ function AssistantActions({
 }) {
   // Feedback endpoints expect the DB id; live messages carry it as metadata.
   const messageId = message.metadata?.persistedMessageId ?? message.id;
+  const text = messagePlainText(message);
   return (
     <div
       data-slot="nannos-message-actions"
       className="-mt-1 flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/nannos-message:opacity-100 has-[[data-rated]]:opacity-100"
     >
+      {text && <CopyMessageButton text={text} />}
       <MessageFeedback conversationId={conversationId} messageId={messageId} />
       <ReportIssueButton conversationId={conversationId} messageId={messageId} />
     </div>
