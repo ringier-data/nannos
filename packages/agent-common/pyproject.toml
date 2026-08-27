@@ -31,6 +31,10 @@ dependencies = [
     "object-storage>=0.1.0",
     # Tracing
     "langsmith>=0.4.37",
+    # OTel API only (never the SDK): a library records spans against whatever
+    # provider the host installs. In the cluster that is the injected
+    # auto-instrumentation agent; with no provider the API is a no-op.
+    "opentelemetry-api>=1.27.0",
     # AWS SDK (for boto3 in model factory)
     "boto3>=1.35.0",
     "google-genai>=1.72.0",
@@ -82,6 +86,8 @@ dev = [
     "psycopg>=3.2.0",
     "psycopg-binary>=3.2.0",
     "aiobotocore>=2.15.0",
+    # In-memory span exporter, to assert on recorded spans.
+    "opentelemetry-sdk>=1.27.0",
 ]
 
 [tool.pytest.ini_options]

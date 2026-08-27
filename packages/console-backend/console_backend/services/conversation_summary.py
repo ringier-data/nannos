@@ -164,10 +164,15 @@ async def generate_summary(user_text: str, assistant_text: str, *, user_sub: str
         raw = await gateway_chat(
             prompt,
             model=model,
-            # Reasoning models (e.g. gemini-flash) spend completion tokens on
-            # thinking BEFORE any text; 200 left the JSON truncated or empty.
-            # The cap only bounds a runaway response (billing is per generated
-            # token, and the timeout bounds latency), so leave thinking headroom.
+            # Thinking off. Naming a conversation from two short strings needs no
+            # reasoning, and thinking tokens are billed like any other generated
+            # token — on every new conversation. Turning them off is the whole
+            # saving here; it also cuts the latency that made this a background task.
+            reasoning_effort="none",
+            # Kept high on purpose, as the fallback for when the line above does not
+            # take: a reasoning model spends completion tokens on thinking BEFORE any
+            # text, and 200 left the JSON truncated or empty. An unused ceiling is
+            # free (billing is per generated token, and the timeout bounds latency).
             max_tokens=4000,
             # The gateway attributes cost by OIDC subject; without it nothing is logged.
             metadata={"user_sub": user_sub} if user_sub else None,

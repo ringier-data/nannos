@@ -32,6 +32,7 @@ import {
   ChevronDownIcon,
   CopyIcon,
   DownloadIcon,
+  ExternalLinkIcon,
   PlayIcon,
   Trash2Icon,
 } from 'lucide-react';
@@ -562,7 +563,8 @@ function TraceLink({ conversationId, hasMessages }: { conversationId: string; ha
       }}
     >
       <AudioWaveformIcon aria-hidden="true" className="size-3 shrink-0" />
-      Open in LangChain
+      LangSmith Trace
+      <ExternalLinkIcon aria-hidden="true" className="size-2.5 shrink-0" />
     </button>
   );
 }

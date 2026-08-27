@@ -87,6 +87,13 @@ export interface OpenOptions {
   /** Page-context key (e.g. `campaign:123`): the chat continues the active
    *  conversation only when it was started under the same key. */
   contextKey?: string;
+  /**
+   * Always land this prompt in a FRESH conversation, even when the active one
+   * was started under the same `contextKey`. For launch surfaces (a header
+   * "Ask" input) where resuming whatever chat happens to be active would read
+   * as a bug. A still-blank active conversation is reused rather than doubled.
+   */
+  newConversation?: boolean;
 }
 
 export interface SeededPrompt {
@@ -94,6 +101,7 @@ export interface SeededPrompt {
   displayText?: string;
   contextKey?: string;
   sendOnOpen: boolean;
+  newConversation: boolean;
 }
 
 /** Handle to a registered page-context layer (see `registerPageContextLayer`). */
@@ -484,6 +492,7 @@ export function NannosProvider(props: NannosProviderProps): ReactNode {
           // unless the caller pins a different one.
           contextKey: opts?.contextKey ?? pageContextRef.current?.key,
           sendOnOpen: opts?.sendOnOpen === true,
+          newConversation: opts?.newConversation === true,
         });
       }
       const current = resolvedRef.current;

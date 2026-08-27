@@ -63,6 +63,20 @@ agent = AgentRunner()
 @asynccontextmanager
 async def lifespan(app) -> AsyncIterator[None]:
     """Lifespan context manager for the FastAPI application."""
+    # Put LangGraph's interrupt/resume events on a handler that traces them.
+    # Deliberately imported here, not at module top: the injected OTel
+    # auto-instrumentation must already have wrapped LangChain, otherwise its
+    # handler joins callback managers created later and re-introduces the
+    # AttributeError noise. See agent_common.core.graph_telemetry.
+    from agent_common.core.graph_telemetry import install_graph_lifecycle_telemetry
+    from ringier_a2a_sdk.telemetry.span_filter import install_span_export_filter
+
+    install_graph_lifecycle_telemetry()
+    # Keep per-ASGI-message and transaction-bookkeeping spans out of the export.
+    # Runs here, not at import: the injected auto-instrumentation must already
+    # have built the tracer provider we wrap.
+    install_span_export_filter()
+
     await agent.setup_checkpointer()
     await agent.ensure_store_setup()
     await agent.init_sandbox_pool()

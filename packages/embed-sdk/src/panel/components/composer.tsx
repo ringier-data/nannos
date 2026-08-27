@@ -78,10 +78,15 @@ export function Composer({ chat, className }: ComposerProps) {
   const clearSeededPrompt = assistant.clearSeededPrompt;
   useEffect(() => {
     if (seededPrompt && seededPrompt.sendOnOpen === false) {
+      // A `newConversation` draft retargets first, so the prefilled question
+      // sits in a fresh thread, not on top of whatever chat was active.
+      if (seededPrompt.newConversation && engine) {
+        engine.conversations.resolveTarget(seededPrompt.contextKey, { fresh: true });
+      }
       setText(seededPrompt.text);
       clearSeededPrompt();
     }
-  }, [seededPrompt, clearSeededPrompt]);
+  }, [seededPrompt, clearSeededPrompt, engine]);
 
   const isReadOnly = chat.isReadOnly;
   const hasUploading = attachments.items.some((item) => item.status === 'uploading');

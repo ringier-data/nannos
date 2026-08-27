@@ -210,6 +210,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     logger.info("Application starting up...")
 
+    # Keep per-ASGI-message and transaction-bookkeeping spans out of the trace
+    # export. Runs here, not at import: the injected auto-instrumentation must
+    # already have built the tracer provider we wrap.
+    from ringier_a2a_sdk.telemetry.span_filter import install_span_export_filter
+
+    install_span_export_filter()
+
     # Initialize PostgreSQL database connection
     await init_db()
     logger.info("PostgreSQL database initialized")
@@ -690,6 +697,21 @@ _pending_interactions: dict[str, dict[str, Any]] = {}
 _tracer = otel_trace.get_tracer("console-backend.chat")
 
 
+def _xray_trace_id(span: otel_trace.Span) -> str | None:
+    """OTel trace id in the form X-Ray search expects: ``1-<8 hex>-<24 hex>``.
+
+    X-Ray splits the 128-bit id into a 32-bit epoch prefix and a 96-bit
+    remainder; ``batch-get-traces`` and the console only accept that dashed
+    form, so logging the raw 32-hex id would leave a manual conversion between
+    a log line and the trace it points at.
+    """
+    context = span.get_span_context()
+    if not context.trace_id:
+        return None
+    raw = format(context.trace_id, "032x")
+    return f"1-{raw[:8]}-{raw[8:]}"
+
+
 def _traced_chat_message(handler):  # type: ignore[no-untyped-def]
     """Start a NEW trace for every incoming chat message.
 
@@ -701,6 +723,18 @@ def _traced_chat_message(handler):  # type: ignore[no-untyped-def]
     awaits the full turn), so the auto-instrumented httpx call to the
     orchestrator becomes a child and carries the trace context downstream.
     Without the injected OTel agent (local dev, tests) this is a no-op.
+
+    The [TRACE] log line is the durable half of this. A trace can go missing —
+    the ids below ride in span METADATA, which X-Ray does not index (custom
+    annotations need Transaction Search, currently off), so a conversation id
+    cannot be searched for; and a root segment exported only when the turn ends
+    is the first casualty when a span-heavy turn overruns the export pipeline.
+    Emitting the pairing to logs makes conversation → trace a Logs Insights
+    query that holds even when the segment never arrives:
+
+        fields @timestamp, log
+        | filter log like "<conversation-id>" and log like "[TRACE]"
+        | sort @timestamp asc
     """
 
     @functools.wraps(handler)
@@ -711,16 +745,43 @@ def _traced_chat_message(handler):  # type: ignore[no-untyped-def]
         # rule that keeps every chat turn (the default rule keeps only ~5%, and
         # an unsampled root drops the orchestrator's whole trace with it).
         attributes: dict[str, str] = {"nannos.chat": "true"}
+        conversation_id = ""
+        message_id = ""
         if isinstance(json_data, dict):
-            attributes["nannos.conversation_id"] = str(json_data.get("conversationId", ""))
-            attributes["nannos.message_id"] = str(json_data.get("id", ""))
+            conversation_id = str(json_data.get("conversationId", ""))
+            message_id = str(json_data.get("id", ""))
+            attributes["nannos.conversation_id"] = conversation_id
+            attributes["nannos.message_id"] = message_id
+        event = handler.__name__.removeprefix("handle_")
         with _tracer.start_as_current_span(
-            handler.__name__.removeprefix("handle_"),
+            event,
             context=no_parent,
             kind=otel_trace.SpanKind.SERVER,
             attributes=attributes,
-        ):
-            return await handler(sid, json_data)
+        ) as span:
+            # Logged at the START of the turn on purpose: a turn that never
+            # finishes (crash, disconnect, timeout) is exactly the one worth
+            # finding, and an end-only line would not exist for it.
+            trace_id = _xray_trace_id(span)
+            logger.info(
+                f"[TRACE] {event} start conversation={conversation_id or '-'} "
+                f"message={message_id or '-'} trace_id={trace_id or 'unsampled'}"
+            )
+            started = time.monotonic()
+            outcome = "ok"
+            try:
+                return await handler(sid, json_data)
+            except BaseException as exc:  # noqa: BLE001 - re-raised; only labels the log line
+                # BaseException, not Exception: a cancelled turn (client gone,
+                # shutdown) is the common non-ok ending here.
+                outcome = type(exc).__name__
+                raise
+            finally:
+                logger.info(
+                    f"[TRACE] {event} end conversation={conversation_id or '-'} "
+                    f"message={message_id or '-'} trace_id={trace_id or 'unsampled'} "
+                    f"outcome={outcome} duration_s={time.monotonic() - started:.3f}"
+                )
 
     return wrapper
 

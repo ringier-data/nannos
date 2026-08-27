@@ -99,6 +99,20 @@ def create_lifespan(
         # Startup: Initialize and start budget guard singleton
         logger.info("Starting application lifespan...")
 
+        # Put LangGraph's interrupt/resume events on a handler that traces them.
+        # Deliberately imported here, not at module top: the injected OTel
+        # auto-instrumentation must already have wrapped LangChain, otherwise its
+        # handler joins callback managers created later and re-introduces the
+        # AttributeError noise. See agent_common.core.graph_telemetry.
+        from agent_common.core.graph_telemetry import install_graph_lifecycle_telemetry
+        from ringier_a2a_sdk.telemetry.span_filter import install_span_export_filter
+
+        install_graph_lifecycle_telemetry()
+        # Keep per-ASGI-message and transaction-bookkeeping spans out of the
+        # export. Runs here, not at import: the injected auto-instrumentation
+        # must already have built the tracer provider we wrap.
+        install_span_export_filter()
+
         # Fail fast if the Model Gateway isn't configured: it's the sole path
         # for LLM traffic, so surface a missing LLM_GATEWAY_URL loudly at boot rather than
         # as an opaque per-request failure (or a misleading "no models registered").
