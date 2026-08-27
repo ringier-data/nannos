@@ -98,6 +98,27 @@ export function textWireId(part: { providerMetadata?: ProviderMetadata }): strin
 }
 
 /**
+ * Stamp for a FILE part the agent produced mid-turn. The AI SDK's `file` chunk
+ * has no filename slot (only url + mediaType), so the name rides here; the
+ * history path sets `filename` on the part directly — `fileName` reads both.
+ */
+export function fileArrival(
+  name: string | undefined,
+  ts: number,
+  wire?: string,
+  wireId?: string,
+): ProviderMetadata {
+  return { nannos: { ts, ...(name && { filename: name }), ...(wire && { wire }), ...(wireId && { wireId }) } };
+}
+
+/** A file part's display name: `filename` (history), the live stamp, else its URL. */
+export function fileName(part: { url: string; filename?: string; providerMetadata?: ProviderMetadata }): string {
+  if (part.filename) return part.filename;
+  const stamped = part.providerMetadata?.nannos?.filename;
+  return typeof stamped === 'string' && stamped ? stamped : part.url;
+}
+
+/**
  * All HITL actions surface as `dynamic-tool` parts (tool names are
  * server-defined), so the tools generic stays open.
  */

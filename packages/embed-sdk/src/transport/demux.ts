@@ -13,6 +13,7 @@ import type { AgentResponseData } from '../core/wire';
 import { clientActionPartId } from './approval-codec';
 import {
   extractPartTexts,
+  getFileInfo,
   getPartKind,
   getTaskState,
   shouldDisplayMessageParts,
@@ -28,7 +29,8 @@ import {
 } from '../core/extensions';
 import { generateUUID } from '../core/protocol';
 import { labelAgentEvent } from './wire-log';
-import { textArrival } from './ai-types';
+import { fileArrival, textArrival } from './ai-types';
+import type { ProviderMetadata } from 'ai';
 import type {
   NannosMessageMetadata,
   NannosUIMessageChunk,
@@ -62,7 +64,8 @@ type DurablePart =
   | { type: 'data-workplan'; id: string; data: { todos: TodoItem[]; wire?: string; wireId?: string } }
   | { type: 'data-agent-thought'; id: string; data: { agent: string; text: string; complete: boolean; startedAt: number; wire?: string; wireId?: string } }
   | { type: 'data-activity'; id: string; data: { text: string; source?: string; ts: number; wire?: string; wireId?: string } }
-  | { type: 'data-auth-required'; id: string; data: { authUrl?: string; tool?: string; message?: string; wire?: string; wireId?: string } };
+  | { type: 'data-auth-required'; id: string; data: { authUrl?: string; tool?: string; message?: string; wire?: string; wireId?: string } }
+  | { type: 'file'; url: string; mediaType: string; providerMetadata?: ProviderMetadata };
 
 /** Per-turn mutable state owned by the TurnSession; demux() mutates it. */
 export interface DemuxState {
@@ -156,11 +159,49 @@ function metadataChunk(state: DemuxState): NannosUIMessageChunk {
 
 /** Record/refresh a durable part in the replay log (workplan + open thoughts update in place). */
 function logDurable(state: DemuxState, part: DurablePart) {
-  const existing = state.durable.find((p) => p.type === part.type && p.id === part.id);
+  if (part.type === 'file') {
+    // Files carry no id; the URL is the identity. Emitted once per turn.
+    state.durable.push(part);
+    return;
+  }
+  const existing = state.durable.find(
+    (p): p is Exclude<DurablePart, { type: 'file' }> => p.type === part.type && 'id' in p && p.id === part.id,
+  );
   if (existing) {
     existing.data = part.data as never;
   } else {
     state.durable.push(part);
+  }
+}
+
+/**
+ * Files the agent produced (a generated report, an image) ride the same parts
+ * arrays as its text — `{ kind: 'file', file: { uri, mimeType, name } }` — in
+ * a full message, a status message, or an artifact. Emit each as a `file`
+ * part ONCE per turn (the same file is persisted several times over: the
+ * artifact, the full message, the terminal status), logged as durable so a
+ * `reset-step` replay keeps it.
+ */
+function emitFiles(
+  state: DemuxState,
+  out: NannosUIMessageChunk[],
+  parts: unknown[] | undefined,
+  wire: string,
+  wireId?: string,
+) {
+  if (!Array.isArray(parts)) return;
+  for (const p of parts) {
+    const file = getFileInfo(p);
+    if (!file) continue;
+    if (state.durable.some((d) => d.type === 'file' && d.url === file.uri)) continue;
+    const part: DurablePart = {
+      type: 'file',
+      url: file.uri,
+      mediaType: file.mimeType ?? 'application/octet-stream',
+      providerMetadata: fileArrival(file.name, Date.now(), wire, wireId),
+    };
+    logDurable(state, part);
+    out.push({ ...part });
   }
 }
 
@@ -351,6 +392,7 @@ export function demux(state: DemuxState, data: AgentResponseData, wireId?: strin
 
   // #5/#6 Streaming artifact chunks. (:526-582)
   if (data.kind === 'artifact-update' && Array.isArray(data.artifact?.parts)) {
+    emitFiles(state, out, data.artifact.parts as unknown[], wire, wireId);
     const text = extractPartTexts(data.artifact.parts).join('');
     if (!text) return { chunks: out };
 
@@ -507,6 +549,7 @@ export function demux(state: DemuxState, data: AgentResponseData, wireId?: strin
   // #10+#12 Full agent message with displayable parts, mid-turn: authoritative
   // text superseding any partial stream. (:673-679, :702-728)
   if (data.role === 'agent' && Array.isArray(data.parts)) {
+    emitFiles(state, out, data.parts as unknown[], wire, wireId);
     if (shouldDisplayMessageParts(data.parts)) {
       const text = extractPartTexts(data.parts).join('\n');
       closeThought(state, out);
@@ -519,6 +562,9 @@ export function demux(state: DemuxState, data: AgentResponseData, wireId?: strin
   if (data.status) {
     const normalized = getTaskState(data.status.state);
     const isTerminal = TERMINAL_STATES.has(normalized);
+    if (Array.isArray(data.status.message?.parts)) {
+      emitFiles(state, out, data.status.message.parts as unknown[], wire, wireId);
+    }
     let finalizedFromStream = false;
 
     if (isTerminal) {
@@ -645,6 +691,7 @@ export function demux(state: DemuxState, data: AgentResponseData, wireId?: strin
       (Array.isArray(data.artifacts)
         ? (data.artifacts as Array<{ parts?: Array<{ text?: string }> }>)[0]
         : null);
+    if (art && Array.isArray(art.parts)) emitFiles(state, out, art.parts as unknown[], wire, wireId);
     if (art && Array.isArray(art.parts) && shouldDisplayMessageParts(art.parts)) {
       emitAuthoritativeText(state, out, extractPartTexts(art.parts).join('\n'), wire, wireId);
     }
