@@ -117,12 +117,18 @@ async def summarize_action_requests(
             lines.append("")
         lines.append(f"Summarize these {len(calls)} tool call(s).")
 
-        result: ToolCallSummaries = await structured_model.ainvoke(
-            [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": "\n".join(lines)},
-            ]
-        )
+        # Side-channel call: it bypasses the agent middleware stack, so stamp
+        # gateway cost attribution (sub_agent, conversation, …) from the run
+        # config ourselves or the spend lands on the orchestrator.
+        from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
+
+        with run_config_attribution_scope():
+            result: ToolCallSummaries = await structured_model.ainvoke(
+                [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": "\n".join(lines)},
+                ]
+            )
     except Exception:
         logger.exception("Tool call summarization failed; falling back to raw args")
         return None
