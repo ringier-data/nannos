@@ -88,7 +88,7 @@ function DevModeSwitch() {
   );
 }
 
-function PanelHeader() {
+function PanelHeader({ showNewChat }: { showNewChat: boolean }) {
   const strings = useStrings();
   const assistant = useAssistant();
   const { conversations, activeConversationId, createConversation } = useConversations();
@@ -116,20 +116,24 @@ function PanelHeader() {
           {assistant.isPinned ? <PinOffIcon /> : <PinIcon />}
         </Button>
       )}
-      <Button
-        data-slot="nannos-panel-new-chat"
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label={strings['panel.newChat']}
-        onClick={() => {
-          createConversation();
-          // The fresh thread must be visible: close the history popover with it.
-          history.close();
-        }}
-      >
-        <MessageCirclePlusIcon />
-      </Button>
+      {/* One way in, never two: in sidebar mode the list carries this button,
+          right where the user is already reading their chats. */}
+      {showNewChat && (
+        <Button
+          data-slot="nannos-panel-new-chat"
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={strings['panel.newChat']}
+          onClick={() => {
+            createConversation();
+            // The fresh thread must be visible: close the history popover with it.
+            history.close();
+          }}
+        >
+          <MessageCirclePlusIcon />
+        </Button>
+      )}
       {history.available && (
         <Button
           data-slot="nannos-panel-history"
@@ -161,14 +165,18 @@ function PanelHeader() {
 /** Inner component so `useNannosChat` runs INSIDE the scope. */
 function PanelMain({
   header,
-  historyAvailable,
+  hasSidebar,
 }: {
   header?: ReactNode | false;
-  historyAvailable: boolean;
+  /** The permanent conversation sidebar is on screen next to this. */
+  hasSidebar: boolean;
 }) {
   const chat = useNannosChat();
   const devMode = useDevMode();
   const strings = useStrings();
+  // The sidebar owns both the list and the new-chat button; the narrow panel's
+  // header owns both instead.
+  const historyAvailable = !hasSidebar;
 
   return (
     <ConversationHistoryProvider available={historyAvailable}>
@@ -179,7 +187,11 @@ function PanelMain({
         aria-label={strings['panel.title']}
         className="flex min-h-0 min-w-0 flex-1 flex-col"
       >
-        {header === false ? null : header === undefined ? <PanelHeader /> : header}
+        {header === false ? null : header === undefined ? (
+          <PanelHeader showNewChat={historyAvailable} />
+        ) : (
+          header
+        )}
         {/* The history popover hangs from the top-right of THIS box, so it
             drops out of the header button without covering the thread. */}
         <div className="relative flex min-h-0 flex-1 flex-col">
@@ -211,10 +223,12 @@ function PanelContent({
 }) {
   return (
     <div className="flex h-full min-h-0 w-full">
-      {showConversationList && <ConversationList className="w-64 shrink-0 border-r" />}
+      {showConversationList && (
+        <ConversationList className="w-64 shrink-0 border-r" showNewChat />
+      )}
       {/* One way in, never two: the header's history button appears only when
           the permanent sidebar is absent. */}
-      <PanelMain header={header} historyAvailable={!showConversationList} />
+      <PanelMain header={header} hasSidebar={showConversationList} />
     </div>
   );
 }

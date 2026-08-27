@@ -7,6 +7,12 @@
  * body of the narrow panel's history overlay — which passes `onSelect` to close
  * itself once the user has picked a conversation.
  *
+ * The sidebar also carries the new-chat button (`showNewChat`): with the list
+ * permanently on screen, that is where a user looks for it — and a host that
+ * hides the panel header (`header={false}`) would otherwise have no way to
+ * start a chat at all. The overlay leaves it out: the header it drops from has
+ * its own.
+ *
  * The list is the server's newest page (50 max, the endpoint's ceiling, with no
  * cursor to page past it). Search reaches older conversations by title.
  *
@@ -25,7 +31,7 @@
  * first.
  */
 import { useEffect, useRef, useState } from 'react';
-import { FileTextIcon, PencilIcon, SearchIcon, Trash2Icon } from 'lucide-react';
+import { FileTextIcon, MessageCirclePlusIcon, PencilIcon, SearchIcon, Trash2Icon } from 'lucide-react';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import {
@@ -54,6 +60,9 @@ export interface ConversationListProps {
   /** Put the caret in the search box on mount. The overlay does (it opened on
    *  purpose); the permanent sidebar must not steal focus from the composer. */
   autoFocusSearch?: boolean;
+  /** Show the new-chat button beside the search box. The sidebar does; the
+   *  overlay does not — the header it hangs from already has one. */
+  showNewChat?: boolean;
 }
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -62,6 +71,7 @@ export function ConversationList({
   className,
   onSelect,
   autoFocusSearch,
+  showNewChat,
 }: ConversationListProps) {
   const strings = useStrings();
   const {
@@ -69,6 +79,7 @@ export function ConversationList({
     activeConversationId,
     isLoading,
     selectConversation,
+    createConversation,
     loadConversations,
     deleteConversation,
     renameConversation,
@@ -157,6 +168,25 @@ export function ConversationList({
             className="h-8 pl-8 text-sm"
           />
         </div>
+        {showNewChat && (
+          <Button
+            data-slot="nannos-conversation-new-chat"
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="size-8 shrink-0"
+            aria-label={strings['panel.newChat']}
+            title={strings['panel.newChat']}
+            onClick={() => {
+              createConversation();
+              // Harmless in the sidebar (nothing to close), and correct for any
+              // host that reuses the list inside a surface of its own.
+              onSelect?.();
+            }}
+          >
+            <MessageCirclePlusIcon />
+          </Button>
+        )}
       </div>
 
       <ScrollArea className="min-h-0 flex-1">

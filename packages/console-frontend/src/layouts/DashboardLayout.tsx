@@ -22,6 +22,7 @@ import { NotificationInbox } from '@/components/notifications/NotificationInbox'
 import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 import { SchedulerNotifications } from '@/components/SchedulerNotifications';
 import { ConsoleNannosProvider } from '@/components/nannos/ConsoleNannosProvider';
+import { AssistantDevModeSwitch } from '@/components/nannos/AssistantDevModeSwitch';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -93,6 +94,7 @@ export function DashboardLayout() {
               </SidebarGroupLabel>
               {adminMode && (
                 <SidebarGroupContent>
+                  <AssistantDevModeSwitch />
                   <SidebarMenu>
                     {adminNavItems.map((item) => (
                       <SidebarMenuItem key={item.title}>

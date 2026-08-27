@@ -7,7 +7,9 @@
  * moment the question matters. Clicking it must show BOTH modes with what each
  * one does — a label alone ("Manual") is not an explanation, and a mode nobody
  * understands is a mode nobody changes. A host that fixed the mode must see no
- * control at all: a locked setting that looks adjustable is worse than none.
+ * control at all: a locked setting that looks adjustable is worse than none —
+ * and neither must a host that registered no object to apply INTO, where the
+ * setting governs something that cannot happen.
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,7 +40,12 @@ const ADAPTER: NannosHostAdapter = {
   api: { getUserSettings: async () => null },
 };
 
-function mountPanel(applyMode?: ApplyMode, opts: { shadow?: boolean } = {}) {
+/** Every test but the "nothing to apply into" one needs a registered target:
+ *  with an empty registry the switch hides itself on purpose. */
+function mountPanel(
+  applyMode?: ApplyMode,
+  opts: { shadow?: boolean; register?: boolean } = {},
+) {
   vi.stubGlobal(
     'fetch',
     vi.fn(
@@ -50,6 +57,9 @@ function mountPanel(applyMode?: ApplyMode, opts: { shadow?: boolean } = {}) {
     ),
   );
   const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
+  if (opts.register !== false) {
+    core.register({ type: 'campaign', id: '1', scope: 'update', getState: () => ({}), apply: () => {} });
+  }
   render(
     <NannosProvider core={core}>
       <AssistantPanel shadow={opts.shadow ?? false} adapter={ADAPTER} applyMode={applyMode} />
@@ -144,6 +154,13 @@ describe('apply-mode switch', () => {
     fireEvent.click(control()!);
     expect(nameOf('allow-edits').className).toContain('font-bold');
     expect(nameOf('manual').className).not.toContain('font-bold');
+  });
+
+  it('renders nothing when no client object is registered', () => {
+    // Nothing to apply into → the mode governs something that cannot happen.
+    mountPanel(undefined, { register: false });
+    expect(control()).toBeNull();
+    expect(send()).toBeTruthy();
   });
 
   it('renders nothing when the host fixed the mode', () => {

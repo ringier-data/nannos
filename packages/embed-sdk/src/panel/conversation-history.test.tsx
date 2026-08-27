@@ -10,6 +10,7 @@
  * box in place, Enter PATCHes it, Escape leaves it alone.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Socket } from 'socket.io-client';
 import { createNannos } from '../core';
@@ -72,7 +73,7 @@ function json(body: unknown): Response {
   });
 }
 
-function mountPanel(props: { showConversationList?: boolean } = {}) {
+function mountPanel(props: { showConversationList?: boolean; header?: ReactNode | false } = {}) {
   const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
   render(
     <NannosProvider core={core}>
@@ -366,5 +367,41 @@ describe('conversation history', () => {
     await screen.findByText('Campaign 42 pacing');
     expect(screen.queryByRole('button', { name: 'History' })).toBeNull();
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('sidebar mode moves new-chat INTO the list — the header keeps none', async () => {
+    // Same rule as the history button: one way in. With the list permanently on
+    // screen, the button belongs where the user is already reading their chats.
+    mountPanel({ showConversationList: true });
+    await screen.findByText('Campaign 42 pacing');
+
+    const list = document.querySelector('[data-slot="nannos-conversation-list"]')!;
+    expect(list.querySelector('[data-slot="nannos-conversation-new-chat"]')).toBeTruthy();
+    expect(document.querySelector('[data-slot="nannos-panel-new-chat"]')).toBeNull();
+  });
+
+  it('a headerless sidebar surface can still start a new chat', async () => {
+    // The console's chat page: `header={false}` + sidebar. Before the list
+    // carried the button, this surface had NO way to start a conversation.
+    mountPanel({ showConversationList: true, header: false });
+    await screen.findByText('Campaign 42 pacing');
+    expect(document.querySelector('[data-slot="nannos-panel-header"]')).toBeNull();
+
+    // Open one from the list, so there is something for new-chat to move off.
+    fireEvent.click(screen.getByText('Campaign 42 pacing'));
+    const row = () => document.querySelector('[data-slot="nannos-conversation-item"][aria-current]');
+    await waitFor(() => expect(row()).toBeTruthy());
+
+    fireEvent.click(document.querySelector('[data-slot="nannos-conversation-new-chat"]')!);
+
+    // The fresh conversation is not in the list yet (nothing has happened in
+    // it), so no row is the current one any more.
+    await waitFor(() => expect(row()).toBeNull());
+  });
+
+  it('the narrow panel keeps its header new-chat button', async () => {
+    mountPanel();
+    await screen.findByRole('button', { name: 'History' });
+    expect(document.querySelector('[data-slot="nannos-panel-new-chat"]')).toBeTruthy();
   });
 });
