@@ -91,8 +91,10 @@ export class TurnSession {
     this.chunksEmitted += 1;
   }
 
-  /** Route one `agent_response` event through the demux into the stream. */
-  handle(data: AgentResponseData): void {
+  /** Route one `agent_response` event through the demux into the stream.
+   *  `wireId` is the event's wire-log entry, stamped onto the parts it
+   *  produces so the dev badge can pull up the raw source. */
+  handle(data: AgentResponseData, wireId?: string): void {
     if (this.closed) return;
     // Stale prompt replay: a `pendingHitl` snapshot (a subscribe racing this
     // resume, or a socket rejoin) re-asks a call this turn already answered.
@@ -105,7 +107,7 @@ export class TurnSession {
       const asked = approvalPrompt(data);
       if (asked && asked.ids.every((id) => this.answered.get(id) === asked.kind)) return;
     }
-    const result = demux(this.state, data);
+    const result = demux(this.state, data, wireId);
     if (result.steering) {
       this.hooks.onSteeringAck?.();
       return;

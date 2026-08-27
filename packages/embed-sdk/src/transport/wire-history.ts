@@ -16,7 +16,7 @@
  * better source; the two merge by timestamp in the log.
  */
 import type { RestMessageRow } from './history-mapper';
-import { labelAgentEvent, type ReplayEntry } from './wire-log';
+import { labelAgentEvent, serverWireId, type ReplayEntry } from './wire-log';
 
 const DEFAULT_LIMIT = 100;
 
@@ -42,6 +42,9 @@ function rowToEntry(row: RestMessageRow, conversationId: string): ReplayEntry {
   const payload = payloadOf(row);
   const out = row.role === 'user';
   return {
+    // The row's own id, so a part the history mapper stamped with the same
+    // key resolves this entry exactly (see `serverWireId`).
+    id: serverWireId(row),
     ts: tsOf(row),
     dir: out ? 'out' : 'in',
     conversationId,

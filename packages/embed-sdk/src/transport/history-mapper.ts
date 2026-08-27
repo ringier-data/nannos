@@ -27,6 +27,7 @@ import { clientActionPartId } from './approval-codec';
 import { textArrival } from './ai-types';
 import type { NannosUIMessage, ReviewConfig } from './ai-types';
 import { readAuthRequired } from './demux';
+import { labelAgentEvent, serverWireId } from './wire-log';
 
 /** The persisted message row as the REST API returns it (tolerant shape). */
 export interface RestMessageRow {
@@ -194,6 +195,14 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
     const time = rowTime(row) || Date.now();
     seq += 1;
 
+    // Dev-mode provenance, same contract as the live demux: the wire label of
+    // the stored event, and the row's SERVER id — the same id the wire replay
+    // stamps on its entries (`serverWireId`), so the badge resolves the raw
+    // event exactly once the backend record is loaded.
+    const wire = payload ? labelAgentEvent(payload) : undefined;
+    const wireId = serverWireId(row);
+    const provenance = { ...(wire && { wire }), ...(wireId && { wireId }) };
+
     // Sub-agent thought (intermediate-output artifact).
     if (row.kind === 'artifact-update' && facts.artifactExtensions.includes(INTERMEDIATE_OUTPUT_EXT)) {
       const agent = (facts.artifactMetadata?.agent_name as string) || 'sub-agent';
@@ -203,7 +212,7 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
         assistantParts.push({
           type: 'data-agent-thought',
           id: `hist-thought-${seq}`,
-          data: { agent, text, complete: true, startedAt: time },
+          data: { agent, text, complete: true, startedAt: time, ...provenance },
         });
       }
       continue;
@@ -226,6 +235,7 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
             ...(facts.source && { source: facts.source }),
             ...(facts.noteKind && { kind: facts.noteKind }),
             ts: time,
+            ...provenance,
           },
         });
       }
@@ -240,7 +250,7 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
         assistantParts.push({
           type: 'data-activity',
           id: `hist-act-${seq}`,
-          data: { text, ts: time },
+          data: { text, ts: time, ...provenance },
         });
       }
       continue;
@@ -257,10 +267,13 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
       assistantParts.push({
         type: 'data-auth-required',
         id: `hist-auth-${seq}`,
-        data: readAuthRequired(
-          text,
-          facts.topMeta ?? (nested?.metadata as Record<string, unknown> | undefined),
-        ),
+        data: {
+          ...readAuthRequired(
+            text,
+            facts.topMeta ?? (nested?.metadata as Record<string, unknown> | undefined),
+          ),
+          ...provenance,
+        },
       });
       continue;
     }
@@ -292,7 +305,7 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
       ? shouldDisplayMessageParts(row.parts as never) || !!text.trim()
       : !!text.trim();
     if (displayable && text.trim()) {
-      assistantParts.push({ type: 'text', text, providerMetadata: textArrival(time) });
+      assistantParts.push({ type: 'text', text, providerMetadata: textArrival(time, wire, wireId) });
       assistantId = rowId(row, `hist-a-${index}`);
     }
   }

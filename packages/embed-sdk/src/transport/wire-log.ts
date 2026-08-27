@@ -66,7 +66,9 @@ export class WireLog {
     return this.store !== undefined;
   }
 
-  push(entry: Omit<WireLogEntry, 'seq' | 'ts' | 'id'>): void {
+  /** Returns the entry's id — the demux stamps it onto the parts the event
+   *  produces, which is how the thread's dev badge finds its source event. */
+  push(entry: Omit<WireLogEntry, 'seq' | 'ts' | 'id'>): string {
     this.seq += 1;
     const full: WireLogEntry = {
       ...entry,
@@ -78,6 +80,41 @@ export class WireLog {
     this.live = next.length > CAPACITY ? next.slice(next.length - CAPACITY) : next;
     this.store?.append(full);
     this.recompute();
+    return full.id;
+  }
+
+  /** The entry behind a stamped part id; undefined once evicted (ring buffer). */
+  find(id: string): WireLogEntry | undefined {
+    return this.merged.find((entry) => entry.id === id);
+  }
+
+  /**
+   * Best-effort source event for a part with NO stamped id — a history
+   * restore, where only content survives. Finds the entries whose payload
+   * carries the part's text and returns the one nearest the part's own
+   * timestamp (or the last one when the part has none — a later event
+   * supersedes an earlier duplicate). Callers label the result as MATCHED,
+   * not stamped: content matching is honest enough for dev tooling, no more.
+   */
+  findSource(
+    conversationId: string,
+    needle: string,
+    ts?: number,
+    dir: 'in' | 'out' = 'in',
+  ): WireLogEntry | undefined {
+    const text = needle.trim();
+    if (text.length < 3) return undefined; // too short to identify anything
+    const candidates = this.merged.filter(
+      (entry) =>
+        entry.dir === dir &&
+        (!entry.conversationId || entry.conversationId === conversationId) &&
+        payloadHasText(entry.payload, text),
+    );
+    if (candidates.length === 0) return undefined;
+    if (ts === undefined) return candidates[candidates.length - 1];
+    return candidates.reduce((best, entry) =>
+      Math.abs(entry.ts - ts) < Math.abs(best.ts - ts) ? entry : best,
+    );
   }
 
   /** Loads this browser's stored record of a conversation. Cheap and
@@ -149,6 +186,33 @@ export class WireLog {
     this.merged = all;
     for (const fn of this.listeners) fn();
   }
+}
+
+/**
+ * Stable id for a SERVER-persisted message row — the shared key between the
+ * wire replay (`fetchWireHistory` stamps it as the entry id) and the history
+ * mapper (which stamps it onto the parts it rebuilds). It is what lets a
+ * history-restored part resolve its raw source event EXACTLY once the
+ * backend record is loaded, instead of falling back to content matching.
+ */
+export function serverWireId(row: {
+  id?: unknown;
+  message_id?: unknown;
+  messageId?: unknown;
+}): string | undefined {
+  const id = row.id ?? row.message_id ?? row.messageId;
+  return typeof id === 'string' && id ? `srv:${id}` : undefined;
+}
+
+/** Deep string scan, bounded — wire payloads are small and never cyclic. */
+function payloadHasText(value: unknown, needle: string, depth = 0): boolean {
+  if (depth > 8 || value == null) return false;
+  if (typeof value === 'string') return value.includes(needle);
+  if (Array.isArray(value)) return value.some((v) => payloadHasText(v, needle, depth + 1));
+  if (typeof value === 'object') {
+    return Object.values(value).some((v) => payloadHasText(v, needle, depth + 1));
+  }
+  return false;
 }
 
 /** 'urn:nannos:a2a:activity-log:1.0' → 'activity-log'. */

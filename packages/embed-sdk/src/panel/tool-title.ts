@@ -36,7 +36,7 @@ export function clientActionKind(input: unknown): string | null {
 export function toolPartTitle(toolName: string, input: unknown): string {
   if (toolName !== CLIENT_ACTION_TOOL) return toolName;
   const kind = clientActionKind(input);
-  return kind || toolName;
+  return kind ? `${toolName} · ${kind}` : toolName;
 }
 
 /** i18n key describing a self-evident `client_action` kind, or null when the

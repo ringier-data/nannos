@@ -37,6 +37,7 @@ import {
   Trash2Icon,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { YamlView } from './yaml-view';
 import { useAssistant } from '../../react';
 import type { ClientActionLogEntry } from '../../core';
 import { fetchWireHistory, type WireLogEntry } from '../../transport';
@@ -77,16 +78,19 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   );
 }
 
-function Json({ value, className }: { value: unknown; className?: string }) {
+/** Payload view, rendered as YAML — half the lines of pretty-printed JSON in
+ *  a panel this narrow. The clipboard exports stay JSON (see the copy button):
+ *  YAML is for reading, JSON is for pasting into a bug report. */
+function Yaml({ value, className }: { value: unknown; className?: string }) {
   return (
-    <pre
+    <YamlView
+      // '—' for a cleared slot: `undefined` already renders so via the emitter.
+      value={value === null ? undefined : value}
       className={cn(
         'max-h-48 overflow-auto rounded-md border border-border bg-muted p-2 font-mono text-[11px] leading-snug text-foreground',
         className,
       )}
-    >
-      {value === undefined || value === null ? '—' : JSON.stringify(value, null, 2)}
-    </pre>
+    />
   );
 }
 
@@ -119,7 +123,7 @@ function WireRow({ entry }: { entry: WireLogEntry }) {
         <span className="min-w-0 flex-1 truncate text-foreground">{entry.label}</span>
         {from && <span className="shrink-0 text-muted-foreground">{from}</span>}
       </summary>
-      {open && <Json value={entry.payload} className="max-h-64" />}
+      {open && <Yaml value={entry.payload} className="max-h-64" />}
     </details>
   );
 }
@@ -354,16 +358,16 @@ function ClientActionRow({ entry }: { entry: ClientActionLogEntry }) {
       {open && (
         <div className="flex flex-col gap-1 px-1 pb-1">
           <Section title="directive" hint={entry.path}>
-            <Json value={entry.directive} className="max-h-40" />
+            <Yaml value={entry.directive} className="max-h-40" />
           </Section>
           {entry.result && (
             <Section title="result" hint="what the agent was told">
-              <Json value={entry.result} className="max-h-40" />
+              <Yaml value={entry.result} className="max-h-40" />
             </Section>
           )}
           {entry.error && (
             <Section title="error" hint="a host handler threw">
-              <Json value={entry.error} className="max-h-24" />
+              <Yaml value={entry.error} className="max-h-24" />
             </Section>
           )}
           {(entry.kind === 'apply' || entry.kind === 'highlight') && (
@@ -375,7 +379,7 @@ function ClientActionRow({ entry }: { entry: ClientActionLogEntry }) {
                   : 'nothing registered — apply/highlight can only fail'
               }
             >
-              <Json value={entry.knownTargets.length ? entry.knownTargets : undefined} className="max-h-24" />
+              <Yaml value={entry.knownTargets.length ? entry.knownTargets : undefined} className="max-h-24" />
             </Section>
           )}
         </div>
@@ -677,13 +681,13 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
                   title="pageContext"
                   hint={pageContext ? `${layerCount} fields · rides every send as metadata.pageContext` : 'no layer provides a key'}
                 >
-                  <Json value={pageContext} />
+                  <Yaml value={pageContext} />
                 </Section>
                 <Section title="contextKey" hint="conversation scope">
-                  <Json value={conversationKey ?? pageContext?.key} />
+                  <Yaml value={conversationKey ?? pageContext?.key} />
                 </Section>
                 <Section title="clientObjects" hint="registry manifest, rides every send">
-                  <Json value={clientObjects.length ? clientObjects : undefined} />
+                  <Yaml value={clientObjects.length ? clientObjects : undefined} />
                 </Section>
               </>
             )}

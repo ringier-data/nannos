@@ -15,6 +15,7 @@ SUPPORTED_A2A_EXTENSIONS = [
     "urn:nannos:a2a:intermediate-output:1.0",
     "urn:nannos:a2a:feedback-request:1.0",
     "urn:nannos:a2a:human-in-the-loop:1.0",
+    "urn:nannos:a2a:conversation-origin:1.0",
     "urn:nannos:a2a:client-action:1.0",
 ]
 

@@ -10,6 +10,7 @@ export const WORK_PLAN_EXT = 'urn:nannos:a2a:work-plan:1.0';
 export const INTERMEDIATE_OUTPUT_EXT = 'urn:nannos:a2a:intermediate-output:1.0';
 export const FEEDBACK_REQUEST_EXT = 'urn:nannos:a2a:feedback-request:1.0';
 export const HITL_EXT = 'urn:nannos:a2a:human-in-the-loop:1.0';
+export const CONVERSATION_ORIGIN_EXT = 'urn:nannos:a2a:conversation-origin:1.0';
 export const CLIENT_ACTION_EXT = 'urn:nannos:a2a:client-action:1.0';
 
 /** All extension ids supported by the Embed SDK runtime. */
@@ -19,6 +20,7 @@ export const SUPPORTED_EXTENSIONS = [
   INTERMEDIATE_OUTPUT_EXT,
   FEEDBACK_REQUEST_EXT,
   HITL_EXT,
+  CONVERSATION_ORIGIN_EXT,
   CLIENT_ACTION_EXT,
 ] as const;
 

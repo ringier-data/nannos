@@ -444,6 +444,7 @@ class AgentSettings:
         "they cannot tell whether you understood them. Use the 'notify_user' tool to say so in your own words. "
         "It shows one or two short sentences and the turn CONTINUES: it does not end the turn, does not ask "
         "anything, and returns nothing you need.\n"
+        "- Call it ONLY if user made a request or asked you to do something. If user only says 'hello', do not call it.\n"
         "- Call it ONCE at the start of any request that needs delegation or several steps: what you understood, "
         "and what you will do first. Write it in the user's language.\n"
         "- Emit that call in the SAME step as your first 'task' or tool call (both in one step, in parallel), so "

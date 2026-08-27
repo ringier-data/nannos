@@ -279,7 +279,15 @@ describe('auth-required rows', () => {
       {
         type: 'data-auth-required',
         id: 'hist-auth-1',
-        data: { authUrl: AUTH_URL, tool: 'eval', message: GATEWAY_TEXT },
+        data: {
+          authUrl: AUTH_URL,
+          tool: 'eval',
+          message: GATEWAY_TEXT,
+          // Dev-mode provenance: the stored event's wire label, and the row id
+          // the wire replay shares (`serverWireId`).
+          wire: 'status',
+          wireId: 'srv:auth1',
+        },
       },
     ]);
     // The agent-directed sentence must never come back as a text bubble.

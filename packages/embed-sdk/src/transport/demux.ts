@@ -26,6 +26,7 @@ import {
   WORK_PLAN_EXT,
 } from '../core/extensions';
 import { generateUUID } from '../core/protocol';
+import { labelAgentEvent } from './wire-log';
 import { textArrival } from './ai-types';
 import type {
   NannosMessageMetadata,
@@ -49,15 +50,18 @@ interface OpenThought {
   agent: string;
   text: string;
   startedAt: number;
+  /** Wire label + log id of the event that OPENED the thought — appends don't change them. */
+  wire: string;
+  wireId?: string;
 }
 
 /** A durable (non-text) part this turn emitted, in emission order — the replay
  *  log for `reset-step` supersedes (workplan/thought entries update in place). */
 type DurablePart =
-  | { type: 'data-workplan'; id: string; data: { todos: TodoItem[] } }
-  | { type: 'data-agent-thought'; id: string; data: { agent: string; text: string; complete: boolean; startedAt: number } }
-  | { type: 'data-activity'; id: string; data: { text: string; source?: string; ts: number } }
-  | { type: 'data-auth-required'; id: string; data: { authUrl?: string; tool?: string; message?: string } };
+  | { type: 'data-workplan'; id: string; data: { todos: TodoItem[]; wire?: string; wireId?: string } }
+  | { type: 'data-agent-thought'; id: string; data: { agent: string; text: string; complete: boolean; startedAt: number; wire?: string; wireId?: string } }
+  | { type: 'data-activity'; id: string; data: { text: string; source?: string; ts: number; wire?: string; wireId?: string } }
+  | { type: 'data-auth-required'; id: string; data: { authUrl?: string; tool?: string; message?: string; wire?: string; wireId?: string } };
 
 /** Per-turn mutable state owned by the TurnSession; demux() mutates it. */
 export interface DemuxState {
@@ -163,7 +167,14 @@ function logDurable(state: DemuxState, part: DurablePart) {
 function closeThought(state: DemuxState, out: NannosUIMessageChunk[]) {
   const open = state.openThought;
   if (!open) return;
-  const data = { agent: open.agent, text: open.text, complete: true, startedAt: open.startedAt };
+  const data = {
+    agent: open.agent,
+    text: open.text,
+    complete: true,
+    startedAt: open.startedAt,
+    wire: open.wire,
+    wireId: open.wireId,
+  };
   logDurable(state, { type: 'data-agent-thought', id: open.partId, data });
   out.push({ type: 'data-agent-thought', id: open.partId, data });
   state.openThought = null;
@@ -187,7 +198,13 @@ function closeText(state: DemuxState, out: NannosUIMessageChunk[]) {
  *   fallback semantics) — text parts carry no ids in the final message, so a
  *   marker-based convention can't work.
  */
-function emitAuthoritativeText(state: DemuxState, out: NannosUIMessageChunk[], fullText: string) {
+function emitAuthoritativeText(
+  state: DemuxState,
+  out: NannosUIMessageChunk[],
+  fullText: string,
+  wire: string,
+  wireId?: string,
+) {
   const streamed = state.textBuffer;
   if (state.textId && streamed && fullText.startsWith(streamed)) {
     const remainder = fullText.slice(streamed.length);
@@ -206,7 +223,7 @@ function emitAuthoritativeText(state: DemuxState, out: NannosUIMessageChunk[], f
   }
   state.textSeq += 1;
   const id = `${state.idPrefix}txt-${state.textSeq}`;
-  out.push({ type: 'text-start', id, providerMetadata: textArrival(Date.now()) });
+  out.push({ type: 'text-start', id, providerMetadata: textArrival(Date.now(), wire, wireId) });
   out.push({ type: 'text-delta', id, delta: fullText });
   out.push({ type: 'text-end', id });
   state.textBuffer = fullText;
@@ -289,13 +306,18 @@ export function approvalPrompt(data: AgentResponseData): ApprovalPrompt | null {
  * enqueue plus lifecycle signals. Events that resolve to no session, and
  * client-action directives, are the caller's concern.
  */
-export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
+export function demux(state: DemuxState, data: AgentResponseData, wireId?: string): DemuxResult {
   const out: NannosUIMessageChunk[] = [];
 
   // #1 Steering ack — the follow-up was queued for the running agent; nothing renders.
   if ((data as { steering?: boolean }).steering) {
     return { chunks: [], steering: true };
   }
+
+  // Dev-mode provenance: every part this event produces is stamped with the
+  // SAME label the wire log gives the raw event, so the thread's dev badge
+  // and the inspector's wire tab speak one language.
+  const wire = labelAgentEvent(data);
 
   // #3 Work plan (todo snapshot) — merge by source, orchestrator ('') first. (:489-518)
   const exts = statusExtensions(data);
@@ -313,8 +335,9 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
         return aSource.localeCompare(bSource);
       });
       state.todos = merged;
-      logDurable(state, { type: 'data-workplan', id: 'workplan', data: { todos: merged } });
-      out.push({ type: 'data-workplan', id: 'workplan', data: { todos: merged } });
+      const planData = { todos: merged, wire, wireId };
+      logDurable(state, { type: 'data-workplan', id: 'workplan', data: planData });
+      out.push({ type: 'data-workplan', id: 'workplan', data: planData });
       return { chunks: out };
     }
   }
@@ -348,10 +371,19 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
           agent,
           text,
           startedAt: Date.now(),
+          wire,
+          wireId,
         };
       }
       const t = state.openThought;
-      const thoughtData = { agent: t.agent, text: t.text, complete: false, startedAt: t.startedAt };
+      const thoughtData = {
+        agent: t.agent,
+        text: t.text,
+        complete: false,
+        startedAt: t.startedAt,
+        wire: t.wire,
+        wireId: t.wireId,
+      };
       logDurable(state, { type: 'data-agent-thought', id: t.partId, data: thoughtData });
       out.push({ type: 'data-agent-thought', id: t.partId, data: thoughtData });
       return { chunks: out };
@@ -369,7 +401,11 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
       state.textId = `${state.idPrefix}txt-${state.textSeq}`;
       // Stamped at the FIRST token: dev mode times the answer's arrival the
       // way it times activity lines.
-      out.push({ type: 'text-start', id: state.textId, providerMetadata: textArrival(Date.now()) });
+      out.push({
+        type: 'text-start',
+        id: state.textId,
+        providerMetadata: textArrival(Date.now(), wire, wireId),
+      });
     }
     out.push({ type: 'text-delta', id: state.textId, delta: text });
     state.textBuffer += text;
@@ -448,6 +484,8 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
           ...(typeof source === 'string' && { source }),
           ...(isNote && { kind: 'note' as const }),
           ts: Date.now(),
+          wire,
+          wireId,
         };
         const actId = `${state.idPrefix}act-${state.activitySeq}`;
         logDurable(state, { type: 'data-activity', id: actId, data: activity });
@@ -471,7 +509,7 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
     if (shouldDisplayMessageParts(data.parts)) {
       const text = extractPartTexts(data.parts).join('\n');
       closeThought(state, out);
-      emitAuthoritativeText(state, out, text);
+      emitAuthoritativeText(state, out, text, wire, wireId);
     }
     return { chunks: out };
   }
@@ -510,8 +548,9 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
           statusMeta,
         );
         const authId = `${state.idPrefix}auth`;
-        logDurable(state, { type: 'data-auth-required', id: authId, data: auth });
-        out.push({ type: 'data-auth-required', id: authId, data: auth });
+        const authData = { ...auth, wire, wireId };
+        logDurable(state, { type: 'data-auth-required', id: authId, data: authData });
+        out.push({ type: 'data-auth-required', id: authId, data: authData });
         return { chunks: out, done: 'terminal' };
       }
 
@@ -564,11 +603,11 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
         // Sub-agent progress line ("Initiating call…") → activity timeline.
         state.activitySeq += 1;
         const actId = `${state.idPrefix}act-${state.activitySeq}`;
-        const activity = { text, ts: Date.now() };
+        const activity = { text, ts: Date.now(), wire, wireId };
         logDurable(state, { type: 'data-activity', id: actId, data: activity });
         out.push({ type: 'data-activity', id: actId, data: activity });
       } else if (isTerminal) {
-        emitAuthoritativeText(state, out, text);
+        emitAuthoritativeText(state, out, text, wire, wireId);
       }
     }
 
@@ -606,7 +645,7 @@ export function demux(state: DemuxState, data: AgentResponseData): DemuxResult {
         ? (data.artifacts as Array<{ parts?: Array<{ text?: string }> }>)[0]
         : null);
     if (art && Array.isArray(art.parts) && shouldDisplayMessageParts(art.parts)) {
-      emitAuthoritativeText(state, out, extractPartTexts(art.parts).join('\n'));
+      emitAuthoritativeText(state, out, extractPartTexts(art.parts).join('\n'), wire, wireId);
     }
     out.push({
       type: 'data-task',
