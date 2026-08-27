@@ -5,7 +5,7 @@
  * parts are the turn's machinery, not its content; files are named, not
  * embedded.
  */
-import type { NannosUIMessage } from '../transport';
+import { fileName, type NannosUIMessage } from '../transport';
 
 type Part = NannosUIMessage['parts'][number];
 
@@ -23,7 +23,7 @@ export function messagePlainText(message: NannosUIMessage): string {
 function messageFileNames(message: NannosUIMessage): string[] {
   const fromParts = message.parts
     .filter((part): part is Extract<Part, { type: 'file' }> => part.type === 'file')
-    .map((part) => part.filename ?? part.url);
+    .map((part) => fileName(part));
   if (fromParts.length > 0) return fromParts;
   return (message.metadata?.attachments ?? []).map((att) => att.name);
 }

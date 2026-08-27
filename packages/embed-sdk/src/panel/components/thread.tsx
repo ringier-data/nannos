@@ -42,7 +42,7 @@ import { cn } from '../../lib/utils';
 import { writeClipboard } from '../../lib/clipboard';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { format, useStrings } from '../../react';
-import { fetchWireHistory, textArrivalTs, textWire, textWireId } from '../../transport';
+import { fetchWireHistory, fileName, textArrivalTs, textWire, textWireId } from '../../transport';
 import type { NannosUIMessage, WireLogEntry } from '../../transport';
 import { YamlView } from './yaml-view';
 import { useChatEngineOptional } from '../engine';
@@ -179,7 +179,7 @@ function UserMessage({ message }: { message: NannosUIMessage }) {
   const files: AttachmentInfo[] =
     fileParts.length > 0
       ? fileParts.map((part) => ({
-          name: part.filename ?? part.url,
+          name: fileName(part),
           mimeType: part.mediaType,
           url: part.url,
         }))
@@ -620,7 +620,7 @@ function renderAssistantPart(
 
   if (part.type === 'file') {
     return (
-      <FileAttachment name={part.filename ?? part.url} mimeType={part.mediaType} url={part.url} />
+      <FileAttachment name={fileName(part)} mimeType={part.mediaType} url={part.url} />
     );
   }
 
