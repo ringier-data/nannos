@@ -33,9 +33,11 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STOP_WORDS = frozenset(
     "a an and are as at be by for from in into is it its of on or that the this to via with your".split()
 )
-# Tokens shorter than this only count as a whole word of the *name* (e.g. ``ad``, ``id``),
-# never as a substring anywhere.
-_MIN_DESC_TOKEN_LEN = 3
+# Tokens shorter than this (``ad``, ``id``, ``ga``, ``ai``) match only as a whole word — in
+# the name or the description — never as a substring (``a`` is inside every name, ``ad``
+# inside ``load``/``read``). 3+ letter tokens are untouched: acronyms like GAM/PDF/API
+# carry a lot of signal and keep the substring tiers.
+_MIN_SUBSTRING_TOKEN_LEN = 3
 
 
 class SearchMatch(TypedDict):
@@ -95,22 +97,25 @@ def _score(entry: dict[str, Any], tokens: list[str]) -> tuple[int, int, int] | N
        token repeated);
     3. number of whole-word hits (``repo`` in ``repo`` beats ``repo`` in ``report``).
 
-    Stop words and very short tokens only match as a whole word of the name, so they
-    cannot turn the whole catalogue into "matches".
+    Stop words only match as a whole word of the name; 1-2 letter tokens only as a whole
+    word (name or description). Neither can turn the whole catalogue into "matches".
     """
     weighted = matched = whole = 0
     for tok in tokens:
-        name_only = tok in _STOP_WORDS or len(tok) < _MIN_DESC_TOKEN_LEN
+        stop = tok in _STOP_WORDS
+        whole_only = stop or len(tok) < _MIN_SUBSTRING_TOKEN_LEN
         if tok in entry["name_words"]:
             weighted += 3
             whole += 1
-        elif name_only:
+        elif stop:
             continue
-        elif tok in entry["name_haystack"]:
-            weighted += 2
         elif tok in entry["words"]:
             weighted += 2
             whole += 1
+        elif whole_only:
+            continue
+        elif tok in entry["name_haystack"]:
+            weighted += 2
         elif tok in entry["haystack"]:
             weighted += 1
         else:

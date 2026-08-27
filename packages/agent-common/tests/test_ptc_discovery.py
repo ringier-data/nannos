@@ -121,6 +121,7 @@ async def test_stop_words_and_short_tokens_do_not_match_whole_catalog():
         _tool("gam_get_report", "Fetch a report for a network."),
         _tool("slack_post_message", "Post a message to a channel for the team."),
         _tool("ad_get", "Get an ad by id."),
+        _tool("analytics_report", "Load a GA report."),
     ]
     search, _ = build_discovery_tools(catalog)
     assert (await search.arun({"query": "a"}))["total_matches"] == 0
@@ -128,8 +129,12 @@ async def test_stop_words_and_short_tokens_do_not_match_whole_catalog():
     result = await search.arun({"query": "list campaigns for an advertiser"})
     assert result["total_matches"] == 1
     assert result["matches"][0]["name"] == "cockpitListCampaigns"
-    # Short tokens still match through the name tiers.
+    # 1-2 letter tokens still match as whole words — in the name...
     assert (await search.arun({"query": "ad"}))["matches"][0]["name"] == "adGet"
+    # ...and in the description — but never as a substring ("ga" is inside "gam").
+    assert [h["name"] for h in (await search.arun({"query": "ga"}))["matches"]] == ["analyticsReport"]
+    # 3-letter acronyms are not gated: substring tiers still apply.
+    assert (await search.arun({"query": "gam"}))["matches"][0]["name"] == "gamGetReport"
 
 
 async def test_search_matches_words_beyond_first_description_line():
