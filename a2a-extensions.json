@@ -15,5 +15,9 @@
     "highlight",
     "navigate",
     "read_current_page"
+  ],
+  "_activityLogKindsComment": "Message-metadata `kind` discriminators of the activity-log extension. Absent kind = an ordinary mechanical line (a tool ran, work was delegated). `note` = a mid-turn note the agent itself wrote for the user (agent-common notify_user tool). Copies: agent-common a2a/stream_events.py ActivityLogMeta.kind Literal, embed-sdk src/core/extensions.ts ACTIVITY_LOG_KINDS. A client drops unknown kinds rather than mis-styling them, so a kind added in Python but not here/in the SDK is silently rendered as nothing.",
+  "activityLogKinds": [
+    "note"
   ]
 }

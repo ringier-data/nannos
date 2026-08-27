@@ -13,6 +13,14 @@ export const HITL_EXT = 'urn:nannos:a2a:human-in-the-loop:1.0';
 export const CONVERSATION_ORIGIN_EXT = 'urn:nannos:a2a:conversation-origin:1.0';
 export const CLIENT_ACTION_EXT = 'urn:nannos:a2a:client-action:1.0';
 
+/**
+ * Message-metadata `kind` discriminators of the activity-log extension. No kind
+ * = a mechanical line (a tool ran); `note` = the agent's own words for the user,
+ * emitted mid-turn by the `notify_user` tool. Pinned to a2a-extensions.json.
+ */
+export const ACTIVITY_LOG_KINDS = ['note'] as const;
+export type ActivityLogKind = (typeof ACTIVITY_LOG_KINDS)[number];
+
 /** All extension ids supported by the Embed SDK runtime. */
 export const SUPPORTED_EXTENSIONS = [
   ACTIVITY_LOG_EXT,

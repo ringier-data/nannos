@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { SUPPORTED_EXTENSIONS, X_A2A_EXTENSIONS_HEADER } from './extensions';
+import { ACTIVITY_LOG_KINDS, SUPPORTED_EXTENSIONS, X_A2A_EXTENSIONS_HEADER } from './extensions';
 
 // Pin the SDK's extension list to the repo-root a2a-extensions.json registry.
 // Orchestrator and console-backend carry their own copies pinned the same way,
@@ -19,5 +19,10 @@ describe('A2A extension registry conformance', () => {
     for (const urn of SUPPORTED_EXTENSIONS) {
       expect(X_A2A_EXTENSIONS_HEADER).toContain(urn);
     }
+  });
+
+  it('ACTIVITY_LOG_KINDS matches the repo-root registry', () => {
+    const registry = JSON.parse(readFileSync(registryPath, 'utf8')).activityLogKinds as string[];
+    expect([...ACTIVITY_LOG_KINDS].sort()).toEqual([...registry].sort());
   });
 });
