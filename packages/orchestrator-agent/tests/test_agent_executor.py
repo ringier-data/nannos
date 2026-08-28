@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import Message, Part, Role, TaskState
@@ -928,14 +929,19 @@ class TestExtractHitlDecisions:
         result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
         assert result == {"decisions": [{"type": "reject", "message": "No"}]}
 
-    def test_extract_defaults_to_reject_when_no_data_part(self, dynamodb_table):
-        """Test fallback to reject when no DataPart with decisions is found."""
+    def test_no_data_part_is_not_a_decision_at_all(self, dynamodb_table):
+        """No DataPart means the user typed instead of clicking — not "reject".
+
+        This used to fabricate a rejection, which discarded their words before
+        anything could read them: typing "approve it" came back as "the call was
+        rejected". The safe default moved down to ``decisions_from_resume``, which
+        rejects unless the reply clearly means yes.
+        """
         context = Mock(spec=RequestContext)
         context.message = Mock(spec=Message)
         context.message.parts = []
 
-        result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
-        assert result == {"decisions": [{"type": "reject"}]}
+        assert OrchestratorDeepAgentExecutor._extract_hitl_decisions(context) is None
 
     @staticmethod
     def _interrupt(intr_id, action_requests=None, value=None):
@@ -1063,6 +1069,125 @@ class TestExtractHitlDecisions:
         assert set(resume_map) == {"a" * 32, "b" * 32}
         assert len(resume_map["a" * 32]["decisions"]) == 2  # replicated to its own count
         assert len(resume_map["b" * 32]["decisions"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_typed_refusal_of_an_auth_prompt_becomes_a_structured_decline(self, dynamodb_table):
+        """"No way I\'ll authorize this!" must arrive as a DECISION, not as words.
+
+        As words it was read only where the tool failed a second time — and once
+        the user had completed the login in their browser the retry succeeded, so
+        nothing read it and the call went through. As a structured decline the
+        sub-agent can veto the call before running it.
+        """
+        auth_intr = self._interrupt(
+            "j" * 32, value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "github_get_me"}
+        )
+
+        with patch(
+            "app.core.executor.classify_reply", AsyncMock(return_value="reject")
+        ):
+            authorization = await OrchestratorDeepAgentExecutor._classify_authorization_reply(
+                [auth_intr], "No way I'll authorize this!"
+            )
+
+        assert authorization == {"decision": "declined", "message": "No way I'll authorize this!"}
+
+    @pytest.mark.asyncio
+    async def test_typed_completion_of_an_auth_prompt_becomes_an_approval(self, dynamodb_table):
+        auth_intr = self._interrupt(
+            "k" * 32, value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "github_get_me"}
+        )
+
+        with patch("app.core.executor.classify_reply", AsyncMock(return_value="approve")):
+            authorization = await OrchestratorDeepAgentExecutor._classify_authorization_reply(
+                [auth_intr], "done, I logged in"
+            )
+
+        assert authorization["decision"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_words_are_left_alone_when_no_auth_prompt_is_pending(self, dynamodb_table):
+        """A tool-approval prompt has its own reader; do not spend the words here."""
+        hitl_intr = self._interrupt("l" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+        classify = AsyncMock(return_value="reject")
+
+        with patch("app.core.executor.classify_reply", classify):
+            authorization = await OrchestratorDeepAgentExecutor._classify_authorization_reply(
+                [hitl_intr], "no thanks"
+            )
+
+        classify.assert_not_awaited()
+        assert authorization is None
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_reply_stays_words(self, dynamodb_table):
+        auth_intr = self._interrupt(
+            "m" * 32, value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "github_get_me"}
+        )
+
+        with patch("app.core.executor.classify_reply", AsyncMock(return_value=None)):
+            assert (
+                await OrchestratorDeepAgentExecutor._classify_authorization_reply([auth_intr], "hmm")
+            ) is None
+
+    def test_typed_reply_reaches_the_reader_instead_of_becoming_a_reject(self, dynamodb_table):
+        """"approve it" typed in the composer must survive as far as the classifier.
+
+        The words were replaced by a synthetic reject here, so the user's approval
+        came back to them as "The call to github_get_me was rejected".
+        """
+        intr = self._interrupt("h" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], None, query="approve it"
+        )
+
+        assert resume_map["h" * 32] == "approve it"
+
+    def test_an_explicit_decision_still_wins_over_the_typed_path(self, dynamodb_table):
+        intr = self._interrupt("i" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], [{"type": "reject"}], query="approve it"
+        )
+
+        assert [d["type"] for d in resume_map["i" * 32]["decisions"]] == ["reject"]
+
+    def test_authorization_answer_rejects_the_pending_approval(self, dynamodb_table):
+        """The user answered an auth prompt; the pending question is an approval.
+
+        It happens whenever the agent re-runs the blocked tool after a decline and
+        its guard asks again. `_extract_hitl_decisions` falls back to a bare reject
+        (safe, but says nothing), so the reason is filled in here instead — the
+        model has to read WHY to stop retrying.
+        """
+        intr = self._interrupt("f" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr],
+            [{"type": "reject"}],
+            query="q",
+            authorization={"decision": "declined", "message": "not now"},
+        )
+
+        decisions = resume_map["f" * 32]["decisions"]
+        assert [d["type"] for d in decisions] == ["reject"]
+        assert [d["id"] for d in decisions] == ["call-1"]
+        assert "skipped the authorization" in decisions[0]["message"]
+        assert "not now" in decisions[0]["message"]
+
+    def test_per_call_decisions_win_over_an_authorization_answer(self, dynamodb_table):
+        """A client that sent real per-call decisions is never second-guessed."""
+        intr = self._interrupt("g" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr],
+            [{"id": "call-1", "type": "approve"}],
+            query="q",
+            authorization={"decision": "declined"},
+        )
+
+        assert [d["type"] for d in resume_map["g" * 32]["decisions"]] == ["approve"]
 
     def test_non_hitl_interrupt_resumes_with_query(self, dynamodb_table):
         """A non-HITL interrupt (no action_requests, e.g. auth) resumes with the raw query."""

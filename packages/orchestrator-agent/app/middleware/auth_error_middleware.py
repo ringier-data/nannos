@@ -64,6 +64,14 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
+
+from agent_common.core.hitl_resume import (
+    NO_WORKAROUND_CLAUSE,
+    NOT_MISSING_CLAUSE,
+    classify_reply,
+    name_or_nothing,
+    pending_authorization_answer,
+)
 from typing_extensions import NotRequired
 
 logger = logging.getLogger(__name__)
@@ -76,6 +84,12 @@ _AUTH_MESSAGE_RE = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"')
 # The actual JSON field, not a bare substring — a business payload merely
 # mentioning the word "need-credentials" in prose must not match this.
 _NEED_CREDENTIALS_FIELD_RE = re.compile(r'"errorCode"\s*:\s*"need-credentials"')
+
+# The inner tool / server the PTC guard stamps onto the payload before it escapes
+# the sandbox (ptc_guard.annotate_need_credentials), read back out of the wrapped
+# text the same way as authorizeUrl.
+_AUTH_TOOL_RE = re.compile(r'"tool"\s*:\s*"([^"]+)"')
+_AUTH_SERVICE_RE = re.compile(r'"service"\s*:\s*"([^"]+)"')
 
 
 class AuthErrorState(AgentState):
@@ -190,6 +204,14 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
         if tool_name in RESPONSE_TOOLS:
             return await handler(request)
 
+        # A refusal that arrived while this tool was waiting on authorization has to
+        # be honored BEFORE the tool runs. Below, the answer is only read where the
+        # call fails a second time — so once the user has completed the login in
+        # their browser the retry succeeds, and their "no" is read by no one.
+        veto = self._refusal_before_running(request, tool_name)
+        if veto is not None:
+            return veto
+
         # Extract subagent_type from tool call args (if this is a task tool)
         subagent_type = None
         if tool_name == "task":
@@ -216,7 +238,12 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                     # Use interrupt() to pause graph execution with auth requirement
                     auth_requirement = {
                         "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
-                        "tool": tool_name,
+                        # The INNER tool when the sandbox stamped one: a
+                        # `need-credentials` raised by an MCP call inside `eval`
+                        # is reported against `eval`, and naming that tells both
+                        # the user and the model the wrong thing.
+                        "tool": auth_metadata.get("tool") or tool_name,
+                        "service": auth_metadata.get("service") or "",
                         "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                         "message": auth_metadata.get("auth_message", "Authentication required"),
                         "auth_url": auth_metadata.get("auth_url", ""),
@@ -234,7 +261,9 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                     #       TODO: could we though hit the edge case where another interrupt will collect the Command
                     #             which was meant to be catched here?
                     resume = interrupt(auth_requirement)
-                    return await self._after_auth_interrupt(resume, request, handler, tool_name)
+                    return await self._after_auth_interrupt(
+                        resume, request, handler, tool_name, auth_requirement
+                    )
 
                 return result
             elif isinstance(result, Command):
@@ -260,7 +289,8 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                             # Use interrupt() to pause graph execution with auth requirement
                             auth_requirement = {
                                 "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
-                                "tool": tool_name,
+                                "tool": auth_metadata.get("tool") or tool_name,
+                                "service": auth_metadata.get("service") or "",
                                 "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                                 "message": auth_metadata.get("auth_message", "Authentication required"),
                                 "auth_url": auth_metadata.get("auth_url", ""),
@@ -270,7 +300,9 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
                             logger.info(f"[AUTH MIDDLEWARE] Interrupting graph for auth requirement: {tool_name}")
                             resume = interrupt(auth_requirement)
-                            return await self._after_auth_interrupt(resume, request, handler, tool_name)
+                            return await self._after_auth_interrupt(
+                                resume, request, handler, tool_name, auth_requirement
+                            )
 
                 return result
 
@@ -286,7 +318,8 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 # Use interrupt() to pause graph execution with auth requirement
                 auth_requirement = {
                     "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
-                    "tool": tool_name,
+                    "tool": auth_metadata.get("tool") or tool_name,
+                    "service": auth_metadata.get("service") or "",
                     "message": auth_metadata.get("auth_message", "Authentication required"),
                     "auth_url": auth_metadata.get("auth_url", ""),
                     "error_code": auth_metadata.get("error_code", "need-credentials"),
@@ -299,10 +332,39 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 # on resume, act on the answer (retry / refusal) instead of
                 # letting the original exception propagate.
                 resume = interrupt(auth_requirement)
-                return await self._after_auth_interrupt(resume, request, handler, tool_name)
+                return await self._after_auth_interrupt(
+                    resume, request, handler, tool_name, auth_requirement
+                )
 
             # Not an auth error, let the exception propagate normally
             raise
+
+    def _refusal_before_running(self, request: ToolCallRequest, tool_name: str) -> ToolMessage | None:
+        """The user's refusal of a pending authorization, honored before the tool runs.
+
+        The answer to an auth prompt is otherwise read where the tool fails a
+        SECOND time — and once the user has completed the login in their browser
+        the retry SUCCEEDS, so that point is never reached: "No way I'll authorize
+        this!" was read by nobody and the profile was fetched anyway.
+
+        The answer is self-identifying (``{"authorization": {...}}``), so it can be
+        found wherever it sits among the task's resume values — it is rarely the one
+        the next ``interrupt()`` consumes, since a settled tool-approval replays
+        first. Words never reach here: the executor classifies them into this shape
+        while the pending interrupt's kind is still known
+        (``_classify_authorization_reply``).
+
+        Returns the refusal to hand the model, or ``None`` to let the call proceed.
+        Nothing is consumed either way.
+        """
+        answer = pending_authorization_answer()
+        if answer is None:
+            return None
+        verdict, message = self._resume_decision(answer)
+        if verdict != "declined":
+            return None
+        logger.info(f"[AUTH MIDDLEWARE] Refusal read BEFORE running {tool_name}; not executing it")
+        return self._refusal_message(request, tool_name, message, None)
 
     @staticmethod
     def _resume_decision(resume: Any) -> tuple[str, str]:
@@ -331,6 +393,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
         tool_name: str,
+        auth_requirement: Dict[str, Any] | None = None,
     ) -> ToolMessage | Command:
         """Turn a resumed auth interrupt back into a tool result.
 
@@ -349,37 +412,93 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
           paragraph.
         - **declined** — hand the model a refusal, explicitly telling it not to
           retry, so it digests the "no" instead of pushing the link again.
-        - **unclear** — the user typed something. Hand the model their words and
-          the two options; it is about to run anyway and is far better placed
-          than a keyword match to tell "ok, done" from "no, those scopes are too
-          wide". Re-calling the tool re-enters the branch above, so a genuine
-          "done" still ends in a retry.
+        - **unclear** — the user typed something instead of clicking. A small
+          fast-LLM classifier reads it first ("ok, done" -> approved, "no, those
+          scopes are too wide" -> declined); only a clear verdict is acted on.
+          When it cannot tell, the words and the two options are handed to the
+          model, which is about to run anyway. Re-calling the tool re-enters the
+          branch above, so a genuine "done" still ends in a retry.
         """
+        subject_tool = str((auth_requirement or {}).get("tool") or "") or tool_name
         verdict, message = self._resume_decision(resume)
+        if verdict == "unclear" and message.strip():
+            # No structured answer: the client never negotiated the in-task-auth
+            # extension, or the user just kept typing. A keyword match cannot tell
+            # "ok, done" from "no, those scopes are too wide", so a small fast-LLM
+            # classifier reads it — and only a clear verdict is acted on (None
+            # keeps the old behaviour of handing the words to the model).
+            intent = await classify_reply(
+                message,
+                [],
+                question=(
+                    f"The assistant asked the user to authorize `{subject_tool}` "
+                    "(a one-time login in their browser) before it could run. "
+                    "Read their reply as: approve = the authorization is done / go ahead and retry now; "
+                    "reject = they refuse to authorize it."
+                ),
+            )
+            if intent == "approve":
+                verdict = "approved"
+            elif intent == "reject":
+                verdict = "declined"
         logger.info(f"[AUTH MIDDLEWARE] Resumed auth interrupt for {tool_name}: {verdict}")
 
         if verdict == "approved":
             return await handler(request)
 
-        tool_call_id = request.tool_call.get("id", "")
         if verdict == "declined":
-            reason = f" They said: {message}" if message.strip() else ""
-            content = (
-                f"The user DECLINED to authorize {tool_name}.{reason} "
-                "Do not retry the call and do not send the authorization link again. "
-                "Tell them what you cannot do without it and offer another way forward."
-            )
-        else:
-            reply = message.strip() or "(no reply)"
-            content = (
-                f"{tool_name} is still waiting on the user's authorization. "
-                f"They replied: {reply}\n"
-                "If that means they completed it, call the tool again now — it will "
-                "ask once more if it is still unauthorized. If it means they refuse, "
-                "do not retry and do not repeat the authorization link: say what you "
-                "cannot do without it and offer another way forward."
-            )
-        return ToolMessage(content=content, tool_call_id=tool_call_id, name=tool_name)
+            return self._refusal_message(request, tool_name, message, auth_requirement)
+
+        reply = message.strip() or "(no reply)"
+        content = (
+            f"The authorization required by {self._subject(tool_name, auth_requirement)} is still "
+            f"pending. They replied: {reply}\n"
+            f"{NOT_MISSING_CLAUSE}\n"
+            "If that means they completed it, call the tool again now — it will "
+            "ask once more if it is still unauthorized. If it means they refuse, "
+            "do not retry and do not repeat the authorization link: say what you "
+            f"cannot do without it. {NO_WORKAROUND_CLAUSE}"
+        )
+        return ToolMessage(content=content, tool_call_id=request.tool_call.get("id", ""), name=tool_name)
+
+    @staticmethod
+    def _subject(tool_name: str, auth_requirement: Dict[str, Any] | None) -> str:
+        """What to call the thing being authorized, in a sentence the model reads.
+
+        NEVER sandbox plumbing. A `need-credentials` raised by an MCP call made in
+        the sandbox is reported against `eval`, and "the user declined to authorize
+        eval" is what made the agent conclude the real tool did not exist and
+        answer "github_get_me is not available in the current environment".
+        """
+        inner = str((auth_requirement or {}).get("tool") or "") or tool_name
+        named = name_or_nothing(inner) or name_or_nothing(tool_name)
+        service = name_or_nothing((auth_requirement or {}).get("service"))
+        if service and named:
+            return f"{service} (`{named}`)"
+        if service:
+            return service
+        if named:
+            return f"`{named}`"
+        return "the call that needed it"
+
+    def _refusal_message(
+        self,
+        request: ToolCallRequest,
+        tool_name: str,
+        message: str,
+        auth_requirement: Dict[str, Any] | None,
+    ) -> ToolMessage:
+        """The refusal handed to the model — identical whichever path read the "no"."""
+        reason = f" They said: {message}" if message.strip() else ""
+        content = (
+            f"The user DECLINED the authorization required by "
+            f"{self._subject(tool_name, auth_requirement)}.{reason} "
+            f"{NOT_MISSING_CLAUSE} "
+            "Do not retry the call and do not send the authorization link again. "
+            "Tell them they skipped the authorization and say plainly what you "
+            f"cannot do without it. {NO_WORKAROUND_CLAUSE}"
+        )
+        return ToolMessage(content=content, tool_call_id=request.tool_call.get("id", ""), name=tool_name)
 
     def _check_a2a_auth_metadata(
         self, a2a_metadata: Dict[str, Any] | None, subagent_name: str
@@ -505,7 +624,16 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 error_message = content_dict.get("message", "Authentication required.")
                 logger.info(f"[AUTH MIDDLEWARE] Detected JSON auth error: {error_message}")
                 logger.info(f"[AUTH MIDDLEWARE] Auth URL: {authorize_url}")
-                return {"auth_url": authorize_url, "auth_message": error_message, "error_code": "need-credentials"}
+                return {
+                    "auth_url": authorize_url,
+                    "auth_message": error_message,
+                    "error_code": "need-credentials",
+                    # Stamped by the PTC guard where the inner tool is still known
+                    # (ptc_guard.annotate_need_credentials). Absent for a tool that
+                    # failed outside the sandbox, where the outer name IS the truth.
+                    "tool": content_dict.get("tool") or "",
+                    "service": content_dict.get("service") or "",
+                }
         except json.JSONDecodeError:
             pass
 
@@ -526,7 +654,15 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                     error_message = msg_match.group(1)
             else:
                 error_message = "This tool requires secondary authorization."
+            tool_match = _AUTH_TOOL_RE.search(content)
+            service_match = _AUTH_SERVICE_RE.search(content)
             logger.info(f"[AUTH MIDDLEWARE] Detected embedded auth error. Auth URL: {authorize_url}")
-            return {"auth_url": authorize_url, "auth_message": error_message, "error_code": "need-credentials"}
+            return {
+                "auth_url": authorize_url,
+                "auth_message": error_message,
+                "error_code": "need-credentials",
+                "tool": tool_match.group(1) if tool_match else "",
+                "service": service_match.group(1) if service_match else "",
+            }
 
         return None

@@ -24,6 +24,13 @@ from a2a.types import (
 from agent_common.a2a.authentication import AuthPayload
 from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.core.hitl_resume import (
+    KIND_AUTH,
+    classify_reply,
+    interrupt_kind,
+    name_or_nothing,
+    structural_decisions,
+)
 from agent_common.models.base import ModelType, ThinkingLevel
 from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
@@ -118,13 +125,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         return user
 
     @staticmethod
-    def _extract_hitl_decisions(context: RequestContext) -> dict:
+    def _extract_hitl_decisions(context: RequestContext) -> dict | None:
         """Extract HITL decisions from the incoming A2A message DataPart.
 
         Clients send decisions as a DataPart with {"decisions": [...]}.
 
         Returns:
-            A dict like {"decisions": [{"type": "approve"}]}
+            A dict like ``{"decisions": [{"type": "approve"}]}``, or ``None`` when
+            the client sent no such DataPart. ``None`` is NOT a rejection: the user
+            may simply have typed "approve it" instead of clicking the card, and
+            those words are the answer. Fabricating a reject here (what this used
+            to do) discarded them before anything could read them, so a typed
+            approval came back to the user as "the call was rejected". The safe
+            default now lives one step further down, in ``decisions_from_resume``,
+            which rejects whenever the words cannot be read as a clear yes.
         """
         from google.protobuf.json_format import MessageToDict
 
@@ -135,8 +149,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     if isinstance(data, dict) and "decisions" in data:
                         return data
 
-        logger.warning("[HITL] No data part with decisions found, defaulting to reject")
-        return {"decisions": [{"type": "reject"}]}
+        logger.info("[HITL] No data part with decisions: the user's own words are the answer")
+        return None
 
     @staticmethod
     def _extract_authorization_decision(context: RequestContext) -> dict | None:
@@ -177,6 +191,50 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             return None
         return (action_request.get("args") or {}).get("_call_id")
 
+    @staticmethod
+    async def _classify_authorization_reply(interrupts: Any, query: Any) -> dict | None:
+        """Read words typed at an authorization prompt as an explicit answer.
+
+        The pending interrupt's KIND is known here and nowhere further down, which
+        is what makes this the right place: a client that never negotiated the
+        in-task-auth extension answers "No way I'll authorize this!" as plain text,
+        and everything downstream then has to guess whether those words were even
+        about the authorization.
+
+        Turning them into the structured answer here means the sub-agent receives a
+        real decision — which its middleware can act on BEFORE running the tool.
+        That matters: once the user has completed the login in their browser the
+        retry SUCCEEDS, so a refusal that is only read on the failure path is read
+        by nobody and the call goes through anyway.
+
+        Returns the authorization dict, or None to hand the words down unchanged.
+        """
+        if not isinstance(query, str) or not query.strip():
+            return None
+        auth_tools = [
+            str((getattr(intr, "value", intr) or {}).get("tool") or "")
+            for intr in interrupts
+            if interrupt_kind(getattr(intr, "value", intr)) == KIND_AUTH
+        ]
+        if not auth_tools:
+            return None
+        named = name_or_nothing(auth_tools[0])
+        subject = f"`{named}`" if named else "a tool"
+        intent = await classify_reply(
+            query,
+            [],
+            question=(
+                f"The assistant asked the user to authorize {subject} (a one-time login in their "
+                "browser) before it could run. Read their reply as: approve = the authorization is "
+                "done / go ahead and retry; reject = they refuse to authorize it."
+            ),
+        )
+        if intent == "approve":
+            return {"decision": "approved", "message": query}
+        if intent == "reject":
+            return {"decision": "declined", "message": query}
+        return None
+
     @classmethod
     def _decisions_for_interrupt(cls, action_requests: list, hitl_decisions: list, decisions_by_id: dict) -> list:
         """Resolve the decision list for ONE interrupt, aligned to its action_requests.
@@ -203,7 +261,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
     def _build_interrupt_resume_map(
         cls,
         interrupts: Any,
-        hitl_decisions: list,
+        hitl_decisions: list | None,
         query: Any,
         authorization: dict | None = None,
     ) -> dict[str, Any]:
@@ -223,13 +281,31 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         an interrupt (by ``call_id``). Non-HITL interrupts (auth, etc.) resume with the
         raw ``query``.
         """
-        decisions_by_id = {d["id"]: d for d in hitl_decisions if isinstance(d, dict) and "id" in d}
+        decisions_by_id = {d["id"]: d for d in (hitl_decisions or []) if isinstance(d, dict) and "id" in d}
         resume_map: dict[str, Any] = {}
         for intr in interrupts:
             intr_value = getattr(intr, "value", intr)
             if isinstance(intr_value, dict) and "action_requests" in intr_value:
                 action_requests = intr_value.get("action_requests", [])
-                per = cls._decisions_for_interrupt(action_requests, hitl_decisions, decisions_by_id)
+                if hitl_decisions is None and not authorization:
+                    # The user typed instead of clicking ("approve it", "no, stop").
+                    # Their words ARE the answer: hand them to the reader, which
+                    # classifies them and rejects unless they clearly mean yes
+                    # (agent_common.core.hitl_resume). Turning them into a reject
+                    # here answered a typed approval with "the call was rejected".
+                    resume_map[intr.id] = query
+                    logger.info(f"Resuming HITL interrupt {intr.id} with the user's reply (no decision sent)")
+                    continue
+                per = cls._decisions_for_interrupt(action_requests, hitl_decisions or [], decisions_by_id)
+                if authorization and not decisions_by_id:
+                    # The client answered an AUTHORIZATION prompt while this approval
+                    # was the pending question (the agent re-ran the blocked tool and
+                    # its guard asked again). Reject it explicitly, with the reason —
+                    # the synthetic blanket reject `_extract_hitl_decisions` falls back
+                    # to is safe but tells the model nothing it can act on.
+                    translated = structural_decisions({"authorization": authorization}, action_requests)
+                    if translated:
+                        per = translated
                 resume_map[intr.id] = {"decisions": per}
                 tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
                 logger.info(f"Resuming HITL interrupt {intr.id} for tools {tool_names} with {len(per)} decision(s)")
@@ -977,8 +1053,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # interrupt (matching today's single approve/reject UI). Per-interrupt
                 # decisions would require the client to key decisions by interrupt id.
                 # Clients send decisions as a DataPart (structured JSON, no XML).
-                hitl_decisions = self._extract_hitl_decisions(context).get("decisions", [])
+                extracted = self._extract_hitl_decisions(context)
+                hitl_decisions = extracted.get("decisions", []) if extracted is not None else None
                 authorization = self._extract_authorization_decision(context)
+                if authorization is None and extracted is None:
+                    # Nothing structured at all: if an authorization prompt is what
+                    # is pending, the user's words ARE the answer to it — read them
+                    # here, where that is still knowable.
+                    authorization = await self._classify_authorization_reply(current_state.interrupts, query)
                 resume_value = self._build_interrupt_resume_map(
                     current_state.interrupts, hitl_decisions, query, authorization
                 )

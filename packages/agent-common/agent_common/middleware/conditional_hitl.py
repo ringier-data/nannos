@@ -47,6 +47,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME, render_client_action_result
+from agent_common.core.hitl_resume import decisions_from_resume, decisions_from_resume_sync
 from agent_common.core.tool_risk_cache import ToolRiskCache, ToolRiskEntry
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
@@ -225,7 +226,10 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         )
 
         # Send interrupt and get response
-        decisions = interrupt(hitl_request)["decisions"]
+        # Shape-tolerant read — see agent_common.core.hitl_resume: a resume value
+        # written for another interrupt (or typed as words) must reject the call,
+        # never crash the agent with KeyError('decisions').
+        decisions = decisions_from_resume_sync(interrupt(hitl_request), hitl_request["action_requests"])
 
         # Validate that the number of decisions matches the number of interrupt tool calls
         if (decisions_len := len(decisions)) != (interrupt_count := len(interrupt_indices)):
@@ -433,7 +437,8 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         )
 
         # Send interrupt and get response
-        decisions = interrupt(hitl_request)["decisions"]
+        # Shape-tolerant read — see agent_common.core.hitl_resume.
+        decisions = await decisions_from_resume(interrupt(hitl_request), hitl_request["action_requests"])
 
         # Validate decisions count
         if (decisions_len := len(decisions)) != (interrupt_count := len(interrupt_indices)):

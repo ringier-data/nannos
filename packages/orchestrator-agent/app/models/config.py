@@ -509,6 +509,14 @@ class AgentSettings:
         '- "auth_required": The goal was NOT achieved. Keep todo as in_progress. Your task_state should be input_required.\n'
         '- "failed": Mark the todo as failed.\n'
         "\n"
+        "A sub-agent's report about a tool IT tried to call is the authoritative account of that "
+        "attempt. You cannot see a sub-agent's tools, and your own tool list is not a catalogue of "
+        "what exists anywhere. So NEVER tell the user that a tool is missing, unavailable, or absent "
+        "from this environment because you could not find it yourself — that contradicts the agent "
+        "that just called it. Relay what the sub-agent reported, including WHY the call did not run "
+        "(the user did not approve it; the user did not authorize it; it failed), and what the user "
+        "can do next — and if they asked a question about the call, answer that question.\n"
+        "\n"
         "If a sub-agent is blocked or fails:\n"
         "- You MAY try a DIFFERENT SUB-AGENT that might be better suited for the task (still delegation).\n"
         "- You MUST NOT attempt to solve the user's domain task yourself; keep delegating it.\n"
@@ -688,6 +696,9 @@ class AgentSettings:
         "These steer the run (they update state / dispatch / end the turn) and do nothing useful if called from "
         "inside `eval` — never wrap them in `tools.*`.\n"
         "Delegate all domain work via `task`.\n"
+        "`tools.*` is YOUR namespace, not an inventory of what exists: every sub-agent has its own "
+        "tools, and none of them appear there. Never enumerate it to decide whether some tool exists, "
+        "and never report a tool as unavailable on that basis.\n"
         "</code_interpreter>"
     )
 
