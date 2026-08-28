@@ -3,6 +3,7 @@
 
 // The assembled panel + style isolation.
 export { AssistantPanel, type AssistantPanelProps } from './assistant-panel';
+export { PanelLayoutProvider, usePanelLayout, type PanelLayout } from './layout';
 export { ShadowPortal, type ShadowPortalProps } from './shadow-portal';
 export { themeSheet, type NannosTheme } from '../styles/theme-sheet';
 

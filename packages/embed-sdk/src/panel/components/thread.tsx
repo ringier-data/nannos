@@ -47,6 +47,7 @@ import type { NannosUIMessage, WireLogEntry } from '../../transport';
 import { YamlView } from './yaml-view';
 import { useChatEngineOptional } from '../engine';
 import { useDevMode } from '../dev-mode';
+import { PAGE_COLUMN, usePanelLayout } from '../layout';
 import { toolPartTitle } from '../tool-title';
 import { messagePlainText } from '../transcript';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
@@ -448,20 +449,25 @@ function DevWirePart({
     <div
       data-slot="nannos-dev-wire"
       className={cn(
-        'flex w-full min-w-0 flex-col rounded-md transition-colors',
+        '@container flex w-full min-w-0 flex-col rounded-md transition-colors',
         'has-[[data-slot=nannos-dev-wire-toggle]:hover]:bg-accent',
         open && 'bg-accent',
       )}
     >
-      <div className="flex w-full min-w-0 items-start gap-1.5">
-        <div className="min-w-0 flex-1">{children}</div>
+      {/* The badge never truncates and must never take width from the content:
+          in a docked panel it sits on its own line above, right-aligned; only
+          when this wrapper is wide enough (a full-page chat) does it move
+          beside the content. The wrapper is the container, so the threshold
+          tracks the column the parts actually render in. */}
+      <div className="flex w-full min-w-0 flex-col gap-0.5 @[40rem]:flex-row @[40rem]:items-start @[40rem]:gap-1.5">
+        <div className="order-last min-w-0 @[40rem]:order-first @[40rem]:flex-1">{children}</div>
         <button
           data-slot="nannos-dev-wire-toggle"
           type="button"
           aria-expanded={open}
           title="Wire detail — click for the raw source event"
           onClick={() => setOpen((v) => !v)}
-          className="inline-flex shrink-0 items-center gap-0.5 rounded border border-amber-500/50 bg-amber-500/5 px-1 py-px text-left font-mono text-[10px] text-amber-700 hover:bg-amber-500/15 dark:text-amber-500"
+          className="inline-flex shrink-0 self-end items-center @[40rem]:ml-auto @[40rem]:self-start gap-0.5 rounded border border-amber-500/50 bg-amber-500/5 px-1 py-px text-left font-mono text-[10px] text-amber-700 hover:bg-amber-500/15 dark:text-amber-500"
         >
           <span>{badgeLabel}</span>
           <ChevronDownIcon
@@ -493,7 +499,8 @@ function AssistantPart({
   conversationId: string;
 }) {
   const devMode = useDevMode();
-  const rendered = renderAssistantPart(part, send, devMode);
+  const strings = useStrings();
+  const rendered = renderAssistantPart(part, send, devMode, strings);
   if (rendered === null || !devMode) return rendered;
   return (
     <DevWirePart
@@ -512,6 +519,7 @@ function renderAssistantPart(
   part: MessagePart,
   send: UseNannosChatValue['send'],
   devMode: boolean,
+  strings: ReturnType<typeof useStrings>,
 ): ReactNode | null {
   if (part.type === 'text') {
     if (!part.text) return null;
@@ -563,15 +571,29 @@ function renderAssistantPart(
   if (part.type === 'data-agent-thought') {
     return (
       <Reasoning data-slot="nannos-agent-thought" isStreaming={!part.data.complete} className="mb-0">
-        <ReasoningTrigger>
-          <span aria-hidden="true">💭</span>
-          <span className="truncate">{part.data.agent}</span>
+        {/* Same voice as every other line in the stream — "source › what": no
+            icon, muted micro-type, the chevron the step group also uses. */}
+        <ReasoningTrigger className="w-fit gap-1 text-xs">
+          <span className="truncate">
+            <span className="font-medium">{part.data.agent}</span> › {strings['thread.thinking']}
+          </span>
           <ChevronDownIcon
             aria-hidden="true"
             className="size-3.5 transition-transform [[data-state=open]_&]:rotate-180"
           />
         </ReasoningTrigger>
-        <ReasoningContent>{part.data.text}</ReasoningContent>
+        {/* Reasoning is context, not the answer: a step down in size and
+            already muted, so the eye lands on the reply below it. */}
+        <ReasoningContent
+          className={cn(
+            'mt-1 text-xs [&_p]:my-1 [&_h1]:text-xs [&_h2]:text-xs [&_h3]:text-xs',
+            // Streamdown pins its own `text-sm` on table cells and inline code;
+            // pull those down too, or a table in a thought lands at answer size.
+            '[&_th]:px-3 [&_th]:py-1 [&_th]:text-xs [&_td]:px-3 [&_td]:py-1 [&_td]:text-xs [&_code]:text-xs',
+          )}
+        >
+          {part.data.text}
+        </ReasoningContent>
       </Reasoning>
     );
   }
@@ -593,7 +615,23 @@ function renderAssistantPart(
     // lines, then the answer. Dev mode is the exception — it shows the raw part
     // (skipping the pending ones the card already renders), framed amber so it
     // clearly is not part of the end-user view.
-    if (!devMode) return null;
+    if (!devMode) {
+      // ...except for the decision itself: the turn pauses at the card and
+      // resumes with more steps, and without a line in between the reader
+      // cannot tell why the work broke off or that they approved anything.
+      const decided =
+        part.state === 'output-available'
+          ? strings['hitl.approved']
+          : part.state === 'output-denied'
+            ? strings['hitl.rejected']
+            : null;
+      if (!decided) return null;
+      return (
+        <div data-slot="nannos-activity" data-decision className="text-muted-foreground text-xs">
+          <span className="font-medium">{format(decided, { toolName: part.toolName })}</span>
+        </div>
+      );
+    }
     const isClientAction = (part.input as { _clientActionRequest?: boolean } | undefined)
       ?._clientActionRequest;
     if (part.state === 'approval-requested' && !isClientAction) return null;
@@ -651,6 +689,115 @@ function AssistantActions({
   );
 }
 
+type ActivityPart = Extract<MessagePart, { type: 'data-activity' | 'dynamic-tool' }>;
+
+/**
+ * A machine line in the activity stream: a tool label, or the approve/reject
+ * acknowledgement an answered HITL tool renders as — a note is the agent
+ * speaking, not one of these.
+ */
+function isMachineActivity(part: MessagePart): part is ActivityPart {
+  if (part.type === 'dynamic-tool') return part.state !== 'approval-requested';
+  return part.type === 'data-activity' && part.data.kind !== 'note';
+}
+
+/** The text a folded group shows while its turn is still running. */
+function latestActivityText(parts: ActivityPart[]): string | undefined {
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const part = parts[i];
+    if (part.type === 'data-activity') return part.data.text;
+  }
+  return undefined;
+}
+
+/**
+ * A "thought" that is the answer, word for word. When the model replies in
+ * plain text instead of calling the response tool, the orchestrator routes
+ * that text to its thinking channel and the fallback then surfaces the same
+ * text as the final message — the thought block becomes a verbatim copy of the
+ * reply above the reply. Nothing to think about in there: drop it. Real
+ * reasoning never equals the answer, so a strict trimmed comparison is enough.
+ */
+function withoutEchoedThoughts(parts: MessagePart[]): MessagePart[] {
+  const answers = parts
+    .filter((part): part is Extract<MessagePart, { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text.trim())
+    .filter(Boolean);
+  if (answers.length === 0) return parts;
+  return parts.filter(
+    (part) =>
+      !(part.type === 'data-agent-thought' && part.data.complete && answers.includes(part.data.text.trim())),
+  );
+}
+
+/**
+ * Page layout folds each run of consecutive machine lines into one group;
+ * everything else (and every part in panel/dev mode) passes through as-is, so
+ * a note or an answer between two runs keeps its place in the timeline.
+ */
+function groupActivity(parts: MessagePart[], fold: boolean): Array<MessagePart | ActivityPart[]> {
+  if (!fold) return parts;
+  const out: Array<MessagePart | ActivityPart[]> = [];
+  for (const part of parts) {
+    const last = out[out.length - 1];
+    if (isMachineActivity(part)) {
+      if (Array.isArray(last)) last.push(part);
+      else out.push([part]);
+    } else {
+      out.push(part);
+    }
+  }
+  return out;
+}
+
+/**
+ * The folded activity stream: one summary line the reader can open. Stays
+ * open while the turn is in progress — that is when "what is it doing" matters
+ * — and collapses to the summary once the answer has landed.
+ */
+function ActivityGroup({
+  parts,
+  send,
+  conversationId,
+  inProgress,
+}: {
+  parts: ActivityPart[];
+  send: UseNannosChatValue['send'];
+  conversationId: string;
+  inProgress: boolean;
+}) {
+  const strings = useStrings();
+  const [open, setOpen] = useState(false);
+  const expanded = inProgress || open;
+  const label =
+    parts.length === 1
+      ? strings['thread.activityStep']
+      : format(strings['thread.activitySteps'], { count: parts.length });
+  return (
+    <div data-slot="nannos-activity-group" className="flex flex-col gap-1">
+      <button
+        type="button"
+        className="inline-flex w-fit items-center gap-1 text-muted-foreground text-xs hover:text-foreground"
+        aria-expanded={expanded}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {inProgress ? <Shimmer>{latestActivityText(parts) ?? label}</Shimmer> : label}
+        <ChevronDownIcon
+          aria-hidden="true"
+          className={cn('size-3.5 shrink-0 transition-transform', expanded && 'rotate-180')}
+        />
+      </button>
+      {expanded && (
+        <div className="flex flex-col gap-1 border-l-2 border-border pl-2.5">
+          {parts.map((part, index) => (
+            <AssistantPart key={index} part={part} send={send} conversationId={conversationId} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ThreadMessage({
   message,
   conversationId,
@@ -665,6 +812,7 @@ function ThreadMessage({
   send: UseNannosChatValue['send'];
 }) {
   const devMode = useDevMode();
+  const layout = usePanelLayout();
   if (message.role === 'user') {
     const rendered = message.metadata?.display ? (
       <ContextChip message={message} />
@@ -693,14 +841,24 @@ function ThreadMessage({
   if (message.role === 'assistant') {
     return (
       <div className="group/nannos-message flex w-full flex-col gap-2">
-        {message.parts.map((part, index) => (
-          <AssistantPart
-            key={`${message.id}-${index}`}
-            part={part}
-            send={send}
-            conversationId={conversationId}
-          />
-        ))}
+        {groupActivity(devMode ? message.parts : withoutEchoedThoughts(message.parts), layout === 'page' && !devMode).map((item, index) =>
+          Array.isArray(item) ? (
+            <ActivityGroup
+              key={`${message.id}-${index}`}
+              parts={item}
+              send={send}
+              conversationId={conversationId}
+              inProgress={!showActions}
+            />
+          ) : (
+            <AssistantPart
+              key={`${message.id}-${index}`}
+              part={item}
+              send={send}
+              conversationId={conversationId}
+            />
+          ),
+        )}
         {showActions && <AssistantActions conversationId={conversationId} message={message} />}
       </div>
     );
@@ -708,8 +866,36 @@ function ThreadMessage({
   return null;
 }
 
+/**
+ * One turn, one block. A HITL pause ends the assistant message the stream was
+ * building and the resume opens a new one, so a turn that asked for approval
+ * arrives as two consecutive assistant messages — and reads as two answers,
+ * with a feedback row in the middle of the work. History already stitches
+ * these back together on reload (`rowsToUIMessages`); do the same live, at
+ * render time, keeping the LAST message's identity so feedback lands on the
+ * row the backend finalised.
+ */
+export function mergeAssistantRuns(messages: NannosUIMessage[]): NannosUIMessage[] {
+  const out: NannosUIMessage[] = [];
+  for (const message of messages) {
+    const last = out[out.length - 1];
+    if (message.role === 'assistant' && last?.role === 'assistant') {
+      out[out.length - 1] = {
+        ...message,
+        id: message.id,
+        parts: [...last.parts, ...message.parts],
+        metadata: { ...last.metadata, ...message.metadata },
+      };
+    } else {
+      out.push(message);
+    }
+  }
+  return out;
+}
+
 export function Thread({ chat, className, showContinue = true }: ThreadProps) {
   const strings = useStrings();
+  const layout = usePanelLayout();
   const lastMessage = chat.messages[chat.messages.length - 1];
   const lastHasStreamingText =
     lastMessage?.role === 'assistant' &&
@@ -718,7 +904,7 @@ export function Thread({ chat, className, showContinue = true }: ThreadProps) {
 
   return (
     <Conversation data-slot="nannos-thread" className={cn('min-h-0', className)}>
-      <ConversationContent className="gap-4">
+      <ConversationContent className={cn('gap-4', layout === 'page' && `${PAGE_COLUMN} gap-6 py-6`)}>
         {chat.hasOlderMessages && (
           <div className="flex justify-center">
             <Button
@@ -754,12 +940,12 @@ export function Thread({ chat, className, showContinue = true }: ThreadProps) {
           </>
         ) : (
           <ConversationFeedbackProvider conversationId={chat.conversationId}>
-            {chat.messages.map((message, index) => (
+            {mergeAssistantRuns(chat.messages).map((message, index, merged) => (
               <ThreadMessage
                 key={message.id}
                 message={message}
                 conversationId={chat.conversationId}
-                showActions={!(chat.isBusy && index === chat.messages.length - 1)}
+                showActions={!(chat.isBusy && index === merged.length - 1)}
                 send={chat.send}
               />
             ))}

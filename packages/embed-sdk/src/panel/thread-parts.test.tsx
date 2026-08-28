@@ -19,8 +19,9 @@ import type { Socket } from 'socket.io-client';
 import { createNannos } from '../core';
 import { NannosProvider, type NannosHostAdapter } from '../react';
 import { textArrival, type NannosUIMessage } from '../transport';
-import { Thread } from './components/thread';
+import { Thread, mergeAssistantRuns } from './components/thread';
 import { DevModeProvider } from './dev-mode';
+import { PanelLayoutProvider, type PanelLayout } from './layout';
 import { NannosChatScope } from './engine';
 import type { UseNannosChatValue } from './hooks/use-nannos-chat';
 
@@ -88,6 +89,7 @@ function mountThread(
   messages: NannosUIMessage[],
   devMode = false,
   send: UseNannosChatValue['send'] = () => {},
+  { layout = 'panel', isBusy = false }: { layout?: PanelLayout; isBusy?: boolean } = {},
 ) {
   vi.stubGlobal(
     'fetch',
@@ -96,7 +98,7 @@ function mountThread(
   const chat = {
     messages,
     send,
-    isBusy: false,
+    isBusy,
     hasOlderMessages: false,
     loadOlderMessages: async () => {},
     conversationId: 'conv-1',
@@ -106,7 +108,9 @@ function mountThread(
     <NannosProvider core={core}>
       <NannosChatScope adapter={ADAPTER}>
         <DevModeProvider enabled={devMode}>
-          <Thread chat={chat} showContinue={false} />
+          <PanelLayoutProvider layout={layout}>
+            <Thread chat={chat} showContinue={false} />
+          </PanelLayoutProvider>
         </DevModeProvider>
       </NannosChatScope>
     </NannosProvider>,
@@ -350,5 +354,184 @@ describe('mid-turn notes in the thread', () => {
     mountThread([noteTurn()], true);
 
     expect(note()?.textContent).toContain(CLOCK);
+  });
+});
+
+/**
+ * Page layout folds a turn's machine lines into one disclosure: at full width
+ * a loose grey stream of "Running X…" is the most prominent thing on screen,
+ * the opposite of what those lines are for. Notes and answers between two runs
+ * keep their place; the panel layout and dev mode keep the flat stream.
+ */
+describe('activity folding in page layout', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  });
+
+  afterEach(cleanup);
+
+  const line = (id: string, text: string) =>
+    ({ type: 'data-activity', id, data: { text, ts: TS } }) as NannosUIMessage['parts'][number];
+  const NOTE = {
+    type: 'data-activity',
+    id: 'act-note',
+    data: { text: 'Understood, checking.', kind: 'note', ts: TS },
+  } as NannosUIMessage['parts'][number];
+  const turn = (): NannosUIMessage => ({
+    id: 'msg-1',
+    role: 'assistant',
+    parts: [
+      line('a1', 'Agent execution started.'),
+      line('a2', 'Running github_get_me…'),
+      NOTE,
+      line('a3', 'Running ls…'),
+      { type: 'text', text: 'Done.' },
+    ],
+  });
+
+  const groups = () => document.querySelectorAll('[data-slot="nannos-activity-group"]');
+  const lines = () => document.querySelectorAll('[data-slot="nannos-activity"]');
+
+  it('keeps the flat stream in panel layout', () => {
+    mountThread([turn()]);
+    expect(groups().length).toBe(0);
+    expect(lines().length).toBe(3);
+  });
+
+  it('folds each run of machine lines, leaving the note in the timeline', () => {
+    mountThread([turn()], false, () => {}, { layout: 'page' });
+    expect(groups().length).toBe(2);
+    expect(lines().length).toBe(0);
+    expect(screen.getByText('Worked through 2 steps')).toBeTruthy();
+    expect(screen.getByText('Worked through 1 step')).toBeTruthy();
+    expect(document.querySelector('[data-slot="nannos-agent-note"]')?.textContent).toContain(
+      'Understood, checking.',
+    );
+  });
+
+  it('opens a folded group on click', () => {
+    mountThread([turn()], false, () => {}, { layout: 'page' });
+    fireEvent.click(screen.getByText('Worked through 2 steps'));
+    expect(lines().length).toBe(2);
+    expect(screen.getByText('Running github_get_me…')).toBeTruthy();
+  });
+
+  it('stays open while the turn is in progress, showing the latest line', () => {
+    mountThread([turn()], false, () => {}, { layout: 'page', isBusy: true });
+    expect(lines().length).toBe(3);
+    expect(screen.getAllByText('Running ls…').length).toBeGreaterThan(0);
+  });
+
+  it('keeps the flat stream in dev mode even on a page', () => {
+    mountThread([turn()], true, () => {}, { layout: 'page' });
+    expect(groups().length).toBe(0);
+    expect(lines().length).toBe(3);
+  });
+});
+
+/**
+ * A thought that is the answer verbatim (the model replied in plain text, the
+ * orchestrator routed it to the thinking channel, the fallback surfaced it as
+ * the reply) is a duplicate, not reasoning — the end-user view drops it, dev
+ * mode keeps it for inspection.
+ */
+describe('echoed orchestrator thoughts', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  });
+
+  afterEach(cleanup);
+
+  const thought = (text: string, complete = true) =>
+    ({
+      type: 'data-agent-thought',
+      id: 'th-1',
+      data: { agent: 'orchestrator', text, complete, startedAt: TS },
+    }) as NannosUIMessage['parts'][number];
+  const turn = (text: string, complete?: boolean): NannosUIMessage => ({
+    id: 'msg-1',
+    role: 'assistant',
+    parts: [thought(text, complete), { type: 'text', text: 'The image shows a 2x2 grid.\n' }],
+  });
+  const block = () => document.querySelector('[data-slot="nannos-agent-thought"]');
+
+  it('drops a completed thought equal to the answer', () => {
+    mountThread([turn('The image shows a 2x2 grid.')]);
+    expect(block()).toBeNull();
+  });
+
+  it('keeps a thought that differs from the answer', () => {
+    mountThread([turn('Let me look at the picture first.')]);
+    expect(block()).not.toBeNull();
+  });
+
+  it('keeps a still-streaming thought — the answer may not exist yet', () => {
+    mountThread([turn('The image shows a 2x2 grid.', false)]);
+    expect(block()).not.toBeNull();
+  });
+
+  it('keeps the echo in dev mode', () => {
+    mountThread([turn('The image shows a 2x2 grid.')], true);
+    expect(block()).not.toBeNull();
+  });
+});
+
+/**
+ * A HITL pause splits one turn into two assistant messages on the live path;
+ * the thread renders them as one block, and the decision itself leaves a line
+ * where the work broke off — so the reader sees "approved X" between the steps
+ * before and after, not two answers with a feedback row in the middle.
+ */
+describe('a turn interrupted by an approval', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  });
+
+  afterEach(cleanup);
+
+  const approved = {
+    type: 'dynamic-tool',
+    toolCallId: 'call-1',
+    toolName: 'github_get_me',
+    state: 'output-available',
+    input: {},
+    output: { approved: true },
+  } as NannosUIMessage['parts'][number];
+  const before: NannosUIMessage = {
+    id: 'msg-1',
+    role: 'assistant',
+    parts: [ACTIVITY, approved],
+  };
+  const after: NannosUIMessage = {
+    id: 'msg-2',
+    role: 'assistant',
+    parts: [ACTIVITY, { type: 'text', text: 'You are aartaria.' }],
+    metadata: { persistedMessageId: 'srv-2' },
+  };
+
+  it('merges consecutive assistant messages, keeping the last identity', () => {
+    const user: NannosUIMessage = { id: 'u', role: 'user', parts: [{ type: 'text', text: 'hi' }] };
+    const merged = mergeAssistantRuns([user, before, after]);
+    expect(merged.length).toBe(2);
+    expect(merged[1].id).toBe('msg-2');
+    expect(merged[1].parts.length).toBe(4);
+    expect(merged[1].metadata?.persistedMessageId).toBe('srv-2');
+  });
+
+  it('renders one block with one feedback row', () => {
+    mountThread([before, after]);
+    expect(document.querySelectorAll('[data-slot="nannos-message-actions"]').length).toBe(1);
+  });
+
+  it('acknowledges the approved call as a machine line', () => {
+    mountThread([before, after]);
+    expect(screen.getByText('Approved github_get_me')).toBeTruthy();
+    expect(toolBox()).toBeNull();
+  });
+
+  it('folds the acknowledgement into the step group on a page', () => {
+    mountThread([before, after], false, () => {}, { layout: 'page' });
+    // Two labels + the decision = one run of three machine lines.
+    expect(screen.getByText('Worked through 3 steps')).toBeTruthy();
   });
 });
