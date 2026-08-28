@@ -287,8 +287,6 @@ describe('the authorization card', () => {
   const done = () => document.querySelector('[data-slot="nannos-auth-done"]') as HTMLElement | null;
   const reauthorize = () => document.querySelector('[data-slot="nannos-auth-retry"]');
   const skip = () => document.querySelector('[data-slot="nannos-auth-skip"]') as HTMLElement | null;
-  const unskip = () =>
-    document.querySelector('[data-slot="nannos-auth-unskip"]') as HTMLElement | null;
 
   it('offers only the way out to the provider at first', () => {
     mountThread([authTurn()]);
@@ -322,6 +320,8 @@ describe('the authorization card', () => {
     expect(send.mock.calls[0][1]).toEqual({
       displayText: 'Authorized gmail_send',
       displayKind: 'receipt',
+      displayOutcome: 'authorized',
+      authorization: { decision: 'approved' },
     });
     expect(card()).toBeNull();
   });
@@ -335,33 +335,34 @@ describe('the authorization card', () => {
       (p) => p.type === 'data-auth-required',
     )!;
     part.data = { ...(part.data as Record<string, unknown>), tool: 'eval', service: 'eval' };
-    mountThread([turn], false, vi.fn());
+    const send = vi.fn();
+    mountThread([turn], false, send);
 
     expect(screen.getByText('Authorization needed')).toBeTruthy();
     fireEvent.click(skip()!);
-    expect(screen.getByText('Skipped the authorization')).toBeTruthy();
+    expect(send.mock.calls[0][1].displayText).toBe('Skipped the authorization');
   });
 
-  it('records a skip in the thread', () => {
+  it('answers the parked interrupt with an explicit refusal', () => {
+    // A refusal has nothing to say to the GATEWAY, but plenty to say to the
+    // agent: it is holding a blocked tool call and will otherwise keep pushing
+    // the same link. The decision rides a DataPart the middleware acts on, with
+    // agent-facing prose beside it for a client that never negotiated the
+    // extension.
     const send = vi.fn();
     mountThread([authTurn()], false, send);
     fireEvent.click(skip()!);
 
-    // Nothing goes to the agent: there is no refusal for the gateway to receive.
-    expect(send).not.toHaveBeenCalled();
-    expect(screen.getByText('Skipped authorizing gmail_send')).toBeTruthy();
-  });
-
-  it('lets a skip be undone — it is a misclick away from stranding the turn', () => {
-    // The card is the only place the authorize link lives, and skipping sends
-    // nothing, so without a way back a mistaken click would leave the task
-    // parked in `auth-required` with no prompt anywhere in the conversation.
-    mountThread([authTurn()], false, vi.fn());
-    fireEvent.click(skip()!);
-    expect(authorize()).toBeNull();
-
-    fireEvent.click(unskip()!);
-    expect(authorize()?.getAttribute('href')).toBe('http://provider/consent');
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toContain('not going to authorize');
+    expect(send.mock.calls[0][1]).toEqual({
+      displayText: 'Skipped authorizing gmail_send',
+      displayKind: 'receipt',
+      displayOutcome: 'skipped',
+      authorization: { decision: 'declined' },
+    });
+    // The receipt rides the turn that answer starts, so the card is done here.
+    expect(card()).toBeNull();
   });
 });
 

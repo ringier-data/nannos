@@ -73,7 +73,12 @@ export interface NannosMessageMetadata {
    *  text. `context` is a host-injected chip; `receipt` is a decision the user
    *  made in an interrupt card — the turn resumes the agent, but the thread must
    *  not show it as something the user typed. */
-  display?: { kind: 'context' | 'receipt'; label: string };
+  display?: { kind: 'context' | 'receipt'; label: string; outcome?: 'authorized' | 'skipped' };
+  /** The user's answer to an `auth-required` prompt, sent as a DataPart so the
+   *  orchestrator's middleware acts on it instead of guessing from prose:
+   *  approved retries the blocked tool, declined tells the agent to stop asking.
+   *  Only meaningful while a turn is parked on that interrupt. */
+  authorization?: { decision: 'approved' | 'declined'; message?: string };
   /** Send-side file info (wire shape, incl. s3Url); `file` parts carry the render shape. */
   attachments?: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }>;
   /** HITL envelope for the current interrupt: reason text + per-tool decision gating. */

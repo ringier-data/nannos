@@ -139,6 +139,32 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         return {"decisions": [{"type": "reject"}]}
 
     @staticmethod
+    def _extract_authorization_decision(context: RequestContext) -> dict | None:
+        """The client's answer to an ``auth-required`` prompt, when it sent one.
+
+        Clients that negotiated the in-task-auth extension answer with a DataPart
+        ``{"authorization": {"decision": "approved"|"declined", "message": "..."}}``
+        — the same shape convention as ``decisions``, one level up because an
+        authorization is a single yes/no about the task, not a list of per-call
+        verdicts.
+
+        Returns None when the client said nothing structured. That is NOT a
+        rejection: the user may simply have typed a sentence, which the model
+        node is left to interpret (see AuthErrorDetectionMiddleware).
+        """
+        from google.protobuf.json_format import MessageToDict
+
+        if context.message and context.message.parts:
+            for part in context.message.parts:
+                if part.WhichOneof("content") != "data":
+                    continue
+                data = MessageToDict(part.data)
+                decision = data.get("authorization") if isinstance(data, dict) else None
+                if isinstance(decision, dict) and decision.get("decision"):
+                    return decision
+        return None
+
+    @staticmethod
     def _action_request_call_id(action_request: Any) -> Any:
         """Extract the stable per-call id an action_request carries, if any.
 
@@ -174,7 +200,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         return hitl_decisions
 
     @classmethod
-    def _build_interrupt_resume_map(cls, interrupts: Any, hitl_decisions: list, query: Any) -> dict[str, Any]:
+    def _build_interrupt_resume_map(
+        cls,
+        interrupts: Any,
+        hitl_decisions: list,
+        query: Any,
+        authorization: dict | None = None,
+    ) -> dict[str, Any]:
         """Build an interrupt-id-keyed resume map for ``Command(resume=...)``.
 
         LangGraph >=1.2 requires an id-keyed map whenever more than one interrupt is
@@ -226,6 +258,23 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     f"Resuming client-action interrupt {intr.id} "
                     f"({'with result' if isinstance(result, dict) else 'WITHOUT result'})"
                 )
+            elif isinstance(intr_value, dict) and intr_value.get("task_state") == TaskState.TASK_STATE_AUTH_REQUIRED:
+                # In-task authorization. A client that negotiated the extension
+                # answers explicitly, and the middleware acts on it without
+                # guessing: approved → retry the tool, declined → tell the agent
+                # so it stops pushing the URL. Without a structured answer the
+                # user's own words are handed through, and the model node reads
+                # them (there is nothing better placed to judge "ok done" against
+                # "no, those scopes are too wide").
+                if authorization:
+                    resume_map[intr.id] = {"authorization": authorization}
+                    logger.info(
+                        f"Resuming auth interrupt {intr.id} with an explicit "
+                        f"'{authorization.get('decision')}' decision"
+                    )
+                else:
+                    resume_map[intr.id] = query
+                    logger.info(f"Resuming auth interrupt {intr.id} with the user's reply (no decision sent)")
             else:
                 resume_map[intr.id] = query
                 logger.info(f"Resuming non-HITL interrupt {intr.id}")
@@ -929,7 +978,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # decisions would require the client to key decisions by interrupt id.
                 # Clients send decisions as a DataPart (structured JSON, no XML).
                 hitl_decisions = self._extract_hitl_decisions(context).get("decisions", [])
-                resume_value = self._build_interrupt_resume_map(current_state.interrupts, hitl_decisions, query)
+                authorization = self._extract_authorization_decision(context)
+                resume_value = self._build_interrupt_resume_map(
+                    current_state.interrupts, hitl_decisions, query, authorization
+                )
 
             if resume_value is None:
                 logger.info("Normal execution (not resuming from interrupt)")

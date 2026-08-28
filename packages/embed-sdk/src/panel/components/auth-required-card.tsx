@@ -6,9 +6,11 @@
  * It renders in the shared interrupt shell, beside the approval card and with
  * the same indent, head and type ramp — the user is being stopped for the same
  * reason, so it should not look like a different species of thing. What it is
- * NOT is an approval: nothing is being proposed here, so there is no decision
- * for the gateway to receive. "Skip" is therefore a client decision — the panel
- * simply does not resume, and says so in the thread.
+ * NOT is an approval: nothing is being proposed here, so there is nothing for
+ * the GATEWAY to refuse. The refusal is still real, though — it is addressed to
+ * the AGENT, which is holding a blocked tool call and needs to be told to stop
+ * asking. Both buttons therefore answer the same parked interrupt with an
+ * explicit decision (a DataPart), and both resume the turn.
  *
  * The card walks the detour in place: "Authorize" opens the provider in a new
  * window, and once it is open the card switches to "Done, continue" — the click
@@ -30,7 +32,7 @@ import { format, useStrings } from '../../react';
 import { useDevMode } from '../dev-mode';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
 import { InterruptActions, InterruptCard, InterruptSection } from './interrupt-card';
-import { Receipt, receiptHeadline } from './receipt';
+import { receiptHeadline } from './receipt';
 
 export interface AuthRequiredCardProps {
   data: { authUrl?: string; tool?: string; service?: string; message?: string };
@@ -63,10 +65,16 @@ const OPAQUE_TOOLS = new Set([
  */
 const ACTION_CLASS = 'h-6 gap-1 px-2 text-xs has-[>svg]:px-2 [&_svg]:size-3';
 
-/** What "Done, continue" actually sends: agent-facing, so English. */
+/** What the buttons actually send: agent-facing, so English and unlocalized.
+ *  These are the fallback for a client that never negotiated the extension —
+ *  the DataPart beside them is what the middleware acts on when it did. */
 const CONTINUE_PROMPT = 'I have completed the authorization. Please retry what needed it and continue.';
 const CONTINUE_PROMPT_TOOL =
   'I have completed the authorization for {tool}. Please retry what needed it and continue.';
+const DECLINE_PROMPT =
+  'I am not going to authorize this. Do not ask again — tell me what you cannot do without it.';
+const DECLINE_PROMPT_TOOL =
+  'I am not going to authorize {tool}. Do not ask again — tell me what you cannot do without it.';
 
 export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProps) {
   const strings = useStrings();
@@ -82,50 +90,40 @@ export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProp
   const subject = service || tool || '';
 
   // `idle` until the user has been sent to the provider, `opened` once they are
-  // through, and `skipped` when they walked away. Local state by design: the
-  // part on the wire never changes, so the card's own progress is the only
+  // through, `done` once they have answered either way. Local state by design:
+  // the part on the wire never changes, so the card's own progress is the only
   // record of it — and a reload starting over is correct, since a tool that is
   // still unauthorized asks again anyway.
-  const [stage, setStage] = useState<'idle' | 'opened' | 'done' | 'skipped'>('idle');
+  const [stage, setStage] = useState<'idle' | 'opened' | 'done'>('idle');
 
-  // Authorizing is the middle of the story, not the end: the receipt for it
-  // rides the resume message the confirm button sends, so the card leaves
-  // nothing behind here.
+  // Answering is the middle of the story, not the end: the receipt rides the
+  // turn the answer starts, so the card itself leaves nothing behind.
   if (stage === 'done') return null;
 
-  // Skipping sends nothing — there is no refusal for the gateway to receive —
-  // so the thread would otherwise lose the fact that the user was asked at all.
-  //
-  // And because it sends nothing, it must not be a ONE-WAY DOOR. A misclick
-  // would otherwise strand the conversation: the card is the only place the
-  // authorize link lives, the task stays parked in `auth-required`, and nothing
-  // in the thread can bring the prompt back. So the receipt keeps the way in.
-  // (Reject on an approval needs no such escape: that decision does reach the
-  // agent, and asking again re-runs the tool and re-raises the card.)
-  if (stage === 'skipped') {
-    return (
-      <div className={cn('flex min-w-0 flex-wrap items-center gap-1.5', className)}>
-        <Receipt outcome="skipped" subject={subject} />
-        {data.authUrl && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className={ACTION_CLASS}
-            data-slot="nannos-auth-unskip"
-            onClick={() => setStage('idle')}
-          >
-            {strings['auth.action']}
-          </Button>
-        )}
-      </div>
-    );
-  }
-
-  const confirm = () => {
-    send?.(tool ? format(CONTINUE_PROMPT_TOOL, { tool }) : CONTINUE_PROMPT, {
-      displayText: receiptHeadline(strings, 'authorized', subject),
+  // Both buttons answer the SAME parked interrupt, and both answer it
+  // explicitly: the decision rides a DataPart the orchestrator's middleware acts
+  // on directly — approved retries the blocked tool (so a still-missing
+  // credential asks again, as a card), declined tells the agent to stop pushing
+  // the link. The prose is what a client that never negotiated the extension
+  // falls back to; the model reads it and decides.
+  const answer = (decision: 'approved' | 'declined') => {
+    const approved = decision === 'approved';
+    const prompt = approved
+      ? tool
+        ? format(CONTINUE_PROMPT_TOOL, { tool })
+        : CONTINUE_PROMPT
+      : tool
+        ? format(DECLINE_PROMPT_TOOL, { tool })
+        : DECLINE_PROMPT;
+    send?.(prompt, {
+      displayText: receiptHeadline(strings, approved ? 'authorized' : 'skipped', subject),
       displayKind: 'receipt',
+      displayOutcome: approved ? 'authorized' : 'skipped',
+      authorization: { decision },
     });
+    // The turn the send starts carries the receipt, so the card leaves nothing
+    // behind. Nothing is lost by a misclick either: the decision reached the
+    // agent, and asking again re-runs the tool and raises a fresh card.
     setStage('done');
   };
 
@@ -168,7 +166,7 @@ export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProp
                   size="sm"
                   className={ACTION_CLASS}
                   data-slot="nannos-auth-skip"
-                  onClick={() => setStage('skipped')}
+                  onClick={() => answer('declined')}
                 >
                   {strings['auth.skip']}
                 </Button>
@@ -181,7 +179,7 @@ export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProp
                 size="sm"
                 className={ACTION_CLASS}
                 data-slot="nannos-auth-done"
-                onClick={confirm}
+                onClick={() => answer('approved')}
               >
                 <CheckIcon aria-hidden="true" />
                 {strings['auth.doneAction']}
