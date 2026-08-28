@@ -295,7 +295,10 @@ export class ConversationsStore {
 
     this.pages.delete(id);
     this.contextKeys.delete(id);
-    if (wasActive) this.persistSession();
+    // The replacement chat exists only in this browser: a session record
+    // pointing at it could never be resumed after a reload, so drop the record
+    // and let the next load land on the most recent conversation instead.
+    if (wasActive) this.clearSession();
     return true;
   }
 
@@ -482,6 +485,14 @@ export class ConversationsStore {
       );
     } catch {
       /* resume simply won't survive a reload */
+    }
+  }
+
+  private clearSession(): void {
+    try {
+      sessionStorage.removeItem(sessionKey(this.sessionScope));
+    } catch {
+      /* nothing to forget */
     }
   }
 

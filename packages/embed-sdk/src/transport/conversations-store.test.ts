@@ -196,6 +196,16 @@ describe('ConversationsStore', () => {
     expect(store.isLocalOnly('minted-1')).toBe(false);
   });
 
+  it('removing the ACTIVE conversation forgets the session record', async () => {
+    const { fetch } = fetchWithDelete([serverConv('c1'), serverConv('c2')]);
+    const store = new ConversationsStore({ fetch, autoSelectConversation: true });
+    await store.loadList();
+    store.select('c2');
+    expect(sessionStorage.getItem('nannos-active-conversation:default')).not.toBeNull();
+    expect(await store.remove('c2')).toBe(true);
+    expect(sessionStorage.getItem('nannos-active-conversation:default')).toBeNull();
+  });
+
   it('resume never takes away a conversation the user already spoke into', async () => {
     sessionStorage.setItem('nannos-active-conversation:default', JSON.stringify({ id: 'c2' }));
     const { fetch } = fetchReturning([serverConv('c1'), serverConv('c2')]);

@@ -102,6 +102,12 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
     if (seededRef.current.has(conversationId)) return;
     seededRef.current.add(conversationId);
     if (chat.messages.length > 0 || engine.transport.hasActiveTurn(conversationId)) return;
+    // Cancelled before the page landed (React runs mount → cleanup → mount over
+    // the same hook in StrictMode; a fast switch away does the same): forget the
+    // mark, or the re-run bails out above and the conversation the panel opened
+    // on stays blank for good — its row in the list is already selected, so
+    // picking it again changes nothing.
+    let seeded = false;
     // A conversation created in this browser has no server side yet: no history
     // to fetch, and `subscribe_conversation` would be rejected — the resume
     // probe would then sit open for its whole timeout, and a send inside that
@@ -115,6 +121,7 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         cursor: rows.nextCursor,
         hasMore: !!rows.nextCursor,
       });
+      seeded = true;
       if (rows.items.length > 0 && chat.messages.length === 0) {
         let mapped = rowsToUIMessages(rows.items);
         const interrupt = findPendingInterrupt(rows.items);
@@ -126,6 +133,7 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
     })();
     return () => {
       cancelled = true;
+      if (!seeded) seededRef.current.delete(conversationId);
     };
   }, [chat, conversationId, engine]);
 
