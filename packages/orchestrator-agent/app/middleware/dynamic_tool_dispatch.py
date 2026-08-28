@@ -370,12 +370,35 @@ def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decis
     For *remote* A2A sub-agents the ``Command`` never reaches the remote as-is — the
     remote executor rebuilds its own resume from the A2A DataPart using its own namespace,
     replicating there — so the plain-payload form is kept unchanged.
+
+    Not every interrupt this forwards is a HITL one. An ``auth-required`` interrupt
+    raised inside a sub-agent resumes with the user's own words (a plain string)
+    when the client sent no structured decision, and those words must survive the
+    trip: they are what the sub-agent's auth middleware reads to tell a "done,
+    try again" from a refusal.
     """
-    payload = user_decisions if isinstance(user_decisions, dict) else {}
     intr_id = getattr(interrupt_obj, "id", None)
     intr_value = getattr(interrupt_obj, "value", interrupt_obj)
     if intr_id is None and isinstance(interrupt_obj, dict):
         intr_id = interrupt_obj.get("id")
+
+    if isinstance(user_decisions, dict):
+        payload = user_decisions
+    elif (
+        isinstance(intr_value, dict)
+        and intr_value.get("task_state") == TaskState.TASK_STATE_AUTH_REQUIRED
+        and user_decisions is not None
+    ):
+        # An AUTHORIZATION interrupt resumes with whatever the user said, which
+        # is a plain string when the client sent no structured decision. The
+        # blanket `{}` below is a HITL-shaped default — applying it here dropped
+        # the user's reply on the floor, so the sub-agent's auth middleware
+        # resumed with nothing to act on and fell through with the stale auth
+        # error. The sub-agent is the one that has to judge "ok, done" against
+        # "no, too wide", so it needs the words.
+        payload = user_decisions
+    else:
+        payload = {}
     if isinstance(runnable, LocalA2ARunnable):
         payload = _replicate_blanket_decision(payload, intr_value)
         if intr_id:
