@@ -162,6 +162,17 @@ async def score_tool_risk(
     entry = cache.get(tool_name, server_slug, current_hash)
     if entry is not None:
         score = entry.match_args(args)
+        # The floor must hold on the HIT path too: the incident entry
+        # (`alloy-riad_delete_campaign_by_id` at 0.75) is already persisted with an
+        # unchanged schema hash, so it never reaches the LLM branch below where
+        # the floor was first applied. Flooring the returned score (not the entry)
+        # keeps the stored estimate intact for diagnostics.
+        floor = _destructive_floor(tool_name)
+        if floor > score:
+            logger.info(
+                "Flooring destructive tool '%s' cached risk %.2f -> %.2f", tool_name, score, floor
+            )
+            score = floor
         return score, entry
 
     # 2. Cache miss — try API (implemented by caller injecting api_client into cache)

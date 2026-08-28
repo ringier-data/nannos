@@ -153,7 +153,7 @@ class TestAgentExecutorStreamHandling:
         """A fully-streamed completion closes the artifact and emits a BARE completion.
 
         Single-source emission: when the full answer was already streamed as the
-        artifact (streamed_chars >= final_message_len), the terminal `completed`
+        artifact (len(streamed_text) >= final_message_len), the terminal `completed`
         status carries NO message — re-sending it would duplicate the answer for
         every consumer (web render + persistence, slack, google-chat). Clients use
         the streamed artifact; the terminal is state-only.
@@ -185,7 +185,7 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-1",
             first_chunk_sent=True,
-            streamed_chars=45,
+            streamed_text="Full response content",
         )
 
         # Last artifact chunk should be empty (just stream close signal)
@@ -473,7 +473,7 @@ class TestAgentExecutorStreamHandling:
         console persisted the same text twice (once from the assembled artifact,
         once from this status), so a reloaded conversation showed one answer as two
         bubbles. How a turn ends says nothing about whether its answer was already
-        delivered — only `streamed_chars` does.
+        delivered — only the streamed text does.
         """
         from app.models.responses import AgentStreamResponse
 
@@ -501,7 +501,6 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-IR",
             first_chunk_sent=True,
-            streamed_chars=len(answer),
             streamed_text=answer,
         )
 
@@ -555,7 +554,6 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-IR",
             first_chunk_sent=True,
-            streamed_chars=10,
             streamed_text="Which proj",
         )
 
@@ -599,7 +597,6 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-IR",
             first_chunk_sent=True,
-            streamed_chars=len(answer),
             streamed_text=answer,
         )
 
@@ -680,7 +677,6 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-AR",
             first_chunk_sent=True,
-            streamed_chars=len(prompt),
             streamed_text=prompt,
         )
 
@@ -733,7 +729,6 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-AR",
             first_chunk_sent=True,
-            streamed_chars=500,
             streamed_text="Here is a long answer about your tickets. " * 12,
         )
 

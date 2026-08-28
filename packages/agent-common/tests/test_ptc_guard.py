@@ -286,6 +286,10 @@ def test_derive_mcp_server_slug():
     assert d("console_list_sub_agents") == "console"
     assert d("scheduler_create_job") == "console"
     assert d("read_file") is None  # in-process platform tool → left unstamped (_self)
+    # Earliest method token wins, even when a later-listed verb appears first in the tuple.
+    assert d("alloy_post_get_report") == "alloy"
+    assert d("crm_delete_get_token_by_id") == "crm"
+    assert d("nometh_tool") is None
 
 
 # ---------------------------------------------------------------------------

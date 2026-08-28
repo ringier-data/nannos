@@ -8,6 +8,8 @@ estimate alone.
 
 import pytest
 
+from agent_common.core.tool_risk_cache import ToolRiskEntry
+
 from agent_common.core.tool_risk_scorer import (
     _DESTRUCTIVE_FLOOR_SCORE,
     _destructive_floor,
@@ -65,3 +67,30 @@ async def test_client_action_unknown_kind_fails_safe():
     # An unrecognized/new kind gates rather than slipping through.
     score, _ = await score_tool_risk("client_action", {"kind": "franticize"}, cache=None)
     assert score >= 0.80
+
+
+@pytest.mark.asyncio
+async def test_destructive_floor_applies_on_cache_hit():
+    """A persisted under-rating (the real incident: delete_* stored at 0.75 with an
+    unchanged schema hash) never reaches the LLM branch — the floor must hold on the
+    cache-hit path too."""
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+
+    now = datetime.now(timezone.utc)
+    stale = ToolRiskEntry(
+        base_score=0.75, risk_factors={}, allowed_actions=["approve", "reject"], schema_hash="",
+        updated_at=now, last_accessed_at=now,
+    )
+    cache = MagicMock()
+    cache.get.return_value = stale
+    score, entry = await score_tool_risk("alloy-riad_delete_campaign_by_id", {"id": 1}, cache=cache)
+    assert score == _DESTRUCTIVE_FLOOR_SCORE
+    assert entry is stale
+    # Non-destructive cached scores are returned as stored.
+    cache.get.return_value = ToolRiskEntry(
+        base_score=0.2, risk_factors={}, allowed_actions=["approve", "reject"], schema_hash="",
+        updated_at=now, last_accessed_at=now,
+    )
+    score, _ = await score_tool_risk("alloy-riad_get_campaign_by_id", {}, cache=cache)
+    assert score == 0.2

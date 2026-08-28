@@ -79,9 +79,14 @@ async def test_client_action_directive_flows_through_real_pipeline():
         async for item in agent.stream_subagent(
             runnable,
             message_parts=[Part(text="Fill the campaign with a frequency cap of 3.")],
-            config={"metadata": {"user_id": 1, "assistant_id": "1"}},
+            config={
+                "metadata": {
+                    "user_id": 1,
+                    "assistant_id": "1",
+                    "client_objects": [{"type": "form", "id": "campaign", "fields": ["name", "frequencyCap"]}],
+                }
+            },
             context_id="conv-1",
-            client_objects=[{"type": "form", "id": "campaign", "fields": ["name", "frequencyCap"]}],
         ):
             items.append(item)
 
@@ -115,13 +120,12 @@ async def test_input_data_carries_orchestrator_conversation_id():
     async for _ in agent.stream_subagent(
         runnable,
         message_parts=[Part(text="hello")],
-        config={"metadata": {}},
+        config={"metadata": {"client_objects": [{"type": "form", "id": "c1"}]}},
         context_id="conv-xyz",
-        client_objects=[{"type": "form", "id": "c1"}],
     ):
         pass
 
     assert isinstance(captured["input"], SubAgentInput)
     assert captured["input"].orchestrator_conversation_id == "conv-xyz"
-    # client_objects reached the config metadata for ClientObjectsMiddleware.
+    # config metadata (incl. client_objects set by the executor) is passed through.
     assert captured["config"]["metadata"]["client_objects"] == [{"type": "form", "id": "c1"}]

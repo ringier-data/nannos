@@ -513,8 +513,15 @@ class ToolDiscoveryService:
                     )
                     call_connections[server_slug] = StreamableHttpConnection(transport="streamable_http", url=url)
             except Exception as gateway_error:
+                # Only tolerable in the dev shape (direct servers configured, no
+                # Gatana). In production a swallowed gateway failure would return a
+                # console-only toolset that the executor caches for the discovery
+                # TTL — every turn in that window silently loses its gateway tools.
+                # Re-raise there so the outer handler returns [] loudly, as before.
+                if not self._direct_servers():
+                    raise
                 logger.warning(
-                    f"MCP gateway discovery unavailable ({gateway_error}); continuing without gateway servers"
+                    f"MCP gateway discovery unavailable ({gateway_error}); continuing with direct/console servers only"
                 )
 
             # --- Direct MCP servers (no gateway, static headers) from config.

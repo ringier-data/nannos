@@ -962,7 +962,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 streaming_artifact_id = str(uuid.uuid4())
                 first_chunk_sent = False  # Track if we've sent the initial MAIN artifact chunk
                 first_intermediate_chunk_sent = False  # Track if we've sent the initial INTERMEDIATE artifact chunk
-                streamed_chars = 0  # Total chars streamed via the MAIN artifact (code points, not wire bytes; for completion diagnostics)
                 # The MAIN artifact text itself. A char count is enough to tell whether
                 # a `completed` turn already delivered its answer (the answer IS what
                 # streamed), but an interrupt's terminal message can be a different,
@@ -984,7 +983,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         context_id=task.context_id,
                         resume=resume_value,
                         turn_state=turn_state,
-                        client_objects=client_objects,
                     )
                 else:
                     stream_source = self.agent.stream(
@@ -1012,7 +1010,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         # go to a separate "-thought" artifact and aren't part of the
                         # main response stream the client renders).
                         if not metadata.get("intermediate_output") and item.content:
-                            streamed_chars += len(item.content)
                             streamed_text += item.content
 
                     # Pass per-artifact first_chunk_sent flags and update after each chunk
@@ -1025,7 +1022,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         first_chunk_sent=first_chunk_sent,
                         first_intermediate_chunk_sent=first_intermediate_chunk_sent,
                         active_extensions=requested_extensions,
-                        streamed_chars=streamed_chars,
                         streamed_text=streamed_text,
                     )
 
@@ -1137,7 +1133,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         first_chunk_sent=first_chunk_sent,
                         first_intermediate_chunk_sent=first_intermediate_chunk_sent,
                         active_extensions=requested_extensions,
-                        streamed_chars=streamed_chars,
                         streamed_text=streamed_text,
                     )
                 break  # Done — no re-invocation needed
@@ -1198,7 +1193,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         first_chunk_sent: bool = False,
         first_intermediate_chunk_sent: bool = False,
         active_extensions: set[str] | None = None,
-        streamed_chars: int = 0,
         streamed_text: str = "",
     ) -> tuple[bool, bool]:
         """Handle a stream item from the agent and update the task accordingly.
@@ -1452,7 +1446,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     msg,
                     streaming_artifact_id=streaming_artifact_id,
                     first_chunk_sent=first_chunk_sent,
-                    streamed_chars=streamed_chars,
                     streamed_text=streamed_text,
                     final_message_len=len(final_answer),
                     base_metadata=metadata,
@@ -1473,7 +1466,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
-                streamed_chars=streamed_chars,
                 streamed_text=streamed_text,
                 final_message_len=len(final_answer),
                 base_metadata=metadata,
@@ -1501,7 +1493,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
-                streamed_chars=streamed_chars,
                 streamed_text=streamed_text,
                 final_message_len=len(final_answer),
                 base_metadata=metadata,
@@ -1534,7 +1525,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         *,
         streaming_artifact_id: str,
         first_chunk_sent: bool,
-        streamed_chars: int,
         streamed_text: str,
         final_message_len: int,
         base_metadata: dict | None,
@@ -1584,7 +1574,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         answer_fully_streamed = (
             first_chunk_sent
             and final_message_len > 0
-            and streamed_chars >= final_message_len
+            and len(streamed_text) >= final_message_len
             and (
                 state == TaskState.TASK_STATE_COMPLETED
                 or (bool(terminal_text) and streamed_text.strip().startswith(terminal_text))
@@ -1602,7 +1592,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 "[STREAMING] Completion: artifact_id=%s streamed_chars=%d "
                 "final_message_len=%d task_state=%s fully_streamed=%s",
                 streaming_artifact_id,
-                streamed_chars,
+                len(streamed_text),
                 final_message_len,
                 state,
                 answer_fully_streamed,
