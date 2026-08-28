@@ -175,10 +175,12 @@ def derive_mcp_server_slug(tool_name: str) -> str | None:
     """
     if is_console_backend_tool(tool_name):
         return "console"
-    for method in _MCP_HTTP_METHOD_TOKENS:
-        idx = tool_name.find(f"_{method}_")
-        if idx > 0:
-            return tool_name[:idx]
+    # Split at the EARLIEST method token, not the first one in tuple order: the
+    # path part may itself contain a verb (``alloy_post_get_report`` is slug
+    # ``alloy``, method ``post``; scanning ``get`` first would yield ``alloy_post``).
+    positions = [idx for method in _MCP_HTTP_METHOD_TOKENS if (idx := tool_name.find(f"_{method}_")) > 0]
+    if positions:
+        return tool_name[: min(positions)]
     return None
 
 

@@ -1415,7 +1415,6 @@ class OrchestratorDeepAgent:
         context_id: str,
         resume: Any = None,
         turn_state: "TurnState | None" = None,
-        client_objects: list | None = None,
     ) -> AsyncIterable[AgentStreamResponse]:
         """Stream a scoped domain sub-agent as the top-level graph (Embedded Nannos, execute-only).
 
@@ -1439,12 +1438,12 @@ class OrchestratorDeepAgent:
             message_parts: User message parts (text; files via attachment blocks).
             config: Sub-agent RunnableConfig — ``configurable.thread_id`` must be
                 the sub-agent thread (``{context_id}::dynamic-{name}``) and
-                ``metadata`` the per-turn context. ``client_objects`` is injected here.
+                ``metadata`` the per-turn context (the executor puts ``client_objects`` /
+                ``page_context`` there for ``ClientObjectsMiddleware``).
             context_id: Conversation id (orchestrator conversation id for the
                 sub-agent's tracking waterfall).
             resume: Optional HITL resume value → fed as ``Command(resume=...)``.
             turn_state: Per-turn carrier (populated best-effort for executor reuse).
-            client_objects: On-screen manifest for ``ClientObjectsMiddleware``.
 
         Yields:
             AgentStreamResponse: same shape as ``stream()`` (streaming chunks,
@@ -1462,11 +1461,6 @@ class OrchestratorDeepAgent:
             WorkPlanMeta,
         )
         from langgraph.errors import GraphInterrupt
-
-        # Surface the on-screen manifest to ClientObjectsMiddleware, which reads it
-        # from the RunnableConfig metadata (keys "client_objects"/"clientObjects").
-        if client_objects:
-            config.setdefault("metadata", {})["client_objects"] = client_objects
 
         # Build the stream input: a Command for HITL resume (bypasses message
         # extraction inside the runnable), else a fresh SubAgentInput. Embedded is
