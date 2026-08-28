@@ -64,7 +64,7 @@ type DurablePart =
   | { type: 'data-workplan'; id: string; data: { todos: TodoItem[]; wire?: string; wireId?: string } }
   | { type: 'data-agent-thought'; id: string; data: { agent: string; text: string; complete: boolean; startedAt: number; wire?: string; wireId?: string } }
   | { type: 'data-activity'; id: string; data: { text: string; source?: string; ts: number; wire?: string; wireId?: string } }
-  | { type: 'data-auth-required'; id: string; data: { authUrl?: string; tool?: string; message?: string; wire?: string; wireId?: string } }
+  | { type: 'data-auth-required'; id: string; data: { authUrl?: string; tool?: string; service?: string; message?: string; wire?: string; wireId?: string } }
   | { type: 'file'; url: string; mediaType: string; providerMetadata?: ProviderMetadata };
 
 /** Per-turn mutable state owned by the TurnSession; demux() mutates it. */
@@ -126,9 +126,48 @@ const TERMINAL_STATES = new Set([
 const URL_IN_TEXT = /https?:\/\/[^\s<>"')]+/;
 
 /**
- * The authorize target for an `auth-required` status. The orchestrator puts it
- * in the status metadata (`auth_url`, plus the `tool` that asked); older/other
- * shapes only spell it out in the message text, so we scan that too.
+ * The `in-task-auth` DataPart (`AuthPayload.client_payload()`), when the
+ * producer sent one. A2A leaves the schema of an `auth-required` status open,
+ * so this is the Nannos convention for filling it: the requirement, never the
+ * server-side client config.
+ *
+ * Only the first method carrying a URL is used — the model allows several ("try
+ * in order"), but the card offers one way forward, and a method with no URL is
+ * nothing a browser can act on.
+ */
+function readAuthDataPart(
+  parts: Array<Record<string, unknown>> | undefined,
+): { authUrl?: string; tool?: string; service?: string } | null {
+  for (const part of parts ?? []) {
+    if (getPartKind(part) !== 'data') continue;
+    const data = (part as { data?: Record<string, unknown> }).data;
+    const requirement = data?.auth_requirement;
+    if (typeof requirement !== 'object' || requirement === null) continue;
+    const req = requirement as { service?: unknown; resource?: unknown; auth_methods?: unknown };
+    const methods = Array.isArray(req.auth_methods) ? req.auth_methods : [];
+    const withUrl = methods.find(
+      (m) => typeof (m as { auth_url?: unknown })?.auth_url === 'string' && (m as { auth_url: string }).auth_url,
+    ) as { auth_url?: string } | undefined;
+    return {
+      ...(withUrl?.auth_url && { authUrl: withUrl.auth_url }),
+      // `resource` is the specific thing that needed the credential (the tool
+      // call); `service` is who it belongs to. The card names both differently.
+      ...(typeof req.resource === 'string' && req.resource && { tool: req.resource }),
+      ...(typeof req.service === 'string' && req.service && { service: req.service }),
+    };
+  }
+  return null;
+}
+
+/**
+ * The authorize target for an `auth-required` status, in descending order of
+ * how much the producer told us: the structured DataPart of the `in-task-auth`
+ * extension, then the status metadata (`auth_url` + the `tool` that asked),
+ * then — last resort — the first URL in the message text.
+ *
+ * That last resort is scraping a sentence the gateway wrote for the AGENT, and
+ * it stays only because a stranded user is worse than an ugly parse: producers
+ * that negotiated the extension never reach it.
  *
  * Shared with the history mapper, so a reloaded conversation restores the same
  * part (and therefore the same localized card) as the live turn.
@@ -136,13 +175,22 @@ const URL_IN_TEXT = /https?:\/\/[^\s<>"')]+/;
 export function readAuthRequired(
   statusText: string,
   meta: Record<string, unknown> | undefined,
-): { authUrl?: string; tool?: string; message?: string } {
+  parts?: Array<Record<string, unknown>>,
+): { authUrl?: string; tool?: string; service?: string; message?: string } {
   const text = statusText.trim();
+  const structured = readAuthDataPart(parts);
   const fromMeta = meta?.auth_url ?? meta?.authUrl ?? meta?.authorizeUrl;
   const authUrl =
-    typeof fromMeta === 'string' && fromMeta ? fromMeta : (text.match(URL_IN_TEXT)?.[0] ?? undefined);
-  const tool = typeof meta?.tool === 'string' && meta.tool ? meta.tool : undefined;
-  return { ...(authUrl && { authUrl }), ...(tool && { tool }), ...(text && { message: text }) };
+    structured?.authUrl ??
+    (typeof fromMeta === 'string' && fromMeta ? fromMeta : (text.match(URL_IN_TEXT)?.[0] ?? undefined));
+  const tool =
+    structured?.tool ?? (typeof meta?.tool === 'string' && meta.tool ? meta.tool : undefined);
+  return {
+    ...(authUrl && { authUrl }),
+    ...(tool && { tool }),
+    ...(structured?.service && { service: structured.service }),
+    ...(text && { message: text }),
+  };
 }
 
 function statusExtensions(data: AgentResponseData): string[] {
@@ -593,6 +641,7 @@ export function demux(state: DemuxState, data: AgentResponseData, wireId?: strin
         const auth = readAuthRequired(
           extractPartTexts(data.status.message?.parts).join('\n'),
           statusMeta,
+          data.status.message?.parts as Array<Record<string, unknown>> | undefined,
         );
         const authId = `${state.idPrefix}auth`;
         const authData = { ...auth, wire, wireId };
