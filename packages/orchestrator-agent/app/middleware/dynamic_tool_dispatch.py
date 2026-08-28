@@ -52,6 +52,14 @@ from agent_common.a2a.stream_events import (
 )
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
+from agent_common.core.hitl_resume import (
+    KIND_AUTH,
+    KIND_HITL,
+    authorization_from_decisions,
+    interrupt_kind,
+    pending_authorization_answer,
+    structural_decisions,
+)
 from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 from agent_common.core.stream_watchdog import inter_chunk_timeout
 from langchain.agents.middleware.types import (
@@ -352,6 +360,55 @@ def _replicate_blanket_decision(payload: Any, interrupt_value: Any) -> Any:
     return payload
 
 
+# Sentinel: the answer in hand belongs to a question the sub-agent has already
+# moved past, so it must not be delivered at all. Resuming a local sub-agent with
+# an EMPTY id-keyed map runs it forward without answering anything, so its pending
+# interrupt raises again and reaches the ``except GraphInterrupt`` handler below,
+# which asks the orchestrator for the answer that was actually written for it.
+_ANSWER_NOTHING = object()
+
+
+def _align_answer_to_interrupt(answer: Any, interrupt_value: Any) -> Any:
+    """Fit the user's answer to the question the sub-agent is actually paused on.
+
+    The orchestrator hands each ``interrupt()`` answer to whatever the sub-agent is
+    parked on at that moment, and the two can be different questions: declining an
+    authorization makes the sub-agent re-run the blocked tool, whose risk guard
+    raises a fresh *approval* interrupt — and the decline, written for the auth
+    prompt, was delivered to that one. It reached ``interrupt(...)["decisions"]``
+    and killed the sub-agent with ``KeyError('decisions')``.
+
+    So the answer is translated into the shape the pending question reads, and
+    only where the translation is honest:
+
+    - auth answer -> approval prompt: a decline becomes an explicit **rejection**
+      carrying the reason (skipping the authorization is not approving the call);
+    - approval answer -> auth prompt: a rejection becomes an explicit *declined*
+      authorization ("don't run it" and "don't authorize" are the same no);
+    - an *approval* has no honest reading as an authorization — the user was never
+      asked that — so it is not delivered at all (``_ANSWER_NOTHING``);
+    - words are forwarded untouched: both readers classify them (see
+      ``agent_common.core.hitl_resume``).
+    """
+    kind = interrupt_kind(interrupt_value)
+    if kind == KIND_HITL and isinstance(answer, dict) and not isinstance(answer.get("decisions"), list):
+        action_requests = interrupt_value.get("action_requests") or []
+        decisions = structural_decisions(answer, action_requests)
+        if decisions is not None:
+            logger.info("[HITL] Translated an authorization answer into %d explicit decision(s)", len(decisions))
+            return {"decisions": decisions}
+        message = (answer.get("authorization") or {}).get("message")
+        return message if isinstance(message, str) and message.strip() else answer
+    if kind == KIND_AUTH and isinstance(answer, dict) and not isinstance(answer.get("authorization"), dict):
+        authorization = authorization_from_decisions(answer.get("decisions"))
+        if authorization is not None:
+            logger.info("[HITL] Translated a rejection into a declined authorization")
+            return {"authorization": authorization}
+        logger.info("[HITL] Answer in hand was written for another interrupt — resuming without answering")
+        return _ANSWER_NOTHING
+    return answer
+
+
 def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decisions: Any) -> Command:
     """Build the ``Command(resume=...)`` used to resume a sub-agent after HITL approval.
 
@@ -376,29 +433,50 @@ def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decis
     when the client sent no structured decision, and those words must survive the
     trip: they are what the sub-agent's auth middleware reads to tell a "done,
     try again" from a refusal.
+
+    Nor is the answer necessarily an answer to the question the sub-agent is parked
+    on — see ``_align_answer_to_interrupt``, which fits the two together (or holds
+    the answer back) instead of forwarding a payload the far end cannot read.
     """
     intr_id = getattr(interrupt_obj, "id", None)
     intr_value = getattr(interrupt_obj, "value", interrupt_obj)
     if intr_id is None and isinstance(interrupt_obj, dict):
         intr_id = interrupt_obj.get("id")
 
-    if isinstance(user_decisions, dict):
-        payload = user_decisions
-    elif (
-        isinstance(intr_value, dict)
-        and intr_value.get("task_state") == TaskState.TASK_STATE_AUTH_REQUIRED
-        and user_decisions is not None
-    ):
-        # An AUTHORIZATION interrupt resumes with whatever the user said, which
-        # is a plain string when the client sent no structured decision. The
-        # blanket `{}` below is a HITL-shaped default — applying it here dropped
-        # the user's reply on the floor, so the sub-agent's auth middleware
-        # resumed with nothing to act on and fell through with the stale auth
-        # error. The sub-agent is the one that has to judge "ok, done" against
-        # "no, too wide", so it needs the words.
-        payload = user_decisions
+    # An authorization answer the orchestrator is holding beats whatever this
+    # ``interrupt()`` returned. On a replay the returned value is the answer to an
+    # ALREADY SETTLED question (a tool approval), while the user's "no" is queued
+    # for a second ``interrupt()`` that fires only if the sub-agent asks again —
+    # and it asks only when the tool fails again. Once the user has completed the
+    # login the tool SUCCEEDS, so that second question never comes and the refusal
+    # is never delivered: the call goes through despite an explicit no.
+    if interrupt_kind(intr_value) == KIND_AUTH:
+        held = pending_authorization_answer()
+        if held is not None:
+            logger.info("[HITL] Delivering the authorization answer the orchestrator holds")
+            user_decisions = held
+
+    if user_decisions is None:
+        payload: Any = {}
     else:
-        payload = {}
+        # Whatever the user said travels as-is, structured or not. The blanket `{}`
+        # this used to fall back to for anything non-dict dropped their reply on the
+        # floor: the sub-agent then resumed with nothing to act on and fell through
+        # with the stale auth error. Words are what BOTH readers need — the auth
+        # middleware to tell "ok, done" from "no, too wide", and the HITL reader to
+        # classify a typed answer instead of a click (agent_common.core.hitl_resume).
+        payload = user_decisions
+    aligned = _align_answer_to_interrupt(payload, intr_value)
+    if aligned is _ANSWER_NOTHING:
+        if isinstance(runnable, LocalA2ARunnable):
+            # Empty id-keyed map: run forward, answer nothing, let the sub-agent's
+            # pending interrupt raise again so the right question gets asked.
+            return Command(resume={})
+        # Remote A2A: the remote executor rebuilds its own resume from the DataPart
+        # and has the same alignment logic on its side of the wire.
+        aligned = payload
+    payload = aligned
+
     if isinstance(runnable, LocalA2ARunnable):
         payload = _replicate_blanket_decision(payload, intr_value)
         if intr_id:

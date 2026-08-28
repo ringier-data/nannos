@@ -1,8 +1,10 @@
 """Tests for AuthErrorDetectionMiddleware."""
 
-from unittest.mock import AsyncMock, MagicMock
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from a2a.types import TaskState
 from langchain_core.messages import ToolMessage
 
 from app.middleware.auth_error_middleware import AuthErrorDetectionMiddleware
@@ -345,17 +347,18 @@ async def test_declined_resume_tells_the_model_to_stop_asking(middleware):
 
 @pytest.mark.asyncio
 async def test_unclear_resume_hands_the_reply_to_the_model(middleware):
-    """Free text is passed on with both options spelled out, and nothing is run.
+    """When even the classifier cannot tell, the words go to the model.
 
-    This is the classifier: the model node runs next anyway, and is far better
-    placed than a keyword match to tell "ok, done" from "no, too wide".
+    Nothing is run and both options are spelled out — the model node runs next
+    anyway, so a genuine "ok, done" still ends in a retry.
     """
     request = _resumable_request()
     handler = AsyncMock()
 
-    result = await middleware._after_auth_interrupt(
-        "damn I missclicked, try again", request, handler, "github_get_me"
-    )
+    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
+        result = await middleware._after_auth_interrupt(
+            "damn I missclicked, try again", request, handler, "github_get_me"
+        )
 
     handler.assert_not_awaited()
     assert isinstance(result, ToolMessage)
@@ -369,3 +372,222 @@ async def test_unclear_resume_without_a_reply_still_reads_sensibly(middleware):
     request = _resumable_request()
     result = await middleware._after_auth_interrupt(None, request, AsyncMock(), "github_get_me")
     assert "(no reply)" in result.content
+
+
+@pytest.mark.asyncio
+async def test_free_text_meaning_done_retries_the_tool(middleware):
+    """A client without the extension answers in words; they must still act.
+
+    Without this the reply fell through as "unclear", the model was told to call
+    the tool again, and the whole approve/authorize round started over.
+    """
+    request = _resumable_request()
+    retried = ToolMessage(content='{"login":"aartaria"}', tool_call_id="tc-resume")
+    handler = AsyncMock(return_value=retried)
+
+    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="approve")):
+        result = await middleware._after_auth_interrupt(
+            "ok I logged in, go ahead", request, handler, "github_get_me"
+        )
+
+    assert result is retried
+    handler.assert_awaited_once_with(request)
+
+
+@pytest.mark.asyncio
+async def test_free_text_meaning_no_is_a_refusal(middleware):
+    request = _resumable_request()
+    handler = AsyncMock()
+
+    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="reject")):
+        result = await middleware._after_auth_interrupt(
+            "no, the permissions are too wide", request, handler, "github_get_me"
+        )
+
+    handler.assert_not_awaited()
+    assert "DECLINED" in result.content
+    assert "Do not retry" in result.content
+
+
+# ── Never name sandbox plumbing, never imply the tool is missing ────────────────
+#
+# `github_get_me` failing inside `eval` is reported against `eval`. Told "the user
+# DECLINED to authorize eval", the sub-agent concluded the real tool did not exist
+# and answered "github_get_me is not available in the current environment".
+
+AUTH_REQUIREMENT = {
+    "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
+    "tool": "github_get_me",
+    "service": "github",
+    "message": "This tool requires secondary authorization.",
+    "auth_url": "https://gatana.example/oauth/gt_x/begin",
+}
+
+
+def test_detector_reads_the_tool_and_service_the_sandbox_stamped(middleware):
+    """`ptc_guard.annotate_need_credentials` puts them there; they must survive."""
+    payload = json.dumps(
+        {
+            "errorCode": "need-credentials",
+            "authorizeUrl": "https://gatana.example/oauth/gt_x/begin",
+            "message": "This tool requires secondary authorization.",
+            "tool": "github_get_me",
+            "service": "github",
+        }
+    )
+
+    metadata = middleware._detect_auth_error(payload)
+
+    assert metadata["tool"] == "github_get_me"
+    assert metadata["service"] == "github"
+
+
+def test_detector_reads_them_out_of_a_wrapped_payload(middleware):
+    """ToolRetryMiddleware wraps the JSON in prose before this middleware sees it."""
+    wrapped = (
+        "Tool 'eval' failed after 1 attempt with ToolException: "
+        '{"errorCode":"need-credentials","authorizeUrl":"https://x/begin",'
+        '"message":"needs auth","tool":"github_get_me","service":"github"}. Please try again.'
+    )
+
+    metadata = middleware._detect_auth_error(wrapped)
+
+    assert metadata["tool"] == "github_get_me"
+    assert metadata["service"] == "github"
+
+
+def test_detector_leaves_them_empty_when_nothing_stamped_them(middleware):
+    metadata = middleware._detect_auth_error(
+        '{"errorCode":"need-credentials","authorizeUrl":"https://x/begin","message":"needs auth"}'
+    )
+    assert metadata["tool"] == ""
+    assert metadata["service"] == ""
+
+
+@pytest.mark.asyncio
+async def test_refusal_names_the_service_not_the_sandbox(middleware):
+    request = _resumable_request("eval")
+
+    result = await middleware._after_auth_interrupt(
+        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval", AUTH_REQUIREMENT
+    )
+
+    assert "github" in result.content
+    assert "github_get_me" in result.content
+    assert "authorize eval" not in result.content
+    assert "`eval`" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_refusal_forbids_claiming_the_tool_is_missing(middleware):
+    """The exact failure: 'not available in the current environment'."""
+    request = _resumable_request("eval")
+
+    result = await middleware._after_auth_interrupt(
+        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval", AUTH_REQUIREMENT
+    )
+
+    assert "NOT missing or unavailable" in result.content
+    assert "Never tell the user it does not exist" in result.content
+
+
+@pytest.mark.asyncio
+async def test_refusal_says_nothing_rather_than_naming_plumbing(middleware):
+    """No payload to name a service from: the sandbox tool is still not a name."""
+    request = _resumable_request("eval")
+
+    result = await middleware._after_auth_interrupt(
+        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval"
+    )
+
+    assert "the call that needed it" in result.content
+    assert "eval" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_refusal_rules_out_remedies_that_do_not_exist_here(middleware):
+    """Told to "offer another way forward", the agent offered a PAT and a curl.
+
+    Neither exists for someone sitting in a chat panel: the authorization prompt
+    is the whole mechanism. The refusal has to say so, or the model fills the gap
+    with advice from outside the product.
+    """
+    request = _resumable_request("eval")
+
+    result = await middleware._after_auth_interrupt(
+        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval", AUTH_REQUIREMENT
+    )
+
+    assert "personal access tokens" in result.content
+    assert "curl/CLI commands" in result.content
+    assert "authorization prompt in this conversation" in result.content
+    assert "offer another way forward" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_pending_reply_rules_them_out_too(middleware):
+    """The unclear branch carried the same invitation."""
+    request = _resumable_request("eval")
+
+    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
+        result = await middleware._after_auth_interrupt(
+            "hmm let me think", request, AsyncMock(), "eval", AUTH_REQUIREMENT
+        )
+
+    assert "personal access tokens" in result.content
+    assert "offer another way forward" not in result.content
+
+
+# ── A refusal must be honored BEFORE the tool runs ──────────────────────────────
+#
+# The answer to an auth prompt used to be read only where the tool failed a SECOND
+# time. Once the user had actually completed the login in their browser the retry
+# SUCCEEDED, so that point was never reached: "No way I'll authorize this!" was
+# read by nobody and the profile was fetched anyway.
+
+
+def _authorization_answer(answer):
+    """Patch the probe so the middleware sees this as the task's auth answer."""
+    return patch(
+        "app.middleware.auth_error_middleware.pending_authorization_answer",
+        return_value=answer,
+    )
+
+
+@pytest.mark.asyncio
+async def test_declined_authorization_stops_the_tool_before_it_runs(middleware):
+    request = _resumable_request("github_get_me")
+    handler = AsyncMock(return_value=ToolMessage(content='{"login":"aartaria"}', tool_call_id="tc-resume"))
+
+    with _authorization_answer({"authorization": {"decision": "declined", "message": "No way"}}):
+        result = await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_not_awaited()
+    assert "DECLINED the authorization" in result.content
+    assert "No way" in result.content
+
+
+@pytest.mark.asyncio
+async def test_approved_authorization_lets_the_tool_run(middleware):
+    request = _resumable_request("github_get_me")
+    retried = ToolMessage(content='{"login":"aartaria"}', tool_call_id="tc-resume")
+    handler = AsyncMock(return_value=retried)
+
+    with _authorization_answer({"authorization": {"decision": "approved"}}):
+        result = await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+    assert result is retried
+
+
+@pytest.mark.asyncio
+async def test_no_authorization_answer_runs_the_tool_untouched(middleware):
+    request = _resumable_request("github_get_me")
+    retried = ToolMessage(content="ok", tool_call_id="tc-resume")
+    handler = AsyncMock(return_value=retried)
+
+    with _authorization_answer(None):
+        result = await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+    assert result is retried

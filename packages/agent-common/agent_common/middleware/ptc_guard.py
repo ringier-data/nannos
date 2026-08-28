@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.prebuilt import ToolRuntime
 
 if TYPE_CHECKING:
@@ -97,17 +97,55 @@ def approval_required_payload(tool_name: str) -> dict[str, str]:
     }
 
 
-def rejection_payload(tool_name: str) -> dict[str, str]:
+def rejection_payload(tool_name: str, reason: str = "") -> dict[str, str]:
     """Build the error payload returned when the user rejects a PTC call.
 
     Surfaced inside ``eval`` on the approved/rejected re-run when the user chose
     ``reject`` for this call. The tool is not executed.
+
+    ``reason`` is the human-written explanation that came with the rejection (a
+    skipped authorization, say). Without it the model only sees "not approved"
+    and invents a cause — it told a user the tool did not exist when in truth
+    they had declined to authorize it.
     """
+    message = _PTC_REJECTION_MESSAGE.format(tool_name=tool_name)
+    if reason.strip():
+        message = f"{reason.strip()} ({message})"
     return {
         "error": _PTC_REJECTION_ERROR,
         "tool": tool_name,
-        "message": _PTC_REJECTION_MESSAGE.format(tool_name=tool_name),
+        "message": message,
     }
+
+
+# The gateway's secondary-authorization error. Raised by the INNER tool, but it
+# escapes ``eval``, so the middleware that reads it sees only the sandbox tool
+# and would report "authorize eval" — which is meaningless to a user and reads
+# to the model as "the real tool is unavailable". Annotating the payload here,
+# where the inner tool is known, is the only place the two facts meet.
+_NEED_CREDENTIALS_FIELD = '"errorCode"'
+
+
+def annotate_need_credentials(exc: BaseException, tool_name: str, server_slug: str | None) -> BaseException:
+    """Name the tool (and its server) inside a ``need-credentials`` payload.
+
+    Returns ``exc`` untouched for anything else, and for a payload that is not a
+    plain JSON object — a best-effort annotation must never swallow the original
+    error or change how it is detected.
+    """
+    text = str(exc)
+    if _NEED_CREDENTIALS_FIELD not in text or "need-credentials" not in text:
+        return exc
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return exc
+    if not isinstance(payload, dict) or payload.get("errorCode") != "need-credentials":
+        return exc
+    payload.setdefault("tool", tool_name)
+    if server_slug:
+        payload.setdefault("service", server_slug)
+    return ToolException(json.dumps(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +200,9 @@ class _PTCTurnState:
 
     pending: list[_PendingApproval] = field(default_factory=list)
     decisions: dict[str, str] = field(default_factory=dict)
+    #: Why a call was rejected, by call key — surfaced to the model with the
+    #: rejection so it can say what actually happened instead of guessing.
+    reject_reasons: dict[str, str] = field(default_factory=dict)
     results: dict[str, Any] = field(default_factory=dict)
 
     def record_pending(self, item: _PendingApproval) -> None:
@@ -344,12 +385,23 @@ def wrap_tool_for_ptc(
     """
     tool_name = inner.name
 
-    async def _execute(runtime: ToolRuntime | None, kwargs: dict[str, Any]) -> Any:
-        return await inner.arun(_inject_for_inner(inner, kwargs, runtime))
+    async def _execute(
+        runtime: ToolRuntime | None, kwargs: dict[str, Any], server_slug: str | None = None
+    ) -> Any:
+        try:
+            return await inner.arun(_inject_for_inner(inner, kwargs, runtime))
+        except ToolException as exc:
+            # Stamp the inner tool onto a secondary-authorization error before it
+            # escapes into ``eval`` and loses that fact (see annotate_need_credentials).
+            raise annotate_need_credentials(exc, tool_name, server_slug) from None
 
     async def _guarded(runtime: ToolRuntime = None, **kwargs: Any) -> Any:  # type: ignore[assignment]
         if risk_scorer is None:
-            return await _execute(runtime, kwargs)
+            return await _execute(
+                runtime,
+                kwargs,
+                _resolve_server_slug(tool_name, getattr(runtime, "context", None), tool_server_map, inner),
+            )
 
         from agent_common.middleware.conditional_hitl import (
             ConditionalHumanInTheLoopMiddleware,
@@ -371,9 +423,9 @@ def wrap_tool_for_ptc(
         if turn is not None:
             decision = turn.decisions.get(call_key)
             if decision == "reject":
-                return rejection_payload(tool_name)
+                return rejection_payload(tool_name, turn.reject_reasons.get(call_key, ""))
             if decision == "approve":
-                result = await _execute(runtime, kwargs)
+                result = await _execute(runtime, kwargs, server_slug)
                 turn.results[call_key] = result
                 return result
 
@@ -382,7 +434,7 @@ def wrap_tool_for_ptc(
         if bypass_rules and ConditionalHumanInTheLoopMiddleware._is_bypassed(
             tool_name, server_slug, kwargs, bypass_rules
         ):
-            result = await _execute(runtime, kwargs)
+            result = await _execute(runtime, kwargs, server_slug)
             if turn is not None:
                 turn.results[call_key] = result
             return result
@@ -414,7 +466,7 @@ def wrap_tool_for_ptc(
             score, entry = 0.0, None
 
         if score < threshold:
-            result = await _execute(runtime, kwargs)
+            result = await _execute(runtime, kwargs, server_slug)
             if turn is not None:
                 turn.results[call_key] = result
             return result

@@ -72,6 +72,7 @@ from agent_common.backends.attachments_store import ContextScopedAttachmentsBack
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
+from agent_common.core.hitl_resume import decisions_from_resume
 from agent_common.core.model_factory import is_gemini_model
 from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.ptc_discovery import (
@@ -1101,7 +1102,11 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                     language=getattr(context, "language", None) or "en",
                     describe=lambda name: descriptions.get(name, ""),
                 )
-                decisions = interrupt(hitl_request)["decisions"]
+                # Shape-tolerant read: the resume value may have been written for a
+                # DIFFERENT question (an authorization prompt the sub-agent has since
+                # moved past), or be the words the user typed instead of clicking.
+                # ``["decisions"]`` killed the whole sub-agent with KeyError there.
+                decisions = await decisions_from_resume(interrupt(hitl_request), hitl_request["action_requests"])
                 if (n := len(decisions)) != (m := len(pending)):
                     msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
                     raise ValueError(msg)
@@ -1206,6 +1211,13 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             else:
                 # reject / edit / unknown — PTC cannot honor edit, so block.
                 turn.decisions[p.call_key] = "reject"
+                # Keep the human-written reason with the block. Dropping it left
+                # the model with a bare "not approved", and it filled the gap by
+                # telling the user the tool did not exist — when in fact they had
+                # skipped its authorization.
+                reason = decision.get("message") if isinstance(decision, dict) else None
+                if isinstance(reason, str) and reason.strip():
+                    turn.reject_reasons[p.call_key] = reason
 
 
 def build_code_interpreter_middlewares(
