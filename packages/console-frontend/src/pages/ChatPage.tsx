@@ -27,6 +27,7 @@ export function ChatPage() {
         showConversationList
         header={false}
         devMode={isAdmin && adminMode}
+        layout="page"
       />
     </div>
   );

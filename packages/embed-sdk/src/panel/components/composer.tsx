@@ -273,8 +273,8 @@ export function Composer({ chat, className }: ComposerProps) {
 
           {/* Directly left of send: whether a form fill asks first is answered
               where the user is when they ask for one. Absent when the host
-              fixed the mode, or when no client object is registered — with
-              nothing to apply into, there is no choice to make. */}
+              fixed the mode, or on a full-page chat — a surface with no forms
+              to fill has no choice to make. */}
           <ApplyModeSwitch />
 
           {/* While a turn runs, what the NEXT send does to it — steer it, or

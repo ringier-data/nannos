@@ -8,8 +8,9 @@
  * one does — a label alone ("Manual") is not an explanation, and a mode nobody
  * understands is a mode nobody changes. A host that fixed the mode must see no
  * control at all: a locked setting that looks adjustable is worse than none —
- * and neither must a host that registered no object to apply INTO, where the
- * setting governs something that cannot happen.
+ * and neither must the console's full-page chat, a surface with no forms to
+ * fill. An embed keeps it on every page, forms registered or not: it is a
+ * standing preference, not a per-route affordance.
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +19,7 @@ import { createNannos } from '../core';
 import { NannosProvider, type NannosHostAdapter } from '../react';
 import { AssistantPanel } from './assistant-panel';
 import type { ApplyMode } from './apply-mode';
+import type { PanelLayout } from './layout';
 
 class FakeResizeObserver {
   observe() {}
@@ -40,11 +42,9 @@ const ADAPTER: NannosHostAdapter = {
   api: { getUserSettings: async () => null },
 };
 
-/** Every test but the "nothing to apply into" one needs a registered target:
- *  with an empty registry the switch hides itself on purpose. */
 function mountPanel(
   applyMode?: ApplyMode,
-  opts: { shadow?: boolean; register?: boolean } = {},
+  opts: { shadow?: boolean; register?: boolean; layout?: PanelLayout } = {},
 ) {
   vi.stubGlobal(
     'fetch',
@@ -62,7 +62,12 @@ function mountPanel(
   }
   render(
     <NannosProvider core={core}>
-      <AssistantPanel shadow={opts.shadow ?? false} adapter={ADAPTER} applyMode={applyMode} />
+      <AssistantPanel
+        shadow={opts.shadow ?? false}
+        adapter={ADAPTER}
+        applyMode={applyMode}
+        layout={opts.layout}
+      />
     </NannosProvider>,
   );
 }
@@ -156,9 +161,15 @@ describe('apply-mode switch', () => {
     expect(nameOf('manual').className).not.toContain('font-bold');
   });
 
-  it('renders nothing when no client object is registered', () => {
-    // Nothing to apply into → the mode governs something that cannot happen.
+  it('stays put on an embed page that registered no form', () => {
+    // A standing preference: it must not come and go with the route.
     mountPanel(undefined, { register: false });
+    expect(control()).toBeTruthy();
+  });
+
+  it('renders nothing on a full-page chat', () => {
+    // The console's own chat has no forms to fill → no choice to make.
+    mountPanel(undefined, { layout: 'page' });
     expect(control()).toBeNull();
     expect(send()).toBeTruthy();
   });

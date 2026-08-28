@@ -31,7 +31,14 @@
  * first.
  */
 import { useEffect, useRef, useState } from 'react';
-import { FileTextIcon, MessageCirclePlusIcon, PencilIcon, SearchIcon, Trash2Icon } from 'lucide-react';
+import {
+  FileTextIcon,
+  MessageCirclePlusIcon,
+  PanelLeftCloseIcon,
+  PencilIcon,
+  SearchIcon,
+  Trash2Icon,
+} from 'lucide-react';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import {
@@ -46,6 +53,7 @@ import { Input } from '../../components/ui/input';
 import { ScrollArea } from '../../components/ui/scroll-area';
 import { Spinner } from '../../components/ui/spinner';
 import { cn } from '../../lib/utils';
+import { usePanelLayout } from '../layout';
 import { format, useStrings } from '../../react';
 import { useChatEngine } from '../engine';
 import { useConversations } from '../hooks/use-conversations';
@@ -63,6 +71,8 @@ export interface ConversationListProps {
   /** Show the new-chat button beside the search box. The sidebar does; the
    *  overlay does not — the header it hangs from already has one. */
   showNewChat?: boolean;
+  /** Set → a collapse button ends the search row; the host hides the list on it. */
+  onCollapse?: () => void;
 }
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -72,7 +82,9 @@ export function ConversationList({
   onSelect,
   autoFocusSearch,
   showNewChat,
+  onCollapse,
 }: ConversationListProps) {
+  const layout = usePanelLayout();
   const strings = useStrings();
   const {
     conversations,
@@ -187,6 +199,20 @@ export function ConversationList({
             <MessageCirclePlusIcon />
           </Button>
         )}
+        {onCollapse && (
+          <Button
+            data-slot="nannos-conversation-collapse"
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="size-8 shrink-0"
+            aria-label={strings['conversations.hide']}
+            title={strings['conversations.hide']}
+            onClick={onCollapse}
+          >
+            <PanelLeftCloseIcon />
+          </Button>
+        )}
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
@@ -282,8 +308,13 @@ export function ConversationList({
                       <span className="flex items-center gap-1.5">
                         <span
                           className={cn(
-                            'min-w-0 flex-1 truncate font-medium text-sm',
-                            isActive && 'font-bold',
+                            'min-w-0 flex-1 truncate',
+                            // The narrow panel's list is the only text in view and
+                            // carries weight; on a page it sits beside the host's
+                            // navigation and must not out-shout it.
+                            layout === 'page'
+                              ? cn('text-[13px]', isActive ? 'font-medium' : 'font-normal')
+                              : cn('font-medium text-sm', isActive && 'font-bold'),
                           )}
                         >
                           {title}

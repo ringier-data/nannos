@@ -45,8 +45,13 @@ export interface NannosStrings {
   'thread.loadOlder': string;
   'thread.error': string;
   'thread.newConversation': string;
+  'thread.activitySteps': string;
+  'thread.activityStep': string;
+  'thread.thinking': string;
   'conversations.title': string;
   'conversations.search': string;
+  'conversations.hide': string;
+  'conversations.show': string;
   'conversations.empty': string;
   'conversations.noMatches': string;
   'conversations.rename': string;
@@ -69,6 +74,8 @@ export interface NannosStrings {
   'hitl.approveAll': string;
   'hitl.rejectAll': string;
   'hitl.reject': string;
+  'hitl.approved': string;
+  'hitl.rejected': string;
   'hitl.requestChanges': string;
   'hitl.reasonPlaceholder': string;
   'hitl.risk': string;
@@ -175,8 +182,13 @@ export const nannosStringKeys = [
   'thread.loadOlder',
   'thread.error',
   'thread.newConversation',
+  'thread.activitySteps',
+  'thread.activityStep',
+  'thread.thinking',
   'conversations.title',
   'conversations.search',
+  'conversations.hide',
+  'conversations.show',
   'conversations.empty',
   'conversations.noMatches',
   'conversations.rename',
@@ -192,6 +204,8 @@ export const nannosStringKeys = [
   'hitl.title',
   'hitl.approve',
   'hitl.reject',
+  'hitl.approved',
+  'hitl.rejected',
   'hitl.requestChanges',
   'hitl.reasonPlaceholder',
   'hitl.risk',

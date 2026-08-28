@@ -26,19 +26,19 @@
  * Renders nothing in two cases:
  *  - the host fixed the mode via the panel's `applyMode` prop — a locked
  *    setting must not look adjustable;
- *  - the host registered NO client object (`core.register`), so there is
- *    nothing an `apply` could ever write into. The switch would then offer a
- *    choice about something that cannot happen — as on a plain chat surface
- *    like the console's own chat page. The registry is live, so the switch
- *    appears the moment a page registers a form and leaves with it.
+ *  - the panel is laid out as a full PAGE (the console's own chat), a plain
+ *    chat surface with no forms to fill, where the choice governs something
+ *    that cannot happen. An embed keeps it on every page, forms or not: the
+ *    mode is a standing preference the user sets once, and a control that
+ *    comes and goes with the route reads as broken, not as tidy.
  */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CheckIcon, HandIcon, PencilIcon, type LucideIcon } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { cn } from '../../lib/utils';
 import { useStrings } from '../../react';
 import { useApplyModeControls, type ApplyMode } from '../apply-mode';
-import { useChatEngineOptional } from '../engine';
+import { usePanelLayout } from '../layout';
 import type { NannosStrings } from '../../i18n/keys';
 
 interface ModeOption {
@@ -75,19 +75,7 @@ export function ApplyModeSwitch({ className }: ApplyModeSwitchProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Is there anything to apply INTO? `keys().length` — a number, so the
-  // snapshot is stable between renders (the keys array itself is rebuilt on
-  // every call and would loop `useSyncExternalStore`).
-  const registry = useChatEngineOptional()?.core.registry;
-  const subscribeRegistry = useCallback(
-    (listener: () => void) => registry?.onChange(listener) ?? (() => {}),
-    [registry],
-  );
-  const targetCount = useSyncExternalStore(
-    subscribeRegistry,
-    () => registry?.keys().length ?? 0,
-    () => 0,
-  );
+  const layout = usePanelLayout();
 
   // Escape, or a pointer down anywhere else, closes it. Bound on the window:
   // events reach it from inside a shadow root, and `composedPath()` is the only
@@ -113,7 +101,7 @@ export function ApplyModeSwitch({ className }: ApplyModeSwitchProps) {
     };
   }, [open]);
 
-  if (locked || targetCount === 0) return null;
+  if (locked || layout === 'page') return null;
 
   const active = OPTIONS.find((o) => o.mode === mode) ?? OPTIONS[0];
   const ActiveIcon = active.icon;
