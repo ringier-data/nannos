@@ -793,6 +793,27 @@ function groupActivity(parts: MessagePart[], fold: boolean): Array<MessagePart |
  * open while the turn is in progress — that is when "what is it doing" matters
  * — and collapses to the summary once the answer has landed.
  */
+/**
+ * "1 approved, 1 rejected" for the collapsed label, or '' when the run holds no
+ * decisions. Counts settled HITL parts only: a pending one renders its card
+ * outside the group, and an activity line is not a decision.
+ */
+function countDecisions(parts: ActivityPart[], strings: ReturnType<typeof useStrings>): string {
+  let approved = 0;
+  let rejected = 0;
+  for (const part of parts) {
+    if (part.type !== 'dynamic-tool') continue;
+    if (part.state === 'output-available') approved += 1;
+    else if (part.state === 'output-denied') rejected += 1;
+  }
+  return [
+    approved > 0 ? format(strings['thread.activityApproved'], { count: approved }) : null,
+    rejected > 0 ? format(strings['thread.activityRejected'], { count: rejected }) : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
+}
+
 function ActivityGroup({
   parts,
   send,
@@ -807,10 +828,15 @@ function ActivityGroup({
   const strings = useStrings();
   const [open, setOpen] = useState(false);
   const expanded = inProgress || open;
-  const label =
+  const steps =
     parts.length === 1
       ? strings['thread.activityStep']
       : format(strings['thread.activitySteps'], { count: parts.length });
+  // Receipts fold with the rest of the steps — but a decision the user made must
+  // never disappear behind a chevron unannounced, so the collapsed label counts
+  // them. Nothing is appended when the group holds no decisions.
+  const decisions = countDecisions(parts, strings);
+  const label = decisions ? `${steps} · ${decisions}` : steps;
   return (
     <div data-slot="nannos-activity-group" className="flex flex-col gap-1">
       <button
