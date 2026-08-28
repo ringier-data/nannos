@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agent_common.middleware.continue_on_truncation import (
     ContinueOnTruncationMiddleware,
-    _is_truncated,
+    _dead_turn,
 )
 
 
@@ -74,26 +74,72 @@ class _AsyncHandler(_Handler):
         return self._responses.pop(0)
 
 
-# --- _is_truncated -----------------------------------------------------------------
+def _reasoned_but_empty() -> ModelResponse:
+    """A CLEAN stop that produced only reasoning: 69/69 output tokens, no answer.
+
+    The user sees "Task completed successfully" — the same dead end as a cutoff,
+    reached without ever hitting the token budget.
+    """
+    return ModelResponse(
+        result=[
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "**Confirming GitHub User**\n\nI've retrieved…"},
+                response_metadata={"finish_reason": "stop"},
+            )
+        ]
+    )
 
 
-def test_is_truncated_detects_length_cutoff():
-    assert _is_truncated(_truncated()) is True
+# --- _dead_turn --------------------------------------------------------------------
 
 
-def test_is_truncated_false_for_normal_completion():
-    assert _is_truncated(_complete()) is False
+def test_dead_turn_detects_length_cutoff():
+    assert _dead_turn(_truncated()) == "truncated"
 
 
-def test_is_truncated_false_when_tool_call_present():
-    # A length cutoff that still produced a tool call is a normal agentic continuation.
-    assert _is_truncated(_with_tool_call()) is False
+def test_dead_turn_detects_a_clean_stop_with_nothing_to_show():
+    assert _dead_turn(_reasoned_but_empty()) == "empty"
 
 
-def test_is_truncated_false_when_structured_response_present():
+def test_dead_turn_none_for_normal_completion():
+    assert _dead_turn(_complete()) is None
+
+
+def test_dead_turn_none_when_tool_call_present():
+    # A cutoff that still produced a tool call is a normal agentic continuation.
+    assert _dead_turn(_with_tool_call()) is None
+
+
+def test_dead_turn_none_for_a_content_block_answer():
+    """Text arrives as blocks too; only reasoning-without-text is dead."""
+    resp = ModelResponse(
+        result=[
+            AIMessage(
+                content=[{"type": "reasoning", "reasoning": "thinking…"}, {"type": "text", "text": "the answer"}],
+                response_metadata={"finish_reason": "stop"},
+            )
+        ]
+    )
+    assert _dead_turn(resp) is None
+
+
+def test_dead_turn_detects_reasoning_blocks_with_no_text():
+    resp = ModelResponse(
+        result=[
+            AIMessage(
+                content=[{"type": "reasoning", "reasoning": "thinking…"}],
+                response_metadata={"finish_reason": "stop"},
+            )
+        ]
+    )
+    assert _dead_turn(resp) == "empty"
+
+
+def test_dead_turn_none_when_structured_response_present():
     resp = _truncated()
     resp.structured_response = {"message": "done"}
-    assert _is_truncated(resp) is False
+    assert _dead_turn(resp) is None
 
 
 # --- retry behavior ----------------------------------------------------------------
@@ -136,7 +182,7 @@ async def test_exhausts_retries_and_returns_last_truncated():
     # All attempts truncated: original + 2 retries, and the (still truncated) response is
     # returned so the downstream guard can surface an honest failure.
     assert len(handler.requests) == 3
-    assert _is_truncated(resp)
+    assert _dead_turn(resp) == "truncated"
 
 
 @pytest.mark.asyncio
@@ -158,3 +204,41 @@ def test_sync_recovers_after_one_truncation():
 
     assert resp.result[0].content == "sync recovered"
     assert len(handler.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_empty_reasoning_turn_is_nudged_and_recovered():
+    """The observed failure: a whole turn spent thinking, and "Task completed successfully".
+
+    It never hit the token budget, so the truncation signature (`finish_reason ==
+    "length"`) does not apply — and the turn used to sail through as a success.
+    """
+    handler = _AsyncHandler([_reasoned_but_empty(), _complete("login: aartaria")])
+    request = _FakeRequest()
+
+    response = await ContinueOnTruncationMiddleware().awrap_model_call(request, handler)
+
+    assert response.result[0].content == "login: aartaria"
+    assert len(handler.requests) == 2
+    assert "EMPTY" in handler.requests[1].messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_an_empty_turn_does_not_buy_more_thinking_budget():
+    """More budget is the remedy for a cutoff, not for a turn that stopped early."""
+    handler = _AsyncHandler([_reasoned_but_empty(), _complete()])
+    request = _FakeRequest(model_settings={"max_tokens": 8192})
+
+    await ContinueOnTruncationMiddleware().awrap_model_call(request, handler)
+
+    assert handler.requests[1].model_settings == {"max_tokens": 8192}
+
+
+@pytest.mark.asyncio
+async def test_a_cutoff_still_buys_more_budget():
+    handler = _AsyncHandler([_truncated(), _complete()])
+    request = _FakeRequest(model_settings={"max_tokens": 8192})
+
+    await ContinueOnTruncationMiddleware().awrap_model_call(request, handler)
+
+    assert handler.requests[1].model_settings["max_tokens"] > 8192

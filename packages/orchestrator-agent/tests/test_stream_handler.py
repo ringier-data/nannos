@@ -186,13 +186,18 @@ class TestParseAgentResponse:
         assert response.content == "Answer 2"
 
     def test_parse_agent_response_with_empty_content(self):
-        """Test parsing AI message with empty content."""
+        """An AI turn with nothing in it is not a completed answer.
+
+        It used to report `completed` with empty content, which the executor then
+        filled in with "Task completed successfully".
+        """
         final_state = {"messages": [HumanMessage(content="Test"), AIMessage(content="")]}
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.TASK_STATE_COMPLETED
-        assert response.content == ""
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert response.content
+        assert response.metadata and response.metadata.get("empty_response") is True
 
     def test_parse_agent_response_truncated_turn_not_faked_as_completed(self):
         """A turn cut off mid-generation (finish_reason=length, no tool call, no structured
@@ -211,19 +216,43 @@ class TestParseAgentResponse:
         assert response.content != "Task completed successfully"
         assert response.metadata and response.metadata.get("truncated") is True
 
-    def test_parse_agent_response_empty_but_not_truncated_stays_completed(self):
-        """An empty completion that stopped normally (finish_reason=stop) is a real empty
-        answer, not a truncation — it stays completed."""
+    def test_parse_agent_response_reasoning_only_turn_is_not_a_success(self):
+        """A clean stop that spent the whole turn thinking produced no answer.
+
+        Observed with 69/69 output tokens billed as reasoning: the turn never hit the
+        budget, so the truncation signature does not apply, and it reached the user as
+        "Task completed successfully" with nothing above it.
+        """
         final_state = {
             "messages": [
                 HumanMessage(content="Test"),
-                AIMessage(content="", response_metadata={"finish_reason": "stop"}),
+                AIMessage(
+                    content="",
+                    additional_kwargs={"reasoning_content": "**Confirming GitHub User**…"},
+                    response_metadata={"finish_reason": "stop"},
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert response.content != "Task completed successfully"
+        assert response.metadata and response.metadata.get("empty_response") is True
+
+    def test_parse_agent_response_a_turn_with_text_is_still_completed(self):
+        """Only a turn with nothing to show is flagged; a real answer is untouched."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Test"),
+                AIMessage(content="here is the answer", response_metadata={"finish_reason": "stop"}),
             ]
         }
 
         response = StreamHandler.parse_agent_response(final_state)
 
         assert response.state == TaskState.TASK_STATE_COMPLETED
+        assert response.content == "here is the answer"
 
 
 class TestStreamHandlerEdgeCases:

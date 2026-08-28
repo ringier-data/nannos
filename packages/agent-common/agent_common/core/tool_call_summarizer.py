@@ -153,23 +153,16 @@ def _resume_pending() -> bool:
     raising), which makes any summary computed for it pure waste — and it sits
     on the critical path between the user's click and the tool actually running.
 
-    Read-only probe of the same scratchpad ``interrupt()`` itself reads
-    (``langgraph.types.interrupt``): a recorded ``resume`` value, or a queued
-    null-resume peeked WITHOUT consuming it. Private LangGraph internals, so any
-    failure answers "not resuming" and we summarize exactly as before.
+    Indexed, not truthy: ``scratchpad.resume`` is the replay LOG of everything the
+    task has already answered, so testing it for emptiness reported "resuming" for
+    every interrupt after the first. A multi-round PTC ``eval`` raises a fresh card
+    each round, and from the second round on it silently lost its summaries — the
+    cards whose raw args are least self-explanatory. See
+    ``agent_common.core.hitl_resume.resume_will_return``.
     """
-    try:
-        from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
-        from langgraph.config import get_config
+    from agent_common.core.hitl_resume import resume_will_return
 
-        scratchpad = get_config()["configurable"][CONFIG_KEY_SCRATCHPAD]
-        if scratchpad.resume:
-            return True
-        # consume=False — taking the value here would starve the real interrupt.
-        return scratchpad.get_null_resume(False) is not None
-    except Exception:  # noqa: BLE001 — best-effort probe; never block the interrupt
-        logger.debug("Resume probe unavailable; summarizing as usual", exc_info=True)
-        return False
+    return resume_will_return()
 
 
 async def attach_summaries(
