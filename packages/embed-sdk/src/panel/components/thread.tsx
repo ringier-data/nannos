@@ -551,6 +551,18 @@ function PendingApprovalCard({ toolCallId }: { toolCallId: string }) {
   return <ApprovalCard interrupt={interrupt} />;
 }
 
+/**
+ * A `dynamic-tool` part the PANEL answers, not the user: the client-action round
+ * trip the SDK executes and auto-resumes (`a2a-transport`'s
+ * `_clientActionRequest`). It pauses through the same interrupt machinery as a
+ * real approval, so every place that reads a decision out of a tool part has to
+ * exclude it — no card, no receipt, and no "approved" in the folded count.
+ */
+function isClientActionRoundTrip(part: MessagePart): boolean {
+  if (part.type !== 'dynamic-tool') return false;
+  return Boolean((part.input as { _clientActionRequest?: boolean } | undefined)?._clientActionRequest);
+}
+
 function renderAssistantPart(
   part: MessagePart,
   send: UseNannosChatValue['send'],
@@ -654,8 +666,7 @@ function renderAssistantPart(
     // when the card was docked in the panel and survived independently; now the
     // card is the thread's job and the only way to answer, so hiding it behind
     // the raw part left a dev-mode session unable to decide anything.
-    const isRoundTrip = (part.input as { _clientActionRequest?: boolean } | undefined)
-      ?._clientActionRequest;
+    const isRoundTrip = isClientActionRoundTrip(part);
     let endUser: ReactNode = null;
     if (part.state === 'approval-requested') {
       // Client-action round trips pause here too, but the SDK answers those
@@ -665,8 +676,12 @@ function renderAssistantPart(
       // The turn pauses at the card and resumes with more steps: without a line
       // in between, a reader cannot tell why the work broke off or that they
       // decided anything.
-      const outcome: ReceiptOutcome | null =
-        part.state === 'output-available'
+      // ...and a settled round trip leaves no receipt either: "Approved
+      // client_action" describes work the SDK answered on its own, not a decision
+      // the user made.
+      const outcome: ReceiptOutcome | null = isRoundTrip
+        ? null
+        : part.state === 'output-available'
           ? 'approved'
           : part.state === 'output-denied'
             ? 'rejected'
@@ -809,6 +824,10 @@ function countDecisions(parts: ActivityPart[], strings: ReturnType<typeof useStr
   let rejected = 0;
   for (const part of parts) {
     if (part.type !== 'dynamic-tool') continue;
+    // The panel settles client-action round trips itself (and `allow-edits`
+    // auto-applies to `output-available` too), so counting them read "2 approved"
+    // at a user who was never asked anything.
+    if (isClientActionRoundTrip(part)) continue;
     if (part.state === 'output-available') approved += 1;
     else if (part.state === 'output-denied') rejected += 1;
   }

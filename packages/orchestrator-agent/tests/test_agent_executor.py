@@ -1176,6 +1176,69 @@ class TestExtractHitlDecisions:
         assert "skipped the authorization" in decisions[0]["message"]
         assert "not now" in decisions[0]["message"]
 
+    def test_an_unreadable_verdict_rejects_instead_of_sending_no_decisions(self, dynamodb_table):
+        """`{"decisions": []}` against a pending call kills the turn in the HITL count check.
+
+        A verdict this build does not know ("skip-for-now" from a newer client) is
+        neither approved nor declined, so nothing filled the list — and
+        `ConditionalHumanInTheLoopMiddleware` raised "Number of decisions (0) does
+        not match (1)" where the old blanket reject had failed safe.
+        """
+        intr = self._interrupt("j" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr],
+            None,
+            query="q",
+            authorization={"decision": "skip-for-now", "message": "maybe later"},
+        )
+
+        decisions = resume_map["j" * 32]["decisions"]
+        assert [d["type"] for d in decisions] == ["reject"]
+        assert [d["id"] for d in decisions] == ["call-1"]
+        assert "NOT executed" in decisions[0]["message"]
+        assert "maybe later" in decisions[0]["message"]
+
+    def test_a_parked_client_action_survives_a_typed_message(self, dynamodb_table):
+        """The user typed instead of the SDK sending its result: no decisions at all.
+
+        The id-less fallback iterated the decision list directly, so this raised
+        `TypeError: 'NoneType' object is not iterable` — on precisely the path the
+        no-result answer exists for.
+        """
+        intr = self._interrupt(
+            "k" * 32, value={"client_action_request": {"id": "car-1", "directive": {"kind": "fill-form"}}}
+        )
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], None, query="wait, what?")
+
+        assert resume_map["k" * 32] == {"ok": False, "reason": "no-result"}
+
+    def test_the_authorization_answer_says_which_call_it_settled(self, dynamodb_table):
+        """The client sends a verdict; only the interrupt knows the blocked call.
+
+        Without the id the middleware's pre-run veto reads the "no" task-wide and
+        refuses every parallel tool call in the node.
+        """
+        auth_intr = self._interrupt(
+            "l" * 32,
+            value={
+                "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
+                "tool": "github_get_me",
+                "tool_call_id": "tc-7",
+            },
+        )
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [auth_intr], None, query="q", authorization={"decision": "declined"}
+        )
+
+        assert resume_map["l" * 32]["authorization"] == {
+            "decision": "declined",
+            "tool": "github_get_me",
+            "tool_call_id": "tc-7",
+        }
+
     def test_per_call_decisions_win_over_an_authorization_answer(self, dynamodb_table):
         """A client that sent real per-call decisions is never second-guessed."""
         intr = self._interrupt("g" * 32, action_requests=[self._ar("github_get_me", "call-1")])

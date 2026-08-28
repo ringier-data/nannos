@@ -604,6 +604,29 @@ describe('a turn interrupted by an approval', () => {
     expect(screen.getByText('Worked through 3 steps')).toBeTruthy();
   });
 
+  it('says nothing about a client-action round trip the SDK answered itself', () => {
+    // `allow-edits` settles these to `output-available` without ever asking the
+    // user, so a receipt ("Approved client_action") and a count ("1 approved")
+    // both credit them with a decision they never made.
+    const roundTrip = {
+      type: 'dynamic-tool',
+      toolCallId: 'call-2',
+      toolName: 'client_action',
+      state: 'output-available',
+      input: { directive: { kind: 'read_current_page' }, _clientActionRequest: true },
+      output: { ok: true },
+    } as NannosUIMessage['parts'][number];
+    mountThread(
+      [{ ...before, parts: [ACTIVITY, roundTrip] } as NannosUIMessage, after],
+      false,
+      () => {},
+      { layout: 'page' },
+    );
+
+    expect(screen.queryByText(/Approved client_action/)).toBeNull();
+    expect(screen.getByText('Worked through 3 steps')).toBeTruthy();
+  });
+
   it('renders a rejected call as a rejection, not an approval', () => {
     const rejected = { ...(approved as Record<string, unknown>), state: 'output-denied' };
     mountThread([{ ...before, parts: [ACTIVITY, rejected] } as NannosUIMessage, after]);

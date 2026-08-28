@@ -25,7 +25,7 @@ import {
 import { ACTIVITY_LOG_EXT, CLIENT_ACTION_EXT, HITL_EXT, INTERMEDIATE_OUTPUT_EXT } from '../core/extensions';
 import { clientActionPartId } from './approval-codec';
 import { textArrival } from './ai-types';
-import type { NannosUIMessage, ReviewConfig } from './ai-types';
+import type { NannosMessageMetadata, NannosUIMessage, ReviewConfig } from './ai-types';
 import { readAuthRequired } from './demux';
 import { labelAgentEvent, serverWireId } from './wire-log';
 
@@ -115,6 +115,24 @@ function payloadFacts(payload: Record<string, unknown> | null): PayloadFacts {
   };
 }
 
+/**
+ * How a panel-composed user row renders on restore. `context` is the default —
+ * the host-injected chip this metadata was introduced for — but a decision made
+ * in an interrupt card was persisted as a `receipt` (with its outcome), and
+ * reloading it as a chip turned "Authorized GitHub · asked Nannos to retry" into
+ * "Context: Authorized GitHub" over the agent-facing prompt.
+ */
+function injectedDisplay(
+  row: RestMessageRow,
+  label: string,
+): NonNullable<NannosMessageMetadata['display']> {
+  const kind = row.metadata?.injectedDisplayKind === 'receipt' ? 'receipt' : 'context';
+  const persisted = row.metadata?.injectedDisplayOutcome;
+  const outcome =
+    persisted === 'skipped' ? ('skipped' as const) : persisted === 'authorized' ? ('authorized' as const) : undefined;
+  return { kind, label, ...(kind === 'receipt' && outcome ? { outcome } : {}) };
+}
+
 /** Build the user message for a `role === 'user'` row. */
 function userMessage(row: RestMessageRow, index: number): NannosUIMessage {
   const parts: Part[] = [];
@@ -139,7 +157,7 @@ function userMessage(row: RestMessageRow, index: number): NannosUIMessage {
     role: 'user',
     parts,
     ...(typeof injectedDisplayText === 'string' && injectedDisplayText
-      ? { metadata: { display: { kind: 'context' as const, label: injectedDisplayText } } }
+      ? { metadata: { display: injectedDisplay(row, injectedDisplayText) } }
       : {}),
   };
 }

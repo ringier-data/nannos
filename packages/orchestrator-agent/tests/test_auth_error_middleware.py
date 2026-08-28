@@ -7,7 +7,7 @@ import pytest
 from a2a.types import TaskState
 from langchain_core.messages import ToolMessage
 
-from app.middleware.auth_error_middleware import AuthErrorDetectionMiddleware
+from app.middleware.auth_error_middleware import _RETRY, AuthErrorDetectionMiddleware
 
 
 @pytest.fixture
@@ -313,15 +313,14 @@ async def test_approved_resume_retries_the_tool(middleware):
     relaying the URL as prose.
     """
     request = _resumable_request()
-    retried = ToolMessage(content='{"login":"aartaria"}', tool_call_id="tc-resume")
-    handler = AsyncMock(return_value=retried)
 
     result = await middleware._after_auth_interrupt(
-        {"authorization": {"decision": "approved"}}, request, handler, "github_get_me"
+        {"authorization": {"decision": "approved"}}, request, "github_get_me"
     )
 
-    assert result is retried
-    handler.assert_awaited_once_with(request)
+    # The retry is asked for, not performed here: `awrap_tool_call` runs it
+    # through the SAME detection, so a still-missing credential asks again.
+    assert result is _RETRY
 
 
 @pytest.mark.asyncio
@@ -333,7 +332,6 @@ async def test_declined_resume_tells_the_model_to_stop_asking(middleware):
     result = await middleware._after_auth_interrupt(
         {"authorization": {"decision": "declined", "message": "the permissions are too wide"}},
         request,
-        handler,
         "github_get_me",
     )
 
@@ -356,9 +354,7 @@ async def test_unclear_resume_hands_the_reply_to_the_model(middleware):
     handler = AsyncMock()
 
     with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
-        result = await middleware._after_auth_interrupt(
-            "damn I missclicked, try again", request, handler, "github_get_me"
-        )
+        result = await middleware._after_auth_interrupt("damn I missclicked, try again", request, "github_get_me")
 
     handler.assert_not_awaited()
     assert isinstance(result, ToolMessage)
@@ -370,7 +366,7 @@ async def test_unclear_resume_hands_the_reply_to_the_model(middleware):
 @pytest.mark.asyncio
 async def test_unclear_resume_without_a_reply_still_reads_sensibly(middleware):
     request = _resumable_request()
-    result = await middleware._after_auth_interrupt(None, request, AsyncMock(), "github_get_me")
+    result = await middleware._after_auth_interrupt(None, request, "github_get_me")
     assert "(no reply)" in result.content
 
 
@@ -382,16 +378,11 @@ async def test_free_text_meaning_done_retries_the_tool(middleware):
     the tool again, and the whole approve/authorize round started over.
     """
     request = _resumable_request()
-    retried = ToolMessage(content='{"login":"aartaria"}', tool_call_id="tc-resume")
-    handler = AsyncMock(return_value=retried)
 
     with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="approve")):
-        result = await middleware._after_auth_interrupt(
-            "ok I logged in, go ahead", request, handler, "github_get_me"
-        )
+        result = await middleware._after_auth_interrupt("ok I logged in, go ahead", request, "github_get_me")
 
-    assert result is retried
-    handler.assert_awaited_once_with(request)
+    assert result is _RETRY
 
 
 @pytest.mark.asyncio
@@ -401,7 +392,7 @@ async def test_free_text_meaning_no_is_a_refusal(middleware):
 
     with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="reject")):
         result = await middleware._after_auth_interrupt(
-            "no, the permissions are too wide", request, handler, "github_get_me"
+            "no, the permissions are too wide", request, "github_get_me"
         )
 
     handler.assert_not_awaited()
@@ -469,7 +460,7 @@ async def test_refusal_names_the_service_not_the_sandbox(middleware):
     request = _resumable_request("eval")
 
     result = await middleware._after_auth_interrupt(
-        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval", AUTH_REQUIREMENT
+        {"authorization": {"decision": "declined"}}, request, "eval", AUTH_REQUIREMENT
     )
 
     assert "github" in result.content
@@ -484,7 +475,7 @@ async def test_refusal_forbids_claiming_the_tool_is_missing(middleware):
     request = _resumable_request("eval")
 
     result = await middleware._after_auth_interrupt(
-        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval", AUTH_REQUIREMENT
+        {"authorization": {"decision": "declined"}}, request, "eval", AUTH_REQUIREMENT
     )
 
     assert "NOT missing or unavailable" in result.content
@@ -497,7 +488,7 @@ async def test_refusal_says_nothing_rather_than_naming_plumbing(middleware):
     request = _resumable_request("eval")
 
     result = await middleware._after_auth_interrupt(
-        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval"
+        {"authorization": {"decision": "declined"}}, request, "eval"
     )
 
     assert "the call that needed it" in result.content
@@ -515,7 +506,7 @@ async def test_refusal_rules_out_remedies_that_do_not_exist_here(middleware):
     request = _resumable_request("eval")
 
     result = await middleware._after_auth_interrupt(
-        {"authorization": {"decision": "declined"}}, request, AsyncMock(), "eval", AUTH_REQUIREMENT
+        {"authorization": {"decision": "declined"}}, request, "eval", AUTH_REQUIREMENT
     )
 
     assert "personal access tokens" in result.content
@@ -531,7 +522,7 @@ async def test_pending_reply_rules_them_out_too(middleware):
 
     with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
         result = await middleware._after_auth_interrupt(
-            "hmm let me think", request, AsyncMock(), "eval", AUTH_REQUIREMENT
+            "hmm let me think", request, "eval", AUTH_REQUIREMENT
         )
 
     assert "personal access tokens" in result.content
@@ -591,3 +582,103 @@ async def test_no_authorization_answer_runs_the_tool_untouched(middleware):
 
     handler.assert_awaited_once_with(request)
     assert result is retried
+
+
+# ── A retry goes through the detection, and a "no" settles ONE call ─────────────
+#
+# Two ways the middleware used to lose track of what it was doing: an approved
+# resume called the handler directly (so a still-unauthorized retry handed the raw
+# `need-credentials` payload to the model instead of asking again), and a refusal
+# was read task-wide (so declining GitHub also refused the `web_search` running
+# beside it).
+
+NEED_CREDENTIALS = json.dumps(
+    {
+        "errorCode": "need-credentials",
+        "authorizeUrl": "https://gatana.example/oauth/gt_x/begin",
+        "message": "This tool requires secondary authorization.",
+    }
+)
+
+
+@pytest.mark.asyncio
+async def test_approved_retry_that_is_still_unauthorized_asks_again(middleware):
+    """The whole point of the loop: a second card, not a URL read out as prose."""
+    request = _resumable_request("github_get_me")
+    # The credential never appears, so both attempts come back unauthorized.
+    handler = AsyncMock(return_value=ToolMessage(content=NEED_CREDENTIALS, tool_call_id="tc-resume"))
+    asked = []
+
+    def fake_interrupt(value):
+        asked.append(value)
+        if len(asked) == 1:
+            return {"authorization": {"decision": "approved"}}
+        raise RuntimeError("interrupt raised: the card is back")
+
+    with _authorization_answer(None), patch("langgraph.types.interrupt", fake_interrupt):
+        with pytest.raises(RuntimeError, match="the card is back"):
+            await middleware.awrap_tool_call(request, handler)
+
+    assert handler.await_count == 2
+    assert len(asked) == 2
+    assert asked[1]["task_state"] == TaskState.TASK_STATE_AUTH_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_interrupt_value_carries_the_blocked_call_id(middleware):
+    """`tool_call_id` is what scopes the answer — and the auth payload's correlation id."""
+    request = _resumable_request("github_get_me")
+    handler = AsyncMock(return_value=ToolMessage(content=NEED_CREDENTIALS, tool_call_id="tc-resume"))
+    captured = []
+
+    def fake_interrupt(value):
+        captured.append(value)
+        raise RuntimeError("parked")
+
+    with _authorization_answer(None), patch("langgraph.types.interrupt", fake_interrupt):
+        with pytest.raises(RuntimeError, match="parked"):
+            await middleware.awrap_tool_call(request, handler)
+
+    assert captured[0]["tool_call_id"] == "tc-resume"
+
+
+@pytest.mark.asyncio
+async def test_refusal_does_not_veto_a_sibling_tool_call(middleware):
+    """Parallel calls share the task's resume log; the "no" belongs to one of them."""
+    sibling = MagicMock()
+    sibling.tool_call = {"name": "web_search", "args": {}, "id": "tc-other"}
+    ran = ToolMessage(content="results", tool_call_id="tc-other")
+    handler = AsyncMock(return_value=ran)
+
+    answer = {"authorization": {"decision": "declined", "message": "No way", "tool_call_id": "tc-resume"}}
+    with _authorization_answer(answer):
+        result = await middleware.awrap_tool_call(sibling, handler)
+
+    handler.assert_awaited_once_with(sibling)
+    assert result is ran
+
+
+@pytest.mark.asyncio
+async def test_refusal_still_vetoes_the_call_it_was_asked_for(middleware):
+    request = _resumable_request("github_get_me")
+    handler = AsyncMock()
+
+    answer = {"authorization": {"decision": "declined", "message": "No way", "tool_call_id": "tc-resume"}}
+    with _authorization_answer(answer):
+        result = await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_not_awaited()
+    assert "DECLINED the authorization" in result.content
+
+
+@pytest.mark.asyncio
+async def test_an_answer_without_a_call_id_is_honored_as_before(middleware):
+    """An in-flight checkpoint from before the stamping must not silently run the tool."""
+    request = _resumable_request("github_get_me")
+    handler = AsyncMock()
+
+    with _authorization_answer({"authorization": {"decision": "declined"}}):
+        result = await middleware.awrap_tool_call(request, handler)
+
+    handler.assert_not_awaited()
+    assert "DECLINED the authorization" in result.content

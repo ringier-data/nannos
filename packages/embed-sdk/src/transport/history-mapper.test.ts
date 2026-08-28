@@ -157,6 +157,39 @@ describe('rowsToUIMessages', () => {
     expect(messages[0].parts[0]).toMatchObject({ type: 'text', text: 'the full instrumentation prompt' });
   });
 
+  it('restores an authorization RECEIPT as a receipt, not a context chip', () => {
+    // The panel composed this turn when the user answered an auth card. Restored
+    // as a chip it read "Context: Authorized GitHub" with the agent-facing prompt
+    // behind a chevron, instead of the muted receipt line the live thread shows.
+    const messages = rowsToUIMessages([
+      userRow(0, 'I have authorized GitHub, please try again.', {
+        injectedDisplayText: 'Authorized GitHub',
+        injectedDisplayKind: 'receipt',
+        injectedDisplayOutcome: 'authorized',
+      }),
+    ]);
+    expect(messages[0].metadata?.display).toEqual({
+      kind: 'receipt',
+      label: 'Authorized GitHub',
+      outcome: 'authorized',
+    });
+  });
+
+  it('restores a skipped receipt with its outcome', () => {
+    const messages = rowsToUIMessages([
+      userRow(0, 'I will not authorize that.', {
+        injectedDisplayText: 'Skipped GitHub',
+        injectedDisplayKind: 'receipt',
+        injectedDisplayOutcome: 'skipped',
+      }),
+    ]);
+    expect(messages[0].metadata?.display).toEqual({
+      kind: 'receipt',
+      label: 'Skipped GitHub',
+      outcome: 'skipped',
+    });
+  });
+
   it('drops task rows and rows with nothing displayable; sorts by time', () => {
     const rows: RestMessageRow[] = [
       finalRow(2, 'answer'),

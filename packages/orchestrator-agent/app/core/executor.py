@@ -26,9 +26,11 @@ from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.core.hitl_resume import (
     KIND_AUTH,
+    NOT_APPROVED_CLAUSE,
     classify_reply,
     interrupt_kind,
     name_or_nothing,
+    reject_decisions,
     structural_decisions,
 )
 from agent_common.models.base import ModelType, ThinkingLevel
@@ -78,6 +80,15 @@ from .steering_state import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# An authorization answer whose verdict this build cannot read, delivered where a
+# tool APPROVAL was the pending question. Neither yes nor no, so the call must not
+# run — and the model has to be told, or it assumes the call succeeded.
+_UNREADABLE_AUTHORIZATION_MESSAGE = (
+    "The user's answer to the authorization prompt could not be read as an approval "
+    "of this call, so it was NOT executed. Ask for it again if it is still needed. "
+    + NOT_APPROVED_CLAUSE
+)
 
 # Bounded re-entries to recover from an "eager completion" where the model sets
 # include_subagent_output=true but never actually delegated (no `task` call).
@@ -304,6 +315,18 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     # the synthetic blanket reject `_extract_hitl_decisions` falls back
                     # to is safe but tells the model nothing it can act on.
                     translated = structural_decisions({"authorization": authorization}, action_requests)
+                    if not translated and not per:
+                        # A verdict this build does not recognize reads as neither
+                        # approved nor declined, and `{"decisions": []}` against N
+                        # pending calls kills the turn in the HITL middleware's count
+                        # check ("Number of decisions (0) does not match"). An
+                        # explicit rejection carrying the user's words is the same
+                        # fail-safe `main` had, and the model can act on it.
+                        translated = reject_decisions(
+                            action_requests,
+                            _UNREADABLE_AUTHORIZATION_MESSAGE
+                            + (f" They said: {authorization.get('message')}" if authorization.get("message") else ""),
+                        )
                     if translated:
                         per = translated
                 resume_map[intr.id] = {"decisions": per}
@@ -320,8 +343,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 decision = decisions_by_id.get(request.get("id"))
                 if not isinstance(decision, dict) or "client_action_result" not in decision:
                     # Id-less fallback: a single result-bearing decision still resolves.
+                    # `hitl_decisions` is None whenever the client sent no decisions
+                    # DataPart at all — the user typed a message while the round trip
+                    # was parked, which is precisely the case this fallback is for.
                     decision = next(
-                        (d for d in hitl_decisions if isinstance(d, dict) and "client_action_result" in d),
+                        (d for d in (hitl_decisions or []) if isinstance(d, dict) and "client_action_result" in d),
                         None,
                     )
                 result = decision.get("client_action_result") if isinstance(decision, dict) else None
@@ -343,10 +369,19 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # them (there is nothing better placed to judge "ok done" against
                 # "no, those scopes are too wide").
                 if authorization:
-                    resume_map[intr.id] = {"authorization": authorization}
+                    # Stamp WHICH call the answer settles. The client only sends a
+                    # verdict; the interrupt knows the blocked call, and without
+                    # that id the middleware's pre-run veto applies a "no" to every
+                    # parallel tool call in the node, not just the one that asked.
+                    settled = dict(authorization)
+                    for key in ("tool", "tool_call_id"):
+                        if intr_value.get(key) and not settled.get(key):
+                            settled[key] = intr_value[key]
+                    resume_map[intr.id] = {"authorization": settled}
                     logger.info(
                         f"Resuming auth interrupt {intr.id} with an explicit "
-                        f"'{authorization.get('decision')}' decision"
+                        f"'{settled.get('decision')}' decision for call "
+                        f"{settled.get('tool_call_id') or '(unknown)'}"
                     )
                 else:
                     resume_map[intr.id] = query
