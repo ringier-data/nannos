@@ -548,9 +548,17 @@ describe('a turn interrupted by an approval', () => {
     expect(toolBox()).toBeNull();
   });
 
-  it('folds the acknowledgement into the step group on a page', () => {
+  it('folds the receipt into the step group, and counts it in the label', () => {
     mountThread([before, after], false, () => {}, { layout: 'page' });
-    // Two labels + the decision = one run of three machine lines.
+    // Two labels + the decision = one run of three machine lines. The decision
+    // is counted in the collapsed label so it does not vanish behind the
+    // chevron unannounced.
+    expect(screen.getByText('Worked through 3 steps · 1 approved')).toBeTruthy();
+  });
+
+  it('leaves the label alone for a group with no decisions in it', () => {
+    const plain: NannosUIMessage = { id: 'msg-0', role: 'assistant', parts: [ACTIVITY, ACTIVITY] };
+    mountThread([plain, after], false, () => {}, { layout: 'page' });
     expect(screen.getByText('Worked through 3 steps')).toBeTruthy();
   });
 
