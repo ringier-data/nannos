@@ -552,9 +552,17 @@ class MessagesService:
             # Parts are usually ProtoJSON dicts (retrieved from the DB) but may be
             # protobuf Part objects in-memory. A2A v1.0+ file parts carry the URI in
             # the `url` field (top-level in ProtoJSON; the `url` oneof on a Part).
+            # User uploads persisted through the v0.3 pydantic models carry it
+            # nested instead: {"kind": "file", "file": {"uri": ..., "mime_type": ...}}.
+            # Both shapes must come back presigned, or the browser is handed a
+            # bare storage URI it cannot load.
             is_dict = isinstance(part, dict)
+            nested: dict | None = None
             if is_dict:
                 uri = part.get("url")
+                if not uri and isinstance(part.get("file"), dict) and isinstance(part["file"].get("uri"), str):
+                    nested = part["file"]
+                    uri = nested["uri"]
             else:
                 uri = part.url if part.WhichOneof("content") == "url" else None
 
@@ -562,28 +570,27 @@ class MessagesService:
                 updated_parts.append(part)
                 continue
 
-            # Check if URI is an S3 URL (s3://bucket/key/...)
-            if uri.startswith("s3://"):
-                # Always regenerate presigned URLs for S3 URIs
+            # A storage URI — s3://bucket/key on S3, file://bucket/key in local
+            # mode — is never loadable by a browser; always mint a fresh URL.
+            if uri.startswith(("s3://", "file://")):
                 try:
-                    # Parse s3://bucket/key... to extract key part
-                    parts_list = uri.split("/", 3)  # Split to get at most 4 parts
+                    parts_list = uri.split("/", 3)  # scheme:, '', bucket, key
                     if len(parts_list) >= 4:
-                        # Format: s3://bucket/key/file -> reconstruct as bucket/key/file
                         bucket = parts_list[2]
                         key = "/".join(parts_list[3:])
 
-                        # Generate fresh presigned URL
                         presigned_url = await storage.generate_presigned_get_url(key)
-                        if is_dict:
+                        if nested is not None:
+                            nested["uri"] = presigned_url
+                        elif is_dict:
                             part["url"] = presigned_url
                         else:
                             part.url = presigned_url
-                        logger.debug(f"Regenerated presigned URL for S3 file: s3://{bucket}/{key}")
+                        logger.debug(f"Regenerated presigned URL for stored file: {bucket}/{key}")
                     else:
-                        logger.warning(f"Invalid S3 URI format: {uri}")
+                        logger.warning(f"Invalid storage URI format: {uri}")
                 except Exception as e:
-                    logger.warning(f"Failed to regenerate presigned URL for S3 URI {uri}: {e}")
+                    logger.warning(f"Failed to regenerate presigned URL for {uri}: {e}")
 
             updated_parts.append(part)
 
