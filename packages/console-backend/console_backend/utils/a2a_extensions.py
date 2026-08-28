@@ -17,6 +17,7 @@ SUPPORTED_A2A_EXTENSIONS = [
     "urn:nannos:a2a:human-in-the-loop:1.0",
     "urn:nannos:a2a:conversation-origin:1.0",
     "urn:nannos:a2a:client-action:1.0",
+    "urn:nannos:a2a:in-task-auth:1.0",
 ]
 
 X_A2A_EXTENSIONS_HEADER = ", ".join(SUPPORTED_A2A_EXTENSIONS)
