@@ -26,6 +26,7 @@ from agent_common.core.tool_catalogue import (
     build_server_catalogue,
     compute_interface_hash,
     make_catalogue_tool,
+    sanitize_tool_name,
 )
 
 SCHEMA = {
@@ -87,6 +88,65 @@ class TestRepresentation:
         ]
         cat = build_server_catalogue("s", tools, source="stateless")
         assert cat.tools["dup"].card.description == "first"
+
+
+class TestNameSanitisation:
+    """A tool's exposed name must survive PTC's ``tools.<camelCase(name)>`` namespace."""
+
+    @pytest.mark.parametrize(
+        ("wire", "exposed"),
+        [
+            ("authrion-atp-v1_okrs.v1.search_okrs", "authrion-atp-v1_okrs_v1_search_okrs"),
+            ("plain_tool", "plain_tool"),
+            ("kebab-tool", "kebab-tool"),
+            ("has space", "has_space"),
+            ("2fa_check", "_2fa_check"),
+            ("-leading", "_leading"),
+        ],
+    )
+    def test_exposed_name_folds_ptc_hostile_characters(self, wire, exposed):
+        assert sanitize_tool_name(wire) == exposed
+        assert sanitize_tool_name(exposed) == exposed, "idempotent"
+
+    def test_sanitised_names_are_valid_js_identifiers_after_camel_casing(self):
+        from langchain_quickjs._prompt import is_valid_ptc_tool_name
+
+        for wire in ("authrion-atp-v1_okrs.v1.search_okrs", "a.b.c", "2fa_check", "-leading", "weird!name"):
+            assert is_valid_ptc_tool_name(sanitize_tool_name(wire)), wire
+
+    def test_catalogue_exposes_the_sanitised_name_and_keeps_the_wire_name(self):
+        cat = _catalogue("okrs.v1.search_okrs")
+        (entry,) = cat.tools.values()
+        assert entry.name == "okrs_v1_search_okrs"
+        assert entry.call_name == "okrs.v1.search_okrs"
+        assert "okrs_v1_search_okrs" in cat.tools
+
+    def test_unsanitised_name_keeps_no_wire_name(self):
+        (entry,) = _catalogue("plain").tools.values()
+        assert entry.wire_name is None and entry.call_name == "plain"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_calls_the_server_by_its_wire_name(self):
+        (tool,) = build_lazy_tools(_catalogue("okrs.v1.search_okrs"), connection={})
+        seen: dict = {}
+
+        async def fake_coroutine(runtime=None, **arguments):
+            return ("ok", None)
+
+        def fake_convert(session, mcp_tool, **kwargs):
+            seen["mcp_tool"] = mcp_tool
+            delegate = Mock()
+            delegate.coroutine = fake_coroutine
+            return delegate
+
+        with patch(
+            "langchain_mcp_adapters.tools.convert_mcp_tool_to_langchain_tool",
+            side_effect=fake_convert,
+        ):
+            await tool.ainvoke({"q": "hi"})
+
+        assert tool.name == "okrs_v1_search_okrs", "the model sees the sanitised name"
+        assert seen["mcp_tool"].name == "okrs.v1.search_okrs", "the server is called by its own name"
 
 
 class TestLazyMcpTool:

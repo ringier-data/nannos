@@ -183,6 +183,63 @@ class TestRegistryService:
             assert local_agent.model_name == "gpt-4o"
 
     @pytest.mark.asyncio
+    async def test_stored_whitelists_are_sanitised_to_exposed_tool_names(self, mock_registry_service):
+        """A whitelist naming a tool in its wire form arrives as the name the catalogue exposes.
+
+        The gateway lists dotted names; the catalogue exposes them with the dots folded
+        (see ``sanitize_tool_name``), so a setting saved from the console's raw listing
+        would otherwise match nothing at all.
+        """
+        mock_sub_agents_response = {
+            "items": [
+                {
+                    "id": 2,
+                    "name": "okr-analyst",
+                    "description": "Reads OKRs",
+                    "owner_user_id": "test-user",
+                    "type": "local",
+                    "current_version": 1,
+                    "default_version": 1,
+                    "config_version": {
+                        "id": 2,
+                        "sub_agent_id": 2,
+                        "version": 1,
+                        "description": "Reads OKRs",
+                        "model": "gpt-4o",
+                        "system_prompt": "You read OKRs.",
+                        "mcp_tools": ["authrion-atp-v1_okrs.v1.search_okrs", "gcal_list_events"],
+                        "status": "approved",
+                        "created_at": "2024-01-01T00:00:00",
+                    },
+                    "created_at": "2024-01-01T00:00:00",
+                    "updated_at": "2024-01-01T00:00:00",
+                }
+            ],
+            "total": 1,
+        }
+        mock_settings_response = {
+            "data": {
+                "user_id": "test-user-id",
+                "sub": "test-user-sub",
+                "language": "en",
+                "custom_prompt": None,
+                "timezone": "Europe/Zurich",
+                "mcp_tools": ["authrion-atp-v1_okrs.v1.search_okrs", "gcal_list_events"],
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        }
+
+        with mock_registry_service(mock_sub_agents_response, mock_settings_response) as registry_service:
+            user = await registry_service.get_user(user_sub="test-user-sub", access_token="test-token")
+
+        assert user.tool_names == ["authrion-atp-v1_okrs_v1_search_okrs", "gcal_list_events"]
+        assert user.local_subagents[0].mcp_tools == [
+            "authrion-atp-v1_okrs_v1_search_okrs",
+            "gcal_list_events",
+        ]
+
+    @pytest.mark.asyncio
     async def test_local_agent_system_prompt_placeholders_resolved(self, mock_registry_service, monkeypatch):
         """A stored local-agent prompt has its {{CONSOLE_FRONTEND_URL}} placeholder resolved."""
         monkeypatch.setenv("CONSOLE_FRONTEND_URL", "https://console.example.com")

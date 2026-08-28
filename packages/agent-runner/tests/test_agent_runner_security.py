@@ -25,6 +25,37 @@ def agent_runner():
         return runner
 
 
+class TestFetchSubAgentConfig:
+    """The job's stored tool whitelist enters the run here, in the catalogue's name space."""
+
+    @pytest.mark.asyncio
+    async def test_whitelist_is_sanitised_to_exposed_tool_names(self, agent_runner):
+        """A stored wire name (dots and all) arrives as the name the catalogue exposes it under."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "type": "automated",
+            "name": "okr-watch",
+            "config_version": {
+                "id": 7,
+                "system_prompt": "You read OKRs.",
+                "model": "claude-sonnet-4.6",
+                "mcp_tools": ["authrion-atp-v1_okrs.v1.search_okrs", "gcal_list_events"],
+            },
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = await agent_runner._fetch_sub_agent_config(7, "my-token")
+
+        assert cfg["mcp_tools"] == ["authrion-atp-v1_okrs_v1_search_okrs", "gcal_list_events"]
+
+
 class TestFetchUserIdFromBackend:
     """Security: user_id must come from verified backend response."""
 

@@ -50,6 +50,7 @@ from agent_common.core.model_factory import (
 )
 from agent_common.core.stream_watchdog import watch_stream_with_resume
 from agent_common.core.token_provider import DEFAULT_LEEWAY_S, UserTokenProvider
+from agent_common.core.tool_catalogue import sanitize_tool_name
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Struct
 from object_storage import get_object_storage_service
@@ -795,7 +796,11 @@ class AgentRunner(BaseAgent):
             "sub_agent_config_version_id": cfg_version.get("id"),
             "description": cfg_version.get("description", ""),
             "system_prompt": cfg_version.get("system_prompt", ""),
-            "mcp_tools": cfg_version.get("mcp_tools") or [],
+            # Sanitised here, the boundary where the job's whitelist enters the run: a
+            # stored name may be a tool's wire name, while the catalogue exposes it under
+            # its sanitised one (see ``sanitize_tool_name``). Everything downstream then
+            # compares exposed names only.
+            "mcp_tools": [sanitize_tool_name(n) for n in (cfg_version.get("mcp_tools") or [])],
             # Prefer effective_model: the backend (annotate_models) resolves a tier-bound config
             # (model is None, model_tier set) to its current alias here, so a tier-bound sub-agent
             # honors its tier instead of silently falling back to the standard default.

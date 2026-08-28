@@ -24,6 +24,15 @@ another — so there is deliberately no process-wide catalogue registry: each us
 own their catalogue's bytes for as long as the per-user discovery cache holds them, and
 nothing may answer *which tools exist* except a listing made with that user's own token.
 
+Names have two spaces, and the split lives here. A tool is **exposed** under
+``sanitize_tool_name(wire_name)`` — the wire name with characters that PTC's
+``tools.<camelCase(name)>`` namespace cannot express folded away — and is **called** by
+its wire name (``CatalogueTool.call_name``). Ingest is the only place that sanitises a
+tool name, and the config boundary where a stored whitelist enters a process (orchestrator
+``registry``, agent-runner's job config) is the only place that sanitises a whitelist;
+everything in between — binding, PTC exposure, whitelist filtering, catalogue lookups —
+compares exposed names and nothing else.
+
 Dispatch delegates to ``langchain_mcp_adapters`` on first invocation: the one tool
 being called is rebuilt as an ``mcp.types.Tool`` (a single small pydantic object) and
 converted with ``convert_mcp_tool_to_langchain_tool`` so interceptors, progress
@@ -35,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -56,6 +66,36 @@ def canonical_bytes(value: Any) -> bytes:
     Canonical so identical schemas hash identically regardless of ingest source.
     """
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+# Characters a tool name may keep when it is exposed to an agent; everything else is
+# folded to "_" at ingest. A PTC agent reaches its tools as ``tools.<camelCase(name)>``
+# and ``langchain_quickjs`` SKIPS any tool whose camelCase name is not a valid JS
+# identifier — its only word separators are "-" and "_". The gateway serves dotted names
+# (``authrion-atp-v1_okrs.v1.search_okrs``), which camelCase to
+# ``authrionAtpV1Okrs.v1.searchOkrs``: not an identifier, so all 29 tools of that server
+# were in the catalogue yet invisible to the orchestrator and to every sub-agent, which
+# then reported them as non-existent (2026-08-28). Sanitising here — the one seam every
+# ingest path goes through — keeps the catalogue, the model-facing name and the PTC
+# namespace in agreement; the original name is kept as ``wire_name`` for dispatch.
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def sanitize_tool_name(name: str) -> str:
+    """The name a tool is exposed under: its wire name with PTC-hostile characters folded to "_".
+
+    Idempotent, so a name that is already exposed-form passes through untouched — which is
+    what lets the config boundaries apply it to every stored whitelist blindly: a setting
+    saved before this existed still matches the tool it enabled.
+    """
+    safe = _UNSAFE_NAME_CHARS.sub("_", name)
+    # A JS identifier may not start with a digit, and a leading "-" survives camelCasing
+    # only when a lowercase letter follows. Neither occurs in a gateway name today.
+    if safe[:1].isdigit():
+        safe = f"_{safe}"
+    elif safe.startswith("-"):
+        safe = f"_{safe[1:]}"
+    return safe
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,10 +121,19 @@ class CatalogueTool:
     output_schema_bytes: bytes | None = None
     annotations: dict[str, Any] | None = None
     meta: dict[str, Any] | None = None
+    # The upstream name, set only when it differs from the exposed one (see
+    # ``sanitize_tool_name``). Dispatch must use it: the server knows the tool by the name
+    # it listed, not by the name we show the model.
+    wire_name: str | None = None
 
     @property
     def name(self) -> str:
         return self.card.name
+
+    @property
+    def call_name(self) -> str:
+        """The name to call on the MCP server — the upstream one when it was sanitised."""
+        return self.wire_name or self.card.name
 
     def decode_schema(self) -> dict[str, Any]:
         schema = json.loads(self.schema_bytes)
@@ -137,8 +186,11 @@ def make_catalogue_tool(
     schema: Mapping[str, Any] = (
         input_schema if isinstance(input_schema, Mapping) else {"type": "object", "properties": {}}
     )
+    exposed_name = sanitize_tool_name(name)
+    if exposed_name != name:
+        logger.debug("Exposing MCP tool '%s' of '%s' as '%s'", name, server_name, exposed_name)
     card = ToolCard(
-        name=name,
+        name=exposed_name,
         description=description or "",
         param_names=_param_names(schema),
         server_name=server_name,
@@ -149,6 +201,7 @@ def make_catalogue_tool(
         output_schema_bytes=canonical_bytes(output_schema) if isinstance(output_schema, Mapping) else None,
         annotations=dict(annotations) if isinstance(annotations, Mapping) and annotations else None,
         meta=dict(meta) if isinstance(meta, Mapping) and meta else None,
+        wire_name=name if exposed_name != name else None,
     )
 
 
@@ -176,10 +229,15 @@ def build_server_catalogue(
     by_name: dict[str, CatalogueTool] = {}
     for tool in tools:
         if tool.name in by_name:
+            # Two upstream names can collide once sanitised ("a.b" and "a_b"): say which
+            # wire names were involved, or the drop looks like the server listing a tool
+            # twice.
             logger.warning(
-                "Duplicate tool name '%s' on server '%s' — keeping the first",
+                "Duplicate tool name '%s' on server '%s' — keeping the first (wire names: '%s', '%s')",
                 tool.name,
                 server_name,
+                by_name[tool.name].call_name,
+                tool.call_name,
             )
             continue
         by_name[tool.name] = tool
@@ -268,7 +326,8 @@ class LazyMcpTool(BaseTool):
             if not isinstance(input_schema, dict):  # pragma: no cover — always a dict for catalogue tools
                 input_schema = entry.decode_schema()
             mcp_tool = MCPTool(
-                name=entry.name,
+                # The server's own name for the tool; ``self.name`` may be the sanitised one.
+                name=entry.call_name,
                 description=entry.card.description or None,
                 inputSchema=input_schema,
                 annotations=entry.annotations,  # type: ignore[arg-type]
