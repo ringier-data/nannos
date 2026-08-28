@@ -582,7 +582,8 @@ class StreamHandler:
         # normally recovers this in-turn; if it's still truncated here every nudge-retry was
         # exhausted. Surface that honestly (input_required, so the user can ask to continue)
         # instead of laundering it into "Task completed successfully".
-        if StreamHandler._current_turn_truncated(messages):
+        dead_turn = StreamHandler._current_turn_produced_nothing(messages)
+        if dead_turn == "truncated":
             logger.warning("[STREAM HANDLER] Current turn truncated (finish_reason=length) and unrecovered")
             return AgentStreamResponse(
                 state=TaskState.TASK_STATE_INPUT_REQUIRED,
@@ -591,6 +592,19 @@ class StreamHandler:
                     "and I'll pick up where I left off."
                 ),
                 metadata={"truncated": True},
+            )
+        if dead_turn == "empty":
+            # A clean stop that spent the turn thinking and said nothing. Same dead end,
+            # reached without hitting the budget — and the one place it must not become
+            # "Task completed successfully", because nothing was completed.
+            logger.warning("[STREAM HANDLER] Current turn produced no answer (reasoning only) and unrecovered")
+            return AgentStreamResponse(
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                content=(
+                    "I finished thinking about that but did not manage to write the answer. "
+                    "Ask me again and I'll give it to you."
+                ),
+                metadata={"empty_response": True},
             )
 
         if messages:
@@ -603,19 +617,25 @@ class StreamHandler:
         return AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
 
     @staticmethod
-    def _current_turn_truncated(messages: list) -> bool:
-        """True when the current turn's last AIMessage was cut off with no usable output.
+    def _current_turn_produced_nothing(messages: list) -> str | None:
+        """Why the current turn has no answer — ``"truncated"``, ``"empty"``, or None.
 
-        Truncation signature: finish_reason == "length" (the gateway's OpenAI-compatible
-        rendering of an output-budget cutoff) with no tool call. A truncated-but-tool-calling
-        turn is a normal continuation and is not flagged.
+        Both reach here only when ``ContinueOnTruncationMiddleware`` exhausted its
+        nudge-retries, and both are otherwise laundered into "Task completed
+        successfully": a cutoff (``finish_reason == "length"``) and a clean stop that
+        produced only reasoning. A turn that made a tool call is a normal continuation
+        and is never flagged.
         """
+        from agent_common.middleware.continue_on_truncation import _has_text
+
         for msg in reversed(StreamHandler._extract_current_turn_messages(messages)):
             if isinstance(msg, AIMessage):
                 if getattr(msg, "tool_calls", None):
-                    return False
-                return getattr(msg, "response_metadata", {}).get("finish_reason") == "length"
-        return False
+                    return None
+                if getattr(msg, "response_metadata", {}).get("finish_reason") == "length":
+                    return "truncated"
+                return None if _has_text(msg) else "empty"
+        return None
 
     @staticmethod
     def build_working_response(content: str, metadata: Optional[Dict[str, Any]] = None) -> AgentStreamResponse:
