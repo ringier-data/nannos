@@ -371,7 +371,7 @@ class TestClientObjectsInjection:
         addendum = middleware._build_preferences_addendum(self._context(client_objects=self.MANIFEST))
         assert "<client_objects>" not in addendum
 
-    def test_manifest_rides_human_message_prefs_stay_in_system(self, middleware):
+    def test_manifest_is_trailing_message_prefs_stay_in_system(self, middleware):
         from langchain_core.messages import HumanMessage
 
         ctx = self._context(client_objects=self.MANIFEST)
@@ -385,10 +385,12 @@ class TestClientObjectsInjection:
         assert "<user_preferences>" in sys_str
         assert "German" in sys_str
         assert "<client_objects>" not in sys_str
-        # Manifest rides the human message.
-        assert "<client_objects>" in str(out.messages[0].content)
+        # The user's message is untouched; the manifest is the trailing flagged message.
+        assert out.messages[0].content == "do it"
+        assert "<client_objects>" in str(out.messages[-1].content)
+        assert out.messages[-1].additional_kwargs.get("volatile_context") is True
 
-    def test_manifest_falls_back_to_system_without_human_message(self, middleware):
+    def test_manifest_appended_even_without_human_message(self, middleware):
         from langchain_core.messages import AIMessage
 
         ctx = self._context(client_objects=self.MANIFEST)
@@ -396,7 +398,8 @@ class TestClientObjectsInjection:
             ctx, [AIMessage(content="ai")], system_message=SystemMessage(content="sys")
         )
         out = middleware._apply(request, ctx)
-        assert "<client_objects>" in str(out.system_message.content)
+        assert "<client_objects>" not in str(out.system_message.content)
+        assert "<client_objects>" in str(out.messages[-1].content)
 
     def test_no_manifest_leaves_messages_untouched(self, middleware):
         from langchain_core.messages import HumanMessage
@@ -409,7 +412,7 @@ class TestClientObjectsInjection:
         assert out.messages[0].content == "do it"
         assert "<client_objects>" not in str(out.messages[0].content)
 
-    def test_page_context_rides_human_message_before_manifest(self, middleware):
+    def test_page_context_precedes_manifest_in_trailing_message(self, middleware):
         """<current_page> follows the same volatile-context rule as the manifest,
         and precedes it (the page frames the objects on it)."""
         from langchain_core.messages import HumanMessage
@@ -423,7 +426,7 @@ class TestClientObjectsInjection:
         )
         out = middleware._apply(request, ctx)
 
-        content = str(out.messages[0].content)
+        content = str(out.messages[-1].content)
         assert "<current_page>" in content
         assert "- path: /campaigns/7" in content
         assert content.index("<current_page>") < content.index("<client_objects>")
@@ -437,6 +440,6 @@ class TestClientObjectsInjection:
             ctx, [HumanMessage(content="hi")], system_message=SystemMessage(content="sys")
         )
         out = middleware._apply(request, ctx)
-        content = str(out.messages[0].content)
+        content = str(out.messages[-1].content)
         assert "<current_page>" in content
         assert "<client_objects>" not in content

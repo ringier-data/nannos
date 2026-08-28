@@ -50,6 +50,8 @@ from typing import Any, Literal
 
 from langchain_core.messages import SystemMessage
 
+from .utils import VOLATILE_CONTEXT_KEY
+
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ModelCallResult,
@@ -195,12 +197,20 @@ def _tag_last_message(messages: list[Any], cache_control: dict[str, str]) -> lis
     no-op by identity. At model-call time the last message is normally a human turn
     or a tool result (both carry content), so a breakpoint is placed on virtually
     every turn.
+
+    Trailing *volatile context* messages (``additional_kwargs[VOLATILE_CONTEXT_KEY]``,
+    the per-call ``<current_page>``/``<client_objects>`` block) are skipped: they
+    are not checkpointed and change between calls, so a breakpoint on them would
+    never be hit. The breakpoint goes on the last persisted message in front.
     """
-    if not messages:
+    idx = len(messages) - 1
+    while idx >= 0 and (getattr(messages[idx], "additional_kwargs", None) or {}).get(VOLATILE_CONTEXT_KEY):
+        idx -= 1
+    if idx < 0:
         return messages
-    new_content = _tag_last_block(messages[-1].content, cache_control)
+    new_content = _tag_last_block(messages[idx].content, cache_control)
     if new_content is None:
         return messages
     new_messages = list(messages)
-    new_messages[-1] = messages[-1].model_copy(update={"content": new_content})
+    new_messages[idx] = messages[idx].model_copy(update={"content": new_content})
     return new_messages
