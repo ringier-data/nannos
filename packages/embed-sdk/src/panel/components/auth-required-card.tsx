@@ -30,7 +30,7 @@ import { format, useStrings } from '../../react';
 import { useDevMode } from '../dev-mode';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
 import { InterruptActions, InterruptCard, InterruptSection } from './interrupt-card';
-import { Receipt } from './receipt';
+import { Receipt, receiptHeadline } from './receipt';
 
 export interface AuthRequiredCardProps {
   data: { authUrl?: string; tool?: string; service?: string; message?: string };
@@ -72,9 +72,14 @@ export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProp
   const strings = useStrings();
   const devMode = useDevMode();
   const tool = data.tool && !OPAQUE_TOOLS.has(data.tool) ? data.tool : undefined;
+  // The same filter applies to the service: a producer that fills it in from the
+  // tool name would otherwise slip `eval` past the check that exists precisely
+  // to keep sandbox plumbing out of the user's face.
+  const service = data.service && !OPAQUE_TOOLS.has(data.service) ? data.service : undefined;
   // What to call the thing being authorized: the service the credential belongs
-  // to when the payload named one, else the tool that asked for it.
-  const subject = data.service || tool || '';
+  // to when the payload named one, else the tool that asked for it — and
+  // nothing at all when neither is fit to show.
+  const subject = service || tool || '';
 
   // `idle` until the user has been sent to the provider, `opened` once they are
   // through, and `skipped` when they walked away. Local state by design: the
@@ -118,7 +123,7 @@ export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProp
 
   const confirm = () => {
     send?.(tool ? format(CONTINUE_PROMPT_TOOL, { tool }) : CONTINUE_PROMPT, {
-      displayText: format(strings['receipt.authorized'], { subject }),
+      displayText: receiptHeadline(strings, 'authorized', subject),
       displayKind: 'receipt',
     });
     setStage('done');
@@ -130,9 +135,7 @@ export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProp
       className={className}
       icon={<ShieldCheckIcon aria-hidden="true" className="size-3.5 shrink-0" />}
       title={
-        data.service
-          ? format(strings['auth.titleService'], { service: data.service })
-          : strings['auth.title']
+        service ? format(strings['auth.titleService'], { service }) : strings['auth.title']
       }
     >
       <InterruptSection slot="nannos-auth-body">

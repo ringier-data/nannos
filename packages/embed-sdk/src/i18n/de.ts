@@ -106,6 +106,8 @@ export const de: NannosStrings = {
   'receipt.batchRejected': '{rejected} abgelehnt',
   'receipt.authorized': '{subject} freigegeben',
   'receipt.skipped': 'Freigabe für {subject} übersprungen',
+  'receipt.authorizedAny': 'Freigabe erteilt',
+  'receipt.skippedAny': 'Freigabe übersprungen',
   'receipt.undecided': 'Über {subject} wurde nie entschieden',
   'receipt.retried': 'Nannos um einen neuen Versuch gebeten',
   'receipt.risk': 'Risiko {level}',

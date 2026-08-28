@@ -1476,10 +1476,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 tool_name = metadata.get("tool") or ""
                 auth_payload = AuthPayload.for_service(
                     # The middleware knows which TOOL asked; the service behind it
-                    # is only named when the producer said so. Falling back to the
-                    # tool keeps the field truthful rather than guessing a slug out
-                    # of the name.
-                    service=metadata.get("service") or tool_name,
+                    # is a different fact, and only the producer can name it. It
+                    # stays EMPTY when unknown rather than falling back to the
+                    # tool: a `need-credentials` raised inside the sandbox is
+                    # reported against `eval`, and "Authorization needed for eval"
+                    # is worse than not naming anything at all.
+                    service=metadata.get("service") or "",
                     resource=tool_name,
                     auth_url=metadata.get("auth_url") or "",
                     description=metadata.get("message") or "",
