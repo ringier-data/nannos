@@ -21,6 +21,7 @@ from a2a.types import (
     TaskStatus,
     TaskStatusUpdateEvent,
 )
+from agent_common.a2a.authentication import AuthPayload
 from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.models.base import ModelType, ThinkingLevel
@@ -41,9 +42,11 @@ from .a2a_extensions import (
     CLIENT_ACTION_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
+    IN_TASK_AUTH_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
     new_activity_log_message,
+    new_auth_required_message,
     new_client_action_message,
     new_client_action_request_message,
     new_feedback_request_message,
@@ -1459,11 +1462,39 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # and ends on a BARE terminal status; otherwise the status carries the
             # authoritative FinalResponseSchema.message, tagged
             # `final_answer_source: "fallback"` when a partial prefix streamed too.
+            #
+            # The text is the gateway's own words, addressed to the AGENT ("You
+            # must tell the end-user to…"), so a client that renders its own copy
+            # needs the facts as data. `auth_url` / `tool` are already on the
+            # item's metadata (AgentStreamResponse.auth_required) — they simply
+            # never crossed the wire, leaving clients to scrape a URL out of the
+            # prose. With the extension negotiated they ride a DataPart instead;
+            # without it the message is exactly what it always was.
             final_answer = content if content else "Authentication is required to continue."
+            auth_message = new_text_message(final_answer, context_id=task.context_id, task_id=task.id)
+            if _ext_active(IN_TASK_AUTH_EXTENSION):
+                tool_name = metadata.get("tool") or ""
+                auth_payload = AuthPayload.for_service(
+                    # The middleware knows which TOOL asked; the service behind it
+                    # is only named when the producer said so. Falling back to the
+                    # tool keeps the field truthful rather than guessing a slug out
+                    # of the name.
+                    service=metadata.get("service") or tool_name,
+                    resource=tool_name,
+                    auth_url=metadata.get("auth_url") or "",
+                    description=metadata.get("message") or "",
+                    correlation_id=metadata.get("tool_call_id") or "",
+                ).client_payload()
+                auth_message = new_auth_required_message(
+                    final_answer,
+                    auth_payload,
+                    context_id=task.context_id,
+                    task_id=task.id,
+                )
             await self._close_streaming_artifact_and_respond(
                 updater,
                 TaskState.TASK_STATE_AUTH_REQUIRED,
-                new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
+                auth_message,
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
                 streamed_text=streamed_text,

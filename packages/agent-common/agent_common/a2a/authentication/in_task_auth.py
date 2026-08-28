@@ -155,6 +155,65 @@ class AuthPayload(BaseModel):
     )
 
 
+    def client_payload(self) -> dict:
+        """The half of this payload that may cross to an end-user client.
+
+        ``oauth2_client_config`` carries a ``client_secret``: it exists so a
+        SERVER can complete the flow, and it must never reach a browser. This
+        builds the outbound dict field by field from the requirement instead of
+        dumping the model and deleting keys — a serializer that *cannot* emit
+        the secret, rather than a convention that says not to. A field added to
+        ``OAuth2ClientConfig`` later is therefore excluded by construction.
+
+        Returned as the DataPart body of an ``auth-required`` status update
+        (see the ``in-task-auth`` A2A extension).
+        """
+        return {
+            "requires_auth": self.requires_auth,
+            "auth_requirement": self.auth_requirement.model_dump(exclude_none=True),
+            **({"session_id": self.session_id} if self.session_id else {}),
+            **({"correlation_id": self.correlation_id} if self.correlation_id else {}),
+        }
+
+    @classmethod
+    def for_service(
+        cls,
+        service: str,
+        auth_url: str = "",
+        description: str = "",
+        instructions: str = "",
+        method: str = "oauth2",
+        resource: str = "",
+        correlation_id: str = "",
+    ) -> "AuthPayload":
+        """Build the common single-method requirement.
+
+        The in-task auth an end-user actually sees is almost always one service,
+        one method, one URL — the shape the MCP gateway's ``need-credentials``
+        reports. Callers with several methods build the models directly.
+
+        ``resource`` is where the specific thing that needed the credential goes
+        (the tool call, typically): a client naming it to the user says "Nannos
+        needs your permission to use github_get_me" rather than naming the whole
+        service.
+        """
+        return cls(
+            auth_requirement=ServiceAuthRequirement(
+                service=service,
+                resource=resource or None,
+                auth_methods=[
+                    AuthenticationMethod(
+                        method=method,  # type: ignore[arg-type]
+                        description=description or f"Authentication required for {service}",
+                        auth_url=auth_url or None,
+                        instructions=instructions or None,
+                    )
+                ],
+            ),
+            correlation_id=correlation_id or None,
+        )
+
+
 __all__ = [
     "AuthenticationMethod",
     "ServiceAuthRequirement",

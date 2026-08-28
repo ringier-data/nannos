@@ -147,6 +147,35 @@ the adopting conversation only. Foundry runs are not adopted (their
 continuity is a session rid the provenance does not carry).
 """
 
+IN_TASK_AUTH_EXTENSION = "urn:nannos:a2a:in-task-auth:1.0"
+"""Structured auth payload on A2A's own ``auth-required`` task state.
+
+The STATE is protocol (``TaskState.TASK_STATE_AUTH_REQUIRED``, understood by any
+A2A client); A2A deliberately leaves the *schema* of what such a status carries
+undefined, so that schema is what this extension declares — the ``AuthPayload``
+models in ``agent_common.a2a.authentication.in_task_auth``.
+
+The extension is ADDITIVE: the status keeps its TextPart, so a client that never
+negotiated the URN sees exactly what it saw before. What it gains is a DataPart::
+
+  {
+    "requires_auth": true,
+    "auth_requirement": {
+      "service": "github",
+      "auth_methods": [{"method": "oauth2", "auth_url": "https://…", "description": "…"}],
+      "required_scopes": ["repo"]
+    },
+    "correlation_id": "<the tool call this blocked>"
+  }
+
+Only the requirement half ever crosses the wire: ``AuthPayload.client_payload()``
+cannot emit ``oauth2_client_config``, which carries a client secret.
+
+Unlike the human-in-the-loop extension this carries no ``review_configs``:
+nothing is being proposed, so there is no decision for the gateway to receive.
+The client resumes the task with a message once the user has authenticated.
+"""
+
 # Keep in sync with the repo-root a2a-extensions.json registry (pinned by
 # tests/test_a2a_extensions_conformance.py) — console-backend's negotiation
 # header and the embed SDK carry their own copies of the same list.
@@ -158,6 +187,7 @@ ALL_EXTENSIONS = [
     HUMAN_IN_THE_LOOP_EXTENSION,
     CONVERSATION_ORIGIN_EXTENSION,
     CLIENT_ACTION_EXTENSION,
+    IN_TASK_AUTH_EXTENSION,
 ]
 
 
@@ -308,6 +338,39 @@ def new_feedback_request_message(
         context_id=context_id or "",
         task_id=task_id or "",
         extensions=[FEEDBACK_REQUEST_EXTENSION],
+    )
+
+
+def new_auth_required_message(
+    description: str,
+    auth_payload: dict,
+    context_id: str | None = None,
+    task_id: str | None = None,
+) -> Message:
+    """Build the Message for an ``auth-required`` status (in-task authentication).
+
+    The message carries:
+      - A TextPart with the human-readable text — kept unconditionally, so a
+        client that never negotiated the extension is unaffected
+      - A DataPart with an ``AuthPayload.client_payload()`` body
+      - extensions=[IN_TASK_AUTH_EXTENSION] for client classification
+
+    The caller is responsible for passing a payload built by ``client_payload()``:
+    the full ``AuthPayload`` dump carries a client secret and must not be sent.
+    """
+    return Message(
+        role=Role.ROLE_AGENT,
+        parts=[
+            Part(text=description),
+            Part(
+                data=ParseDict(auth_payload, Value()),
+                metadata={"media_type": "application/json"},
+            ),
+        ],
+        message_id=str(uuid.uuid4()),
+        context_id=context_id or "",
+        task_id=task_id or "",
+        extensions=[IN_TASK_AUTH_EXTENSION],
     )
 
 
