@@ -9,6 +9,7 @@ rebuilds its own resume from the A2A DataPart).
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from a2a.types import TaskState
 from langgraph.types import Command
 
 from agent_common.a2a.base import LocalA2ARunnable
@@ -55,7 +56,42 @@ def test_interrupt_id_extracted_from_dict():
 
 
 def test_non_dict_user_decisions_become_empty_payload():
+    """A HITL resume is dict-shaped; anything else is not a decision it can use."""
     intr = SimpleNamespace(id=INTERRUPT_ID, value={})
+    cmd = _build_subagent_resume_command(_local_runnable(), intr, "not-a-dict")
+    assert cmd.resume == {INTERRUPT_ID: {}}
+
+
+def test_auth_interrupt_forwards_the_user_reply_verbatim():
+    """An auth interrupt resumes with WORDS, and they must survive the trip.
+
+    The HITL-shaped `{}` default used to swallow them: the sub-agent's auth
+    middleware then resumed with nothing to act on and fell through with the
+    stale auth error, which the sub-agent LLM relayed as prose. The sub-agent is
+    the one that has to tell "done, try again" from a refusal, so it needs them.
+    """
+    intr = SimpleNamespace(
+        id=INTERRUPT_ID,
+        value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "eval"},
+    )
+    cmd = _build_subagent_resume_command(_local_runnable(), intr, "try again I missclicked")
+    assert cmd.resume == {INTERRUPT_ID: "try again I missclicked"}
+
+
+def test_auth_interrupt_keeps_a_structured_decision():
+    """A client that negotiated the extension sends a dict, which passes through."""
+    decision = {"authorization": {"decision": "declined", "message": "scopes too wide"}}
+    intr = SimpleNamespace(
+        id=INTERRUPT_ID,
+        value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "eval"},
+    )
+    cmd = _build_subagent_resume_command(_local_runnable(), intr, decision)
+    assert cmd.resume == {INTERRUPT_ID: decision}
+
+
+def test_non_auth_interrupt_still_drops_a_non_dict_resume():
+    """The widened path is scoped to auth — HITL keeps its dict-only contract."""
+    intr = SimpleNamespace(id=INTERRUPT_ID, value={"action_requests": [{"name": "x"}]})
     cmd = _build_subagent_resume_command(_local_runnable(), intr, "not-a-dict")
     assert cmd.resume == {INTERRUPT_ID: {}}
 
