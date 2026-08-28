@@ -46,10 +46,19 @@ export type NannosDataParts = {
    *  (`notify_user`), not a machine label — the thread renders it as speech. */
   activity: { text: string; source?: string; kind?: 'note'; ts: number; wire?: string; wireId?: string };
   /** A tool needs the user's secondary authorization. The panel renders its OWN
-   *  localized prompt from `authUrl`/`tool`; `message` is the gateway's text,
-   *  addressed to the agent, kept only as a last-resort fallback and for dev
-   *  mode. Persisted. */
-  'auth-required': { authUrl?: string; tool?: string; message?: string; wire?: string; wireId?: string };
+   *  localized prompt from `authUrl`/`tool`/`service`; `message` is the gateway's
+   *  text, addressed to the agent, kept only as a last-resort fallback and for
+   *  dev mode. `service` (who the credential belongs to) arrives only from the
+   *  `in-task-auth` DataPart; `tool` (what needed it) from either that or the
+   *  status metadata. Persisted. */
+  'auth-required': {
+    authUrl?: string;
+    tool?: string;
+    service?: string;
+    message?: string;
+    wire?: string;
+    wireId?: string;
+  };
   /** Task status for the task panel. Transient. */
   task: { taskId?: string; state: string; progress?: number; title?: string };
   /** Proactive feedback prompt. Transient. */

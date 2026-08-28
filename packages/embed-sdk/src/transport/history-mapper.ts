@@ -271,6 +271,7 @@ export function rowsToUIMessages(rows: RestMessageRow[]): NannosUIMessage[] {
           ...readAuthRequired(
             text,
             facts.topMeta ?? (nested?.metadata as Record<string, unknown> | undefined),
+            nested?.parts as Array<Record<string, unknown>> | undefined,
           ),
           ...provenance,
         },
