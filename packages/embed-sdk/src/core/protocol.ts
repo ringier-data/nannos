@@ -99,9 +99,10 @@ export function getPartKind(part: unknown): 'text' | 'data' | 'file' | undefined
 export function getFileInfo(part: unknown): { uri: string; mimeType?: string; name?: string } | null {
   if (!part || typeof part !== 'object') return null;
   const p = part as Record<string, any>;
-  // v0.3: { file: { uri, mimeType, name } }
+  // v0.3: { file: { uri, mimeType, name } } — persisted rows carry the python
+  // SDK's snake_case dump (`mime_type`), so accept both spellings.
   if (p.file && typeof p.file === 'object' && typeof p.file.uri === 'string') {
-    return { uri: p.file.uri, mimeType: p.file.mimeType, name: p.file.name };
+    return { uri: p.file.uri, mimeType: p.file.mimeType ?? p.file.mime_type, name: p.file.name };
   }
   // v1.0: flat { url, mediaType, filename }
   if (typeof p.url === 'string') {

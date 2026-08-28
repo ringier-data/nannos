@@ -604,3 +604,68 @@ async def test_get_messages_propagates_db_failure():
 
     with pytest.raises(RuntimeError):
         await ms.get_messages_by_conversation("conv-1", "user-1")
+
+
+@pytest.mark.asyncio
+async def test_hydrate_nested_v03_file_part():
+    """A user upload persisted as {"kind": "file", "file": {"uri": "s3://..."}} is
+    presigned in place — the shape the browser reads (`file.uri`) is kept."""
+
+    ms = _make_messages_service()
+    mock_storage = AsyncMock()
+    mock_storage.generate_presigned_get_url = AsyncMock(return_value="https://bucket.s3.amazonaws.com/sheet.png?fresh=true")
+
+    with patch("console_backend.services.messages_service.FileStorageService") as mock_fs_class:
+        mock_fs_class.return_value = mock_storage
+        file_part = {
+            "kind": "file",
+            "file": {"uri": "s3://bucket/uploads/u1/sheet.png", "name": "sheet.png", "mime_type": "image/png"},
+        }
+        message = Message(
+            conversation_id="conv-1",
+            sort_key="MSG#1#msg-1",
+            user_id="user-1",
+            message_id="msg-1",
+            role="user",
+            parts=[{"kind": "text", "text": "a"}, file_part],
+            created_at="2025-01-01T00:00:00+00:00",
+            state=TaskState.TASK_STATE_COMPLETED,
+            metadata={},
+            ttl=0,
+        )
+
+        hydrated = await ms.hydrate_message_files(message)
+
+        assert hydrated.parts[1]["file"]["uri"] == "https://bucket.s3.amazonaws.com/sheet.png?fresh=true"
+        assert hydrated.parts[1]["file"]["mime_type"] == "image/png"
+        assert hydrated.parts[0] == {"kind": "text", "text": "a"}
+        mock_storage.generate_presigned_get_url.assert_called_once_with("uploads/u1/sheet.png")
+
+
+@pytest.mark.asyncio
+async def test_hydrate_local_file_uri():
+    """Local object storage stores file://bucket/key; it needs a download URL just like S3."""
+
+    ms = _make_messages_service()
+    mock_storage = AsyncMock()
+    mock_storage.generate_presigned_get_url = AsyncMock(return_value="http://localhost:5001/api/v1/files/download/b/k.png")
+
+    with patch("console_backend.services.messages_service.FileStorageService") as mock_fs_class:
+        mock_fs_class.return_value = mock_storage
+        message = Message(
+            conversation_id="conv-1",
+            sort_key="MSG#1#msg-1",
+            user_id="user-1",
+            message_id="msg-1",
+            role="assistant",
+            parts=[{"url": "file://b/k.png", "filename": "k.png", "mediaType": "image/png"}],
+            created_at="2025-01-01T00:00:00+00:00",
+            state=TaskState.TASK_STATE_COMPLETED,
+            metadata={},
+            ttl=0,
+        )
+
+        hydrated = await ms.hydrate_message_files(message)
+
+        assert hydrated.parts[0]["url"] == "http://localhost:5001/api/v1/files/download/b/k.png"
+        mock_storage.generate_presigned_get_url.assert_called_once_with("k.png")

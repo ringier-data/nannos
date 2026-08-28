@@ -52,6 +52,12 @@ describe('part shape normalization', () => {
 
   it('getFileInfo normalizes both file shapes', () => {
     expect(getFileInfo({ file: { uri: 'u', mimeType: 'm', name: 'n' } })).toEqual({ uri: 'u', mimeType: 'm', name: 'n' });
+    // Persisted user uploads: the python SDK's snake_case dump.
+    expect(getFileInfo({ kind: 'file', file: { uri: 'u', mime_type: 'image/png', name: 'n' } })).toEqual({
+      uri: 'u',
+      mimeType: 'image/png',
+      name: 'n',
+    });
     expect(getFileInfo({ url: 'u', mediaType: 'm', filename: 'n' })).toEqual({ uri: 'u', mimeType: 'm', name: 'n' });
     expect(getFileInfo({})).toBeNull();
   });
