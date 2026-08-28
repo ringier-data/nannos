@@ -10,8 +10,19 @@
  * answered one leaves nothing behind (dev mode aside) — the tool's own activity
  * lines already tell that story.
  */
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
+import { useStickToBottomContext } from 'use-stick-to-bottom';
+import {
+  ArrowDownIcon,
   BugIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -21,6 +32,7 @@ import {
   FileTextIcon,
   ImageIcon,
   MessageCircleDashedIcon,
+  ShieldCheckIcon,
 } from 'lucide-react';
 import {
   Conversation,
@@ -51,8 +63,10 @@ import { PAGE_COLUMN, usePanelLayout } from '../layout';
 import { toolPartTitle } from '../tool-title';
 import { messagePlainText } from '../transcript';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
+import { ApprovalCard } from './approval-card';
 import { AuthRequiredCard } from './auth-required-card';
 import { ContextChip } from './context-chip';
+import { Receipt, ReceiptLine, type ReceiptOutcome } from './receipt';
 import { ContinueCard } from './continue-card';
 import { ConversationFeedbackProvider, MessageFeedback } from './message-feedback';
 import { ReportIssueButton } from './report-issue-dialog';
@@ -515,6 +529,27 @@ function AssistantPart({
   );
 }
 
+/**
+ * The turn's open interrupt, reachable from the part that raised it.
+ * Null outside a thread (a part rendered in isolation, e.g. a test).
+ */
+const PendingInterruptContext = createContext<UseNannosChatValue['interrupt'] | null>(null);
+
+/**
+ * The approval card, at the position in the stream where the turn stopped.
+ *
+ * A batch arrives as several `approval-requested` parts but is ONE card — one
+ * head, one set of batch actions — so it renders at the first of them and the
+ * rest render nothing. Anchoring to the first (rather than the last) keeps the
+ * card where the pause actually began.
+ */
+function PendingApprovalCard({ toolCallId }: { toolCallId: string }) {
+  const interrupt = useContext(PendingInterruptContext);
+  if (!interrupt || interrupt.pending.length === 0) return null;
+  if (interrupt.pending[0].toolCallId !== toolCallId) return null;
+  return <ApprovalCard interrupt={interrupt} />;
+}
+
 function renderAssistantPart(
   part: MessagePart,
   send: UseNannosChatValue['send'],
@@ -607,30 +642,33 @@ function renderAssistantPart(
   }
 
   if (part.type === 'dynamic-tool') {
-    // HITL parts are the thread's ONLY tool parts, and none of them belong in
-    // the end-user view: a PENDING one surfaces through <ApprovalCard>, and an
-    // ANSWERED one settles to a synthetic `{approved: true}` output — no result
-    // anybody can read, and a reload drops the part entirely. So an approved
-    // tool reads exactly like a tool that never needed approval: activity
-    // lines, then the answer. Dev mode is the exception — it shows the raw part
-    // (skipping the pending ones the card already renders), framed amber so it
+    // HITL parts are the thread's ONLY tool parts. A PENDING one renders the
+    // approval card RIGHT HERE — the turn stopped at this point in the stream,
+    // so this is where the question belongs and where the answer will settle.
+    // An ANSWERED one settles to a synthetic `{approved: true}` output — no
+    // result anybody can read — so it leaves a receipt instead: the decision,
+    // and nothing about the tool that a reader could mistake for its outcome.
+    // Dev mode is the exception, showing the raw part framed amber so it
     // clearly is not part of the end-user view.
     if (!devMode) {
-      // ...except for the decision itself: the turn pauses at the card and
-      // resumes with more steps, and without a line in between the reader
-      // cannot tell why the work broke off or that they approved anything.
-      const decided =
+      if (part.state === 'approval-requested') {
+        // Client-action round trips pause here too, but the SDK answers those
+        // itself — a card would ask the user about work already under way.
+        const isRoundTrip = (part.input as { _clientActionRequest?: boolean } | undefined)
+          ?._clientActionRequest;
+        return isRoundTrip ? null : <PendingApprovalCard toolCallId={part.toolCallId} />;
+      }
+      // The turn pauses at the card and resumes with more steps: without a line
+      // in between, a reader cannot tell why the work broke off or that they
+      // decided anything.
+      const outcome: ReceiptOutcome | null =
         part.state === 'output-available'
-          ? strings['hitl.approved']
+          ? 'approved'
           : part.state === 'output-denied'
-            ? strings['hitl.rejected']
+            ? 'rejected'
             : null;
-      if (!decided) return null;
-      return (
-        <div data-slot="nannos-activity" data-decision className="text-muted-foreground text-xs">
-          <span className="font-medium">{format(decided, { toolName: part.toolName })}</span>
-        </div>
-      );
+      if (!outcome) return null;
+      return <Receipt outcome={outcome} subject={toolPartTitle(part.toolName, part.input)} />;
     }
     const isClientAction = (part.input as { _clientActionRequest?: boolean } | undefined)
       ?._clientActionRequest;
@@ -813,12 +851,24 @@ function ThreadMessage({
 }) {
   const devMode = useDevMode();
   const layout = usePanelLayout();
+  const strings = useStrings();
   if (message.role === 'user') {
-    const rendered = message.metadata?.display ? (
-      <ContextChip message={message} />
-    ) : (
-      <UserMessage message={message} />
-    );
+    // A `receipt` display means the PANEL composed this turn to resume the
+    // agent after the user decided something in a card. It is not a sentence
+    // the user typed, so it reads as an activity receipt rather than a bubble
+    // or a context chip — the prompt itself stays visible in dev mode.
+    const rendered =
+      message.metadata?.display?.kind === 'receipt' ? (
+        <ReceiptLine icon={ShieldCheckIcon} outcome="authorized">
+          <span className="font-medium">{message.metadata.display.label}</span>
+          {' · '}
+          {strings['receipt.retried']}
+        </ReceiptLine>
+      ) : message.metadata?.display ? (
+        <ContextChip message={message} />
+      ) : (
+        <UserMessage message={message} />
+      );
     if (!devMode) return rendered;
     // The badge wraps even a message whose bubble renders nothing (a HITL
     // resume row, say) — dev mode is exactly where the invisible send should
@@ -940,15 +990,22 @@ export function Thread({ chat, className, showContinue = true }: ThreadProps) {
           </>
         ) : (
           <ConversationFeedbackProvider conversationId={chat.conversationId}>
-            {mergeAssistantRuns(chat.messages).map((message, index, merged) => (
-              <ThreadMessage
-                key={message.id}
-                message={message}
-                conversationId={chat.conversationId}
-                showActions={!(chat.isBusy && index === merged.length - 1)}
-                send={chat.send}
-              />
-            ))}
+            {/* The approval card renders deep inside a message's parts, at the
+                point the turn stopped. Threading the interrupt down through
+                every part renderer to reach it would touch code that has no
+                interest in approvals; a context puts it exactly where it is
+                consumed. */}
+            <PendingInterruptContext.Provider value={chat.interrupt}>
+              {mergeAssistantRuns(chat.messages).map((message, index, merged) => (
+                <ThreadMessage
+                  key={message.id}
+                  message={message}
+                  conversationId={chat.conversationId}
+                  showActions={!(chat.isBusy && index === merged.length - 1)}
+                  send={chat.send}
+                />
+              ))}
+            </PendingInterruptContext.Provider>
           </ConversationFeedbackProvider>
         )}
 
@@ -958,7 +1015,39 @@ export function Thread({ chat, className, showContinue = true }: ThreadProps) {
           </div>
         )}
       </ConversationContent>
-      <ConversationScrollButton data-slot="nannos-scroll-bottom" />
+      {/* An inline card can be scrolled past — the docked one could not. The
+          pill is the way BACK to it, not a second copy of it, and it takes the
+          scroll button's slot rather than stacking on top of it. */}
+      {chat.interrupt.pending.length > 0 ? (
+        <PendingApprovalPill count={chat.interrupt.pending.length} />
+      ) : (
+        <ConversationScrollButton data-slot="nannos-scroll-bottom" />
+      )}
     </Conversation>
+  );
+}
+
+/**
+ * The jump back to a pending interrupt. Only while one is open and the user has
+ * scrolled away from it: the composer stays live throughout, so scrolling down
+ * to type is a normal thing to do and must not strand the request.
+ */
+function PendingApprovalPill({ count }: { count: number }) {
+  const strings = useStrings();
+  const { isAtBottom, scrollToBottom } = useStickToBottomContext();
+  if (isAtBottom) return null;
+  return (
+    <Button
+      data-slot="nannos-pending-approvals"
+      type="button"
+      size="sm"
+      className="-translate-x-1/2 absolute bottom-4 left-[50%] h-7 gap-1.5 rounded-full px-3 text-xs shadow-md"
+      onClick={() => scrollToBottom()}
+    >
+      <ArrowDownIcon aria-hidden="true" className="size-3" />
+      {count === 1
+        ? strings['thread.pendingOne']
+        : format(strings['thread.pendingMany'], { count: String(count) })}
+    </Button>
   );
 }

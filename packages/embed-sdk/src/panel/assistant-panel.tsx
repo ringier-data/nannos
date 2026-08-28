@@ -23,7 +23,6 @@ import { downloadTextFile, formatTranscript, slugifyFilename } from './transcrip
 import { ShadowPortal } from './shadow-portal';
 import { useConversations } from './hooks/use-conversations';
 import { useNannosChat, type UseNannosChatValue } from './hooks/use-nannos-chat';
-import { ApprovalCard } from './components/approval-card';
 import { Composer } from './components/composer';
 import { DevContextInspector } from './components/dev-context-inspector';
 import { DevModeProvider, resolveDevMode, useDevModeControls } from './dev-mode';
@@ -262,9 +261,11 @@ function PanelMain({
               already permanent, so the thread offers no second way in. */}
           <Thread chat={chat} className="min-h-0 flex-1" showContinue={historyAvailable} />
           <div className={cn('flex shrink-0 flex-col', column)}>
-            {chat.interrupt.pending.length > 0 && (
-              <ApprovalCard interrupt={chat.interrupt} className="mx-2 mb-2 shrink-0" />
-            )}
+            {/* The approval card used to dock here, above the composer. It now
+                renders inline, at the point in the thread where the turn
+                stopped — see thread.tsx. The thread's pending pill is what
+                replaces the dock's one virtue, that the request was always on
+                screen. */}
             {chat.isBusy && chat.workingSteps.length > 0 && (
               <WorkingBlock todos={chat.workingSteps} className="mx-2 mb-2 shrink-0" />
             )}

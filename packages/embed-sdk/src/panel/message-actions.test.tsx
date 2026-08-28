@@ -42,6 +42,7 @@ function mountThread(messages: NannosUIMessage[]) {
     hasOlderMessages: false,
     loadOlderMessages: async () => {},
     conversationId: 'conv-1',
+    interrupt: { pending: [], reason: undefined, reviewConfigs: [], respond: async () => {} },
   } as unknown as UseNannosChatValue;
   const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
   render(

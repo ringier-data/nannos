@@ -69,7 +69,11 @@ export interface NannosMessageMetadata {
   /** DB id the backend injects mid-turn; used as the history dedupe key. */
   persistedMessageId?: string;
   /** Host-injected prompt rendered as a muted context chip instead of a user bubble. */
-  display?: { kind: 'context'; label: string };
+  /** How a user message renders when the panel, not the person, composed its
+   *  text. `context` is a host-injected chip; `receipt` is a decision the user
+   *  made in an interrupt card — the turn resumes the agent, but the thread must
+   *  not show it as something the user typed. */
+  display?: { kind: 'context' | 'receipt'; label: string };
   /** Send-side file info (wire shape, incl. s3Url); `file` parts carry the render shape. */
   attachments?: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }>;
   /** HITL envelope for the current interrupt: reason text + per-tool decision gating. */

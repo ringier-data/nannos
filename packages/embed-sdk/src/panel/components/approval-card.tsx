@@ -22,6 +22,7 @@ import { cn } from '../../lib/utils';
 import { format, useStrings } from '../../react';
 import type { NannosStrings } from '../../i18n/keys';
 import { CLIENT_ACTION_TOOL, clientActionSummaryKey, toolPartTitle } from '../tool-title';
+import { InterruptActions, InterruptCard } from './interrupt-card';
 import { useChatEngineOptional } from '../engine';
 import type { PendingApproval, UseNannosChatValue } from '../hooks/use-nannos-chat';
 
@@ -168,9 +169,12 @@ function ApplyDiffTable({
 function ApprovalSection({
   approval,
   interrupt,
+  divided,
 }: {
   approval: PendingApproval;
   interrupt: UseNannosChatValue['interrupt'];
+  /** Rule above — every section after the first in a batch. */
+  divided?: boolean;
 }) {
   const strings = useStrings();
   const [message, setMessage] = useState('');
@@ -223,6 +227,7 @@ function ApprovalSection({
       data-slot="nannos-approval-action"
       approval={{ id: approval.approvalId }}
       state="approval-requested"
+      className={cn(divided && 'border-t')}
     >
       <ConfirmationTitle className="flex min-w-0 items-baseline gap-1.5">
         <span className="shrink-0 font-bold text-xs">
@@ -368,26 +373,31 @@ export function ApprovalCard({ interrupt, className }: ApprovalCardProps) {
   const showBatchActions = interrupt.pending.length > 1;
 
   return (
-    <div
-      data-slot="nannos-approval-card"
-      className={cn('space-y-1.5 border-l pl-2 bg-card text-card-foreground', className)}
+    <InterruptCard
+      slot="nannos-approval-card"
+      className={className}
+      icon={<ShieldAlertIcon aria-hidden="true" className="size-3.5 shrink-0 text-amber-600" />}
+      // A batch COUNTS rather than naming: three concatenated tool titles
+      // truncate to nothing useful in a 400px panel, and the sections below
+      // name each one anyway.
+      title={
+        showBatchActions
+          ? format(strings['hitl.titleCount'], { count: String(interrupt.pending.length) })
+          : format(strings['hitl.title'], {
+              toolName: toolPartTitle(interrupt.pending[0].toolName, interrupt.pending[0].input),
+            })
+      }
     >
-      <div className="flex items-center gap-1.5 font-medium text-xs">
-        <ShieldAlertIcon aria-hidden="true" className="size-3.5 shrink-0 text-amber-600" />
-        <span className="min-w-0 truncate font-bold">
-          {format(strings['hitl.title'], {
-            // A batch may span tools — name each once, in arrival order.
-            toolName: [
-              ...new Set(interrupt.pending.map((a) => toolPartTitle(a.toolName, a.input))),
-            ].join(', '),
-          })}
-        </span>
-      </div>
-      {interrupt.pending.map((approval) => (
-        <ApprovalSection key={approval.toolCallId} approval={approval} interrupt={interrupt} />
+      {interrupt.pending.map((approval, index) => (
+        <ApprovalSection
+          key={approval.toolCallId}
+          approval={approval}
+          interrupt={interrupt}
+          divided={index > 0}
+        />
       ))}
       {showBatchActions && (
-        <div data-slot="nannos-approval-batch-actions" className="flex items-center gap-1.5">
+        <InterruptActions slot="nannos-approval-batch-actions">
           {canApproveAll && (
             <ConfirmationAction
               data-slot="nannos-approval-approve-all"
@@ -407,8 +417,8 @@ export function ApprovalCard({ interrupt, className }: ApprovalCardProps) {
               {strings['hitl.rejectAll']}
             </ConfirmationAction>
           )}
-        </div>
+        </InterruptActions>
       )}
-    </div>
+    </InterruptCard>
   );
 }
