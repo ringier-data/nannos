@@ -23,46 +23,39 @@ def append_to_system_message(
     return SystemMessage(content_blocks=new_content)
 
 
-def append_to_last_human_message(
+VOLATILE_CONTEXT_KEY = "volatile_context"
+"""``additional_kwargs`` flag on a per-call context message appended by
+:func:`append_volatile_context_message`. Consumers that reason about the
+"real" conversation tail (e.g. the prompt-caching breakpoint) skip it."""
+
+
+def append_volatile_context_message(
     messages: list[AnyMessage],
     text: str,
-) -> list[AnyMessage] | None:
-    """Append ``text`` to the content of the last :class:`HumanMessage`.
+) -> list[AnyMessage]:
+    """Append ``text`` as a trailing, flagged :class:`HumanMessage`.
 
-    Volatile, per-turn context (e.g. the on-screen ``<client_objects>`` manifest)
-    belongs on the human turn rather than the system prompt: the system prompt and
-    all prior conversation history stay byte-stable across turns, so the cached
-    prefix survives while the volatile block rides the (already-uncached) tail.
+    For volatile, per-call context (the on-screen ``<current_page>`` /
+    ``<client_objects>`` block). The block is applied to the model request only —
+    never checkpointed — so the ONLY placement that keeps the provider prompt cache
+    warm is *after* everything that is persisted:
 
-    The last human message — not the literal last message — is targeted so the
-    injection stays valid mid-tool-loop (where the tail is a ``ToolMessage``) and
-    on HITL resume (where the tail is an interrupted AI/tool message).
+    - Appending to the last human message (the previous design) moved the block
+      from ``Human_N`` to ``Human_N+1`` on the next turn. ``Human_N`` was then sent
+      WITHOUT the block it carried before, so the token stream diverged there and
+      turn N's whole tool loop was re-tokenised on every subsequent turn, page
+      changed or not.
+    - Appended last, every byte before the block is identical to what the
+      checkpoint holds, across tool-loop iterations and across turns. Only the
+      block itself is re-tokenised per call.
 
-    Args:
-        messages: The model request's message list.
-        text: Text to append to the last human message.
+    Role validity: mid-tool-loop the tail is a ``ToolMessage``. Chat-completions
+    accepts a user message after tool results, and the Anthropic/Bedrock adapters
+    fold consecutive user-role messages (tool results are user-role there) into one
+    turn, so ``[..., Tool, Human(block)]`` is a valid request everywhere we route.
 
-    Returns:
-        A new message list with ``text`` appended to the last human message, or
-        ``None`` if no human message is present (so callers can fall back to
-        system-prompt injection).
+    The message is flagged ``additional_kwargs[VOLATILE_CONTEXT_KEY] = True`` so the
+    caching middleware places its conversation breakpoint on the stable message in
+    front of it rather than on the block.
     """
-    idx = next(
-        (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
-        None,
-    )
-    if idx is None:
-        return None
-
-    target = messages[idx]
-    content = target.content
-    if isinstance(content, str):
-        new_content: str | list = f"{content}\n\n{text}" if content else text
-    elif isinstance(content, list):
-        new_content = [*content, {"type": "text", "text": text}]
-    else:
-        new_content = text
-
-    new_messages = list(messages)
-    new_messages[idx] = target.model_copy(update={"content": new_content})
-    return new_messages
+    return [*messages, HumanMessage(content=text, additional_kwargs={VOLATILE_CONTEXT_KEY: True})]

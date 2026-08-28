@@ -16,11 +16,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from agent_common.middleware.client_objects_middleware import (
-    render_client_objects_block,
-    render_current_page_block,
-)
-from agent_common.middleware.utils import append_to_last_human_message, append_to_system_message
+from agent_common.middleware.client_objects_middleware import inject_embedded_context
+from agent_common.middleware.utils import append_to_system_message
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -172,38 +169,25 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
 
     def _apply(self, request: ModelRequest, user_context: GraphRuntimeContext) -> ModelRequest:
         """Inject stable per-user prefs into the system prompt, and the volatile
-        Embedded Nannos context (``<current_page>`` + ``<client_objects>``) onto
-        the last human message.
+        Embedded Nannos context (``<current_page>`` + ``<client_objects>``) as a
+        trailing per-call message.
 
         Stable prefs (language/timezone/formatting/custom_prompt) belong in the
         cached system prefix. The page context and manifest reflect on-screen
-        state that changes as the user navigates, so they ride the human turn to
-        avoid busting that prefix.
+        state that is never checkpointed, so they go AFTER every persisted message
+        (see ``inject_embedded_context``) — the only placement that leaves the
+        cached history byte-stable across turns.
         """
         addendum = self._build_preferences_addendum(user_context)
         if addendum:
             request = request.override(
                 system_message=append_to_system_message(request.system_message, addendum)
             )
-
-        blocks = [
-            render_current_page_block(getattr(user_context, "page_context", None)),
-            render_client_objects_block(getattr(user_context, "client_objects", None)),
-        ]
-        block = "\n\n".join(b for b in blocks if b)
-        if block:
-            new_messages = append_to_last_human_message(request.messages, block)
-            if new_messages is not None:
-                request = request.override(messages=new_messages)
-            else:
-                # No human message to carry them (e.g. an unusual resume shape) —
-                # fall back to the system prompt so the agent still perceives the
-                # page and its on-screen objects.
-                request = request.override(
-                    system_message=append_to_system_message(request.system_message, "\n\n" + block)
-                )
-
-        return request
+        return inject_embedded_context(
+            request,
+            getattr(user_context, "page_context", None),
+            getattr(user_context, "client_objects", None),
+        )
 
     def wrap_model_call(
         self,

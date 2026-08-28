@@ -1,9 +1,10 @@
 """Tests for the shared <client_objects> rendering and its injection sites.
 
-Covers the middleware-utils helpers (`append_to_last_human_message`) and the
-`ClientObjectsMiddleware` behaviour: the volatile manifest rides the last human
-message to keep the cached system prefix stable, with a system-prompt fallback
-when no human message is present.
+Covers the middleware-utils helper (`append_volatile_context_message`) and the
+`ClientObjectsMiddleware` behaviour: the volatile manifest is appended as ONE
+trailing, flagged human message so every persisted message — system prompt and
+conversation history alike — stays byte-stable across tool-loop iterations and
+across turns (the provider prompt cache survives).
 """
 
 from unittest.mock import patch
@@ -14,8 +15,9 @@ from agent_common.middleware.client_objects_middleware import (
     render_current_page_block,
 )
 from agent_common.middleware.utils import (
-    append_to_last_human_message,
+    VOLATILE_CONTEXT_KEY,
     append_to_system_message,
+    append_volatile_context_message,
 )
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -38,53 +40,56 @@ def _make_request(messages, system_message=None):
     )
 
 
-class TestAppendToLastHumanMessage:
-    def test_appends_to_string_content(self):
+class TestAppendVolatileContextMessage:
+    def test_appends_flagged_trailing_human_message(self):
         msgs = [HumanMessage(content="hello")]
-        out = append_to_last_human_message(msgs, "BLOCK")
-        assert out is not None
-        assert out[0].content == "hello\n\nBLOCK"
-        # original is not mutated
-        assert msgs[0].content == "hello"
+        out = append_volatile_context_message(msgs, "BLOCK")
+        assert len(out) == 2
+        assert out[0] is msgs[0]  # persisted messages are passed through by identity
+        assert isinstance(out[1], HumanMessage)
+        assert out[1].content == "BLOCK"
+        assert out[1].additional_kwargs[VOLATILE_CONTEXT_KEY] is True
+        # original list is not mutated
+        assert len(msgs) == 1
 
-    def test_appends_text_block_to_list_content(self):
-        msgs = [HumanMessage(content=[{"type": "text", "text": "hi"}])]
-        out = append_to_last_human_message(msgs, "BLOCK")
-        assert out is not None
-        assert out[0].content == [
-            {"type": "text", "text": "hi"},
-            {"type": "text", "text": "BLOCK"},
-        ]
-
-    def test_targets_last_human_not_literal_tail(self):
-        """Mid-tool-loop the tail is a ToolMessage; the block must land on the
-        (earlier) human message so message roles stay valid."""
+    def test_mid_tool_loop_block_follows_the_tool_result(self):
+        """The block goes after the ToolMessage tail — nothing earlier is rewritten."""
         msgs = [
             HumanMessage(content="query"),
             AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "c1"}]),
             ToolMessage(content="result", tool_call_id="c1"),
         ]
-        out = append_to_last_human_message(msgs, "BLOCK")
-        assert out is not None
-        assert out[0].content == "query\n\nBLOCK"
-        # tail is untouched
-        assert isinstance(out[-1], ToolMessage)
-        assert out[-1].content == "result"
+        out = append_volatile_context_message(msgs, "BLOCK")
+        assert out[:3] == msgs
+        assert isinstance(out[2], ToolMessage)
+        assert out[3].content == "BLOCK"
 
-    def test_picks_the_most_recent_human_message(self):
-        msgs = [HumanMessage(content="first"), AIMessage(content="ok"), HumanMessage(content="second")]
-        out = append_to_last_human_message(msgs, "BLOCK")
-        assert out is not None
-        assert out[0].content == "first"
-        assert out[2].content == "second\n\nBLOCK"
+    def test_history_is_byte_stable_across_turns(self):
+        """The regression this design fixes: on turn N+1 the messages sent BEFORE the
+        block must be exactly what was sent on turn N plus the new turn — never a
+        rewritten Human_N. (Appending to the last human message moved the block
+        from Human_N to Human_N+1 and re-tokenised everything after Human_N.)"""
+        h1 = HumanMessage(content="turn 1")
+        turn1 = append_volatile_context_message([h1], "PAGE A")
+        ai1 = AIMessage(content="answer 1")
+        h2 = HumanMessage(content="turn 2")
+        turn2 = append_volatile_context_message([h1, ai1, h2], "PAGE A")
+        # turn-2 prefix == turn-1 prefix (without its block) + persisted continuation
+        assert turn2[:1] == turn1[:-1]
+        assert turn2[:-1] == [h1, ai1, h2]
+        # and the same holds when the page changed: only the trailing block differs
+        turn2b = append_volatile_context_message([h1, ai1, h2], "PAGE B")
+        assert turn2b[:-1] == turn2[:-1]
+        assert turn2b[-1].content != turn2[-1].content
 
-    def test_returns_none_when_no_human_message(self):
+    def test_works_without_any_human_message(self):
         msgs = [SystemMessage(content="sys"), AIMessage(content="ai")]
-        assert append_to_last_human_message(msgs, "BLOCK") is None
+        out = append_volatile_context_message(msgs, "BLOCK")
+        assert out[:2] == msgs and out[2].content == "BLOCK"
 
 
 class TestClientObjectsMiddleware:
-    def test_injects_manifest_into_last_human_message(self):
+    def test_injects_manifest_as_trailing_message(self):
         request = _make_request(
             [HumanMessage(content="do it")], system_message=SystemMessage(content="sys")
         )
@@ -97,8 +102,10 @@ class TestClientObjectsMiddleware:
 
         # System prompt is untouched (stays byte-stable → cacheable).
         assert out.system_message.content == "sys"
-        # Manifest rode the human message.
-        assert "<client_objects>" in out.messages[0].content
+        # The user's message is untouched; the manifest is the trailing flagged message.
+        assert out.messages[0].content == "do it"
+        assert "<client_objects>" in out.messages[-1].content
+        assert out.messages[-1].additional_kwargs[VOLATILE_CONTEXT_KEY] is True
 
     def test_no_manifest_is_a_noop(self):
         request = _make_request([HumanMessage(content="do it")])
@@ -111,7 +118,7 @@ class TestClientObjectsMiddleware:
         assert out is request
         assert out.messages[0].content == "do it"
 
-    def test_falls_back_to_system_prompt_without_human_message(self):
+    def test_appends_trailing_message_even_without_human_message(self):
         request = _make_request(
             [SystemMessage(content="sys"), AIMessage(content="ai")],
             system_message=SystemMessage(content="sys"),
@@ -122,7 +129,9 @@ class TestClientObjectsMiddleware:
             return_value=MANIFEST,
         ):
             out = mw._apply(request)
-        assert "<client_objects>" in str(out.system_message.content)
+        # Never in the system prompt — that would bust the cached prefix on every navigation.
+        assert "<client_objects>" not in str(out.system_message.content)
+        assert "<client_objects>" in out.messages[-1].content
 
 
 class TestCurrentPage:
@@ -162,7 +171,7 @@ class TestCurrentPage:
         assert "visible items" not in block
         assert "breadcrumbs" not in block
 
-    def test_middleware_injects_page_before_manifest_on_last_human_message(self):
+    def test_middleware_injects_page_before_manifest_in_trailing_message(self):
         request = _make_request(
             [HumanMessage(content="what is on this page?")],
             system_message=SystemMessage(content="sys"),
@@ -180,7 +189,8 @@ class TestCurrentPage:
         ):
             out = mw._apply(request)
 
-        content = out.messages[0].content
+        assert out.messages[0].content == "what is on this page?"
+        content = out.messages[-1].content
         assert "<current_page>" in content
         assert "<client_objects>" in content
         assert content.index("<current_page>") < content.index("<client_objects>")
@@ -201,8 +211,9 @@ class TestCurrentPage:
             ),
         ):
             out = mw._apply(request)
-        assert "<current_page>" in out.messages[0].content
-        assert "<client_objects>" not in out.messages[0].content
+        assert out.messages[0].content == "hi"
+        assert "<current_page>" in out.messages[-1].content
+        assert "<client_objects>" not in out.messages[-1].content
 
 
 class TestRenderAndSystemHelper:

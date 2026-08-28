@@ -1,15 +1,16 @@
 """Shared `<client_objects>` rendering for Embedded Nannos.
 
-Renders the on-screen ontology manifest into the system prompt for *any* agent —
+Renders the on-screen ontology manifest as a trailing per-call message for *any* agent —
 the orchestrator main graph or a LOCAL domain sub-agent (the embedded entrypoint).
 The manifest is read from the **RunnableConfig metadata** (provider-neutral), so a
 single implementation serves every build path without depending on the
 orchestrator's typed `GraphRuntimeContext`.
 
 Manifest entry shape: `{type, id, scope, label?, fields?, fieldSpecs?, values?}`.
-The orchestrator's `UserPreferencesMiddleware` reuses `render_client_objects_block`
+The orchestrator's `UserPreferencesMiddleware` reuses `inject_embedded_context`
 (it sources the manifest from its context); `ClientObjectsMiddleware` is for
-sub-agents that get the manifest via config metadata.
+sub-agents that get the manifest via config metadata. Both place the block the
+same way — see `inject_embedded_context`.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from langchain.agents.middleware.types import (
 )
 from langgraph.config import get_config
 
-from .utils import append_to_last_human_message, append_to_system_message
+from .utils import append_volatile_context_message
 
 logger = logging.getLogger(__name__)
 
@@ -166,29 +167,36 @@ def _page_context_from_config() -> Any:
     return _from_config_metadata(PAGE_CONTEXT_METADATA_KEYS)
 
 
+def inject_embedded_context(
+    request: ModelRequest,
+    page_context: Any,
+    client_objects: Any,
+) -> ModelRequest:
+    """Attach the embedded-client context (`<current_page>` then `<client_objects>`)
+    to a model request as ONE trailing, flagged human message.
+
+    Single placement policy for both injection sites (orchestrator
+    `UserPreferencesMiddleware`, sub-agent `ClientObjectsMiddleware`). The block is
+    volatile on-screen state that is never checkpointed, so it must come AFTER all
+    persisted messages to keep the provider prompt cache warm — see
+    `agent_common.middleware.utils.append_volatile_context_message` for why the
+    previous "last human message" placement busted the cache every turn.
+    Returns the request unchanged when there is nothing to render.
+    """
+    blocks = [render_current_page_block(page_context), render_client_objects_block(client_objects)]
+    block = "\n\n".join(b for b in blocks if b)
+    if not block:
+        return request
+    return request.override(messages=append_volatile_context_message(request.messages, block))
+
+
 class ClientObjectsMiddleware(AgentMiddleware):
     """Append the embedded-client context sections (`<current_page>` and
     `<client_objects>`) for a LOCAL sub-agent, reading both from RunnableConfig
     metadata. Attach via `build_sub_agent_graph(extra_middlewares=[...])`."""
 
     def _apply(self, request: ModelRequest) -> ModelRequest:
-        blocks = [
-            render_current_page_block(_page_context_from_config()),
-            render_client_objects_block(_client_objects_from_config()),
-        ]
-        block = "\n\n".join(b for b in blocks if b)
-        if not block:
-            return request
-        # The manifest reflects volatile on-screen state, so ride the last human
-        # message instead of the system prompt — this keeps the cached system
-        # prefix byte-stable as the user navigates the app. Fall back to the
-        # system prompt only when there is no human message to carry it.
-        new_messages = append_to_last_human_message(request.messages, block)
-        if new_messages is not None:
-            return request.override(messages=new_messages)
-        return request.override(
-            system_message=append_to_system_message(request.system_message, "\n\n" + block)
-        )
+        return inject_embedded_context(request, _page_context_from_config(), _client_objects_from_config())
 
     def wrap_model_call(
         self,
