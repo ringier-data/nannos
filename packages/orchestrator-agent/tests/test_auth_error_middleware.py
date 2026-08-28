@@ -266,3 +266,106 @@ async def test_retry_wrapped_tool_message_triggers_interrupt(middleware):
         await middleware.awrap_tool_call(request, handler)
 
     handler.assert_awaited_once_with(request)
+
+
+# ---------------------------------------------------------------------------
+# Resuming a paused auth interrupt
+#
+# On a resume, `interrupt()` RETURNS instead of raising, and what happens next
+# is what decides whether a second attempt gets a card or a paragraph.
+# ---------------------------------------------------------------------------
+
+
+def _resumable_request(tool_name: str = "github_get_me"):
+    req = MagicMock()
+    req.tool_call = {"name": tool_name, "args": {}, "id": "tc-resume"}
+    return req
+
+
+def test_resume_decision_reads_an_explicit_client_answer(middleware):
+    """A client that negotiated the extension leaves nothing to interpret."""
+    approved = middleware._resume_decision({"authorization": {"decision": "approved"}})
+    declined = middleware._resume_decision(
+        {"authorization": {"decision": "declined", "message": "scopes too wide"}}
+    )
+
+    assert approved == ("approved", "")
+    assert declined == ("declined", "scopes too wide")
+
+
+def test_resume_decision_does_not_guess_at_free_text(middleware):
+    """Typed words are reported as unclear, verbatim — the model judges them."""
+    assert middleware._resume_decision("damn I missclicked, try again") == (
+        "unclear",
+        "damn I missclicked, try again",
+    )
+    assert middleware._resume_decision(None) == ("unclear", "")
+
+
+@pytest.mark.asyncio
+async def test_approved_resume_retries_the_tool(middleware):
+    """An approval retries the call, which is what brings the prompt back.
+
+    If the credential still is not there, the retry's result meets the same
+    detection and interrupts again — a second card, rather than the agent
+    relaying the URL as prose.
+    """
+    request = _resumable_request()
+    retried = ToolMessage(content='{"login":"aartaria"}', tool_call_id="tc-resume")
+    handler = AsyncMock(return_value=retried)
+
+    result = await middleware._after_auth_interrupt(
+        {"authorization": {"decision": "approved"}}, request, handler, "github_get_me"
+    )
+
+    assert result is retried
+    handler.assert_awaited_once_with(request)
+
+
+@pytest.mark.asyncio
+async def test_declined_resume_tells_the_model_to_stop_asking(middleware):
+    """A refusal must not come back as the same link a second time."""
+    request = _resumable_request()
+    handler = AsyncMock()
+
+    result = await middleware._after_auth_interrupt(
+        {"authorization": {"decision": "declined", "message": "the permissions are too wide"}},
+        request,
+        handler,
+        "github_get_me",
+    )
+
+    handler.assert_not_awaited()
+    assert isinstance(result, ToolMessage)
+    assert result.tool_call_id == "tc-resume"
+    assert "DECLINED" in result.content
+    assert "the permissions are too wide" in result.content
+    assert "Do not retry" in result.content
+
+
+@pytest.mark.asyncio
+async def test_unclear_resume_hands_the_reply_to_the_model(middleware):
+    """Free text is passed on with both options spelled out, and nothing is run.
+
+    This is the classifier: the model node runs next anyway, and is far better
+    placed than a keyword match to tell "ok, done" from "no, too wide".
+    """
+    request = _resumable_request()
+    handler = AsyncMock()
+
+    result = await middleware._after_auth_interrupt(
+        "damn I missclicked, try again", request, handler, "github_get_me"
+    )
+
+    handler.assert_not_awaited()
+    assert isinstance(result, ToolMessage)
+    assert "damn I missclicked, try again" in result.content
+    assert "call the tool again" in result.content
+    assert "do not repeat the authorization link" in result.content
+
+
+@pytest.mark.asyncio
+async def test_unclear_resume_without_a_reply_still_reads_sensibly(middleware):
+    request = _resumable_request()
+    result = await middleware._after_auth_interrupt(None, request, AsyncMock(), "github_get_me")
+    assert "(no reply)" in result.content

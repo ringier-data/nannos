@@ -57,6 +57,10 @@ export interface UseNannosChatValue {
        * is not a sentence the user typed and must not pose as one.
        */
       displayKind?: 'context' | 'receipt';
+      /** Which receipt this turn reads as, when `displayKind` is `receipt`. */
+      displayOutcome?: 'authorized' | 'skipped';
+      /** The user's answer to an `auth-required` prompt, sent as a DataPart. */
+      authorization?: { decision: 'approved' | 'declined'; message?: string };
       files?: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }>;
       interrupt?: boolean;
     },
@@ -180,8 +184,13 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
           text,
           metadata: {
             ...(opts?.displayText && {
-              display: { kind: opts.displayKind ?? ('context' as const), label: opts.displayText },
+              display: {
+                kind: opts.displayKind ?? ('context' as const),
+                label: opts.displayText,
+                ...(opts.displayOutcome && { outcome: opts.displayOutcome }),
+              },
             }),
+            ...(opts?.authorization && { authorization: opts.authorization }),
             ...(opts?.files?.length && { attachments: opts.files }),
           },
         });

@@ -33,6 +33,7 @@ import {
   ImageIcon,
   MessageCircleDashedIcon,
   ShieldCheckIcon,
+  XIcon,
 } from 'lucide-react';
 import {
   Conversation,
@@ -888,12 +889,22 @@ function ThreadMessage({
     // agent after the user decided something in a card. It is not a sentence
     // the user typed, so it reads as an activity receipt rather than a bubble
     // or a context chip — the prompt itself stays visible in dev mode.
+    const receiptOutcome = message.metadata?.display?.outcome ?? 'authorized';
     const rendered =
       message.metadata?.display?.kind === 'receipt' ? (
-        <ReceiptLine icon={ShieldCheckIcon} outcome="authorized">
+        <ReceiptLine
+          icon={receiptOutcome === 'skipped' ? XIcon : ShieldCheckIcon}
+          outcome={receiptOutcome}
+        >
           <span className="font-medium">{message.metadata.display.label}</span>
-          {' · '}
-          {strings['receipt.retried']}
+          {/* Authorizing is the middle of the story — the agent was asked to try
+              again. A refusal is the end of it, and says nothing more. */}
+          {receiptOutcome === 'authorized' && (
+            <>
+              {' · '}
+              {strings['receipt.retried']}
+            </>
+          )}
         </ReceiptLine>
       ) : message.metadata?.display ? (
         <ContextChip message={message} />

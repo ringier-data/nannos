@@ -226,19 +226,15 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
                     logger.info(f"[AUTH MIDDLEWARE] Interrupting graph for auth requirement: {tool_name}")
 
-                    # This will pause graph execution and surface the auth requirement to the client
-                    # NOTE: in this case the tool is not idempotent, and we will never hit this line again
-                    #       upon resumption, since the graph will resume from the start of the node, and
-                    #       in case the authorization is successful, the tool will succeed without hitting
-                    #       this again. In case the authorization is not successful, the tool may hit this
-                    #       again, but that's expected behavior, and the code just just continue after the interrupt,
-                    #       and shall be handled by the model node.
+                    # Pause the graph and surface the auth requirement to the client.
+                    # On the FIRST pass this raises; on a resume it RETURNS the
+                    # client's answer, and `_after_auth_interrupt` acts on it —
+                    # retrying the tool, or handing the model a refusal — rather
+                    # than falling through with the stale auth error in hand.
                     #       TODO: could we though hit the edge case where another interrupt will collect the Command
                     #             which was meant to be catched here?
-                    interrupt(auth_requirement)
-
-                    # This line should not be reached due to the interrupt, but return for safety
-                    return result
+                    resume = interrupt(auth_requirement)
+                    return await self._after_auth_interrupt(resume, request, handler, tool_name)
 
                 return result
             elif isinstance(result, Command):
@@ -273,7 +269,8 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                             }
 
                             logger.info(f"[AUTH MIDDLEWARE] Interrupting graph for auth requirement: {tool_name}")
-                            interrupt(auth_requirement)
+                            resume = interrupt(auth_requirement)
+                            return await self._after_auth_interrupt(resume, request, handler, tool_name)
 
                 return result
 
@@ -298,14 +295,91 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
                 logger.info(f"[AUTH MIDDLEWARE] Interrupting graph for ToolException auth requirement: {tool_name}")
 
-                # This will pause graph execution and surface the auth requirement to the client
-                interrupt(auth_requirement)
-
-                # This line should not be reached due to the interrupt, but re-raise for safety
-                raise
+                # Pause the graph and surface the auth requirement to the client;
+                # on resume, act on the answer (retry / refusal) instead of
+                # letting the original exception propagate.
+                resume = interrupt(auth_requirement)
+                return await self._after_auth_interrupt(resume, request, handler, tool_name)
 
             # Not an auth error, let the exception propagate normally
             raise
+
+    @staticmethod
+    def _resume_decision(resume: Any) -> tuple[str, str]:
+        """What the client's resume value meant: ``approved``/``declined``/``unclear``.
+
+        A client that negotiated the in-task-auth extension resumes with
+        ``{"authorization": {"decision": ..., "message": ...}}`` and there is
+        nothing to interpret. Anything else is the user's own words — typed into
+        the composer while the turn was parked — and is deliberately reported as
+        ``unclear`` rather than guessed at here.
+        """
+        if isinstance(resume, dict):
+            decision = resume.get("authorization")
+            if isinstance(decision, dict):
+                verdict = str(decision.get("decision") or "").lower()
+                message = str(decision.get("message") or "")
+                if verdict in ("approved", "approve", "completed"):
+                    return "approved", message
+                if verdict in ("declined", "decline", "reject", "rejected", "skipped"):
+                    return "declined", message
+        return "unclear", resume if isinstance(resume, str) else ""
+
+    async def _after_auth_interrupt(
+        self,
+        resume: Any,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+        tool_name: str,
+    ) -> ToolMessage | Command:
+        """Turn a resumed auth interrupt back into a tool result.
+
+        The graph resumes INSIDE the tool call that was blocked, holding the auth
+        error it already got. Returning that error unchanged — what this used to
+        do — hands the model a payload whose text says "visit this URL", and the
+        model dutifully relays it as prose. That is why a second attempt never
+        produced a card: the interrupt had been consumed, and nothing ever asked
+        again.
+
+        So the resume is acted on instead:
+
+        - **approved** — retry the tool now that the credential should exist. If
+          it is still unauthorized the detection above runs again and interrupts
+          again, which is how the prompt comes back rather than turning into a
+          paragraph.
+        - **declined** — hand the model a refusal, explicitly telling it not to
+          retry, so it digests the "no" instead of pushing the link again.
+        - **unclear** — the user typed something. Hand the model their words and
+          the two options; it is about to run anyway and is far better placed
+          than a keyword match to tell "ok, done" from "no, those scopes are too
+          wide". Re-calling the tool re-enters the branch above, so a genuine
+          "done" still ends in a retry.
+        """
+        verdict, message = self._resume_decision(resume)
+        logger.info(f"[AUTH MIDDLEWARE] Resumed auth interrupt for {tool_name}: {verdict}")
+
+        if verdict == "approved":
+            return await handler(request)
+
+        tool_call_id = request.tool_call.get("id", "")
+        if verdict == "declined":
+            reason = f" They said: {message}" if message.strip() else ""
+            content = (
+                f"The user DECLINED to authorize {tool_name}.{reason} "
+                "Do not retry the call and do not send the authorization link again. "
+                "Tell them what you cannot do without it and offer another way forward."
+            )
+        else:
+            reply = message.strip() or "(no reply)"
+            content = (
+                f"{tool_name} is still waiting on the user's authorization. "
+                f"They replied: {reply}\n"
+                "If that means they completed it, call the tool again now — it will "
+                "ask once more if it is still unauthorized. If it means they refuse, "
+                "do not retry and do not repeat the authorization link: say what you "
+                "cannot do without it and offer another way forward."
+            )
+        return ToolMessage(content=content, tool_call_id=tool_call_id, name=tool_name)
 
     def _check_a2a_auth_metadata(
         self, a2a_metadata: Dict[str, Any] | None, subagent_name: str

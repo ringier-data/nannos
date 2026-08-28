@@ -110,6 +110,11 @@ export function buildNewTurnPayload(args: {
   if (displayLabel) metadata.injectedDisplayText = displayLabel;
 
   const attachments = userMessage.metadata?.attachments;
+  // An answer to an `auth-required` prompt rides as a DataPart beside the text,
+  // the same way HITL decisions do. The text still goes (it is what the agent
+  // reads if the extension was never negotiated); the DataPart is what saves the
+  // middleware from having to infer a yes or a no from a sentence.
+  const authorization = userMessage.metadata?.authorization;
   return {
     id: messageId,
     conversationId,
@@ -118,6 +123,7 @@ export function buildNewTurnPayload(args: {
     metadata,
     contextId: conversationId,
     ...(attachments?.length && { fileAttachments: attachments }),
+    ...(authorization && { dataParts: [{ authorization }] }),
   };
 }
 
