@@ -52,6 +52,32 @@ const OUTCOME_KEY: Record<ReceiptOutcome, keyof NannosStrings> = {
   undecided: 'receipt.undecided',
 };
 
+/**
+ * What to say when there is no subject worth naming. Only the authorization
+ * outcomes need this: an approval always has a tool title, but a credential can
+ * be demanded by sandbox plumbing whose name would misinform (`eval`), and then
+ * naming nothing beats naming that.
+ */
+const ANONYMOUS_KEY: Partial<Record<ReceiptOutcome, keyof NannosStrings>> = {
+  authorized: 'receipt.authorizedAny',
+  skipped: 'receipt.skippedAny',
+};
+
+/**
+ * The receipt's headline. Exported because the authorization card needs the
+ * same sentence for the `displayText` of the turn it sends — one phrasing, one
+ * place to change it.
+ */
+export function receiptHeadline(
+  strings: NannosStrings,
+  outcome: ReceiptOutcome,
+  subject: string,
+): string {
+  const anonymous = !subject.trim() ? ANONYMOUS_KEY[outcome] : undefined;
+  if (anonymous) return strings[anonymous];
+  return format(strings[OUTCOME_KEY[outcome]], { subject });
+}
+
 export interface ReceiptProps {
   outcome: ReceiptOutcome;
   /** The tool's display title, or the service that was authorized. */
@@ -122,7 +148,7 @@ export function Receipt({
           approved: String(counts.approved),
           total: String(counts.total),
         })
-      : format(strings[OUTCOME_KEY[outcome]], { subject });
+      : receiptHeadline(strings, outcome, subject);
 
   // Dot-separated tail, in a fixed order: what it cost, why, when. Each piece
   // is omitted rather than blanked, so a bare decision is a bare line.

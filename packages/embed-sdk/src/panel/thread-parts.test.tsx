@@ -326,6 +326,22 @@ describe('the authorization card', () => {
     expect(card()).toBeNull();
   });
 
+  it('never names sandbox plumbing as the thing being authorized', () => {
+    // A `need-credentials` raised inside the sandbox is reported against `eval`.
+    // "Authorization needed for eval" / "Skipped authorizing eval" tells the
+    // user nothing true, so the receipt and the head say neither.
+    const turn = authTurn();
+    const part = (turn.parts as Array<Record<string, unknown>>).find(
+      (p) => p.type === 'data-auth-required',
+    )!;
+    part.data = { ...(part.data as Record<string, unknown>), tool: 'eval', service: 'eval' };
+    mountThread([turn], false, vi.fn());
+
+    expect(screen.getByText('Authorization needed')).toBeTruthy();
+    fireEvent.click(skip()!);
+    expect(screen.getByText('Skipped the authorization')).toBeTruthy();
+  });
+
   it('records a skip in the thread', () => {
     const send = vi.fn();
     mountThread([authTurn()], false, send);

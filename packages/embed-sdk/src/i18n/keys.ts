@@ -135,6 +135,11 @@ export interface NannosStrings {
   'receipt.batchRejected': string;
   'receipt.authorized': string;
   'receipt.skipped': string;
+  /** The same two, for a credential nothing nameable asked for — a
+   *  `need-credentials` raised inside the sandbox is reported against `eval`,
+   *  and naming that misinforms. */
+  'receipt.authorizedAny': string;
+  'receipt.skippedAny': string;
   /** The run ended with the request still open — nobody ever answered it. */
   'receipt.undecided': string;
   /** Tail of an authorization receipt: authorizing is the middle of the story. */
@@ -260,6 +265,8 @@ export const nannosStringKeys = [
   'receipt.batchRejected',
   'receipt.authorized',
   'receipt.skipped',
+  'receipt.authorizedAny',
+  'receipt.skippedAny',
   'receipt.undecided',
   'receipt.retried',
   'receipt.risk',
