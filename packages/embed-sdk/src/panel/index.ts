@@ -47,6 +47,13 @@ export {
 } from './components/conversation-history';
 export { ConnectionStatus, type ConnectionStatusProps } from './components/connection-status';
 export { ApprovalCard, type ApprovalCardProps } from './components/approval-card';
+export {
+  InterruptCard,
+  InterruptSection,
+  InterruptActions,
+  type InterruptCardProps,
+} from './components/interrupt-card';
+export { Receipt, ReceiptLine, type ReceiptProps, type ReceiptOutcome } from './components/receipt';
 export { ApplyModeSwitch, type ApplyModeSwitchProps } from './components/apply-mode-switch';
 export { WorkingBlock, type WorkingBlockProps } from './components/working-block';
 export { ContextChip, type ContextChipProps } from './components/context-chip';

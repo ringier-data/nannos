@@ -49,6 +49,14 @@ export interface UseNannosChatValue {
     text: string,
     opts?: {
       displayText?: string;
+      /**
+       * How `displayText` reads in the thread. `context` (the default) is a
+       * host-injected chip — something the PAGE contributed on the user's
+       * behalf. `receipt` is a decision the user made in a card: it renders as
+       * an activity receipt, because a turn the panel sent to resume the agent
+       * is not a sentence the user typed and must not pose as one.
+       */
+      displayKind?: 'context' | 'receipt';
       files?: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }>;
       interrupt?: boolean;
     },
@@ -171,7 +179,9 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         void sendMessage({
           text,
           metadata: {
-            ...(opts?.displayText && { display: { kind: 'context' as const, label: opts.displayText } }),
+            ...(opts?.displayText && {
+              display: { kind: opts.displayKind ?? ('context' as const), label: opts.displayText },
+            }),
             ...(opts?.files?.length && { attachments: opts.files }),
           },
         });

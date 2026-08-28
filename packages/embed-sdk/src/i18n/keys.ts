@@ -47,7 +47,14 @@ export interface NannosStrings {
   'thread.newConversation': string;
   'thread.activitySteps': string;
   'thread.activityStep': string;
+  /** Appended to the folded-steps label so decisions are never silently hidden. */
+  'thread.activityApproved': string;
+  'thread.activityRejected': string;
   'thread.thinking': string;
+  /** The jump-back pill, shown while an interrupt is pending and off-screen.
+   *  Inline cards can be scrolled past; this is the way back to one. */
+  'thread.pendingOne': string;
+  'thread.pendingMany': string;
   'conversations.title': string;
   'conversations.search': string;
   'conversations.hide': string;
@@ -70,12 +77,13 @@ export interface NannosStrings {
   // HITL approval card
   /** Card heading; `{toolName}` is the tool title(s) awaiting approval. */
   'hitl.title': string;
+  /** Batch heading; `{count}` approvals arrived together. Counting beats naming:
+   *  three concatenated tool names truncate to nothing useful in a narrow panel. */
+  'hitl.titleCount': string;
   'hitl.approve': string;
   'hitl.approveAll': string;
   'hitl.rejectAll': string;
   'hitl.reject': string;
-  'hitl.approved': string;
-  'hitl.rejected': string;
   'hitl.requestChanges': string;
   'hitl.reasonPlaceholder': string;
   'hitl.risk': string;
@@ -105,13 +113,34 @@ export interface NannosStrings {
 
   // Secondary-authorization prompt (a tool needs the user's consent)
   'auth.title': string;
+  /** Heading when the payload named the service the credential belongs to. */
+  'auth.titleService': string;
   'auth.body': string;
   'auth.bodyTool': string;
   'auth.action': string;
   'auth.retryHint': string;
   'auth.doneAction': string;
   'auth.retryAction': string;
-  'auth.doneChip': string;
+  /** Walking away from an authorization. Not a refusal the gateway receives —
+   *  there is nothing to refuse — but a decision the thread records. */
+  'auth.skip': string;
+
+  // Receipts — what a settled interrupt leaves in the thread. One grammar for
+  // both kinds: verb, subject, then dot-separated qualifiers.
+  'receipt.approved': string;
+  'receipt.rejected': string;
+  'receipt.changes': string;
+  /** A whole batch in one line; `{approved}` of `{total}` went through. */
+  'receipt.batch': string;
+  'receipt.batchRejected': string;
+  'receipt.authorized': string;
+  'receipt.skipped': string;
+  /** The run ended with the request still open — nobody ever answered it. */
+  'receipt.undecided': string;
+  /** Tail of an authorization receipt: authorizing is the middle of the story. */
+  'receipt.retried': string;
+  /** Carried only when the risk was High or Critical. */
+  'receipt.risk': string;
 
   // Working / timeline blocks
   'working.title': string;
@@ -202,10 +231,9 @@ export const nannosStringKeys = [
   'conversations.deleteError',
   'context.label',
   'hitl.title',
+  'hitl.titleCount',
   'hitl.approve',
   'hitl.reject',
-  'hitl.approved',
-  'hitl.rejected',
   'hitl.requestChanges',
   'hitl.reasonPlaceholder',
   'hitl.risk',
@@ -217,13 +245,24 @@ export const nannosStringKeys = [
   'hitl.diff.current',
   'hitl.diff.new',
   'auth.title',
+  'auth.titleService',
   'auth.body',
   'auth.bodyTool',
   'auth.action',
   'auth.retryHint',
   'auth.doneAction',
   'auth.retryAction',
-  'auth.doneChip',
+  'auth.skip',
+  'receipt.approved',
+  'receipt.rejected',
+  'receipt.changes',
+  'receipt.batch',
+  'receipt.batchRejected',
+  'receipt.authorized',
+  'receipt.skipped',
+  'receipt.undecided',
+  'receipt.retried',
+  'receipt.risk',
   'working.title',
   'thinking.title',
   'feedback.helpful',

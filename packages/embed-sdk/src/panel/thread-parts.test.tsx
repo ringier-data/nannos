@@ -89,7 +89,18 @@ function mountThread(
   messages: NannosUIMessage[],
   devMode = false,
   send: UseNannosChatValue['send'] = () => {},
-  { layout = 'panel', isBusy = false }: { layout?: PanelLayout; isBusy?: boolean } = {},
+  {
+    layout = 'panel',
+    isBusy = false,
+    pending = [],
+    respond = async () => {},
+  }: {
+    layout?: PanelLayout;
+    isBusy?: boolean;
+    /** Open approvals — the thread renders the card at the first of them. */
+    pending?: Array<{ toolCallId: string; approvalId: string; toolName: string; input: Record<string, unknown> }>;
+    respond?: (approvalId: string, approved: boolean, reason?: string) => Promise<void>;
+  } = {},
 ) {
   vi.stubGlobal(
     'fetch',
@@ -102,6 +113,9 @@ function mountThread(
     hasOlderMessages: false,
     loadOlderMessages: async () => {},
     conversationId: 'conv-1',
+    // The thread reads the open interrupt to place the approval card and the
+    // pending pill. Empty by default: it then renders neither.
+    interrupt: { pending, reason: undefined, reviewConfigs: [], respond },
   } as unknown as UseNannosChatValue;
   const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
   render(
@@ -297,10 +311,15 @@ describe('the authorization card', () => {
     fireEvent.click(authorize()!);
     fireEvent.click(done()!);
 
-    // Agent-facing text names the tool; the user sees the localized chip label.
+    // Agent-facing text names the tool; the user sees a localized receipt. The
+    // `receipt` display kind is what keeps that turn out of the thread as a
+    // user bubble or a context chip — the panel composed it, not the person.
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0][0]).toContain('gmail_send');
-    expect(send.mock.calls[0][1]).toEqual({ displayText: 'Authorization complete' });
+    expect(send.mock.calls[0][1]).toEqual({
+      displayText: 'Authorized gmail_send',
+      displayKind: 'receipt',
+    });
     expect(card()).toBeNull();
   });
 });
@@ -533,5 +552,84 @@ describe('a turn interrupted by an approval', () => {
     mountThread([before, after], false, () => {}, { layout: 'page' });
     // Two labels + the decision = one run of three machine lines.
     expect(screen.getByText('Worked through 3 steps')).toBeTruthy();
+  });
+
+  it('renders a rejected call as a rejection, not an approval', () => {
+    const rejected = { ...(approved as Record<string, unknown>), state: 'output-denied' };
+    mountThread([{ ...before, parts: [ACTIVITY, rejected] } as NannosUIMessage, after]);
+    expect(screen.getByText('Rejected github_get_me')).toBeTruthy();
+  });
+});
+
+/**
+ * The card renders INLINE, at the part where the turn stopped — it used to dock
+ * above the composer, detached from the step that raised it. A batch is still
+ * one card, so several pending parts must not produce several heads.
+ */
+describe('a pending approval, inline', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  });
+
+  afterEach(cleanup);
+
+  function pendingPart(id: string, toolName: string): NannosUIMessage['parts'][number] {
+    return {
+      type: 'dynamic-tool',
+      toolCallId: id,
+      toolName,
+      state: 'approval-requested',
+      input: {},
+    } as NannosUIMessage['parts'][number];
+  }
+
+  const openApproval = (id: string, toolName: string) => ({
+    toolCallId: id,
+    approvalId: id,
+    toolName,
+    input: {},
+  });
+
+  const cards = () => document.querySelectorAll('[data-slot="nannos-approval-card"]');
+
+  it('renders the card where the turn stopped', () => {
+    mountThread(
+      [{ id: 'm', role: 'assistant', parts: [ACTIVITY, pendingPart('call-1', 'github_get_me')] }],
+      false,
+      () => {},
+      { pending: [openApproval('call-1', 'github_get_me')] },
+    );
+    expect(cards().length).toBe(1);
+    expect(screen.getByText('Approval needed for github_get_me')).toBeTruthy();
+  });
+
+  it('renders nothing where no interrupt is open', () => {
+    mountThread([
+      { id: 'm', role: 'assistant', parts: [ACTIVITY, pendingPart('call-1', 'github_get_me')] },
+    ]);
+    expect(cards().length).toBe(0);
+  });
+
+  it('renders a batch as ONE card, counted rather than named', () => {
+    mountThread(
+      [
+        {
+          id: 'm',
+          role: 'assistant',
+          parts: [
+            ACTIVITY,
+            pendingPart('call-1', 'github_get_me'),
+            pendingPart('call-2', 'send_email'),
+          ],
+        },
+      ],
+      false,
+      () => {},
+      {
+        pending: [openApproval('call-1', 'github_get_me'), openApproval('call-2', 'send_email')],
+      },
+    );
+    expect(cards().length).toBe(1);
+    expect(screen.getByText('2 approvals needed')).toBeTruthy();
   });
 });
