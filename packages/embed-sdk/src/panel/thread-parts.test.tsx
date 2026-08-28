@@ -286,6 +286,9 @@ describe('the authorization card', () => {
     document.querySelector('[data-slot="nannos-auth-action"]') as HTMLElement | null;
   const done = () => document.querySelector('[data-slot="nannos-auth-done"]') as HTMLElement | null;
   const reauthorize = () => document.querySelector('[data-slot="nannos-auth-retry"]');
+  const skip = () => document.querySelector('[data-slot="nannos-auth-skip"]') as HTMLElement | null;
+  const unskip = () =>
+    document.querySelector('[data-slot="nannos-auth-unskip"]') as HTMLElement | null;
 
   it('offers only the way out to the provider at first', () => {
     mountThread([authTurn()]);
@@ -321,6 +324,28 @@ describe('the authorization card', () => {
       displayKind: 'receipt',
     });
     expect(card()).toBeNull();
+  });
+
+  it('records a skip in the thread', () => {
+    const send = vi.fn();
+    mountThread([authTurn()], false, send);
+    fireEvent.click(skip()!);
+
+    // Nothing goes to the agent: there is no refusal for the gateway to receive.
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.getByText('Skipped authorizing gmail_send')).toBeTruthy();
+  });
+
+  it('lets a skip be undone — it is a misclick away from stranding the turn', () => {
+    // The card is the only place the authorize link lives, and skipping sends
+    // nothing, so without a way back a mistaken click would leave the task
+    // parked in `auth-required` with no prompt anywhere in the conversation.
+    mountThread([authTurn()], false, vi.fn());
+    fireEvent.click(skip()!);
+    expect(authorize()).toBeNull();
+
+    fireEvent.click(unskip()!);
+    expect(authorize()?.getAttribute('href')).toBe('http://provider/consent');
   });
 });
 
@@ -609,6 +634,20 @@ describe('a pending approval, inline', () => {
     );
     expect(cards().length).toBe(1);
     expect(screen.getByText('Approval needed for github_get_me')).toBeTruthy();
+  });
+
+  it('still renders the card in dev mode, beside the raw part', () => {
+    // Dev mode used to hide it, which was harmless while the card was docked in
+    // the panel and survived on its own. Inline, the card IS the only way to
+    // answer — hiding it left a dev session unable to decide anything.
+    mountThread(
+      [{ id: 'm', role: 'assistant', parts: [ACTIVITY, pendingPart('call-1', 'github_get_me')] }],
+      true,
+      () => {},
+      { pending: [openApproval('call-1', 'github_get_me')] },
+    );
+    expect(cards().length).toBe(1);
+    expect(document.querySelector('[data-slot="nannos-tool"]')).toBeTruthy();
   });
 
   it('renders nothing where no interrupt is open', () => {

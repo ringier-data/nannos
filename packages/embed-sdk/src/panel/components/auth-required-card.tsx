@@ -90,8 +90,30 @@ export function AuthRequiredCard({ data, send, className }: AuthRequiredCardProp
 
   // Skipping sends nothing — there is no refusal for the gateway to receive —
   // so the thread would otherwise lose the fact that the user was asked at all.
+  //
+  // And because it sends nothing, it must not be a ONE-WAY DOOR. A misclick
+  // would otherwise strand the conversation: the card is the only place the
+  // authorize link lives, the task stays parked in `auth-required`, and nothing
+  // in the thread can bring the prompt back. So the receipt keeps the way in.
+  // (Reject on an approval needs no such escape: that decision does reach the
+  // agent, and asking again re-runs the tool and re-raises the card.)
   if (stage === 'skipped') {
-    return <Receipt outcome="skipped" subject={subject} className={className} />;
+    return (
+      <div className={cn('flex min-w-0 flex-wrap items-center gap-1.5', className)}>
+        <Receipt outcome="skipped" subject={subject} />
+        {data.authUrl && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className={ACTION_CLASS}
+            data-slot="nannos-auth-unskip"
+            onClick={() => setStage('idle')}
+          >
+            {strings['auth.action']}
+          </Button>
+        )}
+      </div>
+    );
   }
 
   const confirm = () => {

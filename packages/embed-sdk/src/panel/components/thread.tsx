@@ -648,16 +648,19 @@ function renderAssistantPart(
     // An ANSWERED one settles to a synthetic `{approved: true}` output — no
     // result anybody can read — so it leaves a receipt instead: the decision,
     // and nothing about the tool that a reader could mistake for its outcome.
-    // Dev mode is the exception, showing the raw part framed amber so it
-    // clearly is not part of the end-user view.
-    if (!devMode) {
-      if (part.state === 'approval-requested') {
-        // Client-action round trips pause here too, but the SDK answers those
-        // itself — a card would ask the user about work already under way.
-        const isRoundTrip = (part.input as { _clientActionRequest?: boolean } | undefined)
-          ?._clientActionRequest;
-        return isRoundTrip ? null : <PendingApprovalCard toolCallId={part.toolCallId} />;
-      }
+    // Dev mode ADDS the raw part beneath, framed amber so it clearly is not
+    // part of the end-user view — it never replaces the card. It used to, back
+    // when the card was docked in the panel and survived independently; now the
+    // card is the thread's job and the only way to answer, so hiding it behind
+    // the raw part left a dev-mode session unable to decide anything.
+    const isRoundTrip = (part.input as { _clientActionRequest?: boolean } | undefined)
+      ?._clientActionRequest;
+    let endUser: ReactNode = null;
+    if (part.state === 'approval-requested') {
+      // Client-action round trips pause here too, but the SDK answers those
+      // itself — a card would ask the user about work already under way.
+      endUser = isRoundTrip ? null : <PendingApprovalCard toolCallId={part.toolCallId} />;
+    } else {
       // The turn pauses at the card and resumes with more steps: without a line
       // in between, a reader cannot tell why the work broke off or that they
       // decided anything.
@@ -667,29 +670,31 @@ function renderAssistantPart(
           : part.state === 'output-denied'
             ? 'rejected'
             : null;
-      if (!outcome) return null;
-      return <Receipt outcome={outcome} subject={toolPartTitle(part.toolName, part.input)} />;
+      endUser = outcome ? (
+        <Receipt outcome={outcome} subject={toolPartTitle(part.toolName, part.input)} />
+      ) : null;
     }
-    const isClientAction = (part.input as { _clientActionRequest?: boolean } | undefined)
-      ?._clientActionRequest;
-    if (part.state === 'approval-requested' && !isClientAction) return null;
+    if (!devMode) return endUser;
     return (
-      <div className="rounded-lg border border-amber-500/50 border-dashed bg-amber-500/5 p-1">
-        <span className="flex items-center gap-1 px-1 pb-1 font-medium text-amber-700 text-xs dark:text-amber-500">
-          <BugIcon aria-hidden="true" className="size-3 shrink-0" /> dev only
-        </span>
-        <Tool data-slot="nannos-tool">
-          <ToolHeader
-            type="dynamic-tool"
-            state={part.state}
-            toolName={part.toolName}
-            title={toolPartTitle(part.toolName, part.input)}
-          />
-          <ToolContent>
-            {part.input !== undefined && <ToolInput input={part.input} />}
-            <ToolOutput output={part.output} errorText={part.errorText} />
-          </ToolContent>
-        </Tool>
+      <div className="flex flex-col gap-1">
+        {endUser}
+        <div className="rounded-lg border border-amber-500/50 border-dashed bg-amber-500/5 p-1">
+          <span className="flex items-center gap-1 px-1 pb-1 font-medium text-amber-700 text-xs dark:text-amber-500">
+            <BugIcon aria-hidden="true" className="size-3 shrink-0" /> dev only
+          </span>
+          <Tool data-slot="nannos-tool">
+            <ToolHeader
+              type="dynamic-tool"
+              state={part.state}
+              toolName={part.toolName}
+              title={toolPartTitle(part.toolName, part.input)}
+            />
+            <ToolContent>
+              {part.input !== undefined && <ToolInput input={part.input} />}
+              <ToolOutput output={part.output} errorText={part.errorText} />
+            </ToolContent>
+          </Tool>
+        </div>
       </div>
     );
   }
