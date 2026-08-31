@@ -75,6 +75,16 @@ describe('readAuthRequired', () => {
     expect(prompt.tool).toBeUndefined();
   });
 
+  test('the scrape stops before sentence punctuation', () => {
+    // The prose is a paragraph, so the URL is routinely followed by a full stop
+    // or a comma — welding one onto the link gives the button a 404.
+    const prompt = readAuthRequired([textPart(`Please go to ${AUTH_URL}. Then retry.`)], undefined);
+    expect(prompt.authUrl).toBe(AUTH_URL);
+    expect(
+      readAuthRequired([textPart(`see ${AUTH_URL}, then come back`)], undefined).authUrl
+    ).toBe(AUTH_URL);
+  });
+
   test('sandbox plumbing is never named as the thing being authorized', () => {
     // A `need-credentials` raised inside the sandbox is reported against `eval`;
     // "Authorization needed for eval" is worse than naming nothing at all.

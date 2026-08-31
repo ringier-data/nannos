@@ -15,8 +15,11 @@
  */
 import { Part } from '@a2a-js/sdk';
 
-/** First http(s) URL in a text blob — the fallback when nothing structured came. */
-const URL_IN_TEXT = /https?:\/\/[^\s<>"')]+/;
+/** First http(s) URL in a text blob — the fallback when nothing structured came.
+ *  The trailing class drops sentence punctuation the URL cannot have ended on:
+ *  the prose this scrapes is a paragraph, so "…visit https://host/begin." would
+ *  otherwise yield a link with a full stop welded on and a button that 404s. */
+const URL_IN_TEXT = /https?:\/\/[^\s<>"')]*[^\s<>"').,;:!?\]}]/;
 
 /**
  * Tool names that mean nothing to an end-user: sandbox and orchestration

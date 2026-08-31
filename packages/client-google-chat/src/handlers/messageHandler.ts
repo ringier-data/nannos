@@ -825,6 +825,17 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               statusEvent,
               config,
             );
+            if (authCardPosted) {
+              // Park the public spinner. Updating it in place is the ONLY thing
+              // that ever overwrites "🧠 Working…", and with the card carrying the
+              // prompt there is usually no final text to post — so without this
+              // the thread keeps a spinner that spins forever beside a card
+              // asking for a login. Written into the status line the block below
+              // already renders, rather than pushed here, or that same block
+              // would put the spinner straight back in this iteration.
+              statusMessage.thinking = '⏸️ Awaiting your authorization';
+              statusMessage.activity = '';
+            }
           }
 
           if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {

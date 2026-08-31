@@ -46,6 +46,10 @@ export interface HandleTaskResponseParams {
    * ("You must tell the end-user to…"), so posting it would repeat the prompt in
    * machine-to-machine prose beside the card that replaced it. Whatever the turn
    * streamed BEFORE the interrupt is still posted from the artifacts.
+   *
+   * It gates BOTH readers of `status.message` below — the interrupted-state
+   * branch and the generic final fallback — on purpose: they draw from the same
+   * text, so gating only the first would just let the second post it again.
    */
   suppressStatusText?: boolean;
 }

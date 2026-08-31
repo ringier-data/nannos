@@ -59,6 +59,13 @@ describe('readAuthRequired', () => {
     expect(scraped.tool).toBeUndefined();
   });
 
+  test('the scrape stops before sentence punctuation', () => {
+    // The prose is a paragraph, so the URL is routinely followed by a full stop
+    // or a comma — welding one onto the link gives the button a 404.
+    expect(readAuthRequired([textPart(`Please go to ${AUTH_URL}. Then retry.`)], undefined).authUrl).toBe(AUTH_URL);
+    expect(readAuthRequired([textPart(`see ${AUTH_URL}, then come back`)], undefined).authUrl).toBe(AUTH_URL);
+  });
+
   test('sandbox plumbing is never named as the thing being authorized', () => {
     const prompt = readAuthRequired([textPart(GATEWAY_TEXT)], { auth_url: AUTH_URL, tool: 'eval' });
     expect(prompt.tool).toBeUndefined();
