@@ -172,8 +172,22 @@ Only the requirement half ever crosses the wire: ``AuthPayload.client_payload()`
 cannot emit ``oauth2_client_config``, which carries a client secret.
 
 Unlike the human-in-the-loop extension this carries no ``review_configs``:
-nothing is being proposed, so there is no decision for the gateway to receive.
-The client resumes the task with a message once the user has authenticated.
+nothing is being PROPOSED, so there is nothing for the gateway to refuse. The
+answer is still a decision, though — it is addressed to the AGENT, which is
+holding a blocked tool call. A client resumes the parked task with a message
+carrying::
+
+  {"authorization": {"decision": "approved"|"declined"}}
+
+``approved`` retries the blocked tool (a credential that still is not there
+raises the prompt again); ``declined`` tells the agent to stop pushing the URL.
+Sending no DataPart is NOT a rejection: the user's own words are handed to the
+model node instead, which reads them (see AuthErrorDetectionMiddleware). Clients
+send agent-facing prose alongside the DataPart so a server that never routed it
+still behaves sanely.
+
+Consumers: the Embed SDK / web client (auth-required-card.tsx), the Slack client
+(utils/inTaskAuth.ts) and the Google Chat client (utils/inTaskAuth.ts).
 """
 
 # Keep in sync with the repo-root a2a-extensions.json registry (pinned by
