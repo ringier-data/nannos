@@ -15,8 +15,6 @@
  */
 import { Part } from '@a2a-js/sdk';
 
-export const IN_TASK_AUTH_EXTENSION = 'urn:nannos:a2a:in-task-auth:1.0';
-
 /** First http(s) URL in a text blob — the fallback when nothing structured came. */
 const URL_IN_TEXT = /https?:\/\/[^\s<>"')]+/;
 
@@ -114,6 +112,14 @@ export function authSubject(prompt: AuthPrompt): string {
  * What the buttons send as text. Agent-facing, so it is the same English the
  * Embed SDK sends — the fallback for a server that never routed the DataPart,
  * while the DataPart beside it is what the middleware acts on when it did.
+ *
+ * On that fallback path the words are READ, not just logged: a fast-LLM
+ * classifier grades them approve / reject / unclear before the agent ever sees
+ * them (orchestrator ``AuthErrorDetectionMiddleware._after_auth_interrupt`` ->
+ * ``classify_reply``), and an unclear verdict costs the user a whole extra
+ * round. So keep both sentences blunt and unambiguous about the DECISION —
+ * softening them ("maybe later", "I'll get to it") is what makes them
+ * unclassifiable.
  */
 export function authResumeText(decision: 'approved' | 'declined', tool?: string): string {
   if (decision === 'approved') {
