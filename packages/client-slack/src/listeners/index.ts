@@ -17,6 +17,7 @@ import { registerNannosCommand } from './commands/nannos.js';
 import { registerAuthorizeButtonAction } from './actions/authorizeButton.js';
 import { registerFeedbackButtonActions } from './actions/feedbackButton.js';
 import { registerHitlActions } from './actions/hitlButton.js';
+import { registerInTaskAuthActions } from './actions/inTaskAuthButton.js';
 import { registerHitlModalHandler } from './views/hitlModal.js';
 import { registerReactionListeners } from './events/reactionHandler.js';
 import { Logger } from '../utils/logger.js';
@@ -121,6 +122,9 @@ export async function registerListeners(
   });
   registerHitlActions(app, makeHitlDeps);
   registerHitlModalHandler(app, makeHitlDeps);
+  // The in-task authorization card resumes the same way a HITL decision does,
+  // so it re-enters through the same per-event dependency factory.
+  registerInTaskAuthActions(app, makeHitlDeps);
 
   // Register reaction listeners for message feedback (requires console-backend)
   if (feedbackService) {
