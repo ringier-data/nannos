@@ -48,7 +48,11 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
     headers.set('Authorization', `Bearer ${accessToken}`);
     headers.set(
       'X-A2A-Extensions',
-      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:feedback-request:1.0, urn:nannos:a2a:human-in-the-loop:1.0'
+      // in-task-auth is gated server-side on the client advertising it: without
+      // it an `auth-required` status is prose the gateway wrote for the agent;
+      // with it the facts arrive as a DataPart and the authorization card is
+      // built from them.
+      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:feedback-request:1.0, urn:nannos:a2a:human-in-the-loop:1.0, urn:nannos:a2a:in-task-auth:1.0'
     );
 
     return fetch(input, {

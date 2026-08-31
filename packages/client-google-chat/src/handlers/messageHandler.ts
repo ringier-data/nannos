@@ -17,6 +17,7 @@ import { HandlerDependencies } from './types.js';
 import { getSpinnerVerb } from '../utils/spinnerVerbs.js';
 import { FileStorageService } from '../services/fileStorageService.js';
 import { Config } from '../config/config.js';
+import { readAuthRequired } from '../utils/inTaskAuth.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -394,6 +395,65 @@ async function processMessageAttachments(
     return processedFiles;
 }
 
+/**
+ * The in-task authorization interrupt: A2A's own `auth-required` state, whose
+ * payload schema is the in-task-auth extension.
+ *
+ * The status TEXT is the MCP gateway addressing the AGENT ("You must tell the
+ * end-user to…") — the interrupt fires in middleware, before the model, so no
+ * LLM ever rewrites it. Google Chat used to post it verbatim. The card is our
+ * own copy instead, built from the DataPart when the producer sent one and from
+ * metadata or the prose's URL when it did not.
+ *
+ * Returns whether the card was posted — the caller then keeps that prose out of
+ * the finalized message.
+ */
+async function processAuthRequiredEvent(
+  logger: Logger,
+  chatService: GoogleChatService,
+  inFlightTaskStore: IInFlightTaskStore,
+  projectId: string,
+  spaceId: string,
+  threadId: string,
+  userId: string,
+  accumulatedTask: Task,
+  statusEvent: TaskStatusUpdateEvent,
+  config: Config,
+): Promise<boolean> {
+  const statusMeta = (statusEvent.metadata ?? statusEvent.status.message?.metadata) as
+    | Record<string, unknown>
+    | undefined;
+  const prompt = readAuthRequired(statusEvent.status.message?.parts, statusMeta);
+
+  logger.info(
+    { taskId: accumulatedTask.id, tool: prompt.tool, service: prompt.service, hasUrl: !!prompt.authUrl },
+    `Received in-task authorization interrupt`,
+  );
+
+  try {
+    const authCard = chatService.buildInTaskAuthCard(config, prompt, { taskId: accumulatedTask.id });
+
+    await chatService.sendPrivateCardMessage(
+      projectId,
+      spaceId,
+      userId,
+      [authCard],
+      threadId,
+    );
+
+    await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
+      logger.error(err, `Failed to update in-flight task for auth interrupt: ${err}`);
+    });
+
+    return true;
+  } catch (cardErr) {
+    // Falling back to the wire text is worse copy than the card, but it is the
+    // only thing left that carries the URL — a silent turn would strand the user.
+    logger.error(cardErr, `Failed to post in-task authorization card, falling back to text: ${cardErr}`);
+    return false;
+  }
+}
+
 async function processHumanInTheLoopEvent(
   logger: Logger,
   chatService: GoogleChatService,
@@ -691,6 +751,10 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     let accumulatedTask: Task | null = null;
     let feedbackRequestData: { sub_agents?: string[] } | null = null;
+    // Set once the in-task authorization card is on screen: the `auth-required`
+    // status text is then the gateway's agent-facing prose, and finalizing must
+    // not post it beside the card that replaced it.
+    let authCardPosted = false;
     try {
       for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
         logger.debug(`Stream event: ${_.get(event, 'kind')}`);
@@ -735,6 +799,21 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:human-in-the-loop:1.0')
           ) {
             await processHumanInTheLoopEvent(
+              logger,
+              chatService,
+              inFlightTaskStore,
+              projectId,
+              spaceId,
+              threadId,
+              userId,
+              accumulatedTask,
+              statusEvent,
+              config,
+            );
+          }
+
+          if (statusEvent.status.state === 'auth-required' && !authCardPosted) {
+            authCardPosted = await processAuthRequiredEvent(
               logger,
               chatService,
               inFlightTaskStore,
@@ -851,6 +930,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     const result = await handleTask({
       task: accumulatedTask,
+      suppressStatusText: authCardPosted,
       chatService,
       messageContext: {
         projectId,

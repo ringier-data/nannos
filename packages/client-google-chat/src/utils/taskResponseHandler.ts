@@ -38,6 +38,16 @@ export interface HandleTaskResponseParams {
   task: Task;
   chatService: GoogleChatService;
   messageContext: ChatMessageContext;
+  /**
+   * Drop `status.message` as a source of user-facing text.
+   *
+   * Set for an `auth-required` turn whose authorization card was already posted
+   * (messageHandler): that status text is the MCP gateway addressing the AGENT
+   * ("You must tell the end-user to…"), so posting it would repeat the prompt in
+   * machine-to-machine prose beside the card that replaced it. Whatever the turn
+   * streamed BEFORE the interrupt is still posted from the artifacts.
+   */
+  suppressStatusText?: boolean;
 }
 
 /**
@@ -121,7 +131,7 @@ export function processArtifacts(artifacts?: Artifact[]): {
  * Main entry point for handling any A2A response uniformly
  */
 export async function handleTask(params: HandleTaskResponseParams): Promise<{ messageId: string | undefined }> {
-  const { task, chatService, messageContext } = params;
+  const { task, chatService, messageContext, suppressStatusText } = params;
 
   const { projectId, spaceId, threadId, messageId, statusMessageId } = messageContext;
 
@@ -139,7 +149,7 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
   // For interrupted states (input-required, auth-required), the authoritative
   // message is in status.message — artifacts are just intermediate streaming
   // tokens from BEFORE the interrupt fired, not the final response.
-  if (isInterruptedState(task.status.state) && task.status?.message?.parts) {
+  if (!suppressStatusText && isInterruptedState(task.status.state) && task.status?.message?.parts) {
     for (const part of task.status.message.parts) {
       if (part.kind === 'text') {
         message += (part as { kind: 'text'; text: string }).text;
@@ -153,7 +163,7 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
   }
 
   // Final fallback: extract from status message (e.g. completed with no artifacts)
-  if (!message && task.status?.message?.parts) {
+  if (!message && !suppressStatusText && task.status?.message?.parts) {
     for (const part of task.status.message.parts) {
       if (part.kind === 'text') {
         message += (part as { kind: 'text'; text: string }).text;

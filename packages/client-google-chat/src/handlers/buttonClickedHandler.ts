@@ -5,6 +5,7 @@ import { Logger } from '../utils/logger.js';
 import { handleIncomingMessage, NormalizedMessage } from './messageHandler.js';
 import { HandlerDependencies } from "./types.js";
 import { GoogleChatService } from '../services/googleChatService.js';
+import { AuthDecision, authResumeText, authorizationDataPart } from '../utils/inTaskAuth.js';
 
 export interface ButtonClickedPayload {
   cardId: string,
@@ -277,6 +278,54 @@ async function handleHitlFeedbackCardClick(payload: ButtonClickedPayload, deps: 
   await handleIncomingMessage(syntheticMessage, deps);
 }
 
+/**
+ * Handle the in-task authorization card (`urn:nannos:a2a:in-task-auth:1.0`).
+ *
+ * Both buttons answer the SAME parked interrupt, and both answer it explicitly:
+ * the decision rides a DataPart the orchestrator's middleware acts on directly —
+ * approved retries the blocked tool (so a credential that still is not there
+ * asks again, as a card), declined tells the agent to stop pushing the link.
+ * Agent-facing prose rides along for a server that never routed the DataPart.
+ *
+ * Nothing is lost by a misclick: the decision reached the agent, and asking
+ * again re-runs the tool and raises a fresh card.
+ */
+async function handleInTaskAuthCardClick(payload: ButtonClickedPayload, deps: HandlerDependencies) {
+  const logger = Logger.getLogger('handleInTaskAuthCardClick');
+
+  const params = payload.actionParameters as unknown as { taskId?: string; tool?: string; subject?: string };
+  const decision: AuthDecision = payload.action === 'approved' ? 'approved' : 'declined';
+  const subject = params.subject || params.tool;
+
+  logger.info(`In-task auth ${decision} for taskId=${params.taskId}${params.tool ? ` tool=${params.tool}` : ''}`);
+
+  await deps.chatService.updateMessage({
+    projectId: payload.projectId,
+    messageName: payload.messageId,
+    text:
+      decision === 'approved'
+        ? `✅ Authorized${subject ? ` — ${subject}` : ''}`
+        : `🚫 Authorization declined${subject ? ` — ${subject}` : ''}`,
+    cardsV2: [],
+  });
+
+  const syntheticMessage: NormalizedMessage = {
+    userId: payload.userId,
+    userEmail: payload.userEmail,
+    projectId: payload.projectId,
+    spaceId: payload.spaceId,
+    messageId: `synthetic-${randomUUID()}`,
+    threadId: payload.threadId,
+    // The text is what a server that never routed the DataPart reads; the
+    // DataPart is what the middleware acts on when it did.
+    rawText: authResumeText(decision, params.tool),
+    dataParts: [authorizationDataPart(decision)],
+    source: 'direct_message',
+  };
+
+  await handleIncomingMessage(syntheticMessage, deps);
+}
+
 export async function handleButtonClicked(
   payload: ButtonClickedPayload,
   deps: HandlerDependencies
@@ -312,6 +361,15 @@ export async function handleButtonClicked(
 
     case 'hitl_multi_card': {
       await handleHitlMultiCardClick(
+        payload,
+        deps,
+      );
+
+      break;
+    }
+
+    case 'in_task_auth_card': {
+      await handleInTaskAuthCardClick(
         payload,
         deps,
       );
