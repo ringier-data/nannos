@@ -221,6 +221,70 @@ class TestParallelDifferentAgents:
         assert existing[AGENT]["task_id"] == "task-old", "the record held in state was mutated in place"
 
 
+class TestStaleTaskPhraseIsOnlyAHeuristic:
+    """"task … does not exist" in a result's text is a guess, not an error code.
+
+    It exists to break retry loops when a sub-agent has cleaned up a task the
+    orchestrator still holds an id for. But a genuine answer can contain the
+    phrase — *"that task does not exist — did you mean X?"* is a natural
+    ``input-required`` park — so when there is no stale ``task_id`` to clear, the
+    result must still be read for the ids it carries. Returning early there loses
+    the ``task_id`` of a first-delegation park: the task cannot be resumed, and
+    the ``context_id`` goes with it, restarting the sub-agent conversation.
+    """
+
+    @staticmethod
+    def _parked_result_mentioning_a_missing_task() -> ToolMessage:
+        return ToolMessage(
+            content="That task does not exist — did you mean PROJ-123? Tell me and I'll continue.",
+            name="task",
+            tool_call_id="call_owner",
+            additional_kwargs={
+                "a2a_metadata": {
+                    "task_id": "task-parked-1",
+                    "context_id": "ctx-1",
+                    "is_complete": False,
+                    "requires_input": True,
+                    "state": "input-required",
+                }
+            },
+        )
+
+    def test_ids_are_recorded_when_there_is_nothing_stale_to_clear(self):
+        update = _run(
+            [
+                HumanMessage(content="close that ticket"),
+                _issuing_message("call_owner"),
+                self._parked_result_mentioning_a_missing_task(),
+            ]
+        )
+
+        assert update is not None, "the phrase suppressed a real result"
+        tracking = update["a2a_tracking"][AGENT]
+        assert tracking["task_id"] == "task-parked-1"
+        assert tracking["context_id"] == "ctx-1"
+        assert tracking["requires_input"] is True
+
+    def test_a_stale_id_is_still_cleared_and_the_metadata_left_alone(self):
+        """The loop-breaker still wins when there IS a stale id: clear and stop."""
+        middleware = A2ATaskTrackingMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="close that ticket"),
+                _issuing_message("call_owner"),
+                self._parked_result_mentioning_a_missing_task(),
+            ],
+            "a2a_tracking": {AGENT: {"task_id": "task-stale", "context_id": "ctx-old"}},
+        }
+
+        update = middleware.before_model(state, MagicMock())
+
+        tracking = update["a2a_tracking"][AGENT]
+        assert "task_id" not in tracking, "the stale id must be cleared to break the retry loop"
+        assert tracking["is_complete"] is True
+        assert tracking["context_id"] == "ctx-old"
+
+
 def test_refusal_wording_does_not_delete_the_owners_task_id():
     """The stale-task heuristic fires on a result that says a task "does not exist".
 

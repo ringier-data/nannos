@@ -191,7 +191,13 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
                 agent_record["is_complete"] = True
                 logger.info(f"[A2A MIDDLEWARE before_model] Cleared stale task_id {old_task_id} for {subagent_type}")
                 return True
-            return False
+            # Nothing stale to clear, so DO NOT stop here: the check above is a
+            # content heuristic, not an error channel, and a genuine answer can
+            # contain the phrase ("that task does not exist — did you mean X?" is a
+            # natural input-required park). Falling through is what the
+            # single-message version did; returning here dropped the ids of a
+            # first-delegation park — the very failure this middleware records them
+            # for. Covered by test_a2a_tracking_step_results.py.
 
         # Check if ToolMessage has A2A metadata in additional_kwargs
         # This is placed by DynamicToolDispatchMiddleware after extracting from JSON response
