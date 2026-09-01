@@ -135,6 +135,8 @@ A sub-agent's memory is its LangGraph checkpoint, addressed by conversation and 
 
 The refusal is a `task` ToolMessage tagged `concurrent_task_refusal` (`app/middleware/task_refusal.py`). Anything reading "the latest `task` result" must skip tagged messages — it lands *after* the owner's, so untagged it becomes the user's visible reply and shadows the owner's `a2a_metadata`.
 
+This is plumbing, and the user must never meet it: when work would need one agent twice, the orchestrator folds it into a single task or runs the parts in sequence **on its own**, without asking the user to choose and without narrating the constraint. Both failure modes have been seen in QA — asking "sequential or a different agent?" instead of just doing it, and relaying the refusal text into the chat.
+
 ### Orchestrator Auto-Includes Scheduler + Console Tools
 
 The orchestrator's whitelisted tools always include `scheduler_*` and `console_*` prefixed tools (auto-included regardless of user config). This ensures scheduling and skill management are always available without explicit user configuration.

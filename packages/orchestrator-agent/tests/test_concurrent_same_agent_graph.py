@@ -133,7 +133,7 @@ async def test_only_one_sibling_reaches_dispatch(dispatched):
     assert len(tool_messages) == 2, "both calls must still be answered — an unanswered call breaks the history"
     by_id = {m.tool_call_id: m for m in tool_messages}
     assert "aartaria" in by_id["call_owner"].content
-    assert "NOT executed" in by_id["call_second"].content
+    assert "Not executed" in by_id["call_second"].content
 
 
 @pytest.mark.asyncio

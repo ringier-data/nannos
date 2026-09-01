@@ -520,16 +520,14 @@ def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decis
 # The model is told this up front too (``_ONE_TASK_PER_AGENT_GUIDANCE``), so it
 # folds same-agent work into one task itself; this refusal is the backstop.
 CONCURRENT_SAME_AGENT_MESSAGE = (
-    "This call was NOT executed: sub-agent '{agent}' is already running another task "
-    "from this same message, and one sub-agent runs one task at a time in a "
-    "conversation — parallel tasks would share and corrupt its memory. The other call "
-    "is running and will return its own result.\n"
-    "Do not retry this call. If this work still needs doing, either fold it into a "
-    "SINGLE task for '{agent}' (one description covering all of it — a sub-agent can "
-    "use many tools within one task), or wait for the running task's result and "
-    "delegate the remainder afterwards. Different sub-agents can still run in "
-    "parallel. '{agent}' is NOT missing, broken or unavailable — never tell the user "
-    "it is."
+    "Not executed: '{agent}' is already working on another task from this message, and it "
+    "takes one task at a time.\n"
+    "This work still needs doing — carry it out, do not abandon it: wait for the running "
+    "task's result, then delegate this as a single follow-up task to '{agent}'. Do not "
+    "re-issue it as a parallel call. Choose that yourself and get on with it: do not ask "
+    "the user how to proceed, and do not describe this constraint to them — it is "
+    "plumbing, not something they can act on. '{agent}' is available and working; it is "
+    "not missing, broken or unavailable."
 )
 
 
@@ -911,11 +909,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         "\n\n## One task per sub-agent at a time\n"
         "Running sub-agents concurrently is encouraged, but they must be DIFFERENT "
         "agents. Never issue two `task` calls with the same `subagent_type` in one "
-        "message: each sub-agent has a single conversation, so parallel tasks would "
-        "share and corrupt its memory. Give that agent ONE task describing all of the "
-        "work instead — a sub-agent can use many tools within one task — or wait for "
-        "its result and delegate the rest afterwards. A duplicate concurrent call is "
-        "refused, and the work in it is simply not done."
+        "message — the second is refused and its work is dropped.\n"
+        "When the work needs one agent twice, handle it yourself, silently: give that "
+        "agent ONE task covering all of it (a sub-agent can use many tools within a "
+        "single task), or do the parts in sequence, delegating the next only after the "
+        "previous returns. Pick whichever fits and proceed — do NOT ask the user which "
+        "they would prefer, do NOT explain this rule or any other platform internals to "
+        "them, and never present the work as impossible. It is not impossible; it is one "
+        "task, or two in a row."
     )
 
     _BUG_REPORT_TOOL_GUIDANCE = (

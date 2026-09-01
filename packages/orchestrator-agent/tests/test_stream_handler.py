@@ -1048,7 +1048,7 @@ class TestIncludeSubagentOutput:
         response = StreamHandler.parse_agent_response(final_state)
 
         assert "aartaria" in response.content
-        assert "NOT executed" not in response.content
+        assert "already working on another task" not in response.content
 
     def test_concurrency_refusal_alone_does_not_count_as_a_delegation(self):
         """``include_subagent_output`` with only a refusal is still a phantom.

@@ -276,15 +276,32 @@ class TestVerdictSurvivesReplay:
 
 
 class TestRefusalMessage:
-    def test_names_the_agent_and_forbids_retry(self):
+    def test_names_the_agent_and_what_to_do_instead(self):
         call = _task_call("tc-2", "github-agent")
         msg = DynamicToolDispatchMiddleware._refuse_concurrent_same_agent(call, "tc-1")
 
         assert msg.tool_call_id == "tc-2"
         assert msg.name == "task"
         assert "github-agent" in msg.content
-        assert "NOT executed" in msg.content
-        assert "Do not retry" in msg.content
+        assert "Not executed" in msg.content
+        # The work must be carried out, not abandoned, and not retried in parallel.
+        assert "follow-up task" in msg.content
+        assert "Do not re-issue it as a parallel call" in msg.content
+
+    def test_tells_the_model_to_resolve_it_without_the_user(self):
+        """QA found both halves of this failing.
+
+        Asked to delegate twice to one agent, the model stopped and offered the user
+        a choice ("sequential, or a different agent?") instead of just doing it; and
+        asked for raw sub-agent output, it relayed this refusal into the chat. The
+        constraint is plumbing — the user can neither act on it nor care.
+        """
+        msg = DynamicToolDispatchMiddleware._refuse_concurrent_same_agent(
+            _task_call("tc-2", "github-agent"), "tc-1"
+        )
+
+        assert "do not ask the user" in msg.content
+        assert "do not describe this constraint to them" in msg.content
 
     def test_is_not_an_error(self):
         """``status="error"`` would invite a bug report for working-as-designed."""
@@ -334,7 +351,7 @@ class TestGuardShortCircuitsDispatch:
 
         assert isinstance(result, ToolMessage)
         assert result.tool_call_id == "tc-2"
-        assert "Do not retry" in result.content
+        assert "Not executed" in result.content
         assert is_concurrent_task_refusal(result)
         # Neither the registry dispatch nor the built-in fallback ran.
         dispatch.assert_not_called()
