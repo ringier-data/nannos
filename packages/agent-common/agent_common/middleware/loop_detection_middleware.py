@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 #: never right — there is no loop to break, only an answer to deliver.
 RESPONSE_TOOLS: frozenset[str] = frozenset({"FinalResponseSchema", "SubAgentResponseSchema"})
 
+#: Result given to a call that never ran because the run was force-stopped over a
+#: *different* looping call on the same turn.
+_STOPPED_BEFORE_EXECUTION = (
+    "BLOCKED: the run was stopped because another tool call on this turn was looping. This call was not executed."
+)
+
 
 class LoopDetectionState(AgentState):
     """Extended agent state with tool call tracking for loop detection.
@@ -396,10 +402,32 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 f"[LOOP DETECTION] Force-stopping: {blocked_names} blocked "
                 f"{self.force_stop_after}+ consecutive times. Ending the run."
             )
-            return {
-                "tool_call_history": history,
-                "jump_to": "end",
-            }
+
+            # Answer every call that has no result yet before ending. A tool call left
+            # unanswered in the checkpoint is the mirror image of the orphaned result —
+            # the next turn sends a tool_use with no tool_result, which providers reject
+            # just as hard (cf. ``_seal_dangling_tool_calls`` on the adoption path).
+            # Appending results can never remove a call, so this direction is always safe.
+            blocked_by_id = {info["tool_call"]["id"]: info for info in blocked_calls}
+            stop_messages = [
+                ToolMessage(
+                    content=(
+                        self._build_error_message(blocked_by_id[tool_call["id"]])
+                        if tool_call["id"] in blocked_by_id
+                        else _STOPPED_BEFORE_EXECUTION
+                    ),
+                    tool_call_id=tool_call["id"],
+                    name=tool_call["name"],
+                    status="error",
+                )
+                for tool_call in last_ai_message.tool_calls
+                if tool_call.get("id") and tool_call["id"] not in already_answered
+            ]
+
+            update: dict[str, Any] = {"tool_call_history": history, "jump_to": "end"}
+            if stop_messages:
+                update["messages"] = stop_messages
+            return update
 
         # Build error ToolMessages for blocked calls (only blocked ones!)
         # Frame as permanent failure (not rate-limiting) so models don't stubbornly retry.

@@ -314,8 +314,10 @@ class TestForceStop:
         assert result is not None
         # Ends the run outright. Crucially it does NOT rewrite the AIMessage: doing so
         # orphans any tool result already emitted for the stripped call (issue #182).
+        # The unanswered call is sealed with a result so it is not left dangling.
         assert result["jump_to"] == "end"
-        assert "messages" not in result
+        assert [m.tool_call_id for m in result["messages"]] == ["tc-1"]
+        assert result["messages"][0].status == "error"
 
     @pytest.mark.asyncio
     async def test_no_force_stop_below_threshold(self):
@@ -392,9 +394,11 @@ class TestForceStop:
                 assert len(result["messages"]) == 1
                 assert isinstance(result["messages"][0], ToolMessage)
             else:
-                # 3rd block: force-stop — end the run, message history untouched
+                # 3rd block: force-stop — end the run; the blocked call is answered
+                # (never left dangling) and no existing message is rewritten.
                 assert result["jump_to"] == "end"
-                assert "messages" not in result
+                assert len(result["messages"]) == 1
+                assert result["messages"][0].tool_call_id == f"tc-fs-{block_round}"
 
     """Test dispatch_tools parameter for exempting dispatcher tools from max_tool_repeats."""
 
@@ -574,7 +578,7 @@ class TestAlreadyAnsweredToolCalls:
 
         assert result is not None
         # The run still stops — but by jumping to END, not by stripping the tool call
-        # that ``rejection`` answers.
+        # that ``rejection`` answers, and without answering it a second time.
         assert result["jump_to"] == "end"
         assert "messages" not in result
 
@@ -728,3 +732,39 @@ class TestResponseToolsExempt:
         assert middleware._matches_tool_filter({"name": "search", "args": {}, "id": "x"}) is True
         for name in RESPONSE_TOOLS:
             assert middleware._matches_tool_filter({"name": name, "args": {}, "id": "x"}) is False
+
+    @pytest.mark.asyncio
+    async def test_force_stop_seals_every_unanswered_call_on_the_turn(self):
+        """No tool call may survive a force-stop unanswered — including untracked ones.
+
+        ``all_tracked_blocked`` ignores calls this middleware doesn't track (an exempt
+        response tool, or one filtered out by ``tool_name``), so force-stop can fire on a
+        turn that also carries such a call. Leaving it unanswered puts a ``tool_use`` with
+        no ``tool_result`` in the checkpoint — the mirror image of the orphaned result,
+        and rejected just as hard on the next turn.
+        """
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        middleware = RepeatedToolCallMiddleware(tool_name="search", max_repeats=3, force_stop_after=2, window_size=20)
+
+        args_hash = middleware._hash_args({"q": "x"})
+        ai_message = AIMessage(
+            content="",
+            id="msg-mixed",
+            tool_calls=[
+                {"name": "search", "args": {"q": "x"}, "id": "tc-looping"},
+                {"name": "read_file", "args": {"path": "/a"}, "id": "tc-untracked"},
+            ],
+        )
+
+        state = {"messages": [ai_message], "tool_call_history": {"search": [args_hash] * 5}}
+
+        result = await middleware.aafter_model(state, MagicMock())
+
+        assert result is not None
+        assert result["jump_to"] == "end"
+        answered = {m.tool_call_id for m in result["messages"] if isinstance(m, ToolMessage)}
+        assert answered == {"tc-looping", "tc-untracked"}
+        # The untracked call did not loop — it simply never ran.
+        untracked = next(m for m in result["messages"] if m.tool_call_id == "tc-untracked")
+        assert "not executed" in untracked.content
