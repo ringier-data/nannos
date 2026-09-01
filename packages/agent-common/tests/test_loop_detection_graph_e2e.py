@@ -66,8 +66,10 @@ class _SearchArgs(BaseModel):
     q: str = Field(description="query")
 
 
-def _make_search_tool() -> StructuredTool:
+def _make_search_tool(executions: list | None = None) -> StructuredTool:
     def _search(q: str) -> str:
+        if executions is not None:
+            executions.append(q)
         return "no results"
 
     return StructuredTool.from_function(func=_search, name="search", description="search", args_schema=_SearchArgs)
@@ -113,10 +115,10 @@ class _LoopingModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-def _build_agent(model: _LoopingModel):
+def _build_agent(model: _LoopingModel, executions: list | None = None):
     return create_agent(
         model=model,
-        tools=[_make_search_tool()],
+        tools=[_make_search_tool(executions)],
         middleware=[
             RepeatedToolCallMiddleware(
                 max_repeats=1,
@@ -327,3 +329,74 @@ async def test_response_tool_is_never_force_stopped():
         if isinstance(m, ToolMessage) and isinstance(m.content, str) and m.content.startswith("BLOCKED:")
     ]
     assert not blocked, "the terminal response tool must never be blocked as a loop"
+
+
+@pytest.mark.asyncio
+async def test_blocking_still_fires_on_the_turn_after_a_force_stop():
+    """The counter must survive the stop — otherwise the next turn runs the loop again.
+
+    ``tool_call_history`` is private state carried in the checkpoint. If a force-stop lost
+    it (or reset it), the very next turn would start from zero: the looping call would be
+    executed again and the user would be back where they started, one turn later. So the
+    check is behavioural — on the turn after a stop, the same call must be refused
+    *without* the tool running.
+    """
+    executions: list = []
+    model = _LoopingModel(seen_requests=[])
+    agent = _build_agent(model, executions)
+    config = {"configurable": {"thread_id": "loop-3"}}
+
+    await agent.ainvoke({"messages": [HumanMessage(content="search for it")]}, config)
+    executions_after_first_turn = len(executions)
+    assert executions_after_first_turn, "the tool should have run before the loop was detected"
+
+    # Same thread, same looping model: the model asks for the identical call again.
+    result = await agent.ainvoke({"messages": [HumanMessage(content="try again")]}, config)
+
+    # Refused on the strength of history carried over from the previous turn — the gate
+    # still holds, and the tool did not execute a single further time.
+    assert len(executions) == executions_after_first_turn, (
+        "the looping tool ran again after the force-stop — the repeat counter was lost"
+    )
+
+    last_ai = next(m for m in reversed(result["messages"]) if isinstance(m, AIMessage))
+    refusal = next(m for m in reversed(result["messages"]) if isinstance(m, ToolMessage))
+    assert refusal.tool_call_id == last_ai.tool_calls[0]["id"]
+    assert refusal.status == "error"
+    assert_tool_pairing_valid(result["messages"])
+
+
+@pytest.mark.asyncio
+async def test_do_not_retry_guidance_reaches_the_model_on_the_next_turn():
+    """The refusal is only useful if the model can still read it when it next runs.
+
+    The BLOCKED result is what tells the model to stop retrying and answer with what it
+    has. It is written into the checkpoint on the stopped turn, so the turn after must
+    replay it verbatim — if it were dropped or rewritten, the model would be refused with
+    no idea why, and would simply try again.
+    """
+    model = _LoopingModel(seen_requests=[])
+    agent = _build_agent(model)
+    config = {"configurable": {"thread_id": "loop-4"}}
+
+    await agent.ainvoke({"messages": [HumanMessage(content="search for it")]}, config)
+
+    model.stop_looping = True
+    await agent.ainvoke({"messages": [HumanMessage(content="never mind")]}, config)
+
+    replayed = model.seen_requests[-1]
+    guidance = [
+        m.content
+        for m in replayed
+        if isinstance(m, ToolMessage) and isinstance(m.content, str) and m.content.startswith("BLOCKED:")
+    ]
+    assert guidance, "the model was refused on the previous turn but sees no explanation now"
+    assert any("Do NOT retry with the same arguments" in text for text in guidance)
+    assert any("respond to the user with what you have so far" in text for text in guidance)
+
+    # Specifically the *force-stopped* call must carry it. The stopped call used to get no
+    # result at all, so the model was left with a bare unanswered call and no reason.
+    stopped_call = next(m.tool_calls[0]["id"] for m in reversed(replayed) if isinstance(m, AIMessage) and m.tool_calls)
+    stopped_result = next(m for m in replayed if isinstance(m, ToolMessage) and m.tool_call_id == stopped_call)
+    assert stopped_result.content.startswith("BLOCKED:")
+    assert "Do NOT retry with the same arguments" in stopped_result.content
