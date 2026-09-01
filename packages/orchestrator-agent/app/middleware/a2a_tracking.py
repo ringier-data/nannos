@@ -178,14 +178,17 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         # but the orchestrator still has a stale task_id in state, causing infinite retry loops
         content = tool_message.content if isinstance(tool_message.content, str) else str(tool_message.content)
         if "task" in content.lower() and "does not exist" in content.lower():
-            logger.warning(
-                f"[A2A MIDDLEWARE before_model] Detected 'task does not exist' error for {subagent_type}. "
-                "Clearing stale task_id from state to prevent retry loop."
-            )
             # Clear the task_id while preserving context_id and other tracking.
             # No record means no stale id to clear — and nothing worth creating one for.
             agent_record = tracking.get(subagent_type) or {}
             if "task_id" in agent_record:
+                # Logged here, not on the phrase alone: most results carrying it are
+                # ordinary answers, and warning before knowing whether anything will
+                # be cleared makes every one of them look like a stale-task error.
+                logger.warning(
+                    f"[A2A MIDDLEWARE before_model] Detected 'task does not exist' for {subagent_type} while "
+                    "holding a task_id. Clearing it from state to prevent a retry loop."
+                )
                 old_task_id = agent_record.pop("task_id")
                 # Also mark as incomplete to prevent re-injection
                 agent_record["is_complete"] = True
