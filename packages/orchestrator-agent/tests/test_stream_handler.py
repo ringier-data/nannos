@@ -4,6 +4,8 @@ from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.handlers import StreamHandler
+from app.middleware.dynamic_tool_dispatch import CONCURRENT_SAME_AGENT_MESSAGE
+from app.middleware.task_refusal import CONCURRENT_TASK_REFUSAL_KEY
 
 
 class TestBuildAuthResponse:
@@ -989,6 +991,109 @@ class TestIncludeSubagentOutput:
         assert "Here's the joke the smart-joke-responder created" in response.content
         assert "Why did the model cross the road?" in response.content
         assert "\n\n" in response.content
+
+    def test_concurrency_refusal_is_not_shown_as_the_subagent_answer(self):
+        """A refused same-agent sibling must not become the user's reply.
+
+        The refusal is a ``task`` ToolMessage and lands AFTER the owner's (parallel
+        siblings are written in ``tool_calls`` order), so the reverse scan here
+        would otherwise adopt "This call was NOT executed…" and drop the real
+        answer — the whole visible reply, since the model is told to leave
+        ``message`` short when it sets ``include_subagent_output``.
+        """
+        final_state = {
+            "messages": [
+                HumanMessage(content="who am I on GitHub, and list my repos"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "github-agent", "description": "who am I"},
+                            "id": "call_task_owner",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "github-agent", "description": "list repos"},
+                            "id": "call_task_refused",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                ToolMessage(content="You are aartaria (GitHub ID 10273710).", tool_call_id="call_task_owner"),
+                ToolMessage(
+                    content=CONCURRENT_SAME_AGENT_MESSAGE.format(agent="github-agent"),
+                    tool_call_id="call_task_refused",
+                    additional_kwargs={CONCURRENT_TASK_REFUSAL_KEY: True},
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_refusal",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert "aartaria" in response.content
+        assert "NOT executed" not in response.content
+
+    def test_concurrency_refusal_alone_does_not_count_as_a_delegation(self):
+        """``include_subagent_output`` with only a refusal is still a phantom.
+
+        Otherwise the executor's delegation nudge is skipped on the strength of a
+        sub-agent that never ran.
+        """
+        final_state = {
+            "messages": [
+                HumanMessage(content="list my repos twice"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "github-agent", "description": "list repos"},
+                            "id": "call_task_refused",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=CONCURRENT_SAME_AGENT_MESSAGE.format(agent="github-agent"),
+                    tool_call_id="call_task_refused",
+                    additional_kwargs={CONCURRENT_TASK_REFUSAL_KEY: True},
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "Done.",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_phantom",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        assert StreamHandler.is_phantom_subagent_completion(final_state) is True
 
     def test_include_subagent_output_no_tool_message_uses_intro_only(self):
         """If no ToolMessage exists, keep only the LLM message (no crash)."""

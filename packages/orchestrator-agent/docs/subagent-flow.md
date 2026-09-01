@@ -278,12 +278,44 @@ campaign-listing delegation's state and answered about ad campaigns — the GitH
 was never called again, and the authorization it had parked on was never answered.
 
 **The second concurrent call to one agent is refused** (`surplus_same_agent_call` →
-`_refuse_concurrent_same_agent`, checked in both `wrap_tool_call` and
-`awrap_tool_call` *before* the registry lookup, since the built-in agents that path
-falls through to share the thread the same way). Different agents still run in
-parallel. The model is told the rule up front in the task tool description
-(`_ONE_TASK_PER_AGENT_GUIDANCE`), so it folds same-agent work into a single task
-itself; the refusal is the backstop.
+`_concurrent_same_agent_refusal`, in both `wrap_tool_call` and `awrap_tool_call`).
+Different agents still run in parallel. The model is told the rule up front in the
+task tool description (`_ONE_TASK_PER_AGENT_GUIDANCE`), so it folds same-agent work
+into a single task itself; the refusal is the backstop.
+
+Only for agents in `subagent_registry` — the ones whose thread this middleware owns.
+A name outside it falls through to `SubAgentMiddleware`, which runs its sub-agent
+inline against the parent's config with no `{conv}::{agent}` thread of its own
+(and the built-in general-purpose does not use A2A tracking at all), so there is
+nothing shared to corrupt; and an unknown or typo'd name must reach deepagents'
+*"does not exist, the only allowed types are […]"*, which teaches the model the real
+names, rather than being told a non-existent agent is busy and must never be
+reported as unavailable. In practice this costs nothing: the orchestrator registers
+its own `general-purpose` (see `AGENTS.md`), and the task tool's `subagent_type`
+enum is built from the registry.
+
+Ownership among siblings is decided by **position**, not by comparing ids:
+`ToolCall["id"]` is optional, and comparing a possibly-`None` owner id would return
+"allowed" for every sibling — disabling the guard exactly when the history is
+malformed. An id-less owner still owns.
+
+### The refusal is not a delegation result
+
+It travels as a `task` ToolMessage and lands **after** the owner's (parallel siblings
+are written in `tool_calls` order), so every consumer that reads "the latest `task`
+result" would read it instead of the real answer. It carries
+`additional_kwargs["concurrent_task_refusal"]` and those consumers skip it
+(`app/middleware/task_refusal.py`):
+
+| Consumer | Untagged consequence |
+|----------|----------------------|
+| `StreamHandler.parse_agent_response` (`include_subagent_output`) | the user's whole visible reply becomes *"This call was NOT executed…"* and the real answer is dropped |
+| `StreamHandler._extract_recently_called_subagents` | a turn whose only `task` output is a refusal counts as a delegation, skipping the executor's re-entry nudge |
+| `A2ATaskTrackingMiddleware.before_model` | the owner's `a2a_metadata` is never read, so a parked `input-required`/`auth-required` owner loses the `task_id` needed to resume it |
+
+The refusal's wording must also never say a task *"does not exist"* — that phrase is
+the stale-task heuristic in `a2a_tracking.py`, which would delete the **owner's** live
+`task_id`. Pinned by a test.
 
 ### Why not just isolate the threads?
 
@@ -311,6 +343,27 @@ candidate to address.
 The guard reads only the assistant message that issued the call, which LangGraph replays
 unchanged, so the sibling that won the first attempt wins the resume replay too — a
 refusal cannot become a second execution part way through a turn.
+
+### What this does NOT cover
+
+The invariant is enforced *within one assistant message*. Other routes to the same
+thread remain open, and each needs a claim on the thread itself (the
+`StreamCoordinator.try_register/release` pattern in
+`ringier-a2a-sdk/server/executor.py` is the shape that would subsume all of them):
+
+- **Two orchestrator turns on one conversation** — a second user message arriving
+  mid-turn, or a scheduled run landing on the same `context_id`. Each sees a lone
+  sibling.
+- **A stall-timeout abort** — the consumer is cancelled, but a remote A2A sub-agent
+  keeps executing on `{conv}::{agent}` while the model is told the task failed and
+  may retry.
+- **Re-delegation into a parked task** — the refusal advises "wait for the running
+  task's result and delegate the remainder afterwards". If the owner is still parked
+  when that follow-up lands, the pre-call pending-interrupt probe turns the dispatch
+  into `Command(resume=…)`, which *replaces* the freshly built `HumanMessage`: the
+  follow-up's description is silently dropped and the old task resumes instead. Safe
+  in the common case (the parked owner is resumed first, in the same turn), but not
+  by construction.
 
 ---
 

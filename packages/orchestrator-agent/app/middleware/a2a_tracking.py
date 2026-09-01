@@ -30,6 +30,8 @@ from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
 
+from .task_refusal import is_concurrent_task_refusal
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,9 +110,28 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         if not messages:
             return None
 
-        # Look for ToolMessage from 'task' tool in the most recent message
-        last_message = messages[-1]
-        if not isinstance(last_message, ToolMessage):
+        # Look for ToolMessage from 'task' tool at the end of the step.
+        #
+        # Not strictly ``messages[-1]``: a concurrency refusal
+        # (``DynamicToolDispatchMiddleware``) is a ``task`` ToolMessage that lands
+        # AFTER the owner's, because parallel siblings are written in
+        # ``tool_calls`` order. Stopping at it would drop the owner's
+        # ``a2a_metadata`` — and with it the ``task_id`` a parked
+        # ``input-required``/``auth-required`` owner needs to be resumed. So walk
+        # back over the trailing ToolMessages to the last real result.
+        last_message = None
+        trailing_index = len(messages)
+        for index in range(len(messages) - 1, -1, -1):
+            candidate = messages[index]
+            if not isinstance(candidate, ToolMessage):
+                break
+            trailing_index = index
+            if not is_concurrent_task_refusal(candidate):
+                last_message = candidate
+                break
+        if last_message is None:
+            if trailing_index < len(messages):
+                logger.debug("[A2A MIDDLEWARE before_model] Trailing ToolMessages are refusals only; nothing to track")
             return None
 
         logger.info("[A2A MIDDLEWARE before_model] Found ToolMessage, checking for A2A metadata...")

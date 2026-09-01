@@ -12,12 +12,17 @@ the second concurrent call is refused instead. See the commentary above
 ``surplus_same_agent_call``.
 
 Covers:
-- the verdict itself, including the parallel case that must keep working
-  (different agents) and the sequential case that must not be touched;
+- the verdict itself: the parallel case that must keep working (different
+  agents), the sequential case that must not be touched, and the agents whose
+  thread this middleware does not own (left to deepagents' own answers);
+- fail-*closed* on malformed history, since a silently inactive guard is the one
+  outcome worse than a false refusal;
 - determinism across a resume replay, which is what stops a refusal from
   flipping into a second execution mid-turn;
 - the refusal message reaching the model instead of a dispatch, on both the sync
-  and async tool-call paths.
+  and async tool-call paths, and its tag, without which downstream consumers read
+  it as the sub-agent's answer (``test_stream_handler.py``,
+  ``test_a2a_tracking_refusal.py``).
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -26,17 +31,27 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.middleware.dynamic_tool_dispatch import (
+    CONCURRENT_SAME_AGENT_MESSAGE,
     DynamicToolDispatchMiddleware,
     surplus_same_agent_call,
 )
+from app.middleware.task_refusal import is_concurrent_task_refusal
 from app.models.config import GraphRuntimeContext
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+#: Agents whose checkpoint thread the middleware owns (stand-in registry).
+KNOWN_AGENTS = ("general-purpose", "github-agent", "jira-agent")
 
-def _task_call(call_id: str, subagent_type: str, description: str = "do the thing") -> dict:
+
+def verdict(state, tool_call, known_agents=KNOWN_AGENTS):
+    """``surplus_same_agent_call`` with the registry defaulted for brevity."""
+    return surplus_same_agent_call(state, tool_call, known_agents)
+
+
+def _task_call(call_id, subagent_type: str, description: str = "do the thing") -> dict:
     return {
         "id": call_id,
         "name": "task",
@@ -61,7 +76,7 @@ def _context() -> GraphRuntimeContext:
         user_sub="sub1",
         name="Test",
         email="test@example.com",
-        subagent_registry={},
+        subagent_registry={name: {"description": name} for name in KNOWN_AGENTS},
     )
 
 
@@ -82,22 +97,21 @@ def _request(state: dict, tool_call: dict) -> MagicMock:
 class TestSurplusSameAgentCall:
     def test_lone_call_runs(self):
         call = _task_call("tc-1", "general-purpose")
-        assert surplus_same_agent_call(_state(call), call) is None
+        assert verdict(_state(call), call) is None
 
     def test_second_call_to_same_agent_is_refused(self):
         first = _task_call("tc-1", "general-purpose", "who am I on GitHub")
         second = _task_call("tc-2", "general-purpose", "list campaigns")
         state = _state(first, second)
 
-        assert surplus_same_agent_call(state, first) is None
-        assert surplus_same_agent_call(state, second) == "tc-1"
+        assert verdict(state, first) is None
+        assert verdict(state, second) == "tc-1"
 
     def test_third_call_is_refused_too(self):
         calls = [_task_call(f"tc-{i}", "general-purpose") for i in range(1, 4)]
         state = _state(*calls)
 
-        verdicts = [surplus_same_agent_call(state, c) for c in calls]
-        assert verdicts == [None, "tc-1", "tc-1"]
+        assert [verdict(state, c) for c in calls] == [None, "tc-1", "tc-1"]
 
     def test_different_agents_in_parallel_both_run(self):
         """The parallelism worth having: this must not regress."""
@@ -105,8 +119,8 @@ class TestSurplusSameAgentCall:
         jira = _task_call("tc-2", "jira-agent")
         state = _state(github, jira)
 
-        assert surplus_same_agent_call(state, github) is None
-        assert surplus_same_agent_call(state, jira) is None
+        assert verdict(state, github) is None
+        assert verdict(state, jira) is None
 
     def test_same_agent_in_separate_messages_both_run(self):
         """Sequential re-delegation is the continuity path, not a collision."""
@@ -120,7 +134,7 @@ class TestSurplusSameAgentCall:
             ],
         )
 
-        assert surplus_same_agent_call(state, later) is None
+        assert verdict(state, later) is None
 
     def test_other_tools_alongside_are_ignored(self):
         task = _task_call("tc-2", "general-purpose")
@@ -130,7 +144,53 @@ class TestSurplusSameAgentCall:
             {"id": "tc-3", "name": "write_todos", "args": {}},
         )
 
-        assert surplus_same_agent_call(state, task) is None
+        assert verdict(state, task) is None
+
+
+class TestAgentsWeDoNotOwn:
+    """Only registry agents have a ``{conversation}::{agent}`` thread to protect.
+
+    Anything else falls through to ``SubAgentMiddleware``, which runs its
+    sub-agent inline against the parent's config — nothing shared to corrupt. And
+    a typo'd name must reach deepagents' "does not exist, the only allowed types
+    are […]", which teaches the model the real names, instead of being told that
+    a non-existent agent is busy and must not be reported as unavailable.
+    """
+
+    def test_unknown_agent_is_left_to_fall_through(self):
+        first = _task_call("tc-1", "genral-purpose")
+        second = _task_call("tc-2", "genral-purpose")
+        state = _state(first, second)
+
+        assert verdict(state, first) is None
+        assert verdict(state, second) is None
+
+    def test_empty_registry_refuses_nothing(self):
+        first = _task_call("tc-1", "general-purpose")
+        second = _task_call("tc-2", "general-purpose")
+        state = _state(first, second)
+
+        assert verdict(state, second, known_agents=()) is None
+        assert verdict(state, second, known_agents=None) is None
+
+
+class TestFailsClosed:
+    """A guard that quietly stops guarding is worse than one that over-refuses."""
+
+    def test_owner_without_an_id_still_owns(self):
+        """Ownership is positional; comparing a ``None`` owner id would allow both.
+
+        ``ToolCall["id"]`` is optional (streaming reassembly, synthetic history),
+        and the id-comparison this replaced returned "allowed" for *every* sibling
+        when the first one had no id — disabling the guard exactly when the history
+        is malformed.
+        """
+        first = _task_call(None, "general-purpose")
+        second = _task_call("tc-2", "general-purpose")
+        state = _state(first, second)
+
+        assert verdict(state, second) == "<no id>"
+        assert verdict(state, first) is None  # unreadable argument, dispatch reports it
 
     @pytest.mark.parametrize(
         "tool_call",
@@ -148,17 +208,28 @@ class TestSurplusSameAgentCall:
         shapes — they can only arrive as the argument, so that is where they are fed.
         """
         state = _state(_task_call("tc-1", "general-purpose"))
-        assert surplus_same_agent_call(state, tool_call) is None
+        assert verdict(state, tool_call) is None
 
     def test_missing_messages_is_not_refused(self):
         call = _task_call("tc-1", "general-purpose")
-        assert surplus_same_agent_call({}, call) is None
+        assert verdict({}, call) is None
+
+    def test_unreadable_state_warns(self, caplog):
+        """A state shape the guard cannot read must be visible, not silent.
+
+        Every test here hands it a dict, so a future state schema that breaks the
+        read would otherwise leave the guard inactive with nothing in the log.
+        """
+        call = _task_call("tc-1", "general-purpose")
+        with caplog.at_level("WARNING"):
+            assert verdict(["not", "a", "mapping"], call) is None
+        assert "concurrency guard inactive" in caplog.text
 
     def test_call_absent_from_history_is_not_refused(self):
         """No issuing message to judge by (a hand-built or replayed-away call)."""
         call = _task_call("tc-9", "general-purpose")
         state = _state(_task_call("tc-1", "general-purpose"))
-        assert surplus_same_agent_call(state, call) is None
+        assert verdict(state, call) is None
 
 
 class TestVerdictSurvivesReplay:
@@ -185,9 +256,9 @@ class TestVerdictSurvivesReplay:
             ]
         }
 
-        assert surplus_same_agent_call(attempt, first) == surplus_same_agent_call(replay, first)
-        assert surplus_same_agent_call(attempt, second) == surplus_same_agent_call(replay, second)
-        assert surplus_same_agent_call(replay, second) == "tc-1"
+        assert verdict(attempt, first) == verdict(replay, first)
+        assert verdict(attempt, second) == verdict(replay, second)
+        assert verdict(replay, second) == "tc-1"
 
     def test_verdict_ignores_sibling_order_in_args(self):
         """Identical descriptions still resolve to one owner, by call id."""
@@ -195,8 +266,8 @@ class TestVerdictSurvivesReplay:
         second = _task_call("tc-2", "general-purpose", "same text")
         state = _state(first, second)
 
-        assert surplus_same_agent_call(state, first) is None
-        assert surplus_same_agent_call(state, second) == "tc-1"
+        assert verdict(state, first) is None
+        assert verdict(state, second) == "tc-1"
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +293,21 @@ class TestRefusalMessage:
         )
         assert getattr(msg, "status", "success") != "error"
         assert "[ERROR_TYPE" not in msg.content
+
+    def test_is_tagged_so_consumers_can_tell_it_apart(self):
+        """Untagged, this is indistinguishable from a delegation result — and it
+        lands last, so "the latest task result" resolves to it."""
+        msg = DynamicToolDispatchMiddleware._refuse_concurrent_same_agent(
+            _task_call("tc-2", "github-agent"), "tc-1"
+        )
+        assert is_concurrent_task_refusal(msg)
+        assert not is_concurrent_task_refusal(ToolMessage(content="real answer", name="task", tool_call_id="tc-1"))
+
+    def test_does_not_trip_the_stale_task_heuristic(self):
+        """``A2ATaskTrackingMiddleware`` deletes a live ``task_id`` when a result
+        says a task "does not exist". The wording must never look like that."""
+        content = CONCURRENT_SAME_AGENT_MESSAGE.format(agent="github-agent").lower()
+        assert "does not exist" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +335,7 @@ class TestGuardShortCircuitsDispatch:
         assert isinstance(result, ToolMessage)
         assert result.tool_call_id == "tc-2"
         assert "Do not retry" in result.content
+        assert is_concurrent_task_refusal(result)
         # Neither the registry dispatch nor the built-in fallback ran.
         dispatch.assert_not_called()
         handler.assert_not_called()
@@ -281,5 +368,6 @@ class TestGuardShortCircuitsDispatch:
 
         assert isinstance(result, ToolMessage)
         assert result.tool_call_id == "tc-2"
+        assert is_concurrent_task_refusal(result)
         dispatch.assert_not_called()
         handler.assert_not_called()
