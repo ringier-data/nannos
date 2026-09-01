@@ -22,7 +22,7 @@ Covers:
 - the refusal message reaching the model instead of a dispatch, on both the sync
   and async tool-call paths, and its tag, without which downstream consumers read
   it as the sub-agent's answer (``test_stream_handler.py``,
-  ``test_a2a_tracking_refusal.py``).
+  ``test_a2a_tracking_step_results.py``).
 """
 
 from unittest.mock import AsyncMock, MagicMock

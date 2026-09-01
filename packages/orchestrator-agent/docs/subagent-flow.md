@@ -313,6 +313,12 @@ result" would read it instead of the real answer. It carries
 | `StreamHandler._extract_recently_called_subagents` | a turn whose only `task` output is a refusal counts as a delegation, skipping the executor's re-entry nudge |
 | `A2ATaskTrackingMiddleware.before_model` | the owner's `a2a_metadata` is never read, so a parked `input-required`/`auth-required` owner loses the `task_id` needed to resume it |
 
+`before_model` now folds in **every** real result of the step rather than the trailing
+message alone, keyed by `subagent_type`. That also fixes the same loss for two
+*different* agents delegated in parallel: both return in one step, and reading only
+the last one silently dropped the earlier agent's ids — leaving a parked task there
+unresumable.
+
 The refusal's wording must also never say a task *"does not exist"* — that phrase is
 the stale-task heuristic in `a2a_tracking.py`, which would delete the **owner's** live
 `task_id`. Pinned by a test.
