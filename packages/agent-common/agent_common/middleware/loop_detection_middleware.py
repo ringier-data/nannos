@@ -36,13 +36,23 @@ import json
 import logging
 from typing import Annotated, Any
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr
+from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr, hook_config
 from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
 
 logger = logging.getLogger(__name__)
+
+#: Terminal response tools. These are how a turn *delivers its answer*, not tools the
+#: model chooses between — every turn ends in exactly one of them, and the sub-agent
+#: pass-through variant carries byte-identical arguments every time
+#: (``{"task_state": "completed", "message": "", "include_subagent_output": true}``).
+#: ``tool_call_history`` is cumulative for the whole thread, so tracking them makes a
+#: block inevitable on any sufficiently long conversation: ~6 pass-through turns trip
+#: ``max_repeats``, ~11 turns trip ``max_tool_repeats``. Blocking the response tool is
+#: never right — there is no loop to break, only an answer to deliver.
+RESPONSE_TOOLS: frozenset[str] = frozenset({"FinalResponseSchema", "SubAgentResponseSchema"})
 
 
 class LoopDetectionState(AgentState):
@@ -84,6 +94,8 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
     - dispatch_tools: Tools exempt from max_tool_repeats (e.g. dispatch/meta-tools
       like 'task' that delegate to sub-agents). These are still subject to
       max_repeats (same args) detection.
+    - response_tools: Terminal response tools, exempt from detection altogether
+      (see ``RESPONSE_TOOLS``).
     """
 
     state_schema = LoopDetectionState  # type: ignore[assignment]
@@ -97,6 +109,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         window_size: int = 10,
         force_stop_after: int = 3,
         dispatch_tools: set[str] | None = {"task"},
+        response_tools: frozenset[str] | set[str] | None = None,
     ):
         """Initialize loop detection middleware.
 
@@ -106,13 +119,15 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             max_tool_repeats: Same tool threshold (default: 5)
             window_size: Sliding window size (default: 10)
             force_stop_after: After blocking a tool this many consecutive times,
-                strip tool_calls from the AIMessage to force the graph to END.
+                end the run (jump to END) instead of letting the model retry.
                 This prevents infinite block-retry loops when the model ignores
                 error messages. (default: 3)
             dispatch_tools: Set of tool names exempt from max_tool_repeats.
                 Dispatch/meta-tools (e.g. 'task') delegate to sub-agents and are
                 expected to be called many times with different arguments. They are
                 still subject to max_repeats (same args) detection.
+            response_tools: Terminal response tools, excluded from tracking entirely
+                (see ``RESPONSE_TOOLS``). Pass an empty set to disable the exemption.
         """
         super().__init__()
         self.tool_name = tool_name
@@ -121,11 +136,12 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         self.window_size = window_size
         self.force_stop_after = force_stop_after
         self.dispatch_tools = dispatch_tools or set()
+        self.response_tools = frozenset(RESPONSE_TOOLS if response_tools is None else response_tools)
         logger.info(
             f"RepeatedToolCallMiddleware initialized: tool_name={tool_name}, "
             f"max_repeats={max_repeats}, max_tool_repeats={max_tool_repeats}, "
             f"window_size={window_size}, force_stop_after={force_stop_after}, "
-            f"dispatch_tools={self.dispatch_tools}"
+            f"dispatch_tools={self.dispatch_tools}, response_tools={sorted(self.response_tools)}"
         )
 
     @property
@@ -161,6 +177,9 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         Returns:
             True if this middleware should track this tool call.
         """
+        # Terminal response tools are never loop candidates — see ``RESPONSE_TOOLS``.
+        if tool_call["name"] in self.response_tools:
+            return False
         return self.tool_name is None or tool_call["name"] == self.tool_name
 
     def _build_error_message(self, info: dict[str, Any]) -> str:
@@ -226,6 +245,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
 
         return False, 0, ""
 
+    @hook_config(can_jump_to=["end"])
     async def aafter_model(
         self,
         state: LoopDetectionState,
@@ -237,6 +257,8 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         - Only blocks looping tool calls with error ToolMessages
         - Lets non-looping calls execute normally
         - Updates history state for tracking
+        - Never rewrites an existing message: a tool call that already has a result is
+          left alone, so a stop can never orphan a tool result
 
         Args:
             state: Current agent state
@@ -251,13 +273,26 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             return None
 
         last_ai_message = None
-        for message in reversed(messages):
-            if isinstance(message, AIMessage):
-                last_ai_message = message
+        last_ai_index = -1
+        for index in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[index], AIMessage):
+                last_ai_message = messages[index]
+                last_ai_index = index
                 break
 
         if not last_ai_message or not last_ai_message.tool_calls:
             return None
+
+        # Tool calls that already have a result at this point. ``after_model`` hooks run
+        # innermost-first, so a result can already exist before this one runs — the HITL
+        # middleware answers a rejected call while keeping the call itself, and the model
+        # node emits an AIMessage together with its ToolMessage for structured-output
+        # responses. Answering such a call a second time would leave the turn with two
+        # toolResult blocks for one toolUse, which Anthropic models reject with a hard
+        # 400 on *every* subsequent turn (the conversation is bricked, not just the turn).
+        already_answered = {
+            message.tool_call_id for message in messages[last_ai_index + 1 :] if isinstance(message, ToolMessage)
+        }
 
         # Get current history (per-tool tracking).
         # Deep-copy: shallow .copy() shares inner lists, and .append() below
@@ -330,9 +365,9 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             logger.debug(f"[LOOP DETECTION] Tracked {len(last_ai_message.tool_calls)} tool call(s)")
             return {"tool_call_history": history}
 
-        # Check if we should force-stop by stripping tool_calls from the AIMessage.
-        # This prevents the infinite block-retry loop where the model ignores error
-        # messages and keeps retrying the same tool call.
+        # Check if we should force-stop and end the run. This prevents the infinite
+        # block-retry loop where the model ignores error messages and keeps retrying
+        # the same tool call.
         should_force_stop = any(
             info["repeat_count"] - self.max_repeats >= self.force_stop_after
             if info["loop_type"] == "same_args"
@@ -345,28 +380,31 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         all_tracked_blocked = len(blocked_calls) == len(tracked_calls)
 
         if should_force_stop and all_tracked_blocked:
-            # Strip tool_calls from AIMessage by returning a modified copy with same ID.
-            # LangGraph's message reducer upserts by ID, so this replaces the original.
-            # With no tool_calls, the graph routes to END instead of tools node.
+            # End the run by jumping to END, leaving the message history untouched.
+            #
+            # This used to rebuild the AIMessage without its tool_calls (same id, upserted
+            # by the message reducer) so that routing would fall through to END. That
+            # rewrite is what orphans a tool result: any result already emitted for those
+            # calls — by the HITL middleware, or by the model node's own structured-output
+            # branch, which returns the AIMessage and its ToolMessage in one update — is
+            # left answering a tool call that no longer exists. The gateway then rejects
+            # the whole conversation on every later turn. Stopping a tool must never
+            # orphan its output, so express the stop as what it actually is (end the run)
+            # instead of as message surgery.
             blocked_names = [info["tool_name"] for info in blocked_calls]
             logger.warning(
                 f"[LOOP DETECTION] Force-stopping: {blocked_names} blocked "
-                f"{self.force_stop_after}+ consecutive times. Stripping tool_calls to end loop."
-            )
-
-            # Preserve any text content the model generated alongside the tool calls
-            modified_ai = AIMessage(
-                content=last_ai_message.content or "",
-                id=last_ai_message.id,
-                response_metadata=last_ai_message.response_metadata,
+                f"{self.force_stop_after}+ consecutive times. Ending the run."
             )
             return {
                 "tool_call_history": history,
-                "messages": [modified_ai],
+                "jump_to": "end",
             }
 
         # Build error ToolMessages for blocked calls (only blocked ones!)
-        # Frame as permanent failure (not rate-limiting) so models don't stubbornly retry
+        # Frame as permanent failure (not rate-limiting) so models don't stubbornly retry.
+        # Calls that already carry a result are skipped: a second result for the same
+        # ``tool_call_id`` is one toolResult block too many for the preceding turn.
         error_messages = [
             ToolMessage(
                 content=self._build_error_message(info),
@@ -375,7 +413,15 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 status="error",
             )
             for info in blocked_calls
+            if info["tool_call"]["id"] not in already_answered
         ]
+
+        if not error_messages:
+            logger.info(
+                "[LOOP DETECTION] All blocked call(s) already have results; "
+                "recording history only to avoid duplicate tool results"
+            )
+            return {"tool_call_history": history}
 
         logger.info(
             f"[LOOP DETECTION] Blocked {len(blocked_calls)} looping tool call(s): "

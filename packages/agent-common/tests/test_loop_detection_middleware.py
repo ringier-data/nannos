@@ -284,11 +284,11 @@ class TestEdgeCases:
 
 
 class TestForceStop:
-    """Test force-stop behavior that strips tool_calls from AIMessage."""
+    """Test force-stop behavior that ends the run once a tool keeps looping."""
 
     @pytest.mark.asyncio
     async def test_force_stop_strips_tool_calls_after_threshold(self):
-        """After force_stop_after consecutive blocks, tool_calls are stripped from AIMessage."""
+        """After force_stop_after consecutive blocks, the run ends (no message rewrite)."""
         from langchain_core.messages import AIMessage
 
         middleware = RepeatedToolCallMiddleware(max_repeats=3, force_stop_after=2, window_size=20)
@@ -312,12 +312,10 @@ class TestForceStop:
         result = await middleware.aafter_model(state, MagicMock())
 
         assert result is not None
-        # Should return a modified AIMessage (same ID, no tool_calls)
-        assert "messages" in result
-        modified_msg = result["messages"][0]
-        assert isinstance(modified_msg, AIMessage)
-        assert modified_msg.id == "msg-123"
-        assert modified_msg.tool_calls == []
+        # Ends the run outright. Crucially it does NOT rewrite the AIMessage: doing so
+        # orphans any tool result already emitted for the stripped call (issue #182).
+        assert result["jump_to"] == "end"
+        assert "messages" not in result
 
     @pytest.mark.asyncio
     async def test_no_force_stop_below_threshold(self):
@@ -394,10 +392,9 @@ class TestForceStop:
                 assert len(result["messages"]) == 1
                 assert isinstance(result["messages"][0], ToolMessage)
             else:
-                # 3rd block: force-stop — AIMessage with stripped tool_calls
-                assert len(result["messages"]) == 1
-                assert isinstance(result["messages"][0], AIMessage)
-                assert result["messages"][0].tool_calls == []
+                # 3rd block: force-stop — end the run, message history untouched
+                assert result["jump_to"] == "end"
+                assert "messages" not in result
 
     """Test dispatch_tools parameter for exempting dispatcher tools from max_tool_repeats."""
 
@@ -536,3 +533,198 @@ class TestErrorMessages:
         assert "many times" in msg.lower()
         assert "BLOCKED" in msg
         assert "respond to the user" in msg
+
+
+class TestAlreadyAnsweredToolCalls:
+    """Regression tests for issue #182 — stopping a tool must not orphan its output.
+
+    ``after_model`` hooks run innermost-first, so a tool call can already have a result
+    by the time this hook runs: the HITL middleware answers a rejected call while
+    keeping the call, and the model node emits an AIMessage together with its
+    ToolMessage for structured-output responses. Answering such a call again, or
+    removing the call the result belongs to, leaves the conversation with a tool result
+    that matches no tool call — a hard 400 on every later turn.
+    """
+
+    @pytest.mark.asyncio
+    async def test_force_stop_never_rewrites_messages(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, force_stop_after=2, window_size=20)
+
+        args_hash = middleware._hash_args({"path": "/file.txt"})
+        ai_message = AIMessage(
+            content="",
+            id="msg-789",
+            tool_calls=[{"name": "read_personal_file", "args": {"path": "/file.txt"}, "id": "tc-9"}],
+        )
+        rejection = ToolMessage(
+            content="User rejected the tool call.",
+            tool_call_id="tc-9",
+            name="read_personal_file",
+            status="error",
+        )
+
+        state = {
+            "messages": [ai_message, rejection],
+            "tool_call_history": {"read_personal_file": [args_hash] * 5},
+        }
+
+        result = await middleware.aafter_model(state, MagicMock())
+
+        assert result is not None
+        # The run still stops — but by jumping to END, not by stripping the tool call
+        # that ``rejection`` answers.
+        assert result["jump_to"] == "end"
+        assert "messages" not in result
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_blocked_result_for_answered_call(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, force_stop_after=99, window_size=20)
+
+        args_hash = middleware._hash_args({"path": "/file.txt"})
+        ai_message = AIMessage(
+            content="",
+            id="msg-790",
+            tool_calls=[{"name": "read_personal_file", "args": {"path": "/file.txt"}, "id": "tc-10"}],
+        )
+        tool_message = ToolMessage(content="file contents", tool_call_id="tc-10", name="read_personal_file")
+
+        state = {
+            "messages": [ai_message, tool_message],
+            "tool_call_history": {"read_personal_file": [args_hash] * 3},
+        }
+
+        result = await middleware.aafter_model(state, MagicMock())
+
+        assert result is not None
+        assert "messages" not in result
+
+    @pytest.mark.asyncio
+    async def test_blocked_result_still_emitted_for_unanswered_call(self):
+        """The fix must not disarm blocking for calls that have not run yet."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, force_stop_after=99, window_size=20)
+
+        args_hash = middleware._hash_args({"path": "/file.txt"})
+        ai_message = AIMessage(
+            content="",
+            id="msg-791",
+            tool_calls=[{"name": "read_personal_file", "args": {"path": "/file.txt"}, "id": "tc-11"}],
+        )
+
+        state = {
+            "messages": [ai_message],
+            "tool_call_history": {"read_personal_file": [args_hash] * 3},
+        }
+
+        result = await middleware.aafter_model(state, MagicMock())
+
+        assert result is not None
+        assert len(result["messages"]) == 1
+        assert isinstance(result["messages"][0], ToolMessage)
+        assert result["messages"][0].tool_call_id == "tc-11"
+        assert result["messages"][0].status == "error"
+
+    @pytest.mark.asyncio
+    async def test_hook_can_jump_to_end(self):
+        """The graph only honours ``jump_to`` when the hook declares it."""
+        from langchain.agents.factory import _get_can_jump_to
+
+        assert "end" in _get_can_jump_to(RepeatedToolCallMiddleware(), "after_model")
+
+
+class TestResponseToolsExempt:
+    """The terminal response tools are never loop candidates (issue #182).
+
+    ``FinalResponseSchema`` is how a turn delivers its answer — once per turn, and with
+    byte-identical arguments whenever a sub-agent's output is passed through. Since
+    ``tool_call_history`` is cumulative for the whole thread, tracking it makes a block
+    inevitable on any long conversation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_response_schema_never_blocked(self):
+        from langchain_core.messages import AIMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=5, max_tool_repeats=10, window_size=10)
+
+        args = {"task_state": "completed", "message": "", "include_subagent_output": True}
+        args_hash = middleware._hash_args(args)
+        ai_message = AIMessage(
+            content="",
+            id="msg-resp",
+            tool_calls=[{"name": "FinalResponseSchema", "args": args, "id": "tc-resp"}],
+        )
+
+        # Far past both thresholds on the identical-args *and* per-tool counts.
+        state = {
+            "messages": [ai_message],
+            "tool_call_history": {"FinalResponseSchema": [args_hash] * 40},
+        }
+
+        result = await middleware.aafter_model(state, MagicMock())
+
+        # Not tracked at all: no block, no force-stop, no history growth for it.
+        assert result is not None
+        assert "messages" not in result
+        assert "jump_to" not in result
+        assert len(result["tool_call_history"]["FinalResponseSchema"]) == 40
+
+    @pytest.mark.asyncio
+    async def test_sub_agent_response_schema_also_exempt(self):
+        from langchain_core.messages import AIMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=1, window_size=10)
+
+        args = {"task_state": "completed"}
+        ai_message = AIMessage(
+            content="",
+            id="msg-resp2",
+            tool_calls=[{"name": "SubAgentResponseSchema", "args": args, "id": "tc-resp2"}],
+        )
+        state = {
+            "messages": [ai_message],
+            "tool_call_history": {"SubAgentResponseSchema": [middleware._hash_args(args)] * 10},
+        }
+
+        result = await middleware.aafter_model(state, MagicMock())
+
+        assert result is not None
+        assert "messages" not in result
+        assert "jump_to" not in result
+
+    @pytest.mark.asyncio
+    async def test_exemption_can_be_disabled(self):
+        """Opt-out keeps the old behaviour for callers that want it."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, force_stop_after=99, response_tools=set())
+
+        args = {"task_state": "completed"}
+        ai_message = AIMessage(
+            content="",
+            id="msg-resp3",
+            tool_calls=[{"name": "FinalResponseSchema", "args": args, "id": "tc-resp3"}],
+        )
+        state = {
+            "messages": [ai_message],
+            "tool_call_history": {"FinalResponseSchema": [middleware._hash_args(args)] * 5},
+        }
+
+        result = await middleware.aafter_model(state, MagicMock())
+
+        assert result is not None
+        assert isinstance(result["messages"][0], ToolMessage)
+
+    def test_ordinary_tool_still_tracked(self):
+        from agent_common.middleware.loop_detection_middleware import RESPONSE_TOOLS
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3)
+
+        assert middleware._matches_tool_filter({"name": "search", "args": {}, "id": "x"}) is True
+        for name in RESPONSE_TOOLS:
+            assert middleware._matches_tool_filter({"name": name, "args": {}, "id": "x"}) is False
