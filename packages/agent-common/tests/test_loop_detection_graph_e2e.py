@@ -36,10 +36,21 @@ def assert_tool_pairing_valid(messages: list[BaseMessage]) -> None:
     """Assert the message list satisfies the provider's tool-call/result contract.
 
     This is the offline proxy for what Bedrock enforces; a list that fails here is one the
-    gateway rejects with a hard 400, permanently, because it lives in the checkpoint.
+    gateway rejects with a hard 400, permanently, because it lives in the checkpoint. The
+    rule is per *turn*, not global: results must follow their ``AIMessage`` immediately, so
+    anything else appearing in between (a ``HumanMessage``, say) closes the group — a
+    result arriving after that answers nothing, and a call left open is dangling.
     """
-    answered: dict[str, int] = {}
-    open_calls: dict[str, str] = {}
+    open_calls: set[str] = set()
+    answered: set[str] = set()
+    opened_at = 0
+
+    def _close(position: int) -> None:
+        unanswered = sorted(open_calls - answered)
+        assert not unanswered, (
+            f"dangling tool call(s) {unanswered} from the AIMessage at index {opened_at}: "
+            f"no result before index {position}"
+        )
 
     for position, message in enumerate(messages):
         if isinstance(message, ToolMessage):
@@ -47,19 +58,22 @@ def assert_tool_pairing_valid(messages: list[BaseMessage]) -> None:
                 f"orphaned tool result at index {position}: tool_call_id "
                 f"{message.tool_call_id!r} matches no tool call on the preceding AIMessage"
             )
-            answered[message.tool_call_id] = answered.get(message.tool_call_id, 0) + 1
-            assert answered[message.tool_call_id] == 1, (
+            assert message.tool_call_id not in answered, (
                 f"duplicate tool result at index {position} for {message.tool_call_id!r}"
             )
-        elif isinstance(message, AIMessage):
-            unanswered = [cid for cid in open_calls if cid not in answered]
-            assert not unanswered, (
-                f"dangling tool call(s) {unanswered} left unanswered before the AIMessage at index {position}"
-            )
-            open_calls = {tc["id"]: tc["name"] for tc in message.tool_calls if tc.get("id")}
+            answered.add(message.tool_call_id)
+            continue
 
-    unanswered = [cid for cid in open_calls if cid not in answered]
-    assert not unanswered, f"dangling tool call(s) {unanswered} at the end of the conversation"
+        _close(position)
+        # Any non-result message ends the group; only an AIMessage opens a new one. Ids are
+        # tracked per group rather than globally, so the check does not rely on tool_call_id
+        # being unique across the whole conversation.
+        open_calls, answered = set(), set()
+        if isinstance(message, AIMessage) and message.tool_calls:
+            open_calls = {tc["id"] for tc in message.tool_calls if tc.get("id")}
+            opened_at = position
+
+    _close(len(messages))
 
 
 class _SearchArgs(BaseModel):
@@ -201,6 +215,25 @@ async def test_pairing_helper_catches_both_failure_shapes():
     ]
     with pytest.raises(AssertionError, match="dangling tool call"):
         assert_tool_pairing_valid(dangling)
+
+    # The provider's rule is per turn: the result must directly follow its call.
+    separated = [
+        AIMessage(content="", id="ai", tool_calls=[{"name": "search", "args": {}, "id": "late"}]),
+        HumanMessage(content="actually, never mind"),
+        ToolMessage(content="result", tool_call_id="late", name="search"),
+    ]
+    with pytest.raises(AssertionError, match="dangling tool call"):
+        assert_tool_pairing_valid(separated)
+
+    # Ids are scoped per turn, so reuse across turns is not a duplicate.
+    reused = [
+        AIMessage(content="", id="ai1", tool_calls=[{"name": "search", "args": {}, "id": "same"}]),
+        ToolMessage(content="result", tool_call_id="same", name="search"),
+        HumanMessage(content="again"),
+        AIMessage(content="", id="ai2", tool_calls=[{"name": "search", "args": {}, "id": "same"}]),
+        ToolMessage(content="result", tool_call_id="same", name="search"),
+    ]
+    assert_tool_pairing_valid(reused)
 
 
 class AnswerSchema(BaseModel):
