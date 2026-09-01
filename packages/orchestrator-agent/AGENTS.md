@@ -129,6 +129,14 @@ Graphs are cached by `(model_name, thinking_level)`. All users share the same co
 
 The orchestrator overrides the deepagents SDK's built-in "general-purpose" agent with its own `DynamicLocalAgentRunnable` instance. This is done by registering it in `subagent_registry["general-purpose"]`. The custom GP agent has skill resolution, HITL-guarded self-improvement, and `ToolsetSelectorMiddleware` — none of which the built-in provides.
 
+### One Live Task Per Sub-Agent
+
+A sub-agent's memory is its LangGraph checkpoint, addressed by conversation and agent name (`{conversation_id}::{subagent_type}`). Two `task` calls to the **same** `subagent_type` in one assistant message therefore share one thread: the writes interleave, the last writer wins, and the loser's conversation is lost (a GitHub delegation once came back answering about ad campaigns, its authorization prompt lost with it). The second concurrent call is **refused** (`surplus_same_agent_call`), for registry agents only — a name outside `subagent_registry` falls through to `SubAgentMiddleware`, which has no thread of its own to protect, and a typo'd name must reach deepagents' "does not exist" answer instead. Different agents still run in parallel; sequential re-delegation still continues the agent's thread. Separate threads would not have been enough: neither the client's authorization answer nor a later `task` call can name *which* of two parked tasks it means. Full reasoning in `docs/subagent-flow.md`.
+
+The refusal is a `task` ToolMessage tagged `concurrent_task_refusal` (`app/middleware/task_refusal.py`). Anything reading "the latest `task` result" must skip tagged messages — it lands *after* the owner's, so untagged it becomes the user's visible reply and shadows the owner's `a2a_metadata`.
+
+This is plumbing, and the user must never meet it: when work would need one agent twice, the orchestrator folds it into a single task or runs the parts in sequence **on its own**, without asking the user to choose and without narrating the constraint. Both failure modes have been seen in QA — asking "sequential or a different agent?" instead of just doing it, and relaying the refusal text into the chat.
+
 ### Orchestrator Auto-Includes Scheduler + Console Tools
 
 The orchestrator's whitelisted tools always include `scheduler_*` and `console_*` prefixed tools (auto-included regardless of user config). This ensures scheduling and skill management are always available without explicit user configuration.

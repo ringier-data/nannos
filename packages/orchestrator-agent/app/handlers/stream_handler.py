@@ -12,6 +12,7 @@ from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
+from ..middleware.task_refusal import is_concurrent_task_refusal
 from ..models import AgentStreamResponse
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class StreamHandler:
 
         # Collect all ToolMessages in the current turn
         for i, msg in enumerate(messages_to_check):
-            if isinstance(msg, ToolMessage):
+            if isinstance(msg, ToolMessage) and not is_concurrent_task_refusal(msg):
                 # Find the corresponding AIMessage with tool_calls
                 # Look backward from this ToolMessage within the current turn
                 for prev_msg in reversed(messages_to_check[:i]):
@@ -428,6 +429,13 @@ class StreamHandler:
                             tool_call = tool_call_map.get(msg.tool_call_id)
                             # Filter: only process "task" tool calls (sub-agents)
                             if not (tool_call and tool_call.get("name") == "task"):
+                                continue
+                            # A concurrency refusal is not a delegation result.
+                            # It lands AFTER the owner's (siblings are written in
+                            # tool_calls order), so without this the reverse scan
+                            # would show the user "This call was NOT executed…"
+                            # as the answer and drop the real one.
+                            if is_concurrent_task_refusal(msg):
                                 continue
 
                             # Extract content (sub-agent content may be JSON-wrapped).
