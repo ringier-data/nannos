@@ -484,6 +484,85 @@ def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decis
     return Command(resume=payload)
 
 
+# ── One live task per sub-agent ──────────────────────────────────────────────
+#
+# A sub-agent's memory IS its LangGraph checkpoint, and that checkpoint is
+# addressed by conversation and agent name alone (``_effective_thread_id``
+# below, mirroring ``dynamic_agent.get_thread_id``). Two ``task`` calls to the
+# SAME agent in one assistant message therefore run on ONE thread: their writes
+# interleave, the last writer wins, and the loser's messages are gone. Seen in
+# the wild as a "who am I on GitHub" delegation resuming with the
+# campaign-listing delegation's state and answering about campaigns — the GitHub
+# tool was never called a second time, and the authorization it was parked on
+# went unanswered.
+#
+# Giving the two calls separate threads is NOT enough to make the pair safe,
+# because nothing downstream can address one of two parked tasks:
+#
+# - the answer a client sends back for an authorization carries a verdict and no
+#   interrupt id (``client-slack/src/utils/inTaskAuth.ts::authorizationDataPart``),
+#   so a single "Done, continue" answers BOTH pending prompts — including one
+#   whose card the user never saw;
+# - a later turn cannot name which parked task it is continuing: the ``task``
+#   tool's argument schema belongs to deepagents (``TaskToolSchema``:
+#   description, subagent_type) and has no slot for one.
+#
+# Both would take a contract change — in every client, and in a library we do
+# not own. Allowing one live task per agent removes the need for either: there
+# is never a second candidate to address. Different agents still run in
+# parallel, which is where nearly all of the value of parallel delegation is.
+#
+# The model is told this up front too (``_ONE_TASK_PER_AGENT_GUIDANCE``), so it
+# folds same-agent work into one task itself; this refusal is the backstop.
+CONCURRENT_SAME_AGENT_MESSAGE = (
+    "This call was NOT executed: sub-agent '{agent}' is already running another task "
+    "from this same message, and one sub-agent runs one task at a time in a "
+    "conversation — parallel tasks would share and corrupt its memory. The other call "
+    "is running and will return its own result.\n"
+    "Do not retry this call. If this work still needs doing, either fold it into a "
+    "SINGLE task for '{agent}' (one description covering all of it — a sub-agent can "
+    "use many tools within one task), or wait for the running task's result and "
+    "delegate the remainder afterwards. Different sub-agents can still run in "
+    "parallel. '{agent}' is NOT missing, broken or unavailable — never tell the user "
+    "it is."
+)
+
+
+def surplus_same_agent_call(state: Any, tool_call: Any) -> str | None:
+    """The id of the call that owns the agent, when this ``task`` call must be refused.
+
+    ``None`` means this call may run: either it is the only one for its agent in
+    the message that issued it, or it is the one that owns the agent.
+
+    The verdict reads *only* the assistant message that issued the call, which
+    LangGraph replays byte-identical on a resume, so the sibling that won the
+    first attempt wins the replay too — a refusal cannot flip into a second
+    execution half way through a turn, nor an execution into a refusal.
+    """
+    call_id = tool_call.get("id")
+    subagent_type = (tool_call.get("args") or {}).get("subagent_type")
+    if not call_id or not subagent_type:
+        return None
+
+    messages = (state.get("messages") if hasattr(state, "get") else None) or []
+    for message in reversed(messages):
+        calls = getattr(message, "tool_calls", None) or []
+        if not any(isinstance(c, dict) and c.get("id") == call_id for c in calls):
+            continue
+        siblings = [
+            c
+            for c in calls
+            if isinstance(c, dict)
+            and c.get("name") == "task"
+            and (c.get("args") or {}).get("subagent_type") == subagent_type
+        ]
+        owner = siblings[0].get("id") if siblings else None
+        if len(siblings) < 2 or owner == call_id:
+            return None
+        return owner
+    return None
+
+
 def _seal_dangling_tool_calls(messages: list[Any]) -> list[Any]:
     """Answer AI tool calls that never got a ToolMessage with a synthetic one.
 
@@ -662,6 +741,28 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         self.cost_logger = cost_logger
 
     @staticmethod
+    def _refuse_concurrent_same_agent(tool_call: Any, owner_call_id: str) -> ToolMessage:
+        """The refusal for a second concurrent ``task`` call to one sub-agent.
+
+        Deliberately NOT ``status="error"``: this is a policy decision, not a
+        failure, and an error status would earn it an ``[ERROR_TYPE: ...]`` prefix
+        telling the model to consider a bug report (see ``_classify_error_message``
+        and ``_BUG_REPORT_TOOL_GUIDANCE``) for something working exactly as designed.
+        """
+        subagent_type = (tool_call.get("args") or {}).get("subagent_type", "")
+        logger.info(
+            "[DISPATCH] Refusing concurrent task for '%s' (call %s); owned by call %s",
+            subagent_type,
+            str(tool_call.get("id"))[:8],
+            owner_call_id[:8],
+        )
+        return ToolMessage(
+            content=CONCURRENT_SAME_AGENT_MESSAGE.format(agent=subagent_type),
+            name="task",
+            tool_call_id=tool_call["id"],
+        )
+
+    @staticmethod
     def _classify_error_message(msg: ToolMessage) -> ToolMessage:
         """Apply error classification to a ToolMessage.
 
@@ -735,6 +836,24 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
     # via TASK_TOOL_DESCRIPTION.  Used to locate the agent list inside the tool
     # description and replace it with the full registry.
     _TOOL_DESC_AGENT_MARKER = "Available agent types and the tools they have access to:\n"
+
+    # Appended to the task tool description, countering deepagents' own usage
+    # note 1 ("Launch multiple agents concurrently whenever possible") for the
+    # one case it does not survive. Guidance, not schema: the description is a
+    # string we may rewrite freely, while ``TaskToolSchema`` belongs to
+    # deepagents and ``atask``'s signature would reject an extra argument.
+    # Enforcement is ``surplus_same_agent_call`` — this is what keeps the model
+    # from walking into it.
+    _ONE_TASK_PER_AGENT_GUIDANCE = (
+        "\n\n## One task per sub-agent at a time\n"
+        "Running sub-agents concurrently is encouraged, but they must be DIFFERENT "
+        "agents. Never issue two `task` calls with the same `subagent_type` in one "
+        "message: each sub-agent has a single conversation, so parallel tasks would "
+        "share and corrupt its memory. Give that agent ONE task describing all of the "
+        "work instead — a sub-agent can use many tools within one task — or wait for "
+        "its result and delegate the rest afterwards. A duplicate concurrent call is "
+        "refused, and the work in it is simply not done."
+    )
 
     _BUG_REPORT_TOOL_GUIDANCE = (
         "\n\n## Error Handling & Bug Reporting\n"
@@ -834,6 +953,20 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         return SystemMessage(content_blocks=new_blocks)
 
+    def _append_one_task_per_agent_guidance(self, task_tool_dict: dict[str, Any]) -> dict[str, Any]:
+        """Append the one-task-per-agent rule to the task tool description, once."""
+        function_dict = task_tool_dict.get("function", {})
+        description = function_dict.get("description", "")
+        if not description or self._ONE_TASK_PER_AGENT_GUIDANCE in description:
+            return task_tool_dict
+        return {
+            **task_tool_dict,
+            "function": {
+                **function_dict,
+                "description": description + self._ONE_TASK_PER_AGENT_GUIDANCE,
+            },
+        }
+
     def _enhance_task_tool_schema(
         self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
     ) -> dict[str, Any]:
@@ -851,6 +984,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         Returns:
             Enhanced task tool dict with all subagents in description and enum.
         """
+        # Before the registry check: the one-task-per-agent rule holds for the
+        # built-in agents too, which are all there is when the registry is empty.
+        task_tool_dict = self._append_one_task_per_agent_guidance(task_tool_dict)
+
         if not user_context.subagent_registry:
             return task_tool_dict
 
@@ -2396,6 +2533,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Special handling for "task" tool (subagent dispatch)
         # Try dynamic registry first, fall back to handler (SubAgentMiddleware) for general-purpose
         if tool_name == "task":
+            # Guard BEFORE the registry lookup: the built-in agents this falls
+            # through to share the thread the same way, so both paths need it.
+            owner = surplus_same_agent_call(request.runtime.state, tool_call)
+            if owner:
+                return self._refuse_concurrent_same_agent(tool_call, owner)
             result = self._dispatch_task_tool(
                 tool_call=tool_call,
                 user_context=user_context,
@@ -2493,6 +2635,12 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             # NOTE: Task delegation status ("Delegating to...") is now emitted by the
             # orchestrator's astream loop via tool call detection, not here.
             # Removed duplicate emission to prevent status history duplicates.
+
+            # Guard BEFORE the registry lookup: the built-in agents this falls
+            # through to share the thread the same way, so both paths need it.
+            owner = surplus_same_agent_call(request.runtime.state, tool_call)
+            if owner:
+                return self._refuse_concurrent_same_agent(tool_call, owner)
 
             # Capture the orchestrator's stream_writer now — inside the sub-agent
             # streaming loop the contextvars could shift if sub-agents manipulate them.

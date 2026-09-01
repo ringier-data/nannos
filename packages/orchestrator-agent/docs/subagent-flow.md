@@ -9,8 +9,9 @@ This document describes the complete end-to-end flow of how subagents are discov
 3. [Middleware Stack](#middleware-stack)
 4. [Subagent Types](#subagent-types)
 5. [Request Flow](#request-flow)
-6. [A2A Protocol & Context ID Management](#a2a-protocol--context-id-management)
-7. [Sequence Diagrams](#sequence-diagrams)
+6. [One Live Task Per Sub-Agent](#one-live-task-per-sub-agent)
+7. [A2A Protocol & Context ID Management](#a2a-protocol--context-id-management)
+8. [Sequence Diagrams](#sequence-diagrams)
 
 ---
 
@@ -256,6 +257,60 @@ The `general-purpose` subagent is **NOT** in `subagent_registry`. It's handled s
 │ 5. Return ToolMessage           │
 └─────────────────────────────────┘
 ```
+
+---
+
+## One Live Task Per Sub-Agent
+
+A sub-agent's memory is its LangGraph checkpoint, and that checkpoint is addressed by
+conversation and agent name alone:
+
+```python
+# DynamicToolDispatchMiddleware._adispatch_task_tool
+_effective_thread_id = f"{orchestrator_conversation_id}::{subagent_type}"
+# ...mirroring agents/dynamic_agent.py::get_thread_id -> f"{context_id}::dynamic-{name}"
+```
+
+Two `task` calls to the **same** `subagent_type` in one assistant message therefore run
+on **one thread**. Their writes interleave, the last writer wins, and the loser's
+conversation is gone. Observed: a "who am I on GitHub" delegation resumed on the
+campaign-listing delegation's state and answered about ad campaigns — the GitHub tool
+was never called again, and the authorization it had parked on was never answered.
+
+**The second concurrent call to one agent is refused** (`surplus_same_agent_call` →
+`_refuse_concurrent_same_agent`, checked in both `wrap_tool_call` and
+`awrap_tool_call` *before* the registry lookup, since the built-in agents that path
+falls through to share the thread the same way). Different agents still run in
+parallel. The model is told the rule up front in the task tool description
+(`_ONE_TASK_PER_AGENT_GUIDANCE`), so it folds same-agent work into a single task
+itself; the refusal is the backstop.
+
+### Why not just isolate the threads?
+
+Because separate threads make two parked tasks *distinguishable* but still not
+*addressable*, and two layers downstream need to address them:
+
+| Layer | With two parked tasks for one agent |
+|-------|-------------------------------------|
+| Sub-agent checkpoint / interrupt id | collide — fixable by isolation |
+| Client → orchestrator auth answer | `authorizationDataPart` sends a verdict with no interrupt id, so one "Done, continue" answers **both** prompts — including one whose card the user never saw |
+| Model → orchestrator continuation | nothing can name which parked task a follow-up continues: `TaskToolSchema` (description, subagent_type) belongs to deepagents |
+
+The last two each need a contract change — in every client, and in a library we do not
+own. One live task per agent removes the need for either: there is never a second
+candidate to address.
+
+### What still works
+
+- **Different agents in parallel** — untouched, including two that both need authorization.
+- **Sequential re-delegation** — a later `task` call with a new `tool_call_id` continues
+  the agent's thread, which is how a sub-agent remembers earlier delegations and how a
+  parked `input-required`/`auth-required` task is resumed (`a2a_tracking` keeps
+  `context_id` and clears `task_id` only once the task completes).
+
+The guard reads only the assistant message that issued the call, which LangGraph replays
+unchanged, so the sibling that won the first attempt wins the resume replay too — a
+refusal cannot become a second execution part way through a turn.
 
 ---
 
