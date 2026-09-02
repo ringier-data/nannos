@@ -276,11 +276,15 @@ agent = await sub_agent_service.create_sub_agent(...)
 Two things to get right when an audience is chosen by standing rather than by group
 membership (`BugReportService._notify_administrators` is the worked example):
 
-- **`role = 'admin'` is not the same as `is_administrator`.** Migration 041 seeds a
-  `system` user with `role = 'admin'` — it owns auto-provisioned agents — while leaving
-  `is_administrator` FALSE. Selecting on the flag leaves it out; selecting on the role
-  picks up a service account with no person behind it, and fills an inbox nobody opens.
-  An audience that must select by role has to exclude it explicitly.
+- **Exclude machine accounts explicitly; do not infer that a filter already excludes
+  them.** Migration 041 seeds a `system` user with `role = 'admin'` — it owns
+  auto-provisioned agents — and leaves `is_administrator` FALSE. That makes it tempting
+  to conclude an `is_administrator` audience cannot reach it. It can: deployments promote
+  that account (nothing in the code does, beyond `FIRST_USER_IS_ADMIN` for the very first
+  user), and one was collecting bug-report notifications in an inbox nobody opens. The
+  seed's column values are a starting state, not an invariant — reason from the rows a
+  live database actually holds. There is no structural marker for machine accounts yet,
+  so exclusion is by id.
 - **Match the audience to read visibility, not to a write capability.** `bug_reports`
   grants `triage` to `approver`, but no read path honours it, so notifying triagers would
   hand out content the recipient is denied everywhere else. It is also the less durable
