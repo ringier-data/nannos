@@ -16,6 +16,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from agent_common.core.message_formatting import formatting_prompt_block
 from agent_common.middleware.client_objects_middleware import inject_embedded_context
 from agent_common.middleware.utils import append_to_system_message
 from langchain.agents.middleware.types import (
@@ -103,32 +104,13 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
             )
 
         # Message formatting preference (conversation-level)
-        formatting = getattr(user_context, "message_formatting", "markdown")
-        if formatting == "slack":
-            preferences_parts.append(
-                '<message_formatting format="slack">\n'
-                "Format responses using Slack mrkdwn syntax: *bold* for emphasis, _italic_ for secondary emphasis, "
-                "`code` for inline code, ```code blocks``` for multi-line code. "
-                "Avoid markdown syntax that Slack doesn't support (e.g., # headers, **bold**).\n"
-                "</message_formatting>"
-            )
-        elif formatting == "google-chat":
-            preferences_parts.append(
-                '<message_formatting format="google-chat">\n'
-                "Format responses using Google Chat markup syntax: *bold* for emphasis, _italic_ for secondary emphasis, "
-                "~strikethrough~ for strikethrough, `code` for inline code, ```code blocks``` for multi-line code. "
-                "Use plain URLs for links (they are auto-linked). "
-                "Avoid markdown syntax that Google Chat doesn't support (e.g., # headers, **bold**, [links](url)).\n"
-                "</message_formatting>"
-            )
-        elif formatting == "plain":
-            preferences_parts.append(
-                '<message_formatting format="plain">\n'
-                "Use plain text only. Do not use any formatting syntax "
-                "(no markdown, no bold, no code blocks). Keep responses simple and readable.\n"
-                "</message_formatting>"
-            )
-        # Default 'markdown' needs no special instruction - standard behavior
+        #
+        # Set by the client for an interactive turn, and by the scheduler from the
+        # job's delivery channel for a scheduled one. The rules themselves live in
+        # agent-common so both writers state them identically.
+        formatting_block = formatting_prompt_block(getattr(user_context, "message_formatting", None))
+        if formatting_block:
+            preferences_parts.append(formatting_block)
 
         # Multi-user conversation context
         # Check if we have a client_user_handle, indicating multi-user channel context (Slack or Google Chat)

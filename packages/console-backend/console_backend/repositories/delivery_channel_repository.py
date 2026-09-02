@@ -26,6 +26,7 @@ def _row_to_response(row: Any) -> DeliveryChannelResponse:
         name=row["name"],
         description=row["description"],
         webhook_url=row["webhook_url"],
+        message_formatting=row["message_formatting"],
         client_id=row["client_id"],
         registered_by=row["registered_by"],
         installation_id=row["installation_id"],
@@ -61,6 +62,7 @@ class DeliveryChannelRepository(AuditedRepository):
                 "name": data.name,
                 "description": data.description,
                 "webhook_url": data.webhook_url,
+                "message_formatting": data.message_formatting,
                 "secret": data.secret,
                 "client_id": client_id,
                 "registered_by": actor.sub,
@@ -107,12 +109,15 @@ class DeliveryChannelRepository(AuditedRepository):
         return None if row is None else row["secret"]
 
     async def get_channel_for_dispatch(self, db: AsyncSession, channel_id: int) -> dict | None:
-        """Return the webhook_url and secret needed by the scheduler engine.
+        """Return what the scheduler engine needs at dispatch time.
 
-        Returns a dict with keys ``webhook_url`` and ``secret``, or None if not found.
+        Returns a dict with keys ``webhook_url``, ``secret`` and ``message_formatting``,
+        or None if not found. The formatting is part of dispatch, not just delivery: the
+        run has to be *told* the channel's rendering rules before it writes anything,
+        because no step between the agent and the channel rewrites its output.
         """
         result = await db.execute(
-            text("SELECT webhook_url, secret FROM delivery_channels WHERE id = :id"),
+            text("SELECT webhook_url, secret, message_formatting FROM delivery_channels WHERE id = :id"),
             {"id": channel_id},
         )
         row = result.mappings().first()
@@ -179,7 +184,7 @@ class DeliveryChannelRepository(AuditedRepository):
             return None
 
         fields: dict = {"updated_at": datetime.now(timezone.utc)}
-        for attr in ("name", "description", "webhook_url", "secret"):
+        for attr in ("name", "description", "webhook_url", "secret", "message_formatting"):
             val = getattr(data, attr)
             if val is not None:
                 fields[attr] = val
@@ -268,6 +273,7 @@ class DeliveryChannelRepository(AuditedRepository):
             description=data.description,
             webhook_url=data.webhook_url,
             secret=data.secret,
+            message_formatting=data.message_formatting,
         )
         updated = await self.update_channel(db=db, actor=actor, channel_id=existing.id, data=update)
         if updated is None:

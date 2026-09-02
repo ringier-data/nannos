@@ -312,6 +312,18 @@ class SchedulerEngine:
             "timezone": job.timezone or None,
         }
 
+        # How the channel this job notifies renders text. Resolved here because this is
+        # the only place that knows both the job and its delivery channel, and sent under
+        # the key an interactive client uses (`messageFormatting`), so agent-runner and
+        # the orchestrator apply the same rules whether a human or a cron started the run.
+        # Without it a Slack notification arrives as raw Markdown — '### heading',
+        # '**bold**' — because nothing downstream rewrites the agent's output.
+        channel: dict[str, Any] | None = None
+        if job.delivery_channel_id is not None:
+            channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
+        message_formatting = (channel or {}).get("message_formatting") or "markdown"
+        metadata["messageFormatting"] = message_formatting
+
         if job.sub_agent_id is not None:
             # sub-agent config will be fetched by agent-runner using the sub_agent_id
             metadata["sub_agent_id"] = job.sub_agent_id
@@ -383,8 +395,8 @@ class SchedulerEngine:
         else:
             parts = [{"kind": "text", "text": message_text}]
 
-        # Fetch delivery channel and attach push notification config so the A2A SDK
-        # registers it for the task and BasePushNotificationSender can deliver it
+        # Attach the push notification config (from the channel fetched above) so the A2A
+        # SDK registers it for the task and BasePushNotificationSender can deliver it
         # upon completion.  The channel secret is sent as X-A2A-Notification-Token
         # so the webhook receiver can verify ownership of the notification.
         #
@@ -393,10 +405,8 @@ class SchedulerEngine:
         # payload is an A2A Task envelope that the delivery channels normalise. Posting
         # it from here would duplicate that contract across three receivers.
         push_config: dict[str, str] | None = None
-        if job.delivery_channel_id is not None:
-            channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
-            if channel:
-                push_config = {"url": channel["webhook_url"], "token": channel["secret"]}
+        if channel:
+            push_config = {"url": channel["webhook_url"], "token": channel["secret"]}
 
         return parts, metadata, push_config
 
@@ -421,9 +431,14 @@ class SchedulerEngine:
             logger.warning("Job %d: no chat model configured, reporting the raw result", job.id)
             return f"The watch '{job.name}' triggered. Result: {json.dumps(check_result, default=str)[:300]}"
 
+        # No markup, deliberately: this text goes out verbatim on whichever channel the job
+        # notifies (Slack renders Markdown literally), and one or two sentences lose nothing
+        # by being plain. The channel's own rules are applied where a full reply is composed
+        # — the sub-agent run, which is told them via the dispatch metadata.
         prompt = (
             "Write the notification a user receives when a scheduled watch triggers. "
-            "One or two sentences, factual, highlighting what changed. Reply with the "
+            "One or two sentences, factual, highlighting what changed. Plain text only — "
+            "no markdown, no bold, no headings, no bullet points. Reply with the "
             "message text only, no preamble.\n\n"
             f"Watch: {job.name}\n"
             f"Result:\n{json.dumps(check_result, indent=2, default=str)[:6000]}"

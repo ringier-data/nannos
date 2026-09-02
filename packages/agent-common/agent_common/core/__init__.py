@@ -1,5 +1,13 @@
 """Core utilities: model factory, graph utilities, object storage."""
 
+from .message_formatting import (
+    DEFAULT_MESSAGE_FORMATTING,
+    FORMATTING_RULES,
+    MessageFormatting,
+    formatting_prompt_block,
+    formatting_rules,
+    normalize_message_formatting,
+)
 from .model_factory import (
     _has_aws_credentials as has_aws_credentials,
     NoDefaultModelError,
@@ -31,6 +39,13 @@ __all__ = [
     "require_default_model",
     "NoDefaultModelError",
     "get_reasoning_effort",
+    # Message formatting
+    "MessageFormatting",
+    "DEFAULT_MESSAGE_FORMATTING",
+    "FORMATTING_RULES",
+    "formatting_rules",
+    "formatting_prompt_block",
+    "normalize_message_formatting",
     # Object storage
     "IObjectStorageService",
     "LocalObjectStorageService",

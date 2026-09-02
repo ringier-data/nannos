@@ -42,6 +42,7 @@ from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM, SubAgent
 from agent_common.agents.foundry_agent import create_foundry_local_subagent
 from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
+from agent_common.core.message_formatting import formatting_prompt_block, normalize_message_formatting
 from agent_common.core.model_factory import (
     create_model,
     get_default_model,
@@ -654,6 +655,15 @@ class AgentRunner(BaseAgent):
                     logger.warning("Ignoring non-numeric %s in message metadata: %r", key, value)
             return None
 
+        # How the delivering channel renders text. A scheduled run has no client on the
+        # other end to say so per turn, so the scheduler resolves it from the job's
+        # delivery channel and sends it here under the same key an interactive client
+        # uses. Nothing downstream rewrites the agent's output, so an unset/unknown value
+        # means Markdown — which is what a Slack notification used to arrive as.
+        message_formatting = normalize_message_formatting(
+            message_meta.get("messageFormatting") or message_meta.get("message_formatting")
+        )
+
         sub_agent_id: int | None = _meta_int("sub_agent_id")
         scheduled_job_id: int | None = _meta_int("scheduled_job_id")
         scheduled_job_run_id: int | str = _meta_int("scheduled_job_run_id") or ""
@@ -696,6 +706,7 @@ class AgentRunner(BaseAgent):
                     user_config=user_config,
                     user_id=user_id,
                     context_id=task.context_id,
+                    message_formatting=message_formatting,
                 )
             except Exception as exc:
                 logger.exception(f"Sub-agent execution failed for job {scheduled_job_id}")
@@ -842,6 +853,7 @@ class AgentRunner(BaseAgent):
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
+        message_formatting: str = "markdown",
     ) -> tuple[str | None, str | None]:
         """Dispatch a sub-agent config to the appropriate execution method.
 
@@ -855,6 +867,8 @@ class AgentRunner(BaseAgent):
             user_id: Verified database user UUID (fetched from backend, not from message metadata).
             context_id: Natural A2A context_id for thread isolation (conversation_id).
             raw_a2a_messages: Original A2A messages (used for remote agents to preserve DataParts).
+            message_formatting: Rendering rules of the channel this run's message is
+                delivered to ("slack", "google-chat", "plain", "markdown").
 
         Returns:
             (agent_message, task_state) — task_state is the sub-agent's
@@ -876,6 +890,7 @@ class AgentRunner(BaseAgent):
                 scheduled_job_id=scheduled_job_id,
                 scheduled_job_run_id=scheduled_job_run_id,
                 context_id=context_id,
+                message_formatting=message_formatting,
             )
         elif agent_type == "foundry":
             return await self._run_foundry_agent(
@@ -894,6 +909,7 @@ class AgentRunner(BaseAgent):
                 scheduled_job_id=scheduled_job_id,
                 scheduled_job_run_id=scheduled_job_run_id,
                 context_id=context_id,
+                message_formatting=message_formatting,
             )
         else:
             raise ValueError(
@@ -911,6 +927,7 @@ class AgentRunner(BaseAgent):
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
+        message_formatting: str = "markdown",
     ) -> tuple[str | None, str | None]:
         """Run a one-shot LangGraph agent using agent-common's model factory.
 
@@ -963,6 +980,15 @@ class AgentRunner(BaseAgent):
 
         # Append the A2A response protocol addendum so the LLM knows to use SubAgentResponseSchema
         full_system_prompt = system_prompt + "\n\n" + A2A_PROTOCOL_ADDENDUM
+
+        # ...and the delivery channel's rendering rules. A sub-agent's system prompt is
+        # written once and reused across every job, so the channel cannot be baked into
+        # it: the same agent may notify Slack for one job and the web console for the
+        # next. Injecting it here is what makes correct formatting built in rather than
+        # something each job's author has to remember to ask for.
+        formatting_block = formatting_prompt_block(message_formatting)
+        if formatting_block:
+            full_system_prompt += "\n\n" + formatting_block
 
         mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
 
@@ -1253,6 +1279,7 @@ class AgentRunner(BaseAgent):
         scheduled_job_id: int,
         scheduled_job_run_id: int,
         context_id: str | None = None,
+        message_formatting: str = "markdown",
     ) -> tuple[str | None, str | None]:
         """Run a remote A2A agent by discovering its agent card and invoking it.
 
@@ -1277,6 +1304,9 @@ class AgentRunner(BaseAgent):
                 (scheduled_job_runs.conversation_id) — the prerequisite for a
                 later orchestrator delegation to resume that conversation via
                 the conversation-origin extension.
+            message_formatting: Rendering rules of the delivery channel. A remote
+                agent owns its own system prompt, so the rules ride the message as a
+                trailing instruction — the only place this side can put them.
 
         Returns:
             (result_summary, task_state) — see _collect_stream_text.
@@ -1320,6 +1350,13 @@ class AgentRunner(BaseAgent):
         else:
             # Fallback to plain text prompt
             messages_input = [{"role": "user", "content": prompt}]
+
+        # The channel's rendering rules as a final instruction. There is no system prompt
+        # to append to on this path (the remote agent has its own) and SubAgentInput
+        # carries no per-message metadata, so the message itself is the only carrier.
+        formatting_block = formatting_prompt_block(message_formatting)
+        if formatting_block:
+            messages_input = [*messages_input, HumanMessage(content=formatting_block)]
 
         # orchestrator_conversation_id feeds A2AClientRunnable's contextId
         # waterfall (_extract_tracking_ids), putting the run task's contextId on

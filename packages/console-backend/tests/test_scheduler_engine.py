@@ -789,6 +789,44 @@ class TestBuildMessageArgs:
             )
         assert parts == [{"kind": "text", "text": "Written here."}]
 
+    @pytest.mark.asyncio
+    async def test_the_delivery_channel_decides_how_the_run_writes(self):
+        """A Slack-bound job dispatches with the channel's rendering rules.
+
+        Nothing between the agent and Slack rewrites its output, so a run that is not
+        told the channel renders mrkdwn produces '### heading' / '**bold**' and the user
+        reads the syntax. The rules live on the channel and ride the same metadata key an
+        interactive client sends, so the run obeys them either way.
+        """
+        engine = _make_engine()
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {
+            "webhook_url": "https://slack.example/callback",
+            "secret": "s3cret",
+            "message_formatting": "slack",
+        }
+        job = _make_job(delivery_channel_id=3)
+
+        _, metadata, push_config = await engine._build_message_args(
+            job, run_id=7, access_token="tok", db=AsyncMock()
+        )
+
+        assert metadata["messageFormatting"] == "slack"
+        # The channel is fetched once and still yields the push target.
+        assert push_config == {"url": "https://slack.example/callback", "token": "s3cret"}
+        assert engine._delivery_channel_repo.get_channel_for_dispatch.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_job_without_a_channel_writes_markdown(self):
+        engine = _make_engine()
+        job = _make_job(delivery_channel_id=None)
+
+        _, metadata, push_config = await engine._build_message_args(
+            job, run_id=7, access_token="tok", db=AsyncMock()
+        )
+
+        assert metadata["messageFormatting"] == "markdown"
+        assert push_config is None
+
 
 class TestWatchEvaluatedBeforeDispatch:
     """A watch's condition is decided here, before anything is dispatched.

@@ -1,8 +1,18 @@
 """Pydantic models for delivery channels."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+MessageFormatting = Literal["markdown", "slack", "google-chat", "plain"]
+
+_FORMATTING_DESCRIPTION = (
+    "How this channel renders delivered text. Nothing rewrites an agent's output on the "
+    "way out, so the writer is told these rules up front: 'slack' for Slack mrkdwn, "
+    "'google-chat' for Google Chat markup, 'plain' for no markup, 'markdown' (default) "
+    "for standard Markdown as the web console renders it."
+)
 
 
 class DeliveryChannelCreate(BaseModel):
@@ -31,6 +41,10 @@ class DeliveryChannelCreate(BaseModel):
             "every channel resolves by (client_id, installation_id)."
         ),
     )
+    message_formatting: MessageFormatting = Field(
+        default="markdown",
+        description=_FORMATTING_DESCRIPTION,
+    )
 
 
 class DeliveryChannelUpdate(BaseModel):
@@ -40,6 +54,7 @@ class DeliveryChannelUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     webhook_url: str | None = None
     secret: str | None = Field(default=None, min_length=1)
+    message_formatting: MessageFormatting | None = Field(default=None, description=_FORMATTING_DESCRIPTION)
 
 
 class DeliveryChannelResponse(BaseModel):
@@ -49,6 +64,10 @@ class DeliveryChannelResponse(BaseModel):
     name: str
     description: str | None = None
     webhook_url: str
+    message_formatting: MessageFormatting = Field(
+        default="markdown",
+        description=_FORMATTING_DESCRIPTION,
+    )
     client_id: str = Field(description="Keycloak client ID of the A2A service that registered this channel.")
     registered_by: str = Field(description="OIDC subject (sub) of the token used to register this channel.")
     installation_id: str | None = Field(
