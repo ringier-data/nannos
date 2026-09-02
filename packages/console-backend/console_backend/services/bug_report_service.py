@@ -14,6 +14,10 @@ from .notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
+#: The seeded service account that owns auto-provisioned agents (migration 041). Never a
+#: notification recipient: there is no person behind it, whatever its admin flag says.
+_SYSTEM_USER_ID = "system"
+
 #: How much of a report's description goes into the notification body. The inbox shows a
 #: one-line message; the report itself holds the full text.
 _MESSAGE_DESCRIPTION_CHARS = 200
@@ -91,11 +95,13 @@ class BugReportService:
         The reporter is excluded even when they are an administrator: they know what they
         just filed, and the notification is there to tell someone who does not.
 
-        Note `is_administrator`, not `role = 'admin'`. The seeded `system` user (migration
-        041) carries role 'admin' to own auto-provisioned agents, with no person behind it
-        and `is_administrator` left FALSE — so selecting on the flag leaves it out, while
-        selecting on the role would fill an inbox nobody opens, one row per bug report
-        forever. An audience that must select by role needs to exclude it explicitly.
+        The seeded `system` user is excluded explicitly. It owns auto-provisioned agents
+        and has no person behind it, so anything sent there fills an inbox nobody opens —
+        one row per bug report forever. Migration 041 creates it with role 'admin' and
+        leaves `is_administrator` FALSE, which is *not* enough to rely on: deployments
+        promote it, and one where it is flagged as an administrator was collecting these
+        notifications until this exclusion came back. Filtering on the flag alone is
+        reasoning from the migration; excluding the account is reasoning from the data.
         """
         if self.notification_service is None:
             return
@@ -108,8 +114,9 @@ class BugReportService:
                       AND status = 'active'
                       AND deleted_at IS NULL
                       AND id != :actor_id
+                      AND id != :system_user_id
                 """),
-                {"actor_id": actor.id},
+                {"actor_id": actor.id, "system_user_id": _SYSTEM_USER_ID},
             )
             recipient_ids = [row[0] for row in recipients.fetchall()]
             if not recipient_ids:

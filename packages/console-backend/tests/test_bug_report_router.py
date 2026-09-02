@@ -514,24 +514,18 @@ async def test_filing_never_notifies_the_system_user(
 ):
     """The seeded 'system' account must never collect notifications.
 
-    Migration 041 gives it role 'admin' to own auto-provisioned agents while leaving
-    `is_administrator` FALSE, and that flag is what keeps it out of this audience — so
-    the assertion below is the load-bearing one. An audience selected by role instead
-    would reach it, which is why this stays pinned.
+    Migration 041 creates it with role 'admin' and `is_administrator` FALSE, but that
+    default is not what deployments contain: a live one has the account promoted, and it
+    was collecting these notifications while the audience relied on the flag alone. So
+    the account is promoted here first — this asserts the exclusion, not the seed.
     """
-    row = (
-        (await pg_session.execute(text("SELECT role, is_administrator FROM users WHERE id = 'system'")))
-        .mappings()
-        .first()
-    )
-    assert row is not None, "migration 041 seeds a 'system' user"
-    assert row["role"] == "admin"
-    assert row["is_administrator"] is False, "if 'system' becomes a real administrator, this audience must exclude it"
+    await pg_session.execute(text("UPDATE users SET is_administrator = TRUE WHERE id = 'system'"))
+    await pg_session.commit()
 
     await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Noise check"})
 
     notified = {n["user_id"] for n in await _filed_notifications(pg_session)}
-    assert "system" not in notified
+    assert "system" not in notified, "'system' owns auto-provisioned agents; no person reads its inbox"
 
 
 @pytest.mark.asyncio
