@@ -267,6 +267,25 @@ class TestDispatchShapes:
         assert next(i for i in items if i.get("scheduler_status") == "success")["agent_message"] == ("Handled it.")
 
     @pytest.mark.asyncio
+    async def test_a_stringified_sub_agent_id_still_runs_the_sub_agent(self, agent_runner):
+        """A caller that stringifies the id must not silently produce a no-op success."""
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "debug", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(return_value=("Investigated.", "completed"))
+        items = await self._run(agent_runner, self._task("5"), "Investigate bug report abc.")
+
+        agent_runner._fetch_sub_agent_config.assert_awaited_once()
+        assert agent_runner._fetch_sub_agent_config.await_args[0][0] == 5
+        assert next(i for i in items if i.get("scheduler_status") == "success")["agent_message"] == "Investigated."
+
+    @pytest.mark.asyncio
+    async def test_a_non_numeric_sub_agent_id_is_ignored(self, agent_runner):
+        agent_runner._execute_sub_agent = AsyncMock()
+        await self._run(agent_runner, self._task("not-an-id"), "text")
+        agent_runner._execute_sub_agent.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_an_empty_dispatch_falls_back_to_the_default_instruction(self, agent_runner):
         agent_runner._fetch_sub_agent_config = AsyncMock(
             return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
