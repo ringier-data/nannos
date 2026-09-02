@@ -638,10 +638,21 @@ class AgentRunner(BaseAgent):
         message_meta = _extract_message_metadata(task)
 
         # Struct numbers arrive as floats (protobuf doubles); coerce the ids back
-        # to int — e.g. the sub-agent config URL path rejects "42.0".
+        # to int — e.g. the sub-agent config URL path rejects "42.0". Numeric strings are
+        # accepted too: a caller that stringifies the id must not silently turn into a
+        # no-op run (the sub-agent branch below is skipped when this returns None).
         def _meta_int(key: str) -> int | None:
             value = message_meta.get(key)
-            return int(value) if isinstance(value, int | float) else None
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int | float):
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    return int(float(value))
+                except ValueError:
+                    logger.warning("Ignoring non-numeric %s in message metadata: %r", key, value)
+            return None
 
         sub_agent_id: int | None = _meta_int("sub_agent_id")
         scheduled_job_id: int | None = _meta_int("scheduled_job_id")

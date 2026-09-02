@@ -78,8 +78,12 @@ class SkillSecurityService:
         self._agent_runner_url = agent_runner_url.rstrip("/")
         self._oauth_service = oauth_service
 
-    async def get_assessor_agent_id(self, db: AsyncSession) -> str | None:
-        """Find the active assessor system agent."""
+    async def get_assessor_agent_id(self, db: AsyncSession) -> int | None:
+        """Find the active assessor system agent.
+
+        Returned as int — see DebugAgentService.get_debug_agent_id: agent-runner drops a
+        stringified sub_agent_id and the assessor never runs.
+        """
         result = await db.execute(
             text(
                 "SELECT id FROM sub_agents "
@@ -88,7 +92,7 @@ class SkillSecurityService:
             )
         )
         row = result.scalar_one_or_none()
-        return str(row) if row is not None else None
+        return int(row) if row is not None else None
 
     async def assess_skill(
         self,
