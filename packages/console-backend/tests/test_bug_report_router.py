@@ -296,6 +296,51 @@ async def test_list_bug_reports_created_after(client_with_db: AsyncClient, pg_se
     assert response.json()["meta"]["total"] == 0
 
 
+@pytest.mark.asyncio
+async def test_created_after_without_an_offset_is_read_as_utc(
+    client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
+):
+    """An offset-less timestamp must not be shifted by the server's local timezone.
+
+    asyncpg encodes a naive datetime in the *process's* timezone against a TIMESTAMPTZ
+    column, so without normalisation this window would move by the container's UTC
+    offset — silently, and only on non-UTC deployments.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    older = (
+        await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Older"})
+    ).json()
+    newer = (
+        await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Newer"})
+    ).json()
+
+    # The same instant as `older["created_at"]`, expressed without an offset.
+    boundary = datetime.fromisoformat(older["created_at"]).astimezone(timezone.utc).replace(tzinfo=None)
+
+    response = await client_with_db.get("/api/v1/bug-reports", params={"created_after": boundary.isoformat()})
+    assert response.status_code == 200
+    assert [r["id"] for r in response.json()["data"]] == [newer["id"]]
+
+    # An hour earlier, still offset-less, must include both — a naive value read in a
+    # timezone ahead of UTC would exclude them.
+    earlier = (boundary - timedelta(hours=1)).isoformat()
+    response = await client_with_db.get("/api/v1/bug-reports", params={"created_after": earlier})
+    assert response.status_code == 200
+    assert response.json()["meta"]["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_list_rejects_out_of_range_paging(client_with_db: AsyncClient, test_user_model):
+    """`page=0` used to reach the repository as a negative OFFSET and answer 500."""
+    for params in ({"page": 0}, {"page": -1}, {"limit": 0}, {"limit": -1}, {"limit": 101}):
+        response = await client_with_db.get("/api/v1/bug-reports", params=params)
+        assert response.status_code == 422, f"{params} should be rejected, got {response.status_code}"
+
+        response = await client_with_db.get("/api/v1/bug-reports/mcp/list", params=params)
+        assert response.status_code == 422, f"{params} should be rejected on the MCP twin too"
+
+
 # ---------------------------------------------------------------------------
 # MCP list tool
 # ---------------------------------------------------------------------------
@@ -392,8 +437,7 @@ async def _filed_notifications(pg_session: AsyncSession) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_filing_notifies_triagers(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
-    approver = await _insert_user(pg_session, "approver-id", "approver")
+async def test_filing_notifies_administrators(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
     admin = await _insert_user(pg_session, "admin-id", "admin", is_admin=True)
     plain_member = await _insert_user(pg_session, "member-id", "member")
 
@@ -409,7 +453,7 @@ async def test_filing_notifies_triagers(client_with_db: AsyncClient, pg_session:
 
     notifications = await _filed_notifications(pg_session)
     notified = {n["user_id"] for n in notifications}
-    assert notified == {approver, admin}
+    assert notified == {admin}
     assert plain_member not in notified
     # The reporter is never told about their own report.
     assert test_user_model.id not in notified
@@ -420,12 +464,34 @@ async def test_filing_notifies_triagers(client_with_db: AsyncClient, pg_session:
 
 
 @pytest.mark.asyncio
-async def test_filing_excludes_reporter_who_can_triage(
+async def test_filing_does_not_notify_a_non_admin_triager(
     client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
 ):
-    """A triager filing a report is not notified about it, but their peers are."""
-    await _insert_user(pg_session, test_user_model.id, "approver")
-    peer = await _insert_user(pg_session, "approver-peer-id", "approver")
+    """The audience matches read visibility, not the `triage` capability.
+
+    An approver holds `triage` and may change a report's status, but every read path is
+    administrator-or-owner — so a notification would hand them a description snippet for
+    a report they cannot open.
+    """
+    await _insert_user(pg_session, "approver-id", "approver")
+    admin = await _insert_user(pg_session, "admin-id", "admin", is_admin=True)
+
+    await client_with_db.post(
+        "/api/v1/bug-reports",
+        json={"conversation_id": "conv-1", "description": "Approver must not see this"},
+    )
+
+    notified = {n["user_id"] for n in await _filed_notifications(pg_session)}
+    assert notified == {admin}
+
+
+@pytest.mark.asyncio
+async def test_filing_excludes_the_reporting_administrator(
+    client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
+):
+    """An administrator filing a report is not notified about it, but their peers are."""
+    await _insert_user(pg_session, test_user_model.id, "admin", is_admin=True)
+    peer = await _insert_user(pg_session, "admin-peer-id", "admin", is_admin=True)
 
     await client_with_db.post(
         "/api/v1/bug-reports",
@@ -440,9 +506,21 @@ async def test_filing_excludes_reporter_who_can_triage(
 async def test_filing_never_notifies_the_system_user(
     client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
 ):
-    """The seeded 'system' account has role 'admin' but no inbox anyone reads."""
-    result = await pg_session.execute(text("SELECT role FROM users WHERE id = 'system'"))
-    assert result.scalar() == "admin", "migration 041 seeds 'system' as an admin — this test guards against it"
+    """The seeded 'system' account must never collect notifications.
+
+    Migration 041 gives it role 'admin' to own auto-provisioned agents while leaving
+    `is_administrator` FALSE, and that flag is what keeps it out of this audience — so
+    the assertion below is the load-bearing one. An audience selected by role instead
+    would reach it, which is why this stays pinned.
+    """
+    row = (
+        (await pg_session.execute(text("SELECT role, is_administrator FROM users WHERE id = 'system'")))
+        .mappings()
+        .first()
+    )
+    assert row is not None, "migration 041 seeds a 'system' user"
+    assert row["role"] == "admin"
+    assert row["is_administrator"] is False, "if 'system' becomes a real administrator, this audience must exclude it"
 
     await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Noise check"})
 
@@ -457,7 +535,9 @@ async def test_filing_survives_a_failing_notification(
     """A notification failure must not lose the bug report."""
     from unittest.mock import AsyncMock, patch
 
-    await _insert_user(pg_session, "approver-id", "approver")
+    # An administrator, so there is a recipient and the patched insert is actually
+    # reached — with no recipients the fan-out returns before touching it.
+    await _insert_user(pg_session, "admin-id", "admin", is_admin=True)
 
     with patch.object(
         app_with_db.state.notification_service,

@@ -22,7 +22,7 @@ from ..models.bug_report import (
     BugReportResponse,
     BugReportStatus,
 )
-from ..models.user import PaginationMeta, User
+from ..models.user import User
 from ..services.bug_report_service import BugReportService
 from ..services.forwarded_attribution import forwarded_conversation_id
 
@@ -153,8 +153,13 @@ async def update_bug_report_status_mcp(
         "List bug reports, newest first. Administrators see every report; everyone else sees only "
         "the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. "
         "Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` "
-        "(an ISO-8601 timestamp; only reports filed strictly after it are returned). `created_after` is "
-        "what a scheduled watch should use to look at a rolling window rather than the whole first page."
+        "(an ISO-8601 timestamp, with an offset; only reports filed strictly after it are returned). "
+        "`created_after` is what a scheduled watch should use to look at a rolling window rather than "
+        "the whole first page. Two rules for such a watch: make the window several times the poll "
+        "interval and de-duplicate against what you saw last time, because a report becomes visible "
+        "when its transaction commits and not when `created_at` says it was filed; and when "
+        "`meta.total` exceeds the reports returned, keep requesting further `page`s until you have "
+        "them all, or the oldest reports in the window are the ones you never see."
     ),
 )
 async def list_bug_reports_mcp(
@@ -172,23 +177,14 @@ async def list_bug_reports_mcp(
     user: User = Depends(require_auth_or_bearer_token),
 ) -> BugReportListResponse:
     service = _get_bug_report_service(request)
-
-    # Same visibility rule as the REST list endpoint: administrators see everything,
-    # everyone else only their own reports. Triage capability deliberately does not
-    # widen this — it governs acting on a report, not seeing every user's.
-    user_id_filter = None if user.is_administrator else user.id
-
-    reports, total = await service.list_bug_reports(
+    # Visibility lives in the service, so this tool and the REST route cannot drift apart.
+    return await service.list_for_user(
         db=db,
-        user_id=user_id_filter,
+        user=user,
         status=status_filter,
         created_after=created_after,
         page=page,
         limit=limit,
-    )
-    return BugReportListResponse(
-        data=reports,
-        meta=PaginationMeta(page=page, limit=limit, total=total),
     )
 
 

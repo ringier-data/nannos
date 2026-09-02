@@ -6,27 +6,13 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..authorization import SYSTEM_ROLE_CAPABILITIES
-from ..models.bug_report import BugReportResponse, BugReportStatus
+from ..models.bug_report import BugReportListResponse, BugReportResponse, BugReportStatus
 from ..models.notification import NotificationData, NotificationType
-from ..models.user import User
+from ..models.user import PaginationMeta, User
 from ..repositories.bug_report_repository import BugReportRepository
 from .notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
-
-#: Roles whose capabilities include triaging bug reports. Derived from the capability
-#: table rather than listed by hand, so a role that gains or loses triage is not left
-#: silently in (or out of) the notification audience.
-_TRIAGE_ROLES = sorted(
-    role
-    for role, capabilities in SYSTEM_ROLE_CAPABILITIES.items()
-    if {"triage", "triage.admin"} & capabilities.get("bug_reports", set())
-)
-
-#: The seeded service account that owns auto-provisioned agents (migration 041). It has
-#: role 'admin' but no person behind it, so it is never a notification recipient.
-_SYSTEM_USER_ID = "system"
 
 #: How much of a report's description goes into the notification body. The inbox shows a
 #: one-line message; the report itself holds the full text.
@@ -72,32 +58,44 @@ class BugReportService:
         await db.commit()
         logger.info(f"Bug report {report.id} created by {actor.sub} for conversation {conversation_id}")
 
-        # Notify triagers after the commit, so a failing notification cannot lose the
-        # report itself — the same ordering the other notification producers use.
-        await self._notify_triagers(db=db, actor=actor, report=report)
+        # Notify after the commit, so a failing notification cannot lose the report
+        # itself — the same ordering the other notification producers use.
+        await self._notify_administrators(db=db, actor=actor, report=report)
 
         return report
 
-    async def _notify_triagers(
+    async def _notify_administrators(
         self,
         db: AsyncSession,
         actor: User,
         report: BugReportResponse,
     ) -> None:
-        """Put a newly filed report in the inbox of everyone who can triage it.
+        """Put a newly filed report in the inbox of everyone who can read it.
+
+        Administrators, and only administrators: the audience is matched to *read*
+        visibility rather than to the `triage` capability. An approver holds `triage` and
+        so may change a report's status, but every read path is administrator-or-owner —
+        `get_bug_report` 404s for them, both list surfaces filter to their own reports,
+        and the console page is admin-gated. Notifying them would hand out a description
+        snippet for a report they cannot open, and point them at something they can only
+        act on blind.
+
+        `is_administrator` is also the more durable key: `triage` is a capability whose
+        future is undecided, and an audience keyed on it would have to be revisited if it
+        ever changes or goes away.
 
         Best-effort by construction: the report is already committed, and a bug report
         that exists but was not announced is a far better outcome than a filing that
         failed because an inbox insert did.
 
-        The reporter is excluded even when they can triage: they know what they just
-        filed, and the notification is there to tell someone who does not.
+        The reporter is excluded even when they are an administrator: they know what they
+        just filed, and the notification is there to tell someone who does not.
 
-        So is the seeded `system` user (migration 041), which carries role 'admin' to own
-        auto-provisioned agents and has no person behind it. This is the first
-        notification audience selected by *role* rather than by group membership, so it
-        is the first one that would reach it — an inbox nobody opens, growing one row per
-        bug report forever.
+        Note `is_administrator`, not `role = 'admin'`. The seeded `system` user (migration
+        041) carries role 'admin' to own auto-provisioned agents, with no person behind it
+        and `is_administrator` left FALSE — so selecting on the flag leaves it out, while
+        selecting on the role would fill an inbox nobody opens, one row per bug report
+        forever. An audience that must select by role needs to exclude it explicitly.
         """
         if self.notification_service is None:
             return
@@ -106,21 +104,16 @@ class BugReportService:
             recipients = await db.execute(
                 text("""
                     SELECT id FROM users
-                    WHERE (role = ANY(:triage_roles) OR is_administrator IS TRUE)
+                    WHERE is_administrator IS TRUE
                       AND status = 'active'
                       AND deleted_at IS NULL
                       AND id != :actor_id
-                      AND id != :system_user_id
                 """),
-                {
-                    "triage_roles": _TRIAGE_ROLES,
-                    "actor_id": actor.id,
-                    "system_user_id": _SYSTEM_USER_ID,
-                },
+                {"actor_id": actor.id},
             )
             recipient_ids = [row[0] for row in recipients.fetchall()]
             if not recipient_ids:
-                logger.info("Bug report %s: no triagers to notify", report.id)
+                logger.info("Bug report %s: no administrators to notify", report.id)
                 return
 
             description = (report.description or "").strip()
@@ -149,7 +142,7 @@ class BugReportService:
             # Committed separately from the report, which is already durable.
             await db.commit()
         except Exception as exc:
-            logger.error("Bug report %s: failed to notify triagers: %s", report.id, exc)
+            logger.error("Bug report %s: failed to notify administrators: %s", report.id, exc)
             # Deliberately not re-raised — see the docstring. Rolled back so a half-done
             # insert cannot leave the session in a failed transaction for whatever the
             # request does next; the report itself is already committed.
@@ -165,22 +158,38 @@ class BugReportService:
     ) -> BugReportResponse | None:
         return await self.repository.get_bug_report(db=db, report_id=report_id)
 
-    async def list_bug_reports(
+    async def list_for_user(
         self,
         db: AsyncSession,
-        user_id: str | None = None,
+        user: User,
         status: BugReportStatus | None = None,
         created_after: datetime | None = None,
         page: int = 1,
         limit: int = 50,
-    ) -> tuple[list[BugReportResponse], int]:
-        return await self.repository.list_bug_reports(
+    ) -> BugReportListResponse:
+        """List the reports *this* user may see, newest first.
+
+        The one place that decides which reports a caller sees: administrators see every
+        report, everyone else only their own. Both the REST route and the MCP tool go
+        through here, because two copies of a visibility rule are two things to change
+        when the rule changes — and only one of them would be.
+
+        Triage capability deliberately does not widen the rule. It governs acting on a
+        report (the PATCH routes), not reading every user's.
+        """
+        user_id_filter = None if user.is_administrator else user.id
+
+        reports, total = await self.repository.list_bug_reports(
             db=db,
-            user_id=user_id,
+            user_id=user_id_filter,
             status=status,
             created_after=created_after,
             page=page,
             limit=limit,
+        )
+        return BugReportListResponse(
+            data=reports,
+            meta=PaginationMeta(page=page, limit=limit, total=total),
         )
 
     async def update_status(

@@ -272,14 +272,19 @@ from console_backend.service_instances import sub_agent_service
 agent = await sub_agent_service.create_sub_agent(...)
 ```
 
-### Notification Audiences Chosen by Role
-A notification audience selected by **role** (rather than by group membership) must
-exclude the seeded `system` user — migration 041 creates it with `role = 'admin'` to own
-auto-provisioned agents, and there is no person behind it, so anything sent there lands in
-an inbox nobody opens. Group-membership audiences never hit it, which is why this only
-started to matter with `BugReportService._notify_triagers`. Derive the roles from
-`SYSTEM_ROLE_CAPABILITIES` instead of hardcoding them, so a role that gains or loses the
-capability is not silently left in (or out of) the audience.
+### Notification Audiences Beyond Group Membership
+Two things to get right when an audience is chosen by standing rather than by group
+membership (`BugReportService._notify_administrators` is the worked example):
+
+- **`role = 'admin'` is not the same as `is_administrator`.** Migration 041 seeds a
+  `system` user with `role = 'admin'` — it owns auto-provisioned agents — while leaving
+  `is_administrator` FALSE. Selecting on the flag leaves it out; selecting on the role
+  picks up a service account with no person behind it, and fills an inbox nobody opens.
+  An audience that must select by role has to exclude it explicitly.
+- **Match the audience to read visibility, not to a write capability.** `bug_reports`
+  grants `triage` to `approver`, but no read path honours it, so notifying triagers would
+  hand out content the recipient is denied everywhere else. It is also the less durable
+  key: a capability can be redefined or removed, while `is_administrator` is structural.
 
 ### Authorization Checks
 ```python
