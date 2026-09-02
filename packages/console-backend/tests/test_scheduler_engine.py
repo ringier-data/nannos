@@ -845,6 +845,24 @@ class TestBuildMessageArgs:
 
         assert "messageFormatting" not in metadata
 
+    @pytest.mark.asyncio
+    async def test_a_voice_job_that_finds_no_voice_agent_still_formats_its_text(self):
+        """The degraded path dispatches text, and that text still lands on the channel."""
+        engine = _make_engine()
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {
+            "webhook_url": "https://slack.example/callback",
+            "secret": "s3cret",
+            "message_formatting": "slack",
+        }
+        job = _make_job(delivery_channel_id=3).model_copy(update={"voice_call": True})
+
+        with patch.object(engine, "_resolve_voice_agent_id", AsyncMock(return_value=None)):
+            _, metadata, _ = await engine._build_message_args(
+                job, run_id=7, access_token="tok", db=AsyncMock()
+            )
+
+        assert metadata["messageFormatting"] == "slack"
+
 
 class TestWatchEvaluatedBeforeDispatch:
     """A watch's condition is decided here, before anything is dispatched.

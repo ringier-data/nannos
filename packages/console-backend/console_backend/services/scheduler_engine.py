@@ -312,19 +312,11 @@ class SchedulerEngine:
             "timezone": job.timezone or None,
         }
 
-        # How the channel this job notifies renders text. Resolved here because this is
-        # the only place that knows both the job and its delivery channel, and sent under
-        # the key an interactive client uses (`messageFormatting`), so agent-runner and
-        # the orchestrator apply the same rules whether a human or a cron started the run.
-        # Without it a Slack notification arrives as raw Markdown — '### heading',
-        # '**bold**' — because nothing downstream rewrites the agent's output.
-        # Not for a voice call: nothing is rendered there, and mrkdwn rules in a phone
-        # agent's prompt are instructions about a medium it is not using.
+        # The channel this job notifies, needed twice below: for how it renders text, and
+        # as the push target. Fetched once.
         channel: dict[str, Any] | None = None
         if job.delivery_channel_id is not None:
             channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
-        if not job.voice_call:
-            metadata["messageFormatting"] = (channel or {}).get("message_formatting") or "markdown"
 
         if job.sub_agent_id is not None:
             # sub-agent config will be fetched by agent-runner using the sub_agent_id
@@ -354,10 +346,12 @@ class SchedulerEngine:
         # evaluated and met, so a call happens because something happened. (While the
         # evaluation lived in agent-runner, dispatch preceded the verdict and this had to
         # be task-only or the phone would have rung on every poll.)
+        is_voice_dispatch = False
         if job.voice_call:
             voice_agent_id = await self._resolve_voice_agent_id(db)
             if voice_agent_id is not None:
                 metadata["sub_agent_id"] = voice_agent_id
+                is_voice_dispatch = True
             else:
                 logger.warning("voice_call=True for job %d but voice-agent not found in DB", job.id)
 
@@ -409,6 +403,19 @@ class SchedulerEngine:
         push_config: dict[str, str] | None = None
         if channel:
             push_config = {"url": channel["webhook_url"], "token": channel["secret"]}
+
+        # How the channel this job notifies renders text, sent under the key an interactive
+        # client uses (`messageFormatting`) so agent-runner and the orchestrator apply the
+        # same rules whether a human or a cron started the run. Without it a Slack
+        # notification arrives as raw Markdown — '### heading', '**bold**' — because
+        # nothing downstream rewrites the agent's output.
+        #
+        # Set after the voice branch, and keyed on whether the dispatch actually became a
+        # voice call rather than on job.voice_call: a call renders nothing, but a job that
+        # asked for one and found no voice agent falls back to a text dispatch, and that
+        # text still lands on the channel and still has to be written for it.
+        if not is_voice_dispatch:
+            metadata["messageFormatting"] = (channel or {}).get("message_formatting") or "markdown"
 
         return parts, metadata, push_config
 
