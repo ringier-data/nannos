@@ -1,6 +1,7 @@
 """API routes for bug reports."""
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -53,6 +54,7 @@ async def list_bug_reports(
     page: int = 1,
     limit: int = 50,
     status_filter: BugReportStatus | None = None,
+    created_after: datetime | None = None,
     user: User = Depends(require_auth),
 ) -> BugReportListResponse:
     service = get_bug_report_service(request)
@@ -66,6 +68,7 @@ async def list_bug_reports(
         db=db,
         user_id=user_id_filter,
         status=status_filter,
+        created_after=created_after,
         page=page,
         limit=limit,
     )

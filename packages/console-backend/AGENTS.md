@@ -272,6 +272,15 @@ from console_backend.service_instances import sub_agent_service
 agent = await sub_agent_service.create_sub_agent(...)
 ```
 
+### Notification Audiences Chosen by Role
+A notification audience selected by **role** (rather than by group membership) must
+exclude the seeded `system` user — migration 041 creates it with `role = 'admin'` to own
+auto-provisioned agents, and there is no person behind it, so anything sent there lands in
+an inbox nobody opens. Group-membership audiences never hit it, which is why this only
+started to matter with `BugReportService._notify_triagers`. Derive the roles from
+`SYSTEM_ROLE_CAPABILITIES` instead of hardcoding them, so a role that gains or loses the
+capability is not silently left in (or out of) the audience.
+
 ### Authorization Checks
 ```python
 from console_backend.authorization import check_capability, check_action_allowed

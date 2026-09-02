@@ -1,6 +1,7 @@
 """Repository for bug reports with automatic audit logging."""
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -85,6 +86,7 @@ class BugReportRepository(AuditedRepository):
         db: AsyncSession,
         user_id: str | None = None,
         status: BugReportStatus | None = None,
+        created_after: datetime | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> tuple[list[BugReportResponse], int]:
@@ -98,6 +100,12 @@ class BugReportRepository(AuditedRepository):
         if status is not None:
             conditions.append("status = :status")
             params["status"] = status.value
+
+        if created_after is not None:
+            # Strictly greater than, so a window whose lower bound is a report's own
+            # timestamp does not return that report again.
+            conditions.append("created_at > :created_after")
+            params["created_after"] = created_after
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

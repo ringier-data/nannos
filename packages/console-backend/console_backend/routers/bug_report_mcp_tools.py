@@ -10,14 +10,19 @@ Access control uses the Two-Layer RBAC model:
 """
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..authorization import check_capability
 from ..db.session import DbSession
 from ..dependencies import require_auth_or_bearer_token
-from ..models.bug_report import BugReportResponse, BugReportStatus
-from ..models.user import User
+from ..models.bug_report import (
+    BugReportListResponse,
+    BugReportResponse,
+    BugReportStatus,
+)
+from ..models.user import PaginationMeta, User
 from ..services.bug_report_service import BugReportService
 from ..services.forwarded_attribution import forwarded_conversation_id
 
@@ -132,6 +137,59 @@ async def update_bug_report_status_mcp(
     if report is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bug report not found")
     return report
+
+
+# Two path segments, not a single "/mcp-list": bug_report_router is registered first and
+# owns GET "/{report_id}", which would match a one-segment path here and answer 404 for a
+# report id of "mcp-list". The PATCH tools below have no such problem — their sibling REST
+# routes are also two segments.
+@router.get(
+    "/mcp/list",
+    response_model=BugReportListResponse,
+    tags=["MCP"],
+    operation_id="console_list_bug_reports",
+    summary="List bug reports, most recently filed first.",
+    description=(
+        "List bug reports, newest first. Administrators see every report; everyone else sees only "
+        "the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. "
+        "Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` "
+        "(an ISO-8601 timestamp; only reports filed strictly after it are returned). `created_after` is "
+        "what a scheduled watch should use to look at a rolling window rather than the whole first page."
+    ),
+)
+async def list_bug_reports_mcp(
+    request: Request,
+    db: DbSession,
+    page: int = Query(1, ge=1, description="1-indexed page number."),
+    limit: int = Query(50, ge=1, le=100, description="Reports per page (max 100)."),
+    status_filter: BugReportStatus | None = Query(None, description="Only return reports in this status."),
+    created_after: datetime | None = Query(
+        None,
+        description=(
+            "Only return reports filed strictly after this ISO-8601 timestamp, e.g. '2026-09-02T08:00:00+00:00'."
+        ),
+    ),
+    user: User = Depends(require_auth_or_bearer_token),
+) -> BugReportListResponse:
+    service = _get_bug_report_service(request)
+
+    # Same visibility rule as the REST list endpoint: administrators see everything,
+    # everyone else only their own reports. Triage capability deliberately does not
+    # widen this — it governs acting on a report, not seeing every user's.
+    user_id_filter = None if user.is_administrator else user.id
+
+    reports, total = await service.list_bug_reports(
+        db=db,
+        user_id=user_id_filter,
+        status=status_filter,
+        created_after=created_after,
+        page=page,
+        limit=limit,
+    )
+    return BugReportListResponse(
+        data=reports,
+        meta=PaginationMeta(page=page, limit=limit, total=total),
+    )
 
 
 @router.patch(
