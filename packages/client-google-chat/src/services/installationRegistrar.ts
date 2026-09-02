@@ -25,6 +25,12 @@ interface DeliveryChannelCreateBody {
   webhook_url: string;
   secret: string;
   installation_id: string;
+  /**
+   * How this channel renders delivered text. The scheduler sends it to the run that
+   * writes a notification, so scheduled messages arrive formatted for this client
+   * without every job author having to ask for it.
+   */
+  message_formatting: 'google-chat';
 }
 
 export interface InstallationRegistrarDeps {
@@ -76,6 +82,7 @@ export async function registerOne(
     webhook_url: webhookUrl,
     secret,
     installation_id: opts.installationId,
+    message_formatting: 'google-chat',
   };
 
   const url = new URL('/api/v1/delivery-channels', config.consoleBackend!.url).toString();

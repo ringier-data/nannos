@@ -26,6 +26,7 @@ def _row_to_response(row: Any) -> DeliveryChannelResponse:
         name=row["name"],
         description=row["description"],
         webhook_url=row["webhook_url"],
+        message_formatting=row["message_formatting"],
         client_id=row["client_id"],
         registered_by=row["registered_by"],
         installation_id=row["installation_id"],
@@ -54,21 +55,22 @@ class DeliveryChannelRepository(AuditedRepository):
     ) -> DeliveryChannelResponse:
         """Insert a delivery channel."""
         now = datetime.now(timezone.utc)
-        channel_id: int = await self.create(
-            db=db,
-            actor=actor,
-            fields={
-                "name": data.name,
-                "description": data.description,
-                "webhook_url": data.webhook_url,
-                "secret": data.secret,
-                "client_id": client_id,
-                "registered_by": actor.sub,
-                "installation_id": data.installation_id,
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
+        fields: dict[str, Any] = {
+            "name": data.name,
+            "description": data.description,
+            "webhook_url": data.webhook_url,
+            "secret": data.secret,
+            "client_id": client_id,
+            "registered_by": actor.sub,
+            "installation_id": data.installation_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        # Left out when the client did not declare one, so the column default applies
+        # rather than an explicit NULL against a NOT NULL column.
+        if data.message_formatting is not None:
+            fields["message_formatting"] = data.message_formatting
+        channel_id: int = await self.create(db=db, actor=actor, fields=fields)
 
         row = await self._get_row(db, channel_id)
         assert row is not None
@@ -107,12 +109,15 @@ class DeliveryChannelRepository(AuditedRepository):
         return None if row is None else row["secret"]
 
     async def get_channel_for_dispatch(self, db: AsyncSession, channel_id: int) -> dict | None:
-        """Return the webhook_url and secret needed by the scheduler engine.
+        """Return what the scheduler engine needs at dispatch time.
 
-        Returns a dict with keys ``webhook_url`` and ``secret``, or None if not found.
+        Returns a dict with keys ``webhook_url``, ``secret`` and ``message_formatting``,
+        or None if not found. The formatting is part of dispatch, not just delivery: the
+        run has to be *told* the channel's rendering rules before it writes anything,
+        because no step between the agent and the channel rewrites its output.
         """
         result = await db.execute(
-            text("SELECT webhook_url, secret FROM delivery_channels WHERE id = :id"),
+            text("SELECT webhook_url, secret, message_formatting FROM delivery_channels WHERE id = :id"),
             {"id": channel_id},
         )
         row = result.mappings().first()
@@ -179,7 +184,7 @@ class DeliveryChannelRepository(AuditedRepository):
             return None
 
         fields: dict = {"updated_at": datetime.now(timezone.utc)}
-        for attr in ("name", "description", "webhook_url", "secret"):
+        for attr in ("name", "description", "webhook_url", "secret", "message_formatting"):
             val = getattr(data, attr)
             if val is not None:
                 fields[attr] = val
@@ -237,7 +242,8 @@ class DeliveryChannelRepository(AuditedRepository):
 
         Returns ``(channel, created)`` where ``created`` is True when a new row was inserted.
         On update, the registrar-owned fields (name, description, webhook_url, secret) are
-        overwritten. ``installation_id`` is required on ``DeliveryChannelCreate``; the guard
+        overwritten; ``message_formatting`` only when the client declared one, so a client
+        that has not been taught the field cannot reset a channel on every boot. ``installation_id`` is required on ``DeliveryChannelCreate``; the guard
         below is a defensive internal invariant for non-validated callers.
         """
         if data.installation_id is None:
@@ -268,6 +274,7 @@ class DeliveryChannelRepository(AuditedRepository):
             description=data.description,
             webhook_url=data.webhook_url,
             secret=data.secret,
+            message_formatting=data.message_formatting,
         )
         updated = await self.update_channel(db=db, actor=actor, channel_id=existing.id, data=update)
         if updated is None:

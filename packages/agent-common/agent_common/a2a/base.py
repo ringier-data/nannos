@@ -45,6 +45,21 @@ class SubAgentInput(BaseModel):
         default=None,
         description="Scheduled job ID to propagate to remote agents for cost attribution.",
     )
+    message_formatting: Optional[str] = Field(
+        default=None,
+        description=(
+            "How the channel that delivers the answer renders text ('slack', 'google-chat', "
+            "'plain', 'markdown'). Rides the outgoing A2A message metadata as "
+            "`messageFormatting`, which is the same key an interactive client sends, so a "
+            "remote agent applies its own formatting rules without this side touching its prompt. "
+            "SET IT ONLY when the invoked agent's own text is what reaches the user — a "
+            "scheduled job dispatched by agent-runner, where the answer goes straight to a "
+            "delivery channel. Leave it None whenever an orchestrator is routing: the "
+            "orchestrator composes the delivered message and applies the channel's rules to "
+            "it, so the sub-agent writes raw material for that and rules about a medium it "
+            "never writes to would only spend its prompt."
+        ),
+    )
 
 
 class BaseA2ARunnable(ABC):

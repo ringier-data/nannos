@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from a2a.types import Message, Part, Role
 
+import agent.core as core
+
 
 @pytest.fixture
 def agent_runner():
@@ -370,3 +372,197 @@ class TestRemoteAgentContextPropagation:
 
         kwargs = agent_runner._run_remote_agent.await_args.kwargs
         assert kwargs["context_id"] == "run-ctx-1"
+
+
+class TestDeliveryChannelFormatting:
+    """A scheduled run is told how its delivery channel renders text.
+
+    An interactive turn gets this from the client's `messageFormatting` metadata. A
+    scheduled one has no client on the other end, so the scheduler resolves it from the
+    job's delivery channel and sends it under the same key. Nothing downstream rewrites
+    the agent's output, so losing this hand-off is what made Slack notifications arrive
+    as literal '### heading' / '**bold**'.
+    """
+
+    @staticmethod
+    def _task(formatting: str | None) -> MagicMock:
+        meta: dict = {"sub_agent_id": 5, "scheduled_job_id": 10}
+        if formatting is not None:
+            meta["messageFormatting"] = formatting
+        task = MagicMock()
+        task.context_id = "ctx-fmt"
+        task.history = [MagicMock(metadata=meta)]
+        return task
+
+    @staticmethod
+    def _user_config() -> MagicMock:
+        user_config = MagicMock()
+        user_config.user_sub = "sub-1"
+        user_config.access_token = MagicMock()
+        user_config.access_token.get_secret_value.return_value = "bearer-token"
+        return user_config
+
+    async def _run(self, agent_runner, formatting: str | None) -> None:
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(return_value=("done", "completed"))
+        async for _ in agent_runner._stream_impl(
+            [Message(role=Role.ROLE_USER, parts=[Part(text="Report on campaign 450.")], message_id="msg-f")],
+            self._user_config(),
+            self._task(formatting),
+        ):
+            pass
+
+    @pytest.mark.asyncio
+    async def test_the_channels_format_reaches_the_sub_agent(self, agent_runner):
+        await self._run(agent_runner, "slack")
+        assert agent_runner._execute_sub_agent.await_args.kwargs["message_formatting"] == "slack"
+
+    @pytest.mark.asyncio
+    async def test_an_absent_format_falls_back_to_markdown(self, agent_runner):
+        await self._run(agent_runner, None)
+        assert agent_runner._execute_sub_agent.await_args.kwargs["message_formatting"] == "markdown"
+
+    @pytest.mark.asyncio
+    async def test_execute_sub_agent_forwards_the_format_to_remote(self, agent_runner):
+        agent_runner._run_remote_agent = AsyncMock(return_value=("ok", None))
+
+        await agent_runner._execute_sub_agent(
+            sub_agent_cfg={"type": "remote", "name": "Remote Agent", "agent_url": "https://remote.example"},
+            prompt="p",
+            user_access_token="tok",
+            scheduled_job_id=10,
+            scheduled_job_run_id=99,
+            user_config=MagicMock(),
+            context_id="run-ctx-1",
+            message_formatting="slack",
+        )
+
+        assert agent_runner._run_remote_agent.await_args.kwargs["message_formatting"] == "slack"
+
+    @pytest.mark.asyncio
+    async def test_a_remote_agent_is_told_in_the_metadata(self, agent_runner):
+        """A remote agent owns its system prompt, so the rules ride the A2A metadata.
+
+        Not as an extra message: that would land in the remote's checkpointed
+        conversation, where a later turn can read the instruction as part of the task.
+        """
+        card_response = MagicMock()
+        card_response.json.return_value = {"name": "Remote Agent"}
+        card_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=card_response)
+
+        captured = {}
+
+        async def fake_collect(runnable, input_data):
+            captured["input_data"] = input_data
+            return "done", "completed"
+
+        agent_runner._get_oauth2_client = MagicMock()
+
+        with (
+            patch("httpx.AsyncClient") as mock_cls,
+            patch("agent.core.make_a2a_async_runnable", return_value=MagicMock()),
+            patch("agent.core._collect_stream_text", side_effect=fake_collect),
+        ):
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await agent_runner._run_remote_agent(
+                sub_agent_cfg={"name": "Remote Agent", "agent_url": "https://remote.example", "sub_agent_id": 5},
+                raw_a2a_messages=[],
+                prompt="Do the thing.",
+                user_access_token="tok",
+                scheduled_job_id=10,
+                scheduled_job_run_id=99,
+                context_id="run-ctx-1",
+                message_formatting="slack",
+            )
+
+        input_data = captured["input_data"]
+        assert input_data.message_formatting == "slack"
+        # The dispatch text is untouched — no instruction message was appended.
+        assert len(input_data.messages) == 1
+        assert "Do the thing." in str(input_data.messages[0].content)
+
+    @pytest.mark.asyncio
+    async def test_markdown_is_not_worth_sending(self, agent_runner):
+        card_response = MagicMock()
+        card_response.json.return_value = {"name": "Remote Agent"}
+        card_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=card_response)
+
+        captured = {}
+
+        async def fake_collect(runnable, input_data):
+            captured["input_data"] = input_data
+            return "done", "completed"
+
+        agent_runner._get_oauth2_client = MagicMock()
+
+        with (
+            patch("httpx.AsyncClient") as mock_cls,
+            patch("agent.core.make_a2a_async_runnable", return_value=MagicMock()),
+            patch("agent.core._collect_stream_text", side_effect=fake_collect),
+        ):
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await agent_runner._run_remote_agent(
+                sub_agent_cfg={"name": "Remote Agent", "agent_url": "https://remote.example", "sub_agent_id": 5},
+                raw_a2a_messages=[],
+                prompt="Do the thing.",
+                user_access_token="tok",
+                scheduled_job_id=10,
+                scheduled_job_run_id=99,
+                context_id="run-ctx-1",
+            )
+
+        assert captured["input_data"].message_formatting is None
+
+    @pytest.mark.asyncio
+    async def test_execute_sub_agent_forwards_the_format_to_foundry(self, agent_runner):
+        """Foundry's query API is the third writer, and it was the one left out."""
+        agent_runner._run_foundry_agent = AsyncMock(return_value=("ok", None))
+
+        await agent_runner._execute_sub_agent(
+            sub_agent_cfg={"type": "foundry", "name": "Analyst", "sub_agent_id": 7},
+            prompt="p",
+            user_access_token="tok",
+            scheduled_job_id=10,
+            scheduled_job_run_id=99,
+            user_config=MagicMock(),
+            context_id="run-ctx-1",
+            message_formatting="slack",
+        )
+
+        assert agent_runner._run_foundry_agent.await_args.kwargs["message_formatting"] == "slack"
+
+
+class TestSubAgentSystemPrompt:
+    """A local sub-agent is told the channel's rules through its assembled prompt.
+
+    The stored system prompt cannot carry them: it is written once and reused, while the
+    same agent may notify Slack for one job and the web console for the next.
+    """
+
+    def test_the_channels_rules_are_appended(self):
+        prompt = core._build_sub_agent_system_prompt("You triage alerts.", "slack")
+
+        assert prompt.startswith("You triage alerts.")
+        assert 'format="slack"' in prompt
+        assert "mrkdwn" in prompt
+        # The response protocol still comes first — the rules are additive, not a swap.
+        assert prompt.index("You triage alerts.") < prompt.index('format="slack"')
+
+    def test_markdown_leaves_the_prompt_as_it_was(self):
+        assert core._build_sub_agent_system_prompt("You triage alerts.", "markdown") == (
+            core._build_sub_agent_system_prompt("You triage alerts.", "unknown-channel")
+        )
+        assert 'format=' not in core._build_sub_agent_system_prompt("You triage alerts.", "markdown")

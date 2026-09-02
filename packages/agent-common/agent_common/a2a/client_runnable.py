@@ -452,6 +452,7 @@ class A2AClientRunnable(BaseA2ARunnable):
         context_id: Optional[str],
         task_id: Optional[str],
         scheduled_job_id: Optional[int] = None,
+        message_formatting: Optional[str] = None,
     ) -> Message:
         """Transform a list of LangChain HumanMessages to a single A2A Message.
 
@@ -464,6 +465,9 @@ class A2AClientRunnable(BaseA2ARunnable):
             context_id: Optional context ID for multi-turn conversations
             task_id: Optional task ID for continuing existing tasks
             scheduled_job_id: Optional scheduled job ID for cost attribution
+            message_formatting: Optional rendering rules of the delivering channel, sent
+                as `messageFormatting` — the key an interactive client uses — so the remote
+                agent applies them through its own request-metadata path
 
         Returns:
             Constructed A2A Message aggregating parts from all HumanMessages
@@ -474,6 +478,8 @@ class A2AClientRunnable(BaseA2ARunnable):
         }
         if scheduled_job_id is not None:
             message_metadata["scheduled_job_id"] = scheduled_job_id
+        if message_formatting:
+            message_metadata["messageFormatting"] = message_formatting
 
         all_parts: list[A2APart] = []
 
@@ -629,6 +635,7 @@ class A2AClientRunnable(BaseA2ARunnable):
                 context_id,
                 task_id,
                 scheduled_job_id=input_data_validated.scheduled_job_id,
+                message_formatting=input_data_validated.message_formatting,
             )
 
             logger.info(f"Streaming A2A message: {a2a_message.message_id}")
