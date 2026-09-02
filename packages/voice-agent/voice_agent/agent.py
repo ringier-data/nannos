@@ -620,9 +620,10 @@ class GeminiLiveAgent:
 
         if entries:
             logger.info(
-                "Voice session %s billed usage: %s",
+                "Voice session %s billed usage recorded for %d model(s): %s",
                 self.session_id,
-                {e["model_name"]: e["billing_unit_breakdown"] for e in entries},
+                len(entries),
+                [e["model_name"] for e in entries],
             )
         return entries
 
