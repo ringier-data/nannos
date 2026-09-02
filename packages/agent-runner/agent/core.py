@@ -42,7 +42,11 @@ from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM, SubAgent
 from agent_common.agents.foundry_agent import create_foundry_local_subagent
 from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
-from agent_common.core.message_formatting import formatting_prompt_block, normalize_message_formatting
+from agent_common.core.message_formatting import (
+    formatting_prompt_block,
+    formatting_rules,
+    normalize_message_formatting,
+)
 from agent_common.core.model_factory import (
     create_model,
     get_default_model,
@@ -188,6 +192,21 @@ def _current_time_context(timezone_name: str | None) -> str:
         except Exception:
             pass
     return line
+
+
+def _build_sub_agent_system_prompt(system_prompt: str, message_formatting: str) -> str:
+    """The sub-agent's own prompt, plus the response protocol and the channel's rules.
+
+    The rendering rules cannot live in the stored system prompt: it is written once and
+    reused across every job, while the same agent may notify Slack for one job and the
+    web console for the next. Assembling them per run is what makes correct formatting
+    built in rather than something each job's author has to remember to ask for.
+    """
+    parts = [system_prompt, A2A_PROTOCOL_ADDENDUM]
+    formatting_block = formatting_prompt_block(message_formatting)
+    if formatting_block:
+        parts.append(formatting_block)
+    return "\n\n".join(parts)
 
 
 def _extract_message_metadata(task: Task) -> dict[str, Any]:
@@ -896,6 +915,7 @@ class AgentRunner(BaseAgent):
             return await self._run_foundry_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 prompt=prompt,
+                message_formatting=message_formatting,
                 user_config=user_config,
                 scheduled_job_id=scheduled_job_id,
                 scheduled_job_run_id=scheduled_job_run_id,
@@ -978,17 +998,7 @@ class AgentRunner(BaseAgent):
 
         llm = create_model(model_name, thinking_level=thinking_level)
 
-        # Append the A2A response protocol addendum so the LLM knows to use SubAgentResponseSchema
-        full_system_prompt = system_prompt + "\n\n" + A2A_PROTOCOL_ADDENDUM
-
-        # ...and the delivery channel's rendering rules. A sub-agent's system prompt is
-        # written once and reused across every job, so the channel cannot be baked into
-        # it: the same agent may notify Slack for one job and the web console for the
-        # next. Injecting it here is what makes correct formatting built in rather than
-        # something each job's author has to remember to ask for.
-        formatting_block = formatting_prompt_block(message_formatting)
-        if formatting_block:
-            full_system_prompt += "\n\n" + formatting_block
+        full_system_prompt = _build_sub_agent_system_prompt(system_prompt, message_formatting)
 
         mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
 
@@ -1200,6 +1210,7 @@ class AgentRunner(BaseAgent):
         user_config: UserConfig,
         scheduled_job_id: int,
         scheduled_job_run_id: int,
+        message_formatting: str = "markdown",
     ) -> tuple[str | None, str | None]:
         """Run a Foundry query-API agent using agent-common's foundry module.
 
@@ -1209,6 +1220,10 @@ class AgentRunner(BaseAgent):
             user_config: Authenticated user context.
             scheduled_job_id: For logging.
             scheduled_job_run_id: For tracking the conversation.
+            message_formatting: Rendering rules of the delivery channel. The query API
+                takes a single `userInput` string and no system prompt, so they can only
+                go into the prompt; whether the Foundry-side agent honours them is its
+                own business, but a run that is never told cannot get it right.
         Returns:
             (result_summary, task_state) — see _collect_stream_text.
         """
@@ -1239,9 +1254,12 @@ class AgentRunner(BaseAgent):
             sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
         )
 
+        formatting_block = formatting_prompt_block(message_formatting)
+        foundry_prompt = f"{prompt}\n\n{formatting_block}" if formatting_block else prompt
+
         # Stream the foundry runnable via the A2A SubAgentInput interface
         input_data = SubAgentInput(
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": foundry_prompt}],
         )
         result_summary, task_state = await _collect_stream_text(compiled_subagent["runnable"], input_data)
 
@@ -1304,9 +1322,8 @@ class AgentRunner(BaseAgent):
                 (scheduled_job_runs.conversation_id) — the prerequisite for a
                 later orchestrator delegation to resume that conversation via
                 the conversation-origin extension.
-            message_formatting: Rendering rules of the delivery channel. A remote
-                agent owns its own system prompt, so the rules ride the message as a
-                trailing instruction — the only place this side can put them.
+            message_formatting: Rendering rules of the delivery channel, forwarded as
+                A2A message metadata so the remote agent applies them itself.
 
         Returns:
             (result_summary, task_state) — see _collect_stream_text.
@@ -1351,22 +1368,24 @@ class AgentRunner(BaseAgent):
             # Fallback to plain text prompt
             messages_input = [{"role": "user", "content": prompt}]
 
-        # The channel's rendering rules as a final instruction. There is no system prompt
-        # to append to on this path (the remote agent has its own) and SubAgentInput
-        # carries no per-message metadata, so the message itself is the only carrier.
-        formatting_block = formatting_prompt_block(message_formatting)
-        if formatting_block:
-            messages_input = [*messages_input, HumanMessage(content=formatting_block)]
-
         # orchestrator_conversation_id feeds A2AClientRunnable's contextId
         # waterfall (_extract_tracking_ids), putting the run task's contextId on
         # the wire. The remote keys its checkpoints by the contextId it
         # receives, so the run's stored conversation_id then names a real,
         # resumable conversation on the executing side.
+        # The channel's rendering rules travel as message metadata, not as an extra
+        # message: a remote agent owns its system prompt, and A2AClientRunnable puts
+        # `messageFormatting` on the wire under the key an interactive client uses, so the
+        # remote applies them through its own request-metadata path. Appending an
+        # instruction message instead would land in the remote's checkpointed
+        # conversation, where a later turn can read it as part of the task.
         input_data = SubAgentInput(
             messages=messages_input,
             scheduled_job_id=scheduled_job_id,
             orchestrator_conversation_id=context_id,
+            # Only when there is something to say: plain Markdown is the remote's default
+            # too, so sending it would put a no-op instruction on the wire.
+            message_formatting=message_formatting if formatting_rules(message_formatting) else None,
         )
         result_summary, task_state = await _collect_stream_text(runnable, input_data)
 

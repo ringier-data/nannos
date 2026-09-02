@@ -420,6 +420,30 @@ class TestA2AClientRunnableMessageCreation:
         assert result.parts[0].text == content
         assert result.message_id  # Generated UUID
 
+    def test_message_formatting_rides_the_metadata(self, a2a_client_runnable):
+        """The delivering channel's rendering rules travel as `messageFormatting`.
+
+        Same key an interactive client sends, so a remote agent applies them through its
+        own request-metadata path instead of this side editing its prompt — and an extra
+        instruction message never lands in the remote's checkpointed conversation.
+        """
+        result = a2a_client_runnable._from_human_messages_to_a2a(
+            [HumanMessage(content="Report on the campaign.")],
+            "ctx-123",
+            None,
+            message_formatting="slack",
+        )
+
+        assert result.metadata["messageFormatting"] == "slack"
+        assert len(result.parts) == 1  # no instruction part was appended
+
+    def test_no_formatting_key_when_none_was_given(self, a2a_client_runnable):
+        result = a2a_client_runnable._from_human_messages_to_a2a(
+            [HumanMessage(content="Report on the campaign.")], None, None
+        )
+
+        assert "messageFormatting" not in result.metadata
+
     def test_create_a2a_message_without_tracking(self, a2a_client_runnable):
         """Test creating A2A message without tracking IDs."""
         content = "Test message"

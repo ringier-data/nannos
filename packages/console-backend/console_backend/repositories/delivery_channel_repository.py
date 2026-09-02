@@ -55,22 +55,22 @@ class DeliveryChannelRepository(AuditedRepository):
     ) -> DeliveryChannelResponse:
         """Insert a delivery channel."""
         now = datetime.now(timezone.utc)
-        channel_id: int = await self.create(
-            db=db,
-            actor=actor,
-            fields={
-                "name": data.name,
-                "description": data.description,
-                "webhook_url": data.webhook_url,
-                "message_formatting": data.message_formatting,
-                "secret": data.secret,
-                "client_id": client_id,
-                "registered_by": actor.sub,
-                "installation_id": data.installation_id,
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
+        fields: dict[str, Any] = {
+            "name": data.name,
+            "description": data.description,
+            "webhook_url": data.webhook_url,
+            "secret": data.secret,
+            "client_id": client_id,
+            "registered_by": actor.sub,
+            "installation_id": data.installation_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        # Left out when the client did not declare one, so the column default applies
+        # rather than an explicit NULL against a NOT NULL column.
+        if data.message_formatting is not None:
+            fields["message_formatting"] = data.message_formatting
+        channel_id: int = await self.create(db=db, actor=actor, fields=fields)
 
         row = await self._get_row(db, channel_id)
         assert row is not None
@@ -242,7 +242,8 @@ class DeliveryChannelRepository(AuditedRepository):
 
         Returns ``(channel, created)`` where ``created`` is True when a new row was inserted.
         On update, the registrar-owned fields (name, description, webhook_url, secret) are
-        overwritten. ``installation_id`` is required on ``DeliveryChannelCreate``; the guard
+        overwritten; ``message_formatting`` only when the client declared one, so a client
+        that has not been taught the field cannot reset a channel on every boot. ``installation_id`` is required on ``DeliveryChannelCreate``; the guard
         below is a defensive internal invariant for non-validated callers.
         """
         if data.installation_id is None:

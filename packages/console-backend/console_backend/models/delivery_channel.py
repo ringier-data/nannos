@@ -41,9 +41,14 @@ class DeliveryChannelCreate(BaseModel):
             "every channel resolves by (client_id, installation_id)."
         ),
     )
-    message_formatting: MessageFormatting = Field(
-        default="markdown",
-        description=_FORMATTING_DESCRIPTION,
+    message_formatting: MessageFormatting | None = Field(
+        default=None,
+        description=(
+            _FORMATTING_DESCRIPTION
+            + " Omitted means 'unchanged': a client that does not declare a format leaves "
+            "the stored value alone, so re-registration on every boot cannot reset a "
+            "channel that was set elsewhere. A new channel falls back to the column default."
+        ),
     )
 
 

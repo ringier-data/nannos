@@ -16,11 +16,13 @@ notification) obeys the same ones.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 MessageFormatting = Literal["markdown", "slack", "google-chat", "plain"]
 
 DEFAULT_MESSAGE_FORMATTING: MessageFormatting = "markdown"
+
+KNOWN_FORMATS = frozenset(get_args(MessageFormatting))
 
 #: Rendering rules per channel, as prose for the model. ``markdown`` is absent on
 #: purpose: it is standard behaviour and an instruction saying so only spends tokens.
@@ -55,7 +57,7 @@ def normalize_message_formatting(value: object) -> MessageFormatting:
     """
     if isinstance(value, str):
         candidate = value.strip().lower()
-        if candidate in FORMATTING_RULES or candidate == DEFAULT_MESSAGE_FORMATTING:
+        if candidate in KNOWN_FORMATS:
             return candidate  # type: ignore[return-value]
     return DEFAULT_MESSAGE_FORMATTING
 
@@ -71,8 +73,8 @@ def formatting_prompt_block(value: object) -> str:
     Returned without surrounding blank lines; callers place it (system-prompt
     addendum, user-preferences block, one-shot prompt) as they need.
     """
-    rules = formatting_rules(value)
+    fmt = normalize_message_formatting(value)
+    rules = FORMATTING_RULES.get(fmt)
     if not rules:
         return ""
-    fmt = normalize_message_formatting(value)
     return f'<message_formatting format="{fmt}">\n{rules}\n</message_formatting>'

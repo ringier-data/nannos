@@ -14,17 +14,18 @@
 --
 -- Default 'markdown' keeps every existing row (and any client that has not been
 -- taught the field) on today's behaviour.
+--
+-- No backfill: existing rows are corrected by the clients themselves, which declare
+-- their format on every boot's self-registration. Guessing from client_id would be
+-- wrong as often as right — it is operator-configured (this repo's own example
+-- deployment gives the Slack client OIDC_CLIENT_ID "email-client"), so a pattern
+-- match can both miss a Slack channel and relabel something else as one.
 ALTER TABLE delivery_channels
     ADD COLUMN message_formatting TEXT NOT NULL DEFAULT 'markdown';
 
 ALTER TABLE delivery_channels
     ADD CONSTRAINT delivery_channels_message_formatting_chk
     CHECK (message_formatting IN ('markdown', 'slack', 'google-chat', 'plain'));
-
--- Backfill the channels already registered by the two chat clients, so existing
--- installations are correct before their bots next re-register on boot.
-UPDATE delivery_channels SET message_formatting = 'slack' WHERE client_id LIKE '%slack%';
-UPDATE delivery_channels SET message_formatting = 'google-chat' WHERE client_id LIKE '%google-chat%';
 
 -- rambler down
 

@@ -318,11 +318,13 @@ class SchedulerEngine:
         # the orchestrator apply the same rules whether a human or a cron started the run.
         # Without it a Slack notification arrives as raw Markdown — '### heading',
         # '**bold**' — because nothing downstream rewrites the agent's output.
+        # Not for a voice call: nothing is rendered there, and mrkdwn rules in a phone
+        # agent's prompt are instructions about a medium it is not using.
         channel: dict[str, Any] | None = None
         if job.delivery_channel_id is not None:
             channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
-        message_formatting = (channel or {}).get("message_formatting") or "markdown"
-        metadata["messageFormatting"] = message_formatting
+        if not job.voice_call:
+            metadata["messageFormatting"] = (channel or {}).get("message_formatting") or "markdown"
 
         if job.sub_agent_id is not None:
             # sub-agent config will be fetched by agent-runner using the sub_agent_id

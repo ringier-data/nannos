@@ -6,7 +6,6 @@ Covers:
 - Watch condition short-circuit: when condition_not_met, _stream_impl yields early without sub-agent call
 """
 
-import inspect
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -444,8 +443,12 @@ class TestDeliveryChannelFormatting:
         assert agent_runner._run_remote_agent.await_args.kwargs["message_formatting"] == "slack"
 
     @pytest.mark.asyncio
-    async def test_a_remote_agent_is_told_in_the_message(self, agent_runner):
-        """A remote agent owns its system prompt, so the rules ride the message."""
+    async def test_a_remote_agent_is_told_in_the_metadata(self, agent_runner):
+        """A remote agent owns its system prompt, so the rules ride the A2A metadata.
+
+        Not as an extra message: that would land in the remote's checkpointed
+        conversation, where a later turn can read the instruction as part of the task.
+        """
         card_response = MagicMock()
         card_response.json.return_value = {"name": "Remote Agent"}
         card_response.raise_for_status = MagicMock()
@@ -480,11 +483,14 @@ class TestDeliveryChannelFormatting:
                 message_formatting="slack",
             )
 
-        messages = captured["input_data"].messages
-        assert 'format="slack"' in str(messages[-1].content)
+        input_data = captured["input_data"]
+        assert input_data.message_formatting == "slack"
+        # The dispatch text is untouched — no instruction message was appended.
+        assert len(input_data.messages) == 1
+        assert "Do the thing." in str(input_data.messages[0].content)
 
     @pytest.mark.asyncio
-    async def test_markdown_adds_nothing_to_a_remote_message(self, agent_runner):
+    async def test_markdown_is_not_worth_sending(self, agent_runner):
         card_response = MagicMock()
         card_response.json.return_value = {"name": "Remote Agent"}
         card_response.raise_for_status = MagicMock()
@@ -518,16 +524,45 @@ class TestDeliveryChannelFormatting:
                 context_id="run-ctx-1",
             )
 
-        assert len(captured["input_data"].messages) == 1
+        assert captured["input_data"].message_formatting is None
 
-    def test_a_local_sub_agents_system_prompt_carries_the_rules(self):
-        """The injection point, guarded by source rather than by running a graph.
+    @pytest.mark.asyncio
+    async def test_execute_sub_agent_forwards_the_format_to_foundry(self, agent_runner):
+        """Foundry's query API is the third writer, and it was the one left out."""
+        agent_runner._run_foundry_agent = AsyncMock(return_value=("ok", None))
 
-        A sub-agent's system prompt is written once and reused across jobs, so the
-        channel cannot be baked into it — the same agent may notify Slack for one job
-        and the web console for the next. Building the full prompt without this append
-        is exactly the regression that puts raw Markdown into Slack.
-        """
-        source = inspect.getsource(core.AgentRunner._run_langgraph_agent)
-        assert "formatting_prompt_block(message_formatting)" in source
-        assert "full_system_prompt += " in source
+        await agent_runner._execute_sub_agent(
+            sub_agent_cfg={"type": "foundry", "name": "Analyst", "sub_agent_id": 7},
+            prompt="p",
+            user_access_token="tok",
+            scheduled_job_id=10,
+            scheduled_job_run_id=99,
+            user_config=MagicMock(),
+            context_id="run-ctx-1",
+            message_formatting="slack",
+        )
+
+        assert agent_runner._run_foundry_agent.await_args.kwargs["message_formatting"] == "slack"
+
+
+class TestSubAgentSystemPrompt:
+    """A local sub-agent is told the channel's rules through its assembled prompt.
+
+    The stored system prompt cannot carry them: it is written once and reused, while the
+    same agent may notify Slack for one job and the web console for the next.
+    """
+
+    def test_the_channels_rules_are_appended(self):
+        prompt = core._build_sub_agent_system_prompt("You triage alerts.", "slack")
+
+        assert prompt.startswith("You triage alerts.")
+        assert 'format="slack"' in prompt
+        assert "mrkdwn" in prompt
+        # The response protocol still comes first — the rules are additive, not a swap.
+        assert prompt.index("You triage alerts.") < prompt.index('format="slack"')
+
+    def test_markdown_leaves_the_prompt_as_it_was(self):
+        assert core._build_sub_agent_system_prompt("You triage alerts.", "markdown") == (
+            core._build_sub_agent_system_prompt("You triage alerts.", "unknown-channel")
+        )
+        assert 'format=' not in core._build_sub_agent_system_prompt("You triage alerts.", "markdown")

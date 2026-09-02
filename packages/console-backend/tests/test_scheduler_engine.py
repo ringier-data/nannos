@@ -827,6 +827,24 @@ class TestBuildMessageArgs:
         assert metadata["messageFormatting"] == "markdown"
         assert push_config is None
 
+    @pytest.mark.asyncio
+    async def test_a_voice_call_is_not_told_how_to_render_text(self):
+        """Nothing is rendered on a phone call, so text rules have no business there."""
+        engine = _make_engine()
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {
+            "webhook_url": "https://slack.example/callback",
+            "secret": "s3cret",
+            "message_formatting": "slack",
+        }
+        job = _make_job(delivery_channel_id=3).model_copy(update={"voice_call": True})
+
+        with patch.object(engine, "_resolve_voice_agent_id", AsyncMock(return_value=77)):
+            _, metadata, _ = await engine._build_message_args(
+                job, run_id=7, access_token="tok", db=AsyncMock()
+            )
+
+        assert "messageFormatting" not in metadata
+
 
 class TestWatchEvaluatedBeforeDispatch:
     """A watch's condition is decided here, before anything is dispatched.

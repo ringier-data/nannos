@@ -33,6 +33,7 @@ from agent_common.core.hitl_resume import (
     reject_decisions,
     structural_decisions,
 )
+from agent_common.core.message_formatting import normalize_message_formatting
 from agent_common.models.base import ModelType, ThinkingLevel
 from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
@@ -857,9 +858,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             else:
                 client_user_handle = None
 
-            # Extract message formatting - support both naming conventions
-            message_formatting = (
-                request_metadata.get("messageFormatting") or request_metadata.get("message_formatting") or "markdown"
+            # Extract message formatting - support both naming conventions.
+            # Normalized through agent-common so an unknown or oddly-typed value degrades
+            # to Markdown here exactly as it does on the scheduled path.
+            message_formatting = normalize_message_formatting(
+                request_metadata.get("messageFormatting") or request_metadata.get("message_formatting")
             )
 
             # Build complete UserConfig with all data and discovered capabilities
