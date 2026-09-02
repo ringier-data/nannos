@@ -35,8 +35,10 @@ class _FakeRunnable:
     def __init__(self, events=None, raises=None):
         self._events = events or []
         self._raises = raises
+        self.stream_input = None
 
     async def astream(self, stream_input, config):  # noqa: ARG002 - signature match
+        self.stream_input = stream_input
         for ev in self._events:
             yield ev
         if self._raises is not None:
@@ -60,6 +62,26 @@ async def _collect(agent, runnable, *, resume=None, config=None):
     ):
         out.append(item)
     return out
+
+
+@pytest.mark.asyncio
+async def test_delegation_does_not_impose_a_channel_format_on_the_sub_agent():
+    """A sub-agent answering to the orchestrator is not told how a channel renders text.
+
+    `messageFormatting` describes the medium a message is *delivered* on, and it belongs
+    to whoever writes the delivered text. When the orchestrator routes, that is the
+    orchestrator: it applies the channel's rules to the answer it composes (via
+    UserPreferencesMiddleware) and the sub-agent's output is raw material it rewrites.
+    Handing the rules down as well would spend a sub-agent's prompt on instructions about
+    a medium it never writes to.
+
+    It is only needed the other way round — a scheduled job in agent-runner, where the
+    sub-agent's own text is delivered verbatim and there is no orchestrator in between.
+    """
+    runnable = _FakeRunnable(events=[ArtifactUpdate(content="Hello")])
+    await _collect(_agent(), runnable)
+
+    assert runnable.stream_input.message_formatting is None
 
 
 @pytest.mark.asyncio

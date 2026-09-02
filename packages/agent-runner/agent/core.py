@@ -201,6 +201,13 @@ def _build_sub_agent_system_prompt(system_prompt: str, message_formatting: str) 
     reused across every job, while the same agent may notify Slack for one job and the
     web console for the next. Assembling them per run is what makes correct formatting
     built in rather than something each job's author has to remember to ask for.
+
+    This is the stand-alone case, and the only one that wants the rules. A scheduled run
+    has no orchestrator in between: whatever the sub-agent writes here is delivered to
+    the channel verbatim. When the orchestrator routes instead, it composes the delivered
+    message and applies the channel's rules to that, so its sub-agents are given no
+    formatting instructions at all — theirs is raw material for an answer someone else
+    writes, and rules about a medium they never write to would only spend their prompt.
     """
     parts = [system_prompt, A2A_PROTOCOL_ADDENDUM]
     formatting_block = formatting_prompt_block(message_formatting)
