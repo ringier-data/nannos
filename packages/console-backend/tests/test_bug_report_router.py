@@ -298,15 +298,21 @@ async def test_list_bug_reports_created_after(client_with_db: AsyncClient, pg_se
 
 @pytest.mark.asyncio
 async def test_created_after_without_an_offset_is_read_as_utc(
-    client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
+    client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model, monkeypatch
 ):
     """An offset-less timestamp must not be shifted by the server's local timezone.
 
     asyncpg encodes a naive datetime in the *process's* timezone against a TIMESTAMPTZ
-    column, so without normalisation this window would move by the container's UTC
-    offset — silently, and only on non-UTC deployments.
+    column, so without normalisation the window moves by the deployment's UTC offset.
+
+    The process timezone is pinned for the duration, because on a UTC runner the bug is
+    invisible: "read the naive value as local" and "read it as UTC" are then the same
+    thing, and the test would pass with the normalisation deleted. UTC+14 without DST
+    makes the two readings 14 hours apart — enough that the unfixed code returns both
+    reports where the fixed code returns one.
     """
-    from datetime import datetime, timedelta, timezone
+    import time
+    from datetime import datetime, timezone
 
     older = (
         await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Older"})
@@ -318,16 +324,16 @@ async def test_created_after_without_an_offset_is_read_as_utc(
     # The same instant as `older["created_at"]`, expressed without an offset.
     boundary = datetime.fromisoformat(older["created_at"]).astimezone(timezone.utc).replace(tzinfo=None)
 
-    response = await client_with_db.get("/api/v1/bug-reports", params={"created_after": boundary.isoformat()})
-    assert response.status_code == 200
-    assert [r["id"] for r in response.json()["data"]] == [newer["id"]]
-
-    # An hour earlier, still offset-less, must include both — a naive value read in a
-    # timezone ahead of UTC would exclude them.
-    earlier = (boundary - timedelta(hours=1)).isoformat()
-    response = await client_with_db.get("/api/v1/bug-reports", params={"created_after": earlier})
-    assert response.status_code == 200
-    assert response.json()["meta"]["total"] == 2
+    monkeypatch.setenv("TZ", "Pacific/Kiritimati")  # UTC+14, no DST
+    time.tzset()
+    try:
+        response = await client_with_db.get("/api/v1/bug-reports", params={"created_after": boundary.isoformat()})
+        assert response.status_code == 200
+        # Read as local time the bound would be 14 hours earlier, taking in both reports.
+        assert [r["id"] for r in response.json()["data"]] == [newer["id"]]
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 @pytest.mark.asyncio
