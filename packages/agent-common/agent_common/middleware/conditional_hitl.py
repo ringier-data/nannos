@@ -119,7 +119,55 @@ def _client_action_tool_message(decision: dict[str, Any], tool_call: ToolCall) -
     )
 
 
-def _camel_alias_tool_message(tool_name: str, tool_call: ToolCall, known_names: set[str]) -> ToolMessage | None:
+def _ptc_exposed_tool_names(state: Any) -> set[str] | None:
+    """The exact tool names the PTC bridge last exposed inside ``eval``, or None.
+
+    Written to the checkpoint by the code-interpreter middleware
+    (``PTC_EXPOSED_TOOL_NAMES_STATE_KEY``) so an interrupt resume can re-expose the
+    same set. Read here to keep the corrective hint honest — see
+    _reachable_inside_eval. Absent on the first turn and whenever PTC is off, hence
+    the None fallback rather than an empty set (which would mean "nothing exposed").
+    """
+    from agent_common.core.graph_utils import PTC_EXPOSED_TOOL_NAMES_STATE_KEY
+
+    try:
+        names = state.get(PTC_EXPOSED_TOOL_NAMES_STATE_KEY)
+    except AttributeError:
+        return None
+    if not names:
+        return None
+    return {name for name in names if isinstance(name, str)}
+
+
+def _reachable_inside_eval(snake_name: str, exposed_names: set[str] | None) -> bool:
+    """Whether ``snake_name`` is actually callable as ``tools.<camel>`` inside ``eval``.
+
+    Being a known tool is not enough. ``_PTC_EXCLUDED_TOOL_NAMES`` (``task``,
+    ``write_todos``, the response schemas, ``client_action``, ``notify_user``) are
+    deliberately kept natively bound because they *always fail* inside the sandbox,
+    and the raw MCP-catalogue listers are stripped from the namespace by
+    ``_without_raw_listers``. Sending the model into ``eval`` for one of those costs
+    a round-trip and bounces straight back out through ``_not_a_function_hint``.
+
+    *exposed_names* is the exact set the PTC bridge last exposed, read from the
+    checkpointed state; when it is unavailable we fall back to excluding only the
+    names that can never be in there.
+    """
+    from agent_common.core.graph_utils import _PTC_EXCLUDED_TOOL_NAMES, _RAW_LISTING_TOOL_NAMES
+
+    if snake_name in _PTC_EXCLUDED_TOOL_NAMES or snake_name in _RAW_LISTING_TOOL_NAMES:
+        return False
+    if exposed_names is None:
+        return True
+    return snake_name in exposed_names
+
+
+def _camel_alias_tool_message(
+    tool_name: str,
+    tool_call: ToolCall,
+    known_names: set[str],
+    exposed_names: set[str] | None = None,
+) -> ToolMessage | None:
     """Answer a native call that used a tool's *PTC* identifier, instead of scoring it.
 
     Under PTC the ``eval`` prompt advertises tools as camelCase members
@@ -135,6 +183,14 @@ def _camel_alias_tool_message(tool_name: str, tool_call: ToolCall, known_names: 
     answer the call ourselves with the defect and the fix, the way
     ``graph_utils._not_a_function_hint`` does for the inside-``eval`` direction.
 
+    The caller KEEPS the answered tool call in the AIMessage. A call that already
+    has a ToolMessage is never dispatched (``langchain.agents.factory``,
+    ``pending_tool_calls``), so keeping it costs nothing — while *stripping* it
+    would leave a ``tool_result`` with no matching ``tool_use`` in the checkpointed
+    history, which Bedrock/Anthropic hard-400 on for every later turn (the #184
+    postmortem), and on an all-alias turn would route the graph to END with the
+    hint unread. Upstream's own reject path keeps the call for the same reason.
+
     Returns None unless the name is *positively* identifiable as a camelCase alias
     of a known tool. Absence alone is never enough: tools registered directly with
     ``ToolNode`` (``write_todos``, the filesystem tools) are invisible to this
@@ -144,14 +200,14 @@ def _camel_alias_tool_message(tool_name: str, tool_call: ToolCall, known_names: 
         return None
 
     snake = next((n for n in known_names if to_camel_case(n) == tool_name), None)
-    if snake is None or snake == tool_name:
+    if snake is None:
         return None
 
     # Imported lazily: ``graph_utils`` reaches back into this module (it builds the
     # middleware), so a module-level import would close the cycle.
     from agent_common.core.graph_utils import code_interpreter_ptc_enabled
 
-    if code_interpreter_ptc_enabled():
+    if code_interpreter_ptc_enabled() and _reachable_inside_eval(snake, exposed_names):
         content = (
             f"`{tool_name}` is not a tool you can call directly — it is the identifier of "
             f"`{snake}` *inside* the `eval` code interpreter, where tool names are camelCase. "
@@ -160,10 +216,12 @@ def _camel_alias_tool_message(tool_name: str, tool_call: ToolCall, known_names: 
             "Nothing ran and nothing was approved; re-issue the call inside `eval`."
         )
     else:
+        # Either PTC is off, or the tool is one of those deliberately kept OUT of the
+        # sandbox — in both cases it is natively bound under its snake_case name.
         content = (
             f"`{tool_name}` is not a tool name — that is the camelCase form used inside the "
-            f"`eval` code interpreter, which is not active here. The tool is called `{snake}`: "
-            "re-issue this as a regular tool call under that name. Nothing ran."
+            f"`eval` code interpreter. This tool is called `{snake}` and is a regular tool "
+            "call: re-issue it under that name. Nothing ran."
         )
 
     return ToolMessage(
@@ -358,7 +416,6 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # a camelCase PTC identifier emitted as a native call. See
         # _camel_alias_tool_message.
         corrective_messages: dict[int, ToolMessage] = {}
-        known_names: set[str] = self._known_tool_names(getattr(runtime, "context", None))
 
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
             tool_name: str = tool_call["name"]
@@ -378,7 +435,18 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             #     alone and cached as if it were a real profile. Answer the call
             #     with the fix instead of letting it fall through to the
             #     dispatcher's "Tool ... is not available".
-            corrective = _camel_alias_tool_message(tool_name, tool_call, known_names)
+            #     Gated on the instance lookup (two dict hits) so the name-set build
+            #     and the camel scan stay off the path every resolvable call takes.
+            corrective = (
+                _camel_alias_tool_message(
+                    tool_name,
+                    tool_call,
+                    self._known_tool_names(getattr(runtime, "context", None)),
+                    _ptc_exposed_tool_names(state),
+                )
+                if self._get_tool_instance(tool_name, getattr(runtime, "context", None)) is None
+                else None
+            )
             if corrective is not None:
                 logger.info(
                     "Tool call '%s' used a PTC camelCase identifier natively; answering with a hint "
@@ -500,15 +568,12 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             )
 
         # If no interrupts needed, return early — unless a call was answered above,
-        # in which case the revised tool-call list still has to be written back.
+        # whose ToolMessage still has to reach the graph. The AIMessage is returned
+        # unchanged: the answered call STAYS in ``tool_calls`` (see
+        # _camel_alias_tool_message on why it must not be stripped).
         if not action_requests:
             if not corrective_messages:
                 return None
-            last_ai_msg.tool_calls = [
-                tool_call
-                for idx, tool_call in enumerate(last_ai_msg.tool_calls)
-                if idx not in corrective_messages
-            ]
             return {"messages": [last_ai_msg, *corrective_messages.values()]}
 
         # Attach a plain-language summary to each action request so the client
@@ -542,7 +607,10 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
             if idx in corrective_messages:
-                # Answered above: the call is dropped, its ToolMessage stands in.
+                # Answered above. The call is KEPT (a call that already has a
+                # ToolMessage is never dispatched) so the turn stays provider-legal
+                # and the router loops back to the model with the hint.
+                revised_tool_calls.append(tool_call)
                 artificial_tool_messages.append(corrective_messages[idx])
             elif idx in interrupt_indices:
                 tool_name = tool_call["name"]

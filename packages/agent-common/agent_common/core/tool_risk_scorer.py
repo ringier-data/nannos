@@ -195,7 +195,13 @@ async def score_tool_risk(
         #
         # The call is still gated: this is the same name-based fallback the LLM branch
         # itself falls back to on failure. It is only never classified and never stored.
-        score = _deterministic_fallback(tool_name)
+        #
+        # The destructive floor must be applied here too. `_deterministic_fallback`
+        # tests its safe prefixes FIRST, so `read_and_remove_file` scores 0.3 on the
+        # name alone — under the gate. Before this guard existed such a name reached
+        # the LLM branch, where the floor caught it; without the max() the guard would
+        # turn a would-be approval card into a silent auto-execute.
+        score = max(_deterministic_fallback(tool_name), _destructive_floor(tool_name))
         logger.info(
             "Tool '%s' (%s) could not be fetched; scoring it %.2f from its name alone, "
             "without classifying or persisting it",

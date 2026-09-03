@@ -145,3 +145,23 @@ async def test_unfetchable_tool_still_honours_a_seeded_static_guard():
 
     assert score == 1.0
     assert entry is guard
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_destructive_tool_still_clears_the_floor():
+    """`_deterministic_fallback` checks its safe prefixes first, so a name like
+    `read_and_remove_file` scores 0.3 on the name alone — under the 0.80 gate. The
+    unfetchable path must apply the destructive floor, as the LLM and cache-hit paths do.
+    """
+    from unittest.mock import MagicMock
+
+    cache = MagicMock()
+    cache.get.return_value = None
+
+    assert _deterministic_fallback("read_and_remove_file") == 0.3  # the trap
+    score, entry = await score_tool_risk("read_and_remove_file", {"path": "/x"}, cache=cache)
+
+    assert score == _DESTRUCTIVE_FLOOR_SCORE
+    assert score > 0.80
+    assert entry is None
+    cache.persist_entry.assert_not_called()

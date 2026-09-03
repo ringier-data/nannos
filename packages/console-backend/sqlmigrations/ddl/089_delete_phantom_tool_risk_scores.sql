@@ -12,10 +12,23 @@
 -- The scorer no longer classifies a call it cannot fetch, so no new such row can
 -- appear. These are the ones already on record.
 --
--- Deleted by exact name, never by `schema_hash = ''`: the static guards seeded in
--- 057 carry an empty hash on purpose (they are hand-written policy, not derived
--- profiles). The hash predicate here is only a safety catch, so that a row which
--- has since been re-scored against a real schema is left alone.
+-- Deleted by exact name, never by `schema_hash = ''`: an empty hash does NOT mean
+-- "phantom". The static guards seeded in 057 carry one on purpose (hand-written
+-- policy, not derived profiles), and so does any score an admin creates by hand
+-- through the console — `ToolRiskScoreUpsertRequest.schema_hash` defaults to ''
+-- (routers/tool_risk_router.py). A blanket predicate would delete those too. The
+-- hash test below is only a safety catch, so that a row which has since been
+-- re-scored against a real schema is left alone.
+--
+-- KNOWN GAP (deliberately not addressed here): `ToolRiskCache.get` cannot tell the
+-- two kinds of empty hash apart either — it treats an empty stored hash as
+-- "unchanged, trust it" (`_schema_confirms_unchanged`), so any phantom NOT in this
+-- list keeps shadowing the schema-derived profile this change makes possible. Fixing
+-- that needs a column that records where a row came from; tracked separately.
+--
+-- DEPLOY: `ToolRiskCache._do_refresh` merges additively and never removes, so this
+-- DELETE does not reach already-warm pods. Ship it with a rollout restart of the
+-- orchestrator / agent-runner, or the in-memory copies survive until they expire.
 DELETE FROM tool_risk_scores
 WHERE server_slug = '_self'
   AND schema_hash = ''

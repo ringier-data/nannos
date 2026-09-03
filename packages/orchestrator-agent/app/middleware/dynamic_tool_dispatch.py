@@ -716,7 +716,9 @@ async def _maybe_adopt_run_thread(
     )
 
 
-def _unresolved_tool_content(tool_name: str, user_context: GraphRuntimeContext) -> str:
+def _unresolved_tool_content(
+    tool_name: str, user_context: GraphRuntimeContext, static_tools: dict[str, BaseTool] | None = None
+) -> str:
     """The message for a tool call nothing could resolve.
 
     ``Error: Tool 'X' is not available`` is a dead end: the model has nothing to
@@ -728,7 +730,10 @@ def _unresolved_tool_content(tool_name: str, user_context: GraphRuntimeContext) 
     the PTC prompt and emitted it as a native call) is normally answered earlier,
     by the risk gate; this covers the paths that reach dispatch anyway.
     """
-    known = set(user_context.tool_registry or {})
+    # Match what ``_lookup_tool`` itself resolves against — registry *and* static
+    # tools — so a camel alias of a static tool gets the alias hint rather than
+    # generic MCP-catalogue discovery, which could never surface it.
+    known = set(user_context.tool_registry or {}) | set(static_tools or {})
     snake = next((n for n in known if to_camel_case(n) == tool_name), None)
     if snake is not None and snake != tool_name:
         if code_interpreter_ptc_enabled():
@@ -2712,7 +2717,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
-                content=_unresolved_tool_content(tool_name, user_context),
+                content=_unresolved_tool_content(tool_name, user_context, self.static_tools),
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 status="error",
@@ -2826,7 +2831,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
-                content=_unresolved_tool_content(tool_name, user_context),
+                content=_unresolved_tool_content(tool_name, user_context, self.static_tools),
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 status="error",

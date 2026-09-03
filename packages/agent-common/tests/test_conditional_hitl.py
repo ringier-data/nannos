@@ -2,7 +2,7 @@
 
 import types
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
@@ -371,8 +371,10 @@ class TestUnresolvableToolCall:
 
         assert result is not None
         assert scored == []  # no classification for a tool nobody could fetch
-        # The call is dropped, a corrective ToolMessage stands in for it.
-        assert ai.tool_calls == []
+        # The call is KEPT: a call that already has a ToolMessage is never dispatched,
+        # while stripping it would orphan the tool_result (provider 400 on every later
+        # turn, #184) and route an all-alias turn to END with the hint unread.
+        assert [tc["id"] for tc in ai.tool_calls] == ["tc-camel"]
         tool_msg = result["messages"][-1]
         assert tool_msg.tool_call_id == "tc-camel"
         assert tool_msg.status == "error"
@@ -414,8 +416,42 @@ class TestUnresolvableToolCall:
         result = await mw.aafter_model({"messages": [ai]}, self._runtime({"console_search_skills": None}))
 
         assert scored == ["console_search_skills"]  # only the resolvable name is scored
-        assert [tc["id"] for tc in ai.tool_calls] == ["tc-good"]  # approved, still dispatched
+        # Both calls stay on the AIMessage, in their original order: the aliased one is
+        # answered by its ToolMessage (never dispatched), the approved one dispatches.
+        assert [tc["id"] for tc in ai.tool_calls] == ["tc-bad", "tc-good"]
         assert [m.tool_call_id for m in result["messages"][1:]] == ["tc-bad"]
+
+    async def test_every_answered_call_keeps_a_matching_tool_call(self, monkeypatch):
+        """Every ToolMessage returned must have a ``tool_use`` left on the AIMessage.
+
+        A ``tool_result`` with no matching ``tool_use`` is unrecoverable: ``add_messages``
+        upserts the stripped AIMessage into the checkpoint and Bedrock/Anthropic then
+        hard-400 every later turn on that thread (the #184 postmortem). It also matters
+        for routing — langchain's ``model_to_tools`` returns the end destination on
+        ``len(tool_calls) == 0``, *before* its artificial-tool-message branch, so an
+        all-alias turn would end the run with the corrective hint never read.
+        """
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        mw = self._mw([])
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "consoleSearchSkills", "args": {}, "id": "a", "type": "tool_call"},
+                {"name": "consoleGrepMcpTools", "args": {}, "id": "b", "type": "tool_call"},
+            ],
+        )
+
+        result = await mw.aafter_model(
+            {"messages": [ai]},
+            self._runtime({"console_search_skills": None, "console_grep_mcp_tools": None}),
+        )
+
+        answered = {m.tool_call_id for m in result["messages"] if isinstance(m, ToolMessage)}
+        remaining = {tc["id"] for tc in ai.tool_calls}
+        assert answered == {"a", "b"}
+        assert answered <= remaining, "a ToolMessage without its tool_call bricks the thread"
+        # Not an empty tool_calls list — that would route the turn to END.
+        assert ai.tool_calls
 
     async def test_unknown_name_is_still_scored(self, monkeypatch):
         """No camel match, no positive signal: absence alone must not refuse a call.
@@ -439,6 +475,58 @@ class TestUnresolvableToolCall:
         await mw.aafter_model({"messages": [ai]}, self._runtime({"console_search_skills": None}))
 
         assert scored == ["FinalResponseSchema"]
+
+    async def test_ptc_excluded_tool_is_not_advertised_inside_eval(self, monkeypatch):
+        """``notify_user`` (and the other _PTC_EXCLUDED_TOOL_NAMES, and the raw listers)
+        are deliberately kept natively bound because they always fail inside the sandbox.
+        Sending the model into `eval` for one of them costs a round-trip and bounces
+        straight back out through ``_not_a_function_hint``.
+        """
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        mw = self._mw([])
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "notifyUser", "args": {"note": "hi"}, "id": "tc", "type": "tool_call"}],
+        )
+
+        result = await mw.aafter_model({"messages": [ai]}, self._runtime({"notify_user": None}))
+
+        content = result["messages"][-1].content
+        assert "notify_user" in content
+        assert "regular tool call" in content
+        assert "tools.notifyUser" not in content
+
+    async def test_hint_honours_the_checkpointed_ptc_exposure_set(self, monkeypatch):
+        """A tool outside the set the PTC bridge actually exposed (e.g. filtered out by
+        the toolset selector, or not whitelisted) is natively bound, not in `eval`.
+        """
+        from agent_common.core.graph_utils import PTC_EXPOSED_TOOL_NAMES_STATE_KEY
+
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        mw = self._mw([])
+        registry = {"console_search_skills": None, "github_search_issues": None}
+
+        exposed = AIMessage(
+            content="",
+            tool_calls=[{"name": "consoleSearchSkills", "args": {}, "id": "tc", "type": "tool_call"}],
+        )
+        result = await mw.aafter_model(
+            {"messages": [exposed], PTC_EXPOSED_TOOL_NAMES_STATE_KEY: ["console_search_skills"]},
+            self._runtime(registry),
+        )
+        assert "tools.consoleSearchSkills" in result["messages"][-1].content
+
+        not_exposed = AIMessage(
+            content="",
+            tool_calls=[{"name": "githubSearchIssues", "args": {}, "id": "tc2", "type": "tool_call"}],
+        )
+        result = await mw.aafter_model(
+            {"messages": [not_exposed], PTC_EXPOSED_TOOL_NAMES_STATE_KEY: ["console_search_skills"]},
+            self._runtime(registry),
+        )
+        content = result["messages"][-1].content
+        assert "regular tool call" in content
+        assert "tools.githubSearchIssues" not in content
 
     async def test_platform_tool_is_resolved_and_gated(self, monkeypatch):
         """A callable tool the registry does not hold — ``FinalResponseSchema`` and the
