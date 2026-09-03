@@ -52,6 +52,7 @@ from agent_common.a2a.stream_events import (
 )
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
+from agent_common.core.graph_utils import code_interpreter_ptc_enabled
 from agent_common.core.hitl_resume import (
     KIND_AUTH,
     KIND_HITL,
@@ -75,6 +76,7 @@ from langchain_core.messages.content import NonStandardContentBlock
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
+from langchain_quickjs._prompt import to_camel_case
 from langgraph.config import get_stream_writer
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command, interrupt
@@ -711,6 +713,38 @@ async def _maybe_adopt_run_thread(
         source_thread_id,
         target_config["configurable"]["thread_id"],
         subagent_type,
+    )
+
+
+def _unresolved_tool_content(tool_name: str, user_context: GraphRuntimeContext) -> str:
+    """The message for a tool call nothing could resolve.
+
+    ``Error: Tool 'X' is not available`` is a dead end: the model has nothing to
+    act on, and it has been observed relaying it to the user as "unavailable in
+    this session" — against the standing instruction never to report a tool as
+    missing (``models/config.py``). Say what the defect is and what to do next.
+
+    The camelCase case (the model lifted a ``tools.<camelName>`` identifier out of
+    the PTC prompt and emitted it as a native call) is normally answered earlier,
+    by the risk gate; this covers the paths that reach dispatch anyway.
+    """
+    known = set(user_context.tool_registry or {})
+    snake = next((n for n in known if to_camel_case(n) == tool_name), None)
+    if snake is not None and snake != tool_name:
+        if code_interpreter_ptc_enabled():
+            return (
+                f"`{tool_name}` is not callable as a tool — it is the identifier of `{snake}` "
+                f"*inside* the `eval` code interpreter. Call it there: "
+                f"`await tools.{tool_name}({{ ... }})`."
+            )
+        return (
+            f"`{tool_name}` is not a tool name — the tool is called `{snake}`. Re-issue the call "
+            "under that name."
+        )
+    return (
+        f"`{tool_name}` did not resolve to any tool, so nothing ran. The name is wrong, not the "
+        "capability: look the tool up (`console_grep_mcp_tools` / `console_list_mcp_servers`, or "
+        "`tools.search` inside `eval`) and re-issue the call with the name it reports."
     )
 
 
@@ -2651,7 +2685,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
-                content=f"Error: Tool '{tool_name}' is not available",
+                content=_unresolved_tool_content(tool_name, user_context),
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 status="error",
@@ -2765,7 +2799,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
-                content=f"Error: Tool '{tool_name}' is not available",
+                content=_unresolved_tool_content(tool_name, user_context),
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 status="error",

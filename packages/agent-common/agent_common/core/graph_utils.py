@@ -1449,6 +1449,7 @@ def build_common_middleware_stack(
     context_gated_tools: list[ContextGatedTool] | None = None,
     broaden_baseline_tools: list[BaseTool] | None = None,
     expose_context_registry: bool = False,
+    platform_tools: list[BaseTool] | None = None,
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
@@ -1528,6 +1529,10 @@ def build_common_middleware_stack(
             ``whitelisted_tool_names``) is exposed inside ``eval`` instead of
             being bound to the model. Used by catalog-mode agents (GP) whose
             large tool catalog must stay out of ``create_agent``.
+        platform_tools: The agent's statically bound tools. Handed to the risk
+            gate (alongside the filesystem tools) so it can fetch their schemas:
+            a call the gate cannot fetch is never classified, so a statically
+            bound tool would otherwise fall back to a name-only score.
 
     Returns:
         Ordered list of middleware instances ready to be included in a
@@ -1608,10 +1613,15 @@ def build_common_middleware_stack(
     if hitl_guarded_tools or risk_scorer:
         from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 
-        # Extract filesystem tool instances so the risk scorer has access to their schemas
-        platform_tools: dict[str, Any] | None = None
+        # Tool instances the risk scorer cannot reach through the runtime
+        # ``tool_registry``: the filesystem tools, plus the agent's own statically
+        # bound tools. Without them the gate sees no description and no schema, and
+        # a call it cannot fetch is deliberately never classified (see
+        # ``score_tool_risk``) — so a statically bound tool would silently drop to a
+        # name-only score. Registering them here keeps it schema-gated.
+        gate_tools: dict[str, Any] = {t.name: t for t in (platform_tools or []) if isinstance(t, BaseTool)}
         if fs_middleware is not None:
-            platform_tools = {t.name: t for t in fs_middleware.tools}
+            gate_tools.update({t.name: t for t in fs_middleware.tools})
 
         middleware.append(
             ConditionalHumanInTheLoopMiddleware(
@@ -1620,7 +1630,7 @@ def build_common_middleware_stack(
                 default_risk_threshold=default_risk_threshold,
                 tool_risk_cache=tool_risk_cache,
                 tool_server_map=tool_server_map,
-                platform_tools=platform_tools,
+                platform_tools=gate_tools or None,
             )
         )
 
@@ -1976,6 +1986,7 @@ def build_sub_agent_graph(
         context_gated_tools=context_gated_tools,
         broaden_baseline_tools=all_tools,
         expose_context_registry=expose_context_registry,
+        platform_tools=all_tools,
     )
     if extra_middlewares:
         # Insert extra middlewares *after* GatewayAttributionMiddleware (always

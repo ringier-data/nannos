@@ -94,3 +94,54 @@ async def test_destructive_floor_applies_on_cache_hit():
     )
     score, _ = await score_tool_risk("alloy-riad_get_campaign_by_id", {}, cache=cache)
     assert score == 0.2
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_tool_is_never_classified_or_persisted(monkeypatch):
+    """A call whose tool cannot be fetched has no description and no schema, so the
+    classification would be derived from its name alone — and used to be cached AND
+    persisted with an empty schema_hash, indistinguishable from a real profile.
+    """
+    from unittest.mock import MagicMock
+
+    async def fail(*args, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("the LLM must not be asked to classify a tool nobody could fetch")
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", fail)
+
+    cache = MagicMock()
+    cache.get.return_value = None
+
+    score, entry = await score_tool_risk("consoleCreateBugReport", {"description": "x"}, cache=cache)
+
+    # Still gated — on the same name-based fallback the LLM branch uses on failure.
+    assert score == _deterministic_fallback("consoleCreateBugReport")
+    assert entry is None
+    cache.put.assert_not_called()
+    cache.persist_entry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_tool_still_honours_a_seeded_static_guard():
+    """The seeded static guards (migration 057) carry schema_hash = '' on purpose, so
+    the cache lookup must still run for a tool the caller could not fetch.
+    """
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+
+    now = datetime.now(timezone.utc)
+    guard = ToolRiskEntry(
+        base_score=1.0,
+        risk_factors={},
+        allowed_actions=["approve", "reject"],
+        schema_hash="",
+        updated_at=now,
+        last_accessed_at=now,
+    )
+    cache = MagicMock()
+    cache.get.return_value = guard
+
+    score, entry = await score_tool_risk("read_personal_file", {"path": "x"}, cache=cache)
+
+    assert score == 1.0
+    assert entry is guard

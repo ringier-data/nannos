@@ -320,3 +320,159 @@ class TestPerCallIdStamping:
         mw.after_model({"messages": [ai]}, types.SimpleNamespace(context=None))
 
         assert captured["request"]["action_requests"][0]["args"]["_call_id"] == "tc-sync"
+
+
+class TestUnresolvableToolCall:
+    """A camelCase PTC identifier emitted as a native tool call must be answered
+    with the fix — never classified, never dispatched — while a snake_case tool the
+    middleware simply cannot see stays scored and gated.
+    """
+
+    @staticmethod
+    def _runtime(registry: dict | None = None):
+        return types.SimpleNamespace(
+            context=types.SimpleNamespace(
+                tool_bypass_rules={},
+                tool_risk_cache=None,
+                _pending_bypass_rules=[],
+                tool_registry=registry if registry is not None else {},
+            )
+        )
+
+    @staticmethod
+    def _mw(scored: list[str]):
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            scored.append(name)
+            return 0.99, None  # always high-risk: an interrupt here is visible
+
+        return ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={},
+            risk_scorer=scorer,
+            default_risk_threshold=0.8,
+        )
+
+    async def test_camel_alias_answered_with_eval_hint_and_never_scored(self, monkeypatch):
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        scored: list[str] = []
+        mw = self._mw(scored)
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "consoleCreateBugReport",
+                    "args": {"description": "boom"},
+                    "id": "tc-camel",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+        result = await mw.aafter_model({"messages": [ai]}, self._runtime({"console_create_bug_report": None}))
+
+        assert result is not None
+        assert scored == []  # no classification for a tool nobody could fetch
+        # The call is dropped, a corrective ToolMessage stands in for it.
+        assert ai.tool_calls == []
+        tool_msg = result["messages"][-1]
+        assert tool_msg.tool_call_id == "tc-camel"
+        assert tool_msg.status == "error"
+        assert "eval" in tool_msg.content
+        assert "tools.consoleCreateBugReport" in tool_msg.content
+        assert "console_create_bug_report" in tool_msg.content
+
+    async def test_camel_alias_without_ptc_points_at_the_snake_name(self, monkeypatch):
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "0")
+        scored: list[str] = []
+        mw = self._mw(scored)
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "githubSearchIssues", "args": {}, "id": "tc", "type": "tool_call"}],
+        )
+
+        result = await mw.aafter_model({"messages": [ai]}, self._runtime({"github_search_issues": None}))
+
+        assert scored == []
+        assert "github_search_issues" in result["messages"][-1].content
+
+    async def test_unresolvable_call_alongside_a_real_one(self, monkeypatch):
+        """The corrective message must not disturb the other calls in the same turn."""
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        monkeypatch.setattr(
+            "agent_common.middleware.conditional_hitl.interrupt",
+            lambda request: {"decisions": [{"type": "approve"} for _ in request["action_requests"]]},
+        )
+        scored: list[str] = []
+        mw = self._mw(scored)
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "consoleSearchSkills", "args": {}, "id": "tc-bad", "type": "tool_call"},
+                {"name": "console_search_skills", "args": {"q": "x"}, "id": "tc-good", "type": "tool_call"},
+            ],
+        )
+
+        result = await mw.aafter_model({"messages": [ai]}, self._runtime({"console_search_skills": None}))
+
+        assert scored == ["console_search_skills"]  # only the resolvable name is scored
+        assert [tc["id"] for tc in ai.tool_calls] == ["tc-good"]  # approved, still dispatched
+        assert [m.tool_call_id for m in result["messages"][1:]] == ["tc-bad"]
+
+    async def test_unknown_name_is_still_scored(self, monkeypatch):
+        """No camel match, no positive signal: absence alone must not refuse a call.
+
+        Tools registered directly with ToolNode (``write_todos``, the filesystem
+        tools, the response schemas) never appear in the middleware's view, so
+        anything else keeps going through the gate.
+        """
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        monkeypatch.setattr(
+            "agent_common.middleware.conditional_hitl.interrupt",
+            lambda request: {"decisions": [{"type": "reject"} for _ in request["action_requests"]]},
+        )
+        scored: list[str] = []
+        mw = self._mw(scored)
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "tc", "type": "tool_call"}],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime({"console_search_skills": None}))
+
+        assert scored == ["FinalResponseSchema"]
+
+    async def test_platform_tool_is_resolved_and_gated(self, monkeypatch):
+        """A callable tool the registry does not hold — ``FinalResponseSchema`` and the
+        orchestrator's other static tools — must be fetched from ``platform_tools`` so
+        it is gated on its real schema rather than on its name.
+        """
+        from langchain_core.tools import StructuredTool
+
+        monkeypatch.setattr(
+            "agent_common.middleware.conditional_hitl.interrupt",
+            lambda request: {"decisions": [{"type": "approve"} for _ in request["action_requests"]]},
+        )
+        final_response = StructuredTool.from_function(
+            func=lambda message: message,
+            name="FinalResponseSchema",
+            description="Format the final response.",
+        )
+        seen: list = []
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            seen.append((name, tool))
+            return 0.99, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={},
+            risk_scorer=scorer,
+            default_risk_threshold=0.8,
+            platform_tools={"FinalResponseSchema": final_response},
+        )
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "FinalResponseSchema", "args": {"message": "hi"}, "id": "tc", "type": "tool_call"}],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime({}))
+
+        assert seen == [("FinalResponseSchema", final_response)]
