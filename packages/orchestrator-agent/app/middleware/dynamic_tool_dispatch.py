@@ -741,10 +741,37 @@ def _unresolved_tool_content(tool_name: str, user_context: GraphRuntimeContext) 
             f"`{tool_name}` is not a tool name — the tool is called `{snake}`. Re-issue the call "
             "under that name."
         )
+    # The discovery advice differs by mode, and naming a tool the user does not have
+    # would be its own dead end — so mention the raw MCP-catalogue listers only when
+    # they are actually in the registry. They stay *natively* bound even under PTC
+    # (``graph_utils._without_raw_listers``), so they are the one discovery surface
+    # that reads the same in both modes.
+    listers = [n for n in ("console_grep_mcp_tools", "console_list_mcp_servers") if n in known]
+    lookup = " or ".join(f"`{n}`" for n in listers)
+    opening = f"`{tool_name}` did not resolve to any tool, so nothing ran. The name is wrong, not the capability:"
+
+    if code_interpreter_ptc_enabled():
+        # Under PTC the callable surface is the camelCase `tools.*` members rendered in
+        # the eval prompt. `tools.search` is pinned only in core-only mode (large
+        # catalogue), which is not knowable from here, so it is not promised.
+        parts = [
+            opening,
+            "the tools you can call are the camelCase `tools.*` members listed for `eval`, so check "
+            "that list for the name you meant",
+        ]
+        if lookup:
+            parts.append(f"— {lookup} also lists the wider catalogue as a regular tool call")
+        parts.append("— then re-issue the call, or delegate the work with `task`.")
+        return " ".join(parts)
+
+    if lookup:
+        return (
+            f"{opening} look the tool up with {lookup} and re-issue the call with the name it "
+            "reports, or delegate the work with `task`."
+        )
     return (
-        f"`{tool_name}` did not resolve to any tool, so nothing ran. The name is wrong, not the "
-        "capability: look the tool up (`console_grep_mcp_tools` / `console_list_mcp_servers`, or "
-        "`tools.search` inside `eval`) and re-issue the call with the name it reports."
+        f"{opening} re-check the tools you were given for the name you meant and re-issue the "
+        "call, or delegate the work with `task`."
     )
 
 

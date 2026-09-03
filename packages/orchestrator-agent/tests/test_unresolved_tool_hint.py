@@ -36,12 +36,41 @@ class TestUnresolvedToolContent:
         # PTC is off: pointing the model into `eval` would be wrong advice.
         assert "eval" not in content
 
-    def test_unknown_name_points_at_discovery(self, monkeypatch):
+    def test_unknown_name_under_ptc_points_at_the_eval_namespace(self, monkeypatch):
         monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
-        content = _unresolved_tool_content("frobnicate_widget", _context({"github_search_issues": object()}))
+        content = _unresolved_tool_content(
+            "frobnicate_widget",
+            _context({"github_search_issues": object(), "console_grep_mcp_tools": object()}),
+        )
         assert "did not resolve" in content
-        # Never a dead end: it must say how to find the real name.
-        assert "console_grep_mcp_tools" in content or "tools.search" in content
+        # Under PTC the callable surface is the eval namespace, not the native one.
+        assert "`tools.*`" in content
+        assert "eval" in content
+        # The raw catalogue listers stay natively bound even under PTC.
+        assert "console_grep_mcp_tools" in content
+        # `tools.search` is pinned only in core-only mode — never promised from here.
+        assert "tools.search" not in content
+
+    def test_unknown_name_without_ptc_points_at_the_listers(self, monkeypatch):
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "0")
+        content = _unresolved_tool_content(
+            "frobnicate_widget",
+            _context({"console_grep_mcp_tools": object(), "console_list_mcp_servers": object()}),
+        )
+        assert "console_grep_mcp_tools" in content
+        assert "console_list_mcp_servers" in content
+        # PTC is off: pointing the model into `eval` would be wrong advice.
+        assert "eval" not in content
+
+    def test_discovery_tools_are_only_named_when_the_user_has_them(self, monkeypatch):
+        """Naming a tool the user does not have would be its own dead end."""
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "0")
+        content = _unresolved_tool_content("frobnicate_widget", _context({"github_search_issues": object()}))
+        assert "console_grep_mcp_tools" not in content
+        assert "console_list_mcp_servers" not in content
+        # Still actionable rather than a dead end.
+        assert "re-issue" in content
+        assert "task" in content
 
     def test_never_reports_the_tool_as_missing(self, monkeypatch):
         """The old wording ("is not available") is what leaked to end users."""
