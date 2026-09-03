@@ -6867,6 +6867,10 @@ export type UsageLog = {
      */
     catalog_name?: string | null;
     /**
+     * Voice Session Id
+     */
+    voice_session_id?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;

@@ -190,6 +190,36 @@ async def update_session_handle(session_id: str, gemini_session_handle: str) -> 
         logger.warning("Failed to update session handle %s: %s", session_id, exc)
 
 
+async def report_voice_usage(session_id: str, entries: list[dict]) -> None:
+    """Report measured token usage for a voice session.
+
+    The backend derives attribution (user + impersonated sub-agent) from the session
+    record, so `entries` carry only provider/model/billing units.
+
+    Best-effort like the other teardown calls: cost metering must never break a call.
+    """
+    if not entries:
+        logger.info("No voice usage to report for session %s", session_id)
+        return
+    headers = await _service_headers()
+    url = f"{_CONSOLE_BACKEND_URL}/api/v1/voice/sessions/{session_id}/usage"
+    try:
+        resp = await _http_client.post(url, json={"entries": entries}, headers=headers)
+        if not resp.is_success:
+            logger.error(
+                "Failed to report voice usage for %s: HTTP %s — %s",
+                session_id,
+                resp.status_code,
+                resp.text[:300],
+            )
+            return
+        logger.info(
+            "Reported voice usage for session %s (%d entries)", session_id, len(entries)
+        )
+    except Exception as exc:
+        logger.error("Failed to report voice usage for %s: %s", session_id, exc)
+
+
 async def complete_voice_session(session_id: str) -> None:
     """Mark the voice session as completed."""
     headers = await _service_headers()

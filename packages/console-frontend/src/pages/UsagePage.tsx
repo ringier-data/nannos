@@ -201,12 +201,14 @@ export function UsagePage() {
     orchestrator: 'Orchestrator',
     catalog: 'Catalog',
     scheduler: 'Scheduler',
+    voice: 'Voice',
   };
 
   const SERVICE_COLORS: Record<string, string> = {
     orchestrator: '#8b5cf6',
     catalog: '#f59e0b',
     scheduler: '#10b981',
+    voice: '#3b82f6',
   };
 
   const byServiceChartData = useMemo(() => {
@@ -339,7 +341,7 @@ export function UsagePage() {
         <Card>
           <CardHeader>
             <CardTitle>Cost by Service</CardTitle>
-            <CardDescription>Orchestrator vs Catalog vs Scheduler</CardDescription>
+            <CardDescription>Orchestrator vs Catalog vs Scheduler vs Voice</CardDescription>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={300}>

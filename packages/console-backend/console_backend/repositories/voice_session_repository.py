@@ -123,6 +123,21 @@ class VoiceSessionRepository(AuditedRepository):
         )
         return True
 
+    async def get_session(self, db: AsyncSession, session_id: str) -> VoiceSession | None:
+        """Fetch a single voice session by id, or None if it doesn't exist."""
+        result = await db.execute(
+            text("""
+                SELECT id, user_id, sub_agent_id, phone_number, call_sid,
+                       gemini_session_handle, status, use_session_memory,
+                       started_at, ended_at, created_at, updated_at
+                FROM voice_sessions
+                WHERE id = :id
+            """),
+            {"id": session_id},
+        )
+        row = result.mappings().first()
+        return _row_to_session(row) if row else None
+
     async def complete_session(self, db: AsyncSession, actor: User, session_id: str) -> None:
         now = datetime.now(timezone.utc)
         await self.update(
