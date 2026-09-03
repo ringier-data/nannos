@@ -418,8 +418,12 @@ app.include_router(notification_router)
 app.include_router(scheduler_router)
 app.include_router(delivery_channel_router)
 app.include_router(catalog_router)
-app.include_router(bug_report_router)
+# The MCP router goes first: both share the /api/v1/bug-reports prefix, and the REST
+# router owns GET "/{report_id}", which would otherwise match "/mcp-list" and answer 404
+# for a report id of "mcp-list". FastAPI resolves in registration order, and every MCP
+# path here is a literal segment, so nothing of the REST router is shadowed by going first.
 app.include_router(bug_report_mcp_router)
+app.include_router(bug_report_router)
 # web_search MCP tool (console_web_search) — must be registered before FastApiMCP below.
 app.include_router(web_search_mcp_router)
 app.include_router(feedback_router)

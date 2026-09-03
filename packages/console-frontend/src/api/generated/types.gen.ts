@@ -1552,6 +1552,12 @@ export type DeliveryChannelCreate = {
      * Stable client-supplied identifier (e.g. the bot's installation) that scopes the channel to a tenant and is the idempotency key for re-registration. Required: every channel resolves by (client_id, installation_id).
      */
     installation_id: string;
+    /**
+     * Message Formatting
+     *
+     * How this channel renders delivered text. Nothing rewrites an agent's output on the way out, so the writer is told these rules up front: 'slack' for Slack mrkdwn, 'google-chat' for Google Chat markup, 'plain' for no markup, 'markdown' (default) for standard Markdown as the web console renders it. Omitted means 'unchanged': a client that does not declare a format leaves the stored value alone, so re-registration on every boot cannot reset a channel that was set elsewhere. A new channel falls back to the column default.
+     */
+    message_formatting?: _0Enum | null;
 };
 
 /**
@@ -1588,6 +1594,7 @@ export type DeliveryChannelResponse = {
      * Webhook Url
      */
     webhook_url: string;
+    message_formatting?: _0Enum;
     /**
      * Client Id
      *
@@ -1638,6 +1645,12 @@ export type DeliveryChannelUpdate = {
      * Secret
      */
     secret?: string | null;
+    /**
+     * Message Formatting
+     *
+     * How this channel renders delivered text. Nothing rewrites an agent's output on the way out, so the writer is told these rules up front: 'slack' for Slack mrkdwn, 'google-chat' for Google Chat markup, 'plain' for no markup, 'markdown' (default) for standard Markdown as the web console renders it.
+     */
+    message_formatting?: _0Enum | null;
 };
 
 /**
@@ -5128,7 +5141,7 @@ export type SkillDefinition = {
      *
      * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
-    scope?: _0Enum | null;
+    scope?: _0Enum2 | null;
 };
 
 /**
@@ -5668,7 +5681,7 @@ export type SubAgent = {
     /**
      * Effective Permission
      */
-    effective_permission?: _0Enum2 | null;
+    effective_permission?: _0Enum3 | null;
     /**
      * Deleted At
      */
@@ -6179,7 +6192,7 @@ export type SubAgentListItem = {
     /**
      * Effective Permission
      */
-    effective_permission?: _0Enum2 | null;
+    effective_permission?: _0Enum3 | null;
     /**
      * Deleted At
      */
@@ -7882,6 +7895,8 @@ export type ActionEnum = 'suspend' | 'activate' | 'delete';
  */
 export type ModeEnum = 'judge' | 'cel' | 'cel+judge';
 
+export type _0Enum = 'markdown' | 'slack' | 'google-chat' | 'plain';
+
 /**
  * Role
  */
@@ -7918,9 +7933,9 @@ export type OpEnum = 'add' | 'remove' | 'replace';
 
 export type ItemsEnum = 'read' | 'write';
 
-export type _0Enum = 'standalone' | 'sub-agent';
+export type _0Enum2 = 'standalone' | 'sub-agent';
 
-export type _0Enum2 = 'owner' | 'write' | 'read';
+export type _0Enum3 = 'owner' | 'write' | 'read';
 
 /**
  * Reason
@@ -13153,6 +13168,161 @@ export type GetPageThumbnailResponses = {
     200: unknown;
 };
 
+export type ConsoleCreateBugReportData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Description
+         *
+         * Description of the bug — what went wrong and why it's unrecoverable.
+         */
+        description: string;
+        /**
+         * Task Id
+         *
+         * The A2A task ID associated with the error.
+         */
+        task_id?: string | null;
+    };
+    url: '/api/v1/bug-reports/mcp-create';
+};
+
+export type ConsoleCreateBugReportErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleCreateBugReportError = ConsoleCreateBugReportErrors[keyof ConsoleCreateBugReportErrors];
+
+export type ConsoleCreateBugReportResponses = {
+    /**
+     * Successful Response
+     */
+    201: BugReportResponse;
+};
+
+export type ConsoleCreateBugReportResponse = ConsoleCreateBugReportResponses[keyof ConsoleCreateBugReportResponses];
+
+export type ConsoleUpdateBugReportStatusData = {
+    body?: never;
+    path: {
+        /**
+         * Report Id
+         */
+        report_id: string;
+    };
+    query: {
+        new_status: BugReportStatus;
+    };
+    url: '/api/v1/bug-reports/{report_id}/mcp-status';
+};
+
+export type ConsoleUpdateBugReportStatusErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleUpdateBugReportStatusError = ConsoleUpdateBugReportStatusErrors[keyof ConsoleUpdateBugReportStatusErrors];
+
+export type ConsoleUpdateBugReportStatusResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportResponse;
+};
+
+export type ConsoleUpdateBugReportStatusResponse = ConsoleUpdateBugReportStatusResponses[keyof ConsoleUpdateBugReportStatusResponses];
+
+export type ConsoleListBugReportsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Page
+         *
+         * 1-indexed page number.
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Reports per page (max 100).
+         */
+        limit?: number;
+        /**
+         * Status Filter
+         *
+         * Only return reports in this status.
+         */
+        status_filter?: BugReportStatus | null;
+        /**
+         * Created After
+         *
+         * Only return reports filed strictly after this ISO-8601 timestamp, e.g. '2026-09-02T08:00:00+00:00'.
+         */
+        created_after?: string | null;
+    };
+    url: '/api/v1/bug-reports/mcp-list';
+};
+
+export type ConsoleListBugReportsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleListBugReportsError = ConsoleListBugReportsErrors[keyof ConsoleListBugReportsErrors];
+
+export type ConsoleListBugReportsResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportListResponse;
+};
+
+export type ConsoleListBugReportsResponse = ConsoleListBugReportsResponses[keyof ConsoleListBugReportsResponses];
+
+export type ConsoleSetBugReportExternalLinkData = {
+    body?: never;
+    path: {
+        /**
+         * Report Id
+         */
+        report_id: string;
+    };
+    query: {
+        /**
+         * External Link
+         */
+        external_link: string;
+    };
+    url: '/api/v1/bug-reports/{report_id}/mcp-external-link';
+};
+
+export type ConsoleSetBugReportExternalLinkErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleSetBugReportExternalLinkError = ConsoleSetBugReportExternalLinkErrors[keyof ConsoleSetBugReportExternalLinkErrors];
+
+export type ConsoleSetBugReportExternalLinkResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportResponse;
+};
+
+export type ConsoleSetBugReportExternalLinkResponse = ConsoleSetBugReportExternalLinkResponses[keyof ConsoleSetBugReportExternalLinkResponses];
+
 export type ListBugReportsApiV1BugReportsGetData = {
     body?: never;
     path?: never;
@@ -13313,161 +13483,6 @@ export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses = {
 };
 
 export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponse = TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses[keyof TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses];
-
-export type ConsoleCreateBugReportData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Description
-         *
-         * Description of the bug — what went wrong and why it's unrecoverable.
-         */
-        description: string;
-        /**
-         * Task Id
-         *
-         * The A2A task ID associated with the error.
-         */
-        task_id?: string | null;
-    };
-    url: '/api/v1/bug-reports/mcp-create';
-};
-
-export type ConsoleCreateBugReportErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleCreateBugReportError = ConsoleCreateBugReportErrors[keyof ConsoleCreateBugReportErrors];
-
-export type ConsoleCreateBugReportResponses = {
-    /**
-     * Successful Response
-     */
-    201: BugReportResponse;
-};
-
-export type ConsoleCreateBugReportResponse = ConsoleCreateBugReportResponses[keyof ConsoleCreateBugReportResponses];
-
-export type ConsoleUpdateBugReportStatusData = {
-    body?: never;
-    path: {
-        /**
-         * Report Id
-         */
-        report_id: string;
-    };
-    query: {
-        new_status: BugReportStatus;
-    };
-    url: '/api/v1/bug-reports/{report_id}/mcp-status';
-};
-
-export type ConsoleUpdateBugReportStatusErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleUpdateBugReportStatusError = ConsoleUpdateBugReportStatusErrors[keyof ConsoleUpdateBugReportStatusErrors];
-
-export type ConsoleUpdateBugReportStatusResponses = {
-    /**
-     * Successful Response
-     */
-    200: BugReportResponse;
-};
-
-export type ConsoleUpdateBugReportStatusResponse = ConsoleUpdateBugReportStatusResponses[keyof ConsoleUpdateBugReportStatusResponses];
-
-export type ConsoleListBugReportsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        /**
-         * Page
-         *
-         * 1-indexed page number.
-         */
-        page?: number;
-        /**
-         * Limit
-         *
-         * Reports per page (max 100).
-         */
-        limit?: number;
-        /**
-         * Status Filter
-         *
-         * Only return reports in this status.
-         */
-        status_filter?: BugReportStatus | null;
-        /**
-         * Created After
-         *
-         * Only return reports filed strictly after this ISO-8601 timestamp, e.g. '2026-09-02T08:00:00+00:00'.
-         */
-        created_after?: string | null;
-    };
-    url: '/api/v1/bug-reports/mcp/list';
-};
-
-export type ConsoleListBugReportsErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleListBugReportsError = ConsoleListBugReportsErrors[keyof ConsoleListBugReportsErrors];
-
-export type ConsoleListBugReportsResponses = {
-    /**
-     * Successful Response
-     */
-    200: BugReportListResponse;
-};
-
-export type ConsoleListBugReportsResponse = ConsoleListBugReportsResponses[keyof ConsoleListBugReportsResponses];
-
-export type ConsoleSetBugReportExternalLinkData = {
-    body?: never;
-    path: {
-        /**
-         * Report Id
-         */
-        report_id: string;
-    };
-    query: {
-        /**
-         * External Link
-         */
-        external_link: string;
-    };
-    url: '/api/v1/bug-reports/{report_id}/mcp-external-link';
-};
-
-export type ConsoleSetBugReportExternalLinkErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleSetBugReportExternalLinkError = ConsoleSetBugReportExternalLinkErrors[keyof ConsoleSetBugReportExternalLinkErrors];
-
-export type ConsoleSetBugReportExternalLinkResponses = {
-    /**
-     * Successful Response
-     */
-    200: BugReportResponse;
-};
-
-export type ConsoleSetBugReportExternalLinkResponse = ConsoleSetBugReportExternalLinkResponses[keyof ConsoleSetBugReportExternalLinkResponses];
 
 export type ConsoleWebSearchData = {
     body?: never;

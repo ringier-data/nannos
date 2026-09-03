@@ -343,7 +343,7 @@ async def test_list_rejects_out_of_range_paging(client_with_db: AsyncClient, tes
         response = await client_with_db.get("/api/v1/bug-reports", params=params)
         assert response.status_code == 422, f"{params} should be rejected, got {response.status_code}"
 
-        response = await client_with_db.get("/api/v1/bug-reports/mcp/list", params=params)
+        response = await client_with_db.get("/api/v1/bug-reports/mcp-list", params=params)
         assert response.status_code == 422, f"{params} should be rejected on the MCP twin too"
 
 
@@ -370,7 +370,7 @@ async def test_mcp_list_bug_reports_sees_own_only(
     )
     await pg_session.commit()
 
-    response = await client_with_db.get("/api/v1/bug-reports/mcp/list")
+    response = await client_with_db.get("/api/v1/bug-reports/mcp-list")
     assert response.status_code == 200
     data = response.json()
     assert data["meta"]["total"] == 1
@@ -393,23 +393,38 @@ async def test_mcp_list_bug_reports_filters(client_with_db: AsyncClient, pg_sess
     ).json()
 
     response = await client_with_db.get(
-        "/api/v1/bug-reports/mcp/list",
+        "/api/v1/bug-reports/mcp-list",
         params={"created_after": older["created_at"], "status_filter": "open"},
     )
     assert response.status_code == 200
     assert [r["id"] for r in response.json()["data"]] == [newer["id"]]
 
-    response = await client_with_db.get("/api/v1/bug-reports/mcp/list", params={"status_filter": "resolved"})
+    response = await client_with_db.get("/api/v1/bug-reports/mcp-list", params={"status_filter": "resolved"})
     assert response.status_code == 200
     assert response.json()["meta"]["total"] == 0
 
 
 @pytest.mark.asyncio
-async def test_mcp_list_route_is_not_shadowed_by_get_by_id(client_with_db: AsyncClient, test_user_model):
-    """The tool's path must not be read as a report id by the REST get-by-id route."""
-    response = await client_with_db.get("/api/v1/bug-reports/mcp/list")
+async def test_mcp_and_rest_routes_do_not_shadow_each_other(client_with_db: AsyncClient, test_user_model):
+    """Both routers share the /api/v1/bug-reports prefix; registration order decides.
+
+    The MCP router is registered first so its literal `mcp-list` is not read as a report
+    id by the REST router's `GET /{report_id}`. Going first is only safe because every
+    MCP path is a literal segment — so this asserts the other direction too, that a real
+    report id still reaches the REST route.
+    """
+    response = await client_with_db.get("/api/v1/bug-reports/mcp-list")
     assert response.status_code == 200
-    assert "meta" in response.json()
+    assert "meta" in response.json(), "mcp-list must reach the MCP tool, not get-by-id"
+
+    created = await client_with_db.post(
+        "/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Fetch me by id"}
+    )
+    report_id = created.json()["id"]
+
+    response = await client_with_db.get(f"/api/v1/bug-reports/{report_id}")
+    assert response.status_code == 200
+    assert response.json()["description"] == "Fetch me by id", "a report id must still reach the REST route"
 
 
 # ---------------------------------------------------------------------------

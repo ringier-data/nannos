@@ -4470,6 +4470,112 @@ export const getPageThumbnailOptions = (options: Options<GetPageThumbnailData>) 
     queryKey: getPageThumbnailQueryKey(options)
 });
 
+/**
+ * Create a bug report for an unrecoverable error.
+ *
+ * File a bug report when an unrecoverable error prevents fulfilling the user's request. Only use as a last resort after exhausting recovery options (retries, alternative tools, plan changes).
+ */
+export const consoleCreateBugReportMutation = (options?: Partial<Options<ConsoleCreateBugReportData>>): UseMutationOptions<ConsoleCreateBugReportResponse, ConsoleCreateBugReportError, Options<ConsoleCreateBugReportData>> => {
+    const mutationOptions: UseMutationOptions<ConsoleCreateBugReportResponse, ConsoleCreateBugReportError, Options<ConsoleCreateBugReportData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await consoleCreateBugReport({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Update the status of a bug report.
+ *
+ * Transition a bug report to a new status. Valid statuses: open, acknowledged, investigating, resolved.
+ */
+export const consoleUpdateBugReportStatusMutation = (options?: Partial<Options<ConsoleUpdateBugReportStatusData>>): UseMutationOptions<ConsoleUpdateBugReportStatusResponse, ConsoleUpdateBugReportStatusError, Options<ConsoleUpdateBugReportStatusData>> => {
+    const mutationOptions: UseMutationOptions<ConsoleUpdateBugReportStatusResponse, ConsoleUpdateBugReportStatusError, Options<ConsoleUpdateBugReportStatusData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await consoleUpdateBugReportStatus({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+export const consoleListBugReportsQueryKey = (options?: Options<ConsoleListBugReportsData>) => createQueryKey('consoleListBugReports', options);
+
+/**
+ * List bug reports, most recently filed first.
+ *
+ * List bug reports, newest first. Administrators see every report; everyone else sees only the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` (an ISO-8601 timestamp, with an offset; only reports filed strictly after it are returned). `created_after` is what a scheduled watch should use to look at a rolling window rather than the whole first page. Two rules for such a watch: make the window several times the poll interval and de-duplicate against what you saw last time, because a report becomes visible when its transaction commits and not when `created_at` says it was filed; and when `meta.total` exceeds the reports returned, keep requesting further `page`s until you have them all, or the oldest reports in the window are the ones you never see.
+ */
+export const consoleListBugReportsOptions = (options?: Options<ConsoleListBugReportsData>) => queryOptions<ConsoleListBugReportsResponse, ConsoleListBugReportsError, ConsoleListBugReportsResponse, ReturnType<typeof consoleListBugReportsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await consoleListBugReports({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: consoleListBugReportsQueryKey(options)
+});
+
+export const consoleListBugReportsInfiniteQueryKey = (options?: Options<ConsoleListBugReportsData>): QueryKey<Options<ConsoleListBugReportsData>> => createQueryKey('consoleListBugReports', options, true);
+
+/**
+ * List bug reports, most recently filed first.
+ *
+ * List bug reports, newest first. Administrators see every report; everyone else sees only the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` (an ISO-8601 timestamp, with an offset; only reports filed strictly after it are returned). `created_after` is what a scheduled watch should use to look at a rolling window rather than the whole first page. Two rules for such a watch: make the window several times the poll interval and de-duplicate against what you saw last time, because a report becomes visible when its transaction commits and not when `created_at` says it was filed; and when `meta.total` exceeds the reports returned, keep requesting further `page`s until you have them all, or the oldest reports in the window are the ones you never see.
+ */
+export const consoleListBugReportsInfiniteOptions = (options?: Options<ConsoleListBugReportsData>) => infiniteQueryOptions<ConsoleListBugReportsResponse, ConsoleListBugReportsError, InfiniteData<ConsoleListBugReportsResponse>, QueryKey<Options<ConsoleListBugReportsData>>, number | Pick<QueryKey<Options<ConsoleListBugReportsData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
+// @ts-ignore
+{
+    queryFn: async ({ pageParam, queryKey, signal }) => {
+        // @ts-ignore
+        const page: Pick<QueryKey<Options<ConsoleListBugReportsData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
+            query: {
+                page: pageParam
+            }
+        };
+        const params = createInfiniteParams(queryKey, page);
+        const { data } = await consoleListBugReports({
+            ...options,
+            ...params,
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: consoleListBugReportsInfiniteQueryKey(options)
+});
+
+/**
+ * Set the external link (e.g. GitHub issue URL) on a bug report.
+ *
+ * Store a reference to an external issue tracker (GitHub, Jira, etc.) on the bug report so users can follow up.
+ */
+export const consoleSetBugReportExternalLinkMutation = (options?: Partial<Options<ConsoleSetBugReportExternalLinkData>>): UseMutationOptions<ConsoleSetBugReportExternalLinkResponse, ConsoleSetBugReportExternalLinkError, Options<ConsoleSetBugReportExternalLinkData>> => {
+    const mutationOptions: UseMutationOptions<ConsoleSetBugReportExternalLinkResponse, ConsoleSetBugReportExternalLinkError, Options<ConsoleSetBugReportExternalLinkData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await consoleSetBugReportExternalLink({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 export const listBugReportsApiV1BugReportsGetQueryKey = (options?: Options<ListBugReportsApiV1BugReportsGetData>) => createQueryKey('listBugReportsApiV1BugReportsGet', options);
 
 /**
@@ -4574,112 +4680,6 @@ export const triggerDebugAgentApiV1BugReportsReportIdDebugPostMutation = (option
     const mutationOptions: UseMutationOptions<TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponse, TriggerDebugAgentApiV1BugReportsReportIdDebugPostError, Options<TriggerDebugAgentApiV1BugReportsReportIdDebugPostData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await triggerDebugAgentApiV1BugReportsReportIdDebugPost({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Create a bug report for an unrecoverable error.
- *
- * File a bug report when an unrecoverable error prevents fulfilling the user's request. Only use as a last resort after exhausting recovery options (retries, alternative tools, plan changes).
- */
-export const consoleCreateBugReportMutation = (options?: Partial<Options<ConsoleCreateBugReportData>>): UseMutationOptions<ConsoleCreateBugReportResponse, ConsoleCreateBugReportError, Options<ConsoleCreateBugReportData>> => {
-    const mutationOptions: UseMutationOptions<ConsoleCreateBugReportResponse, ConsoleCreateBugReportError, Options<ConsoleCreateBugReportData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await consoleCreateBugReport({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Update the status of a bug report.
- *
- * Transition a bug report to a new status. Valid statuses: open, acknowledged, investigating, resolved.
- */
-export const consoleUpdateBugReportStatusMutation = (options?: Partial<Options<ConsoleUpdateBugReportStatusData>>): UseMutationOptions<ConsoleUpdateBugReportStatusResponse, ConsoleUpdateBugReportStatusError, Options<ConsoleUpdateBugReportStatusData>> => {
-    const mutationOptions: UseMutationOptions<ConsoleUpdateBugReportStatusResponse, ConsoleUpdateBugReportStatusError, Options<ConsoleUpdateBugReportStatusData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await consoleUpdateBugReportStatus({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-export const consoleListBugReportsQueryKey = (options?: Options<ConsoleListBugReportsData>) => createQueryKey('consoleListBugReports', options);
-
-/**
- * List bug reports, most recently filed first.
- *
- * List bug reports, newest first. Administrators see every report; everyone else sees only the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` (an ISO-8601 timestamp, with an offset; only reports filed strictly after it are returned). `created_after` is what a scheduled watch should use to look at a rolling window rather than the whole first page. Two rules for such a watch: make the window several times the poll interval and de-duplicate against what you saw last time, because a report becomes visible when its transaction commits and not when `created_at` says it was filed; and when `meta.total` exceeds the reports returned, keep requesting further `page`s until you have them all, or the oldest reports in the window are the ones you never see.
- */
-export const consoleListBugReportsOptions = (options?: Options<ConsoleListBugReportsData>) => queryOptions<ConsoleListBugReportsResponse, ConsoleListBugReportsError, ConsoleListBugReportsResponse, ReturnType<typeof consoleListBugReportsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await consoleListBugReports({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: consoleListBugReportsQueryKey(options)
-});
-
-export const consoleListBugReportsInfiniteQueryKey = (options?: Options<ConsoleListBugReportsData>): QueryKey<Options<ConsoleListBugReportsData>> => createQueryKey('consoleListBugReports', options, true);
-
-/**
- * List bug reports, most recently filed first.
- *
- * List bug reports, newest first. Administrators see every report; everyone else sees only the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` (an ISO-8601 timestamp, with an offset; only reports filed strictly after it are returned). `created_after` is what a scheduled watch should use to look at a rolling window rather than the whole first page. Two rules for such a watch: make the window several times the poll interval and de-duplicate against what you saw last time, because a report becomes visible when its transaction commits and not when `created_at` says it was filed; and when `meta.total` exceeds the reports returned, keep requesting further `page`s until you have them all, or the oldest reports in the window are the ones you never see.
- */
-export const consoleListBugReportsInfiniteOptions = (options?: Options<ConsoleListBugReportsData>) => infiniteQueryOptions<ConsoleListBugReportsResponse, ConsoleListBugReportsError, InfiniteData<ConsoleListBugReportsResponse>, QueryKey<Options<ConsoleListBugReportsData>>, number | Pick<QueryKey<Options<ConsoleListBugReportsData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
-// @ts-ignore
-{
-    queryFn: async ({ pageParam, queryKey, signal }) => {
-        // @ts-ignore
-        const page: Pick<QueryKey<Options<ConsoleListBugReportsData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
-            query: {
-                page: pageParam
-            }
-        };
-        const params = createInfiniteParams(queryKey, page);
-        const { data } = await consoleListBugReports({
-            ...options,
-            ...params,
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: consoleListBugReportsInfiniteQueryKey(options)
-});
-
-/**
- * Set the external link (e.g. GitHub issue URL) on a bug report.
- *
- * Store a reference to an external issue tracker (GitHub, Jira, etc.) on the bug report so users can follow up.
- */
-export const consoleSetBugReportExternalLinkMutation = (options?: Partial<Options<ConsoleSetBugReportExternalLinkData>>): UseMutationOptions<ConsoleSetBugReportExternalLinkResponse, ConsoleSetBugReportExternalLinkError, Options<ConsoleSetBugReportExternalLinkData>> => {
-    const mutationOptions: UseMutationOptions<ConsoleSetBugReportExternalLinkResponse, ConsoleSetBugReportExternalLinkError, Options<ConsoleSetBugReportExternalLinkData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await consoleSetBugReportExternalLink({
                 ...options,
                 ...fnOptions,
                 throwOnError: true

@@ -7,6 +7,14 @@ Access control uses the Two-Layer RBAC model:
 - Any authenticated user can create bug reports.
 - Members can update status on their own reports (self-resolve only).
 - Approvers/admins with ``triage`` capability can manage any accessible report.
+
+Path convention: ``mcp-<verb>`` for collection-level tools and
+``/{report_id}/mcp-<verb>`` for item-level ones. The ``mcp-`` prefix keeps these paths
+from colliding with the REST router's, which shares the ``/api/v1/bug-reports`` prefix and
+owns ``GET /{report_id}`` — a bare ``/list`` would be read as a report id. This router is
+registered *before* the REST one in ``app.py`` so its literal segments win that match;
+adding a collection-level tool here needs no further ceremony, but adding one to the REST
+router before ``GET /{report_id}`` would.
 """
 
 import logging
@@ -139,12 +147,8 @@ async def update_bug_report_status_mcp(
     return report
 
 
-# Two path segments, not a single "/mcp-list": bug_report_router is registered first and
-# owns GET "/{report_id}", which would match a one-segment path here and answer 404 for a
-# report id of "mcp-list". The PATCH tools below have no such problem — their sibling REST
-# routes are also two segments.
 @router.get(
-    "/mcp/list",
+    "/mcp-list",
     response_model=BugReportListResponse,
     tags=["MCP"],
     operation_id="console_list_bug_reports",

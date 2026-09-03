@@ -2293,6 +2293,34 @@ export const getSyncQueueDiagnostics = <ThrowOnError extends boolean = false>(op
 export const getPageThumbnail = <ThrowOnError extends boolean = false>(options: Options<GetPageThumbnailData, ThrowOnError>) => (options.client ?? client).get<GetPageThumbnailResponses, GetPageThumbnailErrors, ThrowOnError>({ url: '/api/v1/catalogs/{catalog_id}/pages/{page_id}/thumbnail', ...options });
 
 /**
+ * Create a bug report for an unrecoverable error.
+ *
+ * File a bug report when an unrecoverable error prevents fulfilling the user's request. Only use as a last resort after exhausting recovery options (retries, alternative tools, plan changes).
+ */
+export const consoleCreateBugReport = <ThrowOnError extends boolean = false>(options: Options<ConsoleCreateBugReportData, ThrowOnError>) => (options.client ?? client).post<ConsoleCreateBugReportResponses, ConsoleCreateBugReportErrors, ThrowOnError>({ url: '/api/v1/bug-reports/mcp-create', ...options });
+
+/**
+ * Update the status of a bug report.
+ *
+ * Transition a bug report to a new status. Valid statuses: open, acknowledged, investigating, resolved.
+ */
+export const consoleUpdateBugReportStatus = <ThrowOnError extends boolean = false>(options: Options<ConsoleUpdateBugReportStatusData, ThrowOnError>) => (options.client ?? client).patch<ConsoleUpdateBugReportStatusResponses, ConsoleUpdateBugReportStatusErrors, ThrowOnError>({ url: '/api/v1/bug-reports/{report_id}/mcp-status', ...options });
+
+/**
+ * List bug reports, most recently filed first.
+ *
+ * List bug reports, newest first. Administrators see every report; everyone else sees only the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` (an ISO-8601 timestamp, with an offset; only reports filed strictly after it are returned). `created_after` is what a scheduled watch should use to look at a rolling window rather than the whole first page. Two rules for such a watch: make the window several times the poll interval and de-duplicate against what you saw last time, because a report becomes visible when its transaction commits and not when `created_at` says it was filed; and when `meta.total` exceeds the reports returned, keep requesting further `page`s until you have them all, or the oldest reports in the window are the ones you never see.
+ */
+export const consoleListBugReports = <ThrowOnError extends boolean = false>(options?: Options<ConsoleListBugReportsData, ThrowOnError>) => (options?.client ?? client).get<ConsoleListBugReportsResponses, ConsoleListBugReportsErrors, ThrowOnError>({ url: '/api/v1/bug-reports/mcp-list', ...options });
+
+/**
+ * Set the external link (e.g. GitHub issue URL) on a bug report.
+ *
+ * Store a reference to an external issue tracker (GitHub, Jira, etc.) on the bug report so users can follow up.
+ */
+export const consoleSetBugReportExternalLink = <ThrowOnError extends boolean = false>(options: Options<ConsoleSetBugReportExternalLinkData, ThrowOnError>) => (options.client ?? client).patch<ConsoleSetBugReportExternalLinkResponses, ConsoleSetBugReportExternalLinkErrors, ThrowOnError>({ url: '/api/v1/bug-reports/{report_id}/mcp-external-link', ...options });
+
+/**
  * List Bug Reports
  */
 export const listBugReportsApiV1BugReportsGet = <ThrowOnError extends boolean = false>(options?: Options<ListBugReportsApiV1BugReportsGetData, ThrowOnError>) => (options?.client ?? client).get<ListBugReportsApiV1BugReportsGetResponses, ListBugReportsApiV1BugReportsGetErrors, ThrowOnError>({ url: '/api/v1/bug-reports', ...options });
@@ -2330,34 +2358,6 @@ export const updateBugReportStatusApiV1BugReportsReportIdStatusPatch = <ThrowOnE
  * Trigger Debug Agent
  */
 export const triggerDebugAgentApiV1BugReportsReportIdDebugPost = <ThrowOnError extends boolean = false>(options: Options<TriggerDebugAgentApiV1BugReportsReportIdDebugPostData, ThrowOnError>) => (options.client ?? client).post<TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses, TriggerDebugAgentApiV1BugReportsReportIdDebugPostErrors, ThrowOnError>({ url: '/api/v1/bug-reports/{report_id}/debug', ...options });
-
-/**
- * Create a bug report for an unrecoverable error.
- *
- * File a bug report when an unrecoverable error prevents fulfilling the user's request. Only use as a last resort after exhausting recovery options (retries, alternative tools, plan changes).
- */
-export const consoleCreateBugReport = <ThrowOnError extends boolean = false>(options: Options<ConsoleCreateBugReportData, ThrowOnError>) => (options.client ?? client).post<ConsoleCreateBugReportResponses, ConsoleCreateBugReportErrors, ThrowOnError>({ url: '/api/v1/bug-reports/mcp-create', ...options });
-
-/**
- * Update the status of a bug report.
- *
- * Transition a bug report to a new status. Valid statuses: open, acknowledged, investigating, resolved.
- */
-export const consoleUpdateBugReportStatus = <ThrowOnError extends boolean = false>(options: Options<ConsoleUpdateBugReportStatusData, ThrowOnError>) => (options.client ?? client).patch<ConsoleUpdateBugReportStatusResponses, ConsoleUpdateBugReportStatusErrors, ThrowOnError>({ url: '/api/v1/bug-reports/{report_id}/mcp-status', ...options });
-
-/**
- * List bug reports, most recently filed first.
- *
- * List bug reports, newest first. Administrators see every report; everyone else sees only the reports they filed themselves — so an empty result means 'none of yours', not 'none at all'. Filter with `status_filter` (open, acknowledged, investigating, resolved) and `created_after` (an ISO-8601 timestamp, with an offset; only reports filed strictly after it are returned). `created_after` is what a scheduled watch should use to look at a rolling window rather than the whole first page. Two rules for such a watch: make the window several times the poll interval and de-duplicate against what you saw last time, because a report becomes visible when its transaction commits and not when `created_at` says it was filed; and when `meta.total` exceeds the reports returned, keep requesting further `page`s until you have them all, or the oldest reports in the window are the ones you never see.
- */
-export const consoleListBugReports = <ThrowOnError extends boolean = false>(options?: Options<ConsoleListBugReportsData, ThrowOnError>) => (options?.client ?? client).get<ConsoleListBugReportsResponses, ConsoleListBugReportsErrors, ThrowOnError>({ url: '/api/v1/bug-reports/mcp/list', ...options });
-
-/**
- * Set the external link (e.g. GitHub issue URL) on a bug report.
- *
- * Store a reference to an external issue tracker (GitHub, Jira, etc.) on the bug report so users can follow up.
- */
-export const consoleSetBugReportExternalLink = <ThrowOnError extends boolean = false>(options: Options<ConsoleSetBugReportExternalLinkData, ThrowOnError>) => (options.client ?? client).patch<ConsoleSetBugReportExternalLinkResponses, ConsoleSetBugReportExternalLinkErrors, ThrowOnError>({ url: '/api/v1/bug-reports/{report_id}/mcp-external-link', ...options });
 
 /**
  * Search the web for current, recent, or verifiable information.
