@@ -11,9 +11,9 @@ Runs with no gateway and no credentials, so it belongs in the normal suite.
 
 Usage::
 
-    model = ScriptedChatModel(responses=[task_call("slack-client", "post it"),
+    model = ScriptedChatModel(responses=[task_call("slack-notifier", "post it"),
                                          final_response("Done.")])
-    slack = MockSubAgent("slack-client", "Sends Slack messages.")
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.")
     graph = scripted_graph(model)
     state = await graph.ainvoke(user_turn("slack john"),
                                 config=turn_config(), context=runtime_context(slack))

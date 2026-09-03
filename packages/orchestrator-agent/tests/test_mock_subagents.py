@@ -79,8 +79,8 @@ def test_build_runtime_context_registers_mocks_alongside_builtins():
     because executor.py:311 *assigns* after construction and the model has no
     ``validate_assignment``. Passing them to the constructor instead raises.
     """
-    slack = MockSubAgent("slack-client", "Sends Slack messages.")
-    runner = MockSubAgent("agent-runner", "Runs data queries.")
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.")
+    runner = MockSubAgent("revenue-analyst", "Runs data queries.")
 
     user_config = UserConfig(
         user_id="test-user",
@@ -100,8 +100,8 @@ def test_build_runtime_context_registers_mocks_alongside_builtins():
 
     registry = build_runtime_context(user_config).subagent_registry
 
-    assert {"slack-client", "agent-runner"} <= set(registry)
-    assert registry["slack-client"]["runnable"] is slack
+    assert {"slack-notifier", "revenue-analyst"} <= set(registry)
+    assert registry["slack-notifier"]["runnable"] is slack
     # file-analyzer is registered unconditionally as a built-in capability.
     assert "file-analyzer" in registry
 
@@ -115,7 +115,7 @@ def test_constructor_assignment_of_subagents_is_rejected_by_pydantic():
             access_token=SecretStr("test-token"),
             name="Test User",
             email="test@local",
-            sub_agents=mock_subagents(MockSubAgent("slack-client")),
+            sub_agents=mock_subagents(MockSubAgent("slack-notifier")),
         )
 
 
@@ -125,9 +125,9 @@ def test_constructor_assignment_of_subagents_is_rejected_by_pydantic():
 
 
 async def test_registered_mock_receives_the_instruction_and_reply_reaches_orchestrator():
-    slack = MockSubAgent("slack-client", "Sends Slack messages.", reply="posted to #general")
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.", reply="posted to #general")
 
-    result = await _dispatch(_context(slack), _task_call("slack-client", "post the Q3 summary to @john.doe"))
+    result = await _dispatch(_context(slack), _task_call("slack-notifier", "post the Q3 summary to @john.doe"))
 
     assert slack.call_count == 1
     assert slack.called_with_substring("@john.doe")
@@ -136,26 +136,26 @@ async def test_registered_mock_receives_the_instruction_and_reply_reaches_orches
 
 async def test_unregistered_subagent_returns_none_to_allow_builtin_fallback():
     """None is the signal that lets SubAgentMiddleware handle general-purpose."""
-    result = await _dispatch(_context(MockSubAgent("slack-client")), _task_call("nonexistent-agent"))
+    result = await _dispatch(_context(MockSubAgent("slack-notifier")), _task_call("nonexistent-agent"))
 
     assert result is None
 
 
 async def test_each_mock_only_sees_its_own_delegations():
-    slack = MockSubAgent("slack-client", "Sends Slack messages.")
-    runner = MockSubAgent("agent-runner", "Runs data queries.")
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.")
+    runner = MockSubAgent("revenue-analyst", "Runs data queries.")
     context = _context(slack, runner)
 
-    await _dispatch(context, _task_call("agent-runner", "fetch Q3 earnings"))
+    await _dispatch(context, _task_call("revenue-analyst", "fetch Q3 earnings"))
 
     assert runner.called_with_substring("Q3 earnings")
     assert not slack.called
 
 
 async def test_reply_can_depend_on_the_instruction():
-    echo = MockSubAgent("agent-runner", reply=lambda instruction: f"received: {instruction}")
+    echo = MockSubAgent("revenue-analyst", reply=lambda instruction: f"received: {instruction}")
 
-    result = await _dispatch(_context(echo), _task_call("agent-runner", "count the rows"))
+    result = await _dispatch(_context(echo), _task_call("revenue-analyst", "count the rows"))
 
     assert "received: count the rows" in _tool_message(result).content
 
@@ -167,9 +167,9 @@ async def test_reply_can_depend_on_the_instruction():
 
 async def test_subagent_error_surfaces_without_raising():
     """A failing sub-agent must come back as content, not blow up the turn."""
-    broken = MockSubAgent("slack-client", error="slack API returned 503")
+    broken = MockSubAgent("slack-notifier", error="slack API returned 503")
 
-    result = await _dispatch(_context(broken), _task_call("slack-client"))
+    result = await _dispatch(_context(broken), _task_call("slack-notifier"))
 
     assert "slack API returned 503" in _tool_message(result).content
 
@@ -181,7 +181,7 @@ async def test_subagent_error_surfaces_without_raising():
 
 async def test_astream_yields_a_terminal_task_update():
     """`astream` comes from LocalA2ARunnable — this pins that we satisfy it."""
-    agent = MockSubAgent("agent-runner", reply="done")
+    agent = MockSubAgent("revenue-analyst", reply="done")
 
     events = [
         event
@@ -201,7 +201,7 @@ async def test_astream_without_parent_config_is_rejected():
     Missing config means the sub-agent would fall back to wrong user_id /
     assistant_id values, so the base class treats it as a programming error.
     """
-    agent = MockSubAgent("agent-runner")
+    agent = MockSubAgent("revenue-analyst")
 
     events = [event async for event in agent.astream({"messages": [{"role": "user", "content": "go"}]})]
 
@@ -211,8 +211,8 @@ async def test_astream_without_parent_config_is_rejected():
 
 async def test_input_modes_default_to_text_only():
     """Text-only keeps dispatch off the multimodal path, which needs an LLM."""
-    assert MockSubAgent("agent-runner").input_modes == ["text"]
-    assert MockSubAgent("agent-runner", input_modes=["text", "image"]).input_modes == ["text", "image"]
+    assert MockSubAgent("revenue-analyst").input_modes == ["text"]
+    assert MockSubAgent("revenue-analyst", input_modes=["text", "image"]).input_modes == ["text", "image"]
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +220,7 @@ async def test_input_modes_default_to_text_only():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("agent_name", ["slack-client", "agent-runner"])
+@pytest.mark.parametrize("agent_name", ["slack-notifier", "revenue-analyst"])
 async def test_dispatch_result_is_readable_by_the_extraction_helpers(agent_name):
     """The two halves must compose: dispatch produces what extraction reads."""
     agent = MockSubAgent(agent_name, reply="finished")

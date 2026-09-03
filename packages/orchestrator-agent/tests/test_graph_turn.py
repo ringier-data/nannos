@@ -53,20 +53,20 @@ async def _run(model: ScriptedChatModel, *agents: MockSubAgent, prompt: str = "d
 
 
 async def test_delegation_survives_a_real_turn_and_is_readable():
-    slack = MockSubAgent("slack-client", "Sends Slack messages.", reply="posted")
-    model = ScriptedChatModel(responses=[task_call("slack-client", "post to @john.doe"), final_response("Sent.")])
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.", reply="posted")
+    model = ScriptedChatModel(responses=[task_call("slack-notifier", "post to @john.doe"), final_response("Sent.")])
 
     state = await _run(model, slack, prompt="slack the summary to john")
 
     assert slack.called_with_substring("@john.doe")
-    assert delegated_agents(state) == ["slack-client"]
+    assert delegated_agents(state) == ["slack-notifier"]
     assert delegations(state)[0].result == "posted"
     assert delegations(state)[0].completed
 
 
 async def test_final_response_and_text_read_from_real_state():
-    slack = MockSubAgent("slack-client")
-    model = ScriptedChatModel(responses=[task_call("slack-client"), final_response("All set.")])
+    slack = MockSubAgent("slack-notifier")
+    model = ScriptedChatModel(responses=[task_call("slack-notifier"), final_response("All set.")])
 
     state = await _run(model, slack)
 
@@ -86,19 +86,19 @@ async def test_turn_without_delegation_reports_none():
 
 
 async def test_multiple_delegations_are_ordered():
-    runner = MockSubAgent("agent-runner", "Runs data queries.", reply="revenue up 8%")
-    slack = MockSubAgent("slack-client", "Sends Slack messages.", reply="posted")
+    runner = MockSubAgent("revenue-analyst", "Runs data queries.", reply="revenue up 8%")
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.", reply="posted")
     model = ScriptedChatModel(
         responses=[
-            task_call("agent-runner", "fetch Q3 earnings", call_id="c1"),
-            task_call("slack-client", "post it to @john", call_id="c2"),
+            task_call("revenue-analyst", "fetch Q3 earnings", call_id="c1"),
+            task_call("slack-notifier", "post it to @john", call_id="c2"),
             final_response("Fetched and sent."),
         ]
     )
 
     state = await _run(model, runner, slack)
 
-    assert delegated_agents(state) == ["agent-runner", "slack-client"]
+    assert delegated_agents(state) == ["revenue-analyst", "slack-notifier"]
     assert runner.called_with_substring("Q3 earnings")
     assert slack.called_with_substring("@john")
 
@@ -111,14 +111,14 @@ async def test_multiple_delegations_are_ordered():
 async def test_a2a_tracking_channel_is_populated_by_a_real_dispatch():
     """`a2a_tracking` was the least-verified helper: only ever tested against a
     dict written by hand. This is the middleware actually filling it."""
-    slack = MockSubAgent("slack-client", reply="posted")
-    model = ScriptedChatModel(responses=[task_call("slack-client"), final_response()])
+    slack = MockSubAgent("slack-notifier", reply="posted")
+    model = ScriptedChatModel(responses=[task_call("slack-notifier"), final_response()])
 
     state = await _run(model, slack)
 
     tracking = a2a_tracking(state)
-    assert "slack-client" in tracking
-    entry = tracking["slack-client"]
+    assert "slack-notifier" in tracking
+    entry = tracking["slack-notifier"]
     assert entry["is_complete"] is True
     assert entry["requires_input"] is False
     assert entry["requires_auth"] is False
@@ -138,9 +138,9 @@ async def test_structured_response_channel_really_is_a_pydantic_instance():
 
 
 async def test_orchestrator_visible_tools_are_the_ones_the_graph_ran():
-    slack = MockSubAgent("slack-client")
+    slack = MockSubAgent("slack-notifier")
     model = ScriptedChatModel(
-        responses=[tool_call("get_current_time", call_id="c0"), task_call("slack-client"), final_response()]
+        responses=[tool_call("get_current_time", call_id="c0"), task_call("slack-notifier"), final_response()]
     )
 
     state = await _run(model, slack)
@@ -157,13 +157,13 @@ async def test_task_tool_advertises_exactly_the_registered_subagents():
     """The `subagent_type` enum is rebuilt per request from subagent_registry.
     If it were empty the model would have nothing to route to — the original
     blocker — and no state assertion could detect it."""
-    runner = MockSubAgent("agent-runner", "Runs data queries.")
-    slack = MockSubAgent("slack-client", "Sends Slack messages.")
+    runner = MockSubAgent("revenue-analyst", "Runs data queries.")
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.")
     model = ScriptedChatModel(responses=[final_response()])
 
     await _run(model, runner, slack)
 
-    assert sorted(subagent_enum(model.bound_tool("task"))) == ["agent-runner", "slack-client"]
+    assert sorted(subagent_enum(model.bound_tool("task"))) == ["revenue-analyst", "slack-notifier"]
 
 
 async def test_core_orchestrator_tools_reach_the_model():
@@ -183,10 +183,10 @@ async def test_core_orchestrator_tools_reach_the_model():
 async def test_previous_turn_delegation_is_excluded_from_the_current_turn():
     """Same assertion as the synthetic test, but over history the checkpointer
     actually accumulated across two invocations."""
-    slack = MockSubAgent("slack-client", reply="posted")
+    slack = MockSubAgent("slack-notifier", reply="posted")
     model = ScriptedChatModel(
         responses=[
-            task_call("slack-client", "post to @john"),
+            task_call("slack-notifier", "post to @john"),
             final_response("Sent."),
             final_response("It is 14:00."),
         ]
@@ -195,12 +195,12 @@ async def test_previous_turn_delegation_is_excluded_from_the_current_turn():
     context = runtime_context(slack)
 
     first = await graph.ainvoke(user_turn("slack john"), config=turn_config(), context=context)
-    assert delegated_agents(first) == ["slack-client"]
+    assert delegated_agents(first) == ["slack-notifier"]
 
     second = await graph.ainvoke(user_turn("thanks, what time is it?"), config=turn_config(), context=context)
 
     assert delegated_agents(second) == []
-    assert delegated_agents(second, all_turns=True) == ["slack-client"]
+    assert delegated_agents(second, all_turns=True) == ["slack-notifier"]
     assert final_text(second) == "It is 14:00."
 
 
@@ -212,8 +212,8 @@ async def test_previous_turn_delegation_is_excluded_from_the_current_turn():
 async def test_unscripted_model_call_fails_loudly():
     """A turn that takes an unexpected path must break the test, not loop or
     silently reuse the last scripted message."""
-    slack = MockSubAgent("slack-client")
-    model = ScriptedChatModel(responses=[task_call("slack-client")])  # no final response
+    slack = MockSubAgent("slack-notifier")
+    model = ScriptedChatModel(responses=[task_call("slack-notifier")])  # no final response
 
     with pytest.raises(AssertionError, match="ScriptedChatModel exhausted"):
         await _run(model, slack)

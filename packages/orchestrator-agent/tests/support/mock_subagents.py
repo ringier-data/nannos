@@ -27,7 +27,7 @@ and keeps the same assertions.
 
 Usage::
 
-    slack = MockSubAgent("slack-client", "Sends Slack messages.", reply="sent")
+    slack = MockSubAgent("slack-notifier", "Sends Slack messages.", reply="sent")
     user_config.sub_agents = [slack.compiled()]
     ...
     assert slack.called_with_substring("@john.doe")
@@ -49,9 +49,11 @@ class MockSubAgent(LocalA2ARunnable):
 
     Args:
         name: Registry key — this is the string the model puts in
-            ``task(subagent_type=...)``. Use realistic names (``slack-client``,
-            ``agent-runner``); the model picks from these and the description,
-            so invented names make real-tier routing tests meaningless.
+            ``task(subagent_type=...)``. The model picks from these and the
+            description, so invented names make real-tier routing tests
+            meaningless. Name it like a registry sub-agent (``slack-notifier``,
+            ``revenue-analyst``), never after a client or a peer service:
+            ``client-slack`` and ``agent-runner`` are not delegation targets.
         description: Shown to the model in the ``task`` tool description, and
             what it routes on. Keep it as close to the real agent's wording as
             the test allows.

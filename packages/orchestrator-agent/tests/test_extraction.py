@@ -56,17 +56,17 @@ def test_delegation_is_read_from_task_subagent_type():
     state = {
         "messages": [
             HumanMessage("slack the summary to john"),
-            _task_call("agent-runner", "c1", "fetch Q3 summary"),
+            _task_call("revenue-analyst", "c1", "fetch Q3 summary"),
             ToolMessage(content="Q3 revenue up 8%", tool_call_id="c1", name="task"),
-            _task_call("slack-client", "c2", "post to @john.doe"),
+            _task_call("slack-notifier", "c2", "post to @john.doe"),
             ToolMessage(content="sent", tool_call_id="c2", name="task"),
         ]
     }
 
-    assert delegated_agents(state) == ["agent-runner", "slack-client"]
+    assert delegated_agents(state) == ["revenue-analyst", "slack-notifier"]
 
     first, second = delegations(state)
-    assert (first.subagent, first.description) == ("agent-runner", "fetch Q3 summary")
+    assert (first.subagent, first.description) == ("revenue-analyst", "fetch Q3 summary")
     assert second.result == "sent"
     assert second.completed
 
@@ -75,20 +75,20 @@ def test_repeated_delegation_to_same_agent_is_deduplicated_but_ordered():
     state = {
         "messages": [
             HumanMessage("go"),
-            _task_call("agent-runner", "c1"),
-            _task_call("slack-client", "c2"),
-            _task_call("agent-runner", "c3"),
+            _task_call("revenue-analyst", "c1"),
+            _task_call("slack-notifier", "c2"),
+            _task_call("revenue-analyst", "c3"),
         ]
     }
-    assert delegated_agents(state) == ["agent-runner", "slack-client"]
-    assert [d.subagent for d in delegations(state)] == ["agent-runner", "slack-client", "agent-runner"]
+    assert delegated_agents(state) == ["revenue-analyst", "slack-notifier"]
+    assert [d.subagent for d in delegations(state)] == ["revenue-analyst", "slack-notifier", "revenue-analyst"]
 
 
 def test_attempted_delegation_without_result_is_visible_but_not_completed():
     """An interrupted or failed `task` still counts as routing intent."""
-    state = {"messages": [HumanMessage("go"), _task_call("slack-client", "c1")]}
+    state = {"messages": [HumanMessage("go"), _task_call("slack-notifier", "c1")]}
 
-    assert delegated_agents(state) == ["slack-client"]
+    assert delegated_agents(state) == ["slack-notifier"]
     assert delegated_agents(state, completed_only=True) == []
     assert delegations(state)[0].completed is False
 
@@ -103,7 +103,7 @@ def test_previous_turn_delegation_does_not_leak_into_this_turn():
     state = {
         "messages": [
             HumanMessage("slack john"),
-            _task_call("slack-client", "c1"),
+            _task_call("slack-notifier", "c1"),
             ToolMessage(content="sent", tool_call_id="c1", name="task"),
             HumanMessage("thanks, what time is it?"),
             AIMessage(content="It is 14:00."),
@@ -111,7 +111,7 @@ def test_previous_turn_delegation_does_not_leak_into_this_turn():
     }
 
     assert delegated_agents(state) == []
-    assert delegated_agents(state, all_turns=True) == ["slack-client"]
+    assert delegated_agents(state, all_turns=True) == ["slack-notifier"]
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ def test_only_orchestrator_visible_tools_are_reported():
             ),
             ToolMessage(content="ok", tool_call_id="t1", name="write_todos"),
             ToolMessage(content="14:00", tool_call_id="t2", name="get_current_time"),
-            _task_call("slack-client", "c1"),
+            _task_call("slack-notifier", "c1"),
             ToolMessage(content="sent", tool_call_id="c1", name="task"),
         ]
     }
@@ -197,7 +197,7 @@ def test_include_subagent_output_appends_the_delegation_result():
     state = {
         "messages": [
             HumanMessage("what was Q3 revenue?"),
-            _task_call("agent-runner", "c1"),
+            _task_call("revenue-analyst", "c1"),
             ToolMessage(content="Q3 revenue was 8.2 million EUR.", tool_call_id="c1", name="task"),
             _final_call(message="", include_subagent_output=True),
         ]
@@ -210,7 +210,7 @@ def test_include_subagent_output_keeps_a_nonempty_message_as_a_preamble():
     state = {
         "messages": [
             HumanMessage("what was Q3 revenue?"),
-            _task_call("agent-runner", "c1"),
+            _task_call("revenue-analyst", "c1"),
             ToolMessage(content="8.2 million EUR.", tool_call_id="c1", name="task"),
             _final_call(message="Here you go:", include_subagent_output=True),
         ]
@@ -287,9 +287,9 @@ def test_a_non_message_is_tolerated_rather_than_raising():
 def test_a2a_tracking_channel_is_returned_keyed_by_subagent():
     state = {
         "messages": [HumanMessage("go")],
-        "a2a_tracking": {"slack-client": {"task_id": "t-1", "state": "completed", "is_complete": True}},
+        "a2a_tracking": {"slack-notifier": {"task_id": "t-1", "state": "completed", "is_complete": True}},
     }
-    assert a2a_tracking(state)["slack-client"]["task_id"] == "t-1"
+    assert a2a_tracking(state)["slack-notifier"]["task_id"] == "t-1"
 
 
 def test_a2a_tracking_absent_is_empty_not_error():

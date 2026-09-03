@@ -16,7 +16,7 @@ than issuing a second ``aget_state``::
     turn_state = TurnState()
     async for _ in agent.stream(parts, user_config, config, turn_state=turn_state):
         pass
-    assert delegated_agents(turn_state.final_values) == ["slack-client"]
+    assert delegated_agents(turn_state.final_values) == ["slack-notifier"]
 
 What the orchestrator can actually see
 --------------------------------------

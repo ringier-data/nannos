@@ -121,7 +121,7 @@ async def test_scenario_against_real_model(
     try:
         assert_scenario(scenario, state, agents)
     except AssertionError:
-        # Without this the failure reads "expected slack-client" with no clue
+        # Without this the failure reads "expected slack-notifier" with no clue
         # what the model did instead — the difference between a five-minute and
         # a fifty-minute diagnosis on a non-deterministic test.
         print(f"\n[{scenario.id} / {model_type}] outcome: {outcome}")

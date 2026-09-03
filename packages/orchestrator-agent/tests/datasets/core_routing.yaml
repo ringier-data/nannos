@@ -9,6 +9,14 @@
 # - `subagents` are registered for this scenario only. Their `description` is
 #   what the model routes on, so keep it close to the real agent's wording —
 #   in the real tier that text is doing the actual work.
+# - Name them after the only things the orchestrator can delegate to: registry
+#   sub-agents, either system-seeded (`voice-agent`, `agent-creator`,
+#   `task-scheduler`, `file-analyzer`) or user-created. A *client* is not one —
+#   `client-slack` calls the orchestrator and posts its reply back to Slack; it
+#   serves no agent card, so nothing can delegate to it. Neither is
+#   `agent-runner`, which console-backend's scheduler calls to run sub-agent
+#   jobs. Naming either makes the scenario document a path that does not exist.
+#   Avoid `general-purpose` too: the dispatcher special-cases that name.
 # - `expect.delegations` names `task(subagent_type=...)` targets. There is no
 #   primary/secondary distinction in graph state; use `ordered: true` when
 #   sequence genuinely matters.
@@ -24,62 +32,62 @@
 # Keep expectations to what the orchestrator genuinely controls. Asserting on
 # wording the model chooses makes a flaky test, not a strict one.
 
-- id: routes_to_slack_client
+- id: routes_to_slack_notifier
   description: A request to send something on Slack should reach the Slack agent.
   input:
     query: "Send a message to @john.doe on Slack saying the deployment is done."
   subagents:
-    - name: slack-client
+    - name: slack-notifier
       description: "Sends messages to Slack channels and users. Use for anything involving Slack."
       reply: "Message delivered to @john.doe."
-    - name: agent-runner
+    - name: revenue-analyst
       description: "Runs data queries and analytical jobs. Use for fetching or computing data."
       reply: "No data job required."
   expect:
     delegations:
-      required: [slack-client]
-      forbidden: [agent-runner]
+      required: [slack-notifier]
+      forbidden: [revenue-analyst]
     instructions:
-      slack-client: ["john"]
+      slack-notifier: ["john"]
     task_state: completed
 
-- id: routes_to_agent_runner_for_data
-  description: A data question should reach the runner, not the Slack agent.
+- id: routes_to_analyst_for_data
+  description: A data question should reach the analyst, not the Slack agent.
   input:
     query: "What was our Q3 revenue? Look it up and tell me the number."
   subagents:
-    - name: slack-client
+    - name: slack-notifier
       description: "Sends messages to Slack channels and users. Use for anything involving Slack."
       reply: "Nothing to send."
-    - name: agent-runner
+    - name: revenue-analyst
       description: "Runs data queries and analytical jobs. Use for fetching or computing data."
       reply: "Q3 revenue was 8.2 million EUR."
   expect:
     delegations:
-      required: [agent-runner]
-      forbidden: [slack-client]
+      required: [revenue-analyst]
+      forbidden: [slack-notifier]
     instructions:
-      agent-runner: ["Q3"]
+      revenue-analyst: ["Q3"]
     task_state: completed
     response_contains: ["8.2"]
 
-- id: chains_runner_then_slack
+- id: chains_analyst_then_slack
   description: Fetch-then-send should hit both agents, data first.
   input:
     query: "Look up the Q3 revenue and then post it to @john.doe on Slack."
   subagents:
-    - name: agent-runner
+    - name: revenue-analyst
       description: "Runs data queries and analytical jobs. Use for fetching or computing data."
       reply: "Q3 revenue was 8.2 million EUR."
-    - name: slack-client
+    - name: slack-notifier
       description: "Sends messages to Slack channels and users. Use for anything involving Slack."
       reply: "Message delivered to @john.doe."
   expect:
     delegations:
-      required: [agent-runner, slack-client]
+      required: [revenue-analyst, slack-notifier]
       ordered: true
     instructions:
-      slack-client: ["john"]
+      slack-notifier: ["john"]
     task_state: completed
 
 - id: answers_directly_without_delegating
@@ -87,15 +95,15 @@
   input:
     query: "In one sentence, what is 2 + 2?"
   subagents:
-    - name: slack-client
+    - name: slack-notifier
       description: "Sends messages to Slack channels and users. Use for anything involving Slack."
       reply: "Nothing to send."
-    - name: agent-runner
+    - name: revenue-analyst
       description: "Runs data queries and analytical jobs. Use for fetching or computing data."
       reply: "No data job required."
   expect:
     delegations:
-      forbidden: [slack-client, agent-runner]
+      forbidden: [slack-notifier, revenue-analyst]
     task_state: completed
     # Deliberately no response_contains. An earlier version asserted "4" and
     # gemini answered "Two plus two is four." — a correct answer failing on
@@ -107,12 +115,12 @@
   input:
     query: "What time is it right now?"
   subagents:
-    - name: agent-runner
+    - name: revenue-analyst
       description: "Runs data queries and analytical jobs. Use for fetching or computing data."
       reply: "No data job required."
   expect:
     delegations:
-      forbidden: [agent-runner]
+      forbidden: [revenue-analyst]
     tools:
       required: [get_current_time]
     task_state: completed
@@ -136,17 +144,17 @@
         filename: "q3-report.pdf"
         media_type: "application/pdf"
   subagents:
-    - name: agent-runner
+    - name: doc-summarizer
       description: "Reads documents and runs analysis. Use for summarising attached files."
       input_modes: [text]
       reply: "The report headline is 8.2 million EUR in Q3 revenue."
   expect:
     delegations:
-      required: [agent-runner]
+      required: [doc-summarizer]
     instructions:
       # A text-only sub-agent can only reach the file through the URI, so the
       # orchestrator must pass it along rather than describing it.
-      agent-runner: ["q3-report.pdf", "https://files.example.com/q3-report.pdf"]
+      doc-summarizer: ["q3-report.pdf", "https://files.example.com/q3-report.pdf"]
     # Deliberately no task_state. The URL is unreachable — a real presigned URL
     # cannot live in a public repo's dataset — and the orchestrator also mounts
     # attachments on a /attachments/ virtual filesystem. A model that only
@@ -166,12 +174,12 @@
         filename: "invoice-42.pdf"
         media_type: "application/pdf"
   subagents:
-    - name: agent-runner
+    - name: doc-summarizer
       description: "Reads documents and runs analysis. Use for summarising attached files."
       input_modes: [text]
       reply: "Not needed."
   expect:
     delegations:
-      forbidden: [agent-runner]
+      forbidden: [doc-summarizer]
     task_state: completed
     response_contains: ["invoice-42"]

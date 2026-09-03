@@ -386,7 +386,7 @@ def user_config_with_subagents(test_user_config):
     any test about delegation::
 
         def test_routes_to_slack(user_config_with_subagents):
-            slack = MockSubAgent("slack-client", "Sends Slack messages.")
+            slack = MockSubAgent("slack-notifier", "Sends Slack messages.")
             user_config = user_config_with_subagents(slack)
 
     Assignment is post-construction on purpose — it mirrors executor.py:311 and

@@ -52,7 +52,7 @@ async def test_scenario_is_satisfiable(scenario):
         _assert_attachments_were_appended(scenario, agents)
     except AssertionError:
         # The outcome summary is what makes a dataset failure diagnosable —
-        # without it you get "expected slack-client" and no idea what happened.
+        # without it you get "expected slack-notifier" and no idea what happened.
         print(f"\n[{scenario.id}] outcome: {describe_outcome(state)}")
         raise
 

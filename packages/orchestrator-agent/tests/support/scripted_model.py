@@ -18,7 +18,7 @@ nothing else can see it.
 Usage::
 
     model = ScriptedChatModel(responses=[
-        task_call("slack-client", "post to @john"),
+        task_call("slack-notifier", "post to @john"),
         final_response("Done."),
     ])
 """

@@ -100,7 +100,7 @@ async def test_pdf_becomes_a_file_block_not_an_image_block():
 
 async def test_text_only_subagent_receives_the_uri_in_its_instruction():
     _, blocks = await _blocks_for(_file_part(IMAGE_URL, "vacation.jpg", "image/jpeg"))
-    agent = MockSubAgent("agent-runner", "Runs jobs.", input_modes=["text"])
+    agent = MockSubAgent("doc-summarizer", "Reads documents.", input_modes=["text"])
 
     await _dispatch_with_files(agent, blocks, description="describe the attached image")
 
@@ -116,7 +116,7 @@ async def test_text_only_subagent_receives_every_attachment():
         _file_part(IMAGE_URL, "vacation.jpg", "image/jpeg"),
         _file_part(PDF_URL, "report.pdf", "application/pdf"),
     )
-    agent = MockSubAgent("agent-runner", "Runs jobs.", input_modes=["text"])
+    agent = MockSubAgent("doc-summarizer", "Reads documents.", input_modes=["text"])
 
     await _dispatch_with_files(agent, blocks)
 
@@ -127,7 +127,7 @@ async def test_text_only_subagent_receives_every_attachment():
 
 async def test_no_attachments_means_no_file_section():
     """A bare instruction must not grow an empty '[Attached files]' block."""
-    agent = MockSubAgent("agent-runner", "Runs jobs.", input_modes=["text"])
+    agent = MockSubAgent("doc-summarizer", "Reads documents.", input_modes=["text"])
 
     await _dispatch_with_files(agent, [], description="just do the thing")
 

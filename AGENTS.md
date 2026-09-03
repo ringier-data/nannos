@@ -31,8 +31,13 @@ Console Backend (admin hub, API, scheduler)
 Orchestrator Agent (LangGraph — plans & delegates)
     │ A2A
     ▼
-Sub-Agents (agent-creator, agent-runner, user-created agents)
+Sub-Agents (voice-agent, agent-creator, task-scheduler, user-created agents)
 ```
+
+`agent-runner` is deliberately absent from that last row: the scheduler calls it,
+and it runs sub-agent jobs itself, so nothing delegates to it from above. Clients
+are likewise one-directional — they call the orchestrator and render its reply;
+none of them serves an agent card, so none is a delegation target.
 
 ### Packages
 

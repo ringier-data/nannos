@@ -200,7 +200,7 @@ only hook that runs before a subdirectory conftest is imported. Keep it there.
 |---|---|---|
 | lives in | `tests/` | `tests/integration/` |
 | model | `ScriptedChatModel` | live, via the gateway |
-| sub-agents | `MockSubAgent` | `MockSubAgent` (still — a real slack-client would post real messages) |
+| sub-agents | `MockSubAgent` | `MockSubAgent` (still — a real Slack-posting sub-agent would post real messages) |
 | runs | every PR, no credentials | opt-in, needs `LLM_GATEWAY_URL` |
 | answers | "is it wired correctly?" | "does the model decide correctly?" |
 
@@ -279,21 +279,21 @@ Learned the hard way; each cost real debugging time.
 Add an entry to `tests/datasets/core_routing.yaml`; both tiers pick it up automatically.
 
 ```yaml
-- id: routes_to_slack_client
+- id: routes_to_slack_notifier
   description: A request to send something on Slack should reach the Slack agent.
   input:
     query: "Send a message to @john.doe on Slack saying the deployment is done."
   subagents:
-    - name: slack-client
+    - name: slack-notifier
       description: "Sends messages to Slack channels and users."   # what the model routes on
       reply: "Message delivered."
   expect:
     delegations:
-      required: [slack-client]
-      forbidden: [agent-runner]
+      required: [slack-notifier]
+      forbidden: [revenue-analyst]
       ordered: false        # true only when sequence genuinely matters
     instructions:
-      slack-client: ["john"]     # substrings the sub-agent must have received
+      slack-notifier: ["john"]     # substrings the sub-agent must have received
     tools:
       required: [get_current_time]
     task_state: completed
@@ -309,6 +309,12 @@ Rules that keep scenarios from becoming flaky:
 - **`instructions` are substrings, not equality.** The model phrases hand-offs freely.
 - **`subagents[].description` is the routing signal** in the real tier. Keep it close
   to the real agent card, or you are testing a fiction.
+- **Name sub-agents after things that are actually delegable** — registry sub-agents,
+  system-seeded or user-created. Clients (`client-slack`, `client-email`) call the
+  orchestrator and render its reply; they serve no agent card. `agent-runner` is called
+  by console-backend's scheduler. Nothing delegates to either, so naming one documents
+  a path that does not exist. Nothing in the harness validates this, which is exactly
+  why it needs saying: the tests pass either way.
 - **Include negative expectations.** `forbidden` is what makes a routing assertion
   falsifiable — but only for agents that are actually registered, or it proves nothing.
 
