@@ -2,30 +2,43 @@
 -- Restore the static policy guards seeded in 057 that a derived profile weakened.
 --
 -- Found by QA against a real database: the phantom-classification path did not only
--- add junk rows, it OVERWROTE seeded policy. Two of them are privacy guards, and both
--- had been silently disabled:
+-- add junk rows, it OVERWROTE seeded policy. Seven of the thirteen guards were
+-- weakened, SIX of them to below the 0.80 approval gate:
 --
---   read_personal_file  1.00 -> 0.30  (+ LLM-guessed `path` globs). Below the 0.80
---                                     gate, so reading a user's personal file stopped
---                                     asking for approval except on a few path globs.
---   docstore_search     0.30 -> 0.10  with `risk_factors = {}`, losing the
---                                     `include_personal` factor entirely — the "ask
---                                     before searching personal documents" gate was
---                                     gone, not merely lowered.
+--   read_personal_file        1.00 -> 0.30  (+ LLM-guessed `path` globs) — reading a
+--                                           user's personal file stopped asking
+--   docstore_search           0.30 -> 0.10  with `risk_factors = {}`, losing the
+--                                           `include_personal` factor entirely: the
+--                                           "ask before searching personal documents"
+--                                           gate was gone, not merely lowered
+--   console_remove_skill      1.00 -> 0.60
+--   console_activate_skill    1.00 -> 0.70
+--   console_update_sub_agent  1.00 -> 0.70
 --   console_create_bug_report 1.00 -> 0.40
+--   console_import_skill      1.00 -> 0.80  (still gates, at the boundary)
+--
+-- So the self-improvement guards (removing a skill, activating one, editing a
+-- sub-agent) stopped asking as well, not only the privacy pair.
+--
+-- Four also had `edit` ADDED where 057 withheld it — console_import_skill,
+-- console_activate_skill, read_personal_file, docstore_search — because the LLM's
+-- default action set replaced the policy's. That hands the user an argument-editing
+-- affordance on an approve-or-reject-only guard, so the predicate below treats a
+-- widened action set as a weakening too.
 --
 -- The mechanism: `upsert_score` replaces every column, so a classification of a tool
 -- the gate could not fetch (scored from its name alone) landed on top of a hand-written
 -- guard. 089 cannot repair this — it deletes junk rows by name, and these are the
 -- policy rows themselves, wearing guessed values.
 --
--- Only WEAKENINGS are repaired. The upsert re-asserts a row only when the stored
--- base_score is BELOW the seeded one, or when the seeded risk_factors are non-empty and
--- the stored ones are empty. So an administrator who deliberately RAISED a guard keeps
--- their change, and re-running this migration is a no-op. That asymmetry is the whole
--- safety argument: a weakened guard is indistinguishable from an admin's deliberate
--- relaxation, but restoring it errs toward asking the user rather than toward acting
--- without asking.
+-- Only WEAKENINGS are repaired. The upsert re-asserts a row when the stored base_score
+-- is BELOW the seeded one, when non-empty seeded risk_factors were emptied, or when the
+-- stored allowed_actions are NOT contained in the seeded set (an affordance was added).
+-- Each clause is one-directional, so an administrator who RAISED a score or NARROWED
+-- the actions keeps their change, and re-running this migration is a no-op. That
+-- asymmetry is the whole safety argument: a weakened guard is indistinguishable from an
+-- admin's deliberate relaxation, but restoring it errs toward asking the user rather
+-- than toward acting without asking.
 --
 -- schema_hash is reset to '' on purpose. That is what marks a row as policy rather than
 -- derived, and it is what stops a future classification from overwriting it again
@@ -70,7 +83,8 @@ ON CONFLICT (tool_name, server_slug) DO UPDATE SET
     allowed_actions = EXCLUDED.allowed_actions,
     updated_at = NOW()
 WHERE tool_risk_scores.base_score < EXCLUDED.base_score
-   OR (tool_risk_scores.risk_factors = '{}'::JSONB AND EXCLUDED.risk_factors <> '{}'::JSONB);
+   OR (tool_risk_scores.risk_factors = '{}'::JSONB AND EXCLUDED.risk_factors <> '{}'::JSONB)
+   OR NOT (tool_risk_scores.allowed_actions <@ EXCLUDED.allowed_actions);
 
 -- rambler down
 -- Intentionally a no-op: this migration only ever restores a guard to the value 057
