@@ -545,6 +545,16 @@ class UserService:
                     last_name = EXCLUDED.last_name,
                     company_name = EXCLUDED.company_name,
                     phone_number_idp = COALESCE(EXCLUDED.phone_number_idp, users.phone_number_idp),
+                    -- Monotonic: the token can raise this flag on an existing row but
+                    -- never clear it. Migration 088 backfills machine rows by Keycloak's
+                    -- `service-account-` email convention, and a client-credentials token
+                    -- need not carry an email at all — so a service account onboarded
+                    -- before that migration can sit unflagged forever if the flag is only
+                    -- ever set on insert. Raising it here lets the account correct itself
+                    -- on its next call. The trade-off is deliberate: an operator who
+                    -- clears the flag on a row whose token still says
+                    -- `service-account-<client>` will see it come back.
+                    is_service_account = users.is_service_account OR EXCLUDED.is_service_account,
                     updated_at = EXCLUDED.updated_at
                 RETURNING id, sub, email, first_name, last_name, company_name,
                         is_administrator, is_service_account, role, status, phone_number_idp,
@@ -705,8 +715,11 @@ class UserService:
             phone_number_idp: The user's phone number from IDP (optional)
             company_name: The user's company name (optional)
             is_service_account: True when the caller is a machine identity rather than a
-                person. Set on creation only, like ``is_administrator`` — an operator who
-                corrects the flag afterwards must not have it overwritten on the next call.
+                person. Monotonic rather than insert-only: a machine account onboarded
+                before migration 088 — and missed by its email-pattern backfill, which a
+                client-credentials token carrying no email would be — corrects itself on
+                its next call. Never cleared, so a person is not re-classified by a token
+                that happens to lack the claim.
 
         Returns:
             The created or updated user

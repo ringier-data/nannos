@@ -116,34 +116,49 @@ async def test_backfill_catches_keycloak_service_account_emails(pg_session: Asyn
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_upsert_sets_the_flag_on_creation_only(pg_session: AsyncSession):
-    """Like `is_administrator`: an operator's correction must not be overwritten on the next call."""
+def _user_service():
     from console_backend.repositories.user_repository import UserRepository
     from console_backend.services.audit_service import AuditService
     from console_backend.services.user_service import UserService
 
     repository = UserRepository()
     repository.set_audit_service(AuditService())
-    user_service = UserService(user_repository=repository, audit_service=AuditService())
+    return UserService(user_repository=repository, audit_service=AuditService())
+
+
+@pytest.mark.asyncio
+async def test_upsert_never_clears_the_flag(pg_session: AsyncSession):
+    """A token that lacks the claim must not re-classify a machine account as a person."""
+    user_service = _user_service()
 
     created = await user_service.upsert_user(
-        pg_session,
-        sub="sa-upsert",
-        email="",
-        first_name="",
-        last_name="",
-        is_service_account=True,
+        pg_session, sub="sa-upsert", email="", first_name="", last_name="", is_service_account=True
     )
     assert created.is_service_account is True
 
-    # A second call claiming otherwise must not clear it.
     updated = await user_service.upsert_user(
-        pg_session,
-        sub="sa-upsert",
-        email="",
-        first_name="",
-        last_name="",
-        is_service_account=False,
+        pg_session, sub="sa-upsert", email="", first_name="", last_name="", is_service_account=False
     )
     assert updated.is_service_account is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_raises_the_flag_on_an_existing_row(pg_session: AsyncSession):
+    """A machine account missed by migration 088's backfill corrects itself on its next call.
+
+    The backfill keys on Keycloak's `service-account-` email convention, and a
+    client-credentials token need not carry an email at all — so a service account
+    onboarded before the migration can exist unflagged. Insert-only semantics would leave
+    it that way forever, and it is exactly the row whose notifications nobody reads.
+    """
+    user_service = _user_service()
+
+    created = await user_service.upsert_user(
+        pg_session, sub="sa-late", email="", first_name="", last_name="", is_service_account=False
+    )
+    assert created.is_service_account is False
+
+    corrected = await user_service.upsert_user(
+        pg_session, sub="sa-late", email="", first_name="", last_name="", is_service_account=True
+    )
+    assert corrected.is_service_account is True
