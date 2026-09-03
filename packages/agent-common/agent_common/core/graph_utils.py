@@ -408,6 +408,28 @@ def _code_interpreter_ptc_enabled() -> bool:
     }
 
 
+def deep_agent_builtin_tools(backend: Any) -> list[BaseTool]:
+    """The tools ``create_deep_agent`` registers with ToolNode on its own.
+
+    ``TodoListMiddleware`` and ``FilesystemMiddleware`` are instantiated *inside*
+    ``create_deep_agent`` (``deepagents.graph``), so a caller assembling the
+    middleware stack never sees their tool instances — yet the model can call every
+    one of them. Anything reasoning about "which tool calls can actually resolve"
+    (the risk gate) needs them, and re-instantiating the same two middlewares is the
+    only way to get the names without hardcoding a list that silently rots when
+    deepagents adds a tool.
+
+    ``task`` and ``eval`` are deliberately absent: both are excluded from risk
+    gating at the top of ``aafter_model``, so neither needs to be accounted for.
+
+    The instances are for *inspection only* — never for execution; the real ones
+    live in the compiled graph.
+    """
+    from langchain.agents.middleware import TodoListMiddleware
+
+    return [*TodoListMiddleware().tools, *FilesystemMiddleware(backend=backend).tools]
+
+
 def code_interpreter_ptc_enabled() -> bool:
     """Public wrapper around :func:`_code_interpreter_ptc_enabled`.
 

@@ -29,6 +29,7 @@ from agent_common.core.graph_utils import (
     build_code_interpreter_middlewares,
     code_interpreter_ptc_enabled,
     create_indexing_backend_factory,
+    deep_agent_builtin_tools,
 )
 from agent_common.core.model_factory import (
     _has_aws_credentials,
@@ -76,7 +77,9 @@ from .time_tools import create_time_tool
 logger = logging.getLogger(__name__)
 
 
-def _create_hitl_middleware(platform_tools: list[BaseTool] | None = None) -> ConditionalHumanInTheLoopMiddleware:
+def _create_hitl_middleware(
+    platform_tools: list[BaseTool] | None = None, *, exhaustive: bool = False
+) -> ConditionalHumanInTheLoopMiddleware:
     """Create a ConditionalHumanInTheLoopMiddleware instance for dynamic risk scoring.
 
     All tool guarding is now handled by the dynamic risk scoring system:
@@ -84,19 +87,26 @@ def _create_hitl_middleware(platform_tools: list[BaseTool] | None = None) -> Con
       tool_risk_scores DB table with base_score=1.0 (always interrupt).
     - Other tools are scored by LLM at runtime and interrupt if score >= threshold.
 
-    *platform_tools* are the orchestrator's own static tools (time, presigned-url,
-    copy_file, notify_user, ``FinalResponseSchema``). They are dispatched from
-    ``DynamicToolDispatchMiddleware.static_tools`` / ToolNode, not from the
-    per-user ``tool_registry``, so without them here the gate cannot fetch a
-    callable tool — and a call it cannot fetch is deliberately never classified
-    (see ``score_tool_risk``), which would silently drop these to a name-only
-    score instead of gating them on their real schema.
+    *platform_tools* are every tool the graph can dispatch that is NOT in the
+    per-user ``tool_registry``: the orchestrator's own static tools (time,
+    presigned-url, copy_file, notify_user, ``FinalResponseSchema``) plus the
+    deep-agent builtins ``create_deep_agent`` registers itself (``write_todos``
+    and the filesystem tools). Without them the gate cannot fetch a callable
+    tool, and a call it cannot fetch is deliberately never classified (see
+    ``score_tool_risk``).
+
+    *exhaustive* asserts that the list is complete, which is what lets the gate
+    answer an unresolvable name immediately instead of scoring it — no approval
+    card, and no summary LLM call, for a tool that cannot dispatch. Only pass it
+    with a list that genuinely covers everything: ``task`` and ``eval`` are exempt
+    (the gate skips both), and the registry is read from the runtime context.
     """
     return ConditionalHumanInTheLoopMiddleware(
         interrupt_on=None,
         risk_scorer=score_tool_risk,
         default_risk_threshold=0.8,
         platform_tools={t.name: t for t in (platform_tools or [])} or None,
+        platform_tools_are_exhaustive=exhaustive,
     )
 
 
@@ -660,8 +670,17 @@ class GraphFactory:
         # ConditionalHumanInTheLoopMiddleware: uses interrupt() to pause and ask for user
         # confirmation before executing guarded tools (self-improvement, privacy, bug reports).
         # Supports argument-based conditions (e.g., docstore_search only when include_personal=True).
+        # Everything ToolNode can dispatch outside the per-user registry: our own
+        # static tools plus the builtins create_deep_agent installs (write_todos and
+        # the filesystem tools — their instances only exist inside that call, so they
+        # are re-derived here for inspection). With the set complete, the gate can
+        # answer a name that resolves to nothing instead of scoring it.
         hitl_middleware = _create_hitl_middleware(
-            self.get_static_tools(with_response_tool=True, with_notify_user=True)
+            [
+                *self.get_static_tools(with_response_tool=True, with_notify_user=True),
+                *deep_agent_builtin_tools(self.backend_factory),
+            ],
+            exhaustive=True,
         )
 
         # CodeInterpreterMiddleware exposes a wasm-sandboxed ``eval`` JS REPL.

@@ -322,6 +322,13 @@ class TestPerCallIdStamping:
         assert captured["request"]["action_requests"][0]["args"]["_call_id"] == "tc-sync"
 
 
+def _stub_tool(name: str):
+    """A minimal BaseTool the gate can fetch — stands in for a ToolNode-registered tool."""
+    from langchain_core.tools import StructuredTool
+
+    return StructuredTool.from_function(func=lambda **kwargs: None, name=name, description=name)
+
+
 class TestUnresolvableToolCall:
     """A camelCase PTC identifier emitted as a native tool call must be answered
     with the fix — never classified, never dispatched — while a snake_case tool the
@@ -527,6 +534,89 @@ class TestUnresolvableToolCall:
         content = result["messages"][-1].content
         assert "regular tool call" in content
         assert "tools.githubSearchIssues" not in content
+
+    async def test_invented_name_is_answered_when_the_platform_set_is_exhaustive(self, monkeypatch):
+        """With every dispatchable tool registered, absence IS proof the call cannot
+        resolve — so answer it now rather than scoring it. A destructive-sounding
+        invention would otherwise clear the floor and raise an approval card (and pay
+        for a summary LLM call) for a tool that then fails to dispatch.
+        """
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        scored: list[str] = []
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            scored.append(name)
+            return 0.99, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={},
+            risk_scorer=scorer,
+            default_risk_threshold=0.8,
+            platform_tools={"write_todos": _stub_tool("write_todos")},
+            platform_tools_are_exhaustive=True,
+        )
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "delete_all_campaigns", "args": {}, "id": "tc", "type": "tool_call"}],
+        )
+
+        result = await mw.aafter_model({"messages": [ai]}, self._runtime({}))
+
+        assert scored == []
+        assert [tc["id"] for tc in ai.tool_calls] == ["tc"]  # kept, answered, not dispatched
+        assert "is not a tool that exists here" in result["messages"][-1].content
+
+    async def test_a_registered_builtin_is_scored_not_refused(self, monkeypatch):
+        """The flip side: `write_todos` is invisible to the registry but dispatchable.
+        Registering it is what keeps the exhaustive verdict from breaking real tools.
+        """
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        monkeypatch.setattr(
+            "agent_common.middleware.conditional_hitl.interrupt",
+            lambda request: {"decisions": [{"type": "approve"} for _ in request["action_requests"]]},
+        )
+        seen: list = []
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            seen.append((name, tool is not None))
+            return 0.99, None
+
+        todo = _stub_tool("write_todos")
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={},
+            risk_scorer=scorer,
+            default_risk_threshold=0.8,
+            platform_tools={"write_todos": todo},
+            platform_tools_are_exhaustive=True,
+        )
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "write_todos", "args": {"todos": []}, "id": "tc", "type": "tool_call"}],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime({}))
+
+        assert seen == [("write_todos", True)]  # fetched, so scored on its real schema
+
+    async def test_absence_proves_nothing_without_an_exhaustive_set(self, monkeypatch):
+        """Default (sub-agents, anything that has not registered everything): an
+        unknown name is still scored, because ToolNode tools are invisible here.
+        """
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", "1")
+        monkeypatch.setattr(
+            "agent_common.middleware.conditional_hitl.interrupt",
+            lambda request: {"decisions": [{"type": "reject"} for _ in request["action_requests"]]},
+        )
+        scored: list[str] = []
+        mw = self._mw(scored)
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "write_todos", "args": {}, "id": "tc", "type": "tool_call"}],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime({}))
+
+        assert scored == ["write_todos"]
 
     async def test_platform_tool_is_resolved_and_gated(self, monkeypatch):
         """A callable tool the registry does not hold — ``FinalResponseSchema`` and the

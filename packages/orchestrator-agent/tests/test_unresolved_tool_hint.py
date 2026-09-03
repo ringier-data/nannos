@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 
+from agent_common.core.graph_utils import deep_agent_builtin_tools
+
 from app.core.graph_factory import _create_hitl_middleware
 from app.middleware.dynamic_tool_dispatch import _unresolved_tool_content
 
@@ -100,3 +102,36 @@ class TestHitlMiddlewareStaticTools:
     def test_no_static_tools_keeps_the_previous_behaviour(self):
         mw = _create_hitl_middleware()
         assert mw._get_tool_instance("FinalResponseSchema", None) is None
+        # Without a complete list the gate must not conclude anything from absence.
+        assert mw._platform_tools_are_exhaustive is False
+
+
+class TestDeepAgentBuiltinsAreRegistered:
+    """``create_deep_agent`` installs write_todos + the filesystem tools itself, so
+    their instances exist only inside that call. The gate needs them: they are
+    dispatchable, so absence of one must not read as "this name is invented", and
+    their approval cards need a real args_schema.
+    """
+
+    def test_builtins_are_fetchable_and_the_set_is_marked_complete(self):
+        mw = _create_hitl_middleware(deep_agent_builtin_tools(None), exhaustive=True)
+
+        for name in ("write_todos", "ls", "read_file", "write_file", "edit_file", "glob", "grep"):
+            assert mw._get_tool_instance(name, None) is not None, name
+        assert mw._platform_tools_are_exhaustive is True
+
+    def test_seeded_names_match_the_tools_the_graph_actually_installs(self):
+        """Migration 090 seeds risk policy for these by name. If deepagents renames or
+        adds one, the seed silently stops applying — so pin the list here.
+        """
+        names = {t.name for t in deep_agent_builtin_tools(None)}
+        assert names == {
+            "write_todos",
+            "ls",
+            "glob",
+            "grep",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "execute",
+        }

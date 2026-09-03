@@ -162,11 +162,12 @@ def _reachable_inside_eval(snake_name: str, exposed_names: set[str] | None) -> b
     return snake_name in exposed_names
 
 
-def _camel_alias_tool_message(
+def _unresolvable_tool_message(
     tool_name: str,
     tool_call: ToolCall,
     known_names: set[str],
     exposed_names: set[str] | None = None,
+    known_names_are_exhaustive: bool = False,
 ) -> ToolMessage | None:
     """Answer a native call that used a tool's *PTC* identifier, instead of scoring it.
 
@@ -191,17 +192,32 @@ def _camel_alias_tool_message(
     postmortem), and on an all-alias turn would route the graph to END with the
     hint unread. Upstream's own reject path keeps the call for the same reason.
 
-    Returns None unless the name is *positively* identifiable as a camelCase alias
-    of a known tool. Absence alone is never enough: tools registered directly with
-    ``ToolNode`` (``write_todos``, the filesystem tools) are invisible to this
-    middleware, and refusing those would break callable tools.
+    Without *known_names_are_exhaustive*, returns None unless the name is
+    *positively* identifiable as a camelCase alias of a known tool. Absence alone
+    proves nothing then: tools registered directly with ``ToolNode`` are invisible
+    to this middleware, and refusing those would break callable tools. When the
+    caller has registered every dispatchable tool (see
+    ``deep_agent_builtin_tools``), absence *is* proof and any unresolvable name is
+    answered — sparing the user an approval card for a call that cannot run, and
+    the summary LLM the cost of describing it.
     """
     if tool_name in known_names:
         return None
 
     snake = next((n for n in known_names if to_camel_case(n) == tool_name), None)
     if snake is None:
-        return None
+        if not known_names_are_exhaustive:
+            return None
+        return ToolMessage(
+            content=(
+                f"`{tool_name}` is not a tool that exists here, so nothing ran and nothing was "
+                "approved. The name is wrong, not the capability: check the tools you were given "
+                "for the one you meant, or delegate the work with `task`."
+            ),
+            name=tool_name,
+            tool_call_id=tool_call["id"],
+            status="error",
+        )
 
     # Imported lazily: ``graph_utils`` reaches back into this module (it builds the
     # middleware), so a module-level import would close the cycle.
@@ -257,6 +273,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         tool_risk_cache: ToolRiskCache | None = None,
         tool_server_map: dict[str, str] | None = None,
         platform_tools: dict[str, BaseTool] | None = None,
+        platform_tools_are_exhaustive: bool = False,
     ) -> None:
         interrupt_on = interrupt_on or {}
 
@@ -277,6 +294,13 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # Platform tools (e.g. filesystem tools from FilesystemMiddleware) that
         # aren't in the runtime tool_registry but need schema for risk scoring
         self._platform_tools: dict[str, BaseTool] = platform_tools or {}
+        # True only when the caller has registered EVERY tool the graph can dispatch
+        # that isn't in the runtime registry — the deep-agent builtins included. It
+        # licenses the stronger verdict in _unresolvable_tool_message: with a partial
+        # set, "I can't find it" means nothing; with an exhaustive one it means the
+        # call cannot resolve, and the model is better served by being told so now
+        # than by an approval card for a tool that will fail to dispatch.
+        self._platform_tools_are_exhaustive = platform_tools_are_exhaustive
 
         # Pass through to parent (it safely ignores unknown keys in the dict)
         super().__init__(interrupt_on=interrupt_on, description_prefix=description_prefix)
@@ -388,9 +412,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         Flow for each tool call:
         1. If tool_name == "task" -> auto-approve (sub-agent owns its own HITL)
-        1b. If the name is a camelCase PTC identifier of a known tool -> answer the
-            call with a corrective ToolMessage and drop it (never scored, never
-            dispatched). See _camel_alias_tool_message.
+        1b. If the name resolves to no dispatchable tool -> answer the call with a
+            corrective ToolMessage (never scored, never dispatched; the call itself
+            stays put). See _unresolvable_tool_message.
         2. If tool is in static interrupt_on -> use static guard (same as sync)
         3. If risk_scorer is configured -> score the tool call:
            a. Check bypass rules from runtime context
@@ -413,8 +437,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # Store risk metadata per interrupt for inclusion in the payload
         _risk_metadata: list[_RiskMetadata] = []
         # Calls answered here instead of being scored or dispatched, by index:
-        # a camelCase PTC identifier emitted as a native call. See
-        # _camel_alias_tool_message.
+        # a camelCase PTC identifier emitted as a native call, or (when the platform
+        # set is exhaustive) any name that resolves to nothing. See
+        # _unresolvable_tool_message.
         corrective_messages: dict[int, ToolMessage] = {}
 
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
@@ -438,19 +463,20 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             #     Gated on the instance lookup (two dict hits) so the name-set build
             #     and the camel scan stay off the path every resolvable call takes.
             corrective = (
-                _camel_alias_tool_message(
+                _unresolvable_tool_message(
                     tool_name,
                     tool_call,
                     self._known_tool_names(getattr(runtime, "context", None)),
                     _ptc_exposed_tool_names(state),
+                    self._platform_tools_are_exhaustive,
                 )
                 if self._get_tool_instance(tool_name, getattr(runtime, "context", None)) is None
                 else None
             )
             if corrective is not None:
                 logger.info(
-                    "Tool call '%s' used a PTC camelCase identifier natively; answering with a hint "
-                    "instead of scoring or dispatching it",
+                    "Tool call '%s' does not resolve to any dispatchable tool; answering with a "
+                    "hint instead of scoring or dispatching it",
                     tool_name,
                 )
                 corrective_messages[idx] = corrective
@@ -570,7 +596,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # If no interrupts needed, return early — unless a call was answered above,
         # whose ToolMessage still has to reach the graph. The AIMessage is returned
         # unchanged: the answered call STAYS in ``tool_calls`` (see
-        # _camel_alias_tool_message on why it must not be stripped).
+        # _unresolvable_tool_message on why it must not be stripped).
         if not action_requests:
             if not corrective_messages:
                 return None
