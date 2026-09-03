@@ -43,6 +43,7 @@ from langchain.agents.middleware.human_in_the_loop import (
 from langchain.agents.middleware.types import AgentState, ContextT, ResponseT, StateT
 from langchain_core.messages import AIMessage, ToolCall
 from langchain_core.tools import BaseTool
+from langchain_quickjs._prompt import to_camel_case
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
@@ -118,6 +119,135 @@ def _client_action_tool_message(decision: dict[str, Any], tool_call: ToolCall) -
     )
 
 
+def _ptc_exposed_tool_names(state: Any) -> set[str] | None:
+    """The exact tool names the PTC bridge last exposed inside ``eval``, or None.
+
+    Written to the checkpoint by the code-interpreter middleware
+    (``PTC_EXPOSED_TOOL_NAMES_STATE_KEY``) so an interrupt resume can re-expose the
+    same set. Read here to keep the corrective hint honest — see
+    _reachable_inside_eval. Absent on the first turn and whenever PTC is off, hence
+    the None fallback rather than an empty set (which would mean "nothing exposed").
+    """
+    from agent_common.core.graph_utils import PTC_EXPOSED_TOOL_NAMES_STATE_KEY
+
+    try:
+        names = state.get(PTC_EXPOSED_TOOL_NAMES_STATE_KEY)
+    except AttributeError:
+        return None
+    if not names:
+        return None
+    return {name for name in names if isinstance(name, str)}
+
+
+def _reachable_inside_eval(snake_name: str, exposed_names: set[str] | None) -> bool:
+    """Whether ``snake_name`` is actually callable as ``tools.<camel>`` inside ``eval``.
+
+    Being a known tool is not enough. ``_PTC_EXCLUDED_TOOL_NAMES`` (``task``,
+    ``write_todos``, the response schemas, ``client_action``, ``notify_user``) are
+    deliberately kept natively bound because they *always fail* inside the sandbox,
+    and the raw MCP-catalogue listers are stripped from the namespace by
+    ``_without_raw_listers``. Sending the model into ``eval`` for one of those costs
+    a round-trip and bounces straight back out through ``_not_a_function_hint``.
+
+    *exposed_names* is the exact set the PTC bridge last exposed, read from the
+    checkpointed state; when it is unavailable we fall back to excluding only the
+    names that can never be in there.
+    """
+    from agent_common.core.graph_utils import _PTC_EXCLUDED_TOOL_NAMES, _RAW_LISTING_TOOL_NAMES
+
+    if snake_name in _PTC_EXCLUDED_TOOL_NAMES or snake_name in _RAW_LISTING_TOOL_NAMES:
+        return False
+    if exposed_names is None:
+        return True
+    return snake_name in exposed_names
+
+
+def _unresolvable_tool_message(
+    tool_name: str,
+    tool_call: ToolCall,
+    known_names: set[str],
+    exposed_names: set[str] | None = None,
+    known_names_are_exhaustive: bool = False,
+) -> ToolMessage | None:
+    """Answer a native call that used a tool's *PTC* identifier, instead of scoring it.
+
+    Under PTC the ``eval`` prompt advertises tools as camelCase members
+    (``tools.consoleCreateBugReport``). Models regularly lift one of those
+    identifiers out of the prompt and emit it as a **native** tool call. Nothing
+    resolves it: the registry is keyed on the snake_case name, so the risk gate
+    cannot fetch the tool and the dispatcher cannot execute it.
+
+    Left alone, the call used to be classified from its name alone (see
+    ``score_tool_risk``) and then answered with ``Tool '…' is not available`` — a
+    dead end the model relayed to the user as "unavailable in this session",
+    against the standing instruction never to report a tool as missing. Here we
+    answer the call ourselves with the defect and the fix, the way
+    ``graph_utils._not_a_function_hint`` does for the inside-``eval`` direction.
+
+    The caller KEEPS the answered tool call in the AIMessage. A call that already
+    has a ToolMessage is never dispatched (``langchain.agents.factory``,
+    ``pending_tool_calls``), so keeping it costs nothing — while *stripping* it
+    would leave a ``tool_result`` with no matching ``tool_use`` in the checkpointed
+    history, which Bedrock/Anthropic hard-400 on for every later turn (the #184
+    postmortem), and on an all-alias turn would route the graph to END with the
+    hint unread. Upstream's own reject path keeps the call for the same reason.
+
+    Without *known_names_are_exhaustive*, returns None unless the name is
+    *positively* identifiable as a camelCase alias of a known tool. Absence alone
+    proves nothing then: tools registered directly with ``ToolNode`` are invisible
+    to this middleware, and refusing those would break callable tools. When the
+    caller has registered every dispatchable tool (see
+    ``deep_agent_builtin_tools``), absence *is* proof and any unresolvable name is
+    answered — sparing the user an approval card for a call that cannot run, and
+    the summary LLM the cost of describing it.
+    """
+    if tool_name in known_names:
+        return None
+
+    snake = next((n for n in known_names if to_camel_case(n) == tool_name), None)
+    if snake is None:
+        if not known_names_are_exhaustive:
+            return None
+        return ToolMessage(
+            content=(
+                f"`{tool_name}` is not a tool that exists here, so nothing ran and nothing was "
+                "approved. The name is wrong, not the capability: check the tools you were given "
+                "for the one you meant, or delegate the work with `task`."
+            ),
+            name=tool_name,
+            tool_call_id=tool_call["id"],
+            status="error",
+        )
+
+    # Imported lazily: ``graph_utils`` reaches back into this module (it builds the
+    # middleware), so a module-level import would close the cycle.
+    from agent_common.core.graph_utils import code_interpreter_ptc_enabled
+
+    if code_interpreter_ptc_enabled() and _reachable_inside_eval(snake, exposed_names):
+        content = (
+            f"`{tool_name}` is not a tool you can call directly — it is the identifier of "
+            f"`{snake}` *inside* the `eval` code interpreter, where tool names are camelCase. "
+            f"Call it there instead:\n\n"
+            f"    const result = await tools.{tool_name}({{ ... }});\n    result\n\n"
+            "Nothing ran and nothing was approved; re-issue the call inside `eval`."
+        )
+    else:
+        # Either PTC is off, or the tool is one of those deliberately kept OUT of the
+        # sandbox — in both cases it is natively bound under its snake_case name.
+        content = (
+            f"`{tool_name}` is not a tool name — that is the camelCase form used inside the "
+            f"`eval` code interpreter. This tool is called `{snake}` and is a regular tool "
+            "call: re-issue it under that name. Nothing ran."
+        )
+
+    return ToolMessage(
+        content=content,
+        name=tool_name,
+        tool_call_id=tool_call["id"],
+        status="error",
+    )
+
+
 class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, ContextT, ResponseT]):
     """HumanInTheLoopMiddleware with conditional guarding and dynamic risk scoring.
 
@@ -143,6 +273,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         tool_risk_cache: ToolRiskCache | None = None,
         tool_server_map: dict[str, str] | None = None,
         platform_tools: dict[str, BaseTool] | None = None,
+        platform_tools_are_exhaustive: bool = False,
     ) -> None:
         interrupt_on = interrupt_on or {}
 
@@ -163,6 +294,13 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # Platform tools (e.g. filesystem tools from FilesystemMiddleware) that
         # aren't in the runtime tool_registry but need schema for risk scoring
         self._platform_tools: dict[str, BaseTool] = platform_tools or {}
+        # True only when the caller has registered EVERY tool the graph can dispatch
+        # that isn't in the runtime registry — the deep-agent builtins included. It
+        # licenses the stronger verdict in _unresolvable_tool_message: with a partial
+        # set, "I can't find it" means nothing; with an exhaustive one it means the
+        # call cannot resolve, and the model is better served by being told so now
+        # than by an approval card for a tool that will fail to dispatch.
+        self._platform_tools_are_exhaustive = platform_tools_are_exhaustive
 
         # Pass through to parent (it safely ignores unknown keys in the dict)
         super().__init__(interrupt_on=interrupt_on, description_prefix=description_prefix)
@@ -274,6 +412,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         Flow for each tool call:
         1. If tool_name == "task" -> auto-approve (sub-agent owns its own HITL)
+        1b. If the name resolves to no dispatchable tool -> answer the call with a
+            corrective ToolMessage (never scored, never dispatched; the call itself
+            stays put). See _unresolvable_tool_message.
         2. If tool is in static interrupt_on -> use static guard (same as sync)
         3. If risk_scorer is configured -> score the tool call:
            a. Check bypass rules from runtime context
@@ -295,6 +436,11 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         interrupt_indices: list[int] = []
         # Store risk metadata per interrupt for inclusion in the payload
         _risk_metadata: list[_RiskMetadata] = []
+        # Calls answered here instead of being scored or dispatched, by index:
+        # a camelCase PTC identifier emitted as a native call, or (when the platform
+        # set is exhaustive) any name that resolves to nothing. See
+        # _unresolvable_tool_message.
+        corrective_messages: dict[int, ToolMessage] = {}
 
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
             tool_name: str = tool_call["name"]
@@ -307,6 +453,33 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             #    executing). Interrupting ``eval`` would trigger a graph
             #    interrupt/resume cycle the PTC bridge is designed to avoid.
             if tool_name in ("task", PTC_CODE_INTERPRETER_TOOL_NAME):
+                continue
+
+            # 1b. A name nothing can resolve is not scored — there is no schema to
+            #     reason about, so a classification would be derived from the name
+            #     alone and cached as if it were a real profile. Answer the call
+            #     with the fix instead of letting it fall through to the
+            #     dispatcher's "Tool ... is not available".
+            #     Gated on the instance lookup (two dict hits) so the name-set build
+            #     and the camel scan stay off the path every resolvable call takes.
+            corrective = (
+                _unresolvable_tool_message(
+                    tool_name,
+                    tool_call,
+                    self._known_tool_names(getattr(runtime, "context", None)),
+                    _ptc_exposed_tool_names(state),
+                    self._platform_tools_are_exhaustive,
+                )
+                if self._get_tool_instance(tool_name, getattr(runtime, "context", None)) is None
+                else None
+            )
+            if corrective is not None:
+                logger.info(
+                    "Tool call '%s' does not resolve to any dispatchable tool; answering with a "
+                    "hint instead of scoring or dispatching it",
+                    tool_name,
+                )
+                corrective_messages[idx] = corrective
                 continue
 
             # 2. Static guards take priority
@@ -420,9 +593,14 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 }
             )
 
-        # If no interrupts needed, return early
+        # If no interrupts needed, return early — unless a call was answered above,
+        # whose ToolMessage still has to reach the graph. The AIMessage is returned
+        # unchanged: the answered call STAYS in ``tool_calls`` (see
+        # _unresolvable_tool_message on why it must not be stripped).
         if not action_requests:
-            return None
+            if not corrective_messages:
+                return None
+            return {"messages": [last_ai_msg, *corrective_messages.values()]}
 
         # Attach a plain-language summary to each action request so the client
         # can show non-technical users what the tool would do. Display-only
@@ -454,7 +632,13 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         decision_idx = 0
 
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
-            if idx in interrupt_indices:
+            if idx in corrective_messages:
+                # Answered above. The call is KEPT (a call that already has a
+                # ToolMessage is never dispatched) so the turn stays provider-legal
+                # and the router loops back to the model with the hint.
+                revised_tool_calls.append(tool_call)
+                artificial_tool_messages.append(corrective_messages[idx])
+            elif idx in interrupt_indices:
                 tool_name = tool_call["name"]
                 decision = decisions[decision_idx]
                 metadata = _risk_metadata[decision_idx]
@@ -556,6 +740,26 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         # Default: platform tools
         return "_self"
+
+    def _known_tool_names(self, context: Any) -> set[str]:
+        """Every tool name this middleware can account for, for alias detection.
+
+        The union of the per-user registry, the injected platform/static tools and
+        both server maps. It is deliberately *not* treated as the set of callable
+        tools: the dispatcher also resolves tools registered directly with
+        ``ToolNode`` (``write_todos``, the filesystem tools, the response schemas),
+        which never appear here. So this set answers "is this name a mangled form
+        of something I know?", never "is this name callable?".
+        """
+        names: set[str] = set(self._platform_tools)
+        if self._tool_server_map:
+            names |= set(self._tool_server_map)
+        if context is not None:
+            for attr in ("tool_registry", "tool_server_map"):
+                mapping = getattr(context, attr, None)
+                if isinstance(mapping, dict):
+                    names |= {name for name in mapping if isinstance(name, str)}
+        return names
 
     def _get_tool_instance(self, tool_name: str, context: Any) -> BaseTool | None:
         """Get a BaseTool instance from the runtime context's tool registry or platform tools."""

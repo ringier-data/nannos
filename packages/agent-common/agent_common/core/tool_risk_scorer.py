@@ -111,7 +111,9 @@ async def score_tool_risk(
     Args:
         tool_name: Name of the tool being called.
         args: The tool call arguments.
-        tool: The BaseTool instance (for schema hashing). If None, schema check is skipped.
+        tool: The BaseTool instance (for description + schema). If None the call is NOT
+            classified at all — see the guard below: a name-only deterministic score is
+            returned and nothing is cached or persisted.
         cache: The shared ToolRiskCache instance.
         server_slug: MCP server slug (e.g. 'console', 'github'). '_self' for in-process tools.
 
@@ -179,13 +181,40 @@ async def score_tool_risk(
     # The cache's refresh loop handles bulk loading. For individual misses during
     # scoring, we do an inline LLM call (step 3).
 
+    if tool is None:
+        # 2b. Nothing to classify. The lookup above still ran — a hand-seeded static
+        # guard carries `schema_hash = ''` and must be honoured whether or not the
+        # instance is fetchable — but there is no description and no input schema to
+        # reason about, so the classification below would degenerate to
+        # "No description available / No schema available". `risk_factors` then comes
+        # back `{}`: a profile asserting "this tool has no risk-bearing parameters",
+        # derived from a tool nobody looked at, and it used to be cached AND persisted
+        # with an empty `schema_hash` — indistinguishable in the catalogue from a
+        # profile derived from a real schema. Every camelCase name a model guessed
+        # natively left such a row behind (see migration 089).
+        #
+        # The call is still gated: this is the same name-based fallback the LLM branch
+        # itself falls back to on failure. It is only never classified and never stored.
+        #
+        # The destructive floor must be applied here too. `_deterministic_fallback`
+        # tests its safe prefixes FIRST, so `read_and_remove_file` scores 0.3 on the
+        # name alone — under the gate. Before this guard existed such a name reached
+        # the LLM branch, where the floor caught it; without the max() the guard would
+        # turn a would-be approval card into a silent auto-execute.
+        score = max(_deterministic_fallback(tool_name), _destructive_floor(tool_name))
+        logger.info(
+            "Tool '%s' (%s) could not be fetched; scoring it %.2f from its name alone, "
+            "without classifying or persisting it",
+            tool_name,
+            server_slug,
+            score,
+        )
+        return score, None
+
     # 3. LLM scoring
     try:
-        description = ""
-        input_schema: dict[str, Any] = {}
-        if tool is not None:
-            description = tool.description or ""
-            input_schema = tool.get_input_schema().model_json_schema()
+        description = tool.description or ""
+        input_schema: dict[str, Any] = tool.get_input_schema().model_json_schema()
 
         entry = await _score_tool_via_llm(tool_name, description, input_schema)
         entry.schema_hash = current_hash

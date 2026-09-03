@@ -94,3 +94,98 @@ async def test_destructive_floor_applies_on_cache_hit():
     )
     score, _ = await score_tool_risk("alloy-riad_get_campaign_by_id", {}, cache=cache)
     assert score == 0.2
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_tool_is_never_classified_or_persisted(monkeypatch):
+    """A call whose tool cannot be fetched has no description and no schema, so the
+    classification would be derived from its name alone — and used to be cached AND
+    persisted with an empty schema_hash, indistinguishable from a real profile.
+    """
+    from unittest.mock import MagicMock
+
+    async def fail(*args, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("the LLM must not be asked to classify a tool nobody could fetch")
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", fail)
+
+    cache = MagicMock()
+    cache.get.return_value = None
+
+    score, entry = await score_tool_risk("consoleCreateBugReport", {"description": "x"}, cache=cache)
+
+    # Still gated — on the same name-based fallback the LLM branch uses on failure.
+    assert score == _deterministic_fallback("consoleCreateBugReport")
+    assert entry is None
+    cache.put.assert_not_called()
+    cache.persist_entry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_tool_still_honours_a_seeded_static_guard():
+    """The seeded static guards (migration 057) carry schema_hash = '' on purpose, so
+    the cache lookup must still run for a tool the caller could not fetch.
+    """
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+
+    now = datetime.now(timezone.utc)
+    guard = ToolRiskEntry(
+        base_score=1.0,
+        risk_factors={},
+        allowed_actions=["approve", "reject"],
+        schema_hash="",
+        updated_at=now,
+        last_accessed_at=now,
+    )
+    cache = MagicMock()
+    cache.get.return_value = guard
+
+    score, entry = await score_tool_risk("read_personal_file", {"path": "x"}, cache=cache)
+
+    assert score == 1.0
+    assert entry is guard
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_destructive_tool_still_clears_the_floor():
+    """`_deterministic_fallback` checks its safe prefixes first, so a name like
+    `read_and_remove_file` scores 0.3 on the name alone — under the 0.80 gate. The
+    unfetchable path must apply the destructive floor, as the LLM and cache-hit paths do.
+    """
+    from unittest.mock import MagicMock
+
+    cache = MagicMock()
+    cache.get.return_value = None
+
+    assert _deterministic_fallback("read_and_remove_file") == 0.3  # the trap
+    score, entry = await score_tool_risk("read_and_remove_file", {"path": "/x"}, cache=cache)
+
+    assert score == _DESTRUCTIVE_FLOOR_SCORE
+    assert score > 0.80
+    assert entry is None
+    cache.persist_entry.assert_not_called()
+
+
+def test_persist_entry_refuses_a_profile_with_no_schema_hash(caplog):
+    """The structural half of "no row for a tool that could not be fetched".
+
+    `score_tool_risk` returns before classifying an unfetchable tool, but that is one
+    early return away from regressing. The cache refuses the write too, so a future
+    caller cannot reintroduce a phantom row by skipping the check.
+    """
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+
+    from agent_common.core.tool_risk_cache import ToolRiskCache
+
+    now = datetime.now(timezone.utc)
+    cache = ToolRiskCache()
+    cache._api_client = MagicMock()
+
+    no_schema = ToolRiskEntry(
+        base_score=0.4, risk_factors={}, allowed_actions=["approve"], schema_hash="",
+        updated_at=now, last_accessed_at=now,
+    )
+    cache.persist_entry("consoleCreateBugReport", "_self", no_schema)
+    cache._api_client.upsert_score.assert_not_called()

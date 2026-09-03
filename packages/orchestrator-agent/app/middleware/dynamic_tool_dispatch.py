@@ -52,6 +52,7 @@ from agent_common.a2a.stream_events import (
 )
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
+from agent_common.core.graph_utils import code_interpreter_ptc_enabled
 from agent_common.core.hitl_resume import (
     KIND_AUTH,
     KIND_HITL,
@@ -75,6 +76,7 @@ from langchain_core.messages.content import NonStandardContentBlock
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
+from langchain_quickjs._prompt import to_camel_case
 from langgraph.config import get_stream_writer
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command, interrupt
@@ -711,6 +713,70 @@ async def _maybe_adopt_run_thread(
         source_thread_id,
         target_config["configurable"]["thread_id"],
         subagent_type,
+    )
+
+
+def _unresolved_tool_content(
+    tool_name: str, user_context: GraphRuntimeContext, static_tools: dict[str, BaseTool] | None = None
+) -> str:
+    """The message for a tool call nothing could resolve.
+
+    ``Error: Tool 'X' is not available`` is a dead end: the model has nothing to
+    act on, and it has been observed relaying it to the user as "unavailable in
+    this session" — against the standing instruction never to report a tool as
+    missing (``models/config.py``). Say what the defect is and what to do next.
+
+    The camelCase case (the model lifted a ``tools.<camelName>`` identifier out of
+    the PTC prompt and emitted it as a native call) is normally answered earlier,
+    by the risk gate; this covers the paths that reach dispatch anyway.
+    """
+    # Match what ``_lookup_tool`` itself resolves against — registry *and* static
+    # tools — so a camel alias of a static tool gets the alias hint rather than
+    # generic MCP-catalogue discovery, which could never surface it.
+    known = set(user_context.tool_registry or {}) | set(static_tools or {})
+    snake = next((n for n in known if to_camel_case(n) == tool_name), None)
+    if snake is not None and snake != tool_name:
+        if code_interpreter_ptc_enabled():
+            return (
+                f"`{tool_name}` is not callable as a tool — it is the identifier of `{snake}` "
+                f"*inside* the `eval` code interpreter. Call it there: "
+                f"`await tools.{tool_name}({{ ... }})`."
+            )
+        return (
+            f"`{tool_name}` is not a tool name — the tool is called `{snake}`. Re-issue the call "
+            "under that name."
+        )
+    # The discovery advice differs by mode, and naming a tool the user does not have
+    # would be its own dead end — so mention the raw MCP-catalogue listers only when
+    # they are actually in the registry. They stay *natively* bound even under PTC
+    # (``graph_utils._without_raw_listers``), so they are the one discovery surface
+    # that reads the same in both modes.
+    listers = [n for n in ("console_grep_mcp_tools", "console_list_mcp_servers") if n in known]
+    lookup = " or ".join(f"`{n}`" for n in listers)
+    opening = f"`{tool_name}` did not resolve to any tool, so nothing ran. The name is wrong, not the capability:"
+
+    if code_interpreter_ptc_enabled():
+        # Under PTC the callable surface is the camelCase `tools.*` members rendered in
+        # the eval prompt. `tools.search` is pinned only in core-only mode (large
+        # catalogue), which is not knowable from here, so it is not promised.
+        parts = [
+            opening,
+            "the tools you can call are the camelCase `tools.*` members listed for `eval`, so check "
+            "that list for the name you meant",
+        ]
+        if lookup:
+            parts.append(f"— {lookup} also lists the wider catalogue as a regular tool call")
+        parts.append("— then re-issue the call, or delegate the work with `task`.")
+        return " ".join(parts)
+
+    if lookup:
+        return (
+            f"{opening} look the tool up with {lookup} and re-issue the call with the name it "
+            "reports, or delegate the work with `task`."
+        )
+    return (
+        f"{opening} re-check the tools you were given for the name you meant and re-issue the "
+        "call, or delegate the work with `task`."
     )
 
 
@@ -2651,7 +2717,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
-                content=f"Error: Tool '{tool_name}' is not available",
+                content=_unresolved_tool_content(tool_name, user_context, self.static_tools),
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 status="error",
@@ -2765,7 +2831,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
-                content=f"Error: Tool '{tool_name}' is not available",
+                content=_unresolved_tool_content(tool_name, user_context, self.static_tools),
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 status="error",
