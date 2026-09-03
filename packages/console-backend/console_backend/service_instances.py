@@ -293,6 +293,7 @@ async def initialize_services(app: "FastAPI") -> None:
 
     app.state.bug_report_service = BugReportService()
     app.state.bug_report_service.set_repository(app.state.bug_report_repository)
+    app.state.bug_report_service.set_notification_service(app.state.notification_service)
 
     # Initialize debug agent service (dispatches to agent-runner)
     app.state.debug_agent_service = DebugAgentService(

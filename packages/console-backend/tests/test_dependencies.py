@@ -218,6 +218,7 @@ class TestRequireAuthOrBearerToken:
                 first_name="New",
                 last_name="User",
                 company_name="New Company",
+                is_service_account=False,
             )
 
     @pytest.mark.asyncio
@@ -265,6 +266,9 @@ class TestRequireAuthOrBearerToken:
                 first_name="",
                 last_name="",
                 company_name=None,
+                # A token carrying nothing but a `sub` is a person with sparse claims,
+                # not a machine — only Keycloak's `service-account-` username says that.
+                is_service_account=False,
             )
 
     @pytest.mark.asyncio

@@ -51,6 +51,10 @@ class User(BaseModel):
     last_name: str
     company_name: str | None = None
     is_administrator: bool = False
+    #: True for machine identities — the seeded `system` owner of auto-provisioned agents
+    #: and the service accounts auto-onboarded from client-credentials tokens. Nobody reads
+    #: their inbox, so audiences selected by standing filter them out.
+    is_service_account: bool = False
     role: UserRole = UserRole.MEMBER
     status: UserStatus = UserStatus.ACTIVE
     phone_number_idp: str | None = None

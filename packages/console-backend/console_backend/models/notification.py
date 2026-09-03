@@ -25,6 +25,7 @@ class NotificationType(str, Enum):
     SECRET_ACCESS_REVOKED = "secret_access_revoked"
     SECRET_PERMISSION_CHANGED = "secret_permission_changed"
     SYSTEM_ANNOUNCEMENT = "system_announcement"
+    BUG_REPORT_FILED = "bug_report_filed"
 
 
 class ActivationSource(str, Enum):

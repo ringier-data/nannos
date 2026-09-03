@@ -128,6 +128,7 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
                     first_name=payload.get("given_name", ""),
                     last_name=payload.get("family_name", ""),
                     company_name=payload.get("company_name"),
+                    is_service_account=token_is_service_account(payload),
                 )
 
             logger.info(f"Bearer token validated for user: {user.email} (sub={sub})")
@@ -146,6 +147,33 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
         detail="Not authenticated",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+#: Keycloak names a client's service account `service-account-<clientId>` and puts that in
+#: `preferred_username`. It is the one claim that distinguishes a client-credentials token
+#: from a person's, since a service account also carries `azp` — every token does.
+_SERVICE_ACCOUNT_USERNAME_PREFIX = "service-account-"
+
+
+def token_is_service_account(payload: dict) -> bool:
+    """Whether this token belongs to a machine identity rather than a person.
+
+    Used when auto-onboarding from token claims, so the row is marked at creation instead
+    of being inferred later from a naming convention (see issue #198).
+
+    One signal only: `preferred_username` carrying Keycloak's `service-account-` prefix,
+    which is the issuer *stating* that this is a client's service account. Absence of
+    identity claims is deliberately not treated as a second signal, however tempting —
+    `require_auth_or_bearer_token` onboards a person from a token carrying nothing but a
+    `sub`, filling the rest with empty strings, so "no email and no name" describes a
+    real person with sparse claims as readily as a machine.
+
+    Errs towards "person", which is the cheaper way to be wrong: an unflagged machine
+    collects notifications nobody reads, while a flagged person silently stops receiving
+    theirs. Anything the prefix misses is a row an operator can flag directly.
+    """
+    username = str(payload.get("preferred_username") or "")
+    return username.startswith(_SERVICE_ACCOUNT_USERNAME_PREFIX)
 
 
 async def get_client_id_from_request(request: Request) -> str | None:

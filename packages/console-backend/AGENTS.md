@@ -272,6 +272,27 @@ from console_backend.service_instances import sub_agent_service
 agent = await sub_agent_service.create_sub_agent(...)
 ```
 
+### Notification Audiences Beyond Group Membership
+Two things to get right when an audience is chosen by standing rather than by group
+membership (`BugReportService._notify_administrators` is the worked example):
+
+- **Filter out machine accounts with `AND is_service_account IS FALSE`.** Two rows exist
+  in every deployment with no person behind them: the seeded `system` owner of
+  auto-provisioned agents (migration 041) and a `service-account-<client>` row that
+  console-backend onboards the first time a service calls it with a client-credentials
+  token. Both have been found flagged `is_administrator` in a live database, so an
+  audience keyed on that flag reaches them and fills inboxes nobody opens.
+
+  The flag (migration 088) is set at creation from the token's own claims — see
+  `dependencies.token_is_service_account`. Use it rather than an id list: an id list is
+  one instance of the category, and the previous version of this note argued the seed's
+  `is_administrator = FALSE` default made even that redundant. It did not. A seed's column
+  values are a starting state, not an invariant; reason from the rows a live database holds.
+- **Match the audience to read visibility, not to a write capability.** `bug_reports`
+  grants `triage` to `approver`, but no read path honours it, so notifying triagers would
+  hand out content the recipient is denied everywhere else. It is also the less durable
+  key: a capability can be redefined or removed, while `is_administrator` is structural.
+
 ### Authorization Checks
 ```python
 from console_backend.authorization import check_capability, check_action_allowed

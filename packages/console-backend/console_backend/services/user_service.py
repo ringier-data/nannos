@@ -76,7 +76,7 @@ class UserService:
         try:
             query = text("""
                 SELECT id, sub, email, first_name, last_name, company_name,
-                       is_administrator, role, status, phone_number_idp,
+                       is_administrator, is_service_account, role, status, phone_number_idp,
                        scim_attributes, deleted_at, created_at, updated_at
                 FROM users
                 WHERE id = :user_id
@@ -96,6 +96,7 @@ class UserService:
                 last_name=row["last_name"],
                 company_name=row["company_name"],
                 is_administrator=row["is_administrator"],
+                is_service_account=row["is_service_account"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
                 phone_number_idp=row["phone_number_idp"],
@@ -121,7 +122,7 @@ class UserService:
         try:
             query = text("""
                 SELECT id, sub, email, first_name, last_name, company_name,
-                       is_administrator, role, status, phone_number_idp,
+                       is_administrator, is_service_account, role, status, phone_number_idp,
                        scim_attributes, deleted_at, created_at, updated_at
                 FROM users
                 WHERE sub = :sub
@@ -141,6 +142,7 @@ class UserService:
                 last_name=row["last_name"],
                 company_name=row["company_name"],
                 is_administrator=row["is_administrator"],
+                is_service_account=row["is_service_account"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
                 phone_number_idp=row["phone_number_idp"],
@@ -171,7 +173,7 @@ class UserService:
         try:
             query = text("""
                 SELECT id, sub, email, first_name, last_name, company_name,
-                       is_administrator, role, status, phone_number_idp,
+                       is_administrator, is_service_account, role, status, phone_number_idp,
                        scim_attributes, deleted_at, created_at, updated_at
                 FROM users
                 WHERE lower(email) = lower(:email) AND deleted_at IS NULL
@@ -191,6 +193,7 @@ class UserService:
                 last_name=row["last_name"],
                 company_name=row["company_name"],
                 is_administrator=row["is_administrator"],
+                is_service_account=row["is_service_account"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
                 phone_number_idp=row["phone_number_idp"],
@@ -218,7 +221,7 @@ class UserService:
         try:
             query = text("""
                 SELECT u.id, u.sub, u.email, u.first_name, u.last_name, u.company_name,
-                       u.is_administrator, u.role, u.status, u.phone_number_idp,
+                       u.is_administrator, u.is_service_account, u.role, u.status, u.phone_number_idp,
                        u.scim_attributes, u.deleted_at, u.created_at, u.updated_at
                 FROM users u
                 LEFT JOIN user_settings us ON u.id = us.user_id
@@ -242,6 +245,7 @@ class UserService:
                 last_name=row["last_name"],
                 company_name=row["company_name"],
                 is_administrator=row["is_administrator"],
+                is_service_account=row["is_service_account"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
                 phone_number_idp=row["phone_number_idp"],
@@ -355,7 +359,7 @@ class UserService:
         # Data query - get users
         data_query = text(f"""
             SELECT u.id, u.sub, u.email, u.first_name, u.last_name, u.company_name,
-                   u.is_administrator, u.role, u.status, u.deleted_at,
+                   u.is_administrator, u.is_service_account, u.role, u.status, u.deleted_at,
                    u.created_at, u.updated_at
             FROM users u
             {where_clause}
@@ -382,6 +386,7 @@ class UserService:
                     last_name=row["last_name"],
                     company_name=row["company_name"],
                     is_administrator=row["is_administrator"],
+                    is_service_account=row["is_service_account"],
                     role=row["role"],
                     status=UserStatus(row["status"]),
                     deleted_at=row["deleted_at"],
@@ -504,6 +509,7 @@ class UserService:
         last_name: str,
         phone_number_idp: str | None,
         company_name: str | None,
+        is_service_account: bool = False,
         retries_left: int = 1,
     ) -> User:
         """Internal method to upsert user with retry on IntegrityError.
@@ -528,9 +534,10 @@ class UserService:
 
             query = text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, company_name,
-                                is_administrator, role, status, phone_number_idp, created_at, updated_at)
+                                is_administrator, is_service_account, role, status,
+                                phone_number_idp, created_at, updated_at)
                 VALUES (:id, :sub, :email, :first_name, :last_name, :company_name,
-                        FALSE, 'member', 'active', :phone_number_idp, :now, :now)
+                        FALSE, :is_service_account, 'member', 'active', :phone_number_idp, :now, :now)
                 ON CONFLICT (id) DO UPDATE SET
                     sub = EXCLUDED.sub,
                     email = EXCLUDED.email,
@@ -538,9 +545,19 @@ class UserService:
                     last_name = EXCLUDED.last_name,
                     company_name = EXCLUDED.company_name,
                     phone_number_idp = COALESCE(EXCLUDED.phone_number_idp, users.phone_number_idp),
+                    -- Monotonic: the token can raise this flag on an existing row but
+                    -- never clear it. Migration 088 backfills machine rows by Keycloak's
+                    -- `service-account-` email convention, and a client-credentials token
+                    -- need not carry an email at all — so a service account onboarded
+                    -- before that migration can sit unflagged forever if the flag is only
+                    -- ever set on insert. Raising it here lets the account correct itself
+                    -- on its next call. The trade-off is deliberate: an operator who
+                    -- clears the flag on a row whose token still says
+                    -- `service-account-<client>` will see it come back.
+                    is_service_account = users.is_service_account OR EXCLUDED.is_service_account,
                     updated_at = EXCLUDED.updated_at
                 RETURNING id, sub, email, first_name, last_name, company_name,
-                        is_administrator, role, status, phone_number_idp,
+                        is_administrator, is_service_account, role, status, phone_number_idp,
                         deleted_at, created_at, updated_at
             """)
 
@@ -554,6 +571,7 @@ class UserService:
                     "last_name": last_name,
                     "company_name": company_name,
                     "phone_number_idp": phone_number_idp,
+                    "is_service_account": is_service_account,
                     "now": now,
                 },
             )
@@ -571,6 +589,7 @@ class UserService:
                 last_name=row["last_name"],
                 company_name=row["company_name"],
                 is_administrator=row["is_administrator"],
+                is_service_account=row["is_service_account"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
                 phone_number_idp=row["phone_number_idp"],
@@ -679,6 +698,7 @@ class UserService:
         last_name: str,
         phone_number_idp: str | None = None,
         company_name: str | None = None,
+        is_service_account: bool = False,
     ) -> User:
         """Create or update a user using PostgreSQL upsert.
 
@@ -694,6 +714,12 @@ class UserService:
             last_name: The user's last name
             phone_number_idp: The user's phone number from IDP (optional)
             company_name: The user's company name (optional)
+            is_service_account: True when the caller is a machine identity rather than a
+                person. Monotonic rather than insert-only: a machine account onboarded
+                before migration 088 — and missed by its email-pattern backfill, which a
+                client-credentials token carrying no email would be — corrects itself on
+                its next call. Never cleared, so a person is not re-classified by a token
+                that happens to lack the claim.
 
         Returns:
             The created or updated user
@@ -708,6 +734,7 @@ class UserService:
                 last_name=last_name,
                 phone_number_idp=phone_number_idp,
                 company_name=company_name,
+                is_service_account=is_service_account,
                 retries_left=1,
             )
 
