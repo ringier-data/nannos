@@ -165,3 +165,27 @@ async def test_unfetchable_destructive_tool_still_clears_the_floor():
     assert score > 0.80
     assert entry is None
     cache.persist_entry.assert_not_called()
+
+
+def test_persist_entry_refuses_a_profile_with_no_schema_hash(caplog):
+    """The structural half of "no row for a tool that could not be fetched".
+
+    `score_tool_risk` returns before classifying an unfetchable tool, but that is one
+    early return away from regressing. The cache refuses the write too, so a future
+    caller cannot reintroduce a phantom row by skipping the check.
+    """
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+
+    from agent_common.core.tool_risk_cache import ToolRiskCache
+
+    now = datetime.now(timezone.utc)
+    cache = ToolRiskCache()
+    cache._api_client = MagicMock()
+
+    no_schema = ToolRiskEntry(
+        base_score=0.4, risk_factors={}, allowed_actions=["approve"], schema_hash="",
+        updated_at=now, last_accessed_at=now,
+    )
+    cache.persist_entry("consoleCreateBugReport", "_self", no_schema)
+    cache._api_client.upsert_score.assert_not_called()

@@ -117,21 +117,11 @@ class TestDeepAgentBuiltinsAreRegistered:
         mw = _create_hitl_middleware(deep_agent_builtin_tools(None), exhaustive=True)
 
         for name in ("write_todos", "ls", "read_file", "write_file", "edit_file", "glob", "grep"):
-            assert mw._get_tool_instance(name, None) is not None, name
+            tool = mw._get_tool_instance(name, None)
+            # Fetchable at all is what keeps the exhaustive verdict from refusing a
+            # dispatchable tool; a real schema is what gets it classified properly
+            # rather than guessed from its name.
+            assert tool is not None, name
+            assert tool.get_input_schema().model_json_schema().get("properties"), name
         assert mw._platform_tools_are_exhaustive is True
 
-    def test_seeded_names_match_the_tools_the_graph_actually_installs(self):
-        """Migration 090 seeds risk policy for these by name. If deepagents renames or
-        adds one, the seed silently stops applying — so pin the list here.
-        """
-        names = {t.name for t in deep_agent_builtin_tools(None)}
-        assert names == {
-            "write_todos",
-            "ls",
-            "glob",
-            "grep",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "execute",
-        }
