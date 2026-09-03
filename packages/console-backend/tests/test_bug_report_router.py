@@ -524,23 +524,31 @@ async def test_filing_excludes_the_reporting_administrator(
 
 
 @pytest.mark.asyncio
-async def test_filing_never_notifies_the_system_user(
+async def test_filing_never_notifies_machine_accounts(
     client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
 ):
-    """The seeded 'system' account must never collect notifications.
+    """Machine identities stay out of the audience however they are configured.
 
-    Migration 041 creates it with role 'admin' and `is_administrator` FALSE, but that
-    default is not what deployments contain: a live one has the account promoted, and it
-    was collecting these notifications while the audience relied on the flag alone. So
-    the account is promoted here first — this asserts the exclusion, not the seed.
+    Both are promoted to `is_administrator` first, because that is what a live deployment
+    turned out to contain — the seed's column values are a starting state, not an
+    invariant. The exclusion is by `is_service_account`, so it holds for the seeded
+    `system` owner of auto-provisioned agents and for a service account auto-onboarded
+    from a client-credentials token alike.
     """
-    await pg_session.execute(text("UPDATE users SET is_administrator = TRUE WHERE id = 'system'"))
+    await _insert_user(pg_session, "service-account-orchestrator-id", "member", is_admin=True)
+    await pg_session.execute(
+        text("""
+            UPDATE users SET is_administrator = TRUE, is_service_account = TRUE
+             WHERE id IN ('system', 'service-account-orchestrator-id')
+        """)
+    )
+    human_admin = await _insert_user(pg_session, "admin-id", "admin", is_admin=True)
     await pg_session.commit()
 
     await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Noise check"})
 
     notified = {n["user_id"] for n in await _filed_notifications(pg_session)}
-    assert "system" not in notified, "'system' owns auto-provisioned agents; no person reads its inbox"
+    assert notified == {human_admin}, "only accounts with a person behind them are notified"
 
 
 @pytest.mark.asyncio

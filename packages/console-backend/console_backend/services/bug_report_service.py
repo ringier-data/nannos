@@ -14,10 +14,6 @@ from .notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
-#: The seeded service account that owns auto-provisioned agents (migration 041). Never a
-#: notification recipient: there is no person behind it, whatever its admin flag says.
-_SYSTEM_USER_ID = "system"
-
 #: How much of a report's description goes into the notification body. The inbox shows a
 #: one-line message; the report itself holds the full text.
 _MESSAGE_DESCRIPTION_CHARS = 200
@@ -95,13 +91,12 @@ class BugReportService:
         The reporter is excluded even when they are an administrator: they know what they
         just filed, and the notification is there to tell someone who does not.
 
-        The seeded `system` user is excluded explicitly. It owns auto-provisioned agents
-        and has no person behind it, so anything sent there fills an inbox nobody opens —
-        one row per bug report forever. Migration 041 creates it with role 'admin' and
-        leaves `is_administrator` FALSE, which is *not* enough to rely on: deployments
-        promote it, and one where it is flagged as an administrator was collecting these
-        notifications until this exclusion came back. Filtering on the flag alone is
-        reasoning from the migration; excluding the account is reasoning from the data.
+        Machine identities are excluded by `is_service_account`, which covers the seeded
+        `system` owner of auto-provisioned agents and the service accounts auto-onboarded
+        from client-credentials tokens (the orchestrator's among them). Both are flagged
+        `is_administrator` in at least one deployment and were collecting notifications
+        nobody reads. An earlier version excluded `system` by id, which fixed one instance
+        of the category rather than the category — see issue #198 and migration 088.
         """
         if self.notification_service is None:
             return
@@ -111,12 +106,12 @@ class BugReportService:
                 text("""
                     SELECT id FROM users
                     WHERE is_administrator IS TRUE
+                      AND is_service_account IS FALSE
                       AND status = 'active'
                       AND deleted_at IS NULL
                       AND id != :actor_id
-                      AND id != :system_user_id
                 """),
-                {"actor_id": actor.id, "system_user_id": _SYSTEM_USER_ID},
+                {"actor_id": actor.id},
             )
             recipient_ids = [row[0] for row in recipients.fetchall()]
             if not recipient_ids:

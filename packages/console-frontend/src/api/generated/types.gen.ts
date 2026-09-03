@@ -7434,6 +7434,10 @@ export type UserWithGroups = {
      * Is Administrator
      */
     is_administrator?: boolean;
+    /**
+     * Is Service Account
+     */
+    is_service_account?: boolean;
     role?: UserRole;
     status?: UserStatus;
     /**

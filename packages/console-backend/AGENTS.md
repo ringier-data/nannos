@@ -276,15 +276,18 @@ agent = await sub_agent_service.create_sub_agent(...)
 Two things to get right when an audience is chosen by standing rather than by group
 membership (`BugReportService._notify_administrators` is the worked example):
 
-- **Exclude machine accounts explicitly; do not infer that a filter already excludes
-  them.** Migration 041 seeds a `system` user with `role = 'admin'` — it owns
-  auto-provisioned agents — and leaves `is_administrator` FALSE. That makes it tempting
-  to conclude an `is_administrator` audience cannot reach it. It can: deployments promote
-  that account (nothing in the code does, beyond `FIRST_USER_IS_ADMIN` for the very first
-  user), and one was collecting bug-report notifications in an inbox nobody opens. The
-  seed's column values are a starting state, not an invariant — reason from the rows a
-  live database actually holds. There is no structural marker for machine accounts yet,
-  so exclusion is by id.
+- **Filter out machine accounts with `AND is_service_account IS FALSE`.** Two rows exist
+  in every deployment with no person behind them: the seeded `system` owner of
+  auto-provisioned agents (migration 041) and a `service-account-<client>` row that
+  console-backend onboards the first time a service calls it with a client-credentials
+  token. Both have been found flagged `is_administrator` in a live database, so an
+  audience keyed on that flag reaches them and fills inboxes nobody opens.
+
+  The flag (migration 088) is set at creation from the token's own claims — see
+  `dependencies.token_is_service_account`. Use it rather than an id list: an id list is
+  one instance of the category, and the previous version of this note argued the seed's
+  `is_administrator = FALSE` default made even that redundant. It did not. A seed's column
+  values are a starting state, not an invariant; reason from the rows a live database holds.
 - **Match the audience to read visibility, not to a write capability.** `bug_reports`
   grants `triage` to `approver`, but no read path honours it, so notifying triagers would
   hand out content the recipient is denied everywhere else. It is also the less durable
