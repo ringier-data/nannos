@@ -14,6 +14,9 @@ from agent_common.core.tool_risk_scorer import (
     _DESTRUCTIVE_FLOOR_SCORE,
     _destructive_floor,
     _deterministic_fallback,
+    _score_tool_via_llm,
+    RiskyValuesOutput,
+    ToolRiskOutput,
     score_tool_risk,
 )
 
@@ -189,3 +192,73 @@ def test_persist_entry_refuses_a_profile_with_no_schema_hash(caplog):
     )
     cache.persist_entry("consoleCreateBugReport", "_self", no_schema)
     cache._api_client.upsert_score.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_risk_classification_asks_for_tool_calling_not_strict_json_schema(monkeypatch):
+    """Regression (#188): `with_structured_output` must be called with
+    method="function_calling".
+
+    langchain-openai >= 0.3 defaults to method="json_schema", which routes through
+    OpenAI's *strict* structured-output validator. That validator cannot express an
+    open map, and `ToolRiskOutput` is built on two of them (`risk_factors`, keyed by
+    the tool's own parameter names, and `risky_values` inside each). Verified live
+    against an OpenAI-compatible gateway fronting several providers:
+
+      * gpt-4o-2024-08-06 (Azure) rejects the request outright, 3/3 --
+        400 "Invalid schema for response_format 'ToolRiskOutput': 'required' is
+        required to be supplied and to be an array including every key in
+        properties. Extra required key 'risky_values' supplied."
+      * claude-haiku-4-5 (Bedrock) accepts it and silently returns
+        `risk_factors={}`, 3/3 -- worse than the 400, because the empty profile is
+        then persisted with a *real* schema hash and so never self-corrects, which
+        permanently disables per-argument risk matching for that tool.
+
+    Both symptoms disappear under method="function_calling" (same run, same prompt:
+    Azure returns base_score=1.0, Bedrock returns factors ['path', 'recursive']).
+    The choice is therefore load-bearing and invisible in the diff -- hence this test.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    recorded: dict[str, object] = {}
+
+    structured = MagicMock()
+    structured.ainvoke = AsyncMock(
+        return_value=ToolRiskOutput(base_score=0.9, risk_factors={}, reasoning="stub")
+    )
+
+    def with_structured_output(schema, **kwargs):
+        recorded["schema"] = schema
+        recorded["kwargs"] = kwargs
+        return structured
+
+    model = MagicMock()
+    model.with_structured_output = with_structured_output
+
+    monkeypatch.setattr("agent_common.core.model_factory.create_model", lambda *a, **k: model)
+    monkeypatch.setattr("agent_common.core.model_factory.get_default_fast_model", lambda: "stub-model")
+
+    await _score_tool_via_llm("fs_delete_path", "Delete a path.", {"type": "object"})
+
+    assert recorded["schema"] is ToolRiskOutput
+    assert recorded["kwargs"].get("method") == "function_calling", (
+        "the strict json_schema default 400s on Azure and silently drops risk_factors "
+        "on Bedrock/Vertex -- see #188"
+    )
+
+
+def test_tool_risk_output_keeps_the_open_maps_strict_mode_cannot_express():
+    """The reason function_calling is required, asserted on the schema itself.
+
+    If this ever fails, `ToolRiskOutput` has been flattened to fixed keys and the
+    method override above may no longer be needed -- revisit both together rather
+    than deleting either in isolation.
+    """
+    schema = ToolRiskOutput.model_json_schema()
+    assert "additionalProperties" in schema["properties"]["risk_factors"], (
+        "risk_factors is keyed by the tool's own parameter names, so it is an open map"
+    )
+    risky = RiskyValuesOutput.model_json_schema()
+    assert "additionalProperties" in risky["properties"]["risky_values"], (
+        "risky_values is keyed by glob patterns the LLM invents, so it is an open map"
+    )
