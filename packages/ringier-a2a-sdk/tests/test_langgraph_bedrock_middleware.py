@@ -7,6 +7,7 @@ import pytest
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.messages import HumanMessage
 
+from httpx_stubs import allow_all_urls, stub_httpx_client
 from ringier_a2a_sdk.agent.langgraph_bedrock import LangGraphBedrockAgent
 from ringier_a2a_sdk.middleware.steering import SteeringMiddleware
 from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
@@ -133,6 +134,13 @@ class TestLangGraphBedrockAgentMiddleware:
 class TestBedrockImagePreprocessing:
     """Tests for LangGraphBedrockAgent._preprocess_input_messages (URL→base64 conversion)."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_ssrf_guard(self):
+        """The guard resolves hostnames for real; these tests stub the transport."""
+        with allow_all_urls():
+            yield
+
+
     def _make_agent(self):
         """Create a minimal LangGraphBedrockAgent for testing."""
         import os
@@ -194,16 +202,7 @@ class TestBedrockImagePreprocessing:
         fake_image_bytes = b"\x89PNG\r\n\x1a\nfake_image_data"
         expected_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
 
-        mock_response = MagicMock()
-        mock_response.content = fake_image_bytes
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        with patch("httpx.AsyncClient", return_value=stub_httpx_client(fake_image_bytes)):
             result = await agent._preprocess_input_messages(msgs)
 
         assert len(result) == 1
@@ -230,12 +229,7 @@ class TestBedrockImagePreprocessing:
         ]
         msgs = [HumanMessage(content=blocks)]
 
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=Exception("Connection refused"))
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        with patch("httpx.AsyncClient", return_value=stub_httpx_client(error=Exception("Connection refused"))):
             result = await agent._preprocess_input_messages(msgs)
 
         assert len(result) == 1
@@ -250,18 +244,15 @@ class TestBedrockImagePreprocessing:
 class TestBedrockContentBlockPreprocessing:
     """Tests for preprocess_content_blocks_for_bedrock (image/file/video URL→base64)."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_ssrf_guard(self):
+        """The guard resolves hostnames for real; these tests stub the transport."""
+        with allow_all_urls():
+            yield
+
+
     def _mock_httpx(self, payload: bytes):
-        from unittest.mock import AsyncMock
-
-        mock_response = MagicMock()
-        mock_response.content = payload
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        return mock_client
+        return stub_httpx_client(payload)
 
     @pytest.mark.asyncio
     async def test_url_file_converted_to_base64_document(self):
@@ -329,13 +320,8 @@ class TestBedrockContentBlockPreprocessing:
 
         from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
 
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=Exception("boom"))
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
         blocks = [{"type": "file", "url": "https://example.com/x.pdf", "mime_type": "application/pdf"}]
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        with patch("httpx.AsyncClient", return_value=stub_httpx_client(error=Exception("boom"))):
             result = await preprocess_content_blocks_for_bedrock(blocks)
 
         assert len(result) == 1
