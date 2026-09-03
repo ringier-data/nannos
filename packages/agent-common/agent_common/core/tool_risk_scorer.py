@@ -296,7 +296,20 @@ async def _score_tool_via_llm(
     from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 
     model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
-    structured_model = model.with_structured_output(ToolRiskOutput)
+    # method="function_calling", not the langchain-openai>=0.3 default of "json_schema".
+    # OpenAI's strict structured-output validator requires every object to declare
+    # additionalProperties: false and to list every property in `required`, but
+    # ToolRiskOutput is built on open maps (risk_factors, risky_values) whose keys are
+    # the tool's own parameter names, unknowable ahead of the call. Under the default
+    # every scoring request came back 400 ("'additionalProperties' is required to be
+    # supplied and to be false"), so each tool silently fell through to the
+    # deterministic fallback after paying a full round trip.
+    #
+    # Tool calling accepts the same schema and is what the rest of this stack already
+    # speaks: the gateway normalizes every provider (Bedrock included) into
+    # OpenAI-shape tool_calls (see a2a.structured_response.select_response_format,
+    # which picks ToolStrategy for the same reason).
+    structured_model = model.with_structured_output(ToolRiskOutput, method="function_calling")
 
     # Build user prompt with tool details
     schema_str = json.dumps(input_schema, indent=2) if input_schema else "No schema available"
