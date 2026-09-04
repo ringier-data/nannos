@@ -32,7 +32,7 @@ from tests.support.scenarios import (
 
 from .conftest import one_model_per_provider
 
-SCENARIOS = load_scenarios("core_routing.yaml")
+SCENARIOS = load_scenarios("core_routing.yaml", "failure_propagation.yaml")
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 

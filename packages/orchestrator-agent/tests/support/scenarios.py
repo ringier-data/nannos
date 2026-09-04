@@ -62,6 +62,21 @@ class SubAgentSpec:
     filtering — so declaring ``image`` puts the turn on a path that calls a model
     even in the mock tier."""
 
+    fails: str | None = None
+    """When set, this sub-agent returns ``failed`` with this message instead of
+    ``reply``. Set it to test the prompt rule that a non-success sub-agent state
+    means the goal was *not* achieved."""
+
+    needs_input: str | None = None
+    """When set, this sub-agent returns ``input_required`` with this message.
+    The work is unfinished rather than wrong, and the orchestrator is supposed to
+    relay the question rather than answer it itself."""
+
+    @property
+    def outcome_message(self) -> str | None:
+        """The message a non-success terminal state carries, if any."""
+        return self.fails or self.needs_input
+
 
 @dataclass(frozen=True)
 class AttachmentSpec:
@@ -100,7 +115,14 @@ class Scenario:
     def mock_subagents(self) -> list[MockSubAgent]:
         """Fresh mocks for this scenario — never reuse across tests, they record calls."""
         return [
-            MockSubAgent(s.name, s.description, reply=s.reply, input_modes=list(s.input_modes))
+            MockSubAgent(
+                s.name,
+                s.description,
+                reply=s.reply,
+                input_modes=list(s.input_modes),
+                error=s.fails,
+                input_required=s.needs_input,
+            )
             for s in self.subagents
         ]
 
@@ -121,18 +143,35 @@ class Scenario:
         return blocks
 
 
-def load_scenarios(filename: str) -> list[Scenario]:
-    """Parse a dataset file into Scenarios, failing loudly on a malformed entry."""
+def load_scenarios(*filenames: str) -> list[Scenario]:
+    """Parse dataset files into Scenarios, failing loudly on a malformed entry.
+
+    Datasets are split by subject, not by tier — both tiers load the same set.
+    The split exists so the real tier's spend stays separable: its cost is per
+    scenario per model, so ``-k`` against one topic is the only cheap way to
+    re-run part of it.
+
+    Ids must be unique across *all* files, not just within one: they become
+    pytest parameter ids, and a collision would silently run one scenario twice
+    under the same name.
+    """
+    scenarios: list[Scenario] = []
+    seen: dict[str, str] = {}
+    for filename in filenames:
+        scenarios.extend(_load_one(filename, seen))
+    return scenarios
+
+
+def _load_one(filename: str, seen: dict[str, str]) -> list[Scenario]:
     path = DATASETS_DIR / filename
     raw = yaml.safe_load(path.read_text()) or []
 
     scenarios: list[Scenario] = []
-    seen: set[str] = set()
     for index, entry in enumerate(raw):
         scenario_id = entry.get("id") or f"{filename}[{index}]"
         if scenario_id in seen:
-            raise ValueError(f"{path}: duplicate scenario id {scenario_id!r}")
-        seen.add(scenario_id)
+            raise ValueError(f"{path}: scenario id {scenario_id!r} already used in {seen[scenario_id]}")
+        seen[scenario_id] = filename
 
         expect = entry.get("expect") or {}
         delegations_cfg = expect.get("delegations") or {}
@@ -149,6 +188,8 @@ def load_scenarios(filename: str) -> list[Scenario]:
                         description=s.get("description", ""),
                         reply=s.get("reply", "Done."),
                         input_modes=tuple(s.get("input_modes") or ("text",)),
+                        fails=s.get("fails"),
+                        needs_input=s.get("needs_input"),
                     )
                     for s in (entry.get("subagents") or [])
                 ],
@@ -223,6 +264,8 @@ def assert_scenario(scenario: Scenario, state: Any, agents: list[MockSubAgent]) 
                 f"[{scenario.id}] {agent!r} never received {needle!r}; got {mock.received}"
             )
 
+    _assert_outcomes_propagated(scenario, state)
+
     called = tool_names(state)
     for tool in expect.tools_required:
         assert tool in called, f"[{scenario.id}] expected tool {tool!r}, got {called}"
@@ -241,10 +284,44 @@ def assert_scenario(scenario: Scenario, state: Any, agents: list[MockSubAgent]) 
             assert needle.lower() in text, f"[{scenario.id}] response missing {needle!r}; got: {text[:300]}"
 
 
+def _assert_outcomes_propagated(scenario: Scenario, state: Any) -> None:
+    """A sub-agent's non-success message must reach the orchestrator.
+
+    Derived from the sub-agent spec rather than a separate expectation key: if a
+    scenario configures a sub-agent to fail, propagation is not an optional
+    extra, and a `task_state` expectation alone would not catch its absence.
+
+    This is also the part of a failure scenario with teeth in *both* tiers. The
+    mock tier scripts the final response from ``expect``, so ``task_state:
+    failed`` there proves only that the scenario is well-formed — but the
+    delegation's result comes from the real dispatch path either way, so a
+    failure that never made it back to the model is caught cheaply.
+    """
+    delegated = delegations(state)
+    for spec in scenario.subagents:
+        outcome = spec.outcome_message
+        if not outcome:
+            continue
+        # Only delegations that returned can carry it. A sub-agent that was
+        # never called is `delegations_required`'s business, not this check's.
+        results = [d.result or "" for d in delegated if d.subagent == spec.name]
+        if not results:
+            continue
+        assert any(outcome in result for result in results), (
+            f"[{scenario.id}] {spec.name!r} returned a non-success state carrying {outcome!r}, "
+            f"but the orchestrator received: {results}"
+        )
+
+
 def describe_outcome(state: Any) -> dict[str, Any]:
     """Compact summary of what a turn did — for failure output and eval logging."""
     return {
-        "delegations": [{"subagent": d.subagent, "completed": d.completed} for d in delegations(state)],
+        "delegations": [
+            # The result is what makes a failure-propagation failure readable:
+            # "completed: True" says the call returned, not what came back.
+            {"subagent": d.subagent, "completed": d.completed, "result": (d.result or "")[:120]}
+            for d in delegations(state)
+        ],
         "tools": tool_names(state),
         "task_state": task_state(state),
         "response": final_text(state)[:300],

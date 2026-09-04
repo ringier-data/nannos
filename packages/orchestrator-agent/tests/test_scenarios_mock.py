@@ -28,7 +28,7 @@ from tests.support.scenarios import (
 )
 from tests.support.scripted_model import ScriptedChatModel
 
-SCENARIOS = load_scenarios("core_routing.yaml")
+SCENARIOS = load_scenarios("core_routing.yaml", "failure_propagation.yaml")
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s.id for s in SCENARIOS])
@@ -106,6 +106,32 @@ def test_dataset_instructions_reference_registered_subagents():
         registered = {s.name for s in scenario.subagents}
         for agent in scenario.expect.instructions:
             assert agent in registered, f"[{scenario.id}] instructions for unregistered sub-agent {agent!r}"
+
+
+def test_dataset_failure_scenarios_do_not_expect_success():
+    """A scenario whose every required delegation fails must not expect success.
+
+    The trap this closes: add ``fails:`` to a sub-agent, forget to change
+    ``task_state``, and the dataset now asserts the orchestrator *should* report
+    ``completed`` after a failed delegation — the exact bug these scenarios exist
+    to catch, encoded as the expectation. Neither tier would object: the mock
+    tier scripts its final response from ``expect``, and the real tier would just
+    reward a model for hiding the failure.
+
+    Deliberately narrow. One failing sub-agent among several can legitimately end
+    ``completed`` if the orchestrator was expected to recover another way, so
+    this only fires when *nothing* required of the turn succeeded.
+    """
+    for scenario in SCENARIOS:
+        required = scenario.expect.delegations_required
+        specs = {s.name: s for s in scenario.subagents}
+        if not required or not all(specs[a].outcome_message for a in required if a in specs):
+            continue
+        assert scenario.expect.task_state not in (None, "completed"), (
+            f"[{scenario.id}] every required delegation returns a non-success state, but the "
+            f"scenario expects task_state={scenario.expect.task_state!r}. "
+            "Set 'failed' or 'input_required', or the scenario asserts the bug."
+        )
 
 
 def test_dataset_delegation_expectations_are_consistent():

@@ -10,8 +10,9 @@ suite alongside everything else.
 from __future__ import annotations
 
 import pytest
+from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.stream_events import ErrorEvent, TaskUpdate
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 from pydantic import SecretStr, ValidationError
 
@@ -172,6 +173,46 @@ async def test_subagent_error_surfaces_without_raising():
     result = await _dispatch(_context(broken), _task_call("slack-notifier"))
 
     assert "slack API returned 503" in _tool_message(result).content
+
+
+async def test_subagent_input_required_reaches_the_orchestrator():
+    """The question a sub-agent stopped to ask must arrive intact.
+
+    `input_required` is the state the orchestrator is supposed to *relay* rather
+    than answer, so the text is the payload — a state with no question in it
+    leaves the model nothing to pass on.
+    """
+    stalled = MockSubAgent("slack-notifier", input_required="which channel? #team-eng or #team-ops")
+
+    result = await _dispatch(_context(stalled), _task_call("slack-notifier"))
+
+    assert "which channel?" in _tool_message(result).content
+
+
+def test_a_subagent_cannot_both_fail_and_ask_for_input():
+    """Two terminal states are a scenario bug, and a silent precedence rule in
+    `_process` would decide it invisibly. Refuse at construction instead."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        MockSubAgent("slack-notifier", error="boom", input_required="which channel?")
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [{"error": "boom"}, {"input_required": "which channel?"}, {"reply": "done"}],
+    ids=["failed", "input_required", "completed"],
+)
+async def test_every_terminal_state_reuses_the_orchestrator_context_id(outcome):
+    """`a2a_tracking` correlates a sub-agent by context_id, so a non-success
+    response that mints a fresh one is untrackable across turns — which is
+    exactly the case a multi-turn failure test would need to follow."""
+    agent = MockSubAgent("slack-notifier", **outcome)
+
+    response = await agent._process(
+        SubAgentInput(messages=[HumanMessage("go")], orchestrator_conversation_id="ctx-42"),
+        {"configurable": {"thread_id": "test-thread"}},
+    )
+
+    assert response.context_id == "ctx-42"
 
 
 # ---------------------------------------------------------------------------

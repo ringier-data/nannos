@@ -63,8 +63,13 @@ class MockSubAgent(LocalA2ARunnable):
             orchestrator on the text-only path; include ``"image"`` to exercise
             multimodal forwarding (which invokes LLM-based file filtering, so
             that path is not credential-free).
-        error: When set, the agent fails with this message instead of replying,
-            for exercising sub-agent failure handling.
+        error: When set, the agent fails with this message instead of replying —
+            terminal state ``failed``.
+        input_required: When set, the agent stops and asks for something instead
+            of replying — terminal state ``input_required``. Distinct from
+            ``error``: the work is not wrong, it is unfinished, and the
+            orchestrator is supposed to relay the question rather than answer
+            it. Mutually exclusive with ``error``.
     """
 
     def __init__(
@@ -75,13 +80,17 @@ class MockSubAgent(LocalA2ARunnable):
         reply: str | Callable[[str], str] = "ok",
         input_modes: list[str] | None = None,
         error: str | None = None,
+        input_required: str | None = None,
     ) -> None:
         super().__init__()
+        if error is not None and input_required is not None:
+            raise ValueError(f"{name}: error and input_required are mutually exclusive terminal states")
         self._name = name
         self._description = description
         self._reply = reply
         self._input_modes = input_modes or ["text"]
         self._error = error
+        self._input_required = input_required
         self.received: list[str] = []
         """Instructions this agent was handed, in order — the ``description``
         argument of each ``task`` call that reached it."""
@@ -109,12 +118,22 @@ class MockSubAgent(LocalA2ARunnable):
         instruction = self._extract_message_content(input_data)
         self.received.append(instruction)
 
-        if self._error is not None:
-            return self._build_error_response(self._error)
-
         # Reuse the orchestrator's context_id on follow-up calls so multi-turn
-        # continuity is exercised rather than silently bypassed.
+        # continuity is exercised rather than silently bypassed. Non-success
+        # outcomes carry the ids too: `a2a_tracking` is keyed off them, and a
+        # failure the tracking channel cannot correlate is a failure no
+        # multi-turn assertion can follow.
         context_id, task_id = self._extract_tracking_ids(input_data)
+
+        # Every branch goes through the production builders in
+        # `agent_common.a2a.base` rather than hand-rolling a response dict —
+        # that is what keeps the double's terminal states identical in shape to
+        # a real sub-agent's.
+        if self._error is not None:
+            return self._build_error_response(self._error, context_id=context_id, task_id=task_id)
+        if self._input_required is not None:
+            return self._build_input_required_response(self._input_required, context_id=context_id, task_id=task_id)
+
         reply = self._reply(instruction) if callable(self._reply) else self._reply
         return self._build_success_response(reply, context_id=context_id, task_id=task_id)
 

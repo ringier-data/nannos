@@ -1,0 +1,76 @@
+# Sub-agent failure propagation.
+#
+# The rule under test is a *prompt* rule, stated in `app/models/config.py`: a
+# sub-agent returning `input_required`, `auth_required` or `failed` means the
+# goal was NOT achieved, and the orchestrator must not report success. Nothing
+# else in the system enforces it — no middleware inspects the terminal state and
+# overrides the model — so it holds only as long as the prompt says so and the
+# model obeys. A prompt edit is exactly what breaks it, silently.
+#
+# Which is why these scenarios earn their keep in the *real* tier. The mock tier
+# scripts the final response from `expect`, so `task_state: failed` there is
+# satisfied by construction; what the mock tier does prove is that the scenario
+# is well-formed and that the sub-agent's message survives the dispatch path
+# back to the model (see `_assert_outcomes_propagated`). The judgement — does a
+# live model, handed a failure, admit it? — only happens against a real model.
+#
+# Schema, beyond `core_routing.yaml`'s:
+#   `fails:`       sub-agent returns `failed` with this message
+#   `needs_input:` sub-agent returns `input_required` with this message
+# Both replace `reply`, and both go through the same production response
+# builders a real sub-agent uses.
+#
+# Keep `response_contains` off the failure text itself. The model paraphrases a
+# sub-agent's error freely, and asserting on its wording is the flaky-test trap
+# `AGENTS.md` warns about; `task_state` is the falsifiable part.
+
+- id: reports_subagent_failure_as_failure
+  description: A failed delegation must not be reported as success.
+  input:
+    query: "Look up our Q3 revenue and tell me the number."
+  subagents:
+    - name: revenue-analyst
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      fails: "query timed out after 30s against the warehouse"
+  expect:
+    delegations:
+      required: [revenue-analyst]
+    task_state: failed
+
+- id: relays_subagent_request_for_input
+  description: A sub-agent asking for input must have the question relayed, not answered.
+  input:
+    query: "Post the quarterly summary to the team channel on Slack."
+  subagents:
+    - name: slack-notifier
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      needs_input: "which channel? the workspace has #team-eng, #team-sales and #team-ops"
+  expect:
+    delegations:
+      required: [slack-notifier]
+    # `input_required` rather than `failed`: nothing went wrong, the turn is
+    # unfinished. Conflating the two is the specific mistake this catches — it
+    # would tell the user their request was impossible rather than ask them one
+    # question.
+    task_state: input_required
+
+- id: partial_failure_is_not_overall_success
+  description: One failed step in a chain must sink the whole turn's reported state.
+  input:
+    query: "Look up the Q3 revenue and then post it to @john.doe on Slack."
+  subagents:
+    - name: revenue-analyst
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      reply: "Q3 revenue was 8.2 million EUR."
+    - name: slack-notifier
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      fails: "slack API returned 503 for @john.doe"
+  expect:
+    delegations:
+      required: [revenue-analyst, slack-notifier]
+      ordered: true
+    # The interesting failure mode: the first step succeeded and produced a
+    # genuinely useful number, so a model that reports what it *learned* looks
+    # helpful while hiding that the message was never sent. Half a chain is not
+    # a completed task.
+    task_state: failed
