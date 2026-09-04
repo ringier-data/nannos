@@ -86,6 +86,7 @@ export async function registerListeners(
       app,
       bot.slashCommand,
       userAuthService,
+      a2aClientService,
       contextStore,
       inFlightTaskStore,
       pendingRequestStore,
