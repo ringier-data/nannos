@@ -151,6 +151,21 @@ def tool_call(name: str, args: dict[str, Any] | None = None, call_id: str = "cal
     )
 
 
+def parallel_calls(*calls: tuple[str, dict[str, Any]]) -> AIMessage:
+    """One model turn that emits several tool calls at once, ids ``tc-0``, ``tc-1``…
+
+    The shape gemini and claude both produce, and the one that makes HITL
+    interesting: a single interrupt covers every guarded call in the batch, and
+    the un-guarded calls in the same batch are *held* rather than run early.
+    """
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"id": f"tc-{i}", "name": name, "args": args, "type": "tool_call"} for i, (name, args) in enumerate(calls)
+        ],
+    )
+
+
 def final_response(
     message: str = "Done.",
     *,

@@ -62,9 +62,22 @@ class ToolCall:
     result: str | None = None
     """ToolMessage content, or None when the call never returned (interrupt, error)."""
 
+    status: str | None = None
+    """ToolMessage status — ``"success"``, or ``"error"`` for a tool that raised
+    *or* a call a human rejected. HITL rejection is the case that makes this
+    worth having: the rejected call stays in the AIMessage (langchain's
+    ``_process_decision`` returns the tool call, not None) and is answered with a
+    synthetic error ToolMessage instead of being removed, so ``result is not
+    None`` alone cannot tell "ran" from "refused"."""
+
     @property
     def completed(self) -> bool:
         return self.result is not None
+
+    @property
+    def rejected(self) -> bool:
+        """Answered with an error rather than executed. See ``status``."""
+        return self.status == "error"
 
 
 @dataclass(frozen=True)
@@ -114,9 +127,11 @@ def tool_calls(values: Any, *, all_turns: bool = False) -> list[ToolCall]:
     messages = _messages(values, all_turns=all_turns)
 
     results: dict[str, str] = {}
+    statuses: dict[str, str] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage) and msg.tool_call_id:
             results[msg.tool_call_id] = message_text(msg)
+            statuses[msg.tool_call_id] = getattr(msg, "status", None) or "success"
 
     calls: list[ToolCall] = []
     for msg in messages:
@@ -130,6 +145,7 @@ def tool_calls(values: Any, *, all_turns: bool = False) -> list[ToolCall]:
                     args=call.get("args") or {},
                     id=call_id,
                     result=results.get(call_id) if call_id else None,
+                    status=statuses.get(call_id) if call_id else None,
                 )
             )
     return calls
@@ -167,6 +183,42 @@ def delegated_agents(values: Any, *, all_turns: bool = False, completed_only: bo
         for d in delegations(values, all_turns=all_turns)
         if d.subagent and (d.completed or not completed_only)
     )
+
+
+def interrupts(values: Any) -> list[Any]:
+    """Pending interrupts on a turn that stopped for human review.
+
+    ``ainvoke`` returns these on the ``__interrupt__`` key of the values dict, so
+    the mock tier needs no second ``aget_state``. The real tier does not read
+    this at all — ``agent.stream`` parks interrupts on ``TurnState.interrupts``
+    (``app/core/agent.py:750``) and ``TurnState.has_interrupts`` is the property
+    production checks.
+    """
+    if not isinstance(values, dict):
+        return []
+    pending = values.get("__interrupt__")
+    return list(pending) if pending else []
+
+
+def interrupt_action_requests(values: Any) -> list[dict[str, Any]]:
+    """The tool calls a human is being asked to review, across all interrupts.
+
+    ``ConditionalHumanInTheLoopMiddleware`` raises **one** interrupt carrying
+    every guarded call in the batch, not one interrupt per call — so the length
+    of this list is the number of decisions a resume must supply, and a mismatch
+    raises ``ValueError`` rather than failing quietly.
+    """
+    requests: list[dict[str, Any]] = []
+    for pending in interrupts(values):
+        value = getattr(pending, "value", None)
+        if isinstance(value, dict):
+            requests.extend(r for r in (value.get("action_requests") or []) if isinstance(r, dict))
+    return requests
+
+
+def interrupted_tools(values: Any) -> list[str]:
+    """Names of the tools awaiting human review, in the order presented."""
+    return [str(request.get("name", "")) for request in interrupt_action_requests(values)]
 
 
 def a2a_tracking(values: Any) -> dict[str, dict[str, Any]]:

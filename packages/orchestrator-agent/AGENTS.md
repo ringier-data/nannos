@@ -212,13 +212,73 @@ genuinely needs model judgment. A scripted model cannot tell you whether routing
 *right*, but it catches everything that breaks without a model involved — and it does
 so in milliseconds.
 
+### Test rigor
+
+Four rules, in descending order of how much damage breaking them does. The first
+one is the whole section; the rest are its common shapes.
+
+**1. A test must not replace the system whose behaviour it asserts.**
+
+Ask it directly: *does the setup stub out the thing the assertion is about?* If
+yes, the test proves nothing however green it is, and — worse than useless — it
+reports confidence it does not have.
+
+`tests/test_hitl_reject_turn.py` is the worked example. It used to build its own
+`StateGraph` including its own router, then assert that rejected tool calls do not
+execute. But a rejected call *stays* in the AIMessage (langchain's
+`_process_decision` returns the tool call, not `None`) and is answered with a
+synthetic error `ToolMessage`, so non-execution depends entirely on a router
+skipping already-answered calls. Supplying that router is testing your own copy.
+
+Measured: disabling the orchestrator's HITL guard entirely — every guarded tool
+executing with no approval — left the whole 796-test suite green. Only the
+rewrite against the real graph caught it, 7 tests failing.
+
+Corollary: **never rebuild production topology in a test.** `scripted_graph()`
+compiles the real `GraphFactory` graph in ~21ms. A hand-copied graph, router or
+middleware stack is a copy that drifts, and it drifts silently.
+
+**2. Test a provider-dependent claim with a pin plus recorded evidence.**
+
+Some claims are only true of a real provider — that a structured-output method
+works, that a schema is accepted. A stub cannot answer those, and hitting five
+providers on every commit is not affordable. So split it:
+
+- the **pin** is cheap and permanent: assert the request was *shaped* correctly
+  (e.g. `method="function_calling"` was passed). Mutation-check it, then it runs
+  free forever and catches the regression.
+- the **proof** is expensive and recorded once: the live results, per model and
+  provider, in the PR body.
+
+PR #202 is the reference: a five-model table showing a 400 from Azure and
+silently-empty output from Bedrock, next to a one-line pin in CI.
+
+**3. Label a pin as a pin.**
+
+A test that asserts "we pass X to third-party Y" is legitimate and worth having —
+it is *not* evidence that Y then behaves. Say which one it is in the docstring.
+`TestLangchainHITLContract` in `test_hitl_reject_turn.py` is labelled this way,
+and kept precisely because the real-graph tests cannot tell you whether a
+regression is upstream or ours.
+
+**4. Know the mock tier's blind spot.**
+
+Its final response is scripted *from* the expectations, so anything derived from
+`expect` is true by construction there. `task_state: failed` in a dataset
+scenario cannot fail in the mock tier — which is why
+`_assert_outcomes_propagated` asserts on the sub-agent's returned message
+instead, since that comes from the real dispatch path in both tiers.
+
+If you cannot state what a test would catch that nothing else would, it is not
+ready. Mutating the code it covers is the cheapest way to find out.
+
 ### `tests/support/`
 
 Not a test package; nothing here is collected.
 
 | module | purpose |
 |---|---|
-| `extraction.py` | Read a finished turn: `delegated_agents`, `tool_names`, `final_text`, `a2a_tracking`, `task_state` |
+| `extraction.py` | Read a finished turn: `delegated_agents`, `tool_names`, `final_text`, `a2a_tracking`, `task_state`, `interrupted_tools` |
 | `mock_subagents.py` | `MockSubAgent` — subclasses `LocalA2ARunnable`, so it travels the real dispatch path |
 | `scripted_model.py` | `ScriptedChatModel` — replays canned responses, records what tools were bound |
 | `graph_harness.py` | `scripted_graph()` builds a **real** `GraphFactory` graph with a scripted model |
