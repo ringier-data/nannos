@@ -179,8 +179,19 @@ async def gateway_chat_json(
     cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if not match:
+        # The caller decides what an empty answer means; this is the only place that
+        # knows why it is empty, so the shape of the reply is recorded here.
+        logger.warning("No JSON object in the model's reply (%d chars) for model %s", len(text), model)
         return {}
-    parsed = json.loads(match.group())
+    try:
+        parsed = json.loads(match.group())
+    except json.JSONDecodeError as exc:
+        # The match is greedy, so prose holding two objects spans from the first `{`
+        # to the last `}` and is not JSON. Same contract as above: no object found.
+        logger.warning(
+            "Unparseable JSON in the model's reply (%d chars) for model %s: %s", len(text), model, exc
+        )
+        return {}
     return parsed if isinstance(parsed, dict) else {}
 
 

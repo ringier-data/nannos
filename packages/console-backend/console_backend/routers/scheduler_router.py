@@ -49,10 +49,19 @@ from ..services.llm_gateway import gateway_chat_json
 from ..services.scheduler_engine import SchedulerEngine
 from ..services.scheduler_service import _UNSET, SchedulerService
 from ..utils.timezones import resolve_timezone
+from .mcp_router import MCPTool, _list_mcp_tools, rank_mcp_tools
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/scheduler")
+
+#: How many tools the draft generator shows the model. The registry can hold hundreds
+#: of tools across dozens of servers — with every schema included that is on the order
+#: of a hundred thousand tokens for an answer of twenty lines, and the one name the
+#: model needs is buried in it (the reply came back unparseable, as a 200 of nulls).
+#: Fifteen leaves room for a query that matches a family of tools (list/get/search
+#: variants across servers) while keeping the prompt within a few thousand tokens.
+_DRAFT_TOOL_CANDIDATES = 15
 
 
 #: Why check_args must never carry a date: they are stored once and sent unchanged on
@@ -245,6 +254,22 @@ def _coerce_id(value: object, allowed: set[int]) -> int | None:
     return candidate
 
 
+def _coerce_name(value: object, allowed: set[str]) -> str | None:
+    """A generated name, or None when it is not a string or not among the offered ones.
+
+    The string guard matters: a model asked for "the single best-matching tool" answers
+    with a list when several match, and a bare `in` on a set would raise on it.
+    """
+    if not isinstance(value, str):
+        if value is not None:
+            logger.info("Discarding generated name %r: not a string", value)
+        return None
+    if value not in allowed:
+        logger.info("Discarding generated name %r outside the offered set", value)
+        return None
+    return value
+
+
 def _agent_choices(sub_agents: list[SubAgent]) -> list[dict[str, Any]]:
     """The sub-agents a generated job may pick from, as the prompt sees them.
 
@@ -287,14 +312,64 @@ def _get_scheduler_service(request: Request) -> SchedulerService:
     return request.app.state.scheduler_service  # type: ignore[no-any-return]
 
 
+async def _candidate_tools(request: Request, user: User, query: str) -> list[MCPTool]:
+    """The tools worth offering the draft generator for `query`: the user's own catalogue,
+    ranked by the search endpoint's scorer, cut to `_DRAFT_TOOL_CANDIDATES`.
+
+    Read here rather than accepted from the caller for the same reason the sub-agents
+    and channels are: a generated job may only reference what this user can reach, and
+    the request body is not where that is decided.
+    """
+    try:
+        catalogue = await _list_mcp_tools(request, user)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # When the gateway starts failing this is the only line an operator gets, so
+        # it carries the upstream status where there is one, and the traceback.
+        upstream = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "Could not read the tool catalogue for draft generation (%s, upstream status %s)",
+            type(exc).__name__,
+            upstream,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not read the tool catalogue — try again shortly.",
+        ) from exc
+    candidates = rank_mcp_tools(catalogue.tools, query, _DRAFT_TOOL_CANDIDATES)
+    # An empty offer is legitimate — a task job needs no tool, and the request may
+    # simply share no vocabulary with the catalogue — but it is worth its own line, since
+    # the model can then only name a tool from memory, which is discarded afterwards.
+    if not candidates:
+        logger.info(
+            "Draft generation offers no tools for query %r (%d in the catalogue%s)",
+            query,
+            len(catalogue.tools),
+            "" if catalogue.tools else " — empty, e.g. under impersonation",
+        )
+    else:
+        logger.info(
+            "Draft generation offers %d of %d tools for query %r: %s",
+            len(candidates),
+            len(catalogue.tools),
+            query,
+            [t.name for t in candidates],
+        )
+    return candidates
+
+
 @router.post(
     "/generate-job-draft",
     response_model=ScheduledJobDraft,
     summary="Draft a whole scheduled job from a one-line description.",
     description=(
-        "Given the available MCP tools and a natural-language request, returns a partial "
-        "ScheduledJobCreate: job type, schedule, check tool and arguments, condition, "
-        "outcome and delivery. Fields it cannot infer are omitted for the caller to fill in."
+        "Given a natural-language request, returns a partial ScheduledJobCreate: job type, "
+        "schedule, check tool and arguments, condition, outcome and delivery. The tools, "
+        "sub-agents and channels the draft may reference are the caller's own, read "
+        "server-side. Fields it cannot infer are omitted for the caller to fill in; a "
+        "generation that infers nothing at all is an error, not an empty draft."
     ),
 )
 async def generate_job_draft(
@@ -305,17 +380,19 @@ async def generate_job_draft(
 ) -> ScheduledJobDraft:
     """Generate a whole job from one sentence: type, schedule, tool, condition, outcome.
 
-    The sub-agents and delivery channels the model may choose from are read here rather
-    than accepted from the caller, so a generated job can only ever reference something
-    the user can already reach.
+    The tools, sub-agents and delivery channels the model may choose from are read here
+    rather than accepted from the caller, so a generated job can only ever reference
+    something the user can already reach. Tools are additionally ranked against the
+    request and cut to a handful — see `_DRAFT_TOOL_CANDIDATES`.
     """
+    candidate_tools = await _candidate_tools(request, current_user, data.query)
+    # Compact on purpose: pretty-printed schema is a third more tokens for whitespace the
+    # model does not need, and the whole prompt is re-sent on every CEL repair round.
     tools_summary = json.dumps(
-        [
-            {"name": t.get("name"), "description": t.get("description"), "input_schema": t.get("input_schema")}
-            for t in data.tools
-        ],
-        indent=2,
+        [{"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in candidate_tools],
+        separators=(",", ":"),
     )
+    allowed_tool_names = {t.name for t in candidate_tools}
     # Offer only what this user can reach: the model picks from these, and anything
     # outside the offered ids is discarded after the call.
     # The same set create_job validates against — offering anything wider produces a
@@ -465,13 +542,41 @@ async def generate_job_draft(
     generated["schedule_kind"] = _coerce_enum(ScheduleKind, result.get("schedule_kind"))
     generated["sub_agent_id"] = _coerce_id(result.get("sub_agent_id"), allowed_agent_ids)
     generated["delivery_channel_id"] = _coerce_id(result.get("delivery_channel_id"), allowed_channel_ids)
+    # A tool name outside the offered set is an invention — the model saw only the
+    # candidates — and would produce a job whose check fails on its first run. The
+    # arguments and condition were written against that invented tool, so they go with
+    # it: the form applies each of them independently, and pre-filled arguments under a
+    # tool the user then picks by hand are exactly the first-run failure being avoided.
+    generated["check_tool"] = _coerce_name(result.get("check_tool"), allowed_tool_names)
+    if generated["check_tool"] is None and result.get("check_tool") is not None:
+        for key in ("check_args", "check_args_exprs", "cel_expr", "llm_condition"):
+            generated.pop(key, None)
     if isinstance(generated.get("check_args"), str):
         try:
             generated["check_args"] = json.loads(generated["check_args"])
         except json.JSONDecodeError:
             generated["check_args"] = None
 
-    return _build_draft(generated)
+    draft = _build_draft(generated)
+    # A draft with nothing in it is not "the request implied nothing" — it is a
+    # generation that produced no usable output (no JSON in the reply, or none of the
+    # fields asked for). Rendering that as a 200 left the form silently empty and the
+    # logs silent with it. A draft the model filled only partly is a different outcome
+    # and stays a success. 422 rather than 503, as /generate-condition answers the same
+    # case: the service is up, and a retry-on-503 layer must not re-run a content miss.
+    if not draft.model_fields_set:
+        logger.warning(
+            "Draft generation produced nothing usable for query %r (model %s, %d candidate tools, raw keys %s)",
+            data.query,
+            model,
+            len(candidate_tools),
+            sorted(result),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The model produced no usable draft — rephrase the request.",
+        )
+    return draft
 
 
 @router.post(

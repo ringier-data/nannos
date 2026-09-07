@@ -2020,16 +2020,11 @@ export type GenerateConditionResponse = {
  * GenerateJobDraftRequest
  *
  * Request body for generating a scheduled job from a one-line description.
+ *
+ * Only the request itself: the tools, sub-agents and channels the draft may reference
+ * are the caller's own and are read server-side, never accepted from the body.
  */
 export type GenerateJobDraftRequest = {
-    /**
-     * Tools
-     *
-     * List of available MCP tool objects (name, description, input_schema.)
-     */
-    tools: Array<{
-        [key: string]: unknown;
-    }>;
     /**
      * Query
      *

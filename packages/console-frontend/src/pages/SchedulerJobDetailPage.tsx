@@ -388,7 +388,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setAiLoading(true);
     setError(null);
     try {
-      const draft = await generateJobDraft(mcpTools as unknown as Record<string, unknown>[], aiQuery);
+      const draft = await generateJobDraft(aiQuery);
       setWatch((w) => {
         const next = { ...w };
         if (draft.check_tool) next.check_tool = draft.check_tool;
@@ -707,7 +707,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
                     />
                     <Button
                       type="button"
-                      disabled={!aiQuery.trim() || aiLoading || mcpTools.length === 0}
+                      disabled={!aiQuery.trim() || aiLoading}
                       onClick={handleAiGenerate}
                     >
                       {aiLoading ? <Loader2 className="size-4 animate-spin" /> : 'Generate'}
