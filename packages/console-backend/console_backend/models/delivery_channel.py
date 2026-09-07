@@ -6,6 +6,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 MessageFormatting = Literal["markdown", "slack", "google-chat", "plain"]
+#: What a channel renders when it declares no formatting of its own.
+DEFAULT_MESSAGE_FORMATTING: MessageFormatting = "markdown"
 
 _FORMATTING_DESCRIPTION = (
     "How this channel renders delivered text. Nothing rewrites an agent's output on the "
@@ -70,7 +72,7 @@ class DeliveryChannelResponse(BaseModel):
     description: str | None = None
     webhook_url: str
     message_formatting: MessageFormatting = Field(
-        default="markdown",
+        default=DEFAULT_MESSAGE_FORMATTING,
         description=_FORMATTING_DESCRIPTION,
     )
     client_id: str = Field(description="Keycloak client ID of the A2A service that registered this channel.")
