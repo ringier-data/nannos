@@ -453,7 +453,10 @@ class SchedulerEngine:
             f"Result:\n{json.dumps(check_result, indent=2, default=str)[:6000]}"
         )
         try:
-            message = await gateway_chat(prompt, model=model, max_tokens=256)
+            # Thinking off: two sentences of plain text need no reasoning, and on the low
+            # tier a reasoning model spends the budget thinking and is cut off mid-sentence
+            # — which would then be sent to the person verbatim.
+            message = await gateway_chat(prompt, model=model, max_tokens=256, reasoning_effort="none")
             written = message.strip().strip('"')
             if written:
                 logger.info("Job %d: wrote notification %r", job.id, written[:100])

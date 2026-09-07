@@ -45,7 +45,7 @@ from ..services.cel_condition import (
     evaluate_arg_exprs,
     validate_cel_expression,
 )
-from ..services.llm_gateway import gateway_chat_json
+from ..services.llm_gateway import GatewayReplyTruncated, gateway_chat_json
 from ..services.scheduler_engine import SchedulerEngine
 from ..services.scheduler_service import _UNSET, SchedulerService
 from ..utils.timezones import resolve_timezone
@@ -117,6 +117,17 @@ _EXPRESSION_RULES = (
     "Every watch needs cel_expr, llm_condition, or both.\n\n"
 )
 
+
+#: Thinking off for the draft and condition generators. Both are mechanical JSON-filling
+#: from a prompt that already states the rules, and reasoning tokens count against
+#: `max_tokens`: on the low tier a reasoning model spent 979 of a 1024 budget thinking
+#: and was cut off 41 tokens into the answer, which read as "no usable draft". The proxy
+#: drops the parameter for models that have no such control.
+_GENERATION_REASONING = "none"
+
+#: What the person sees when the model's reply hit the output budget. Not a request to
+#: rephrase — the request was fine.
+_TRUNCATED_DETAIL = "The model's reply was cut off before it finished — try again."
 
 #: How many times a generated expression that fails to compile or evaluate is sent
 #: back with its error. Two is deliberate: the first retry fixes most syntax slips,
@@ -491,10 +502,13 @@ async def generate_job_draft(
             model=model,
             max_tokens=1024,
             metadata={"user_sub": current_user.sub},  # OIDC subject — the gateway/proxy attributes by sub, not internal id
+            reasoning_effort=_GENERATION_REASONING,
         )
 
     try:
         result = await _generate(prompt)
+    except GatewayReplyTruncated as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_TRUNCATED_DETAIL) from exc
     except Exception as exc:
         logger.warning("Watch-param generation via gateway failed: %s", exc)
         raise HTTPException(
@@ -646,6 +660,7 @@ async def generate_condition(
             model=model,
             max_tokens=1024,
             metadata={"user_sub": current_user.sub},
+            reasoning_effort=_GENERATION_REASONING,
         )
 
     notes: list[str] = []
@@ -656,6 +671,8 @@ async def generate_condition(
     for _ in range(1 + _GENERATE_CONDITION_RETRIES):
         try:
             candidate = await _generate(instruction)
+        except GatewayReplyTruncated as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_TRUNCATED_DETAIL) from exc
         except Exception as exc:
             logger.warning("Condition generation via gateway failed: %s", exc)
             raise HTTPException(

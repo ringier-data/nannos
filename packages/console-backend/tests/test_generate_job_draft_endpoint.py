@@ -184,6 +184,37 @@ class TestToolsAreSelectedServerSide:
         assert any("offers no tools" in r.getMessage() for r in caplog.records)
 
 
+class TestReasoningBudget:
+    """Why the bug-report request still failed after the catalogue was trimmed.
+
+    The low tier resolved to a reasoning model; reasoning tokens count against
+    `max_tokens=1024`, so it spent 979 of them thinking and was stopped 41 tokens into
+    the JSON. The salvage found no object and the person was told to rephrase.
+    """
+
+    def test_thinking_is_off_for_draft_generation(self, draft_client, raw_gateway, catalogue):
+        raw_gateway.return_value = '{"job_type": "watch", "check_tool": "console_list_bug_reports"}'
+
+        resp = draft_client.post(URL, json={"query": QUERY})
+
+        assert resp.status_code == 200
+        assert raw_gateway.await_args.kwargs["reasoning_effort"] == "none"
+
+    def test_a_reply_cut_off_by_the_budget_is_reported_as_such(self, draft_client, raw_gateway, catalogue, caplog):
+        from console_backend.services.llm_gateway import GatewayText
+
+        raw_gateway.return_value = GatewayText('{\n  "job_type": "watch",\n  "name": "New Bug Report Watcher",\n  "sch', "length")
+
+        with caplog.at_level("WARNING"):
+            resp = draft_client.post(URL, json={"query": QUERY})
+
+        assert resp.status_code == 422
+        assert "cut off" in resp.json()["detail"]
+        assert "rephrase" not in resp.json()["detail"]
+        message = next(r.getMessage() for r in caplog.records if "finish_reason=length" in r.getMessage())
+        assert "New Bug Report Watcher" in message
+
+
 class TestAnEmptyGenerationFailsLoudly:
     def test_no_json_in_the_reply_is_a_422(self, draft_client, raw_gateway, catalogue, caplog):
         # A reply with no JSON object used to flow through as a 200 with every field
