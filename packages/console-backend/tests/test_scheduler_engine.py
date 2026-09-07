@@ -1098,10 +1098,8 @@ class TestWriteNotification:
     async def test_the_model_writes_it(self):
         engine = _make_engine()
         job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
-        with patch(
-            "console_backend.services.scheduler_engine.gateway_chat",
-            AsyncMock(return_value='  "Campaign 4821 stopped syncing."  '),
-        ):
+        chat = AsyncMock(return_value='  "Campaign 4821 stopped syncing."  ')
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
             with patch(
                 "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
                 AsyncMock(return_value={"chat:low": "some-model"}),
@@ -1111,6 +1109,9 @@ class TestWriteNotification:
                 )
         # Quotes and padding stripped: this goes straight to a person.
         assert written == "Campaign 4821 stopped syncing."
+        # Thinking off: a reasoning model on the low tier would otherwise spend the
+        # 256-token budget thinking and send a cut-off sentence to the person.
+        assert chat.await_args.kwargs["reasoning_effort"] == "none"
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_still_says_something(self):

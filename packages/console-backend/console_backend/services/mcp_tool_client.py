@@ -221,7 +221,6 @@ async def call_tool(
                 "params": {"name": tool_name, "arguments": arguments or {}},
             },
             timeout=timeout,
-            # follow_redirects=True,
         )
         response.raise_for_status()
         data = parse_envelope(response, expect_id=_CALL_ID)
