@@ -40,7 +40,15 @@
 - id: relays_subagent_request_for_input
   description: A sub-agent asking for input must have the question relayed, not answered.
   input:
-    query: "Post the quarterly summary to the team channel on Slack."
+    # The message content is supplied inline, deliberately. An earlier version
+    # said only "post the quarterly summary", and claude-sonnet-4-6 correctly
+    # refused to guess: it ran `ls`, found no summary, and asked the user for the
+    # content instead of delegating — reaching `input_required` by a route the
+    # scenario was not testing. gemini-3-flash-preview delegated and passed, so
+    # the dataset was measuring how literally a model reads an ambiguous request.
+    # A scenario about relaying a *sub-agent's* question must leave the
+    # orchestrator nothing else to be unsure about.
+    query: "Post this to the team Slack channel, exactly as written: Q3 revenue was 8.2 million EUR."
   subagents:
     - name: slack-notifier
       description: "Sends messages to Slack channels and users. Use for anything involving Slack."
@@ -48,6 +56,10 @@
   expect:
     delegations:
       required: [slack-notifier]
+    instructions:
+      # Proves the content reached the sub-agent, so a pass cannot come from
+      # delegating an empty or invented message.
+      slack-notifier: ["8.2"]
     # `input_required` rather than `failed`: nothing went wrong, the turn is
     # unfinished. Conflating the two is the specific mistake this catches — it
     # would tell the user their request was impossible rather than ask them one
