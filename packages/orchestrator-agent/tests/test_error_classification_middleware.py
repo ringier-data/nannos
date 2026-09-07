@@ -269,3 +269,23 @@ async def test_auth_takes_priority_over_transient(middleware):
     result = await middleware.awrap_tool_call(request, handler)
     # 401 matches auth first
     assert result.additional_kwargs["error_classification"] == "auth"
+
+
+class TestStructuredEvalResults:
+    """A successful PTC ``eval`` ``<result>`` must never be classified, whatever words it contains."""
+
+    def test_successful_result_with_error_words_is_not_classified(self):
+        from app.middleware.error_classification_middleware import classify_error
+
+        grep_output = (
+            '<result>[{type: "text", text: "{\n  \"tools\": [{\"name\": \"github_search_users\", '
+            '\"description\": \"Find users. Returns an error if the query is invalid\", '
+            '\"input_schema\": {\"required\": [\"query\"], \"properties\": {}}}]}"}]</result>'
+        )
+        assert classify_error(grep_output) is None
+
+    def test_structured_eval_error_is_still_classified(self):
+        from app.middleware.error_classification_middleware import classify_error
+
+        assert classify_error('<error type="TypeError">not a function</error>') == "system_error"
+        assert classify_error('<error type="Error">Missing required field: owner</error>') == "user_fixable"

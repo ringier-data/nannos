@@ -46,6 +46,28 @@ class ToolRiskRepository(AuditedRepository):
         row = result.mappings().first()
         return dict(row) if row else None
 
+    async def get_scores_by_tool(
+        self,
+        db: AsyncSession,
+        tool_name: str,
+    ) -> list[dict[str, Any]]:
+        """All scores recorded for a tool name, across servers.
+
+        Scores are keyed (tool_name, server_slug) and the same tool is scored
+        separately per server it was reached through, so a caller that does not know
+        which slug was used has to consider them all.
+        """
+        result = await db.execute(
+            text("""
+                SELECT tool_name, server_slug, schema_hash, base_score,
+                       risk_factors, allowed_actions, updated_at, created_at
+                FROM tool_risk_scores
+                WHERE tool_name = :tool_name
+            """),
+            {"tool_name": tool_name},
+        )
+        return [dict(row) for row in result.mappings().all()]
+
     async def get_scores_paginated(
         self,
         db: AsyncSession,

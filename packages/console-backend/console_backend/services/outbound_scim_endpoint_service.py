@@ -37,14 +37,15 @@ class OutboundScimEndpointService:
         bearer_token: str,
         push_users: bool,
         push_groups: bool,
+        is_mcp_gateway: bool,
         actor: User,
     ) -> OutboundScimEndpointCreated:
         """Create a new outbound SCIM endpoint."""
         result = await db.execute(
             text("""
                 INSERT INTO outbound_scim_endpoints
-                    (name, endpoint_url, bearer_token, push_users, push_groups, created_by)
-                VALUES (:name, :endpoint_url, :bearer_token, :push_users, :push_groups, :created_by)
+                    (name, endpoint_url, bearer_token, push_users, push_groups, is_mcp_gateway, created_by)
+                VALUES (:name, :endpoint_url, :bearer_token, :push_users, :push_groups, :is_mcp_gateway, :created_by)
                 RETURNING id, enabled, created_at
             """),
             {
@@ -53,6 +54,7 @@ class OutboundScimEndpointService:
                 "bearer_token": bearer_token,
                 "push_users": push_users,
                 "push_groups": push_groups,
+                "is_mcp_gateway": is_mcp_gateway,
                 "created_by": actor.id,
             },
         )
@@ -64,7 +66,7 @@ class OutboundScimEndpointService:
             entity_type=AuditEntityType.OUTBOUND_SCIM_ENDPOINT,
             entity_id=str(row.id),
             action=AuditAction.CREATE,
-            changes={"after": {"name": name, "endpoint_url": endpoint_url, "push_users": push_users, "push_groups": push_groups}},
+            changes={"after": {"name": name, "endpoint_url": endpoint_url, "push_users": push_users, "push_groups": push_groups, "is_mcp_gateway": is_mcp_gateway}},
         )
 
         return OutboundScimEndpointCreated(
@@ -75,6 +77,7 @@ class OutboundScimEndpointService:
             enabled=row.enabled,
             push_users=push_users,
             push_groups=push_groups,
+            is_mcp_gateway=is_mcp_gateway,
             created_at=row.created_at,
         )
 
@@ -83,7 +86,7 @@ class OutboundScimEndpointService:
         result = await db.execute(
             text("""
                 SELECT id, name, endpoint_url, bearer_token, enabled,
-                       push_users, push_groups, created_by, created_at, updated_at
+                       push_users, push_groups, is_mcp_gateway, created_by, created_at, updated_at
                 FROM outbound_scim_endpoints
                 WHERE deleted_at IS NULL
                 ORDER BY created_at DESC
@@ -99,6 +102,7 @@ class OutboundScimEndpointService:
                 enabled=row.enabled,
                 push_users=row.push_users,
                 push_groups=row.push_groups,
+                is_mcp_gateway=row.is_mcp_gateway,
                 created_by=row.created_by,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
@@ -111,7 +115,7 @@ class OutboundScimEndpointService:
         result = await db.execute(
             text("""
                 SELECT id, name, endpoint_url, bearer_token, enabled,
-                       push_users, push_groups, created_by, created_at, updated_at
+                       push_users, push_groups, is_mcp_gateway, created_by, created_at, updated_at
                 FROM outbound_scim_endpoints
                 WHERE id = :id AND deleted_at IS NULL
             """),
@@ -129,6 +133,7 @@ class OutboundScimEndpointService:
             enabled=row.enabled,
             push_users=row.push_users,
             push_groups=row.push_groups,
+            is_mcp_gateway=row.is_mcp_gateway,
             created_by=row.created_by,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -146,6 +151,7 @@ class OutboundScimEndpointService:
         enabled: bool | None = None,
         push_users: bool | None = None,
         push_groups: bool | None = None,
+        is_mcp_gateway: bool | None = None,
     ) -> OutboundScimEndpoint | None:
         """Update an outbound SCIM endpoint."""
         # Build dynamic SET clause
@@ -162,6 +168,8 @@ class OutboundScimEndpointService:
             fields["push_users"] = push_users
         if push_groups is not None:
             fields["push_groups"] = push_groups
+        if is_mcp_gateway is not None:
+            fields["is_mcp_gateway"] = is_mcp_gateway
 
         if not fields:
             return await self.get_endpoint(db, endpoint_id)

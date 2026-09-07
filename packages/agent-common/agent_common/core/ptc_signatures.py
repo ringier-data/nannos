@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from agent_common.core.tool_search import first_line
 from langchain_quickjs._prompt import to_camel_case
 
 if TYPE_CHECKING:
@@ -192,7 +193,7 @@ def render_signature_block(tool: BaseTool) -> str:
     """Render ``/** description */\\n<signature>`` for a single tool."""
     camel = to_camel_case(tool.name)
     schema = _safe_json_schema(tool)
-    description = (tool.description or "").strip().splitlines()[0] if tool.description else ""
+    description = first_line(tool.description)
     signature = render_signature(camel, schema)
     return f"/** {description} */\n{signature}"
 

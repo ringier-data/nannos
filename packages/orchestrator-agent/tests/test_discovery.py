@@ -1,12 +1,66 @@
 """Unit tests for discovery services."""
 
+import asyncio
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
+from mcp.types import ListToolsResult, Tool as MCPTool
 
+import app.core.discovery as discovery_module
 from app.core.discovery import AgentDiscoveryService, ToolDiscoveryService
 from app.models.config import AgentSettings
+from agent_common.core.catalogue_ingest import reset_stateless_memo
+from agent_common.core.tool_catalogue import LazyMcpTool
+
+
+def _mcp_tool(name: str, description: str = "") -> MCPTool:
+    return MCPTool(name=name, description=description, inputSchema={"type": "object", "properties": {}})
+
+
+def _mock_mcp_client(tools_by_server=None, on_list=None):
+    """A MultiServerMCPClient stand-in whose ``session(name)`` yields a session with ``list_tools``.
+
+    ``tools_by_server`` maps slug -> list[MCPTool] (default: one tool named after the slug);
+    ``on_list(server_name)`` is awaited before each list for instrumentation.
+    """
+    client = Mock()
+    client.callbacks = None
+    client.tool_interceptors = []
+
+    def session(server_name: str):
+        @asynccontextmanager
+        async def _cm():
+            if on_list is not None:
+                await on_list(server_name)
+            sess = Mock()
+            tools = (tools_by_server or {}).get(server_name, [_mcp_tool(f"tool_{server_name}")])
+            sess.list_tools = AsyncMock(return_value=ListToolsResult(tools=tools, nextCursor=None))
+            yield sess
+
+        return _cm()
+
+    client.session = session
+    return client
+
+
+def _settings(**overrides):
+    config = Mock(spec=AgentSettings)
+    config.get_oidc_client_id.return_value = "test_client_id"
+    config.get_oidc_client_secret.return_value = Mock()
+    config.get_oidc_client_secret.return_value.get_secret_value.return_value = "test_secret"
+    config.get_oidc_issuer.return_value = "https://test.oidc.com"
+    config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
+    config.CONSOLE_BACKEND_URL = None
+    config.MCP_DISCOVERY_CONCURRENCY = 5
+    config.MCP_CATALOGUE_STATELESS_LIST = False
+    config.MCP_TOKEN_LEEWAY_SECONDS = 90
+    config.MCP_DIRECT_SERVERS = None
+    for k, v in overrides.items():
+        setattr(config, k, v)
+    return config
+
 
 
 class TestAgentDiscoveryService:
@@ -60,8 +114,10 @@ class TestAgentDiscoveryService:
             mock_http_client.get = AsyncMock(return_value=mock_response)
             mock_client.return_value.__aenter__.return_value = mock_http_client
 
-            # Mock A2A runnable
+            # Mock A2A runnable — the registry key comes from its tracking_key
+            # (card name, spaces stripped)
             mock_runnable_instance = Mock()
+            mock_runnable_instance.tracking_key = "TestAgent"
             mock_runnable.return_value = mock_runnable_instance
 
             result = await service.register_agents(agent_metadata, token)
@@ -133,6 +189,44 @@ class TestToolDiscoveryService:
         assert service.oauth2_client == oauth2_client
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("gateway_url", "expected_servers_url"),
+        [
+            # A host ending in one of the stripped characters (m/c/p) is exactly
+            # the case the old rstrip("/mcp") corrupted — most commonly any
+            # ".com" host (verified against the old code: it produces
+            # "https://gateway.example.co", dropping the "m"). This is the one
+            # case that actually fails without the fix; the others below don't
+            # (nannos.gatana.nannos.ringier.ch ends in "i", not m/c/p — accidentally correct
+            # either way — and are kept for the trailing-slash-only regression).
+            ("https://gateway.example.com/mcp", "https://gateway.example.com/api/v1/mcp-servers"),
+            ("https://nannos.gatana.nannos.ringier.ch/mcp", "https://nannos.gatana.nannos.ringier.ch/api/v1/mcp-servers"),
+            # A trailing slash is a no-op for removesuffix("/mcp") unless the
+            # slash is stripped first — regression coverage for that fix.
+            ("https://gw.example/mcp/", "https://gw.example/api/v1/mcp-servers"),
+            ("https://gw.example/mcp", "https://gw.example/api/v1/mcp-servers"),
+        ],
+    )
+    async def test_fetch_available_servers_builds_correct_url(self, gateway_url, expected_servers_url):
+        config = Mock(spec=AgentSettings)
+        config.MCP_GATEWAY_URL = gateway_url
+        service = ToolDiscoveryService(config, oauth2_client=Mock())
+
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"servers": []}
+
+        mock_http_client = AsyncMock()
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value = mock_http_client
+            await service.fetch_available_servers("test_token")
+
+        called_url = mock_http_client.get.call_args[0][0]
+        assert called_url == expected_servers_url
+
+    @pytest.mark.asyncio
     async def test_discover_tools_basic(self):
         """Test basic tool discovery functionality."""
         config = Mock(spec=AgentSettings)
@@ -146,10 +240,7 @@ class TestToolDiscoveryService:
         service = ToolDiscoveryService(config, oauth2_client)
 
         with patch("app.core.discovery.MultiServerMCPClient") as mock_client:
-            # Mock MCP client
-            mock_client_instance = Mock()
-            mock_client_instance.get_tools = AsyncMock(return_value=[])
-            mock_client.return_value = mock_client_instance
+            mock_client.return_value = _mock_mcp_client()
 
             token = "test_token"
             result = await service.discover_tools(token)
@@ -168,27 +259,20 @@ class TestToolDiscoveryService:
         config.get_oidc_issuer.return_value = "https://test.oidc.com"
         config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
         config.CONSOLE_BACKEND_URL = None
+        config.MCP_DISCOVERY_CONCURRENCY = 5
+        config.MCP_CATALOGUE_STATELESS_LIST = False
+        config.MCP_TOKEN_LEEWAY_SECONDS = 90
+        config.MCP_DIRECT_SERVERS = None
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
         service = ToolDiscoveryService(config, oauth2_client)
 
-        # Mock tools from MCP
-        mock_tool1 = Mock()
-        mock_tool1.name = "allowed_tool"
-        mock_tool1.description = "This tool is allowed"
-        mock_tool1.metadata = None
-
-        mock_tool2 = Mock()
-        mock_tool2.name = "blocked_tool"
-        mock_tool2.description = "This tool is blocked"
-        mock_tool2.metadata = None
+        reset_stateless_memo()
+        tools = [_mcp_tool("allowed_tool", "This tool is allowed"), _mcp_tool("blocked_tool", "This tool is blocked")]
 
         with patch("app.core.discovery.MultiServerMCPClient") as mock_client:
-            mock_client_instance = Mock()
-            # Called as: await client.get_tools(server_name=slug)
-            mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool1, mock_tool2])
-            mock_client.return_value = mock_client_instance
+            mock_client.return_value = _mock_mcp_client({"mock-server": tools})
 
             # Mock fetch_available_servers so no real HTTP call is made
             service.fetch_available_servers = AsyncMock(return_value=[{"slug": "mock-server"}])
@@ -199,7 +283,71 @@ class TestToolDiscoveryService:
 
             assert len(result) == 1
             assert result[0].name == "allowed_tool"
+            assert isinstance(result[0], LazyMcpTool)
+            assert result[0].metadata["server_name"] == "mock-server"
+            assert not result[0].schema_decoded, "discovery must not decode any schema"
             oauth2_client.exchange_token.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_discover_tools_bounds_concurrent_server_fetches(self):
+        """Cold discovery must not query every MCP server at once.
+
+        An unbounded fan-out holds every server's session, response body, parsed
+        schema and tool objects in memory simultaneously, so the memory peak scales
+        with the size of the gateway catalogue. That spike OOMKilled the prod pod
+        (2026-08-15). This pins the bound: with 20 servers and a limit of 3, no more
+        than 3 fetches may ever be in flight together, and every server is still
+        visited exactly once.
+        """
+        config = Mock(spec=AgentSettings)
+        config.get_oidc_client_id.return_value = "test_client_id"
+        config.get_oidc_client_secret.return_value = Mock()
+        config.get_oidc_client_secret.return_value.get_secret_value.return_value = "test_secret"
+        config.get_oidc_issuer.return_value = "https://test.oidc.com"
+        config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
+        config.CONSOLE_BACKEND_URL = None
+        config.MCP_DISCOVERY_CONCURRENCY = 3
+        config.MCP_CATALOGUE_STATELESS_LIST = False
+        config.MCP_TOKEN_LEEWAY_SECONDS = 90
+        config.MCP_DIRECT_SERVERS = None
+
+        oauth2_client = AsyncMock()
+        oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
+        service = ToolDiscoveryService(config, oauth2_client)
+
+        # The semaphore is process-wide and lazily built; clear it so this test's
+        # limit applies rather than one cached by an earlier test.
+        discovery_module._DISCOVERY_SEMAPHORE = None
+        discovery_module._DISCOVERY_SEMAPHORE_LIMIT = None
+
+        servers = [{"slug": f"server-{i}"} for i in range(20)]
+        in_flight = 0
+        max_in_flight = 0
+        visited: list[str] = []
+
+        async def on_list(server_name: str):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            visited.append(server_name)
+            # Yield control so overlapping fetches actually interleave; without this
+            # the coroutines would run to completion one after another and the test
+            # would pass even with an unbounded gather.
+            await asyncio.sleep(0)
+            in_flight -= 1
+
+        reset_stateless_memo()
+        with patch("app.core.discovery.MultiServerMCPClient") as mock_client:
+            mock_client.return_value = _mock_mcp_client(on_list=on_list)
+            service.fetch_available_servers = AsyncMock(return_value=servers)
+
+            result = await service.discover_tools("test_token")
+
+        # Exactly 3: `<= 3` would also pass under full serialisation, which would
+        # hide a bound that throttles far harder than configured.
+        assert max_in_flight == 3, f"expected exactly 3 concurrent fetches, saw {max_in_flight}"
+        assert sorted(visited) == sorted(s["slug"] for s in servers)
+        assert len(result) == 20
 
     @pytest.mark.asyncio
     async def test_discover_tools_error_handling(self):
@@ -244,10 +392,7 @@ class TestDiscoveryIntegration:
         token = "test_token"
 
         with patch("app.core.discovery.MultiServerMCPClient") as mock_mcp_client:
-            # Mock MCP client
-            mock_mcp_instance = Mock()
-            mock_mcp_instance.get_tools = AsyncMock(return_value=[])
-            mock_mcp_client.return_value = mock_mcp_instance
+            mock_mcp_client.return_value = _mock_mcp_client()
 
             # Run both discoveries concurrently
             import asyncio

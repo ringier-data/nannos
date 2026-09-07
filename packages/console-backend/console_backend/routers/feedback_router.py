@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import text
 
 from ..db.session import DbSession
-from ..dependencies import User, require_auth, require_auth_or_bearer_token
+from ..dependencies import User, require_auth_or_bearer_token
 from ..models.feedback import (
     MessageFeedbackCreate,
     MessageFeedbackResponse,
@@ -115,7 +115,9 @@ async def get_conversation_feedback(
     request: Request,
     conversation_id: str,
     db: DbSession,
-    user: User = Depends(require_auth),
+    # Bearer accepted: the embed SDK (ADR-0004) reads feedback state cross-origin,
+    # same as the sibling feedback POST/DELETE endpoints above.
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> list[MessageFeedbackResponse]:
     await _verify_conversation_ownership(db, conversation_id, user.id)
     service = get_feedback_service(request)

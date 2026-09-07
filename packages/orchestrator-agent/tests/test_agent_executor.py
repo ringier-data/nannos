@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import Message, Part, Role, TaskState
@@ -153,7 +154,7 @@ class TestAgentExecutorStreamHandling:
         """A fully-streamed completion closes the artifact and emits a BARE completion.
 
         Single-source emission: when the full answer was already streamed as the
-        artifact (streamed_chars >= final_message_len), the terminal `completed`
+        artifact (len(streamed_text) >= final_message_len), the terminal `completed`
         status carries NO message — re-sending it would duplicate the answer for
         every consumer (web render + persistence, slack, google-chat). Clients use
         the streamed artifact; the terminal is state-only.
@@ -185,7 +186,7 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-1",
             first_chunk_sent=True,
-            streamed_chars=45,
+            streamed_text="Full response content",
         )
 
         # Last artifact chunk should be empty (just stream close signal)
@@ -465,11 +466,70 @@ class TestAgentExecutorStreamHandling:
         # stream termination is inferred from the terminal task state, not an explicit flag.
         assert status_call[1].get("final") is not True
 
-    async def test_handle_stream_item_streaming_input_required_closes_artifact_with_fallback(self, dynamodb_table):
-        """When orchestrator streamed token chunks this turn and then resolves to
-        input_required, the streaming artifact is closed cleanly and the terminal
-        status carries the authoritative final answer tagged
-        `final_answer_source: "fallback"` for client-side deduping.
+    async def test_handle_stream_item_streaming_input_required_closes_artifact_and_ends_bare(self, dynamodb_table):
+        """A fully streamed answer that ends in input_required is delivered ONCE.
+
+        The artifact is closed cleanly and the terminal status is BARE. Re-sending
+        the answer in `status.message` here duplicated it for every consumer: the
+        console persisted the same text twice (once from the assembled artifact,
+        once from this status), so a reloaded conversation showed one answer as two
+        bubbles. How a turn ends says nothing about whether its answer was already
+        delivered — only the streamed text does.
+        """
+        from app.models.responses import AgentStreamResponse
+
+        executor = OrchestratorDeepAgentExecutor()
+
+        updater = Mock()
+        updater.add_artifact = AsyncMock()
+        updater.update_status = AsyncMock()
+
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        answer = "Which project should I file the ticket under?"
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
+            content=answer,
+        )
+
+        # The whole answer streamed, so the terminal status has nothing left to add.
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-IR",
+            first_chunk_sent=True,
+            streamed_text=answer,
+        )
+
+        # Artifact stream closed with an empty append+last_chunk frame
+        updater.add_artifact.assert_called_once()
+        artifact_call = updater.add_artifact.call_args
+        assert artifact_call[1]["last_chunk"] is True
+        assert artifact_call[1]["append"] is True
+        assert artifact_call[1]["artifact_id"] == "artifact-IR"
+        parts = artifact_call[0][0]
+        assert parts[0].text == ""
+
+        # Bare terminal status: no message, and nothing to dedupe against
+        updater.update_status.assert_called_once()
+        status_call = updater.update_status.call_args
+        assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert status_call[0][1] is None
+        assert "final_answer_source" not in (status_call[1].get("metadata") or {})
+        # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
+        # stream termination is inferred from the terminal task state, not an explicit flag.
+        assert status_call[1].get("final") is not True
+
+    async def test_handle_stream_item_streaming_input_required_partial_prefix_keeps_fallback(self, dynamodb_table):
+        """Only a PREFIX streamed — the terminal status must still carry the answer.
+
+        The dedupe applies to a fully streamed answer, not to any interrupt: when
+        the client has less text than the final answer, dropping the message would
+        lose the rest of it.
         """
         from app.models.responses import AgentStreamResponse
 
@@ -495,29 +555,55 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-IR",
             first_chunk_sent=True,
-            streamed_chars=120,
+            streamed_text="Which proj",
         )
 
-        # Artifact stream closed with an empty append+last_chunk frame
-        updater.add_artifact.assert_called_once()
-        artifact_call = updater.add_artifact.call_args
-        assert artifact_call[1]["last_chunk"] is True
-        assert artifact_call[1]["append"] is True
-        assert artifact_call[1]["artifact_id"] == "artifact-IR"
-        parts = artifact_call[0][0]
-        assert parts[0].text == ""
-
-        # Terminal status carries the final message + fallback metadata + final=True
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
         final_msg = status_call[0][1]
         text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "Which project should I file the ticket under?" in "".join(text_parts)
         assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
-        # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
-        # stream termination is inferred from the terminal task state, not an explicit flag.
-        assert status_call[1].get("final") is not True
+
+    async def test_handle_stream_item_bare_input_required_keeps_interrupt_reason(self, dynamodb_table):
+        """Dropping the duplicate message must not drop what it carried.
+
+        `interrupt_reason` rode on the message body. With the message gone, the
+        status is the only frame left, so the reason moves onto its metadata —
+        otherwise a client could not tell why the turn paused.
+        """
+        from app.models.responses import AgentStreamResponse
+
+        executor = OrchestratorDeepAgentExecutor()
+
+        updater = Mock()
+        updater.add_artifact = AsyncMock()
+        updater.update_status = AsyncMock()
+
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        answer = "Which project should I file the ticket under?"
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
+            content=answer,
+            interrupt_reason="graph_interrupted",
+        )
+
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-IR",
+            first_chunk_sent=True,
+            streamed_text=answer,
+        )
+
+        status_call = updater.update_status.call_args
+        assert status_call[0][1] is None
+        assert status_call[1]["metadata"]["interrupt_reason"] == "graph_interrupted"
 
     async def test_handle_stream_item_auth_required_carries_final_message(self, dynamodb_table):
         """auth_required terminal status MUST carry the FinalResponseSchema.message
@@ -560,11 +646,65 @@ class TestAgentExecutorStreamHandling:
         # stream termination is inferred from the terminal task state, not an explicit flag.
         assert status_call[1].get("final") is not True
 
-    async def test_handle_stream_item_streaming_auth_required_closes_artifact_with_fallback(self, dynamodb_table):
-        """When orchestrator streamed token chunks and then resolves to
-        auth_required, the streaming artifact is closed cleanly and the terminal
-        status carries the authoritative final answer tagged
-        `final_answer_source: "fallback"`.
+    async def test_handle_stream_item_streaming_auth_required_closes_artifact_and_ends_bare(self, dynamodb_table):
+        """A fully streamed answer that ends in auth_required is delivered ONCE.
+
+        Same rule as input_required: the artifact is closed cleanly and the
+        terminal status is bare, so no consumer stores or renders the answer twice.
+        """
+        from app.models.responses import AgentStreamResponse
+
+        executor = OrchestratorDeepAgentExecutor()
+
+        updater = Mock()
+        updater.add_artifact = AsyncMock()
+        updater.update_status = AsyncMock()
+
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        prompt = "Please re-authenticate with Google to continue."
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
+            content=prompt,
+        )
+
+        # This prompt IS what streamed, so re-sending it would only duplicate it.
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-AR",
+            first_chunk_sent=True,
+            streamed_text=prompt,
+        )
+
+        updater.add_artifact.assert_called_once()
+        artifact_call = updater.add_artifact.call_args
+        assert artifact_call[1]["last_chunk"] is True
+        assert artifact_call[1]["append"] is True
+        assert artifact_call[1]["artifact_id"] == "artifact-AR"
+        parts = artifact_call[0][0]
+        assert parts[0].text == ""
+
+        updater.update_status.assert_called_once()
+        status_call = updater.update_status.call_args
+        assert status_call[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
+        assert status_call[0][1] is None
+        assert "final_answer_source" not in (status_call[1].get("metadata") or {})
+        # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
+        # stream termination is inferred from the terminal task state, not an explicit flag.
+        assert status_call[1].get("final") is not True
+
+    async def test_handle_stream_item_auth_required_after_long_answer_keeps_prompt(self, dynamodb_table):
+        """A short auth prompt after a long streamed answer must still be sent.
+
+        The prompt is a DIFFERENT text from the answer, so it was never delivered.
+        Counting characters alone would say "already streamed" (500 >= 35) and drop
+        it — and the console renders its auth card from exactly this row, so a
+        reloaded conversation would lose the sign-in prompt entirely.
         """
         from app.models.responses import AgentStreamResponse
 
@@ -580,7 +720,7 @@ class TestAgentExecutorStreamHandling:
 
         item = AgentStreamResponse(
             state=TaskState.TASK_STATE_AUTH_REQUIRED,
-            content="Please re-authenticate with Google to continue.",
+            content="Please sign in to Jira to continue.",
         )
 
         await executor._handle_stream_item(
@@ -590,27 +730,88 @@ class TestAgentExecutorStreamHandling:
             is_final=True,
             streaming_artifact_id="artifact-AR",
             first_chunk_sent=True,
-            streamed_chars=80,
+            streamed_text="Here is a long answer about your tickets. " * 12,
         )
-
-        updater.add_artifact.assert_called_once()
-        artifact_call = updater.add_artifact.call_args
-        assert artifact_call[1]["last_chunk"] is True
-        assert artifact_call[1]["append"] is True
-        assert artifact_call[1]["artifact_id"] == "artifact-AR"
-        parts = artifact_call[0][0]
-        assert parts[0].text == ""
 
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
         final_msg = status_call[0][1]
+        assert final_msg is not None
         text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
-        assert "Please re-authenticate with Google to continue." in "".join(text_parts)
-        assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
-        # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
-        # stream termination is inferred from the terminal task state, not an explicit flag.
-        assert status_call[1].get("final") is not True
+        assert "Please sign in to Jira to continue." in "".join(text_parts)
+
+    async def test_handle_stream_item_input_required_client_action_request(self, dynamodb_table):
+        """A client-action round trip pauses as input_required carrying the
+        {"request": {id, directive}} DataPart under the client-action extension —
+        NOT the HITL message, and NOT the generic text fallback."""
+        from app.core.a2a_extensions import CLIENT_ACTION_EXTENSION
+        from app.models.responses import AgentStreamResponse
+        from google.protobuf.json_format import MessageToDict
+
+        executor = OrchestratorDeepAgentExecutor()
+
+        updater = Mock()
+        updater.update_status = AsyncMock()
+        updater.add_artifact = AsyncMock()
+
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        request = {"id": "call-1", "directive": {"kind": "apply", "target": {"type": "Campaign", "id": "7"}}}
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
+            content="Waiting for the application…",
+            client_action_request=request,
+        )
+
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-1",
+            active_extensions={CLIENT_ACTION_EXTENSION},
+        )
+
+        updater.add_artifact.assert_not_called()  # nothing streamed → nothing to seal
+        updater.update_status.assert_called_once()
+        state_arg, msg = updater.update_status.call_args[0]
+        assert state_arg == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert CLIENT_ACTION_EXTENSION in list(msg.extensions)
+        data = MessageToDict(msg.parts[0].data)
+        assert data == {"request": request}
+
+    async def test_handle_stream_item_client_action_request_seals_open_artifact(self, dynamodb_table):
+        """Tokens streamed before the pause: the artifact is closed first (the
+        same rule as HITL), so the client's stream never dangles."""
+        from app.core.a2a_extensions import CLIENT_ACTION_EXTENSION
+        from app.models.responses import AgentStreamResponse
+
+        executor = OrchestratorDeepAgentExecutor()
+        updater = Mock()
+        updater.update_status = AsyncMock()
+        updater.add_artifact = AsyncMock()
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
+            content="Waiting…",
+            client_action_request={"id": "call-1", "directive": {"kind": "apply"}},
+        )
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-1",
+            first_chunk_sent=True,
+            active_extensions={CLIENT_ACTION_EXTENSION},
+        )
+        updater.add_artifact.assert_called_once()
+        assert updater.add_artifact.call_args[1]["last_chunk"] is True
 
     async def test_handle_stream_item_input_required_hitl_path_unchanged(self, dynamodb_table):
         """HITL action_requests interrupts still emit the structured HITL message
@@ -728,14 +929,19 @@ class TestExtractHitlDecisions:
         result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
         assert result == {"decisions": [{"type": "reject", "message": "No"}]}
 
-    def test_extract_defaults_to_reject_when_no_data_part(self, dynamodb_table):
-        """Test fallback to reject when no DataPart with decisions is found."""
+    def test_no_data_part_is_not_a_decision_at_all(self, dynamodb_table):
+        """No DataPart means the user typed instead of clicking — not "reject".
+
+        This used to fabricate a rejection, which discarded their words before
+        anything could read them: typing "approve it" came back as "the call was
+        rejected". The safe default moved down to ``decisions_from_resume``, which
+        rejects unless the reply clearly means yes.
+        """
         context = Mock(spec=RequestContext)
         context.message = Mock(spec=Message)
         context.message.parts = []
 
-        result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
-        assert result == {"decisions": [{"type": "reject"}]}
+        assert OrchestratorDeepAgentExecutor._extract_hitl_decisions(context) is None
 
     @staticmethod
     def _interrupt(intr_id, action_requests=None, value=None):
@@ -796,6 +1002,55 @@ class TestExtractHitlDecisions:
         passed = resume_map["d" * 32]["decisions"]
         assert [d["type"] for d in passed] == ["approve", "reject"]
 
+    def test_from_interrupt_maps_client_action_request(self, dynamodb_table):
+        """The tool's interrupt value dispatches to input_required carrying the
+        request — not the HITL card, not the generic passthrough."""
+        from app.models.responses import AgentStreamResponse
+
+        request = {"id": "c1", "directive": {"kind": "apply"}}
+        item = AgentStreamResponse.from_interrupt({"client_action_request": request})
+        assert item.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert item.client_action_request == request
+        assert item.interrupt_reason == "client_action_result"
+        assert not item.action_requests
+
+    def test_client_action_interrupt_resumes_with_matched_result(self, dynamodb_table):
+        """A client-action interrupt resumes with the result of the decision whose
+        id matches the request id — not with decisions, not with the query."""
+        intr = self._interrupt(
+            "e" * 32,
+            value={"client_action_request": {"id": "call-1", "directive": {"kind": "apply"}}},
+        )
+        decisions = [
+            {"id": "other", "type": "approve"},
+            {"id": "call-1", "type": "approve", "client_action_result": {"ok": True, "applied": ["budget"]}},
+        ]
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        assert resume_map["e" * 32] == {"ok": True, "applied": ["budget"]}
+
+    def test_client_action_interrupt_without_result_resumes_no_result(self, dynamodb_table):
+        """A plain user message while parked (default reject decision, no result)
+        must hand the tool an explicit no-result — never an assumed success."""
+        intr = self._interrupt(
+            "f" * 32,
+            value={"client_action_request": {"id": "call-1", "directive": {"kind": "apply"}}},
+        )
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], [{"type": "reject"}], query="user typed something"
+        )
+        assert resume_map["f" * 32] == {"ok": False, "reason": "no-result"}
+
+    def test_client_action_interrupt_idless_fallback_takes_single_result(self, dynamodb_table):
+        """A result-bearing decision without a matching id still resolves when it
+        is the only one (belt for clients that lost the call id)."""
+        intr = self._interrupt(
+            "1" * 32,
+            value={"client_action_request": {"id": "", "directive": {"kind": "apply"}}},
+        )
+        decisions = [{"type": "approve", "client_action_result": {"ok": False, "reason": "unknown-target"}}]
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
+        assert resume_map["1" * 32] == {"ok": False, "reason": "unknown-target"}
+
     def test_multiple_pending_interrupts_each_keyed_and_replicated(self, dynamodb_table):
         """The migration's core case: >1 co-pending interrupt → id-keyed map.
 
@@ -814,6 +1069,188 @@ class TestExtractHitlDecisions:
         assert set(resume_map) == {"a" * 32, "b" * 32}
         assert len(resume_map["a" * 32]["decisions"]) == 2  # replicated to its own count
         assert len(resume_map["b" * 32]["decisions"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_typed_refusal_of_an_auth_prompt_becomes_a_structured_decline(self, dynamodb_table):
+        """"No way I\'ll authorize this!" must arrive as a DECISION, not as words.
+
+        As words it was read only where the tool failed a second time — and once
+        the user had completed the login in their browser the retry succeeded, so
+        nothing read it and the call went through. As a structured decline the
+        sub-agent can veto the call before running it.
+        """
+        auth_intr = self._interrupt(
+            "j" * 32, value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "github_get_me"}
+        )
+
+        with patch(
+            "app.core.executor.classify_reply", AsyncMock(return_value="reject")
+        ):
+            authorization = await OrchestratorDeepAgentExecutor._classify_authorization_reply(
+                [auth_intr], "No way I'll authorize this!"
+            )
+
+        assert authorization == {"decision": "declined", "message": "No way I'll authorize this!"}
+
+    @pytest.mark.asyncio
+    async def test_typed_completion_of_an_auth_prompt_becomes_an_approval(self, dynamodb_table):
+        auth_intr = self._interrupt(
+            "k" * 32, value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "github_get_me"}
+        )
+
+        with patch("app.core.executor.classify_reply", AsyncMock(return_value="approve")):
+            authorization = await OrchestratorDeepAgentExecutor._classify_authorization_reply(
+                [auth_intr], "done, I logged in"
+            )
+
+        assert authorization["decision"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_words_are_left_alone_when_no_auth_prompt_is_pending(self, dynamodb_table):
+        """A tool-approval prompt has its own reader; do not spend the words here."""
+        hitl_intr = self._interrupt("l" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+        classify = AsyncMock(return_value="reject")
+
+        with patch("app.core.executor.classify_reply", classify):
+            authorization = await OrchestratorDeepAgentExecutor._classify_authorization_reply(
+                [hitl_intr], "no thanks"
+            )
+
+        classify.assert_not_awaited()
+        assert authorization is None
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_reply_stays_words(self, dynamodb_table):
+        auth_intr = self._interrupt(
+            "m" * 32, value={"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "tool": "github_get_me"}
+        )
+
+        with patch("app.core.executor.classify_reply", AsyncMock(return_value=None)):
+            assert (
+                await OrchestratorDeepAgentExecutor._classify_authorization_reply([auth_intr], "hmm")
+            ) is None
+
+    def test_typed_reply_reaches_the_reader_instead_of_becoming_a_reject(self, dynamodb_table):
+        """"approve it" typed in the composer must survive as far as the classifier.
+
+        The words were replaced by a synthetic reject here, so the user's approval
+        came back to them as "The call to github_get_me was rejected".
+        """
+        intr = self._interrupt("h" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], None, query="approve it"
+        )
+
+        assert resume_map["h" * 32] == "approve it"
+
+    def test_an_explicit_decision_still_wins_over_the_typed_path(self, dynamodb_table):
+        intr = self._interrupt("i" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr], [{"type": "reject"}], query="approve it"
+        )
+
+        assert [d["type"] for d in resume_map["i" * 32]["decisions"]] == ["reject"]
+
+    def test_authorization_answer_rejects_the_pending_approval(self, dynamodb_table):
+        """The user answered an auth prompt; the pending question is an approval.
+
+        It happens whenever the agent re-runs the blocked tool after a decline and
+        its guard asks again. `_extract_hitl_decisions` falls back to a bare reject
+        (safe, but says nothing), so the reason is filled in here instead — the
+        model has to read WHY to stop retrying.
+        """
+        intr = self._interrupt("f" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr],
+            [{"type": "reject"}],
+            query="q",
+            authorization={"decision": "declined", "message": "not now"},
+        )
+
+        decisions = resume_map["f" * 32]["decisions"]
+        assert [d["type"] for d in decisions] == ["reject"]
+        assert [d["id"] for d in decisions] == ["call-1"]
+        assert "skipped the authorization" in decisions[0]["message"]
+        assert "not now" in decisions[0]["message"]
+
+    def test_an_unreadable_verdict_rejects_instead_of_sending_no_decisions(self, dynamodb_table):
+        """`{"decisions": []}` against a pending call kills the turn in the HITL count check.
+
+        A verdict this build does not know ("skip-for-now" from a newer client) is
+        neither approved nor declined, so nothing filled the list — and
+        `ConditionalHumanInTheLoopMiddleware` raised "Number of decisions (0) does
+        not match (1)" where the old blanket reject had failed safe.
+        """
+        intr = self._interrupt("j" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr],
+            None,
+            query="q",
+            authorization={"decision": "skip-for-now", "message": "maybe later"},
+        )
+
+        decisions = resume_map["j" * 32]["decisions"]
+        assert [d["type"] for d in decisions] == ["reject"]
+        assert [d["id"] for d in decisions] == ["call-1"]
+        assert "NOT executed" in decisions[0]["message"]
+        assert "maybe later" in decisions[0]["message"]
+
+    def test_a_parked_client_action_survives_a_typed_message(self, dynamodb_table):
+        """The user typed instead of the SDK sending its result: no decisions at all.
+
+        The id-less fallback iterated the decision list directly, so this raised
+        `TypeError: 'NoneType' object is not iterable` — on precisely the path the
+        no-result answer exists for.
+        """
+        intr = self._interrupt(
+            "k" * 32, value={"client_action_request": {"id": "car-1", "directive": {"kind": "fill-form"}}}
+        )
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], None, query="wait, what?")
+
+        assert resume_map["k" * 32] == {"ok": False, "reason": "no-result"}
+
+    def test_the_authorization_answer_says_which_call_it_settled(self, dynamodb_table):
+        """The client sends a verdict; only the interrupt knows the blocked call.
+
+        Without the id the middleware's pre-run veto reads the "no" task-wide and
+        refuses every parallel tool call in the node.
+        """
+        auth_intr = self._interrupt(
+            "l" * 32,
+            value={
+                "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
+                "tool": "github_get_me",
+                "tool_call_id": "tc-7",
+            },
+        )
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [auth_intr], None, query="q", authorization={"decision": "declined"}
+        )
+
+        assert resume_map["l" * 32]["authorization"] == {
+            "decision": "declined",
+            "tool": "github_get_me",
+            "tool_call_id": "tc-7",
+        }
+
+    def test_per_call_decisions_win_over_an_authorization_answer(self, dynamodb_table):
+        """A client that sent real per-call decisions is never second-guessed."""
+        intr = self._interrupt("g" * 32, action_requests=[self._ar("github_get_me", "call-1")])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr],
+            [{"id": "call-1", "type": "approve"}],
+            query="q",
+            authorization={"decision": "declined"},
+        )
+
+        assert [d["type"] for d in resume_map["g" * 32]["decisions"]] == ["approve"]
 
     def test_non_hitl_interrupt_resumes_with_query(self, dynamodb_table):
         """A non-HITL interrupt (no action_requests, e.g. auth) resumes with the raw query."""

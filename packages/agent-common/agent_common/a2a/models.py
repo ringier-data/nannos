@@ -38,6 +38,14 @@ class BaseLocalSubAgentConfig(BaseModel):
         default=None,
         description="Optional list of input modalities supported by this agent (e.g., ['text', 'image']). If None, derived from the model's capabilities.",
     )
+    interactive: bool = Field(
+        default=True,
+        description=(
+            "Whether the sub-agent is registered for interactive delegation by default. "
+            "Automated (scheduler-only) sub-agents carry False and are only registered "
+            "into a conversation that adopted one of their scheduled runs."
+        ),
+    )
 
 
 class LocalFoundrySubAgentConfig(BaseLocalSubAgentConfig):
@@ -160,6 +168,25 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
     sandbox_enabled: bool = Field(
         default=False,
         description="Whether sandbox execution is enabled for this sub-agent",
+    )
+    client_action_enabled: bool = Field(
+        default=False,
+        description=(
+            "Embedded Nannos: when true this sub-agent drives on-screen objects — it gets the "
+            "client_action tool (apply/highlight/navigate) and renders <client_objects>. Set by the "
+            "embedded-mode invocation, not persisted per-agent."
+        ),
+    )
+    embedded_entrypoint: bool = Field(
+        default=False,
+        description=(
+            "Embedded Nannos (ADR-0004): when true this sub-agent runs as the embedded entrypoint "
+            "— the top-level graph for the turn, with no orchestrator turn in front of it. It "
+            "therefore owns direct communication with the user: it gets the notify_user tool and "
+            "the guidance for it. A sub-agent delegated via 'task' is narrated by the "
+            "orchestrator instead and leaves this false. Set by the execute-only invocation "
+            "(a turn carrying executeOnlySubAgentId), not persisted per-agent."
+        ),
     )
     effective_permission: Optional[Literal["owner", "write", "read"]] = Field(
         default=None,

@@ -51,6 +51,56 @@ async def test_create_channel_without_groups(repo, pg_session: AsyncSession, tes
 
 
 @pytest.mark.asyncio
+async def test_message_formatting_defaults_and_round_trips(repo, pg_session: AsyncSession, test_user_db: User):
+    """A client declares how its channel renders text; silence means Markdown."""
+    plain = await repo.create_channel(
+        db=pg_session, actor=test_user_db, client_id="client-a", data=_channel("web", "inst-web")
+    )
+    slack = await repo.create_channel(
+        db=pg_session,
+        actor=test_user_db,
+        client_id="slack-client",
+        data=_channel("slack", "inst-slack").model_copy(update={"message_formatting": "slack"}),
+    )
+    await pg_session.commit()
+
+    assert plain.message_formatting == "markdown"
+    assert slack.message_formatting == "slack"
+
+    # And the scheduler sees it at dispatch time, alongside the push target.
+    dispatch = await repo.get_channel_for_dispatch(pg_session, slack.id)
+    assert dispatch["message_formatting"] == "slack"
+
+
+@pytest.mark.asyncio
+async def test_reregistration_without_a_format_keeps_the_stored_one(
+    repo, pg_session: AsyncSession, test_user_db: User
+):
+    """A client that does not declare a format must not reset the channel on every boot.
+
+    Bots re-register on startup, so a blanket overwrite would silently return a Slack
+    channel to Markdown any time an older image (or a third-party client) came up.
+    """
+    first, _ = await repo.upsert_channel_by_installation(
+        db=pg_session,
+        actor=test_user_db,
+        client_id="slack-client",
+        data=_channel("bot", "inst-1").model_copy(update={"message_formatting": "slack"}),
+    )
+    await pg_session.commit()
+    assert first.message_formatting == "slack"
+
+    second, created = await repo.upsert_channel_by_installation(
+        db=pg_session, actor=test_user_db, client_id="slack-client", data=_channel("bot", "inst-1")
+    )
+    await pg_session.commit()
+
+    assert created is False
+    assert second.id == first.id
+    assert second.message_formatting == "slack"  # untouched, not reset to the default
+
+
+@pytest.mark.asyncio
 async def test_upsert_creates_then_updates_same_row(repo, pg_session: AsyncSession, test_user_db: User):
     """Re-registration with the same (client_id, installation_id) updates in place, not duplicates."""
     first, created1 = await repo.upsert_channel_by_installation(

@@ -390,11 +390,13 @@ async def warm_up_mcp_gateway() -> None:
                     await mcp_session.list_tools()
         logger.info("MCP gateway warm-up complete (url=%s, authenticated=%s)", gateway_url, token is not None)
     except Exception as exc:
+        from ringier_a2a_sdk.utils.mcp_errors import flatten_exceptions  # noqa: PLC0415
+
         # MCP's streamablehttp_client runs inside an anyio TaskGroup, so failures arrive
         # wrapped in an ExceptionGroup whose str() only says "N sub-exception(s)" and hides
         # the real cause. Unwrap every leaf so the actual error (e.g. the gateway 500 body)
         # is visible, and include the full traceback.
-        leaves = _flatten_exceptions(exc)
+        leaves = flatten_exceptions(exc)
         detail = "; ".join(f"{type(e).__name__}: {e}" for e in leaves)
         logger.warning(
             "MCP gateway warm-up failed (url=%s): %s — ignoring",
@@ -402,16 +404,6 @@ async def warm_up_mcp_gateway() -> None:
             detail,
             exc_info=True,
         )
-
-
-def _flatten_exceptions(exc: BaseException) -> list[BaseException]:
-    """Recursively flatten ExceptionGroups into their leaf exceptions."""
-    if isinstance(exc, BaseExceptionGroup):
-        leaves: list[BaseException] = []
-        for sub in exc.exceptions:
-            leaves.extend(_flatten_exceptions(sub))
-        return leaves
-    return [exc]
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────

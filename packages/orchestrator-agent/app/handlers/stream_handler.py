@@ -12,6 +12,7 @@ from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
+from ..middleware.task_refusal import is_concurrent_task_refusal
 from ..models import AgentStreamResponse
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ class StreamHandler:
 
         # Collect all ToolMessages in the current turn
         for i, msg in enumerate(messages_to_check):
-            if isinstance(msg, ToolMessage):
+            if isinstance(msg, ToolMessage) and not is_concurrent_task_refusal(msg):
                 # Find the corresponding AIMessage with tool_calls
                 # Look backward from this ToolMessage within the current turn
                 for prev_msg in reversed(messages_to_check[:i]):
@@ -299,26 +300,11 @@ class StreamHandler:
         Returns:
             AgentStreamResponse with auth_required state
         """
-        # TODO: Localize auth_content based on user config language
-        if auth_url:
-            auth_content = (
-                f"{auth_message}\n\n"
-                f"Please visit the following URL to complete authentication:\n"
-                f"{auth_url}\n\n"
-                f"After completing authentication, you can retry your request."
-            )
-        else:
-            # TODO: we should instruct the chat UI to show an auth widget instead
-            auth_content = (
-                f"{auth_message}\n\n"
-                f"Please complete the required authentication and try again. Just answer DONE when authorized."
-            )
-
-        return AgentStreamResponse(
-            state=TaskState.TASK_STATE_AUTH_REQUIRED,
-            content=auth_content,
-            interrupt_reason="auth_required",
-            metadata={"auth_url": auth_url, "error_code": error_code, "requires_auth": True, **metadata},
+        return AgentStreamResponse.auth_required(
+            message=auth_message,
+            auth_url=auth_url,
+            error_code=error_code,
+            **metadata,
         )
 
     @staticmethod
@@ -448,6 +434,13 @@ class StreamHandler:
                             tool_call = tool_call_map.get(msg.tool_call_id)
                             # Filter: only process "task" tool calls (sub-agents)
                             if not (tool_call and tool_call.get("name") == "task"):
+                                continue
+                            # A concurrency refusal is not a delegation result.
+                            # It lands AFTER the owner's (siblings are written in
+                            # tool_calls order), so without this the reverse scan
+                            # would show the user "This call was NOT executed…"
+                            # as the answer and drop the real one.
+                            if is_concurrent_task_refusal(msg):
                                 continue
 
                             # Extract content (sub-agent content may be JSON-wrapped).
@@ -602,7 +595,8 @@ class StreamHandler:
         # normally recovers this in-turn; if it's still truncated here every nudge-retry was
         # exhausted. Surface that honestly (input_required, so the user can ask to continue)
         # instead of laundering it into "Task completed successfully".
-        if StreamHandler._current_turn_truncated(messages):
+        dead_turn = StreamHandler._current_turn_produced_nothing(messages)
+        if dead_turn == "truncated":
             logger.warning("[STREAM HANDLER] Current turn truncated (finish_reason=length) and unrecovered")
             return AgentStreamResponse(
                 state=TaskState.TASK_STATE_INPUT_REQUIRED,
@@ -611,6 +605,19 @@ class StreamHandler:
                     "and I'll pick up where I left off."
                 ),
                 metadata={"truncated": True},
+            )
+        if dead_turn == "empty":
+            # A clean stop that spent the turn thinking and said nothing. Same dead end,
+            # reached without hitting the budget — and the one place it must not become
+            # "Task completed successfully", because nothing was completed.
+            logger.warning("[STREAM HANDLER] Current turn produced no answer (reasoning only) and unrecovered")
+            return AgentStreamResponse(
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                content=(
+                    "I finished thinking about that but did not manage to write the answer. "
+                    "Ask me again and I'll give it to you."
+                ),
+                metadata={"empty_response": True},
             )
 
         if messages:
@@ -623,19 +630,25 @@ class StreamHandler:
         return AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
 
     @staticmethod
-    def _current_turn_truncated(messages: list) -> bool:
-        """True when the current turn's last AIMessage was cut off with no usable output.
+    def _current_turn_produced_nothing(messages: list) -> str | None:
+        """Why the current turn has no answer — ``"truncated"``, ``"empty"``, or None.
 
-        Truncation signature: finish_reason == "length" (the gateway's OpenAI-compatible
-        rendering of an output-budget cutoff) with no tool call. A truncated-but-tool-calling
-        turn is a normal continuation and is not flagged.
+        Both reach here only when ``ContinueOnTruncationMiddleware`` exhausted its
+        nudge-retries, and both are otherwise laundered into "Task completed
+        successfully": a cutoff (``finish_reason == "length"``) and a clean stop that
+        produced only reasoning. A turn that made a tool call is a normal continuation
+        and is never flagged.
         """
+        from agent_common.middleware.continue_on_truncation import _has_text
+
         for msg in reversed(current_turn_messages(messages)):
             if isinstance(msg, AIMessage):
                 if getattr(msg, "tool_calls", None):
-                    return False
-                return getattr(msg, "response_metadata", {}).get("finish_reason") == "length"
-        return False
+                    return None
+                if getattr(msg, "response_metadata", {}).get("finish_reason") == "length":
+                    return "truncated"
+                return None if _has_text(msg) else "empty"
+        return None
 
     @staticmethod
     def build_working_response(content: str, metadata: Optional[Dict[str, Any]] = None) -> AgentStreamResponse:

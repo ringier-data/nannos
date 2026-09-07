@@ -58,6 +58,28 @@ def _wrap_tool_with_agent_name(tool: Any, agent_name: str) -> Any:
     )
 
 
+def _pre_resolved_tools_for(config: Any, tool_registry: dict[str, Any]) -> dict[str, Any]:
+    """The orchestrator's already-authenticated tools a sub-agent can reuse, by name.
+
+    A delegated sub-agent runs as the same user against the same MCP gateway/console, so
+    the tools the orchestrator discovered this turn (token-free connections whose calls are
+    authenticated by this user's token provider) are exactly what the sub-agent would rebuild
+    with two or three more token exchanges and a gateway-wide ``tools/list``. Hand them over instead: the
+    whitelist (``config.mcp_tools``) plus the console self-improvement tools every
+    sub-agent gets. Names not in the registry are left for the sub-agent to discover.
+
+    ``tool_registry`` must be the registry *before* the orchestrator wraps the skill tools
+    with ``agent_name="orchestrator"``: the sub-agent applies its own default, and a raw
+    tool without one behaves exactly like the tool it used to discover itself.
+    """
+    from langchain_core.tools import BaseTool
+
+    from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
+
+    wanted = set(config.mcp_tools or []) | set(DynamicLocalAgentRunnable._CONSOLE_SELF_IMPROVEMENT_TOOLS)
+    return {name: tool_registry[name] for name in wanted if isinstance(tool_registry.get(name), BaseTool)}
+
+
 def _gp_tool_catalog_enabled() -> bool:
     """Whether the GP agent gets its registry as a lazy catalog (default on).
 
@@ -83,6 +105,7 @@ def build_runtime_context(
     backend_url: str | None = None,
     sandbox_pool: SandboxPool | None = None,
     tool_risk_cache: ToolRiskCache | None = None,
+    adopted_sub_agent_ids: set[int] | None = None,
 ) -> Any:  # GraphRuntimeContext
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
@@ -120,6 +143,13 @@ def build_runtime_context(
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
+        adopted_sub_agent_ids: Console ids of sub-agents this conversation adopted a
+            scheduled run of (conversation-origin extension, server-validated).
+            Non-interactive configs (automated, scheduler-only sub-agents carry
+            ``interactive=False``) are registered ONLY when their id is in this set —
+            making the run's agent delegable inside the adopting conversation while
+            staying invisible to every other one. Interactive configs ignore it.
+            None (the default) registers interactive configs only.
 
     Returns:
         GraphRuntimeContext for graph invocation
@@ -215,11 +245,16 @@ def build_runtime_context(
 
     # Auto-include scheduler tools and console tools (always available from MCP)
     # These are essential for the orchestrator to delegate to task-scheduler sub-agent
+    #
+    # Deliberately NOT here: console_list_mcp_servers / console_grep_mcp_tools. They date
+    # from when the orchestrator ran the scheduler itself and needed tool names for job
+    # configs; that moved into the task-scheduler sub-agent (#108), whose seed whitelists
+    # both listers (agent-creator's too). On the orchestrator they only tempted the model
+    # to discover tools it cannot call — the right move for anything outside its own
+    # whitelist is a `task` delegation, and it knows the sub-agents from the task enum.
     allowed_orchestrator_tools = {
         "console_list_sub_agents",
         "console_update_sub_agent",
-        "console_list_mcp_servers",
-        "console_grep_mcp_tools",
         "console_create_bug_report",
         "console_create_skill",
         "console_update_skill",
@@ -250,6 +285,13 @@ def build_runtime_context(
         "docstore_export",
     }
     orchestrator_auto_tools.update(name for name in _ORCHESTRATOR_DOCSTORE_TOOLS if name in tool_registry)
+    # Direct MCP servers (MCP_DIRECT_SERVERS) have no per-user registry entry to
+    # enable their tools from — auto-whitelist them (dev/spike scope by design).
+    orchestrator_auto_tools.update(
+        name
+        for name, tool in tool_registry.items()
+        if getattr(tool, "metadata", None) and tool.metadata.get("direct_server")
+    )
     whitelisted_tool_names.update(orchestrator_auto_tools)
     logger.debug(
         f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/console tools)"
@@ -268,6 +310,11 @@ def build_runtime_context(
         "console_import_skill",
         "console_activate_skill",
     }
+    # Snapshot BEFORE the orchestrator-specific wrap below: sub-agents get the raw tools
+    # (see _pre_resolved_tools_for) and apply their own agent_name default, otherwise a
+    # sub-agent whose whitelist names a skill tool would silently edit the orchestrator's
+    # skills/playbook.
+    unwrapped_registry = dict(tool_registry)
     for tool_name in _SKILL_TOOLS_NEEDING_AGENT_NAME:
         if tool_name in tool_registry:
             tool_registry[tool_name] = _wrap_tool_with_agent_name(tool_registry[tool_name], "orchestrator")
@@ -289,6 +336,14 @@ def build_runtime_context(
 
         for config in user_config.local_subagents:
             try:
+                # Automated (scheduler-only) sub-agents are registered only into
+                # a conversation that adopted one of their scheduled runs — they
+                # stay invisible to every other interactive conversation.
+                if not getattr(config, "interactive", True) and (
+                    adopted_sub_agent_ids is None
+                    or getattr(config, "sub_agent_id", None) not in adopted_sub_agent_ids
+                ):
+                    continue
                 if isinstance(config, LocalFoundrySubAgentConfig):
                     # Create Foundry local sub-agent
                     dynamic_subagent = create_foundry_local_subagent(
@@ -467,6 +522,8 @@ def build_runtime_context(
                         config=config,
                         model=subagent_model,
                         orchestrator_tools=orchestrator_tools,
+                        pre_resolved_tools=_pre_resolved_tools_for(config, unwrapped_registry),
+                        token_provider=user_config.token_provider,
                         oauth2_client=oauth2_client,
                         user_token=user_config.access_token.get_secret_value() if user_config.access_token else None,
                         checkpointer=checkpointer,
@@ -523,6 +580,16 @@ def build_runtime_context(
                 tool_server_map[tool_name] = server_name
         # In-process tools without server_name fall back to "_self" in middleware
 
+    # Embedded Nannos: when the client sent an on-screen object manifest,
+    # register the per-turn client_action tool so the agent can act on those
+    # objects (directives executed client-side against host-registered handles).
+    if user_config.client_objects:
+        from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME, create_client_action_tool
+
+        tool_registry[CLIENT_ACTION_TOOL_NAME] = create_client_action_tool()
+        # DynamicToolDispatchMiddleware only binds whitelisted registry tools.
+        whitelisted_tool_names.add(CLIENT_ACTION_TOOL_NAME)
+
     context = GraphRuntimeContext(
         user_id=user_config.user_id,  # Database ID (stable)
         user_sub=user_config.user_sub,  # OIDC sub (current)
@@ -533,6 +600,8 @@ def build_runtime_context(
         message_formatting=user_config.message_formatting,
         client_user_handle=user_config.client_user_handle,
         custom_prompt=user_config.custom_prompt,
+        client_objects=user_config.client_objects,
+        page_context=user_config.page_context,
         groups=user_config.groups,
         tool_registry=tool_registry,
         subagent_registry=subagent_registry,

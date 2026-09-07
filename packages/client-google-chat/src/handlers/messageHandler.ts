@@ -17,6 +17,7 @@ import { HandlerDependencies } from './types.js';
 import { getSpinnerVerb } from '../utils/spinnerVerbs.js';
 import { FileStorageService } from '../services/fileStorageService.js';
 import { Config } from '../config/config.js';
+import { readAuthRequired } from '../utils/inTaskAuth.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -394,6 +395,65 @@ async function processMessageAttachments(
     return processedFiles;
 }
 
+/**
+ * The in-task authorization interrupt: A2A's own `auth-required` state, whose
+ * payload schema is the in-task-auth extension.
+ *
+ * The status TEXT is the MCP gateway addressing the AGENT ("You must tell the
+ * end-user to…") — the interrupt fires in middleware, before the model, so no
+ * LLM ever rewrites it. Google Chat used to post it verbatim. The card is our
+ * own copy instead, built from the DataPart when the producer sent one and from
+ * metadata or the prose's URL when it did not.
+ *
+ * Returns whether the card was posted — the caller then keeps that prose out of
+ * the finalized message.
+ */
+async function processAuthRequiredEvent(
+  logger: Logger,
+  chatService: GoogleChatService,
+  inFlightTaskStore: IInFlightTaskStore,
+  projectId: string,
+  spaceId: string,
+  threadId: string,
+  userId: string,
+  accumulatedTask: Task,
+  statusEvent: TaskStatusUpdateEvent,
+  config: Config,
+): Promise<boolean> {
+  const statusMeta = (statusEvent.metadata ?? statusEvent.status.message?.metadata) as
+    | Record<string, unknown>
+    | undefined;
+  const prompt = readAuthRequired(statusEvent.status.message?.parts, statusMeta);
+
+  logger.info(
+    { taskId: accumulatedTask.id, tool: prompt.tool, service: prompt.service, hasUrl: !!prompt.authUrl },
+    `Received in-task authorization interrupt`,
+  );
+
+  try {
+    const authCard = chatService.buildInTaskAuthCard(config, prompt, { taskId: accumulatedTask.id });
+
+    await chatService.sendPrivateCardMessage(
+      projectId,
+      spaceId,
+      userId,
+      [authCard],
+      threadId,
+    );
+
+    await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
+      logger.error(err, `Failed to update in-flight task for auth interrupt: ${err}`);
+    });
+
+    return true;
+  } catch (cardErr) {
+    // Falling back to the wire text is worse copy than the card, but it is the
+    // only thing left that carries the URL — a silent turn would strand the user.
+    logger.error(cardErr, `Failed to post in-task authorization card, falling back to text: ${cardErr}`);
+    return false;
+  }
+}
+
 async function processHumanInTheLoopEvent(
   logger: Logger,
   chatService: GoogleChatService,
@@ -535,6 +595,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     inFlightTaskStore,
     fileStorageService,
     feedbackService,
+    scheduledRunStore,
     config,
   } = deps;
 
@@ -576,6 +637,47 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     // Get thread history if we're in a thread (i.e. threadId differs from messageId). This will be included in the A2A request so the server can have more context about the conversation. We also fetch attachments from the thread history so they can be processed and included in the A2A request if needed.
     const isInThread = threadId !== messageId; // If thread ID differs from message ID, we're in a thread
+
+    // Reply under a delivered scheduled-run notification: forward the run's
+    // provenance as a conversation-origin DataPart so the orchestrator can
+    // reconstruct the delegation in the conversation it opens for this thread.
+    // This is the client side of urn:nannos:a2a:conversation-origin:1.0, kind
+    // "scheduled_run" (declared in the orchestrator's agent card; contract
+    // documented in the orchestrator's app/core/a2a_extensions.py). Attached on
+    // EVERY thread reply that has a provenance row — the orchestrator injects
+    // only on a conversation with no history, and it is the side that actually
+    // knows whether history exists (a contextId stored here can belong to a
+    // first turn that failed before any checkpoint was written). The run's
+    // contextId is deliberately NOT sent as the request contextId — it names
+    // the sub-agent's own conversation, not an orchestrator one.
+    let scheduledRunDataPart: Record<string, unknown> | undefined;
+    if (isInThread) {
+      try {
+        const runRecord = await scheduledRunStore.get(scheduledRunStore.buildKey(threadId));
+        if (runRecord) {
+          scheduledRunDataPart = {
+            origin: {
+              kind: 'scheduled_run',
+              context_id: runRecord.contextId,
+              scheduled_job_id: runRecord.scheduledJobId,
+              scheduled_job_run_id: runRecord.scheduledJobRunId,
+              sub_agent_id: runRecord.subAgentId,
+              sub_agent_name: runRecord.subAgentName,
+              prompt: runRecord.prompt,
+              result_summary: runRecord.resultSummary,
+              scheduler_status: runRecord.schedulerStatus,
+              error_message: runRecord.errorMessage,
+              task_state: runRecord.taskState,
+            },
+          };
+          logger.info(
+            `Thread reply correlates to scheduled run (job=${runRecord.scheduledJobId}, run=${runRecord.scheduledJobRunId}, contextId=${runRecord.contextId})`
+          );
+        }
+      } catch (e) {
+        logger.warn(`Failed to look up scheduled-run provenance for thread ${threadId}: ${e}`);
+      }
+    }
     let threadHistoryResult: ThreadHistoryResult | undefined = undefined;
     if (isInThread) {
       const sinceMessageId = existingContext?.lastProcessedMessageId;
@@ -639,7 +741,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               url: f.url,
             }))
           : undefined,
-      dataParts,
+      dataParts: scheduledRunDataPart ? [...(dataParts ?? []), scheduledRunDataPart] : dataParts,
       contextId: existingContextId || undefined,
       webhookUrl: config.isLocal() ? undefined : webhookUrl,
       webhookToken: config.isLocal() ? undefined : webhookToken,
@@ -649,6 +751,10 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     let accumulatedTask: Task | null = null;
     let feedbackRequestData: { sub_agents?: string[] } | null = null;
+    // Set once the in-task authorization card is on screen: the `auth-required`
+    // status text is then the gateway's agent-facing prose, and finalizing must
+    // not post it beside the card that replaced it.
+    let authCardPosted = false;
     try {
       for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
         logger.debug(`Stream event: ${_.get(event, 'kind')}`);
@@ -704,6 +810,32 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               statusEvent,
               config,
             );
+          }
+
+          if (statusEvent.status.state === 'auth-required' && !authCardPosted) {
+            authCardPosted = await processAuthRequiredEvent(
+              logger,
+              chatService,
+              inFlightTaskStore,
+              projectId,
+              spaceId,
+              threadId,
+              userId,
+              accumulatedTask,
+              statusEvent,
+              config,
+            );
+            if (authCardPosted) {
+              // Park the public spinner. Updating it in place is the ONLY thing
+              // that ever overwrites "🧠 Working…", and with the card carrying the
+              // prompt there is usually no final text to post — so without this
+              // the thread keeps a spinner that spins forever beside a card
+              // asking for a login. Written into the status line the block below
+              // already renders, rather than pushed here, or that same block
+              // would put the spinner straight back in this iteration.
+              statusMessage.thinking = '⏸️ Awaiting your authorization';
+              statusMessage.activity = '';
+            }
           }
 
           if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {
@@ -809,6 +941,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     const result = await handleTask({
       task: accumulatedTask,
+      suppressStatusText: authCardPosted,
       chatService,
       messageContext: {
         projectId,

@@ -26,9 +26,12 @@ build_sub_agent_graph
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterable
 import contextvars
+import difflib
 import logging
 import os
+import re
 import threading
 from typing import TYPE_CHECKING, Annotated, Any, Iterator, Optional
 
@@ -54,6 +57,7 @@ from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_quickjs import CodeInterpreterMiddleware
+from langchain_quickjs._prompt import to_camel_case
 from langchain_quickjs.middleware import REPLState, _resolve_thread_id
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_config
@@ -67,7 +71,10 @@ from typing_extensions import NotRequired
 from agent_common.backends.attachments_store import ContextScopedAttachmentsBackend
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
+from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
+from agent_common.core.hitl_resume import decisions_from_resume
 from agent_common.core.model_factory import is_gemini_model
+from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.ptc_discovery import (
     PTC_DESCRIBE_TOOL_NAME,
     PTC_SEARCH_TOOL_NAME,
@@ -294,6 +301,21 @@ _PTC_SANDBOX_TOOLS: frozenset[str] = frozenset({"execute"})
 #   - ``write_todos``: planning/UI tool whose effect is the work-plan stream.
 #   - ``FinalResponseSchema`` / ``SubAgentResponseSchema``: structured-response
 #     schema "tools" — not executable; selecting them terminates the turn.
+#   - ``client_action`` / ``notify_user``: both reach the USER, not a backend, and
+#     both do it through machinery the PTC bridge cannot provide. The bridge
+#     dispatches tools via ``asyncio.run_coroutine_threadsafe`` from a worker
+#     thread, which runs them in a FRESH context (the reason ptc_guard keeps its
+#     approval collector in a module dict rather than a ContextVar). So inside
+#     ``eval``: ``get_stream_writer()`` finds no writer, which kills
+#     ``notify_user`` and ``client_action``'s fire-and-forget kinds
+#     (navigate/highlight); and ``interrupt()`` cannot be raised cleanly, which
+#     kills the awaited round trip (``apply``/``read_current_page``) — the turn
+#     never parks, so the browser is never asked and never answers. Since every
+#     PTC-exposed tool is also STRIPPED from the model's bound list, exposing
+#     these made them unreachable by any working path: the model could only call
+#     them from inside ``eval``, where they always fail. Excluding them keeps
+#     them natively bound and running through ``ToolNode``, where both the stream
+#     writer and ``interrupt()`` work.
 # The PTC self tool (``eval``) is always auto-excluded by ``filter_tools_for_ptc``.
 _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -301,6 +323,8 @@ _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
         "write_todos",
         "FinalResponseSchema",
         "SubAgentResponseSchema",
+        CLIENT_ACTION_TOOL_NAME,
+        NOTIFY_USER_TOOL_NAME,
     }
 )
 
@@ -330,8 +354,11 @@ PTC_INLINE_RENDER_THRESHOLD = int(os.getenv("PTC_INLINE_RENDER_THRESHOLD", "40")
 _PTC_DISCOVERY_INSTRUCTION = (
     "Only the core tools above are listed. Many more tools are available but NOT listed "
     "here (to keep this prompt stable). Discover them at runtime:\n"
-    f"- `await tools.{PTC_SEARCH_TOOL_NAME}({{ query: '...' }})` — find tools by intent; "
-    "returns `{ name, description }` matches.\n"
+    f"- `await tools.{PTC_SEARCH_TOOL_NAME}({{ query: '...', limit?, offset? }})` — find tools "
+    "by intent; returns ONE PAGE of ranked `{ name, description }` matches in `matches`, plus "
+    "`total_matches`, `truncated` and `next_offset`. If `truncated` is true the tool you need "
+    "may be on a later page: call again with `offset: next_offset` or narrow the query before "
+    "concluding a tool does not exist.\n"
     f"- `await tools.{PTC_DESCRIBE_TOOL_NAME}({{ name: '...' }})` — get the exact "
     "signature for a tool before calling it.\n"
     f"Always `{PTC_SEARCH_TOOL_NAME}`/`{PTC_DESCRIBE_TOOL_NAME}` a tool you don't see "
@@ -381,6 +408,28 @@ def _code_interpreter_ptc_enabled() -> bool:
     }
 
 
+def deep_agent_builtin_tools(backend: Any) -> list[BaseTool]:
+    """The tools ``create_deep_agent`` registers with ToolNode on its own.
+
+    ``TodoListMiddleware`` and ``FilesystemMiddleware`` are instantiated *inside*
+    ``create_deep_agent`` (``deepagents.graph``), so a caller assembling the
+    middleware stack never sees their tool instances — yet the model can call every
+    one of them. Anything reasoning about "which tool calls can actually resolve"
+    (the risk gate) needs them, and re-instantiating the same two middlewares is the
+    only way to get the names without hardcoding a list that silently rots when
+    deepagents adds a tool.
+
+    ``task`` and ``eval`` are deliberately absent: both are excluded from risk
+    gating at the top of ``aafter_model``, so neither needs to be accounted for.
+
+    The instances are for *inspection only* — never for execution; the real ones
+    live in the compiled graph.
+    """
+    from langchain.agents.middleware import TodoListMiddleware
+
+    return [*TodoListMiddleware().tools, *FilesystemMiddleware(backend=backend).tools]
+
+
 def code_interpreter_ptc_enabled() -> bool:
     """Public wrapper around :func:`_code_interpreter_ptc_enabled`.
 
@@ -389,6 +438,103 @@ def code_interpreter_ptc_enabled() -> bool:
     runtime tool discovery (``tools.search``/``tools.describe``) supersedes it.
     """
     return _code_interpreter_ptc_enabled()
+
+
+# Appended to the interpreter prompt: langchain-quickjs' own text only *prefers* the
+# last expression over console.log; it never says the code is a script, so models
+# trained on function-bodied sandboxes emit `return x;` and hit a SyntaxError.
+_TOP_LEVEL_RETURN_RULE = (
+    "\n- The code runs as a script, not inside a function: a top-level `return` is a "
+    "SyntaxError. End with the expression whose value you want back (e.g. the variable "
+    "holding your result) instead of `return`ing it.\n"
+)
+
+_TOP_LEVEL_RETURN_ERROR_MARKER = "'return' statement can only be used within a function body"
+
+# Console tools that list raw MCP tool names; kept out of ``eval`` when discovery is attached.
+_RAW_LISTING_TOOL_NAMES = frozenset({"console_grep_mcp_tools", "console_list_mcp_servers"})
+
+# ``tools.<name>`` member accesses in an eval program.
+_TOOLS_MEMBER_RE = re.compile(r"\btools\.([A-Za-z_$][\w$]*)")
+
+# Names models reach for by habit that map onto the PTC discovery surface.
+_DISCOVERY_SYNONYMS = {
+    "search_tools": PTC_SEARCH_TOOL_NAME,
+    "searchTools": PTC_SEARCH_TOOL_NAME,
+    "describe_tool": PTC_DESCRIBE_TOOL_NAME,
+    "describeTool": PTC_DESCRIBE_TOOL_NAME,
+}
+
+
+def _is_not_a_function_error(result: Any) -> bool:
+    content = getattr(result, "content", result)
+    if isinstance(content, list):
+        content = " ".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in content)
+    return isinstance(content, str) and 'type="TypeError"' in content and "not a function" in content
+
+
+def _not_a_function_hint(code: str, exposed_names: Iterable[str]) -> str:
+    """Explain a ``tools.<x> is not a function`` in terms the model can act on.
+
+    QuickJS' message does not name the member, so find every ``tools.<x>`` in the
+    program that is not an exposed camelCase bridge and say what it should have been.
+    The advice depends on what this ``eval`` actually has: with in-sandbox discovery
+    (core-only mode) point at ``tools.search``; without it (inline mode — the
+    orchestrator's few whitelisted tools) list the callable names and say the rest are
+    regular tool calls or a ``task`` delegation. No aliases are installed: the namespace
+    stays camelCase-only, the error just becomes self-correcting.
+    """
+    exposed = [n for n in exposed_names if isinstance(n, str)]
+    known = {to_camel_case(n) for n in exposed}
+    has_search = PTC_SEARCH_TOOL_NAME in known
+    raw_listers_camel = {to_camel_case(n) for n in _RAW_LISTING_TOOL_NAMES}
+    callable_list = ", ".join(f"`tools.{n}`" for n in sorted(known)[:30]) + (" …" if len(known) > 30 else "")
+    outside = (
+        "Tools not in that list are not reachable from eval: call them as regular tool calls if you have "
+        "them, or delegate the work with `task`."
+    )
+    search_tip = f"Use `await tools.{PTC_SEARCH_TOOL_NAME}({{ query: '...' }})` to find callable names."
+
+    lines: list[str] = []
+    for ident in dict.fromkeys(_TOOLS_MEMBER_RE.findall(code)):
+        if ident in known:
+            continue
+        camel = to_camel_case(ident)
+        if ident in _DISCOVERY_SYNONYMS:
+            if has_search:
+                lines.append(f"`tools.{ident}` does not exist — use `tools.{_DISCOVERY_SYNONYMS[ident]}`.")
+            else:
+                lines.append(f"`tools.{ident}` does not exist and this eval has no discovery helper. Callable here: {callable_list}. {outside}")
+        elif ident == "call_tool":
+            lines.append("`tools.call_tool` does not exist — call the tool directly, e.g. `await tools.githubGetMe({...})`.")
+        elif camel in known:
+            lines.append(f"`tools.{ident}` does not exist — tool names are camelCase here: use `tools.{camel}`.")
+        elif ident in _RAW_LISTING_TOOL_NAMES or camel in raw_listers_camel:
+            lines.append(
+                f"`tools.{ident}` is not available inside eval. Call `{ident if ident in _RAW_LISTING_TOOL_NAMES else next(n for n in _RAW_LISTING_TOOL_NAMES if to_camel_case(n) == camel)}` "
+                "as a regular tool call instead; tools it lists are mostly not callable here — delegate work that needs them with `task`."
+            )
+        elif has_search:
+            close = difflib.get_close_matches(camel, sorted(known), n=3, cutoff=0.6)
+            hint = f" Did you mean {', '.join(f'`tools.{c}`' for c in close)}?" if close else ""
+            lines.append(f"`tools.{ident}` is not exposed in this eval.{hint} {search_tip}")
+        else:
+            close = difflib.get_close_matches(camel, sorted(known), n=3, cutoff=0.6)
+            hint = f" Did you mean {', '.join(f'`tools.{c}`' for c in close)}?" if close else ""
+            lines.append(f"`tools.{ident}` is not available inside eval.{hint} Callable here: {callable_list}. {outside}")
+    if not lines:
+        return ""
+    return "\n<hint>\n" + "\n".join(lines) + "\n</hint>"
+
+
+def _is_top_level_return_parse_error(result: Any) -> bool:
+    """True when an ``eval`` result is QuickJS' parse error for a top-level ``return``."""
+    content = getattr(result, "content", result)
+    if isinstance(content, list):
+        content = " ".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in content)
+    if not isinstance(content, str):
+        return False
+    return 'type="SyntaxError"' in content and _TOP_LEVEL_RETURN_ERROR_MARKER in content
 
 
 class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
@@ -577,8 +723,9 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         # pinned ``search``/``describe`` discovery tools (below) so the prompt
         # stays bounded and the model can find the rest at runtime.
         if not self._broaden_exposure:
+            collected = self._without_raw_listers(collected)
             if self._is_core_only(collected):
-                collected.extend(build_discovery_tools(collected))
+                collected = self._with_discovery(collected)
             return collected
 
         def _consider(tool: Any) -> None:
@@ -637,10 +784,32 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         # set (callable + rendered) so the model can find the unrendered catalog at
         # runtime. They close over the catalog collected above. Small, fixed sub-agent
         # toolsets stay fully rendered inline and need no discovery helpers.
+        collected = self._without_raw_listers(collected)
         if self._is_core_only(collected):
-            collected.extend(build_discovery_tools(collected))
+            collected = self._with_discovery(collected)
 
         return collected
+
+    @staticmethod
+    def _without_raw_listers(collected: list[BaseTool]) -> list[BaseTool]:
+        """Keep the raw MCP-catalogue listers out of the ``eval`` namespace.
+
+        ``console_grep_mcp_tools`` / ``console_list_mcp_servers`` return raw MCP names
+        (``github_get_me``) for the *whole* catalogue — tools that are mostly not callable
+        in this sandbox at all (not exposed) and never under that spelling (bridges are
+        camelCase). A model that greps inside ``eval`` then calls ``tools.github_get_me``
+        gets ``TypeError: not a function`` and detours through introspection before it
+        delegates. Outside the sandbox the same tool is bound natively and its output
+        feeds a ``task`` delegation — the right move — so it is only removed from ``eval``.
+        In core-only mode ``tools.search``/``tools.describe`` cover in-sandbox discovery
+        with callable names.
+        """
+        return [t for t in collected if t.name not in _RAW_LISTING_TOOL_NAMES]
+
+    @staticmethod
+    def _with_discovery(collected: list[BaseTool]) -> list[BaseTool]:
+        """Core-only mode: add the ``tools.search``/``tools.describe`` discovery helpers."""
+        return [*collected, *build_discovery_tools(collected)]
 
     @staticmethod
     def _mcp_tool_count(tools: list[BaseTool]) -> int:
@@ -723,7 +892,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # <0.2) became the ``_base_prompt(*, ptc_attached=...)`` method in the
             # 0.2 wasm rewrite; the flag toggles whether the base prompt describes
             # the ``tools.*`` namespace.
-            return self._base_prompt(ptc_attached=False)
+            return self._base_prompt(ptc_attached=False) + _TOP_LEVEL_RETURN_RULE
         exposed = [t for t in self._ptc if isinstance(t, BaseTool) and t.name != self._tool_name]
         thread_id = _resolve_thread_id(self._fallback_thread_id)
         repl = self._registry.get(thread_id)
@@ -737,7 +906,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         if self._ptc_prompt_cache is None or self._ptc_prompt_cache[0] != cache_key:
             body = render_tools_namespace(render_set, tool_name=self._tool_name, discovery_note=discovery_note)
             self._ptc_prompt_cache = (cache_key, body)
-        return self._base_prompt(ptc_attached=bool(exposed)) + self._ptc_prompt_cache[1]
+        return self._base_prompt(ptc_attached=bool(exposed)) + _TOP_LEVEL_RETURN_RULE + self._ptc_prompt_cache[1]
 
     def _ptc_prompt_and_hidden(self, request: Any) -> tuple[str, set[str]]:
         """Build the PTC prompt and the set of tool names exposed this turn.
@@ -838,6 +1007,52 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         return self._exposure_state_update()
 
+    async def _run_eval_with_guidance(self, request: Any, handler: Any, thread_id: Any) -> Any:
+        """Run ``eval`` with the top-level-``return`` retry, then annotate a ``not a function``.
+
+        A ``TypeError: not a function`` on ``tools.<x>`` almost always means the model used
+        a snake_case MCP name or a misremembered discovery helper; QuickJS does not say
+        which member, so append a hint naming the offending accesses and their fix.
+        """
+        result = await self._run_eval_tolerating_top_level_return(request, handler)
+        if not _is_not_a_function_error(result) or not isinstance(getattr(result, "content", None), str):
+            return result
+        code = ((getattr(request, "tool_call", None) or {}).get("args") or {}).get("code")
+        if not isinstance(code, str):
+            return result
+        exposed = self._ptc_tools_by_thread.get(thread_id) or ()
+        hint = _not_a_function_hint(code, (t.name for t in exposed if isinstance(t, BaseTool)))
+        if not hint:
+            return result
+        logger.info("[PTC] eval called a non-existent tools.* member; appending naming hint")
+        return result.model_copy(update={"content": result.content + hint})
+
+    async def _run_eval_tolerating_top_level_return(self, request: Any, handler: Any) -> Any:
+        """Run ``eval``; if the source failed to parse only because of a top-level ``return``,
+        re-run it once wrapped in an async IIFE.
+
+        Models carry a strong prior from other sandboxes (which run code inside a function)
+        and write ``return result;`` at the top level; QuickJS parses the source as a script
+        and rejects that — a wasted round-trip per occurrence. Wrapping is done *only* on
+        that specific error, never up front: wrapping always would put the model's
+        ``const``/``let`` declarations inside the IIFE and break the persistent-REPL contract
+        the prompt promises (top-level state survives across ``eval`` calls in a turn). The
+        wrapped run's own declarations do not persist either — the prompt rule steers the
+        model away from the pattern so this stays a fallback.
+        """
+        result = await handler(request)
+        if not _is_top_level_return_parse_error(result):
+            return result
+        tool_call = getattr(request, "tool_call", None) or {}
+        args = tool_call.get("args") or {}
+        code = args.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return result
+        logger.info("[PTC] eval used a top-level `return`; re-running the source wrapped in an async IIFE")
+        wrapped = f"(async () => {{\n{code}\n}})()"
+        retry = request.override(tool_call={**tool_call, "args": {**args, "code": wrapped}})
+        return await handler(retry)
+
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
         """Drive PTC HITL approvals for the ``eval`` tool from the main graph loop.
 
@@ -861,11 +1076,13 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         tool calls (and the unguarded configuration) pass straight through.
         """
         tool_call = getattr(request, "tool_call", None) or {}
-        if not self._ptc_enabled or self._ptc_risk_scorer is None or tool_call.get("name") != self._tool_name:
+        if tool_call.get("name") != self._tool_name:
             return await handler(request)
-
         runtime = getattr(request, "runtime", None)
         thread_id = resolve_ptc_thread_id(runtime)
+        if not self._ptc_enabled or self._ptc_risk_scorer is None:
+            return await self._run_eval_with_guidance(request, handler, thread_id)
+
         context = getattr(runtime, "context", None)
         # On an interrupt *resume* the graph may have been rebuilt (a fresh
         # middleware instance on a different request/pod), so the upstream
@@ -883,7 +1100,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         try:
             while True:
                 clear_ptc_pending(thread_id)
-                result = await handler(request)
+                result = await self._run_eval_with_guidance(request, handler, thread_id)
                 pending = take_ptc_pending(thread_id)
                 if not pending:
                     return result
@@ -894,7 +1111,24 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 # resume by interrupt id, so each interrupt() returns exactly its own
                 # decisions — no cross-eval bleed from LangGraph's multi-interrupt resume.
                 # Any count mismatch here is therefore a genuine bug, not a resume artefact.
-                decisions = interrupt(self._build_ptc_hitl_request(pending))["decisions"]
+                hitl_request = self._build_ptc_hitl_request(pending)
+                # Same plain-language summaries the normal HITL path stamps
+                # (see ConditionalHumanInTheLoopMiddleware._attach_summaries).
+                # Best-effort: on failure the client shows raw args.
+                from agent_common.core.tool_call_summarizer import attach_summaries
+
+                ptc_tools = self._ptc_tools_by_thread.get(thread_id) or ()
+                descriptions = {t.name: t.description or "" for t in ptc_tools}
+                await attach_summaries(
+                    hitl_request["action_requests"],
+                    language=getattr(context, "language", None) or "en",
+                    describe=lambda name: descriptions.get(name, ""),
+                )
+                # Shape-tolerant read: the resume value may have been written for a
+                # DIFFERENT question (an authorization prompt the sub-agent has since
+                # moved past), or be the words the user typed instead of clicking.
+                # ``["decisions"]`` killed the whole sub-agent with KeyError there.
+                decisions = await decisions_from_resume(interrupt(hitl_request), hitl_request["action_requests"])
                 if (n := len(decisions)) != (m := len(pending)):
                     msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
                     raise ValueError(msg)
@@ -999,6 +1233,13 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             else:
                 # reject / edit / unknown — PTC cannot honor edit, so block.
                 turn.decisions[p.call_key] = "reject"
+                # Keep the human-written reason with the block. Dropping it left
+                # the model with a bare "not approved", and it filled the gap by
+                # telling the user the tool did not exist — when in fact they had
+                # skipped its authorization.
+                reason = decision.get("message") if isinstance(decision, dict) else None
+                if isinstance(reason, str) and reason.strip():
+                    turn.reject_reasons[p.call_key] = reason
 
 
 def build_code_interpreter_middlewares(
@@ -1230,6 +1471,7 @@ def build_common_middleware_stack(
     context_gated_tools: list[ContextGatedTool] | None = None,
     broaden_baseline_tools: list[BaseTool] | None = None,
     expose_context_registry: bool = False,
+    platform_tools: list[BaseTool] | None = None,
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
@@ -1309,6 +1551,10 @@ def build_common_middleware_stack(
             ``whitelisted_tool_names``) is exposed inside ``eval`` instead of
             being bound to the model. Used by catalog-mode agents (GP) whose
             large tool catalog must stay out of ``create_agent``.
+        platform_tools: The agent's statically bound tools. Handed to the risk
+            gate (alongside the filesystem tools) so it can fetch their schemas:
+            a call the gate cannot fetch is never classified, so a statically
+            bound tool would otherwise fall back to a name-only score.
 
     Returns:
         Ordered list of middleware instances ready to be included in a
@@ -1389,10 +1635,15 @@ def build_common_middleware_stack(
     if hitl_guarded_tools or risk_scorer:
         from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 
-        # Extract filesystem tool instances so the risk scorer has access to their schemas
-        platform_tools: dict[str, Any] | None = None
+        # Tool instances the risk scorer cannot reach through the runtime
+        # ``tool_registry``: the filesystem tools, plus the agent's own statically
+        # bound tools. Without them the gate sees no description and no schema, and
+        # a call it cannot fetch is deliberately never classified (see
+        # ``score_tool_risk``) — so a statically bound tool would silently drop to a
+        # name-only score. Registering them here keeps it schema-gated.
+        gate_tools: dict[str, Any] = {t.name: t for t in (platform_tools or []) if isinstance(t, BaseTool)}
         if fs_middleware is not None:
-            platform_tools = {t.name: t for t in fs_middleware.tools}
+            gate_tools.update({t.name: t for t in fs_middleware.tools})
 
         middleware.append(
             ConditionalHumanInTheLoopMiddleware(
@@ -1401,7 +1652,7 @@ def build_common_middleware_stack(
                 default_risk_threshold=default_risk_threshold,
                 tool_risk_cache=tool_risk_cache,
                 tool_server_map=tool_server_map,
-                platform_tools=platform_tools,
+                platform_tools=gate_tools or None,
             )
         )
 
@@ -1757,6 +2008,7 @@ def build_sub_agent_graph(
         context_gated_tools=context_gated_tools,
         broaden_baseline_tools=all_tools,
         expose_context_registry=expose_context_registry,
+        platform_tools=all_tools,
     )
     if extra_middlewares:
         # Insert extra middlewares *after* GatewayAttributionMiddleware (always

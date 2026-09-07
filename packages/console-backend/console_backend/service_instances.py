@@ -293,6 +293,7 @@ async def initialize_services(app: "FastAPI") -> None:
 
     app.state.bug_report_service = BugReportService()
     app.state.bug_report_service.set_repository(app.state.bug_report_repository)
+    app.state.bug_report_service.set_notification_service(app.state.notification_service)
 
     # Initialize debug agent service (dispatches to agent-runner)
     app.state.debug_agent_service = DebugAgentService(
@@ -340,6 +341,7 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.scheduler_service.set_repository(app.state.scheduled_job_repository)
     app.state.scheduler_service.set_sub_agent_service(app.state.sub_agent_service)
     app.state.scheduler_service.set_delivery_channel_repository(app.state.delivery_channel_repository)
+    app.state.scheduler_service.set_user_settings_service(app.state.user_settings_service)
 
     app.state.scheduler_engine = SchedulerEngine(
         repo=app.state.scheduled_job_repository,

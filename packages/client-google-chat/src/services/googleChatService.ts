@@ -657,6 +657,89 @@ export class GoogleChatService {
   }
 
   /**
+   * Build the in-task authorization card (`urn:nannos:a2a:in-task-auth:1.0`):
+   * a tool the agent wanted to use needs the END-USER's consent.
+   *
+   * The copy is OURS. What comes on the wire with an `auth-required` status is
+   * the MCP gateway addressing the AGENT ("You must tell the end-user to…"), so
+   * it is rendered only when the producer gave us no URL to link — better
+   * stranded text than no way forward.
+   *
+   * Unlike the panel this does NOT walk through stages (Authorize, then "Done,
+   * continue"): a Google Chat openLink button reports nothing back, so the way
+   * forward must not depend on a state change we would never see. All three
+   * buttons are live from the start.
+   */
+  buildInTaskAuthCard(
+    config: Config,
+    prompt: { authUrl?: string; tool?: string; service?: string; message?: string },
+    parameters: Record<string, unknown>,
+  ): chat_v1.Schema$CardWithId {
+    const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
+    const subject = prompt.service || prompt.tool || '';
+    const paramsJson = JSON.stringify({ ...parameters, ...(prompt.tool ? { tool: prompt.tool } : {}), subject });
+
+    const answerButton = (text: string, action: string) => ({
+      text,
+      onClick: {
+        action: {
+          function: buttonClickHandlerUrl,
+          parameters: [
+            { key: 'cardId', value: 'in_task_auth_card' },
+            { key: 'action', value: action },
+            { key: 'parameters', value: paramsJson },
+          ],
+        },
+      },
+    });
+
+    const buttons: any[] = [];
+    if (prompt.authUrl) {
+      buttons.push({
+        text: '🔓 Authorize',
+        onClick: { openLink: { url: prompt.authUrl } },
+        color: { red: 0.0, green: 0.54, blue: 0.86, alpha: 1 },
+      });
+    }
+    // Both answers resume the same parked interrupt. Declining has to reach the
+    // agent too — it is holding a blocked tool call and needs to stop pushing the
+    // link — so it stays offered even when there is no URL to open.
+    buttons.push(answerButton('✅ Done, continue', 'approved'));
+    buttons.push(answerButton("🚫 Don't allow", 'declined'));
+
+    const widgets: any[] = [
+      {
+        textParagraph: {
+          text: prompt.tool
+            ? `Nannos needs your permission to use <code>${prompt.tool}</code>.`
+            : 'Nannos needs your permission before it can continue.',
+        },
+      } as any,
+    ];
+    if (prompt.authUrl) {
+      widgets.push({
+        textParagraph: { text: 'Authorize in the browser, then come back and confirm here.' },
+      } as any);
+    } else if (prompt.message) {
+      widgets.push({ textParagraph: { text: prompt.message.substring(0, 3000) } } as any);
+    }
+    widgets.push({ divider: {} });
+    widgets.push({ buttonList: { buttons } } as any);
+
+    return {
+      cardId: 'in_task_auth_card',
+      card: {
+        header: {
+          title: '🔐 Authorization needed',
+          ...(subject ? { subtitle: subject } : {}),
+          imageType: 'CIRCLE',
+        },
+        sections: [{ widgets }],
+      },
+    };
+  }
+
+  /**
    * Build a multi-action HITL approval card for interrupts carrying more than one
    * action_request (e.g. parallel tool calls). Renders the detail of EVERY call (so
    * nothing is approved unseen) with a per-call Approve/Reject radio. "Submit

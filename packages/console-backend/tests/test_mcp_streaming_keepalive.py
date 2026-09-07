@@ -11,11 +11,13 @@ no notification arrives before the final result.
 """
 
 import asyncio
+import json
 import os
 import socket
 import threading
 import time
 
+import httpx
 import pytest
 import uvicorn
 
@@ -58,7 +60,7 @@ def _build_app(interval: float = 0.4) -> FastAPI:
 
     mcp._execute_api_tool = _with_keepalive
 
-    session_manager = StreamableHTTPSessionManager(app=mcp.server, json_response=False, stateless=False)
+    session_manager = StreamableHTTPSessionManager(app=mcp.server, json_response=False, stateless=True)
 
     async def _mcp_asgi(scope, receive, send):
         await session_manager.handle_request(scope, receive, send)
@@ -115,6 +117,39 @@ async def test_keepalive_notifications_stream_before_result():
         )
         assert any(kind == "progress" for _, kind in notifications)
         assert any(kind == "log" for _, kind in notifications)
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_bare_tools_list_without_session_id_is_served():
+    """The orchestrator's raw-bytes catalogue fast path POSTs ``tools/list`` with no
+    ``initialize`` handshake and no ``Mcp-Session-Id``. With ``stateless=False`` the SDK
+    answers ``400 Missing session ID`` and our own server falls back to the slow path."""
+    port = _free_port()
+    config = uvicorn.Config(_build_app(), host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not server.started:
+            await asyncio.sleep(0.05)
+        assert server.started, "uvicorn did not start"
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{port}/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+        assert resp.status_code == 200, resp.text
+        # SSE transport: the result is the data payload of the first event.
+        payload = next(line for line in resp.text.splitlines() if line.startswith("data:"))
+        body = json.loads(payload[len("data:"):])
+        assert body["id"] == 1 and "error" not in body, body
+        assert [t["name"] for t in body["result"]["tools"]] == ["slow_tool"]
     finally:
         server.should_exit = True
         thread.join(timeout=10)

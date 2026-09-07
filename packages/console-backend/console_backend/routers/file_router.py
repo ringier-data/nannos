@@ -4,7 +4,7 @@ import json
 import os
 from typing import Annotated
 
-from console_backend.dependencies import require_auth
+from console_backend.dependencies import require_auth, require_auth_or_bearer_token
 from console_backend.models.user import User
 from console_backend.services.file_storage_service import FileStorageService
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -53,7 +53,9 @@ async def upload_files(
     request: Request,
     files: Annotated[list[UploadFile], File(...)],
     conversation_id: Annotated[str | None, Form()] = None,
-    user: User = Depends(require_auth),
+    # Bearer accepted: the embed SDK (ADR-0004) uploads chat attachments
+    # cross-origin with the user's access token — no console session cookie exists.
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> UploadedFileResponse:
     """Upload one or more files (including audio recordings) for a chat message.
 

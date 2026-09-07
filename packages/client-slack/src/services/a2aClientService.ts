@@ -60,8 +60,11 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
       'X-A2A-Extensions',
       // intermediate-output is gated server-side on the client advertising it
       // (the orchestrator suppresses sub-agent reasoning otherwise) — advertise
-      // it so the "reasoning" thinking cards are populated.
-      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0, urn:nannos:a2a:human-in-the-loop:1.0'
+      // it so the "reasoning" thinking cards are populated. in-task-auth is
+      // gated the same way: without it an `auth-required` status is prose the
+      // gateway wrote for the agent; with it the facts arrive as a DataPart and
+      // the authorization card is built from them.
+      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0, urn:nannos:a2a:human-in-the-loop:1.0, urn:nannos:a2a:in-task-auth:1.0'
     );
     return fetch(input, {
       ...init,
@@ -182,7 +185,16 @@ export class A2AClientService {
     // Build message parts (text + optional files)
     const messageParts = this.buildMessageParts(request);
 
-    // Build A2A message send params
+    // NOTE: no `configuration.pushNotificationConfig` is sent here, even though
+    // the request carries webhookUrl/webhookToken. Wiring it up is not a one-line
+    // change and sending it half-configured is worse than not sending it:
+    //   - the callback route validates the token against the per-installation
+    //     secret (validateNotificationToken in slackApp.ts), not against the
+    //     per-turn randomUUID the caller generates, so every push would 403 —
+    //     after an uncached listAll() scan of all installations;
+    //   - handleA2ANotification only understands scheduler payloads and DMs, so
+    //     even a validated chat-turn Task would be dropped with a warning.
+    // Tracked in ringier-data/nannos#150.
     const sendParams: MessageSendParams = {
       message: {
         messageId,

@@ -27,6 +27,7 @@ class InMemorySessionService:
         id_token: str,
         access_token: str,
         access_token_expires_in: int = 3600,
+        session_ttl_seconds: int | None = None,
     ) -> str:
         session_id = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
@@ -40,7 +41,7 @@ class InMemorySessionService:
             refresh_token=refresh_token,
             id_token=id_token,
             issued_at=now,
-            expires_at=now + timedelta(hours=24),
+            expires_at=now + (timedelta(seconds=session_ttl_seconds) if session_ttl_seconds else timedelta(hours=24)),
         )
         self._sessions[session_id] = session
         return session_id
@@ -54,6 +55,13 @@ class InMemorySessionService:
 
     async def destroy_session(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+
+    async def destroy_expired_sessions(self) -> int:
+        now = datetime.now(timezone.utc)
+        expired = [sid for sid, s in self._sessions.items() if s.expires_at <= now]
+        for sid in expired:
+            del self._sessions[sid]
+        return len(expired)
 
     async def update_session(
         self,

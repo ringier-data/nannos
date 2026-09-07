@@ -187,6 +187,7 @@ function setupServerTimeouts(server: Server, config: Config) {
       pendingRequestStore: storage.pendingRequest,
       inFlightTaskStore: storage.inFlightTask,
       userAuthStorage: storage.userAuth,
+      scheduledRunStore: storage.scheduledRun,
       fileStorageService,
       feedbackService,
       config,

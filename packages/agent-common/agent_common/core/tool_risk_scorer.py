@@ -24,6 +24,8 @@ from langchain_core.tools import BaseTool
 from langsmith import traceable
 from pydantic import BaseModel, Field
 
+from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
+from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.tool_risk_cache import ParamRiskProfile, ToolRiskCache, ToolRiskEntry
 
 logger = logging.getLogger(__name__)
@@ -109,13 +111,48 @@ async def score_tool_risk(
     Args:
         tool_name: Name of the tool being called.
         args: The tool call arguments.
-        tool: The BaseTool instance (for schema hashing). If None, schema check is skipped.
+        tool: The BaseTool instance (for description + schema). If None the call is NOT
+            classified at all — see the guard below: a name-only deterministic score is
+            returned and nothing is cached or persisted.
         cache: The shared ToolRiskCache instance.
         server_slug: MCP server slug (e.g. 'console', 'github'). '_self' for in-process tools.
 
     Returns:
         Tuple of (risk_score, entry). Entry is None only if scoring completely fails.
     """
+    # Embedded Nannos: the client_action tool is the SINGLE HITL path for on-screen
+    # actions (the SDK no longer has its own approval card). Score it deterministically
+    # by `kind` — never via the LLM/cache — so an ``apply`` (writes into the user's form)
+    # always interrupts for approval while ``highlight``/``navigate`` (benign) never do.
+    # notify_user only writes one sentence onto the user's own screen: it touches no
+    # backend, returns no data to the model, and cannot be made risky by its args.
+    # Score it deterministically at 0 so an approval card can never appear in front of
+    # a progress note — and so the LLM scorer is never paid for it.
+    if tool_name == NOTIFY_USER_TOOL_NAME:
+        now = datetime.now(timezone.utc)
+        return 0.0, ToolRiskEntry(
+            base_score=0.0,
+            risk_factors={},
+            allowed_actions=["approve", "reject"],
+            schema_hash="",
+            updated_at=now,
+            last_accessed_at=now,
+        )
+
+    if tool_name == CLIENT_ACTION_TOOL_NAME:
+        kind = (args or {}).get("kind")
+        score = _CLIENT_ACTION_KIND_SCORES.get(kind, _CLIENT_ACTION_DEFAULT_SCORE)
+        now = datetime.now(timezone.utc)
+        entry = ToolRiskEntry(
+            base_score=score,
+            risk_factors={},
+            allowed_actions=["approve", "reject"],
+            schema_hash="",
+            updated_at=now,
+            last_accessed_at=now,
+        )
+        return score, entry
+
     if cache is None:
         # No cache available — deterministic fallback
         return _deterministic_fallback(tool_name), None
@@ -127,22 +164,75 @@ async def score_tool_risk(
     entry = cache.get(tool_name, server_slug, current_hash)
     if entry is not None:
         score = entry.match_args(args)
+        # The floor must hold on the HIT path too: the incident entry
+        # (`alloy-riad_delete_campaign_by_id` at 0.75) is already persisted with an
+        # unchanged schema hash, so it never reaches the LLM branch below where
+        # the floor was first applied. Flooring the returned score (not the entry)
+        # keeps the stored estimate intact for diagnostics.
+        floor = _destructive_floor(tool_name)
+        if floor > score:
+            logger.info(
+                "Flooring destructive tool '%s' cached risk %.2f -> %.2f", tool_name, score, floor
+            )
+            score = floor
         return score, entry
 
     # 2. Cache miss — try API (implemented by caller injecting api_client into cache)
     # The cache's refresh loop handles bulk loading. For individual misses during
     # scoring, we do an inline LLM call (step 3).
 
+    if tool is None:
+        # 2b. Nothing to classify. The lookup above still ran — a hand-seeded static
+        # guard carries `schema_hash = ''` and must be honoured whether or not the
+        # instance is fetchable — but there is no description and no input schema to
+        # reason about, so the classification below would degenerate to
+        # "No description available / No schema available". `risk_factors` then comes
+        # back `{}`: a profile asserting "this tool has no risk-bearing parameters",
+        # derived from a tool nobody looked at, and it used to be cached AND persisted
+        # with an empty `schema_hash` — indistinguishable in the catalogue from a
+        # profile derived from a real schema. Every camelCase name a model guessed
+        # natively left such a row behind (see migration 089).
+        #
+        # The call is still gated: this is the same name-based fallback the LLM branch
+        # itself falls back to on failure. It is only never classified and never stored.
+        #
+        # The destructive floor must be applied here too. `_deterministic_fallback`
+        # tests its safe prefixes FIRST, so `read_and_remove_file` scores 0.3 on the
+        # name alone — under the gate. Before this guard existed such a name reached
+        # the LLM branch, where the floor caught it; without the max() the guard would
+        # turn a would-be approval card into a silent auto-execute.
+        score = max(_deterministic_fallback(tool_name), _destructive_floor(tool_name))
+        logger.info(
+            "Tool '%s' (%s) could not be fetched; scoring it %.2f from its name alone, "
+            "without classifying or persisting it",
+            tool_name,
+            server_slug,
+            score,
+        )
+        return score, None
+
     # 3. LLM scoring
     try:
-        description = ""
-        input_schema: dict[str, Any] = {}
-        if tool is not None:
-            description = tool.description or ""
-            input_schema = tool.get_input_schema().model_json_schema()
+        description = tool.description or ""
+        input_schema: dict[str, Any] = tool.get_input_schema().model_json_schema()
 
         entry = await _score_tool_via_llm(tool_name, description, input_schema)
         entry.schema_hash = current_hash
+
+        # Safety floor: an LLM under-rating must never drop a clearly irreversible /
+        # destructive operation below the HITL approval gate. Observed in practice:
+        # `alloy-riad_delete_campaign_by_id` was LLM-scored 0.75 (< 0.80 threshold)
+        # and deleted a campaign without asking. Floor destructive verbs so they
+        # always require approval regardless of the model's estimate.
+        floor = _destructive_floor(tool_name)
+        if floor > entry.base_score:
+            logger.info(
+                "Flooring destructive tool '%s' risk %.2f -> %.2f (LLM under-rated)",
+                tool_name,
+                entry.base_score,
+                floor,
+            )
+            entry.base_score = floor
 
         # Update cache immediately
         cache.put(tool_name, server_slug, entry)
@@ -206,7 +296,20 @@ async def _score_tool_via_llm(
     from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 
     model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
-    structured_model = model.with_structured_output(ToolRiskOutput)
+    # method="function_calling", not the langchain-openai>=0.3 default of "json_schema".
+    # OpenAI's strict structured-output validator requires every object to declare
+    # additionalProperties: false and to list every property in `required`, but
+    # ToolRiskOutput is built on open maps (risk_factors, risky_values) whose keys are
+    # the tool's own parameter names, unknowable ahead of the call. Under the default
+    # every scoring request came back 400 ("'additionalProperties' is required to be
+    # supplied and to be false"), so each tool silently fell through to the
+    # deterministic fallback after paying a full round trip.
+    #
+    # Tool calling accepts the same schema and is what the rest of this stack already
+    # speaks: the gateway normalizes every provider (Bedrock included) into
+    # OpenAI-shape tool_calls (see a2a.structured_response.select_response_format,
+    # which picks ToolStrategy for the same reason).
+    structured_model = model.with_structured_output(ToolRiskOutput, method="function_calling")
 
     # Build user prompt with tool details
     schema_str = json.dumps(input_schema, indent=2) if input_schema else "No schema available"
@@ -217,12 +320,17 @@ async def _score_tool_via_llm(
         f"Assess the risk level of this tool."
     )
 
-    result: ToolRiskOutput = await structured_model.ainvoke(
-        [
-            {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-    )
+    # Side-channel call (not through the agent middleware stack): attribute the
+    # gateway spend from the run config's tags, like GatewayAttributionMiddleware.
+    from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
+
+    with run_config_attribution_scope():
+        result: ToolRiskOutput = await structured_model.ainvoke(
+            [
+                {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
 
     # Convert LLM output to ToolRiskEntry
     risk_factors: dict[str, ParamRiskProfile] = {}
@@ -248,6 +356,37 @@ async def _score_tool_via_llm(
 # ---------------------------------------------------------------------------
 # Deterministic fallback (when LLM is unavailable)
 # ---------------------------------------------------------------------------
+
+
+# Irreversible / data-loss verbs. A tool whose name contains one of these must
+# never sit below the HITL gate on the strength of an LLM estimate alone. Kept
+# narrow (only clearly-destructive verbs) so read-ish names containing "run"/"exec"
+# aren't over-gated.
+_HARD_DESTRUCTIVE_KEYWORDS: tuple[str, ...] = ("delete", "remove", "drop", "destroy")
+_DESTRUCTIVE_FLOOR_SCORE = 0.9
+
+# Deterministic risk per client_action `kind` (Embedded Nannos). Mutating kinds
+# gate for approval; benign ones never do. Unknown/new kinds default to gating
+# (fail safe). ``refresh``/``invalidate`` are listed ahead of that kind landing.
+_CLIENT_ACTION_KIND_SCORES: dict[str | None, float] = {
+    "apply": 0.9,
+    "refresh": 0.9,
+    "invalidate": 0.9,
+    "highlight": 0.1,
+    "navigate": 0.1,
+    # Read-only by construction: the SDK answers from host-registered readers
+    # through the same sanitizer as the page snapshot (deny list + caps).
+    "read_current_page": 0.1,
+}
+_CLIENT_ACTION_DEFAULT_SCORE = 0.9  # unknown kind → gate (fail safe)
+
+
+def _destructive_floor(tool_name: str) -> float:
+    """Minimum base_score for a clearly-destructive tool (0.0 if it isn't one)."""
+    tool_lower = tool_name.lower()
+    if any(kw in tool_lower for kw in _HARD_DESTRUCTIVE_KEYWORDS):
+        return _DESTRUCTIVE_FLOOR_SCORE
+    return 0.0
 
 
 def _deterministic_fallback(tool_name: str) -> float:

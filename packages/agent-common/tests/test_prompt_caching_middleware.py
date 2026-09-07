@@ -114,3 +114,27 @@ class TestPerCallContract:
 
         out = await mw.awrap_model_call(req, handler)
         assert _last_block_cache_control(out.messages[-1]) == CC
+
+
+class TestVolatileContextIsSkipped:
+    def test_breakpoint_lands_on_last_persisted_message(self):
+        """The per-call <current_page>/<client_objects> block is appended AFTER the
+        conversation and never checkpointed; a breakpoint on it would never be hit.
+        The breakpoint must go on the stable message in front of it."""
+        from agent_common.middleware.utils import append_volatile_context_message
+
+        tool = ToolMessage(content="result", tool_call_id="c1")
+        msgs = append_volatile_context_message(
+            [HumanMessage(content="q"), AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "c1"}]), tool],
+            "<current_page>...</current_page>",
+        )
+        out = _tag_last_message(msgs, CC)
+        assert _last_block_cache_control(out[2]) == CC  # the ToolMessage
+        assert out[3].content == "<current_page>...</current_page>"  # block untouched (str content)
+        assert out[3].additional_kwargs.get("volatile_context") is True
+
+    def test_only_volatile_messages_is_noop(self):
+        from agent_common.middleware.utils import append_volatile_context_message
+
+        msgs = append_volatile_context_message([], "BLOCK")
+        assert _tag_last_message(msgs, CC) is msgs

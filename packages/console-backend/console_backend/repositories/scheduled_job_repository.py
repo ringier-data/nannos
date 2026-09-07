@@ -10,8 +10,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditEntityType
-from ..models.scheduled_job import JobRunStatus, JobType, ScheduledJob, ScheduledJobRun, ScheduleKind
+from ..models.scheduled_job import (
+    ConditionEvaluation,
+    JobRunStatus,
+    JobType,
+    ScheduledJob,
+    ScheduledJobRun,
+    ScheduleKind,
+)
 from ..models.user import User
+from ..utils.timezones import resolve_timezone
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -27,6 +35,7 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         job_type=JobType(row["job_type"]),
         schedule_kind=ScheduleKind(row["schedule_kind"]),
         cron_expr=row["cron_expr"],
+        timezone=row["timezone"],
         interval_seconds=row["interval_seconds"],
         run_at=row["run_at"],
         next_run_at=row["next_run_at"],
@@ -35,8 +44,8 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         notification_message=row.get("notification_message"),
         check_tool=row["check_tool"],
         check_args=row["check_args"],
-        condition_expr=row["condition_expr"],
-        expected_value=row.get("expected_value"),
+        check_args_exprs=row.get("check_args_exprs"),
+        cel_expr=row.get("cel_expr"),
         llm_condition=row.get("llm_condition"),
         destroy_after_trigger=row.get("destroy_after_trigger", True),
         last_check_result=row["last_check_result"],
@@ -64,6 +73,7 @@ def _row_to_run(row: Any) -> ScheduledJobRun:
         error_message=row["error_message"],
         conversation_id=row.get("conversation_id"),
         delivered=row["delivered"],
+        condition_evaluation=row.get("condition_evaluation"),
     )
 
 
@@ -73,17 +83,29 @@ def compute_next_run(
     interval_seconds: int | None,
     run_at: datetime | None,
     after: datetime | None = None,
+    tz: str | None = None,
 ) -> datetime | None:
-    """Compute the next scheduled run datetime.
+    """Compute the next scheduled run datetime (always returned in UTC).
 
-    Returns None for schedule_kind='once' — the job is done after the first run.
+    Cron wall-clock fields are interpreted in *tz* (IANA name; None/empty falls
+    back to the DEFAULT_TIMEZONE deployment default), so "0 8 * * *" fires at
+    08:00 local time across DST changes. Raises ValueError if *tz* cannot be
+    resolved. Returns None for schedule_kind='once' — the job is done after
+    the first run.
     """
     base = after or datetime.now(timezone.utc)
 
     if schedule_kind == ScheduleKind.CRON:
         assert cron_expr, "cron_expr required for cron schedule"
-        cron = croniter(cron_expr, base)
-        return cron.get_next(datetime)
+        zone = resolve_timezone(tz)
+        cron = croniter(cron_expr, base.astimezone(zone))
+        next_dt = cron.get_next(datetime)
+        # During a DST fall-back the same wall-clock time exists twice and
+        # croniter yields both folds. A wall-clock schedule must fire once, so
+        # skip a fold-1 repeat whose first occurrence has already passed.
+        while next_dt.fold and next_dt.replace(fold=0).astimezone(timezone.utc) <= base:
+            next_dt = cron.get_next(datetime)
+        return next_dt.astimezone(timezone.utc)
 
     if schedule_kind == ScheduleKind.INTERVAL:
         assert interval_seconds, "interval_seconds required for interval schedule"
@@ -237,7 +259,13 @@ class ScheduledJobRepository(AuditedRepository):
                 "last_run_at": now,
                 "next_run_at": next_run_at,
                 "paused_reason": paused_reason,
-                "last_check_result": json.dumps(last_check_result) if last_check_result else None,
+                # `is not None`, not truthiness: `{}` is a real response (a tool with no
+                # content returns one), and mapping it to NULL makes the COALESCE above
+                # keep the previous payload — so `prev` never catches up and a
+                # `result != prev` condition stays true on every poll.
+                "last_check_result": (
+                    json.dumps(last_check_result) if last_check_result is not None else None
+                ),
                 "now": now,
             },
         )
@@ -288,6 +316,7 @@ class ScheduledJobRepository(AuditedRepository):
         error_message: str | None = None,
         conversation_id: str | None = None,
         delivered: bool = False,
+        condition_evaluation: ConditionEvaluation | None = None,
     ) -> None:
         """Finalise a run record with execution outcome."""
         await db.execute(
@@ -299,7 +328,8 @@ class ScheduledJobRepository(AuditedRepository):
                     result_summary   = :result_summary,
                     error_message    = :error_message,
                     conversation_id  = :conversation_id,
-                    delivered        = :delivered
+                    delivered        = :delivered,
+                    condition_evaluation = :condition_evaluation
                 WHERE id = :run_id
             """),
             {
@@ -309,8 +339,32 @@ class ScheduledJobRepository(AuditedRepository):
                 "error_message": error_message,
                 "conversation_id": conversation_id,
                 "delivered": delivered,
+                # mode="json" so the stored form is exactly what ScheduledJobRun will
+                # validate when it is read back.
+                "condition_evaluation": (
+                    json.dumps(condition_evaluation.model_dump(mode="json"))
+                    if condition_evaluation is not None
+                    else None
+                ),
             },
         )
+
+    async def get_run(
+        self,
+        db: AsyncSession,
+        job_id: int,
+        run_id: int,
+    ) -> ScheduledJobRun | None:
+        """Fetch a single run of a job by id, regardless of age."""
+        result = await db.execute(
+            text("""
+                SELECT * FROM scheduled_job_runs
+                WHERE id = :run_id AND job_id = :job_id
+            """),
+            {"run_id": run_id, "job_id": job_id},
+        )
+        row = result.mappings().first()
+        return _row_to_run(row) if row is not None else None
 
     async def list_runs(
         self,

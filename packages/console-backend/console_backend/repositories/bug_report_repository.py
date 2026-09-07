@@ -1,6 +1,7 @@
 """Repository for bug reports with automatic audit logging."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -85,6 +86,7 @@ class BugReportRepository(AuditedRepository):
         db: AsyncSession,
         user_id: str | None = None,
         status: BugReportStatus | None = None,
+        created_after: datetime | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> tuple[list[BugReportResponse], int]:
@@ -99,15 +101,32 @@ class BugReportRepository(AuditedRepository):
             conditions.append("status = :status")
             params["status"] = status.value
 
+        if created_after is not None:
+            # Strictly greater than, so a window whose lower bound is a report's own
+            # timestamp does not return that report again.
+            #
+            # A naive value is read as UTC rather than passed through: `created_at` is
+            # TIMESTAMPTZ, and asyncpg encodes a naive datetime in the *server process's*
+            # local timezone, so an offset-less `created_after=2026-09-02T08:00:00` (which
+            # FastAPI accepts without complaint) would silently shift the window by the
+            # container's UTC offset. Same normalisation as scheduler_service._normalize_run_at
+            # and cel_condition's `now`.
+            if created_after.tzinfo is None:
+                created_after = created_after.replace(tzinfo=timezone.utc)
+            conditions.append("created_at > :created_after")
+            params["created_after"] = created_after
+
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         count_query = text(f"SELECT COUNT(*) FROM bug_reports {where_clause}")
         count_result = await db.execute(count_query, params)
         total = count_result.scalar() or 0
 
+        # `id` breaks ties: reports filed inside the same clock tick would otherwise be
+        # ordered arbitrarily, and a paging caller could see one twice or not at all.
         data_query = text(f"""
             SELECT * FROM bug_reports {where_clause}
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT :limit OFFSET :offset
         """)
         params["limit"] = limit

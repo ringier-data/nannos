@@ -67,7 +67,7 @@ def classify_error(content: str) -> str | None:
     Returns one of: ``"auth"``, ``"transient"``, ``"user_fixable"``,
     ``"capability_gap"``, ``"system_error"``, or ``None``.
     """
-    if not content:
+    if not content or _is_structured_success(content):
         return None
 
     # Check for structured JSON errors first
@@ -93,9 +93,20 @@ def classify_error(content: str) -> str | None:
     return None
 
 
+def _is_structured_success(content: str) -> bool:
+    """A PTC ``eval`` reply is a ``<result …>`` block on success and an ``<error type=…>``
+    block on failure. A successful result routinely *contains* the words "error",
+    "required", "failed" … (tool descriptions, JSON schemas, log lines the program
+    printed), so keyword heuristics must not run on it: a grep over the tool catalogue
+    was being stamped ``[ERROR_TYPE: user_fixable]`` because its schemas say
+    ``"required": [...]``, and the model then treated a good result as a failure.
+    """
+    return "<result" in content and "<error type=" not in content
+
+
 def _looks_like_error(content: str) -> bool:
     """Heuristic: does this content look like an error response?"""
-    if not content:
+    if not content or _is_structured_success(content):
         return False
     lower = content.lower()
     return any(

@@ -246,7 +246,7 @@ class TestTimeToolCreation:
         result = tool.invoke({})
 
         assert isinstance(result, str)
-        # Should use default timezone (Europe/Zurich) and format (iso8601)
+        # Should use the deployment default timezone (DEFAULT_TIMEZONE) and format (iso8601)
         assert "2026" in result
 
 

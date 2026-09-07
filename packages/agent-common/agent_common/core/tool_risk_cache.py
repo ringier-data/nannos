@@ -247,8 +247,28 @@ class ToolRiskCache:
 
         Called by the scorer after LLM scoring to write-through to the database.
         Does nothing if no API client is configured.
+
+        Refuses an entry with no ``schema_hash``. This is the one path by which a
+        *derived* profile reaches the table, and a derived profile with no schema hash
+        is by definition one the classifier could not read a schema for — the defect
+        behind the phantom rows migration 089 removes. Enforcing it here rather than
+        only at the call site keeps the guarantee structural: a future caller cannot
+        reintroduce the bug by omitting the check.
+
+        Hand-written policy rows legitimately carry an empty hash (the static guards
+        seeded in 057, and admin overrides through the console API) — those are written
+        directly, never through here, so they are unaffected.
         """
         if self._api_client is None:
+            return
+
+        if not entry.schema_hash:
+            logger.warning(
+                "Refusing to persist a risk profile for %s::%s with no schema hash — "
+                "a derived profile requires a schema to derive it from",
+                tool_name,
+                server_slug,
+            )
             return
 
         data = {

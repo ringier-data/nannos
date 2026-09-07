@@ -40,8 +40,13 @@ class DebugAgentService:
         self._agent_runner_url = agent_runner_url.rstrip("/")
         self._oauth_service = oauth_service
 
-    async def get_debug_agent_id(self, db: AsyncSession) -> str | None:
-        """Find the active debug agent (system_role='debug', approved with default_version)."""
+    async def get_debug_agent_id(self, db: AsyncSession) -> int | None:
+        """Find the active debug agent (system_role='debug', approved with default_version).
+
+        Returned as int: agent-runner reads sub_agent_id off the A2A message metadata
+        through a numeric coercion, so a stringified id is silently dropped and the run
+        completes without ever executing the sub-agent.
+        """
         result = await db.execute(
             text(
                 "SELECT id FROM sub_agents "
@@ -50,7 +55,7 @@ class DebugAgentService:
             )
         )
         row = result.scalar_one_or_none()
-        return str(row) if row is not None else None
+        return int(row) if row is not None else None
 
     async def trigger_debug(
         self,
@@ -102,7 +107,7 @@ class DebugAgentService:
     async def _run_debug(
         self,
         report_id: str,
-        sub_agent_id: str,
+        sub_agent_id: int,
         bug_report: BugReportResponse,
         user_access_token: str,
         context_id: str,
@@ -116,7 +121,7 @@ class DebugAgentService:
             )
             # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client and drive
             # the stream to completion (the debug agent updates the bug report via MCP tools).
-            await dispatch_streaming(
+            result_data = await dispatch_streaming(
                 agent_url=self._agent_runner_url,
                 access_token=access_token,
                 parts=self._build_message_parts(report_id, bug_report),
@@ -124,7 +129,13 @@ class DebugAgentService:
                 context_id=context_id,
                 timeout_read=float(DEBUG_AGENT_TIMEOUT_SECONDS),
             )
-            logger.info(f"Debug agent completed for bug report {report_id}")
+            # agent-runner reports a non-completed terminal state in-band, so an unchecked
+            # await here would log "completed" for a run that never executed.
+            state = result_data["result"].get("status", {}).get("state")
+            if state == "completed":
+                logger.info(f"Debug agent completed for bug report {report_id}")
+            else:
+                logger.error(f"Debug agent finished in state {state!r} for bug report {report_id}")
         except Exception:
             logger.exception(f"Debug agent failed for bug report {report_id}")
         finally:

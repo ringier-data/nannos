@@ -65,6 +65,45 @@ export interface IContextStore {
 }
 
 /**
+ * Provenance of a scheduled-run notification delivered to Google Chat, keyed
+ * by the delivered message's thread resource name
+ * ("spaces/{space}/threads/{thread}" — globally unique, and the same value
+ * arrives verbatim as threadId on reply events). `contextId` is the run's own
+ * A2A conversation on agent-runner — it is forwarded to the orchestrator as
+ * structured data only (conversation-origin extension), NEVER as the request
+ * contextId (the orchestrator checkpoints under the same key convention, so
+ * reusing it as a conversation id would collide with the sub-agent's state).
+ */
+export interface ScheduledRunRecord {
+  contextKey: string;
+  contextId: string;
+  scheduledJobId?: number;
+  scheduledJobRunId?: number;
+  subAgentId?: number;
+  subAgentName?: string;
+  prompt?: string;
+  resultSummary?: string;
+  /** 'success' | 'failed' (condition_not_met notifications are never delivered) */
+  schedulerStatus?: string;
+  errorMessage?: string;
+  /**
+   * Terminal A2A task state of the run ('completed' | 'input_required' |
+   * 'failed'); 'input_required' = the run asked the user a question and its
+   * conversation is waiting for the answer.
+   */
+  taskState?: string;
+}
+
+/**
+ * Interface for scheduled-run provenance storage
+ */
+export interface IScheduledRunStore {
+  set(record: ScheduledRunRecord): Promise<void>;
+  get(key: string): Promise<ScheduledRunRecord | null>;
+  buildKey(threadName: string): string;
+}
+
+/**
  * Pending request data structure
  */
 export interface PendingRequest {

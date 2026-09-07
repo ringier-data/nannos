@@ -59,6 +59,7 @@ async def create_outbound_scim_endpoint(
         bearer_token=body.bearer_token,
         push_users=body.push_users,
         push_groups=body.push_groups,
+        is_mcp_gateway=body.is_mcp_gateway,
         actor=admin,
     )
     await db.commit()
@@ -118,6 +119,7 @@ async def update_outbound_scim_endpoint(
         enabled=body.enabled,
         push_users=body.push_users,
         push_groups=body.push_groups,
+        is_mcp_gateway=body.is_mcp_gateway,
     )
     if not endpoint:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outbound SCIM endpoint not found")

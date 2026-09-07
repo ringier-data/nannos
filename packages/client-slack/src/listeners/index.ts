@@ -9,6 +9,7 @@ import type {
   IInFlightTaskStore,
   IOAuthStateStore,
   IBotInstallationStore,
+  IScheduledRunStore,
 } from '../storage/types.js';
 import { registerAppMentionListener } from './events/appMention.js';
 import { registerMessageListeners } from './events/directMessage.js';
@@ -16,6 +17,7 @@ import { registerNannosCommand } from './commands/nannos.js';
 import { registerAuthorizeButtonAction } from './actions/authorizeButton.js';
 import { registerFeedbackButtonActions } from './actions/feedbackButton.js';
 import { registerHitlActions } from './actions/hitlButton.js';
+import { registerInTaskAuthActions } from './actions/inTaskAuthButton.js';
 import { registerHitlModalHandler } from './views/hitlModal.js';
 import { registerReactionListeners } from './events/reactionHandler.js';
 import { Logger } from '../utils/logger.js';
@@ -42,6 +44,7 @@ export async function registerListeners(
   isLocalMode: boolean,
   botInstallationStore: IBotInstallationStore,
   feedbackService?: FeedbackService,
+  scheduledRunStore?: IScheduledRunStore,
 ): Promise<void> {
   // Register event listeners (botToken/botName resolved per-event via context)
   registerAppMentionListener(
@@ -69,6 +72,7 @@ export async function registerListeners(
     fileStorageService,
     isLocalMode,
     feedbackService,
+    scheduledRunStore,
   );
 
   // Register slash commands dynamically for every active bot installation
@@ -118,6 +122,9 @@ export async function registerListeners(
   });
   registerHitlActions(app, makeHitlDeps);
   registerHitlModalHandler(app, makeHitlDeps);
+  // The in-task authorization card resumes the same way a HITL decision does,
+  // so it re-enters through the same per-event dependency factory.
+  registerInTaskAuthActions(app, makeHitlDeps);
 
   // Register reaction listeners for message feedback (requires console-backend)
   if (feedbackService) {

@@ -202,11 +202,33 @@ class TestEnhanceTaskToolSchema:
         enum = result["function"]["parameters"]["properties"]["subagent_type"]["enum"]
         assert enum == ["general-purpose", "file-analyzer", "jira-agent"]
 
-    def test_returns_original_when_registry_empty(self, middleware):
+    def test_keeps_agent_list_when_registry_empty(self, middleware):
+        """No registry to substitute, but the one-task-per-agent rule still applies.
+
+        The built-in agents this falls through to share a thread the same way, so
+        the guidance is appended even with nothing to enumerate.
+        """
         original = _make_task_tool_dict("- general-purpose: GP agent")
         ctx = _make_context(subagent_registry={})
+
         result = middleware._enhance_task_tool_schema(original, ctx)
-        assert result is original
+
+        desc = result["function"]["description"]
+        assert "- general-purpose: GP agent" in desc
+        assert "<agent name=" not in desc
+        assert DynamicToolDispatchMiddleware._ONE_TASK_PER_AGENT_GUIDANCE in desc
+
+    def test_one_task_per_agent_guidance_is_appended_once(self, middleware):
+        """Re-enhancing an already-enhanced dict must not stack the guidance."""
+        original = _make_task_tool_dict("- general-purpose: GP agent")
+        ctx = _make_context(subagent_registry=SAMPLE_REGISTRY)
+
+        once = middleware._enhance_task_tool_schema(original, ctx)
+        twice = middleware._enhance_task_tool_schema(once, ctx)
+
+        guidance = DynamicToolDispatchMiddleware._ONE_TASK_PER_AGENT_GUIDANCE
+        assert once["function"]["description"].count(guidance) == 1
+        assert twice["function"]["description"].count(guidance) == 1
 
     def test_fallback_appends_when_marker_missing(self, middleware):
         """When the marker is absent, append 'Available agents:' section."""

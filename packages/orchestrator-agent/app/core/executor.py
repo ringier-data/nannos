@@ -21,7 +21,19 @@ from a2a.types import (
     TaskStatus,
     TaskStatusUpdateEvent,
 )
+from agent_common.a2a.authentication import AuthPayload
 from agent_common.a2a.client_runnable import A2AClientRunnable
+from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.core.hitl_resume import (
+    KIND_AUTH,
+    NOT_APPROVED_CLAUSE,
+    classify_reply,
+    interrupt_kind,
+    name_or_nothing,
+    reject_decisions,
+    structural_decisions,
+)
+from agent_common.core.message_formatting import normalize_message_formatting
 from agent_common.models.base import ModelType, ThinkingLevel
 from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
@@ -37,11 +49,16 @@ from app.models.responses import AgentStreamResponse
 from ..models.config import AgentSettings, UserConfig
 from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    CLIENT_ACTION_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
+    IN_TASK_AUTH_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
     new_activity_log_message,
+    new_auth_required_message,
+    new_client_action_message,
+    new_client_action_request_message,
     new_feedback_request_message,
     new_hitl_interrupt_message,
     new_work_plan_message,
@@ -51,7 +68,7 @@ from .a2a_extensions import (
 from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
-from .discovery_cache import cache_key, get_discovery_cache, get_user_cache
+from .discovery_cache import cache_key, get_discovery_cache, get_embedded_runnable_cache, get_user_cache
 from .registry import RegistryService, User
 from .turn_state import TurnState, count_tool_messages
 from .steering_state import (
@@ -64,6 +81,15 @@ from .steering_state import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# An authorization answer whose verdict this build cannot read, delivered where a
+# tool APPROVAL was the pending question. Neither yes nor no, so the call must not
+# run — and the model has to be told, or it assumes the call succeeded.
+_UNREADABLE_AUTHORIZATION_MESSAGE = (
+    "The user's answer to the authorization prompt could not be read as an approval "
+    "of this call, so it was NOT executed. Ask for it again if it is still needed. "
+    + NOT_APPROVED_CLAUSE
+)
 
 # Bounded re-entries to recover from an "eager completion" where the model sets
 # include_subagent_output=true but never actually delegated (no `task` call).
@@ -111,13 +137,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         return user
 
     @staticmethod
-    def _extract_hitl_decisions(context: RequestContext) -> dict:
+    def _extract_hitl_decisions(context: RequestContext) -> dict | None:
         """Extract HITL decisions from the incoming A2A message DataPart.
 
         Clients send decisions as a DataPart with {"decisions": [...]}.
 
         Returns:
-            A dict like {"decisions": [{"type": "approve"}]}
+            A dict like ``{"decisions": [{"type": "approve"}]}``, or ``None`` when
+            the client sent no such DataPart. ``None`` is NOT a rejection: the user
+            may simply have typed "approve it" instead of clicking the card, and
+            those words are the answer. Fabricating a reject here (what this used
+            to do) discarded them before anything could read them, so a typed
+            approval came back to the user as "the call was rejected". The safe
+            default now lives one step further down, in ``decisions_from_resume``,
+            which rejects whenever the words cannot be read as a clear yes.
         """
         from google.protobuf.json_format import MessageToDict
 
@@ -128,8 +161,34 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     if isinstance(data, dict) and "decisions" in data:
                         return data
 
-        logger.warning("[HITL] No data part with decisions found, defaulting to reject")
-        return {"decisions": [{"type": "reject"}]}
+        logger.info("[HITL] No data part with decisions: the user's own words are the answer")
+        return None
+
+    @staticmethod
+    def _extract_authorization_decision(context: RequestContext) -> dict | None:
+        """The client's answer to an ``auth-required`` prompt, when it sent one.
+
+        Clients that negotiated the in-task-auth extension answer with a DataPart
+        ``{"authorization": {"decision": "approved"|"declined", "message": "..."}}``
+        — the same shape convention as ``decisions``, one level up because an
+        authorization is a single yes/no about the task, not a list of per-call
+        verdicts.
+
+        Returns None when the client said nothing structured. That is NOT a
+        rejection: the user may simply have typed a sentence, which the model
+        node is left to interpret (see AuthErrorDetectionMiddleware).
+        """
+        from google.protobuf.json_format import MessageToDict
+
+        if context.message and context.message.parts:
+            for part in context.message.parts:
+                if part.WhichOneof("content") != "data":
+                    continue
+                data = MessageToDict(part.data)
+                decision = data.get("authorization") if isinstance(data, dict) else None
+                if isinstance(decision, dict) and decision.get("decision"):
+                    return decision
+        return None
 
     @staticmethod
     def _action_request_call_id(action_request: Any) -> Any:
@@ -143,6 +202,50 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if not isinstance(action_request, dict):
             return None
         return (action_request.get("args") or {}).get("_call_id")
+
+    @staticmethod
+    async def _classify_authorization_reply(interrupts: Any, query: Any) -> dict | None:
+        """Read words typed at an authorization prompt as an explicit answer.
+
+        The pending interrupt's KIND is known here and nowhere further down, which
+        is what makes this the right place: a client that never negotiated the
+        in-task-auth extension answers "No way I'll authorize this!" as plain text,
+        and everything downstream then has to guess whether those words were even
+        about the authorization.
+
+        Turning them into the structured answer here means the sub-agent receives a
+        real decision — which its middleware can act on BEFORE running the tool.
+        That matters: once the user has completed the login in their browser the
+        retry SUCCEEDS, so a refusal that is only read on the failure path is read
+        by nobody and the call goes through anyway.
+
+        Returns the authorization dict, or None to hand the words down unchanged.
+        """
+        if not isinstance(query, str) or not query.strip():
+            return None
+        auth_tools = [
+            str((getattr(intr, "value", intr) or {}).get("tool") or "")
+            for intr in interrupts
+            if interrupt_kind(getattr(intr, "value", intr)) == KIND_AUTH
+        ]
+        if not auth_tools:
+            return None
+        named = name_or_nothing(auth_tools[0])
+        subject = f"`{named}`" if named else "a tool"
+        intent = await classify_reply(
+            query,
+            [],
+            question=(
+                f"The assistant asked the user to authorize {subject} (a one-time login in their "
+                "browser) before it could run. Read their reply as: approve = the authorization is "
+                "done / go ahead and retry; reject = they refuse to authorize it."
+            ),
+        )
+        if intent == "approve":
+            return {"decision": "approved", "message": query}
+        if intent == "reject":
+            return {"decision": "declined", "message": query}
+        return None
 
     @classmethod
     def _decisions_for_interrupt(cls, action_requests: list, hitl_decisions: list, decisions_by_id: dict) -> list:
@@ -167,7 +270,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         return hitl_decisions
 
     @classmethod
-    def _build_interrupt_resume_map(cls, interrupts: Any, hitl_decisions: list, query: Any) -> dict[str, Any]:
+    def _build_interrupt_resume_map(
+        cls,
+        interrupts: Any,
+        hitl_decisions: list | None,
+        query: Any,
+        authorization: dict | None = None,
+    ) -> dict[str, Any]:
         """Build an interrupt-id-keyed resume map for ``Command(resume=...)``.
 
         LangGraph >=1.2 requires an id-keyed map whenever more than one interrupt is
@@ -184,16 +293,100 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         an interrupt (by ``call_id``). Non-HITL interrupts (auth, etc.) resume with the
         raw ``query``.
         """
-        decisions_by_id = {d["id"]: d for d in hitl_decisions if isinstance(d, dict) and "id" in d}
+        decisions_by_id = {d["id"]: d for d in (hitl_decisions or []) if isinstance(d, dict) and "id" in d}
         resume_map: dict[str, Any] = {}
         for intr in interrupts:
             intr_value = getattr(intr, "value", intr)
             if isinstance(intr_value, dict) and "action_requests" in intr_value:
                 action_requests = intr_value.get("action_requests", [])
-                per = cls._decisions_for_interrupt(action_requests, hitl_decisions, decisions_by_id)
+                if hitl_decisions is None and not authorization:
+                    # The user typed instead of clicking ("approve it", "no, stop").
+                    # Their words ARE the answer: hand them to the reader, which
+                    # classifies them and rejects unless they clearly mean yes
+                    # (agent_common.core.hitl_resume). Turning them into a reject
+                    # here answered a typed approval with "the call was rejected".
+                    resume_map[intr.id] = query
+                    logger.info(f"Resuming HITL interrupt {intr.id} with the user's reply (no decision sent)")
+                    continue
+                per = cls._decisions_for_interrupt(action_requests, hitl_decisions or [], decisions_by_id)
+                if authorization and not decisions_by_id:
+                    # The client answered an AUTHORIZATION prompt while this approval
+                    # was the pending question (the agent re-ran the blocked tool and
+                    # its guard asked again). Reject it explicitly, with the reason —
+                    # the synthetic blanket reject `_extract_hitl_decisions` falls back
+                    # to is safe but tells the model nothing it can act on.
+                    translated = structural_decisions({"authorization": authorization}, action_requests)
+                    if not translated and not per:
+                        # A verdict this build does not recognize reads as neither
+                        # approved nor declined, and `{"decisions": []}` against N
+                        # pending calls kills the turn in the HITL middleware's count
+                        # check ("Number of decisions (0) does not match"). An
+                        # explicit rejection carrying the user's words is the same
+                        # fail-safe `main` had, and the model can act on it.
+                        translated = reject_decisions(
+                            action_requests,
+                            _UNREADABLE_AUTHORIZATION_MESSAGE
+                            + (f" They said: {authorization.get('message')}" if authorization.get("message") else ""),
+                        )
+                    if translated:
+                        per = translated
                 resume_map[intr.id] = {"decisions": per}
                 tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
                 logger.info(f"Resuming HITL interrupt {intr.id} for tools {tool_names} with {len(per)} decision(s)")
+            elif isinstance(intr_value, dict) and "client_action_request" in intr_value:
+                # Client-action round trip: resume the paused client_action tool
+                # with the browser's result, matched by the request id the SDK
+                # echoed on its decision. A resume WITHOUT a result (the user
+                # typed a message while the turn was parked, or the request id
+                # got lost) hands the tool an explicit no-result so it reports
+                # honestly instead of assuming success.
+                request = intr_value.get("client_action_request") or {}
+                decision = decisions_by_id.get(request.get("id"))
+                if not isinstance(decision, dict) or "client_action_result" not in decision:
+                    # Id-less fallback: a single result-bearing decision still resolves.
+                    # `hitl_decisions` is None whenever the client sent no decisions
+                    # DataPart at all — the user typed a message while the round trip
+                    # was parked, which is precisely the case this fallback is for.
+                    decision = next(
+                        (d for d in (hitl_decisions or []) if isinstance(d, dict) and "client_action_result" in d),
+                        None,
+                    )
+                result = decision.get("client_action_result") if isinstance(decision, dict) else None
+                resume_map[intr.id] = (
+                    result
+                    if isinstance(result, dict)
+                    else {"ok": False, "reason": "no-result"}
+                )
+                logger.info(
+                    f"Resuming client-action interrupt {intr.id} "
+                    f"({'with result' if isinstance(result, dict) else 'WITHOUT result'})"
+                )
+            elif isinstance(intr_value, dict) and intr_value.get("task_state") == TaskState.TASK_STATE_AUTH_REQUIRED:
+                # In-task authorization. A client that negotiated the extension
+                # answers explicitly, and the middleware acts on it without
+                # guessing: approved → retry the tool, declined → tell the agent
+                # so it stops pushing the URL. Without a structured answer the
+                # user's own words are handed through, and the model node reads
+                # them (there is nothing better placed to judge "ok done" against
+                # "no, those scopes are too wide").
+                if authorization:
+                    # Stamp WHICH call the answer settles. The client only sends a
+                    # verdict; the interrupt knows the blocked call, and without
+                    # that id the middleware's pre-run veto applies a "no" to every
+                    # parallel tool call in the node, not just the one that asked.
+                    settled = dict(authorization)
+                    for key in ("tool", "tool_call_id"):
+                        if intr_value.get(key) and not settled.get(key):
+                            settled[key] = intr_value[key]
+                    resume_map[intr.id] = {"authorization": settled}
+                    logger.info(
+                        f"Resuming auth interrupt {intr.id} with an explicit "
+                        f"'{settled.get('decision')}' decision for call "
+                        f"{settled.get('tool_call_id') or '(unknown)'}"
+                    )
+                else:
+                    resume_map[intr.id] = query
+                    logger.info(f"Resuming auth interrupt {intr.id} with the user's reply (no decision sent)")
             else:
                 resume_map[intr.id] = query
                 logger.info(f"Resuming non-HITL interrupt {intr.id}")
@@ -213,6 +406,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         sub_agent_config_hash: str | None,
         enable_thinking: bool | None = None,
         thinking_level: str | None = None,
+        client_objects: list | None = None,
+        page_context: dict | None = None,
     ) -> UserConfig:
         """Build complete UserConfig with all data and discovered capabilities.
 
@@ -256,6 +451,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             thinking_level=thinking_level,
             user_system_role=user.system_role,
             tool_bypass_rules=user.tool_bypass_rules,
+            client_objects=client_objects,
+            page_context=page_context,
         )
 
         # Discover capabilities (tools and sub-agents), memoized per-user to avoid
@@ -270,8 +467,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
         )
         cached = cache.get(dkey)
+        user_token_value = user_config.access_token.get_secret_value()
         if cached is not None:
-            tools, sub_agents = cached
+            tools, sub_agents, token_provider = cached
+            # The provider mints this user's MCP bearers at call time; hand it the token the
+            # user presented *this* turn so exchanges never run against a rotated-out one.
+            if token_provider is not None:
+                token_provider.update_subject_token(user_token_value)
             logger.info(
                 "[DISCOVERY-CACHE] hit for user_sub=%s (%d tools, %d sub-agents) — skipping discovery",
                 user_config.user_sub,
@@ -287,14 +489,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Discover ALL tools (without whitelist)
             # The whitelist will be applied later in build_runtime_context for orchestrator binding
             # Server info is stored in tool.metadata["server_name"] by MultiServerMCPClient
-            tools = await self.agent.tool_discovery_service.discover_tools(
-                user_config.access_token.get_secret_value(),
+            discovery = self.agent.tool_discovery_service
+            token_provider = discovery.make_token_provider(user_token_value) if discovery.oauth2_client else None
+            tools = await discovery.discover_tools(
+                user_token_value,
                 white_list=None,  # Don't filter here - GP agent needs access to all tools
+                token_provider=token_provider,
             )
             cache.put(
                 dkey,
-                (tools, sub_agents),
-                user_config.access_token.get_secret_value(),
+                (tools, sub_agents, token_provider),
+                user_token_value,
                 owner=user_config.user_sub,
             )
             logger.info(
@@ -309,6 +514,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # Update user_config with discovered data
         user_config.tools = tools
         user_config.sub_agents = sub_agents
+        user_config.token_provider = token_provider
 
         logger.debug(f"Built complete UserConfig with {len(user_config.sub_agents)} sub-agents")
 
@@ -512,6 +718,54 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         request_metadata = {**params_metadata, **message_metadata}
 
         model_choice = user.preferred_model or request_metadata.get("model")
+        # Embedded Nannos: per-turn manifest of on-screen ontology objects the
+        # embedding client registered ({type, id, scope, label?, fields?}).
+        # Message.metadata is a protobuf Struct, so the value arrives as a
+        # ListValue wrapper — unwrap it to plain python before use.
+        raw_client_objects = request_metadata.get("clientObjects")
+        client_objects: list | None = None
+        if raw_client_objects is not None:
+            if hasattr(raw_client_objects, "DESCRIPTOR"):
+                from google.protobuf.json_format import MessageToDict
+
+                converted = MessageToDict(raw_client_objects)
+                if isinstance(converted, list) and converted:
+                    client_objects = converted
+            elif isinstance(raw_client_objects, list) and raw_client_objects:
+                client_objects = raw_client_objects
+        if client_objects:
+            logger.info(f"[CLIENT-OBJECTS] Manifest received: {client_objects}")
+
+        # Embedded Nannos: the page the user is CURRENTLY on ({key, label?,
+        # description?, data?}), published by the host on navigation and sent
+        # with every turn. Same protobuf-Struct unwrap caveat as the manifest.
+        raw_page_context = request_metadata.get("pageContext")
+        page_context: dict | None = None
+        if raw_page_context is not None:
+            if hasattr(raw_page_context, "DESCRIPTOR"):
+                from google.protobuf.json_format import MessageToDict
+
+                converted_page = MessageToDict(raw_page_context)
+                if isinstance(converted_page, dict) and converted_page:
+                    page_context = converted_page
+            elif isinstance(raw_page_context, dict) and raw_page_context:
+                page_context = raw_page_context
+        if page_context:
+            logger.info(f"[PAGE-CONTEXT] Current page received: {page_context}")
+
+        # Embedded Nannos (execute-only, ADR-0004): the console-backend maps the
+        # embedding app-id → a scoped domain sub-agent and passes its id here. When
+        # present we run THAT sub-agent as the top-level graph — bypassing the routing
+        # orchestrator turn — via the same interactive executor loop below.
+        # Numbers arrive through the protobuf Struct as floats, so coerce defensively.
+        embedded_sub_agent_id: int | None = None
+        _raw_embedded_id = request_metadata.get("executeOnlySubAgentId") or request_metadata.get("subAgentId")
+        if _raw_embedded_id is not None:
+            try:
+                embedded_sub_agent_id = int(float(_raw_embedded_id))
+            except (TypeError, ValueError):
+                logger.warning(f"[EMBEDDED] Ignoring non-numeric execute-only sub-agent id: {_raw_embedded_id!r}")
+
         enable_thinking = user.enable_thinking or request_metadata.get("enableThinking") in ("true", "1", "yes")
         thinking_level = user.thinking_level or request_metadata.get("thinkingLevel") if enable_thinking else None
         logger.debug(
@@ -604,9 +858,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             else:
                 client_user_handle = None
 
-            # Extract message formatting - support both naming conventions
-            message_formatting = (
-                request_metadata.get("messageFormatting") or request_metadata.get("message_formatting") or "markdown"
+            # Extract message formatting - support both naming conventions.
+            # Normalized through agent-common so an unknown or oddly-typed value degrades
+            # to Markdown here exactly as it does on the scheduled path.
+            message_formatting = normalize_message_formatting(
+                request_metadata.get("messageFormatting") or request_metadata.get("message_formatting")
             )
 
             # Build complete UserConfig with all data and discovered capabilities
@@ -623,6 +879,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 sub_agent_config_hash=sub_agent_config_hash,
                 enable_thinking=enable_thinking,
                 thinking_level=thinking_level,
+                client_objects=client_objects,
+                page_context=page_context,
             )
 
             # Extract message parts for multimodal support (text + files)
@@ -651,21 +909,144 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 thinking_level = thinking_level.value
 
             model_type = user_config.model if user_config.model else self.agent._default_model_type
-            graph = await self.agent.get_or_create_graph(
-                model_type=model_type,
-                thinking_level=thinking_level,
-            )
+
+            # Embedded execute-only: build the scoped sub-agent and use ITS graph as
+            # the top-level graph, instead of the routing orchestrator graph. The rest
+            # of the loop (resume detection, streaming, extensions) is generic over the
+            # graph + the stream source selected at the astream call below.
+            embedded_runnable = None
+            embedded_target: LocalLangGraphSubAgentConfig | None = None
+            if embedded_sub_agent_id is not None:
+                embedded_target = next(
+                    (
+                        c
+                        for c in (user_config.local_subagents or [])
+                        if isinstance(c, LocalLangGraphSubAgentConfig) and c.sub_agent_id == embedded_sub_agent_id
+                    ),
+                    None,
+                )
+                if embedded_target is None:
+                    logger.error(
+                        f"[EMBEDDED] Requested execute-only sub-agent id={embedded_sub_agent_id} "
+                        f"is not among the user's {len(user_config.local_subagents or [])} local sub-agent(s)"
+                    )
+                    await updater.update_status(
+                        TaskState.TASK_STATE_FAILED,
+                        new_text_message(
+                            "This assistant isn't available for your account.",
+                            context_id=task.context_id,
+                            task_id=task.id,
+                        ),
+                    )
+                    return
+                # Reuse the built runnable across turns: _ensure_agent() re-runs the
+                # OAuth exchange + MCP gateway list_tools + graph compilation, which is
+                # seconds of time-to-first-token per message. Keyed like the discovery
+                # cache (entitlements + sub-agent config hash) plus the target id;
+                # entries are token-bounded and flushed by the same owner-scoped
+                # invalidation. The per-turn <client_objects> manifest is NOT baked in —
+                # ClientObjectsMiddleware reads it from config metadata per invocation.
+                ecache = get_embedded_runnable_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
+                ekey = (
+                    cache_key(
+                        user_sub=user_config.user_sub,
+                        groups=user_config.groups,
+                        sub_agent_config_hash=user_config.sub_agent_config_hash,
+                        policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
+                    )
+                    + f":{embedded_sub_agent_id}"
+                )
+                embedded_runnable = ecache.get(ekey)
+                if embedded_runnable is None:
+                    # Mark as the embedded entrypoint and isolate to just this agent —
+                    # execute-only means no routing and no peer sub-agents. Two distinct
+                    # flags, deliberately: ``embedded_entrypoint`` says this agent IS the
+                    # top-level graph and so owns talking to the user (notify_user), while
+                    # ``client_action_enabled`` says it may drive on-screen objects
+                    # (client_action + <client_objects>). Both are true for an embed today;
+                    # a future user-facing surface without on-screen objects would set only
+                    # the first. Copy first: the config instance is shared by reference with
+                    # the per-user cache, so an in-place mutation would leak the
+                    # embedded-only flags into subsequent non-embedded turns for this user.
+                    embedded_target = embedded_target.model_copy(
+                        update={"embedded_entrypoint": True, "client_action_enabled": True}
+                    )
+                    user_config.local_subagents = [embedded_target]
+                    runtime_context = self.agent.build_runtime_context(
+                        user_config, sandbox_pool=self.agent.sandbox_pool
+                    )
+                    compiled = (runtime_context.subagent_registry or {}).get(embedded_target.name)
+                    embedded_runnable = compiled.get("runnable") if compiled else None
+                    if embedded_runnable is None:
+                        logger.error(f"[EMBEDDED] Sub-agent '{embedded_target.name}' failed to build")
+                        await updater.update_status(
+                            TaskState.TASK_STATE_FAILED,
+                            new_text_message(
+                                "This assistant couldn't be started. Please try again.",
+                                context_id=task.context_id,
+                                task_id=task.id,
+                            ),
+                        )
+                        return
+                    await embedded_runnable._ensure_agent()
+                    if embedded_runnable._agent is None:
+                        # Sandbox sub-agents build their graph per-invocation (no cached
+                        # ._agent); execute-only embedded doesn't support that path yet.
+                        logger.error(f"[EMBEDDED] Sub-agent '{embedded_target.name}' has no cached graph (sandbox?)")
+                        await updater.update_status(
+                            TaskState.TASK_STATE_FAILED,
+                            new_text_message(
+                                "This assistant isn't configured for embedded use.",
+                                context_id=task.context_id,
+                                task_id=task.id,
+                            ),
+                        )
+                        return
+                    # Only a fully-built runnable (graph compiled, tools discovered) is
+                    # cached, so a hit can use ._agent directly.
+                    ecache.put(
+                        ekey,
+                        embedded_runnable,
+                        user_config.access_token.get_secret_value(),
+                        owner=user_config.user_sub,
+                    )
+                    logger.info(
+                        f"[EMBEDDED] Built sub-agent '{embedded_target.name}' "
+                        f"(id={embedded_sub_agent_id}) execute-only (cached for reuse)"
+                    )
+                else:
+                    logger.info(
+                        f"[EMBEDDED] Reusing cached sub-agent runnable '{embedded_runnable.name}' "
+                        f"(id={embedded_sub_agent_id}) execute-only"
+                    )
+                graph = embedded_runnable._agent
+            else:
+                graph = await self.agent.get_or_create_graph(
+                    model_type=model_type,
+                    thinking_level=thinking_level,
+                )
 
             # NOTE: we decide to use channel_id as part of the filesystem namespace since if one has access to the
             # channel, she should have access to all files shared in that channel.
             # This is a design decision based on Slack's permission model.
             # Create config for graph execution with interrupt support
             # CRITICAL: Include __pregel_checkpointer to prevent LangGraph from misinterpreting checkpoint_ns as subgraph
-            config = {
-                "configurable": {
+            # Embedded execute-only runs the sub-agent as a standalone pregel root
+            # (its _astream_impl forces checkpoint_ns=""); resume aget_state below must
+            # match, and the thread is namespaced per sub-agent. The orchestrator path
+            # keeps its own thread + __pregel_checkpointer for subgraph isolation.
+            if embedded_runnable is not None:
+                configurable = {
+                    "thread_id": f"{task.context_id}::dynamic-{embedded_runnable.name}",
+                    "checkpoint_ns": "",
+                }
+            else:
+                configurable = {
                     "thread_id": task.context_id,
                     "__pregel_checkpointer": graph.checkpointer,  # Required for proper checkpoint isolation
-                },
+                }
+            config = {
+                "configurable": configurable,
                 "metadata": {
                     "assistant_id": stream_info.assistant_id,
                     "user_id": user.id,  # Stable database ID (not OIDC sub)
@@ -685,6 +1066,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     f"conversation:{task.context_id}",
                 ],
             }
+            # ClientObjectsMiddleware reads the on-screen manifest AND the
+            # current page from config metadata.
+            if embedded_runnable is not None and client_objects:
+                config["metadata"]["client_objects"] = client_objects
+            if embedded_runnable is not None and page_context:
+                config["metadata"]["page_context"] = page_context
 
             current_state = await graph.aget_state(config)  # type: ignore
 
@@ -704,8 +1091,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # interrupt (matching today's single approve/reject UI). Per-interrupt
                 # decisions would require the client to key decisions by interrupt id.
                 # Clients send decisions as a DataPart (structured JSON, no XML).
-                hitl_decisions = self._extract_hitl_decisions(context).get("decisions", [])
-                resume_value = self._build_interrupt_resume_map(current_state.interrupts, hitl_decisions, query)
+                extracted = self._extract_hitl_decisions(context)
+                hitl_decisions = extracted.get("decisions", []) if extracted is not None else None
+                authorization = self._extract_authorization_decision(context)
+                if authorization is None and extracted is None:
+                    # Nothing structured at all: if an authorization prompt is what
+                    # is pending, the user's words ARE the answer to it — read them
+                    # here, where that is still knowable.
+                    authorization = await self._classify_authorization_reply(current_state.interrupts, query)
+                resume_value = self._build_interrupt_resume_map(
+                    current_state.interrupts, hitl_decisions, query, authorization
+                )
 
             if resume_value is None:
                 logger.info("Normal execution (not resuming from interrupt)")
@@ -741,7 +1137,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 streaming_artifact_id = str(uuid.uuid4())
                 first_chunk_sent = False  # Track if we've sent the initial MAIN artifact chunk
                 first_intermediate_chunk_sent = False  # Track if we've sent the initial INTERMEDIATE artifact chunk
-                streamed_chars = 0  # Total chars streamed via the MAIN artifact (code points, not wire bytes; for completion diagnostics)
+                # The MAIN artifact text itself. A char count is enough to tell whether
+                # a `completed` turn already delivered its answer (the answer IS what
+                # streamed), but an interrupt's terminal message can be a different,
+                # shorter text — so the single-source check compares content there.
+                streamed_text = ""
                 deferred_terminal_item = None
                 # Per-round carrier: the agent populates this from its single
                 # end-of-stream aget_state, so the phantom / feedback / terminal
@@ -750,9 +1150,21 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # shared singletons.
                 turn_state = TurnState()
 
-                async for item in self.agent.stream(
-                    message_parts, user_config, config=config, resume=resume_value, turn_state=turn_state
-                ):
+                if embedded_runnable is not None:
+                    stream_source = self.agent.stream_subagent(
+                        embedded_runnable,
+                        message_parts,
+                        config=config,
+                        context_id=task.context_id,
+                        resume=resume_value,
+                        turn_state=turn_state,
+                    )
+                else:
+                    stream_source = self.agent.stream(
+                        message_parts, user_config, config=config, resume=resume_value, turn_state=turn_state
+                    )
+
+                async for item in stream_source:
                     # Buffer the terminal completed item so we can check for unconsumed
                     # steering messages before emitting it to the SSE stream.
                     # Other terminal states are emitted immediately.
@@ -773,7 +1185,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         # go to a separate "-thought" artifact and aren't part of the
                         # main response stream the client renders).
                         if not metadata.get("intermediate_output") and item.content:
-                            streamed_chars += len(item.content)
+                            streamed_text += item.content
 
                     # Pass per-artifact first_chunk_sent flags and update after each chunk
                     first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
@@ -785,7 +1197,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         first_chunk_sent=first_chunk_sent,
                         first_intermediate_chunk_sent=first_intermediate_chunk_sent,
                         active_extensions=requested_extensions,
-                        streamed_chars=streamed_chars,
+                        streamed_text=streamed_text,
                     )
 
                 # Check for steering messages that arrived after the last abefore_model
@@ -896,7 +1308,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         first_chunk_sent=first_chunk_sent,
                         first_intermediate_chunk_sent=first_intermediate_chunk_sent,
                         active_extensions=requested_extensions,
-                        streamed_chars=streamed_chars,
+                        streamed_text=streamed_text,
                     )
                 break  # Done — no re-invocation needed
         except asyncio.CancelledError:
@@ -956,7 +1368,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         first_chunk_sent: bool = False,
         first_intermediate_chunk_sent: bool = False,
         active_extensions: set[str] | None = None,
-        streamed_chars: int = 0,
+        streamed_text: str = "",
     ) -> tuple[bool, bool]:
         """Handle a stream item from the agent and update the task accordingly.
 
@@ -996,7 +1408,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             if not _ext_active(ACTIVITY_LOG_EXTENSION):
                 return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
             source = metadata.get("source")
-            logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, content: {content[:50]}")
+            # "note" marks a mid-turn note the agent wrote for the user (notify_user);
+            # ordinary tool/delegation lines carry no kind.
+            kind = metadata.get("kind")
+            logger.info(
+                f"[ACTIVITY_LOG] Emitting status update: source={source}, kind={kind}, content: {content[:50]}"
+            )
             await updater.update_status(
                 TaskState.TASK_STATE_WORKING,
                 new_activity_log_message(
@@ -1004,6 +1421,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                     source=source,
+                    kind=kind,
                 ),
             )
             return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
@@ -1018,6 +1436,22 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 TaskState.TASK_STATE_WORKING,
                 new_work_plan_message(
                     todos,
+                    task.context_id,
+                    task.id,
+                ),
+            )
+            return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
+
+        # --- Client-action directives (Embedded Nannos) → status-update with DataPart extension ---
+        if metadata.get("client_action"):
+            if not _ext_active(CLIENT_ACTION_EXTENSION):
+                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
+            directive = metadata["client_action"]
+            logger.info(f"[CLIENT_ACTION] Emitting directive: {directive}")
+            await updater.update_status(
+                TaskState.TASK_STATE_WORKING,
+                new_client_action_message(
+                    directive,
                     task.context_id,
                     task.id,
                 ),
@@ -1113,7 +1547,28 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         elif state == TaskState.TASK_STATE_INPUT_REQUIRED:
             # User input required - leave task in input_required state
             action_requests = item.action_requests
-            if action_requests and _ext_active(HUMAN_IN_THE_LOOP_EXTENSION):
+            client_action_request = getattr(item, "client_action_request", None)
+            if client_action_request and _ext_active(CLIENT_ACTION_EXTENSION):
+                # Client-action round trip: the tool paused awaiting the browser's
+                # result. Same stream-sealing rule as HITL — a turn that streamed
+                # tokens before pausing must not leave the artifact open.
+                if first_chunk_sent:
+                    await updater.add_artifact(
+                        [Part(text="")],
+                        artifact_id=streaming_artifact_id,
+                        append=True,
+                        last_chunk=True,
+                        metadata={},
+                    )
+                await updater.update_status(
+                    TaskState.TASK_STATE_INPUT_REQUIRED,
+                    new_client_action_request_message(
+                        client_action_request,
+                        context_id=task.context_id,
+                        task_id=task.id,
+                    ),
+                )
+            elif action_requests and _ext_active(HUMAN_IN_THE_LOOP_EXTENSION):
                 # Structured HITL interrupt via extension — any A2A client can respond
                 # review_configs are provided by the ConditionalHumanInTheLoopMiddleware
                 review_configs = item.review_configs or [
@@ -1149,15 +1604,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             else:
                 # Generic input_required (no HITL extension or not subscribed).
                 #
-                # CONTRACT FOR CLIENTS: Mirror the `completed` path — the terminal
-                # input_required status ALWAYS carries the authoritative
-                # FinalResponseSchema.message in its message body, and (if the
-                # orchestrator streamed token chunks this turn) we close the
-                # streaming artifact cleanly first. This guarantees the user
-                # receives the orchestrator's reply even if intermediate SSE
-                # artifact frames were dropped or the client only renders status
-                # messages. The `final_answer_source: "fallback"` metadata flag
-                # signals well-behaved clients to dedupe against the artifact.
+                # CONTRACT FOR CLIENTS: Mirror the `completed` path — the answer
+                # is delivered EXACTLY ONCE. If the orchestrator streamed the whole
+                # answer as token chunks this turn, the artifact is closed cleanly
+                # and the terminal status is BARE (state only). Otherwise the status
+                # carries the authoritative FinalResponseSchema.message, tagged
+                # `final_answer_source: "fallback"` when a partial prefix streamed
+                # too, so clients can dedupe against what they already rendered.
                 final_answer = content if content else "Additional input is required to continue."
                 msg = new_text_message(final_answer, context_id=task.context_id, task_id=task.id)
                 if item.interrupt_reason:
@@ -1168,7 +1621,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     msg,
                     streaming_artifact_id=streaming_artifact_id,
                     first_chunk_sent=first_chunk_sent,
-                    streamed_chars=streamed_chars,
+                    streamed_text=streamed_text,
                     final_message_len=len(final_answer),
                     base_metadata=metadata,
                 )
@@ -1176,21 +1629,49 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         elif state == TaskState.TASK_STATE_AUTH_REQUIRED:
             # Authentication required - leave task in auth_required state.
             #
-            # CONTRACT FOR CLIENTS: Mirror the `completed` path — the terminal
-            # auth_required status ALWAYS carries the authoritative
-            # FinalResponseSchema.message in its message body, and (if the
-            # orchestrator streamed token chunks this turn) we close the
-            # streaming artifact cleanly first. The `final_answer_source:
-            # "fallback"` metadata flag signals well-behaved clients to dedupe
-            # against the artifact text they already rendered.
+            # CONTRACT FOR CLIENTS: Mirror the `completed` path — the answer is
+            # delivered EXACTLY ONCE. A fully streamed answer closes its artifact
+            # and ends on a BARE terminal status; otherwise the status carries the
+            # authoritative FinalResponseSchema.message, tagged
+            # `final_answer_source: "fallback"` when a partial prefix streamed too.
+            #
+            # The text is the gateway's own words, addressed to the AGENT ("You
+            # must tell the end-user to…"), so a client that renders its own copy
+            # needs the facts as data. `auth_url` / `tool` are already on the
+            # item's metadata (AgentStreamResponse.auth_required) — they simply
+            # never crossed the wire, leaving clients to scrape a URL out of the
+            # prose. With the extension negotiated they ride a DataPart instead;
+            # without it the message is exactly what it always was.
             final_answer = content if content else "Authentication is required to continue."
+            auth_message = new_text_message(final_answer, context_id=task.context_id, task_id=task.id)
+            if _ext_active(IN_TASK_AUTH_EXTENSION):
+                tool_name = metadata.get("tool") or ""
+                auth_payload = AuthPayload.for_service(
+                    # The middleware knows which TOOL asked; the service behind it
+                    # is a different fact, and only the producer can name it. It
+                    # stays EMPTY when unknown rather than falling back to the
+                    # tool: a `need-credentials` raised inside the sandbox is
+                    # reported against `eval`, and "Authorization needed for eval"
+                    # is worse than not naming anything at all.
+                    service=metadata.get("service") or "",
+                    resource=tool_name,
+                    auth_url=metadata.get("auth_url") or "",
+                    description=metadata.get("message") or "",
+                    correlation_id=metadata.get("tool_call_id") or "",
+                ).client_payload()
+                auth_message = new_auth_required_message(
+                    final_answer,
+                    auth_payload,
+                    context_id=task.context_id,
+                    task_id=task.id,
+                )
             await self._close_streaming_artifact_and_respond(
                 updater,
                 TaskState.TASK_STATE_AUTH_REQUIRED,
-                new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
+                auth_message,
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
-                streamed_chars=streamed_chars,
+                streamed_text=streamed_text,
                 final_message_len=len(final_answer),
                 base_metadata=metadata,
             )
@@ -1199,15 +1680,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Task completed successfully.
             #
             # CONTRACT FOR CLIENTS: The terminal `completed` status ALWAYS carries the
-            # authoritative final answer in its message body (the validated
-            # FinalResponseSchema.message). This is true for both the streamed and
-            # non-streamed branches. Clients that already rendered the streamed
-            # artifact chunks should treat this terminal message as the source of
-            # truth (dedupe / replace) rather than appending it — the
-            # `final_answer_source: "fallback"` metadata flag on the status update
-            # signals that the same text was also delivered via artifact-append.
-            # This guarantees the user receives the reply even if any intermediate
-            # SSE artifact frame fails to parse on the client side.
+            # authoritative final answer in its message body — UNLESS the whole
+            # answer already streamed as artifact chunks, in which case the status
+            # is bare and the artifact is the answer. When the status does carry
+            # text alongside a streamed prefix it is tagged
+            # `final_answer_source: "fallback"`, and clients should treat it as the
+            # source of truth (dedupe / replace) rather than appending it.
             final_answer = content if content else "Task completed successfully"
             # Streamed and non-streamed completions converge here: the helper
             # closes the streaming artifact (only when token chunks were streamed
@@ -1220,7 +1698,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
-                streamed_chars=streamed_chars,
+                streamed_text=streamed_text,
                 final_message_len=len(final_answer),
                 base_metadata=metadata,
             )
@@ -1252,7 +1730,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         *,
         streaming_artifact_id: str,
         first_chunk_sent: bool,
-        streamed_chars: int,
+        streamed_text: str,
         final_message_len: int,
         base_metadata: dict | None,
     ) -> None:
@@ -1266,21 +1744,46 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         chunks, the streamed artifact *is* the answer — re-sending it in the
         terminal ``status.message`` would duplicate it for every consumer (web
         render + persistence, slack, google-chat). So in that case emit a BARE
-        completion (state only) and let clients use the streamed artifact.
+        terminal status (state only) and let clients use the streamed artifact.
+        This holds for every state routed through here, ``input_required`` and
+        ``auth_required`` included: how a turn ENDS says nothing about whether its
+        answer was already delivered.
 
         The terminal message stays authoritative only when the answer was NOT
         fully streamed:
-        - interrupts (``input_required`` / ``auth_required`` carry the message);
         - answers assembled at the terminal (e.g. ``include_subagent_output``,
           where nothing — or only a partial prefix — was streamed to the main
           artifact). A streamed partial prefix is tagged ``final_answer_source``
-          so consumers can still dedupe it.
+          so consumers can still dedupe it;
+        - interrupts that never streamed a token (the message is all there is).
+
+        Structured HITL prompts do NOT come through here — they carry
+        action_requests / review_configs that clients need, and their branch emits
+        the message directly.
         """
+        # Applies to EVERY terminal state, not only `completed`. An interrupt turn
+        # streams its answer exactly the same way, so gating this on `completed`
+        # alone meant an `input_required` / `auth_required` turn always re-sent the
+        # whole answer: the console stored it twice, and a reloaded conversation
+        # showed one answer as two bubbles.
+        #
+        # The extra content check is what makes that safe. For `completed` the
+        # terminal message IS the streamed answer, so the char count settles it.
+        # An interrupt's message may be a DIFFERENT, shorter text — an auth prompt
+        # ("Please sign in to Jira to continue.") after a long streamed answer —
+        # and a length check alone would call that already-delivered and drop a
+        # prompt the client has to render. So compare the text itself there.
+        terminal_text = "".join(
+            part.text for part in msg.parts if part.WhichOneof("content") == "text"
+        ).strip()
         answer_fully_streamed = (
-            state == TaskState.TASK_STATE_COMPLETED
-            and first_chunk_sent
+            first_chunk_sent
             and final_message_len > 0
-            and streamed_chars >= final_message_len
+            and len(streamed_text) >= final_message_len
+            and (
+                state == TaskState.TASK_STATE_COMPLETED
+                or (bool(terminal_text) and streamed_text.strip().startswith(terminal_text))
+            )
         )
         if first_chunk_sent:
             await updater.add_artifact(
@@ -1294,15 +1797,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 "[STREAMING] Completion: artifact_id=%s streamed_chars=%d "
                 "final_message_len=%d task_state=%s fully_streamed=%s",
                 streaming_artifact_id,
-                streamed_chars,
+                len(streamed_text),
                 final_message_len,
                 state,
                 answer_fully_streamed,
             )
         if answer_fully_streamed:
             # Answer already delivered via the streamed artifact — emit a bare
-            # completion (no message) so it isn't re-sent / re-persisted / re-rendered.
-            await updater.update_status(state, None, metadata=(base_metadata or None))
+            # terminal status (no message) so it isn't re-sent / re-persisted / re-rendered.
+            bare_metadata = dict(base_metadata) if base_metadata else {}
+            # The status is now the only frame left, so anything the dropped message
+            # carried has to ride on it — e.g. `interrupt_reason` on a generic
+            # input_required, which the client needs to explain why the turn paused.
+            bare_metadata.update(dict(msg.metadata))
+            await updater.update_status(state, None, metadata=bare_metadata or None)
         else:
             status_metadata = dict(base_metadata) if base_metadata else {}
             if first_chunk_sent:

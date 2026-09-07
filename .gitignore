@@ -41,6 +41,12 @@ eggs/
 lib/
 lib64/
 parts/
+
+# The `lib/` rule above is for Python build output, but it collaterally ignores
+# the embed-sdk's TypeScript SOURCE dir (src/lib: utils, portal-container, …).
+# Re-include it — those files must be version-controlled or the SDK can't build.
+!/packages/embed-sdk/src/lib/
+!/packages/embed-sdk/src/lib/**
 sdist/
 var/
 wheels/
@@ -331,6 +337,8 @@ pnpm-debug.log*
 .local-db-data
 alloy-infra-agents
 gitops
+# per-machine symlinks to external @nannos/embed-sdk consumers (see justfile: hosts)
+hosts
 
 # Local LiteLLM gateway model_list (deployment-specific; example template is committed)
 litellm-local-models.yaml

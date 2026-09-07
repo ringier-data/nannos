@@ -3,7 +3,7 @@
 import logging
 
 from fastapi import HTTPException, Request, status
-from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
+from ringier_a2a_sdk.auth import JWTValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
@@ -11,6 +11,7 @@ from .config import config
 from .db.session import DbSession
 from .models.user import User, UserRole, UserStatus
 from .services.user_service import UserService
+from .utils.jwt_validators import get_jwt_validator
 
 logger = logging.getLogger(__name__)
 
@@ -95,14 +96,12 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
         try:
-            # Validate the user's access token against OIDC provider
-            validator = JWTValidator(
-                issuer=config.oidc.issuer,
-                # Don't validate azp/aud - accept any valid token from the issuer
-                # The token could be issued to the frontend, orchestrator, or other clients
-                # TODO: we do not validate the audience here. Consider tightening this in the future.
-                # this requires the sub-agent to exchange the token with agent-console as target audience.
-            )
+            # Validate the user's access token against OIDC provider.
+            # Don't validate azp/aud - accept any valid token from the issuer
+            # The token could be issued to the frontend, orchestrator, or other clients
+            # TODO: we do not validate the audience here. Consider tightening this in the future.
+            # this requires the sub-agent to exchange the token with agent-console as target audience.
+            validator = get_jwt_validator(issuer=config.oidc.issuer)
 
             payload = await validator.validate(token)
             sub = payload.get("sub")
@@ -129,6 +128,7 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
                     first_name=payload.get("given_name", ""),
                     last_name=payload.get("family_name", ""),
                     company_name=payload.get("company_name"),
+                    is_service_account=token_is_service_account(payload),
                 )
 
             logger.info(f"Bearer token validated for user: {user.email} (sub={sub})")
@@ -149,6 +149,33 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
     )
 
 
+#: Keycloak names a client's service account `service-account-<clientId>` and puts that in
+#: `preferred_username`. It is the one claim that distinguishes a client-credentials token
+#: from a person's, since a service account also carries `azp` — every token does.
+_SERVICE_ACCOUNT_USERNAME_PREFIX = "service-account-"
+
+
+def token_is_service_account(payload: dict) -> bool:
+    """Whether this token belongs to a machine identity rather than a person.
+
+    Used when auto-onboarding from token claims, so the row is marked at creation instead
+    of being inferred later from a naming convention (see issue #198).
+
+    One signal only: `preferred_username` carrying Keycloak's `service-account-` prefix,
+    which is the issuer *stating* that this is a client's service account. Absence of
+    identity claims is deliberately not treated as a second signal, however tempting —
+    `require_auth_or_bearer_token` onboards a person from a token carrying nothing but a
+    `sub`, filling the rest with empty strings, so "no email and no name" describes a
+    real person with sparse claims as readily as a machine.
+
+    Errs towards "person", which is the cheaper way to be wrong: an unflagged machine
+    collects notifications nobody reads, while a flagged person silently stops receiving
+    theirs. Anything the prefix misses is a row an operator can flag directly.
+    """
+    username = str(payload.get("preferred_username") or "")
+    return username.startswith(_SERVICE_ACCOUNT_USERNAME_PREFIX)
+
+
 async def get_client_id_from_request(request: Request) -> str | None:
     """Extract the Keycloak client_id from a client-credentials Bearer JWT.
 
@@ -164,7 +191,7 @@ async def get_client_id_from_request(request: Request) -> str | None:
         return None
     token = auth_header.split(" ", 1)[1]
     try:
-        validator = JWTValidator(issuer=config.oidc.issuer)
+        validator = get_jwt_validator(issuer=config.oidc.issuer)
         payload = await validator.validate(token)
         return payload.get("azp") or payload.get("client_id") or None
     except JWTValidationError:
@@ -268,7 +295,7 @@ async def require_admin_or_orchestrator(request: Request, db: DbSession) -> User
         sub = ""
         if token:
             try:
-                validator = JWTValidator(issuer=config.oidc.issuer)
+                validator = get_jwt_validator(issuer=config.oidc.issuer)
                 payload = await validator.validate(token)
                 sub = payload.get("sub", "")
             except JWTValidationError:

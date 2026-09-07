@@ -18,8 +18,8 @@ entitled to *and* that the cached value actually depends on::
 
 Note that the per-user *tool whitelist* (``tool_names``) is deliberately NOT part of the
 key: discovery runs unfiltered (``white_list=None``) and the whitelist is applied later in
-``build_runtime_context``, so the cached ``(tools, sub_agents)`` value does not depend on
-it. Keying on it would only fragment the cache. A whitelist change (or any other per-user
+``build_runtime_context``, so the cached ``(tools, sub_agents, token_provider)`` value does not depend
+on it. Keying on it would only fragment the cache. A whitelist change (or any other per-user
 entitlement field carried on the cached ``User`` — role, bypass rules, catalog access) is
 propagated by console-backend calling ``invalidate_users`` for the affected user(s); see
 ``main.invalidate_discovery_cache``.
@@ -32,18 +32,14 @@ and every entry is recomputed.
 
 Token-expiry safety
 -------------------
-Discovered tools embed an *exchanged* bearer token (gatana/console) in their MCP connection,
-and the registry data was fetched with the user token, so a cache entry must not outlive
-those tokens. Each entry is bounded by ``min(ttl, user_token.exp - margin)``.
-
-The user token's ``exp`` is used as the bound because the exchanged tokens are not available
-at ``put`` time. This is safe **only while** the exchanged gatana/console tokens are minted
-with a lifetime at least as long as the user token's remaining validity — which holds when
-those OIDC clients use (at least) the realm's default access-token lifespan. To keep that
-assumption robust the default TTL is kept well below a typical realm access-token lifespan,
-so an entry can never outlive a freshly-minted exchanged token even if a client is
-configured with a shorter lifespan. If you shorten the gatana/console token lifespan below
-``AGENT_DISCOVERY_CACHE_TTL``, lower the TTL to match.
+Discovered tools carry **no** bearer token: each call mints one through the user's
+``UserTokenProvider`` (``agent_common.core.token_provider``), which is cached alongside the
+tools and given the user's current token at the start of every turn. The registry data,
+however, was fetched with the user token and reflects entitlements tied to it, so a cache
+entry is still bounded by ``min(ttl, user_token.exp - margin)``: it never outlives the user
+token it was built for. The TTL itself is therefore purely a *catalogue-freshness* knob (how
+long before a changed gateway catalogue or group→server policy is picked up), not a
+credential bound.
 """
 
 from __future__ import annotations
@@ -166,10 +162,11 @@ class TtlTokenCache:
 
 _discovery_cache: TtlTokenCache | None = None
 _user_cache: TtlTokenCache | None = None
+_embedded_runnable_cache: TtlTokenCache | None = None
 
 
 def get_discovery_cache(ttl_seconds: float | None = None) -> TtlTokenCache:
-    """Process-wide cache of discovered (tools, sub_agents) tuples."""
+    """Process-wide cache of discovered ``(tools, sub_agents, token_provider)`` tuples."""
     global _discovery_cache
     if _discovery_cache is None:
         _discovery_cache = TtlTokenCache(ttl_seconds if ttl_seconds is not None else 300.0, name="DISCOVERY-CACHE")
@@ -182,6 +179,25 @@ def get_user_cache(ttl_seconds: float | None = None) -> TtlTokenCache:
     if _user_cache is None:
         _user_cache = TtlTokenCache(ttl_seconds if ttl_seconds is not None else 300.0, name="USER-CACHE")
     return _user_cache
+
+
+def get_embedded_runnable_cache(ttl_seconds: float | None = None) -> TtlTokenCache:
+    """Process-wide cache of built embedded (execute-only) sub-agent runnables.
+
+    The embedded path builds the scoped sub-agent per turn — ``_ensure_agent`` runs an
+    OAuth token exchange, MCP gateway ``list_tools`` handshakes, console-tool discovery,
+    and LangGraph compilation — which is seconds of time-to-first-token on every message
+    while the non-embedded path reuses ``GraphFactory._graphs``. Entries are keyed like
+    the discovery cache (entitlements + sub-agent config hash + target id): the runnable's
+    tools embed exchanged bearer tokens, so entries are token-bounded exactly like
+    discovery entries, and the same owner-scoped ``invalidate_users`` flush applies.
+    """
+    global _embedded_runnable_cache
+    if _embedded_runnable_cache is None:
+        _embedded_runnable_cache = TtlTokenCache(
+            ttl_seconds if ttl_seconds is not None else 300.0, name="EMBEDDED-RUNNABLE-CACHE"
+        )
+    return _embedded_runnable_cache
 
 
 def invalidate_users(user_subs: list[str]) -> int:
@@ -198,6 +214,8 @@ def invalidate_users(user_subs: list[str]) -> int:
             removed += _discovery_cache.invalidate_owner(sub)
         if _user_cache is not None:
             removed += _user_cache.invalidate_owner(sub)
+        if _embedded_runnable_cache is not None:
+            removed += _embedded_runnable_cache.invalidate_owner(sub)
     return removed
 
 
@@ -211,3 +229,5 @@ def invalidate_all() -> None:
         _discovery_cache.clear()
     if _user_cache is not None:
         _user_cache.clear()
+    if _embedded_runnable_cache is not None:
+        _embedded_runnable_cache.clear()

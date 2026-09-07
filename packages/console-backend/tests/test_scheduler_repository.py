@@ -101,6 +101,112 @@ class TestComputeNextRun:
         )
         assert result is None
 
+    def test_cron_respects_timezone_summer(self):
+        """'0 8 * * *' with tz=Europe/Zurich fires at 08:00 CEST (06:00 UTC) during DST."""
+        after = datetime(2026, 6, 10, 5, 0, 0, tzinfo=timezone.utc)  # 07:00 CEST
+        result = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="0 8 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after,
+            tz="Europe/Zurich",
+        )
+        assert result == datetime(2026, 6, 10, 6, 0, 0, tzinfo=timezone.utc)
+
+    def test_cron_respects_timezone_winter(self):
+        """'0 8 * * *' with tz=Europe/Zurich fires at 08:00 CET (07:00 UTC) outside DST."""
+        after = datetime(2026, 1, 10, 5, 0, 0, tzinfo=timezone.utc)  # 06:00 CET
+        result = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="0 8 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after,
+            tz="Europe/Zurich",
+        )
+        assert result == datetime(2026, 1, 10, 7, 0, 0, tzinfo=timezone.utc)
+
+    def test_cron_without_tz_uses_utc_when_no_default_configured(self, monkeypatch: pytest.MonkeyPatch):
+        """tz=None resolves to DEFAULT_TIMEZONE, which falls back to UTC when unset."""
+        monkeypatch.delenv("DEFAULT_TIMEZONE", raising=False)
+        after = datetime(2026, 6, 10, 5, 0, 0, tzinfo=timezone.utc)
+        result = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="0 8 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after,
+        )
+        assert result == datetime(2026, 6, 10, 8, 0, 0, tzinfo=timezone.utc)
+
+    def test_cron_without_tz_follows_default_timezone_env(self, monkeypatch: pytest.MonkeyPatch):
+        """tz=None (and empty string) follow the deployment's DEFAULT_TIMEZONE env var."""
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "Europe/Zurich")
+        after = datetime(2026, 6, 10, 5, 0, 0, tzinfo=timezone.utc)  # 07:00 CEST
+        for tz in (None, "", "  "):
+            result = compute_next_run(
+                schedule_kind=ScheduleKind.CRON,
+                cron_expr="0 8 * * *",
+                interval_seconds=None,
+                run_at=None,
+                after=after,
+                tz=tz,
+            )
+            assert result == datetime(2026, 6, 10, 6, 0, 0, tzinfo=timezone.utc)
+
+    def test_cron_invalid_tz_raises_value_error(self):
+        """Unresolvable names raise ValueError (not ZoneInfoNotFoundError, a KeyError subclass)."""
+        with pytest.raises(ValueError, match="Unknown IANA timezone"):
+            compute_next_run(
+                schedule_kind=ScheduleKind.CRON,
+                cron_expr="0 8 * * *",
+                interval_seconds=None,
+                run_at=None,
+                tz="Zurich",
+            )
+
+    def test_cron_dst_fall_back_fires_once(self):
+        """2026-10-25 Europe/Zurich: 02:30 exists twice (CEST and CET); the job must fire once.
+
+        croniter yields both folds — after the fold-0 fire (00:30 UTC) the recompute
+        must skip the fold-1 repeat (01:30 UTC) and land on the next day.
+        """
+        zone_day = datetime(2026, 10, 24, 23, 0, 0, tzinfo=timezone.utc)
+        first = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="30 2 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=zone_day,
+            tz="Europe/Zurich",
+        )
+        assert first == datetime(2026, 10, 25, 0, 30, 0, tzinfo=timezone.utc)  # 02:30+02:00
+
+        after_first_fire = first + timedelta(minutes=1)
+        second = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="30 2 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after_first_fire,
+            tz="Europe/Zurich",
+        )
+        assert second == datetime(2026, 10, 26, 1, 30, 0, tzinfo=timezone.utc)  # next day, 02:30+01:00
+
+    def test_cron_dst_spring_forward_maps_to_existing_time(self):
+        """2026-03-29 Europe/Zurich: 02:30 does not exist; croniter maps it forward once."""
+        after = datetime(2026, 3, 28, 23, 0, 0, tzinfo=timezone.utc)
+        result = compute_next_run(
+            schedule_kind=ScheduleKind.CRON,
+            cron_expr="30 2 * * *",
+            interval_seconds=None,
+            run_at=None,
+            after=after,
+            tz="Europe/Zurich",
+        )
+        assert result == datetime(2026, 3, 29, 1, 0, 0, tzinfo=timezone.utc)  # 03:00+02:00
+
     def test_once_returns_none_regardless_of_run_at(self):
         """Once schedule always returns None even when run_at is in the past."""
         past = datetime(2020, 1, 1, tzinfo=timezone.utc)

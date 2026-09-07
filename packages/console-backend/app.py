@@ -1,8 +1,10 @@
 import asyncio
+import functools
 import json
 import logging
 import os
 import socket
+import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -16,7 +18,7 @@ import bleach
 import httpx
 import socketio
 import yaml
-from a2a.client import A2ACardResolver, A2AClientError
+from a2a.client import A2ACardResolver, A2AClientError, A2AClientTimeoutError
 from a2a.client.client import Client
 from a2a.types import (
     CancelTaskRequest,
@@ -33,6 +35,7 @@ from fastapi_mcp import FastApiMCP
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from opentelemetry import trace as otel_trace
 from rcplus_alloy_common.logging import (
     configure_existing_logger,
     configure_logger,
@@ -50,6 +53,7 @@ from console_backend.exceptions import ConversationOwnershipError
 from console_backend.middleware import OrchestratorAuth, ProxyHeadersMiddleware
 from console_backend.middleware import SessionMiddleware as CustomSessionMiddleware
 from console_backend.models.socket_session import SocketSession
+from console_backend.utils.a2a_extensions import X_A2A_EXTENSIONS_HEADER
 from console_backend.models.user import User
 from console_backend.routers.admin_audit_router import router as admin_audit_router
 from console_backend.routers.admin_budget_router import router as admin_budget_router
@@ -90,6 +94,7 @@ from console_backend.routers.voice_agent_router import router as voice_agent_rou
 from console_backend.routers.web_search_mcp_tools import router as web_search_mcp_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
+from console_backend.services.conversation_summary import maybe_summarize_conversation
 from console_backend.services.messages_service import MessagesService, _parse_task_state
 from console_backend.services.socket_notification_manager import SocketNotificationManager
 from console_backend.utils.connection_pool import connection_pool
@@ -205,6 +210,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     logger.info("Application starting up...")
 
+    # Keep per-ASGI-message and transaction-bookkeeping spans out of the trace
+    # export. Runs here, not at import: the injected auto-instrumentation must
+    # already have built the tracer provider we wrap.
+    from ringier_a2a_sdk.telemetry.span_filter import install_span_export_filter
+
+    install_span_export_filter()
+
     # Initialize PostgreSQL database connection
     await init_db()
     logger.info("PostgreSQL database initialized")
@@ -239,6 +251,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     connection_pool.start_cleanup_task()
     logger.info("Connection pool cleanup task started")
 
+    # Periodic sweep of expired StoredSessions. get_session refuses expired rows,
+    # but only this physically removes them — without it, token-minted embedded
+    # sessions (one per socket connect that misses a clean disconnect) accumulate.
+    async def _session_sweep_loop() -> None:
+        while True:
+            try:
+                await app.state.session_service.destroy_expired_sessions()
+            except Exception:  # noqa: BLE001 — the sweep must never die
+                logger.exception("Expired-session sweep failed")
+            await asyncio.sleep(3600)
+
+    app.state.session_sweep_task = asyncio.create_task(_session_sweep_loop())
+    logger.info("Expired-session sweep task started")
+
     # Start the MCP StreamableHTTP session manager (streaming SSE transport mounted
     # at /mcp). Its run() context owns the background task that services /mcp requests.
     # A fresh instance is created here each startup because run() can only be entered
@@ -246,7 +272,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.mcp_session_manager = StreamableHTTPSessionManager(
         app=mcp.server,
         json_response=False,  # SSE so intermediate keepalive notifications stream
-        stateless=False,  # keep optional session support, matching fastapi_mcp's mount_http
+        # Stateless: no Mcp-Session-Id required, so a bare `POST tools/list` (the
+        # orchestrator's raw-bytes catalogue fast path) is served, and requests are not
+        # pinned to one ECS task behind the ALB. Progress/keepalive notifications still
+        # stream on the calling request's SSE response; we never push notifications
+        # between requests, so nothing depends on session state.
+        stateless=True,
     )
     app.state.mcp_sm_stack = AsyncExitStack()
     await app.state.mcp_sm_stack.enter_async_context(app.state.mcp_session_manager.run())
@@ -258,6 +289,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Shutdown - called automatically when Uvicorn receives SIGTERM/SIGINT
     logger.info("Application shutting down...")
+    if hasattr(app.state, "session_sweep_task"):
+        app.state.session_sweep_task.cancel()
     if hasattr(app.state, "mcp_sm_stack"):
         await app.state.mcp_sm_stack.aclose()
         logger.info("MCP StreamableHTTP session manager stopped")
@@ -303,20 +336,47 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 if not config.is_local():
     app.add_middleware(ProxyHeadersMiddleware)
 
-# Add CORS middleware for dev/local environments to allow localhost origins
-if config.is_local() or config.is_dev():
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:5001",
-            "http://127.0.0.1:5001",
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS origins — ONE list shared by the REST API (CORSMiddleware, here) and
+# Socket.IO (cors_allowed_origins, below). The two used to be maintained
+# separately and disagreed: deployed Socket.IO only accepted the console's own
+# BASE_DOMAIN, so any embed-sdk host (Embedded Nannos, ADR-0004) was rejected
+# with "not an accepted origin" before auth even ran.
+#
+# Composition:
+#  - local: the localhost dev frontends (console 5001/5173, cockpit 3000)
+#  - deployed: the console's own domain (same-origin console-frontend needs no
+#    CORS, but Socket.IO checks the Origin header on every handshake)
+#  - ALL environments: + EMBED_ALLOWED_ORIGINS (exact origins, from env) for
+#    embed-sdk hosts, which connect cross-origin with bearer tokens (ADR-0002).
+if config.is_local():
+    cors_origins = [
+        "http://localhost:5001",
+        "http://127.0.0.1:5001",
+        "https://localhost:5001",
+        "https://127.0.0.1:5001",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        # Embedded Nannos: the cockpit frontend (guinea-pig host) runs on :3000
+        # and mounts the chat widget cross-origin against this backend.
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+else:
+    cors_origins = [f"https://{os.environ['BASE_DOMAIN']}"]
+cors_origins += [o for o in config.embed_allowed_origins if o not in cors_origins]
+
+# REST CORS: registered in EVERY environment — the embed widget's REST legs
+# (sub-agent lookup, conversations, feedback, uploads) are cross-origin wherever
+# the host page lives, production included. Explicit origins only: the browser
+# requires an exact Access-Control-Allow-Origin echo in credentials mode (the
+# ALB affinity cookie rides on these requests), so no wildcard.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Add Starlette's SessionMiddleware for OAuth state management
 # This is required by Authlib to store temporary OAuth state during login,
@@ -358,8 +418,15 @@ app.include_router(notification_router)
 app.include_router(scheduler_router)
 app.include_router(delivery_channel_router)
 app.include_router(catalog_router)
-app.include_router(bug_report_router)
+# The MCP router goes first: both share the /api/v1/bug-reports prefix, and the REST
+# router owns GET "/{report_id}", which would otherwise match "/mcp-list" and answer 404
+# for a report id of "mcp-list". FastAPI resolves in registration order, and going first
+# shadows nothing of the REST router because every MCP path is distinguished by a literal
+# segment the REST paths do not have: "mcp-create"/"mcp-list" at the collection level, and
+# a "mcp-"-prefixed tail on the item-level ones ("/{report_id}/mcp-status" cannot capture
+# "/{report_id}/status").
 app.include_router(bug_report_mcp_router)
+app.include_router(bug_report_router)
 # web_search MCP tool (console_web_search) — must be registered before FastApiMCP below.
 app.include_router(web_search_mcp_router)
 app.include_router(feedback_router)
@@ -375,22 +442,9 @@ app.include_router(scim_router)
 app.include_router(outbound_scim_router)
 app.include_router(voice_agent_router)
 
-# Configure CORS origins for Socket.IO
-# In development, allow localhost. In production, use BASE_DOMAIN env var.
-if config.is_local():
-    # Allow both http and https for localhost development
-    # Include Vite dev server port (5173) for frontend development
-    cors_origins = [
-        "http://localhost:5001",
-        "http://127.0.0.1:5001",
-        "https://localhost:5001",
-        "https://127.0.0.1:5001",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
-else:
-    # In production, use the configured base domain
-    cors_origins = [f"https://{os.environ['BASE_DOMAIN']}"]
+# Socket.IO reuses the SAME `cors_origins` list built next to the CORSMiddleware
+# registration above — keeping REST and socket origin policy in lockstep (they
+# drifted apart before, which broke embed-sdk hosts on deployed environments).
 
 # Create FastAPI-MCP server without auth_config
 # Authentication is handled by individual tool endpoints via require_auth_or_bearer_token
@@ -428,11 +482,10 @@ async def _handle_list_tools() -> list:
             return all_tools
 
         token = auth_header.split(" ", 1)[1]
-        from ringier_a2a_sdk.auth import JWTValidator
-
         from console_backend.config import config as app_config
+        from console_backend.utils.jwt_validators import get_jwt_validator
 
-        validator = JWTValidator(issuer=app_config.oidc.issuer)
+        validator = get_jwt_validator(issuer=app_config.oidc.issuer)
         payload = await validator.validate(token)
         sub = payload.get("sub")
         if not sub:
@@ -563,6 +616,114 @@ active_tasks: dict[str, ActiveTaskInfo] = {}
 # Intermediate output (with urn:nannos:a2a:intermediate-output:1.0 extensions) are NOT accumulated.
 _streaming_buffers: dict[str, str] = {}
 
+# The answer text this turn already persisted from the assembled streaming
+# artifact, keyed by context_id. Read by _repeats_persisted_answer to drop a
+# terminal status that merely re-sends the same answer. Cleared with the rest of
+# the turn state.
+_persisted_answer: dict[str, str] = {}
+
+# Detached work that must outlive the turn that started it (conversation titling).
+# asyncio keeps no strong reference to a bare create_task, so a task can be
+# garbage-collected mid-flight; holding it here until it completes is the fix.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro, *, name: str) -> None:
+    """Run a coroutine detached from the caller, keeping it alive to completion."""
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+# Conversations whose titling task is running right now (see the trigger).
+_titling_in_flight: set[str] = set()
+
+
+async def _title_conversation(conversation_id: str, user_id: str, answer: str) -> None:
+    """Name a conversation after the answer just given — detached from the turn."""
+    try:
+        await maybe_summarize_conversation(
+            sio.app_instance.state.conversation_service,  # type: ignore[attr-defined]
+            conversation_id,
+            user_id,
+            answer=answer,
+            # The socket session's user_id IS the OIDC sub, which is what the
+            # gateway attributes spend by.
+            user_sub=user_id,
+            on_stored=_conversation_title_notifier(conversation_id),
+        )
+    finally:
+        _titling_in_flight.discard(conversation_id)
+
+
+def _answer_text_of(response_data: dict[str, Any]) -> str:
+    """The assistant text carried by a turn-ending event, or ''.
+
+    Covers the shape the streaming buffer does not: a final answer riding a
+    status message (`status.message.parts`), which is how a fallback answer and a
+    non-streamed reply arrive.
+    """
+    status = response_data.get("status")
+    message = status.get("message") if isinstance(status, dict) else None
+    parts = message.get("parts") if isinstance(message, dict) else None
+    if not isinstance(parts, list):
+        return ""
+    return "\n".join(
+        part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)
+    ).strip()
+
+
+def _repeats_persisted_answer(response_data: dict[str, Any], context_id: str) -> bool:
+    """Whether this status merely re-sends the answer this turn already stored.
+
+    The A2A contract lets a terminal status carry the final answer, and a
+    well-behaved agent leaves it out once the answer has streamed in full (see the
+    orchestrator's _close_streaming_artifact_and_respond). But console-backend
+    talks to agent cards it does not own, so the repeat still arrives — and it used
+    to be stored as a second row under its own id, which made a reloaded
+    conversation show one answer as two bubbles. Drop it here, the same way the
+    live path already drops it on the wire.
+
+    Only a PLAIN-TEXT message can be a repeat. A structured payload (a HITL
+    approval, a client action) carries data parts or extensions that the widget
+    needs to be restored on reload, so it is stored even when its description
+    happens to echo the answer.
+    """
+    stored = _persisted_answer.get(context_id)
+    if not stored or response_data.get("kind") != "status-update":
+        return False
+    status = response_data.get("status")
+    message = status.get("message") if isinstance(status, dict) else None
+    if not isinstance(message, dict) or message.get("extensions"):
+        return False
+    parts = message.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return False
+    if any(not (isinstance(part, dict) and isinstance(part.get("text"), str)) for part in parts):
+        return False
+    echoed = _answer_text_of(response_data)
+    # Equal, or shorter and a prefix: adds nothing that is not already stored. A
+    # text that EXTENDS what was stored is new content and must be kept.
+    return bool(echoed) and stored.startswith(echoed)
+
+
+def _conversation_title_notifier(conversation_id: str):
+    """Push a freshly written title/summary to everyone viewing the conversation.
+
+    The name lands a second or two after the answer, so without this push the
+    panel would keep showing the first-message placeholder until its next list
+    load. Room-targeted, so other tabs and surfaces update too.
+    """
+
+    async def notify(title: str, summary: str) -> None:
+        await sio.emit(
+            SocketEvents.CONVERSATION_UPDATED,
+            {"conversationId": conversation_id, "title": title, "summary": summary},
+            to=_conversation_room(conversation_id),
+        )
+
+    return notify
+
 # Buffer for accumulating intermediate-output chunks (sub-agent thoughts) per conversation.
 # Keyed by "{context_id}:{agent_name}". Persisted when the conversation turn ends
 # (terminal status or main artifact last_chunk) so reasoning blocks survive page reload.
@@ -578,6 +739,98 @@ _intermediate_buffer_ts: dict[str, datetime] = {}
 # while it was disconnected — otherwise the turn would hang waiting on input the user
 # never saw. Value is the raw agent_response payload of the prompt event.
 _pending_interactions: dict[str, dict[str, Any]] = {}
+
+
+_tracer = otel_trace.get_tracer("console-backend.chat")
+
+
+def _xray_trace_id(span: otel_trace.Span) -> str | None:
+    """OTel trace id in the form X-Ray search expects: ``1-<8 hex>-<24 hex>``.
+
+    X-Ray splits the 128-bit id into a 32-bit epoch prefix and a 96-bit
+    remainder; ``batch-get-traces`` and the console only accept that dashed
+    form, so logging the raw 32-hex id would leave a manual conversion between
+    a log line and the trace it points at.
+    """
+    context = span.get_span_context()
+    if not context.trace_id:
+        return None
+    raw = format(context.trace_id, "032x")
+    return f"1-{raw[:8]}-{raw[8:]}"
+
+
+def _traced_chat_message(handler):  # type: ignore[no-untyped-def]
+    """Start a NEW trace for every incoming chat message.
+
+    Messages arrive as events on one long-lived socket.io connection, which HTTP
+    auto-instrumentation cannot see — without this, a turn is invisible and the
+    orchestrator's spans hang in a trace of their own. The span is a fresh root
+    on purpose: parenting to the connection would merge every message of a
+    session into one giant trace. It stays current for the whole handler (which
+    awaits the full turn), so the auto-instrumented httpx call to the
+    orchestrator becomes a child and carries the trace context downstream.
+    Without the injected OTel agent (local dev, tests) this is a no-op.
+
+    The [TRACE] log line is the durable half of this. A trace can go missing —
+    the ids below ride in span METADATA, which X-Ray does not index (custom
+    annotations need Transaction Search, currently off), so a conversation id
+    cannot be searched for; and a root segment exported only when the turn ends
+    is the first casualty when a span-heavy turn overruns the export pipeline.
+    Emitting the pairing to logs makes conversation → trace a Logs Insights
+    query that holds even when the segment never arrives:
+
+        fields @timestamp, log
+        | filter log like "<conversation-id>" and log like "[TRACE]"
+        | sort @timestamp asc
+    """
+
+    @functools.wraps(handler)
+    async def wrapper(sid: str, json_data: dict[str, Any]) -> Any:
+        no_parent = otel_trace.set_span_in_context(otel_trace.INVALID_SPAN)
+        # Attributes must be set at span CREATION: the sampler only sees these,
+        # not ones added later. "nannos.chat" is the hook for the X-Ray sampling
+        # rule that keeps every chat turn (the default rule keeps only ~5%, and
+        # an unsampled root drops the orchestrator's whole trace with it).
+        attributes: dict[str, str] = {"nannos.chat": "true"}
+        conversation_id = ""
+        message_id = ""
+        if isinstance(json_data, dict):
+            conversation_id = str(json_data.get("conversationId", ""))
+            message_id = str(json_data.get("id", ""))
+            attributes["nannos.conversation_id"] = conversation_id
+            attributes["nannos.message_id"] = message_id
+        event = handler.__name__.removeprefix("handle_")
+        with _tracer.start_as_current_span(
+            event,
+            context=no_parent,
+            kind=otel_trace.SpanKind.SERVER,
+            attributes=attributes,
+        ) as span:
+            # Logged at the START of the turn on purpose: a turn that never
+            # finishes (crash, disconnect, timeout) is exactly the one worth
+            # finding, and an end-only line would not exist for it.
+            trace_id = _xray_trace_id(span)
+            logger.info(
+                f"[TRACE] {event} start conversation={conversation_id or '-'} "
+                f"message={message_id or '-'} trace_id={trace_id or 'unsampled'}"
+            )
+            started = time.monotonic()
+            outcome = "ok"
+            try:
+                return await handler(sid, json_data)
+            except BaseException as exc:  # noqa: BLE001 - re-raised; only labels the log line
+                # BaseException, not Exception: a cancelled turn (client gone,
+                # shutdown) is the common non-ok ending here.
+                outcome = type(exc).__name__
+                raise
+            finally:
+                logger.info(
+                    f"[TRACE] {event} end conversation={conversation_id or '-'} "
+                    f"message={message_id or '-'} trace_id={trace_id or 'unsampled'} "
+                    f"outcome={outcome} duration_s={time.monotonic() - started:.3f}"
+                )
+
+    return wrapper
 
 
 def _conversation_room(conversation_id: str) -> str:
@@ -631,6 +884,7 @@ def _clear_turn_state(context_id: str, *, preserve_pending_interaction: bool = F
     starts the next turn (handle_send_message) or when a later turn ends without asking.
     """
     _streaming_buffers.pop(context_id, None)
+    _persisted_answer.pop(context_id, None)
     if not preserve_pending_interaction:
         _pending_interactions.pop(context_id, None)
     prefix = f"{context_id}:"
@@ -795,6 +1049,28 @@ async def _flush_intermediate_buffers(
         )
 
 
+def _assembled_answer_payload(text: str, kind: str, state: str | None) -> str:
+    """A stored payload for an answer the backend ASSEMBLED from stream chunks.
+
+    No single wire frame carries it — each frame held a fragment — so these rows
+    used to be the only ones persisted with an empty `raw_payload`. That made
+    them unnameable in the dev wire log: with nothing to read, it fell back to
+    its catch-all "event", so the assembled answer and its echo did not read as
+    the pair they were. Mirrors the synthetic payload
+    _flush_intermediate_buffers writes for sub-agent thoughts.
+    """
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "artifact": {"parts": [{"kind": "text", "text": text}]},
+        # Marks a payload the backend built, so nobody mistakes it for a frame
+        # the agent actually sent.
+        "assembledByConsole": True,
+    }
+    if state:
+        payload["status"] = {"state": state}
+    return json.dumps(payload)
+
+
 async def _process_a2a_response(
     client_event: Any,
     sid: str,
@@ -907,7 +1183,12 @@ async def _process_a2a_response(
                 # that (re)subscribes mid-turn can restore a prompt that arrived while it was
                 # disconnected — otherwise the turn hangs on input the user never saw. Kept in
                 # memory keyed by conversation; cleared when the turn ends without asking.
-                if is_feedback_request or status_state == "input-required":
+                #
+                # A message-less input-required is NOT a prompt: it means the agent already
+                # delivered its whole answer as a streamed artifact and merely ended the turn
+                # in that state. Capturing it would make the conversation report itself
+                # in-flight forever and hand a reconnecting client an empty payload to replay.
+                if is_feedback_request or (status_state == "input-required" and status_message):
                     _pending_interactions[effective_context_id] = response_data
 
                 # Orchestrator reply chunks are accumulated into _streaming_buffers earlier
@@ -977,6 +1258,9 @@ async def _process_a2a_response(
                                     task_id=task_id,
                                     state=TaskState.TASK_STATE_COMPLETED,
                                     kind="artifact-update",
+                                    raw_payload=_assembled_answer_payload(
+                                        accumulated, "artifact-update", status_state
+                                    ),
                                 )
                                 # Inject persisted message_id into response so frontend
                                 # can associate its msg-* placeholder with the real DB ID
@@ -996,12 +1280,19 @@ async def _process_a2a_response(
                                     task_id=task_id,
                                     state=_parse_task_state(status_state),
                                     kind="status-update",
+                                    raw_payload=_assembled_answer_payload(
+                                        accumulated, "status-update", status_state
+                                    ),
                                 )
                                 response_data["persistedMessageId"] = saved_msg.message_id
                                 # For HITL interrupts (input-required), don't block save_agent_response:
                                 # the HITL event carries action_requests/review_configs/extensions in its
                                 # raw payload that must be persisted so the widget can be restored on reload.
                                 safety_net_saved = status_state != "input-required"
+                            # Whichever branch stored it, remember the text: a terminal
+                            # status that re-sends the same answer is dropped below
+                            # instead of landing as a second copy.
+                            _persisted_answer[effective_context_id] = accumulated.strip()
                         elif is_last_chunk:
                             logger.warning(
                                 f"[STREAMING] last_chunk=True but accumulated content is empty "
@@ -1022,25 +1313,58 @@ async def _process_a2a_response(
                 # ── Persist non-streaming responses ──
                 # Skip: work-plan (transient), artifact chunks (accumulated above),
                 # bare completion signals (no content to save), safety-net (already saved).
-                is_bare_completion_signal = (
+                # A terminal status with no message carries nothing to store. Saving it
+                # anyway produced a junk placeholder row ("Status: TASK_STATE_… at …",
+                # see messages_service._parse_status_update) under a fresh uuid7, so it
+                # was not even idempotent. input-required and auth-required belong here
+                # too: an agent that already streamed its whole answer now ends the turn
+                # on a bare status in those states as well.
+                _TERMINAL_STATES = ("completed", "failed", "canceled", "input-required", "auth-required")
+                is_bare_terminal_signal = (
                     response_data.get("kind") == "status-update"
                     and status_obj
-                    and status_state in ("completed", "failed", "canceled")
+                    and status_state in _TERMINAL_STATES
                     and not status_obj.get("message")
                 )
+                repeats_stored_answer = _repeats_persisted_answer(response_data, effective_context_id)
+                if repeats_stored_answer:
+                    logger.info(
+                        "[STREAMING] Dropping status that repeats the stored answer "
+                        "(state=%s) for context %s",
+                        status_state,
+                        effective_context_id,
+                    )
 
                 if (
                     not is_work_plan
                     and not is_feedback_request
                     and not is_artifact_update
-                    and not is_bare_completion_signal
+                    and not is_bare_terminal_signal
                     and not safety_net_saved
+                    and not repeats_stored_answer
                 ):
                     await messages_service.save_agent_response(
                         response_data=response_data,
                         conversation_id=effective_context_id,
                         user_id=user_id,
                     )
+
+                # ── Name the conversation after what it is about ──
+                # The answer text is taken from THIS event, not read back from the
+                # database: whichever way the turn ended, we already have it here.
+                # 'input-required' is not an ending — the turn paused for an approval
+                # and has no answer yet, so a later completed turn titles it instead.
+                if is_turn_ending and status_state != "input-required":
+                    answer_text = (accumulated or "").strip() or _answer_text_of(response_data)
+                    # A turn can end twice on the wire (a last_chunk artifact, then a
+                    # completed status). The DB flag stops the second RUN; this set stops
+                    # a second concurrent gateway CALL before the first has written.
+                    if answer_text and effective_context_id not in _titling_in_flight:
+                        _titling_in_flight.add(effective_context_id)
+                        _spawn_background(
+                            _title_conversation(effective_context_id, user_id, answer_text),
+                            name=f"title:{effective_context_id}",
+                        )
         except Exception as db_error:
             # Log but don't fail the response if DB write fails
             logger.error(f"Failed to save agent response to DynamoDB: {db_error}", exc_info=True)
@@ -1211,65 +1535,158 @@ async def get_agent_card(request: Request, user: User = Depends(require_auth)) -
 # ==============================================================================
 
 
-@sio.on(SocketEvents.CONNECT)  # type: ignore
-async def handle_connect(sid: str, environ: dict[str, Any]) -> bool:
-    """Handle the 'connect' socket.io event with authentication.
-
-    Authenticates the connection using the same signed session cookie as HTTP requests.
-    Returns False to reject unauthenticated connections.
-    """
-    # Extract cookies from ASGI environ
+async def _resolve_socket_user_via_cookie(environ: dict[str, Any]) -> str | None:
+    """Resolve the user from the signed session cookie (same as the HTTP session
+    middleware). Returns the StoredSession id to link the socket to, or None."""
     cookie_header = None
     headers = environ.get("asgi.scope", {}).get("headers", [])
     for header_name, header_value in headers:
         if header_name == b"cookie":
             cookie_header = header_value.decode("utf-8")
             break
-
     if not cookie_header:
-        logger.warning(f"Socket.IO connection rejected for {sid}: No cookies found")
-        return False
+        return None
 
-    # Parse cookies to extract session cookie
     cookies = SimpleCookie()
     cookies.load(cookie_header)
-
     session_cookie = cookies.get(config.cookie_name)
     if not session_cookie:
-        logger.warning(f"Socket.IO connection rejected for {sid}: No session cookie")
-        return False
+        return None
 
-    # Verify the signed session cookie (same as HTTP middleware does)
     session_id = verify_cookie(session_cookie.value)
     if not session_id:
-        logger.warning(f"Socket.IO connection rejected for {sid}: Invalid session signature")
-        return False
+        return None
 
-    # Load session and user (same as HTTP middleware does)
     stored_session = await sio.app_instance.state.session_service.get_session(session_id)  # type: ignore[attr-defined]
     if not stored_session:
-        logger.warning(f"Socket.IO connection rejected for {sid}: Session not found")
-        return False
+        return None
 
-    # Get database session for user lookup
     session_factory = get_async_session_factory()
     async with session_factory() as db:
         user = await sio.app_instance.state.user_service.get_user(db, stored_session.user_id)  # type: ignore[attr-defined]
     if not user:
-        logger.warning(f"Socket.IO connection rejected for {sid}: User not found")
+        return None
+    return session_id
+
+
+async def _resolve_socket_user_via_token(token: str) -> str | None:
+    """Embedded/cross-origin hosts (ADR-0002 Amendment 2 — browser leg): authenticate
+    a socket from a nannos bearer token in the socket.io ``auth`` payload instead of
+    the session cookie (which a different-origin host like the cockpit cannot carry).
+
+    Validates the token against the nannos issuer's JWKS (same JWTValidator the HTTP
+    bearer path uses), provisions/looks up the user by ``sub``, and creates a
+    StoredSession holding the token — so the downstream OrchestratorAuth on-behalf-of
+    exchange (StoredSession.access_token → orchestrator audience → Gatana) works
+    unchanged. Returns the new StoredSession id, or None on any failure.
+    """
+    from ringier_a2a_sdk.auth.jwt_validator import JWTValidationError
+
+    from console_backend.utils.jwt_validators import get_jwt_validator
+
+    validator = get_jwt_validator(issuer=config.oidc.issuer)
+    try:
+        claims = await validator.validate(token)
+    except JWTValidationError as e:
+        logger.warning(f"Socket token auth rejected: {e}")
+        return None
+    except Exception as e:  # noqa: BLE001 — never let a validator surprise reject-close into a 500
+        logger.warning(f"Socket token auth error: {e}")
+        return None
+
+    sub = claims.get("sub")
+    if not sub:
+        logger.warning("Socket token auth rejected: token has no 'sub' claim")
+        return None
+
+    session_factory = get_async_session_factory()
+    async with session_factory() as db:
+        user = await sio.app_instance.state.user_service.get_user_by_sub(db, sub)  # type: ignore[attr-defined]
+        if not user:
+            user = await sio.app_instance.state.user_service.upsert_user(  # type: ignore[attr-defined]
+                db,
+                sub=sub,
+                email=claims.get("email", ""),
+                first_name=claims.get("given_name", ""),
+                last_name=claims.get("family_name", ""),
+                company_name=claims.get("company_name"),
+            )
+            # upsert_user only executes the INSERT; without an explicit commit the
+            # session close rolls it back and the StoredSession created below would
+            # point at a user id that never landed (the HTTP paths get their commit
+            # from get_db_session).
+            await db.commit()
+
+    # Cache expiry from the token's own exp so OrchestratorAuth's refresh window is
+    # accurate. No refresh_token: an embedded token is short-lived and re-minted by
+    # the host's getToken()/federated-exchange endpoint, not refreshed server-side.
+    # The session TTL is bounded to the token too (plus a grace window for in-flight
+    # exchanges): the SDK reconnects with a fresh token before every expiry, minting
+    # a NEW session each time — a long default TTL would accumulate one token-bearing
+    # 30-day row per ~token-lifetime per open widget. Disconnect also destroys the
+    # session (handle_disconnect); this bound covers ungraceful drops.
+    exp = claims.get("exp")
+    expires_in = max(1, int(exp - time.time())) if isinstance(exp, (int, float)) else 3600
+    return await sio.app_instance.state.session_service.create_session(  # type: ignore[attr-defined]
+        user_id=user.id,
+        refresh_token="",
+        id_token="",
+        access_token=token,
+        access_token_expires_in=expires_in,
+        session_ttl_seconds=expires_in + 300,
+    )
+
+
+# StoredSession ids minted per-connection by the token path, keyed by socket id, so
+# handle_disconnect can delete them (the disconnect always lands on the replica that
+# holds the socket, so process-local state suffices).
+_socket_owned_sessions: dict[str, str] = {}
+
+
+@sio.on(SocketEvents.CONNECT)  # type: ignore
+async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any] | None = None) -> bool:
+    """Handle the 'connect' socket.io event with authentication.
+
+    Two accepted credentials:
+    - the signed session cookie (same-origin console — primary path), and
+    - a nannos bearer token in the socket.io ``auth`` payload (embedded/cross-origin
+      hosts; non-production only for now — see ADR-0002 Amendment 2).
+
+    Returns False to reject unauthenticated connections.
+    """
+    http_session_id = await _resolve_socket_user_via_cookie(environ)
+
+    if not http_session_id and not config.is_production():
+        token = auth.get("token") if isinstance(auth, dict) else None
+        if token:
+            http_session_id = await _resolve_socket_user_via_token(token)
+            if http_session_id:
+                # This StoredSession exists only for this socket connection (the
+                # cookie path's session is the user's browser login — never ours to
+                # delete). Remember it so handle_disconnect can destroy it; the SDK
+                # mints a fresh one on every reconnect.
+                _socket_owned_sessions[sid] = http_session_id
+
+    if not http_session_id:
+        logger.warning(f"Socket.IO connection rejected for {sid}: no valid session cookie or bearer token")
         return False
 
-    # Create socket session in DynamoDB (minimal data)
+    stored_session = await sio.app_instance.state.session_service.get_session(http_session_id)  # type: ignore[attr-defined]
+    if not stored_session:
+        logger.warning(f"Socket.IO connection rejected for {sid}: session vanished after auth")
+        return False
+
+    # Create socket session (links to the StoredSession that carries the access_token).
     await sio.app_instance.state.socket_session_service.create_session(  # type: ignore[attr-defined]
         socket_id=sid,
-        user_id=user.id,
-        http_session_id=session_id,
+        user_id=stored_session.user_id,
+        http_session_id=http_session_id,
     )
 
     # Register connection for scheduler notifications
-    socket_notification_manager.register_connection(user.id, sid)
+    socket_notification_manager.register_connection(stored_session.user_id, sid)
 
-    logger.debug(f"Socket.IO connection authenticated for {sid}: {user.email}")
+    logger.debug(f"Socket.IO connection authenticated for {sid}: user={stored_session.user_id}")
     return True  # Accept the connection
 
 
@@ -1303,6 +1720,12 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     # Clean up socket session from DynamoDB
     await sio.app_instance.state.socket_session_service.destroy_session(sid)  # type: ignore[attr-defined]
 
+    # A token-authenticated (embedded) connection owns its StoredSession — destroy it
+    # with the socket, or one token-bearing row leaks per reconnect cycle.
+    owned_session_id = _socket_owned_sessions.pop(sid, None)
+    if owned_session_id:
+        await sio.app_instance.state.session_service.destroy_session(owned_session_id)  # type: ignore[attr-defined]
+
     # Clean up cached connections — defer if tasks are still streaming
     if has_running_tasks:
         logger.info(f"Deferring connection cleanup for {sid} — tasks still running")
@@ -1329,12 +1752,10 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
     agent_card_url = data.get("url")
     custom_headers = data.get("customHeaders", {})
 
-    # Console UI supports all extensions — always request them from the orchestrator
-    custom_headers["X-A2A-Extensions"] = (
-        "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, "
-        "urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0, "
-        "urn:nannos:a2a:human-in-the-loop:1.0"
-    )
+    # Console UI supports all extensions — always request them from the orchestrator.
+    # The header is the on/off switch for extension emission; the list lives in one
+    # module pinned against the repo-root a2a-extensions.json registry.
+    custom_headers["X-A2A-Extensions"] = X_A2A_EXTENSIONS_HEADER
 
     if custom_headers:
         logger.info(f"Received custom headers for {sid}: {list(custom_headers.keys())}")
@@ -1560,6 +1981,36 @@ def _build_a2a_message_parts(
     return a2a_parts
 
 
+def _user_facing_send_error(err: A2AClientError) -> tuple[str, bool]:
+    """Map an A2A client failure to a (user-presentable message, retryable) pair.
+
+    The SDK's error strings embed transport internals (gRPC StreamReset dumps,
+    raw httpx reprs) that must never reach the chat UI — an embedded widget
+    shows them to end users, not operators. The full detail stays in the log
+    (callers log with exc_info) and in the response's `error_details.detail`.
+
+    Classification uses `__cause__`, which the SDK sets to the original httpx
+    error: an HTTPStatusError carries the upstream status; any TransportError
+    (connection reset mid-stream — e.g. the orchestrator being OOM-killed or
+    redeployed — refused connections, protocol errors) is a transient outage.
+    """
+    cause = err.__cause__
+    status = getattr(getattr(cause, "response", None), "status_code", None)
+    if status in (401, 403):
+        return ("You are no longer authorized. Please refresh the page and sign in again.", False)
+    if (
+        isinstance(err, A2AClientTimeoutError)
+        or isinstance(cause, (httpx.TransportError, httpx.TimeoutException))
+        or status in (502, 503, 504)
+    ):
+        return (
+            "The assistant is temporarily unavailable — it may be restarting. "
+            "Your conversation is saved; please try again in a moment.",
+            True,
+        )
+    return ("Something went wrong while contacting the assistant. Please try again.", True)
+
+
 async def _send_message_to_agent(
     a2a_client: Client | None,
     message: Message,
@@ -1619,9 +2070,11 @@ async def _send_message_to_agent(
         return create_success_response({"id": message_id})
     except A2AClientError as http_err:
         logger.error(f"Runtime error during message send: {http_err}", exc_info=True)
+        user_message, retryable = _user_facing_send_error(http_err)
         error_response = create_error_response(
             SocketError.MSG_SEND_FAILED,
-            details={"reason": f"HTTP error during message send: {http_err}"},
+            message_override=user_message,
+            details={"detail": str(http_err), "retryable": retryable},
         )
         error_response["id"] = message_id
         await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
@@ -1680,9 +2133,11 @@ async def _send_steering_message_to_agent(
 
     except A2AClientError as http_err:
         logger.error(f"[STEERING] Failed to send steering message: {http_err}", exc_info=True)
+        user_message, retryable = _user_facing_send_error(http_err)
         error_response = create_error_response(
             SocketError.MSG_SEND_FAILED,
-            details={"reason": f"Steering message failed: {http_err}"},
+            message_override=user_message,
+            details={"detail": str(http_err), "retryable": retryable, "steering": True},
         )
         error_response["id"] = message_id
         await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
@@ -1691,6 +2146,7 @@ async def _send_steering_message_to_agent(
 
 @sio.on(SocketEvents.SEND_MESSAGE)  # type: ignore
 @require_socket_auth(sio)
+@_traced_chat_message
 async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
     """Handle the 'send_message' socket.io event.
 
@@ -1759,6 +2215,7 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
 
         if socket_session.user_id:
             metadata["user_id"] = socket_session.user_id
+            otel_trace.get_current_span().set_attribute("enduser.id", socket_session.user_id)
         else:
             error_response = create_error_response(
                 SocketError.SESSION_NOT_FOUND,
@@ -1801,6 +2258,13 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         # outage, timeouts) are NOT ownership violations and propagate to the generic error
         # handler below so they surface as retryable server errors, not "Conversation not found".
         sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
+        # The embedded widget marks its turns with executeOnlySubAgentId; stamp the
+        # conversation on creation so the console can label it and render it
+        # read-only (its turns assume a live host page with registered objects).
+        embedded_sub_agent_id = metadata.get("executeOnlySubAgentId") or metadata.get("subAgentId")
+        # Where the conversation STARTED (embed SDK metadata.pageContext) — stamped on
+        # creation only, so the list can say "this one began on campaign 123".
+        page_context = metadata.get("pageContext") if isinstance(metadata, dict) else None
         try:
             await conversation_service.get_or_create_conversation(
                 conversation_id=context_id,
@@ -1808,6 +2272,8 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
                 agent_url=socket_session.agent_url or "",
                 message=message_text,
                 sub_agent_config_hash=sub_agent_config_hash,
+                embedded_sub_agent_id=str(embedded_sub_agent_id) if embedded_sub_agent_id is not None else None,
+                page_context=page_context if isinstance(page_context, dict) else None,
             )
         except (ConversationOwnershipError, IntegrityError):
             logger.warning(

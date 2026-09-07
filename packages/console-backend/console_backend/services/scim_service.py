@@ -880,7 +880,12 @@ class ScimGroupService:
     async def _add_member(self, db: AsyncSession, group_id: int, user_id: str) -> None:
         """Add a member to a group via UserGroupService (handles Keycloak sync and agent activation)."""
         try:
-            await self.user_group_service.add_member(db, SCIM_ACTOR, group_id, user_id, role="write")
+            # require_active=False: the IdP owns the group graph and keeps suspended users in their
+            # groups (active=false maps to `suspended` here), so mirroring it must not drop them.
+            # Their suspension is enforced at sign-in, not by pruning memberships.
+            await self.user_group_service.add_member(
+                db, SCIM_ACTOR, group_id, user_id, role="write", require_active=False
+            )
         except Exception as exc:
             # Log but swallow so that a single bad member reference doesn't abort the whole operation.
             logger.warning("SCIM _add_member(%s, %s) failed: %s", group_id, user_id, exc)

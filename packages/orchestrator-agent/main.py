@@ -57,6 +57,7 @@ from ringier_a2a_sdk.server import AuthRequestContextBuilder
 
 from app.core.a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    CONVERSATION_ORIGIN_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
@@ -97,6 +98,20 @@ def create_lifespan(
         """Application lifespan manager for startup/shutdown tasks."""
         # Startup: Initialize and start budget guard singleton
         logger.info("Starting application lifespan...")
+
+        # Put LangGraph's interrupt/resume events on a handler that traces them.
+        # Deliberately imported here, not at module top: the injected OTel
+        # auto-instrumentation must already have wrapped LangChain, otherwise its
+        # handler joins callback managers created later and re-introduces the
+        # AttributeError noise. See agent_common.core.graph_telemetry.
+        from agent_common.core.graph_telemetry import install_graph_lifecycle_telemetry
+        from ringier_a2a_sdk.telemetry.span_filter import install_span_export_filter
+
+        install_graph_lifecycle_telemetry()
+        # Keep per-ASGI-message and transaction-bookkeeping spans out of the
+        # export. Runs here, not at import: the injected auto-instrumentation
+        # must already have built the tracer provider we wrap.
+        install_span_export_filter()
 
         # Fail fast if the Model Gateway isn't configured: it's the sole path
         # for LLM traffic, so surface a missing LLM_GATEWAY_URL loudly at boot rather than
@@ -264,6 +279,13 @@ def create_app():
                 uri=HUMAN_IN_THE_LOOP_EXTENSION,
                 description="Emits structured interrupt requests requiring human approval before tool execution. "
                 "Response: send a DataPart with {decisions: [{type, ...}]}.",
+            ),
+            AgentExtension(
+                uri=CONVERSATION_ORIGIN_EXTENSION,
+                description="Accepts an origin descriptor on incoming messages: a DataPart with "
+                "{origin: {kind, ...}} describing prior work this conversation is about (e.g. a delivered "
+                "scheduled-run notification the user replies to). Consumed only on the first turn of a "
+                "conversation, where the kind's builder reconstructs the origin as context.",
             ),
         ],
     )
@@ -436,7 +458,8 @@ async def invalidate_discovery_cache(request: Request) -> JSONResponse:
     issuer configured, dev only) there is no token to check and the call is allowed.
 
     Multi-replica note: the cache is in-process, so one call flushes one replica. Behind a
-    load balancer the other replicas fall back to the TTL (kept short for this reason) or a
+    load balancer the other replicas fall back to the TTL (which bounds that lag; fan-out to
+    every replica is tracked in #171) or a
     ``ENTITLEMENT_POLICY_VERSION`` bump for a fleet-wide flush. A fan-out/pub-sub broadcast
     is the follow-up for instant fleet-wide invalidation.
     """

@@ -612,6 +612,34 @@ class TestScimGroups:
         member_ids = [m["value"] for m in data.get("members", [])]
         assert seed_user in member_ids
 
+    async def test_patch_group_add_suspended_member(self, scim_client, seed_group, seed_user, pg_session):
+        """The IdP owns the group graph: a user suspended here must still be mirrored into its groups."""
+        await pg_session.execute(
+            text("UPDATE users SET status = 'suspended' WHERE id = :id"),
+            {"id": seed_user},
+        )
+        await pg_session.commit()
+
+        response = await scim_client.patch(
+            f"/api/scim/v2/Groups/{seed_group}",
+            json={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [
+                    {
+                        "op": "add",
+                        "path": "members",
+                        "value": [{"value": seed_user}],
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+        row = await pg_session.execute(
+            text("SELECT COUNT(*) FROM user_group_members WHERE user_group_id = :gid AND user_id = :uid"),
+            {"gid": int(seed_group), "uid": seed_user},
+        )
+        assert row.scalar() == 1
+
     async def test_patch_group_remove_member(self, scim_client, seed_group, seed_user, pg_session):
         # First add the member
         await pg_session.execute(

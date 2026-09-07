@@ -870,6 +870,31 @@ class TestVersionSubmissionWorkflow:
         assert result.config_version.change_summary == summary
 
 
+class TestApproverEligibility:
+    """Test which users are offered a sub-agent's approval requests."""
+
+    @pytest.mark.asyncio
+    async def test_suspended_admin_is_not_an_eligible_approver(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User, test_admin_user_db: User
+    ):
+        """Test that suspending a user removes them from the approvers notified for a submission."""
+        from sqlalchemy import text
+
+        agent = await _create_sub_agent(pg_session, test_user_db, "Agent", sub_agent_service)
+
+        eligible = await sub_agent_service._get_eligible_approvers_for_sub_agent(pg_session, agent.id)
+        assert test_admin_user_db.id in eligible
+
+        await pg_session.execute(
+            text("UPDATE users SET status = 'suspended' WHERE id = :id"),
+            {"id": test_admin_user_db.id},
+        )
+        await pg_session.commit()
+
+        eligible = await sub_agent_service._get_eligible_approvers_for_sub_agent(pg_session, agent.id)
+        assert test_admin_user_db.id not in eligible
+
+
 class TestVersionApprovalWorkflow:
     """Test version approval and rejection workflows."""
 

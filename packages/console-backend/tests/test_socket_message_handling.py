@@ -1,5 +1,6 @@
 """Tests for Socket.IO message handling logic."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -261,6 +262,114 @@ async def test_first_artifact_chunk_is_accumulated_not_persisted_standalone():
         mock_sio.app_instance.state.messages_service.save_agent_response.assert_not_called()
 
 
+async def _drive_turn_end(event_kind: str):
+    """Run one turn-ending response through the real handler; return the spawned tasks.
+
+    The titling trigger has to fire whichever way a turn ends, so this drives both
+    shapes: a streamed artifact carrying last_chunk, and a completed status message
+    (the fallback-answer path, which saves through save_agent_response instead).
+    """
+    from a2a.types import (
+        Artifact,
+        Message,
+        Part,
+        StreamResponse,
+        Task,
+        TaskArtifactUpdateEvent,
+        TaskState,
+        TaskStatus,
+        TaskStatusUpdateEvent,
+    )
+
+    import app as app_module
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+    mock_sio.app_instance.state.messages_service.insert_message = AsyncMock(
+        return_value=MagicMock(message_id="m1")
+    )
+
+    if event_kind == "artifact":
+        # A streamed answer: the buffer is flushed and saved on last_chunk.
+        app_module._streaming_buffers["conv-title"] = "Its daily cap was lowered."
+        event = StreamResponse(
+            artifact_update=TaskArtifactUpdateEvent(
+                task_id="t1",
+                context_id="conv-title",
+                artifact=Artifact(artifact_id="a1", parts=[Part(text=" Done.")]),
+                append=True,
+                last_chunk=True,
+            )
+        )
+    else:
+        # A non-streamed final answer riding a completed status.
+        event = StreamResponse(
+            status_update=TaskStatusUpdateEvent(
+                task_id="t1",
+                context_id="conv-title",
+                status=TaskStatus(
+                    state=TaskState.TASK_STATE_COMPLETED,
+                    message=Message(message_id="m1", parts=[Part(text="The full answer.")]),
+                ),
+            )
+        )
+
+    spawned = []
+    # Stub the summarizer itself, so the assertion covers the whole path from the
+    # wire event to the text handed over — which is the point of the change: the
+    # answer comes from this event, not from a read-back of the messages table.
+    summarize = AsyncMock(return_value=False)
+    with (
+        patch("app.sio", mock_sio),
+        patch("app._spawn_background", side_effect=lambda coro, name: spawned.append((name, coro))),
+        patch("app.maybe_summarize_conversation", summarize),
+    ):
+        await app_module._process_a2a_response(
+            client_event=event,
+            sid="sid",
+            request_id="req-title",
+            context_id="conv-title",
+            user_id="user-1",
+        )
+        for _, coro in spawned:
+            await coro  # the detached task, run inline
+    app_module._streaming_buffers.pop("conv-title", None)
+    app_module._titling_in_flight.discard("conv-title")
+    answers = [call.kwargs["answer"] for call in summarize.await_args_list]
+    return spawned, answers
+
+
+@pytest.mark.asyncio
+async def test_titling_gets_the_streamed_answer_when_a_turn_ends():
+    spawned, titled = await _drive_turn_end("artifact")
+    assert [name for name, _ in spawned] == ["title:conv-title"]
+    # The flushed buffer, not a database read.
+    assert titled == ["Its daily cap was lowered. Done."]
+
+
+@pytest.mark.asyncio
+async def test_titling_gets_an_answer_that_rides_a_completed_status():
+    """The regression: this shape used to schedule nothing at all, because the
+    trigger sat inside the streamed-artifact branch."""
+    spawned, titled = await _drive_turn_end("status")
+    assert [name for name, _ in spawned] == ["title:conv-title"]
+    assert titled == ["The full answer."]
+
+
+@pytest.mark.asyncio
+async def test_titling_is_not_scheduled_twice_for_one_turn():
+    import app as app_module
+
+    app_module._titling_in_flight.add("conv-title")
+    try:
+        spawned, _ = await _drive_turn_end("artifact")
+        assert spawned == []
+    finally:
+        app_module._titling_in_flight.discard("conv-title")
+
+
 @pytest.mark.asyncio
 async def test_conversation_title_with_unicode_characters():
     """Test that conversation title handles Unicode characters correctly."""
@@ -397,8 +506,13 @@ async def test_subscribe_conversation_rejected_when_not_owner():
 @pytest.mark.asyncio
 async def test_pending_hitl_is_captured_on_input_required_and_cleared_on_completion():
     """A HITL prompt (input-required) is retained for mid-turn resume, then cleared once
-    the turn completes without asking — so a stale prompt isn't replayed forever."""
-    from a2a.types import StreamResponse, TaskStatus, TaskState, TaskStatusUpdateEvent
+    the turn completes without asking — so a stale prompt isn't replayed forever.
+
+    The prompt carries a message, as a real one always does: that message IS what a
+    reconnecting client replays. A message-less input-required is a different thing
+    entirely (an already-delivered answer) and is covered by its own test.
+    """
+    from a2a.types import Message, Part, StreamResponse, TaskStatus, TaskState, TaskStatusUpdateEvent
 
     import app
     from app import _process_a2a_response
@@ -424,7 +538,13 @@ async def test_pending_hitl_is_captured_on_input_required_and_cleared_on_complet
                     status_update=TaskStatusUpdateEvent(
                         task_id="t1",
                         context_id="conv-hitl",
-                        status=TaskStatus(state=TaskState.TASK_STATE_INPUT_REQUIRED),
+                        status=TaskStatus(
+                            state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                            message=Message(
+                                message_id="m-hitl",
+                                parts=[Part(text="Approve running create_campaign?")],
+                            ),
+                        ),
                     )
                 ),
                 sid="sid",
@@ -672,3 +792,319 @@ async def test_send_message_surfaces_db_errors_instead_of_conversation_not_found
     mock_a2a_client.send_message.assert_not_called()
     assert result is not None
     assert result.get("details", {}).get("reason") != "Conversation not found"
+
+
+def test_user_facing_send_error_never_leaks_transport_internals():
+    """A2A client failures reach end users of the EMBEDDED widget, so the message
+    must be presentable: transport internals (gRPC StreamReset dumps, raw httpx
+    reprs, upstream 503s) map to a friendly retry-later message; the raw string
+    stays available in error_details only."""
+    import httpx
+    from a2a.client import A2AClientError, A2AClientTimeoutError
+
+    from app import _user_facing_send_error
+
+    # Orchestrator died mid-stream (e.g. OOMKilled): SDK wraps an httpx transport
+    # error — the classic "<StreamReset ...>" dump.
+    reset = A2AClientError("Network communication error: <StreamReset stream_id:11, error_code:2>")
+    reset.__cause__ = httpx.RemoteProtocolError("<StreamReset stream_id:11, error_code:2>")
+    msg, retryable = _user_facing_send_error(reset)
+    assert "StreamReset" not in msg
+    assert retryable is True
+
+    # Orchestrator down while restarting: upstream 503.
+    resp_503 = httpx.Response(503, request=httpx.Request("POST", "http://agent"))
+    http_503 = A2AClientError("HTTP Error 503: Service Unavailable")
+    http_503.__cause__ = httpx.HTTPStatusError("503", request=resp_503.request, response=resp_503)
+    msg, retryable = _user_facing_send_error(http_503)
+    assert "503" not in msg
+    assert retryable is True
+
+    # Timeout: retryable.
+    msg, retryable = _user_facing_send_error(A2AClientTimeoutError("Client Request timed out"))
+    assert retryable is True
+
+    # Auth failure: not retryable, tells the user to sign in again.
+    resp_401 = httpx.Response(401, request=httpx.Request("POST", "http://agent"))
+    auth_err = A2AClientError("HTTP Error 401: Unauthorized")
+    auth_err.__cause__ = httpx.HTTPStatusError("401", request=resp_401.request, response=resp_401)
+    msg, retryable = _user_facing_send_error(auth_err)
+    assert retryable is False
+    assert "sign in" in msg
+
+
+async def _drive_streamed_answer_then_status(status_event_builder, *, context_id):
+    """Stream an answer to its last_chunk, then feed one terminal status event.
+
+    Returns (insert_calls, save_agent_response_mock). This is the real duplicate:
+    the assembled artifact is stored first, and whatever the terminal status then
+    carries decides whether the same answer lands a second time.
+    """
+    from a2a.types import Artifact, Part, StreamResponse, TaskArtifactUpdateEvent
+
+    import app as app_module
+
+    answer = "Hello! Would you like to set up this campaign, or something else?"
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+    mock_sio.app_instance.state.messages_service.insert_message = AsyncMock(
+        return_value=MagicMock(message_id="stored-1")
+    )
+
+    app_module._streaming_buffers[context_id] = answer
+    try:
+        with (
+            patch("app.sio", mock_sio),
+            patch("app._spawn_background", side_effect=lambda coro, name: coro.close()),
+        ):
+            # 1. last_chunk seals the artifact — the answer is stored here.
+            await app_module._process_a2a_response(
+                client_event=StreamResponse(
+                    artifact_update=TaskArtifactUpdateEvent(
+                        task_id="t1",
+                        context_id=context_id,
+                        artifact=Artifact(artifact_id="a1", parts=[Part(text="")]),
+                        append=True,
+                        last_chunk=True,
+                    )
+                ),
+                sid="sid",
+                request_id="req-1",
+                context_id=context_id,
+                user_id="user-1",
+            )
+            assert mock_sio.app_instance.state.messages_service.insert_message.await_count == 1
+
+            # 2. the terminal status that follows it on the wire.
+            await app_module._process_a2a_response(
+                client_event=status_event_builder(answer, context_id),
+                sid="sid",
+                request_id="req-2",
+                context_id=context_id,
+                user_id="user-1",
+            )
+    finally:
+        app_module._clear_turn_state(context_id)
+        app_module._titling_in_flight.discard(context_id)
+
+    return answer, mock_sio.app_instance.state.messages_service.save_agent_response
+
+
+def _plain_status(text, context_id, state):
+    from a2a.types import Message, Part, StreamResponse, TaskStatus, TaskStatusUpdateEvent
+
+    return StreamResponse(
+        status_update=TaskStatusUpdateEvent(
+            task_id="t1",
+            context_id=context_id,
+            status=TaskStatus(state=state, message=Message(message_id="m-term", parts=[Part(text=text)])),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_status_repeating_the_streamed_answer_is_not_stored_twice():
+    """The same answer must not land as two rows.
+
+    The A2A contract lets a terminal status carry the final answer, and an
+    input-required turn used to always re-send it. Both copies were stored under
+    different ids, so a reloaded conversation showed one answer as two bubbles
+    while the live view showed one. The repeat is dropped here.
+    """
+    from a2a.types import TaskState
+
+    _, save = await _drive_streamed_answer_then_status(
+        lambda text, cid: _plain_status(text, cid, TaskState.TASK_STATE_INPUT_REQUIRED),
+        context_id="conv-echo",
+    )
+    save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_terminal_status_that_extends_the_streamed_answer_is_stored():
+    """A longer terminal text is NEW content, not a repeat, and must be kept.
+
+    Only a text already covered by what was stored is dropped. Dropping one that
+    continues past it would silently lose the rest of the answer.
+    """
+    from a2a.types import TaskState
+
+    _, save = await _drive_streamed_answer_then_status(
+        lambda text, cid: _plain_status(
+            text + " I can also check a campaign's health.", cid, TaskState.TASK_STATE_INPUT_REQUIRED
+        ),
+        context_id="conv-extends",
+    )
+    save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_structured_hitl_prompt_is_stored_even_when_its_text_repeats_the_answer():
+    """An approval prompt is never a repeat, whatever its description says.
+
+    Its data parts and extension are what the widget is rebuilt from on reload, so
+    dropping the row would lose the approval card. Only a plain-text-only message
+    can be dropped as a duplicate.
+    """
+    from a2a.types import Message, Part, StreamResponse, TaskState, TaskStatus, TaskStatusUpdateEvent
+    from google.protobuf.json_format import ParseDict
+    from google.protobuf.struct_pb2 import Value
+
+    def build(text, cid):
+        msg = Message(
+            message_id="m-hitl",
+            parts=[
+                Part(text=text),
+                Part(data=ParseDict({"action_requests": [{"name": "create_campaign"}]}, Value())),
+            ],
+        )
+        msg.extensions.append("urn:nannos:a2a:human-in-the-loop:1.0")
+        return StreamResponse(
+            status_update=TaskStatusUpdateEvent(
+                task_id="t1",
+                context_id=cid,
+                status=TaskStatus(state=TaskState.TASK_STATE_INPUT_REQUIRED, message=msg),
+            )
+        )
+
+    _, save = await _drive_streamed_answer_then_status(build, context_id="conv-hitl")
+    save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bare_terminal_status_is_not_stored_as_a_placeholder():
+    """A message-less terminal status carries nothing worth storing.
+
+    Saving it anyway produced a junk row whose only text was
+    "Status: TASK_STATE_INPUT_REQUIRED at …" under a fresh uuid7 — not even
+    idempotent. An agent that already streamed its whole answer now ends the turn
+    on exactly such a bare status, so this covers the common case.
+    """
+    from a2a.types import StreamResponse, TaskState, TaskStatus, TaskStatusUpdateEvent
+
+    def build(_text, cid):
+        return StreamResponse(
+            status_update=TaskStatusUpdateEvent(
+                task_id="t1",
+                context_id=cid,
+                status=TaskStatus(state=TaskState.TASK_STATE_INPUT_REQUIRED),
+            )
+        )
+
+    _, save = await _drive_streamed_answer_then_status(build, context_id="conv-bare")
+    save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bare_input_required_is_not_captured_as_a_pending_prompt():
+    """A message-less input-required has no prompt to restore.
+
+    It means the agent already delivered its whole answer as a streamed artifact
+    and just ended the turn in that state. Capturing it would leave the
+    conversation reporting itself in-flight and hand a reconnecting client an
+    empty payload to replay as an approval card.
+    """
+    from a2a.types import Message, Part, StreamResponse, TaskState, TaskStatus, TaskStatusUpdateEvent
+
+    import app as app_module
+
+    async def drive(status, context_id):
+        mock_sio = MagicMock()
+        mock_sio.emit = AsyncMock()
+        mock_sio.app_instance = MagicMock()
+        mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+        mock_sio.app_instance.state.messages_service.insert_message = AsyncMock(
+            return_value=MagicMock(message_id="m1")
+        )
+        with (
+            patch("app.sio", mock_sio),
+            patch("app._spawn_background", side_effect=lambda coro, name: coro.close()),
+        ):
+            await app_module._process_a2a_response(
+                client_event=StreamResponse(
+                    status_update=TaskStatusUpdateEvent(task_id="t1", context_id=context_id, status=status)
+                ),
+                sid="sid",
+                request_id="req",
+                context_id=context_id,
+                user_id="user-1",
+            )
+
+    try:
+        await drive(TaskStatus(state=TaskState.TASK_STATE_INPUT_REQUIRED), "conv-bare-pending")
+        assert "conv-bare-pending" not in app_module._pending_interactions
+        assert not app_module._has_active_turn("conv-bare-pending")
+
+        # A real prompt still is captured.
+        await drive(
+            TaskStatus(
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                message=Message(message_id="m-p", parts=[Part(text="Approve this?")]),
+            ),
+            "conv-real-pending",
+        )
+        assert "conv-real-pending" in app_module._pending_interactions
+    finally:
+        app_module._clear_turn_state("conv-bare-pending")
+        app_module._clear_turn_state("conv-real-pending")
+        app_module._titling_in_flight.discard("conv-bare-pending")
+        app_module._titling_in_flight.discard("conv-real-pending")
+
+
+@pytest.mark.asyncio
+async def test_assembled_answer_row_stores_a_payload_the_wire_log_can_name():
+    """The assembled answer must not be the one row persisted without a payload.
+
+    No single wire frame carries it — each frame held a fragment — so it used to
+    go in with an empty `raw_payload`. The dev wire log then had nothing to read
+    and fell back to its catch-all "event", which is how this row and its echo
+    stopped reading as the duplicate pair they were.
+    """
+    from a2a.types import Artifact, Part, StreamResponse, TaskArtifactUpdateEvent
+
+    import app as app_module
+
+    answer = "Would you like to set up this campaign, or something else?"
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+    mock_sio.app_instance.state.messages_service.insert_message = AsyncMock(
+        return_value=MagicMock(message_id="stored-1")
+    )
+
+    app_module._streaming_buffers["conv-payload"] = answer
+    try:
+        with (
+            patch("app.sio", mock_sio),
+            patch("app._spawn_background", side_effect=lambda coro, name: coro.close()),
+        ):
+            await app_module._process_a2a_response(
+                client_event=StreamResponse(
+                    artifact_update=TaskArtifactUpdateEvent(
+                        task_id="t1",
+                        context_id="conv-payload",
+                        artifact=Artifact(artifact_id="a1", parts=[Part(text="")]),
+                        append=True,
+                        last_chunk=True,
+                    )
+                ),
+                sid="sid",
+                request_id="req",
+                context_id="conv-payload",
+                user_id="user-1",
+            )
+    finally:
+        app_module._clear_turn_state("conv-payload")
+        app_module._titling_in_flight.discard("conv-payload")
+
+    insert = mock_sio.app_instance.state.messages_service.insert_message.await_args
+    stored = json.loads(insert.kwargs["raw_payload"])
+    assert stored["kind"] == "artifact-update"
+    assert stored["artifact"]["parts"][0]["text"] == answer
+    # Marked, so nobody mistakes it for a frame the agent actually sent.
+    assert stored["assembledByConsole"] is True

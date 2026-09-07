@@ -19,7 +19,7 @@ from console_backend.routers import conversation_router
 app = FastAPI()
 app.include_router(conversation_router.router)
 # Ensure tests run with an authenticated user by default
-app.dependency_overrides[conversation_router.require_auth] = lambda: MagicMock(
+app.dependency_overrides[conversation_router.require_auth_or_bearer_token] = lambda: MagicMock(
     id="test-user-id", email="test@example.com", is_administrator=False
 )
 
@@ -139,7 +139,7 @@ def test_get_conversations_permission(mock_config):
 
     # Override the dependency to inject a specific user
     test_user = MagicMock(id="user-1", email="user1@test.com")
-    app.dependency_overrides[conversation_router.require_auth] = lambda: test_user
+    app.dependency_overrides[conversation_router.require_auth_or_bearer_token] = lambda: test_user
 
     try:
         # Requesting different user's conversations should be forbidden
@@ -152,6 +152,129 @@ def test_get_conversations_permission(mock_config):
         assert resp.status_code == 200
     finally:
         # Restore default override
-        app.dependency_overrides[conversation_router.require_auth] = lambda: MagicMock(
+        app.dependency_overrides[conversation_router.require_auth_or_bearer_token] = lambda: MagicMock(
             id="test-user-id", email="test@example.com", is_administrator=False
         )
+
+
+def _conv(conversation_id: str, metadata: dict) -> MagicMock:
+    return MagicMock(
+        conversation_id=conversation_id,
+        user_id="0490f8d6-67ee-439b-8178-6ed66a72b0c9",
+        started_at=datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc),
+        last_message_at=datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc),
+        status="active",
+        metadata=metadata,
+        title="t",
+        agent_url="",
+        sub_agent_config_hash=None,
+    )
+
+
+def test_get_conversations_embedded_scope_filter():
+    """embedded_sub_agent_id scopes the list to ONE application's conversations —
+    a host page must never receive console or other-app conversation titles."""
+    mock_service = MagicMock()
+    mock_service.get_conversations_by_user_id = AsyncMock(
+        return_value=[
+            _conv("app42", {"embedded_sub_agent_id": "42"}),
+            _conv("console-conv", {}),
+            _conv("app7", {"embedded_sub_agent_id": "7"}),
+        ]
+    )
+    app.state.conversation_service = mock_service
+
+    resp = client.get(
+        "/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9&embedded_sub_agent_id=42"
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [c["conversation_id"] for c in data["conversations"]] == ["app42"]
+    assert data["count"] == 1
+
+
+def test_get_conversations_unfiltered_includes_embedded():
+    """Without the param (console main list) embedded conversations stay visible
+    (they render with a badge and read-only input client-side)."""
+    mock_service = MagicMock()
+    mock_service.get_conversations_by_user_id = AsyncMock(
+        return_value=[
+            _conv("app42", {"embedded_sub_agent_id": "42"}),
+            _conv("console-conv", {}),
+        ]
+    )
+    app.state.conversation_service = mock_service
+
+    resp = client.get("/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9")
+
+    assert resp.status_code == 200
+    assert {c["conversation_id"] for c in resp.json()["conversations"]} == {"app42", "console-conv"}
+
+
+def test_delete_conversation_soft_deletes_and_returns_204():
+    """DELETE archives the conversation — the row and its messages survive, it
+    just stops being listed."""
+    mock_service = MagicMock()
+    mock_service.archive_conversation = AsyncMock(return_value=True)
+    app.state.conversation_service = mock_service
+
+    resp = client.delete("/api/v1/conversations/conv1")
+
+    assert resp.status_code == 204
+    mock_service.archive_conversation.assert_awaited_once_with(
+        conversation_id="conv1", user_id="test-user-id"
+    )
+
+
+def test_delete_conversation_missing_or_not_yours_is_404():
+    """Ownership is enforced inside the UPDATE, so someone else's conversation
+    is indistinguishable from a missing one — nothing leaks about whose it is."""
+    mock_service = MagicMock()
+    mock_service.archive_conversation = AsyncMock(return_value=False)
+    app.state.conversation_service = mock_service
+
+    resp = client.delete("/api/v1/conversations/someone-elses")
+
+    assert resp.status_code == 404
+
+
+def test_rename_conversation_returns_204():
+    """PATCH stores the new name; the marker that protects it lives in the
+    service, not here."""
+    mock_service = MagicMock()
+    mock_service.rename_conversation = AsyncMock(return_value=True)
+    app.state.conversation_service = mock_service
+
+    resp = client.patch("/api/v1/conversations/conv1", json={"title": "  Q3   pacing  "})
+
+    assert resp.status_code == 204
+    # Whitespace is collapsed before it reaches the database.
+    mock_service.rename_conversation.assert_awaited_once_with(
+        conversation_id="conv1", user_id="test-user-id", title="Q3 pacing"
+    )
+
+
+def test_rename_conversation_missing_or_not_yours_is_404():
+    """Same as delete: ownership is enforced in the UPDATE, so nothing leaks."""
+    mock_service = MagicMock()
+    mock_service.rename_conversation = AsyncMock(return_value=False)
+    app.state.conversation_service = mock_service
+
+    resp = client.patch("/api/v1/conversations/someone-elses", json={"title": "Mine now"})
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("title", ["", "   ", "x" * 61])
+def test_rename_conversation_rejects_unusable_names(title):
+    """A blank name has no way back to the generated one, and an essay does not
+    fit a list row — both are refused before the database sees them."""
+    mock_service = MagicMock()
+    mock_service.rename_conversation = AsyncMock(return_value=True)
+    app.state.conversation_service = mock_service
+
+    resp = client.patch("/api/v1/conversations/conv1", json={"title": title})
+
+    assert resp.status_code == 422
+    mock_service.rename_conversation.assert_not_awaited()

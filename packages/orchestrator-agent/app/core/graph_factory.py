@@ -29,6 +29,7 @@ from agent_common.core.graph_utils import (
     build_code_interpreter_middlewares,
     code_interpreter_ptc_enabled,
     create_indexing_backend_factory,
+    deep_agent_builtin_tools,
 )
 from agent_common.core.model_factory import (
     _has_aws_credentials,
@@ -36,6 +37,7 @@ from agent_common.core.model_factory import (
     is_gemini_model,
     require_default_model,
 )
+from agent_common.core.notify_user_tool import create_notify_user_tool
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
@@ -75,18 +77,36 @@ from .time_tools import create_time_tool
 logger = logging.getLogger(__name__)
 
 
-def _create_hitl_middleware() -> ConditionalHumanInTheLoopMiddleware:
+def _create_hitl_middleware(
+    platform_tools: list[BaseTool] | None = None, *, exhaustive: bool = False
+) -> ConditionalHumanInTheLoopMiddleware:
     """Create a ConditionalHumanInTheLoopMiddleware instance for dynamic risk scoring.
 
     All tool guarding is now handled by the dynamic risk scoring system:
     - Static guards (self-improvement, privacy, bug reports) are stored in the
       tool_risk_scores DB table with base_score=1.0 (always interrupt).
     - Other tools are scored by LLM at runtime and interrupt if score >= threshold.
+
+    *platform_tools* are every tool the graph can dispatch that is NOT in the
+    per-user ``tool_registry``: the orchestrator's own static tools (time,
+    presigned-url, copy_file, notify_user, ``FinalResponseSchema``) plus the
+    deep-agent builtins ``create_deep_agent`` registers itself (``write_todos``
+    and the filesystem tools). Without them the gate cannot fetch a callable
+    tool, and a call it cannot fetch is deliberately never classified (see
+    ``score_tool_risk``).
+
+    *exhaustive* asserts that the list is complete, which is what lets the gate
+    answer an unresolvable name immediately instead of scoring it — no approval
+    card, and no summary LLM call, for a tool that cannot dispatch. Only pass it
+    with a list that genuinely covers everything: ``task`` and ``eval`` are exempt
+    (the gate skips both), and the registry is read from the runtime context.
     """
     return ConditionalHumanInTheLoopMiddleware(
         interrupt_on=None,
         risk_scorer=score_tool_risk,
         default_risk_threshold=0.8,
+        platform_tools={t.name: t for t in (platform_tools or [])} or None,
+        platform_tools_are_exhaustive=exhaustive,
     )
 
 
@@ -650,7 +670,18 @@ class GraphFactory:
         # ConditionalHumanInTheLoopMiddleware: uses interrupt() to pause and ask for user
         # confirmation before executing guarded tools (self-improvement, privacy, bug reports).
         # Supports argument-based conditions (e.g., docstore_search only when include_personal=True).
-        hitl_middleware = _create_hitl_middleware()
+        # Everything ToolNode can dispatch outside the per-user registry: our own
+        # static tools plus the builtins create_deep_agent installs (write_todos and
+        # the filesystem tools — their instances only exist inside that call, so they
+        # are re-derived here for inspection). With the set complete, the gate can
+        # answer a name that resolves to nothing instead of scoring it.
+        hitl_middleware = _create_hitl_middleware(
+            [
+                *self.get_static_tools(with_response_tool=True, with_notify_user=True),
+                *deep_agent_builtin_tools(self.backend_factory),
+            ],
+            exhaustive=True,
+        )
 
         # CodeInterpreterMiddleware exposes a wasm-sandboxed ``eval`` JS REPL.
         # The orchestrator passes ``broaden_exposure=False``: that path harvests
@@ -731,12 +762,17 @@ class GraphFactory:
         ]
         return middleware_stack
 
-    def get_static_tools(self, with_response_tool: bool = False) -> list[BaseTool]:
+    def get_static_tools(self, with_response_tool: bool = False, with_notify_user: bool = False) -> list[BaseTool]:
         """Get static tools for the given model type.
 
         Returns:
             List of static tools (cached). When with_response_tool=True, returns a
             new list with FinalResponseSchema appended (does not pollute the cache).
+            When with_notify_user=True, the mid-turn note tool is appended the same
+            way — it is deliberately NOT part of the cached list, because that list
+            also feeds ``extra_static_ptc_tools`` (tools reached through ``eval``),
+            and a progress note must stay natively bound so the model can emit it in
+            the same step as its first real tool call.
         """
         if not self._static_tools_cache:
             static_tools: list[BaseTool] = []
@@ -753,10 +789,13 @@ class GraphFactory:
 
             self._static_tools_cache = static_tools
 
-        # Return a copy with FinalResponseSchema appended if needed,
-        # to avoid polluting the shared cache for other models
+        # Return a copy with the per-call extras appended, to avoid polluting the
+        # shared cache for other models / for the PTC exposure list.
+        extras: list[BaseTool] = []
+        if with_notify_user:
+            extras.append(create_notify_user_tool())
         if with_response_tool:
-            return list(self._static_tools_cache) + [
+            extras.append(
                 StructuredTool.from_function(
                     func=lambda **kwargs: FinalResponseSchema(**kwargs),
                     name="FinalResponseSchema",
@@ -769,8 +808,10 @@ class GraphFactory:
                     args_schema=FinalResponseSchema,
                     return_direct=True,
                 )
-            ]
+            )
 
+        if extras:
+            return list(self._static_tools_cache) + extras
         return self._static_tools_cache
 
     def _create_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
@@ -840,7 +881,10 @@ class GraphFactory:
             has_builtin_tools=is_gemini,
         )
         middleware = self._create_middleware_stack(model=model, is_gemini=is_gemini)
-        static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
+        # with_notify_user: the mid-turn note tool is bound natively here (and kept out
+        # of the PTC ``eval`` exposure list above) so the model can call it alongside its
+        # first real tool call without an extra round trip.
+        static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool, with_notify_user=True)
 
         system_prompt = (
             self.config.SYSTEM_INSTRUCTION_SHORT

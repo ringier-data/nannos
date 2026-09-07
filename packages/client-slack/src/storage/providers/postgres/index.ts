@@ -6,3 +6,4 @@ export { PgInFlightTaskStore, type InFlightTask } from './pgInFlightTaskStore.js
 export { PgOAuthStateStore, type OAuthStateData } from './pgOAuthStateStore.js';
 export { PgBotInstallationStore } from './pgBotInstallationStore.js';
 export { PgAdminSessionStore } from './pgAdminSessionStore.js';
+export { PgScheduledRunStore } from './pgScheduledRunStore.js';

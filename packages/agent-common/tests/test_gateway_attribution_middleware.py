@@ -203,3 +203,38 @@ def test_extra_middlewares_do_not_displace_attribution_outermost(monkeypatch):
     mw = captured["middleware"]
     assert isinstance(mw[0], GatewayAttributionMiddleware), "attribution must stay outermost"
     assert extra in mw and mw.index(extra) > 0, "extra middleware must sit inside the attribution scope"
+
+
+class TestRunConfigAttributionScope:
+    """Side-channel model calls (HITL summaries, risk scoring) must self-attribute
+    from the run config's tags too, since they bypass the middleware stack."""
+
+    async def test_sets_from_tags_inside_runnable_context_and_restores(self):
+        from langchain_core.runnables import RunnableLambda
+
+        from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
+
+        seen: dict = {}
+
+        def side_channel(_: object) -> None:
+            with run_config_attribution_scope():
+                seen["inside"] = current_sub_agent_id.get()
+            seen["after"] = current_sub_agent_id.get()
+
+        prev = current_sub_agent_id.set(None)
+        try:
+            await RunnableLambda(side_channel).ainvoke(None, config={"tags": ["sub_agent:42", "user_sub:u1"]})
+            assert seen == {"inside": 42, "after": None}
+        finally:
+            current_sub_agent_id.reset(prev)
+
+    def test_outside_runnable_context_is_a_no_op(self):
+        from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
+
+        prev = current_sub_agent_id.set(7)
+        try:
+            with run_config_attribution_scope():
+                assert current_sub_agent_id.get() == 7
+            assert current_sub_agent_id.get() == 7
+        finally:
+            current_sub_agent_id.reset(prev)

@@ -116,7 +116,7 @@ class GraphRuntimeContext:
     language: str = field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))
     """User's preferred language for responses (ISO 639-1 code)."""
 
-    timezone: str = field(default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"))
+    timezone: str = field(default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "UTC"))
     """User's preferred timezone (IANA timezone name like 'America/New_York', 'Europe/Berlin')."""
 
     message_formatting: str = "markdown"
@@ -139,10 +139,21 @@ class GraphRuntimeContext:
 
     custom_prompt: Optional[str] = None
     """User's custom prompt addendum.
-    
+
     If set, this text is appended to the system prompt as additional instructions.
     Allows users to customize agent behavior with personal preferences or guidelines.
     """
+
+    client_objects: Optional[list] = None
+    """Per-turn manifest of ontology objects registered on the user's screen
+    (Embedded Nannos). Entries: {type, id, scope, label?, fields?}. When present,
+    the `client_action` tool is registered and a <client_objects> section is
+    injected into the system prompt."""
+
+    page_context: Optional[dict] = None
+    """The page the user is currently on in the embedding app ({key, label?,
+    description?, data?}), published on navigation and sent with every turn.
+    Rendered as a <current_page> section next to <client_objects>."""
 
     groups: list[str] = field(default_factory=list)
     """User's group memberships (Keycloak group paths).
@@ -265,7 +276,7 @@ class UserConfig(BaseModel):
         default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"), description="User's preferred language"
     )
     timezone: str = Field(
-        default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"),
+        default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "UTC"),
         description="User's preferred timezone (IANA timezone name)",
     )
     model: Optional[str] = Field(
@@ -284,6 +295,14 @@ class UserConfig(BaseModel):
         default=None,
         description="User's custom prompt addendum to append to system prompt",
     )
+    client_objects: Optional[list] = Field(
+        default=None,
+        description="Per-turn manifest of on-screen ontology objects from the embedding client (Embedded Nannos)",
+    )
+    page_context: Optional[dict] = Field(
+        default=None,
+        description="The page the user is currently on in the embedding client ({key, label?, description?, data?})",
+    )
     sub_agent_config_hash: Optional[str] = Field(
         default=None,
         description="Sub-agent config hash for console testing mode (single sub-agent isolation)",
@@ -301,6 +320,11 @@ class UserConfig(BaseModel):
         description="Discovered remote A2A sub-agents (CompiledSubAgent TypedDicts with name, description, runnable)",
     )
     tools: Optional[list] = Field(default=None, description="Discovered MCP tools")
+    token_provider: Optional[Any] = Field(
+        default=None,
+        description="Per-user UserTokenProvider that mints MCP bearer tokens at call time (shared with sub-agents)",
+        exclude=True,
+    )
     local_subagents: Optional[list[LocalSubAgentConfig]] = Field(
         default=None,
         description="User-configured local sub-agents",
@@ -377,11 +401,13 @@ class AgentSettings:
     # No env var or hardcoded alias: models are registered at runtime.
 
     # Cache configuration.
-    # Per-user discovery + registry cache TTL (seconds). Kept well below a typical realm
-    # access-token lifespan so a cache entry can never outlive the exchanged gatana/console
-    # tokens embedded in the discovered tools (see discovery_cache "Token-expiry safety"),
-    # and so an entitlement *revocation* that only reaches one replica (the invalidation POST
-    # is in-process / single-replica) self-heals fleet-wide within the TTL.
+    # Per-user discovery + registry cache TTL (seconds). Discovered tools carry no credential
+    # (bearers are minted at call time by the per-user token provider), so this is purely a
+    # freshness bound: how long a catalogue change made *outside* the console (on the MCP
+    # gateway itself) may go unnoticed, and how long an entitlement change may lag on replicas
+    # the console's invalidation POST did not reach (it is in-process, one replica). Changes
+    # made through the console invalidate the receiving replica immediately. Entries are
+    # additionally bounded by the user token's expiry.
     AGENT_DISCOVERY_CACHE_TTL = _int_env("AGENT_DISCOVERY_CACHE_TTL", 60)
     # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env)
     # or call discovery_cache.invalidate_all() when a group→server/tool access policy
@@ -402,8 +428,34 @@ class AgentSettings:
     DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "dev-nannos-infrastructure-agents-files")
 
     # MCP gateway configuration
-    MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
+    MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://nannos.gatana.nannos.ringier.ch/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
+
+    # How many MCP servers may be queried for their tool catalogue at the same time
+    # during a cold discovery.  Discovery opens one connection per server, so an
+    # unbounded fan-out holds every server's session, response body, parsed schema
+    # and resulting tool objects in memory simultaneously — with ~31 servers on prod
+    # that spike OOMKilled the pod twice on 2026-08-15, each time within seconds of a
+    # single request.  Bounding it trades a little cold-start latency for a peak that
+    # no longer scales with the size of the gateway catalogue.
+    MCP_DISCOVERY_CONCURRENCY = max(1, _int_env("MCP_DISCOVERY_CONCURRENCY", 5))
+
+    # Tool-catalogue ingest (agent_common.core.tool_catalogue / catalogue_ingest).
+    #
+    # The catalogue is always held as raw bytes + cards; this only selects how it is
+    # *fetched*. When true (default), discovery lists each server with a single stateless
+    # JSON-RPC ``tools/list`` POST — the standard MCP method, same URL and token as the
+    # SDK path, so the gateway applies per-user entitlements/overrides exactly as usual —
+    # but without the SDK handshake or its pydantic parse (~0.5 s instead of ~3 s for ~30
+    # servers). Whether an endpoint accepts a stateless request is probed once per URL;
+    # refusal or any other failure falls back to the SDK session. Set false to force the
+    # SDK session everywhere (bisecting lever).
+    MCP_CATALOGUE_STATELESS_LIST = os.getenv("MCP_CATALOGUE_STATELESS_LIST", "true").strip().lower() in {"1", "true", "yes"}
+
+    # MCP bearer tokens are minted at call time by a per-user provider and reused only while at
+    # least this many seconds of validity remain (bounded by the user token's exp). Raise it
+    # above the exchanged tokens' lifetime to force an exchange on every call (QA lever).
+    MCP_TOKEN_LEEWAY_SECONDS = max(0, _int_env("MCP_TOKEN_LEEWAY_SECONDS", 90))
 
     # Gatana compression: slug of the MCP server that provides compression utilities.
     # When tools from compression-enabled servers are in use, all tools from this
@@ -413,6 +465,14 @@ class AgentSettings:
     # Console backend URL — used to subscribe to console's MCP endpoint
     CONSOLE_BACKEND_URL: str | None = os.getenv("CONSOLE_BACKEND_URL", None)
     CONSOLE_BACKEND_CLIENT_ID: str = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")
+
+    # Direct MCP servers (no gateway/token-exchange): JSON array of
+    # {"slug": str, "url": str, "headers": {str: str}?}. Intended for local dev
+    # and hosts not fronted by Gatana (e.g. an embedding application's MCP
+    # server, Embedded Nannos act-on-behalf tier). Headers typically carry a
+    # static bearer token; per-user token exchange remains the production path
+    # (ADR-0002).
+    MCP_DIRECT_SERVERS: str = os.getenv("MCP_DIRECT_SERVERS", "")
 
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -437,6 +497,24 @@ class AgentSettings:
         "Never do the user's domain work yourself — not from your own knowledge and not with your own tools. "
         "Delegate it via 'task'.\n"
         "</how_you_act>\n"
+        "\n"
+        "<keep_the_user_informed>\n"
+        "Planning and delegating takes time, and until you answer the user sees only tool labels — "
+        "they cannot tell whether you understood them. Use the 'notify_user' tool to say so in your own words. "
+        "It shows one or two short sentences and the turn CONTINUES: it does not end the turn, does not ask "
+        "anything, and returns nothing you need.\n"
+        "- Call it ONLY if user made a request or asked you to do something. If user only says 'hello', do not call it.\n"
+        "- Call it ONCE at the start of any request that needs delegation or several steps: what you understood, "
+        "and what you will do first. Write it in the user's language.\n"
+        "- Emit that call in the SAME step as your first 'task' or tool call (both in one step, in parallel), so "
+        "the work does not wait on it.\n"
+        "- Call it again before a step that will take a while, and again when your plan changes — a sub-agent "
+        "failed, you switch to another one, the request turns out to be something else.\n"
+        "- Never put the answer in a note: the answer belongs in the structured response ONLY, and a note that "
+        "carries it shows the same text twice.\n"
+        "- Never ask a question in a note (nothing comes back). A question means task_state=input_required.\n"
+        "- Keep notes few and never repeat the same text. Skip them entirely for a request you can answer at once.\n"
+        "</keep_the_user_informed>\n"
         "\n"
         "<delegation_rules>\n"
         "You are primarily a planner and delegator, not a domain executor. Plan the work, then delegate it.\n"
@@ -489,6 +567,14 @@ class AgentSettings:
         '- "input_required": The goal was NOT achieved. Keep todo as in_progress. Your task_state should be input_required.\n'
         '- "auth_required": The goal was NOT achieved. Keep todo as in_progress. Your task_state should be input_required.\n'
         '- "failed": Mark the todo as failed.\n'
+        "\n"
+        "A sub-agent's report about a tool IT tried to call is the authoritative account of that "
+        "attempt. You cannot see a sub-agent's tools, and your own tool list is not a catalogue of "
+        "what exists anywhere. So NEVER tell the user that a tool is missing, unavailable, or absent "
+        "from this environment because you could not find it yourself — that contradicts the agent "
+        "that just called it. Relay what the sub-agent reported, including WHY the call did not run "
+        "(the user did not approve it; the user did not authorize it; it failed), and what the user "
+        "can do next — and if they asked a question about the call, answer that question.\n"
         "\n"
         "If a sub-agent is blocked or fails:\n"
         "- You MAY try a DIFFERENT SUB-AGENT that might be better suited for the task (still delegation).\n"
@@ -619,7 +705,9 @@ class AgentSettings:
         "\n"
         "WORKFLOW:\n"
         "1. Analyze the user's request\n"
-        "2. Create a todo list of tasks\n"
+        "2. Create a todo list of tasks — and unless you can answer at once, call 'notify_user' with one short "
+        "sentence saying what you understood and what you will do first (same step as your first 'task' call; "
+        "it does NOT end the turn, and never carries the answer or a question)\n"
         "3. Delegate each task to a sub-agent using the 'task' tool\n"
         "4. Update todo status: in_progress → completed/failed\n"
         "5. Return final response with task_state: completed|working|input_required|failed\n"
@@ -653,7 +741,8 @@ class AgentSettings:
     # when PTC is off and the tools are natively bound.
     PTC_ORCHESTRATOR_GUIDANCE = (
         "\n\n<code_interpreter>\n"
-        "`eval` is how you DO things; `task` / `write_todos` / the response tool are how you STEER the run. "
+        "`eval` is how you DO things; `task` / `write_todos` / `notify_user` / the response tool are how you "
+        "STEER the run. "
         "Keep them separate:\n"
         "- Your working tools — the ones that perform an action and return a result (current time, file presigning, "
         "skill/playbook and console management, filesystem, and any enabled MCP tools) — are exposed as JavaScript "
@@ -661,10 +750,14 @@ class AgentSettings:
         "JavaScript in `eval` that calls it. Use `eval` ONLY to invoke these tools — never to compute or otherwise "
         "solve the user's domain task yourself.\n"
         "- Your control primitives are NOT in `eval`; call them directly as normal tools: `task` to delegate work to "
-        "a sub-agent, `write_todos` to record/update your plan, and the response tool to deliver the final answer. "
+        "a sub-agent, `write_todos` to record/update your plan, `notify_user` to tell the user mid-turn what you are "
+        "doing, and the response tool to deliver the final answer. "
         "These steer the run (they update state / dispatch / end the turn) and do nothing useful if called from "
         "inside `eval` — never wrap them in `tools.*`.\n"
         "Delegate all domain work via `task`.\n"
+        "`tools.*` is YOUR namespace, not an inventory of what exists: every sub-agent has its own "
+        "tools, and none of them appear there. Never enumerate it to decide whether some tool exists, "
+        "and never report a tool as unavailable on that basis.\n"
         "</code_interpreter>"
     )
 

@@ -56,6 +56,12 @@ Add a case entry declaring the package type (`python` or `node`):
     # python packages: agent-creator|agent-runner|orchestrator-agent|console-backend|ringier-a2a-sdk|<new-package>
 ```
 
+#### d. `NPM_PACKAGES` variable — only for packages published to the npm registry
+
+Libraries released as npm packages instead of Docker images (like `embed-sdk`)
+go in `NPM_PACKAGES`. The release then runs `npm publish` for them; the
+package.json must not be `"private": true` and should carry a `publishConfig`.
+
 ### 3. Update `justfile`
 
 Only required if the package has a **Dockerfile** (is buildable/deployable):

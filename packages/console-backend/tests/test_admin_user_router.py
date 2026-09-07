@@ -155,6 +155,88 @@ class TestAdminUserPatchEndpoint:
 
 
 @pytest.mark.asyncio
+class TestAdminUserGroupsEndpoint:
+    """Test PUT /admin/users/{id}/groups."""
+
+    async def test_set_groups_refuses_suspended_user_without_removing_anything(
+        self, admin_client, inserted_user, non_admin_user_model, pg_session
+    ):
+        """A suspended user cannot be added to a group, and the refusal happens before any removal."""
+        keep_id, add_id = (
+            await pg_session.execute(
+                text("""
+                INSERT INTO user_groups (name, description, created_at, updated_at)
+                VALUES ('Current Group', '', NOW(), NOW()), ('New Group', '', NOW(), NOW())
+                RETURNING id
+                """)
+            )
+        ).scalars().all()
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+                VALUES (:group_id, :user_id, 'read', NOW())
+            """),
+            {"group_id": keep_id, "user_id": non_admin_user_model.id},
+        )
+        await pg_session.execute(
+            text("UPDATE users SET status = 'suspended' WHERE id = :id"),
+            {"id": non_admin_user_model.id},
+        )
+        await pg_session.commit()
+
+        response = await admin_client.put(
+            f"/api/v1/admin/users/{non_admin_user_model.id}/groups",
+            json={"group_ids": [add_id], "operation": "set"},
+        )
+        assert response.status_code == 409
+
+        # The membership it would have removed on the way is still there
+        remaining = await pg_session.execute(
+            text("SELECT user_group_id FROM user_group_members WHERE user_id = :uid"),
+            {"uid": non_admin_user_model.id},
+        )
+        assert remaining.scalars().all() == [keep_id]
+
+    async def test_remove_groups_still_works_for_suspended_user(
+        self, admin_client, inserted_user, non_admin_user_model, pg_session
+    ):
+        """Suspension blocks additions only — an admin can still take groups away."""
+        group_id = (
+            await pg_session.execute(
+                text("""
+                INSERT INTO user_groups (name, description, created_at, updated_at)
+                VALUES ('Leaving Group', '', NOW(), NOW())
+                RETURNING id
+                """)
+            )
+        ).scalar_one()
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+                VALUES (:group_id, :user_id, 'read', NOW())
+            """),
+            {"group_id": group_id, "user_id": non_admin_user_model.id},
+        )
+        await pg_session.execute(
+            text("UPDATE users SET status = 'suspended' WHERE id = :id"),
+            {"id": non_admin_user_model.id},
+        )
+        await pg_session.commit()
+
+        response = await admin_client.put(
+            f"/api/v1/admin/users/{non_admin_user_model.id}/groups",
+            json={"group_ids": [group_id], "operation": "remove"},
+        )
+        assert response.status_code == 200
+
+        remaining = await pg_session.execute(
+            text("SELECT COUNT(*) FROM user_group_members WHERE user_id = :uid"),
+            {"uid": non_admin_user_model.id},
+        )
+        assert remaining.scalar() == 0
+
+
+@pytest.mark.asyncio
 class TestAdminUserPatchAuthorization:
     """Test authorization for PATCH endpoint."""
 

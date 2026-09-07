@@ -8,12 +8,22 @@ from typing import Any
 
 import httpx
 from agent_common.a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
+from agent_common.core.tool_catalogue import sanitize_tool_name
 from agent_common.models.base import ThinkingLevel
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .prompt_placeholders import resolve_prompt_placeholders
 
 logger = logging.getLogger(__name__)
+
+# A stored whitelist names tools as console-backend's raw ``tools/list`` did, which may
+# differ from the name the catalogue exposes them under (see ``sanitize_tool_name``).
+# Normalising the two models that carry a whitelist into this process — user settings and
+# a sub-agent's config version — is what lets every consumer downstream (orchestrator
+# binding, PTC exposure, sub-agent discovery) compare exposed names and nothing else.
+# Assigning it in each model is what registers it: pydantic collects validators from the
+# class namespace, so the attribute is never read by name but must exist.
+_sanitize_whitelist = field_validator("mcp_tools")(lambda cls, v: [sanitize_tool_name(n) for n in v] if v else v)
 
 # System prompt addendum for playground mode
 PLAYGROUND_MODE_ADDENDUM = """
@@ -45,6 +55,8 @@ class UserSettings(BaseModel):
     thinking_level: ThinkingLevel | None = None
     tool_bypass_rules: dict[str, Any] = Field(default_factory=dict)
 
+    _sanitize_mcp_tools = _sanitize_whitelist
+
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}
 
@@ -69,6 +81,8 @@ class SubAgentConfigVersion(BaseModel):
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] = []  # MCP tool names enabled for this version
+
+    _sanitize_mcp_tools = _sanitize_whitelist
 
     # Foundry agent configuration
     foundry_hostname: str | None = None
@@ -383,11 +397,6 @@ class RegistryService:
             if not sa.config_version:
                 continue
 
-            # Automated sub-agents are for system scheduling only — never exposed to users
-            if sa.type == "automated":
-                logger.debug(f"Skipping automated sub-agent '{sa.name}' (not for interactive use)")
-                continue
-
             cv = sa.config_version
             if sa.type == "remote":
                 # Remote A2A agents have agent_url at root level
@@ -399,8 +408,13 @@ class RegistryService:
                         "name": sa.name,
                         "description": cv.description,
                     }
-            elif sa.type == "local":
-                # Local agents have system_prompt and mcp_tools at root level
+            elif sa.type in ("local", "automated"):
+                # Local agents have system_prompt and mcp_tools at root level.
+                # Automated agents share the exact config shape (agent-runner
+                # executes both through the same path) but are for system
+                # scheduling: they carry interactive=False and are registered
+                # into a conversation only when it adopted one of their
+                # scheduled runs (conversation-origin extension).
                 system_prompt = resolve_prompt_placeholders(cv.system_prompt or "")
                 mcp_tools = cv.mcp_tools or []
 
@@ -418,6 +432,7 @@ class RegistryService:
                         LocalLangGraphSubAgentConfig(
                             name=sa.name,
                             description=cv.description or f"Local agent: {sa.name}",
+                            interactive=sa.type == "local",
                             system_prompt=system_prompt,
                             mcp_tools=mcp_tools if mcp_tools else None,
                             model_name=effective_model,

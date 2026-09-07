@@ -4,6 +4,8 @@ from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.handlers import StreamHandler, current_turn_messages
+from app.middleware.dynamic_tool_dispatch import CONCURRENT_SAME_AGENT_MESSAGE
+from app.middleware.task_refusal import CONCURRENT_TASK_REFUSAL_KEY
 
 
 class TestBuildAuthResponse:
@@ -186,13 +188,18 @@ class TestParseAgentResponse:
         assert response.content == "Answer 2"
 
     def test_parse_agent_response_with_empty_content(self):
-        """Test parsing AI message with empty content."""
+        """An AI turn with nothing in it is not a completed answer.
+
+        It used to report `completed` with empty content, which the executor then
+        filled in with "Task completed successfully".
+        """
         final_state = {"messages": [HumanMessage(content="Test"), AIMessage(content="")]}
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.TASK_STATE_COMPLETED
-        assert response.content == ""
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert response.content
+        assert response.metadata and response.metadata.get("empty_response") is True
 
     def test_parse_agent_response_truncated_turn_not_faked_as_completed(self):
         """A turn cut off mid-generation (finish_reason=length, no tool call, no structured
@@ -211,19 +218,43 @@ class TestParseAgentResponse:
         assert response.content != "Task completed successfully"
         assert response.metadata and response.metadata.get("truncated") is True
 
-    def test_parse_agent_response_empty_but_not_truncated_stays_completed(self):
-        """An empty completion that stopped normally (finish_reason=stop) is a real empty
-        answer, not a truncation — it stays completed."""
+    def test_parse_agent_response_reasoning_only_turn_is_not_a_success(self):
+        """A clean stop that spent the whole turn thinking produced no answer.
+
+        Observed with 69/69 output tokens billed as reasoning: the turn never hit the
+        budget, so the truncation signature does not apply, and it reached the user as
+        "Task completed successfully" with nothing above it.
+        """
         final_state = {
             "messages": [
                 HumanMessage(content="Test"),
-                AIMessage(content="", response_metadata={"finish_reason": "stop"}),
+                AIMessage(
+                    content="",
+                    additional_kwargs={"reasoning_content": "**Confirming GitHub User**…"},
+                    response_metadata={"finish_reason": "stop"},
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert response.content != "Task completed successfully"
+        assert response.metadata and response.metadata.get("empty_response") is True
+
+    def test_parse_agent_response_a_turn_with_text_is_still_completed(self):
+        """Only a turn with nothing to show is flagged; a real answer is untouched."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Test"),
+                AIMessage(content="here is the answer", response_metadata={"finish_reason": "stop"}),
             ]
         }
 
         response = StreamHandler.parse_agent_response(final_state)
 
         assert response.state == TaskState.TASK_STATE_COMPLETED
+        assert response.content == "here is the answer"
 
 
 class TestStreamHandlerEdgeCases:
@@ -960,6 +991,109 @@ class TestIncludeSubagentOutput:
         assert "Here's the joke the smart-joke-responder created" in response.content
         assert "Why did the model cross the road?" in response.content
         assert "\n\n" in response.content
+
+    def test_concurrency_refusal_is_not_shown_as_the_subagent_answer(self):
+        """A refused same-agent sibling must not become the user's reply.
+
+        The refusal is a ``task`` ToolMessage and lands AFTER the owner's (parallel
+        siblings are written in ``tool_calls`` order), so the reverse scan here
+        would otherwise adopt "This call was NOT executed…" and drop the real
+        answer — the whole visible reply, since the model is told to leave
+        ``message`` short when it sets ``include_subagent_output``.
+        """
+        final_state = {
+            "messages": [
+                HumanMessage(content="who am I on GitHub, and list my repos"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "github-agent", "description": "who am I"},
+                            "id": "call_task_owner",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "github-agent", "description": "list repos"},
+                            "id": "call_task_refused",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                ToolMessage(content="You are aartaria (GitHub ID 10273710).", tool_call_id="call_task_owner"),
+                ToolMessage(
+                    content=CONCURRENT_SAME_AGENT_MESSAGE.format(agent="github-agent"),
+                    tool_call_id="call_task_refused",
+                    additional_kwargs={CONCURRENT_TASK_REFUSAL_KEY: True},
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_refusal",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert "aartaria" in response.content
+        assert "already working on another task" not in response.content
+
+    def test_concurrency_refusal_alone_does_not_count_as_a_delegation(self):
+        """``include_subagent_output`` with only a refusal is still a phantom.
+
+        Otherwise the executor's delegation nudge is skipped on the strength of a
+        sub-agent that never ran.
+        """
+        final_state = {
+            "messages": [
+                HumanMessage(content="list my repos twice"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "github-agent", "description": "list repos"},
+                            "id": "call_task_refused",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=CONCURRENT_SAME_AGENT_MESSAGE.format(agent="github-agent"),
+                    tool_call_id="call_task_refused",
+                    additional_kwargs={CONCURRENT_TASK_REFUSAL_KEY: True},
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "Done.",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_phantom",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        assert StreamHandler.is_phantom_subagent_completion(final_state) is True
 
     def test_include_subagent_output_no_tool_message_uses_intro_only(self):
         """If no ToolMessage exists, keep only the LLM message (no crash)."""

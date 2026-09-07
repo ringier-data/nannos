@@ -1,10 +1,12 @@
 """Custom exceptions for the application.
 
-This module contains session-related and conversation-related exceptions.
+This module contains session-related, conversation-related and message-related
+exceptions.
 """
 
 __all__ = [
     "ConversationError",
+    "UnknownCursorError",
     "ConversationNotFoundError",
     "ConversationOwnershipError",
     "SessionError",
@@ -35,3 +37,7 @@ class ConversationNotFoundError(ConversationError):
 
 class ConversationOwnershipError(ConversationError):
     """Raised when attempting to access or modify a conversation that doesn't belong to the user."""
+
+
+class UnknownCursorError(ValueError):
+    """Raised when a pagination cursor does not name a message in the conversation."""

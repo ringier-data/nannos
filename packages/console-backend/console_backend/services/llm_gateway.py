@@ -9,6 +9,8 @@ dependency-light (httpx only; no langchain in console-backend).
 import json
 import logging
 import os
+import re
+from typing import Any
 
 import httpx
 from ringier_a2a_sdk.utils.http_pool import LazyClient
@@ -107,12 +109,20 @@ async def gateway_chat(
     model: str,
     max_tokens: int = 1024,
     metadata: dict | None = None,
+    reasoning_effort: str | None = None,
     timeout: float = 60.0,
 ) -> str:
     """Single-turn completion through the gateway; returns the assistant text.
 
     `metadata` (e.g. {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the
     proxy attributes the cost. Without a user_sub the proxy logs nothing.
+
+    `reasoning_effort` is LiteLLM's unified extended-thinking control, in the same
+    vocabulary agent-common's `get_reasoning_effort` and the console's `thinking_levels_for`
+    use — with ``"none"`` meaning thinking off. Pass it when the call is mechanical enough
+    that reasoning only burns generated tokens (conversation titling does). Left unset it is
+    omitted entirely and the model reasons however it normally would. The proxy runs
+    `drop_params: true`, so a model that takes no such param is unaffected either way.
 
     Note: the canonical attribution-header builder lives in agent-common
     (`attribution.attribution_header`, used by the chat client + embeddings adapter). It is
@@ -121,10 +131,17 @@ async def gateway_chat(
     summarization) run outside any sub-agent / scheduled-job context, so the richer
     attribution dimensions would always be empty. The caller passes whatever applies.
     """
+    payload: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    }
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     resp = await _client.get().post(
         _completions_url(),
         headers=_gateway_headers(metadata),
-        json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
+        json=payload,
         timeout=timeout,
     )
     resp.raise_for_status()
@@ -135,6 +152,36 @@ async def gateway_chat(
     # _first_message tolerates an empty choices array the same way (returns {} → "").
     content = _first_message(resp.json()).get("content")
     return content or ""
+
+
+async def gateway_chat_json(
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int = 1024,
+    metadata: dict | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """`gateway_chat`, for the common case of asking for a single JSON object.
+
+    Models wrap JSON in markdown fences or a sentence of prose however firmly they are
+    told not to, so the object has to be dug out of the text. That salvage lived in three
+    places — draft generation, condition generation and the watch judge — character for
+    character, which meant any robustness fix had to be made three times and a divergence
+    would let one path succeed while another silently read `{}`.
+
+    Returns `{}` when there is no object to be found, which every caller already treats as
+    "no usable output" and answers with its own fallback.
+    """
+    text = await gateway_chat(
+        prompt, model=model, max_tokens=max_tokens, metadata=metadata, timeout=timeout
+    )
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return {}
+    parsed = json.loads(match.group())
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _extract_citations(resp_json: dict) -> list[dict]:

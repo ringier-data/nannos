@@ -16,6 +16,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from agent_common.core.message_formatting import formatting_prompt_block
+from agent_common.middleware.client_objects_middleware import inject_embedded_context
 from agent_common.middleware.utils import append_to_system_message
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -102,32 +104,13 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
             )
 
         # Message formatting preference (conversation-level)
-        formatting = getattr(user_context, "message_formatting", "markdown")
-        if formatting == "slack":
-            preferences_parts.append(
-                '<message_formatting format="slack">\n'
-                "Format responses using Slack mrkdwn syntax: *bold* for emphasis, _italic_ for secondary emphasis, "
-                "`code` for inline code, ```code blocks``` for multi-line code. "
-                "Avoid markdown syntax that Slack doesn't support (e.g., # headers, **bold**).\n"
-                "</message_formatting>"
-            )
-        elif formatting == "google-chat":
-            preferences_parts.append(
-                '<message_formatting format="google-chat">\n'
-                "Format responses using Google Chat markup syntax: *bold* for emphasis, _italic_ for secondary emphasis, "
-                "~strikethrough~ for strikethrough, `code` for inline code, ```code blocks``` for multi-line code. "
-                "Use plain URLs for links (they are auto-linked). "
-                "Avoid markdown syntax that Google Chat doesn't support (e.g., # headers, **bold**, [links](url)).\n"
-                "</message_formatting>"
-            )
-        elif formatting == "plain":
-            preferences_parts.append(
-                '<message_formatting format="plain">\n'
-                "Use plain text only. Do not use any formatting syntax "
-                "(no markdown, no bold, no code blocks). Keep responses simple and readable.\n"
-                "</message_formatting>"
-            )
-        # Default 'markdown' needs no special instruction - standard behavior
+        #
+        # Set by the client for an interactive turn, and by the scheduler from the
+        # job's delivery channel for a scheduled one. The rules themselves live in
+        # agent-common so both writers state them identically.
+        formatting_block = formatting_prompt_block(getattr(user_context, "message_formatting", None))
+        if formatting_block:
+            preferences_parts.append(formatting_block)
 
         # Multi-user conversation context
         # Check if we have a client_user_handle, indicating multi-user channel context (Slack or Google Chat)
@@ -143,6 +126,11 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
                 "- Address responses appropriately when multiple users are involved.\n"
                 "</multi_user_conversation>"
             )
+
+        # NOTE: the Embedded Nannos <client_objects> manifest is intentionally NOT
+        # part of this system-prompt addendum. It reflects volatile on-screen state,
+        # so it rides the last human message (see _apply) to keep the cached system
+        # prefix byte-stable across turns.
 
         # Custom prompt addendum from user settings
         custom_prompt = getattr(user_context, "custom_prompt", None)
@@ -160,6 +148,28 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
         )
 
         return addendum
+
+    def _apply(self, request: ModelRequest, user_context: GraphRuntimeContext) -> ModelRequest:
+        """Inject stable per-user prefs into the system prompt, and the volatile
+        Embedded Nannos context (``<current_page>`` + ``<client_objects>``) as a
+        trailing per-call message.
+
+        Stable prefs (language/timezone/formatting/custom_prompt) belong in the
+        cached system prefix. The page context and manifest reflect on-screen
+        state that is never checkpointed, so they go AFTER every persisted message
+        (see ``inject_embedded_context``) — the only placement that leaves the
+        cached history byte-stable across turns.
+        """
+        addendum = self._build_preferences_addendum(user_context)
+        if addendum:
+            request = request.override(
+                system_message=append_to_system_message(request.system_message, addendum)
+            )
+        return inject_embedded_context(
+            request,
+            getattr(user_context, "page_context", None),
+            getattr(user_context, "client_objects", None),
+        )
 
     def wrap_model_call(
         self,
@@ -180,12 +190,7 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
             logger.warning("UserPreferencesMiddleware: No GraphRuntimeContext, passing through")
             return handler(request)
 
-        addendum = self._build_preferences_addendum(user_context)
-        if addendum:
-            new_system_message = append_to_system_message(request.system_message, addendum)
-            request = request.override(system_message=new_system_message)
-
-        return handler(request)
+        return handler(self._apply(request, user_context))
 
     async def awrap_model_call(
         self,
@@ -206,9 +211,4 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
             logger.warning("UserPreferencesMiddleware: No GraphRuntimeContext, passing through")
             return await handler(request)
 
-        addendum = self._build_preferences_addendum(user_context)
-        if addendum:
-            new_system_message = append_to_system_message(request.system_message, addendum)
-            request = request.override(system_message=new_system_message)
-
-        return await handler(request)
+        return await handler(self._apply(request, user_context))

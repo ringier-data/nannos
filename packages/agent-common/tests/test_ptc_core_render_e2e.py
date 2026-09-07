@@ -55,7 +55,10 @@ def _mcp_tool(name: str) -> StructuredTool:
         return f"{name}:{owner}/{repo}"
 
     return StructuredTool.from_function(
-        coroutine=_fn, name=name, description=f"{name} description.", args_schema=_CommitArgs,
+        coroutine=_fn,
+        name=name,
+        description=f"{name} description.",
+        args_schema=_CommitArgs,
         metadata={"server_name": "github"},
     )
 
@@ -98,13 +101,18 @@ async def test_unrendered_mcp_tool_callable_and_discovery_works(monkeypatch):
         "const direct = await tools.githubListCommits({owner: 'o', repo: 'r'});"
         "const hits = await tools.search({query: 'list issues'});"
         "const sig = await tools.describe({name: 'githubListIssues'});"
-        "JSON.stringify({direct, hitNames: hits.map(h => h.name), sig})"
+        "JSON.stringify({direct, hitNames: hits.matches.map(h => h.name), "
+        "truncated: hits.truncated, total: hits.total_matches, sig})"
     )
     model = _ScriptedModel()
     model.seen_system = []
     model.responses = deque(
         [
-            AIMessage(content="", id="ai-1", tool_calls=[{"id": "c1", "name": "eval", "args": {"code": code}}]),
+            AIMessage(
+                content="",
+                id="ai-1",
+                tool_calls=[{"id": "c1", "name": "eval", "args": {"code": code}}],
+            ),
             AIMessage(content="done", id="ai-2"),
         ]
     )
@@ -116,6 +124,9 @@ async def test_unrendered_mcp_tool_callable_and_discovery_works(monkeypatch):
     assert payload["direct"] == "github_list_commits:o/r"
     # search finds tools by intent and returns callable camelCase names.
     assert "githubListIssues" in payload["hitNames"]
+    # ...and the page metadata survives the JS bridge so the model can tell a cap from an exhaustive result.
+    assert payload["truncated"] is False
+    assert payload["total"] == len(payload["hitNames"])
     # describe returns the resolved signature for a tool not listed in the prompt.
     assert "async function githubListIssues" in payload["sig"]
     assert "owner: string" in payload["sig"]

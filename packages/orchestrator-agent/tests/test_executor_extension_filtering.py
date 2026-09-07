@@ -11,8 +11,11 @@ import pytest
 from a2a.types import TaskState
 from ringier_a2a_sdk.models import TodoItem
 
+from google.protobuf.json_format import MessageToDict
+
 from app.core.a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    IN_TASK_AUTH_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
 )
@@ -132,6 +135,66 @@ class TestActivityLogExtensionFiltering:
             active_extensions={ACTIVITY_LOG_EXTENSION},
         )
         assert result[0] is True  # preserved
+
+    @pytest.mark.asyncio
+    async def test_note_kind_reaches_the_message_metadata(self, executor, updater, task):
+        """A mid-turn note (notify_user) is an activity-log line marked kind='note',
+        and it must leave the task in WORKING — it does not end the turn."""
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_WORKING,
+            content="Understood — pulling last week's numbers.",
+            metadata={"activity_log": True, "kind": "note"},
+        )
+        result = await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=False,
+            active_extensions={ACTIVITY_LOG_EXTENSION},
+        )
+        updater.update_status.assert_awaited_once()
+        state, msg = updater.update_status.call_args[0][:2]
+        assert state == TaskState.TASK_STATE_WORKING
+        assert ACTIVITY_LOG_EXTENSION in msg.extensions
+        assert msg.metadata["kind"] == "note"
+        assert msg.parts[0].text == "Understood — pulling last week's numbers."
+        assert result[0] is False  # streaming artifact untouched
+
+    @pytest.mark.asyncio
+    async def test_mechanical_line_carries_no_kind(self, executor, updater, task):
+        """Ordinary tool/delegation lines must stay unmarked, so a client can tell them
+        apart from the agent's own words."""
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_WORKING,
+            content="Using tool X…",
+            metadata={"activity_log": True},
+        )
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=False,
+            active_extensions={ACTIVITY_LOG_EXTENSION},
+        )
+        msg = updater.update_status.call_args[0][1]
+        assert "kind" not in msg.metadata
+
+    @pytest.mark.asyncio
+    async def test_note_suppressed_without_the_extension(self, executor, updater, task):
+        """Notes ride the activity-log extension: no header, no note."""
+        item = AgentStreamResponse(
+            state=TaskState.TASK_STATE_WORKING,
+            content="Understood — starting now.",
+            metadata={"activity_log": True, "kind": "note"},
+        )
+        await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=False,
+            active_extensions=None,
+        )
+        updater.update_status.assert_not_called()
 
 
 # ===========================================================================
@@ -562,3 +625,81 @@ class TestConsoleScenario:
         main_kwargs = updater.add_artifact.call_args[1]
         assert main_kwargs["artifact_id"] == artifact_id
         assert main_kwargs["extensions"] is None
+
+
+# ===========================================================================
+# In-task auth extension filtering
+# ===========================================================================
+
+
+class TestInTaskAuthExtensionFiltering:
+    """`auth-required` is A2A's own state — the extension only adds a DataPart.
+
+    So the interesting property is not "is it emitted": the status goes out
+    either way. It is that the message DEGRADES to exactly today's shape for a
+    client that never negotiated the URN.
+    """
+
+    @staticmethod
+    def _auth_item():
+        return AgentStreamResponse.auth_required(
+            message="GitHub needs authorization",
+            auth_url="https://gatana.example/begin",
+            error_code="need-credentials",
+            tool="github_get_me",
+        )
+
+    @staticmethod
+    def _emitted_message(updater):
+        return updater.update_status.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_text_only_when_extension_not_requested(self, executor, updater, task):
+        """No negotiation → the status is exactly what it was before this extension."""
+        await executor._handle_stream_item(
+            self._auth_item(), updater, task, is_final=True, active_extensions=None
+        )
+
+        message = self._emitted_message(updater)
+        assert message.extensions == [] or IN_TASK_AUTH_EXTENSION not in (message.extensions or [])
+        assert all(not part.data.ListFields() for part in message.parts if part.HasField("data"))
+
+    @pytest.mark.asyncio
+    async def test_data_part_carries_the_requirement_when_negotiated(self, executor, updater, task):
+        """Negotiated → the facts ride a DataPart instead of being scraped from prose."""
+        await executor._handle_stream_item(
+            self._auth_item(),
+            updater,
+            task,
+            is_final=True,
+            active_extensions={IN_TASK_AUTH_EXTENSION},
+        )
+
+        message = self._emitted_message(updater)
+        assert message.extensions == [IN_TASK_AUTH_EXTENSION]
+
+        data_parts = [part for part in message.parts if part.HasField("data")]
+        assert len(data_parts) == 1
+        payload = MessageToDict(data_parts[0].data)
+        requirement = payload["auth_requirement"]
+        assert payload["requires_auth"] is True
+        assert requirement["resource"] == "github_get_me"
+        assert requirement["auth_methods"][0]["auth_url"] == "https://gatana.example/begin"
+
+        # The human-readable text is kept alongside it, unconditionally.
+        assert any(part.text for part in message.parts)
+
+    @pytest.mark.asyncio
+    async def test_client_secret_never_reaches_the_wire(self, executor, updater, task):
+        """The emitted payload carries the requirement half only."""
+        await executor._handle_stream_item(
+            self._auth_item(),
+            updater,
+            task,
+            is_final=True,
+            active_extensions={IN_TASK_AUTH_EXTENSION},
+        )
+
+        message = self._emitted_message(updater)
+        assert "client_secret" not in str(message)
+        assert "oauth2_client_config" not in str(message)

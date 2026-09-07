@@ -1,7 +1,9 @@
 """Unit tests for DynamicLocalAgentRunnable and LocalSubAgentConfig."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from a2a.types import TaskState
 from langchain_core.messages import HumanMessage
@@ -15,6 +17,40 @@ from agent_common.agents.dynamic_agent import (
     DynamicLocalAgentRunnable,
     create_dynamic_local_subagent,
 )
+
+
+def _install_list_tools(mock_client_cls, **list_tools_kwargs):
+    """Make the patched MultiServerMCPClient's ``session(name)`` yield a session whose
+    ``list_tools`` behaves per ``list_tools_kwargs`` (AsyncMock kwargs). A ``return_value``
+    given as a list of LangChain tools is converted into an MCP ``ListToolsResult``."""
+    from contextlib import asynccontextmanager
+    from mcp.types import ListToolsResult, Tool as MCPTool
+
+    rv = list_tools_kwargs.get("return_value")
+    if isinstance(rv, list):
+        list_tools_kwargs["return_value"] = ListToolsResult(
+            tools=[
+                MCPTool(name=t.name, description=t.description, inputSchema={"type": "object", "properties": {}})
+                for t in rv
+            ],
+            nextCursor=None,
+        )
+    client = mock_client_cls.return_value
+    client.callbacks = None
+    client.tool_interceptors = []
+
+    def session(name):
+        @asynccontextmanager
+        async def _cm():
+            sess = MagicMock()
+            sess.list_tools = AsyncMock(**list_tools_kwargs)
+            yield sess
+
+        return _cm()
+
+    client.session = session
+
+
 
 
 class TestDynamicLocalAgentRunnable:
@@ -60,7 +96,191 @@ class TestDynamicLocalAgentRunnable:
         """Test that agent is not created on initialization."""
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
         assert runnable._agent is None
+
+    # --- Embedded Nannos: client-action gate (Phase 7 step 3) ---
+
+    def test_client_action_disabled_by_default(self, basic_config, mock_model):
+        """Ordinary sub-agents don't get the embedded machinery."""
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        assert runnable.client_action_enabled is False
+
+    def test_client_action_enabled_flag_read(self, mock_model):
+        """The embedded entrypoint config turns the capability on."""
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="cockpit",
+            description="Embedded cockpit agent",
+            system_prompt="You are the cockpit assistant.",
+            client_action_enabled=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        assert runnable.client_action_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_notify_user_guidance_in_prompt_when_embedded_entrypoint(self, mock_model):
+        """The embedded entrypoint gets the notify_user tool AND the guidance for it."""
+        from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="cockpit",
+            description="Embedded cockpit agent",
+            system_prompt="You are the cockpit assistant.",
+            embedded_entrypoint=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=MagicMock()):
+            await runnable._ensure_agent()
+
+        prompt = runnable._cached_system_prompt
+        assert "<keep_the_user_informed>" in prompt
+        assert NOTIFY_USER_TOOL_NAME in prompt
+        # A greeting must never trigger a note, and the note must never carry the answer.
+        assert "'hello'" in prompt
+        assert any(t.name == NOTIFY_USER_TOOL_NAME for t in runnable._cached_tools)
+
+    @pytest.mark.asyncio
+    async def test_notify_user_guidance_absent_for_delegated_subagent(self, basic_config, mock_model):
+        """An ordinary sub-agent has no notify_user tool, so it must not be told to call one."""
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=MagicMock()):
+            await runnable._ensure_agent()
+
+        assert "<keep_the_user_informed>" not in runnable._cached_system_prompt
+        assert not any(t.name == "notify_user" for t in runnable._cached_tools)
+
+    @pytest.mark.asyncio
+    async def test_notify_user_does_not_ride_on_client_action(self, mock_model):
+        """The two capabilities are independent gates, not one flag doing double duty.
+
+        ``client_action_enabled`` means "may drive on-screen objects"; only
+        ``embedded_entrypoint`` means "faces the user, so it narrates". An agent with
+        just the former must get client_action and NOT notify_user.
+        """
+        from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
+        from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="screen-only",
+            description="Drives on-screen objects but is delegated to",
+            system_prompt="You are a screen driver.",
+            client_action_enabled=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=MagicMock()):
+            await runnable._ensure_agent()
+
+        names = [t.name for t in runnable._cached_tools]
+        assert CLIENT_ACTION_TOOL_NAME in names
+        assert NOTIFY_USER_TOOL_NAME not in names
+        assert "<keep_the_user_informed>" not in runnable._cached_system_prompt
+
+    def test_embedded_entrypoint_disabled_by_default(self, basic_config, mock_model):
+        """Delegated sub-agents are not the entrypoint."""
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        assert runnable.embedded_entrypoint is False
+
+    def _prime_cached_state(self, runnable):
+        runnable._cached_tools = []
+        runnable._cached_system_prompt = "p"
+        runnable._cached_response_format = None
+        runnable._cached_hitl_guarded = None
+        runnable._cached_context_gated_tools = None
+
+    def test_client_objects_middleware_attached_when_enabled(self, mock_model):
+        """When enabled, _build_graph attaches ClientObjectsMiddleware."""
+        from agent_common.middleware.client_objects_middleware import ClientObjectsMiddleware
+
+        cfg = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="cockpit",
+            description="Embedded cockpit agent",
+            system_prompt="You are the cockpit assistant.",
+            client_action_enabled=True,
+        )
+        runnable = DynamicLocalAgentRunnable(config=cfg, model=mock_model)
+        self._prime_cached_state(runnable)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph") as mock_build:
+            runnable._build_graph()
+        mws = mock_build.call_args.kwargs.get("extra_middlewares") or []
+        assert any(isinstance(mw, ClientObjectsMiddleware) for mw in mws)
+
+    def test_client_objects_middleware_absent_when_disabled(self, basic_config, mock_model):
+        """Disabled (default) sub-agents get no ClientObjectsMiddleware."""
+        from agent_common.middleware.client_objects_middleware import ClientObjectsMiddleware
+
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        self._prime_cached_state(runnable)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph") as mock_build:
+            runnable._build_graph()
+        mws = mock_build.call_args.kwargs.get("extra_middlewares") or []
+        assert not any(isinstance(mw, ClientObjectsMiddleware) for mw in mws)
         assert runnable._discovered_tools is None
+
+    def test_client_action_meta_round_trips(self):
+        """The client_action directive survives the shared stream-event contract that
+        _astream_impl uses to forward it to the execute-only adapter."""
+        from agent_common.a2a.stream_events import ClientActionMeta, TaskUpdate, parse_event_metadata
+
+        directive = {"kind": "apply", "payload": {"name": "Spring sale"}}
+        meta = parse_event_metadata({"client_action": directive})
+        assert isinstance(meta, ClientActionMeta)
+        assert meta.client_action == directive
+        # And it is accepted on a TaskUpdate's event_metadata union.
+        assert TaskUpdate(event_metadata=meta).event_metadata is meta
+
+    # --- Mid-turn notes (notify_user) ---
+
+    @pytest.mark.asyncio
+    async def test_user_note_event_becomes_an_activity_log_line_marked_note(self, basic_config, mock_model):
+        """A notify_user note reaches the client as an activity-log line carrying
+        kind='note', so the execute-only adapter can style the agent's own words apart
+        from a mechanical tool label. It is NOT a terminal event — the turn continues."""
+        from agent_common.a2a.stream_events import ActivityLogMeta
+        from agent_common.core.notify_user_tool import USER_NOTE_EVENT
+
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+
+        mock_graph = AsyncMock()
+        mock_graph.with_config = MagicMock(return_value=mock_graph)
+
+        async def note_stream(*args, **kwargs):
+            yield {"type": "custom", "ns": (), "data": (USER_NOTE_EVENT, {"message": "Understood — starting now."})}
+            # An empty note must be dropped rather than shown as a blank line.
+            yield {"type": "custom", "ns": (), "data": (USER_NOTE_EVENT, {"message": ""})}
+
+        mock_graph.astream = note_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
+
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
+
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.retrieve_final_state", return_value=final_state),
+        ):
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do the thing.")]),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
+
+        notes = [
+            e
+            for e in events
+            if isinstance(e, TaskUpdate) and isinstance(e.event_metadata, ActivityLogMeta) and e.event_metadata.kind
+        ]
+        assert len(notes) == 1
+        assert notes[0].status_text == "Understood — starting now."
+        assert notes[0].event_metadata.kind == "note"
+        assert not notes[0].data.is_complete  # a note never ends the turn
 
     def test_inherits_orchestrator_tools(self, basic_config, mock_model):
         """Test that no tool is inherited when no MCP tools specified."""
@@ -453,3 +673,374 @@ class TestAttachmentMounting:
         composed = runnable._compose_backend_with_attachments(StateBackend(), att_backend)
         assert isinstance(composed, CompositeBackend)
         assert "/attachments/" in composed.routes
+
+
+def _http_error(status: int) -> Exception:
+    request = httpx.Request("POST", "https://gateway.example/mcp")
+    response = httpx.Response(status, request=request, text="boom")
+    return httpx.HTTPStatusError(f"{status} error", request=request, response=response)
+
+
+class TestDiscoverMcpTools:
+    """Tests for DynamicLocalAgentRunnable._discover_mcp_tools' error handling:
+    graceful degradation on gateway/transport errors, no degradation for
+    token-exchange (auth) failures, and stale-error cleanup on retry."""
+
+    @pytest.fixture
+    def mock_model(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def gateway_config(self):
+        return LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="gateway-agent",
+            description="Agent with gateway MCP tools",
+            system_prompt="You are an expert with tools.",
+            mcp_tools=["some_gateway_tool"],
+        )
+
+    @pytest.fixture
+    def runnable(self, gateway_config, mock_model):
+        oauth2_client = MagicMock()
+        oauth2_client.exchange_token = AsyncMock(return_value="gateway-token")
+        return DynamicLocalAgentRunnable(
+            config=gateway_config,
+            model=mock_model,
+            oauth2_client=oauth2_client,
+            user_token="user-token",
+            mcp_gateway_url="https://gateway.example/mcp",
+            mcp_gateway_client_id="gatana",
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_mcp_error_is_not_degraded(self, runnable):
+        """A bug in our own code (not an httpx/gateway error) raised from
+        inside the discovery try block must propagate, not be silently
+        reported to the user as "temporarily unavailable" forever."""
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(mock_client_cls, side_effect=ValueError("schema bug"))
+
+            with pytest.raises(ValueError, match="schema bug"):
+                await runnable._discover_mcp_tools()
+
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_gateway_error_degrades_to_empty_list(self, runnable):
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(mock_client_cls, 
+                side_effect=ExceptionGroup("boom", [_http_error(400)])
+            )
+            tools = await runnable._discover_mcp_tools()
+
+        assert tools == []
+        assert runnable._mcp_discovery_error is not None
+        assert "400" in runnable._mcp_discovery_error or "MCP" in runnable._mcp_discovery_error
+
+    @pytest.mark.asyncio
+    async def test_nested_exception_group_also_degrades(self, runnable):
+        # The exact shape the pre-fix single-level unwrap missed.
+        nested = ExceptionGroup("outer", [ExceptionGroup("inner", [_http_error(403)])])
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(mock_client_cls, side_effect=nested)
+            tools = await runnable._discover_mcp_tools()
+
+        assert tools == []
+        assert runnable._mcp_discovery_error is not None
+
+    @pytest.mark.asyncio
+    async def test_token_exchange_failure_is_not_degraded(self, runnable):
+        """An auth failure exchanging the user's own token is a different
+        failure class from the gateway being down — it must propagate, not
+        be swallowed into the same empty-list degrade path."""
+        runnable.oauth2_client.exchange_token = AsyncMock(side_effect=RuntimeError("token exchange failed"))
+
+        with pytest.raises(RuntimeError, match="token exchange failed"):
+            await runnable._discover_mcp_tools()
+
+        # Never reached the degrade path, so no warning was recorded.
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
+    async def test_retryable_token_exchange_error_is_retried_then_raised(self, runnable):
+        """A transient OIDC hiccup exchanging the user's token gets the same
+        retry-with-backoff treatment as a transient gateway error — it must
+        not raise on attempt 1 just because it's an auth failure. Once
+        retries are exhausted it still raises (not degrades): this is a
+        different failure class from the gateway being down."""
+        transient_error = _http_error(503)
+        runnable.oauth2_client.exchange_token = AsyncMock(side_effect=transient_error)
+
+        with patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            with pytest.raises(httpx.HTTPStatusError):
+                await runnable._discover_mcp_tools()
+
+        assert runnable.oauth2_client.exchange_token.await_count == 3  # max_retries
+        assert mock_sleep.await_count == 2  # slept between attempts, not after the last
+        # Never reached the degrade path, so no warning was recorded.
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
+    async def test_stale_discovery_error_cleared_on_next_call(self, runnable):
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(mock_client_cls, 
+                side_effect=ExceptionGroup("boom", [_http_error(400)])
+            )
+            await runnable._discover_mcp_tools()
+        assert runnable._mcp_discovery_error is not None
+
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(mock_client_cls, return_value=[])
+            await runnable._discover_mcp_tools()
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
+    async def test_discovery_error_survives_a_later_raising_call(self, runnable):
+        """A degraded call followed by a *raising* call (auth failure, or any
+        non-transport error) must NOT clear the error — only an actual
+        successful resolution should. Otherwise _ensure_agent's guard would
+        see a cleared error next to still-cached degraded tools and wrongly
+        treat the instance as resolved, permanently skipping the retry it's
+        meant to allow (this is the within-turn "stale pin" the reset-at-entry
+        version of this method was vulnerable to)."""
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(mock_client_cls, 
+                side_effect=ExceptionGroup("boom", [_http_error(400)])
+            )
+            await runnable._discover_mcp_tools()
+        assert runnable._mcp_discovery_error is not None
+
+        runnable.oauth2_client.exchange_token = AsyncMock(side_effect=RuntimeError("token exchange failed"))
+        with pytest.raises(RuntimeError, match="token exchange failed"):
+            await runnable._discover_mcp_tools()
+
+        # The raise must not have cleared the still-outstanding degrade.
+        assert runnable._mcp_discovery_error is not None
+
+    @pytest.mark.asyncio
+    async def test_ensure_agent_retries_discovery_after_degraded_call(self, runnable):
+        """A degraded _ensure_agent() call must not permanently pin the instance
+        at zero MCP tools: the next call should retry discovery, not treat the
+        degraded state as resolved."""
+        mock_graph = MagicMock()
+
+        def fake_tool(name):
+            return Tool(name=name, description="A fake gateway tool", func=lambda x: x)
+
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls,
+        ):
+            _install_list_tools(mock_client_cls, 
+                side_effect=ExceptionGroup("boom", [_http_error(400)])
+            )
+            await runnable._ensure_agent()
+            assert runnable._mcp_discovery_error is not None
+            assert runnable._discovered_tools is None  # not cached as "[]"
+
+            # Second call must retry discovery (not short-circuit on the
+            # _cached_tools guard) and, on success, actually resolve.
+            _install_list_tools(mock_client_cls, return_value=[fake_tool("some_gateway_tool")])
+            await runnable._ensure_agent()
+
+        assert runnable._mcp_discovery_error is None
+        assert [t.name for t in runnable._discovered_tools] == ["some_gateway_tool"]
+        assert "tool_availability_warning" not in runnable._cached_system_prompt
+
+    @pytest.mark.asyncio
+    async def test_names_not_pre_resolved_are_listed_on_the_agents_own_connection(self, runnable):
+        """A name the orchestrator did not hand over is resolved by a tools/list on this agent's
+        connection with this user's token — a listing is a per-user view, never reused."""
+        from agent_common.core.tool_catalogue import LazyMcpTool
+
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(
+                mock_client_cls,
+                return_value=[Tool(name="some_gateway_tool", description="fetched", func=lambda x: x)],
+            )
+            tools = await runnable._discover_mcp_tools()
+        assert [t.name for t in tools] == ["some_gateway_tool"]
+        assert isinstance(tools[0], LazyMcpTool) and tools[0].catalogue_entry.card.description == "fetched"
+        assert tools[0]._connection["headers"]["Authorization"] == "Bearer gateway-token"
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
+    async def test_listed_tools_bind_to_the_connection_by_key_not_position(self, gateway_config, mock_model):
+        """Console names are listed on and bound to 'console'; gateway names to the connection keyed by
+        mcp_gateway_client_id. Dict order must not matter (regression for a positional gateway[0] pick)."""
+        config = LocalLangGraphSubAgentConfig(
+            type="langgraph", name="g", description="x", system_prompt="x", mcp_tools=["some_gateway_tool", "console_create_skill"]
+        )
+        oauth2_client = MagicMock()
+        oauth2_client.exchange_token = AsyncMock(side_effect=lambda **kw: f"tok-{kw['target_client_id']}")
+        runnable = DynamicLocalAgentRunnable(
+            config=config,
+            model=mock_model,
+            oauth2_client=oauth2_client,
+            user_token="user-token",
+            mcp_gateway_url="https://gateway.example/mcp",
+            mcp_gateway_client_id="gatana",
+        )
+        runnable.console_backend_mcp_url = "https://console.example/mcp"
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(
+                mock_client_cls,
+                return_value=[
+                    Tool(name="some_gateway_tool", description="", func=lambda x: x),
+                    Tool(name="console_create_skill", description="", func=lambda x: x),
+                ],
+            )
+            tools = {t.name: t for t in await runnable._discover_mcp_tools()}
+
+        assert set(tools) == {"some_gateway_tool", "console_create_skill"}
+        assert tools["some_gateway_tool"]._connection["headers"]["Authorization"] == "Bearer tok-gatana"
+        assert tools["console_create_skill"]._connection["headers"]["Authorization"] == "Bearer tok-agent-console"
+
+    @pytest.mark.asyncio
+    async def test_with_a_token_provider_tools_are_token_free_and_mint_per_call(self, gateway_config, mock_model):
+        """Given the orchestrator's UserTokenProvider, the sub-agent exchanges through it and the
+        tools it discovers itself carry no bearer — an interceptor mints one per call."""
+        from agent_common.core.token_provider import UserTokenProvider
+        exchanges: list[str] = []
+
+        import base64
+        import json
+        import time
+
+        def _jwt(aud: str) -> str:
+            seg = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()  # noqa: E731
+            return f"{seg({'alg': 'none'})}.{seg({'exp': time.time() + 900, 'aud': aud})}.sig"
+
+        minted: dict[str, str] = {}
+
+        async def exchange(*, subject_token, target_client_id, requested_scopes):
+            exchanges.append(target_client_id)
+            return minted.setdefault(target_client_id, _jwt(target_client_id))
+
+        provider = UserTokenProvider("user-token", exchange)
+        oauth2_client = MagicMock()
+        oauth2_client.exchange_token = AsyncMock(side_effect=AssertionError("must go through the provider"))
+        runnable = DynamicLocalAgentRunnable(
+            config=gateway_config,
+            model=mock_model,
+            oauth2_client=oauth2_client,
+            user_token="user-token",
+            mcp_gateway_url="https://gateway.example/mcp",
+            mcp_gateway_client_id="gatana",
+            token_provider=provider,
+        )
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(mock_client_cls, return_value=[Tool(name="some_gateway_tool", description="d", func=lambda x: x)])
+            (tool,) = await runnable._discover_mcp_tools()
+            listing_connection = mock_client_cls.call_args.kwargs["connections"]["gatana"]
+
+        assert exchanges == ["gatana"], "one exchange, via the provider"
+        assert listing_connection["headers"] == {"Authorization": f"Bearer {minted['gatana']}"}, "listing used the bearer"
+        assert not (tool._connection.get("headers") or {}), "the tool's connection carries no credential"
+        assert tool._interceptors and len(tool._interceptors) == 1
+        seen = {}
+
+        class Req(SimpleNamespace):
+            def override(self, **kw):
+                return Req(**{**self.__dict__, **kw})
+
+        async def handler(req):
+            seen.update(req.headers)
+            return "ok"
+
+        await tool._interceptors[0](Req(server_name="gatana", headers=None), handler)
+        assert seen == {"Authorization": f"Bearer {minted['gatana']}"} and exchanges == ["gatana"], "memoised: no second exchange"
+
+    @pytest.mark.asyncio
+    async def test_pre_resolved_tools_skip_exchange_and_discovery_entirely(self, gateway_config, mock_model):
+        """When the orchestrator hands over its already-authenticated tools, a delegation must
+        perform no token exchange, build no MCP client and open no tools/list."""
+        from agent_common.core.tool_catalogue import (
+            LazyMcpTool,
+            build_server_catalogue,
+            make_catalogue_tool,
+            make_lazy_tool,
+        )
+
+        entry = make_catalogue_tool(
+            server_name="some-server",
+            name="some_gateway_tool",
+            description="orchestrator's",
+            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+        )
+        build_server_catalogue("some-server", [entry], source="stateless")
+        orch_tool = make_lazy_tool(
+            entry, server_name="some-server", connection={"url": "gw", "headers": {"Authorization": "Bearer orch"}}
+        )
+        oauth2_client = MagicMock()
+        oauth2_client.exchange_token = AsyncMock(side_effect=AssertionError("must not exchange"))
+        runnable = DynamicLocalAgentRunnable(
+            config=gateway_config,
+            model=mock_model,
+            oauth2_client=oauth2_client,
+            user_token="user-token",
+            mcp_gateway_url="https://gateway.example/mcp",
+            mcp_gateway_client_id="gatana",
+            pre_resolved_tools={"some_gateway_tool": orch_tool},
+        )
+        with patch(
+            "agent_common.agents.dynamic_agent.MultiServerMCPClient", side_effect=AssertionError("no MCP client")
+        ):
+            tools = await runnable._discover_mcp_tools()
+
+        assert [t.name for t in tools] == ["some_gateway_tool"]
+        assert isinstance(tools[0], LazyMcpTool)
+        assert tools[0] is not orch_tool, "a private copy — schema validation must not touch the registry entry"
+        assert tools[0].catalogue_entry is orch_tool.catalogue_entry, "…but the bytes are shared"
+        assert tools[0]._connection["headers"]["Authorization"] == "Bearer orch"
+        oauth2_client.exchange_token.assert_not_called()
+        assert runnable._mcp_discovery_error is None
+
+    @pytest.mark.asyncio
+    async def test_only_names_missing_from_pre_resolved_are_discovered(self, mock_model):
+        config = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="gateway-agent",
+            description="x",
+            system_prompt="x",
+            mcp_tools=["have_this", "need_this"],
+        )
+        oauth2_client = MagicMock()
+        oauth2_client.exchange_token = AsyncMock(return_value="gateway-token")
+        runnable = DynamicLocalAgentRunnable(
+            config=config,
+            model=mock_model,
+            oauth2_client=oauth2_client,
+            user_token="user-token",
+            mcp_gateway_url="https://gateway.example/mcp",
+            mcp_gateway_client_id="gatana",
+            pre_resolved_tools={"have_this": Tool(name="have_this", description="d", func=lambda x: x)},
+        )
+        with patch("agent_common.agents.dynamic_agent.MultiServerMCPClient") as mock_client_cls:
+            _install_list_tools(
+                mock_client_cls,
+                return_value=[
+                    Tool(name="need_this", description="d", func=lambda x: x),
+                    Tool(name="have_this", description="dup", func=lambda x: x),
+                ],
+            )
+            tools = await runnable._discover_mcp_tools()
+
+        assert sorted(t.name for t in tools) == ["have_this", "need_this"]
+        assert next(t for t in tools if t.name == "have_this").description == "d", "pre-resolved wins"
+        assert oauth2_client.exchange_token.await_count == 1  # one exchange for the one connection still needed
+
+    def test_tool_availability_addendum_empty_when_no_error(self, runnable):
+        assert runnable._build_tool_availability_addendum() == ""
+
+    def test_tool_availability_addendum_is_fixed_and_url_free(self, runnable):
+        runnable._mcp_discovery_error = "MCP server returned HTTP 403 for https://internal-gateway.example/mcp"
+        addendum = runnable._build_tool_availability_addendum()
+
+        assert "tool_availability_warning" in addendum
+        assert "temporarily unavailable" in addendum
+        # The raw, gateway-controlled error text (and any URL in it) must never
+        # be interpolated into the prompt — see the addendum's own docstring.
+        assert "internal-gateway.example" not in addendum
+        assert "403" not in addendum

@@ -45,6 +45,21 @@ class SubAgentInput(BaseModel):
         default=None,
         description="Scheduled job ID to propagate to remote agents for cost attribution.",
     )
+    message_formatting: Optional[str] = Field(
+        default=None,
+        description=(
+            "How the channel that delivers the answer renders text ('slack', 'google-chat', "
+            "'plain', 'markdown'). Rides the outgoing A2A message metadata as "
+            "`messageFormatting`, which is the same key an interactive client sends, so a "
+            "remote agent applies its own formatting rules without this side touching its prompt. "
+            "SET IT ONLY when the invoked agent's own text is what reaches the user — a "
+            "scheduled job dispatched by agent-runner, where the answer goes straight to a "
+            "delivery channel. Leave it None whenever an orchestrator is routing: the "
+            "orchestrator composes the delivered message and applies the channel's rules to "
+            "it, so the sub-agent writes raw material for that and rules about a medium it "
+            "never writes to would only spend its prompt."
+        ),
+    )
 
 
 class BaseA2ARunnable(ABC):
@@ -87,6 +102,17 @@ class BaseA2ARunnable(ABC):
     def description(self) -> str:
         """Return the agent description use for agent selection."""
         ...
+
+    @property
+    def tracking_key(self) -> str:
+        """The key this runnable's tracking state lives under in a2a_tracking.
+
+        Single home for the convention: anything seeding or reading
+        a2a_tracking entries for this runnable (the orchestrator's dispatch
+        middleware, conversation adoption, _extract_tracking_ids) must use
+        this key, not re-derive it from the name.
+        """
+        return self.name.replace(" ", "")
 
     async def ainvoke(self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> StreamEvent:
         """Async invoke the sub-agent by collecting stream results.
@@ -338,7 +364,7 @@ class BaseA2ARunnable(ABC):
         """
         logger.debug(f"Extracting tracking IDs for agent: {self.name}")
         logger.debug(f"Full a2a_tracking state: {input_data.a2a_tracking}")
-        agent_name = self.name.replace(" ", "")
+        agent_name = self.tracking_key
         agent_tracking = input_data.a2a_tracking.get(agent_name, {})
 
         # Waterfall: Try persisted context_id first, fallback to orchestrator's

@@ -9,8 +9,9 @@ This document describes the complete end-to-end flow of how subagents are discov
 3. [Middleware Stack](#middleware-stack)
 4. [Subagent Types](#subagent-types)
 5. [Request Flow](#request-flow)
-6. [A2A Protocol & Context ID Management](#a2a-protocol--context-id-management)
-7. [Sequence Diagrams](#sequence-diagrams)
+6. [One Live Task Per Sub-Agent](#one-live-task-per-sub-agent)
+7. [A2A Protocol & Context ID Management](#a2a-protocol--context-id-management)
+8. [Sequence Diagrams](#sequence-diagrams)
 
 ---
 
@@ -256,6 +257,119 @@ The `general-purpose` subagent is **NOT** in `subagent_registry`. It's handled s
 │ 5. Return ToolMessage           │
 └─────────────────────────────────┘
 ```
+
+---
+
+## One Live Task Per Sub-Agent
+
+A sub-agent's memory is its LangGraph checkpoint, and that checkpoint is addressed by
+conversation and agent name alone:
+
+```python
+# DynamicToolDispatchMiddleware._adispatch_task_tool
+_effective_thread_id = f"{orchestrator_conversation_id}::{subagent_type}"
+# ...mirroring agents/dynamic_agent.py::get_thread_id -> f"{context_id}::dynamic-{name}"
+```
+
+Two `task` calls to the **same** `subagent_type` in one assistant message therefore run
+on **one thread**. Their writes interleave, the last writer wins, and the loser's
+conversation is gone. Observed: a "who am I on GitHub" delegation resumed on the
+campaign-listing delegation's state and answered about ad campaigns — the GitHub tool
+was never called again, and the authorization it had parked on was never answered.
+
+**The second concurrent call to one agent is refused** (`surplus_same_agent_call` →
+`_concurrent_same_agent_refusal`, in both `wrap_tool_call` and `awrap_tool_call`).
+Different agents still run in parallel. The model is told the rule up front in the
+task tool description (`_ONE_TASK_PER_AGENT_GUIDANCE`), so it folds same-agent work
+into a single task itself; the refusal is the backstop.
+
+Only for agents in `subagent_registry` — the ones whose thread this middleware owns.
+A name outside it falls through to `SubAgentMiddleware`, which runs its sub-agent
+inline against the parent's config with no `{conv}::{agent}` thread of its own
+(and the built-in general-purpose does not use A2A tracking at all), so there is
+nothing shared to corrupt; and an unknown or typo'd name must reach deepagents'
+*"does not exist, the only allowed types are […]"*, which teaches the model the real
+names, rather than being told a non-existent agent is busy and must never be
+reported as unavailable. In practice this costs nothing: the orchestrator registers
+its own `general-purpose` (see `AGENTS.md`), and the task tool's `subagent_type`
+enum is built from the registry.
+
+Ownership among siblings is decided by **position**, not by comparing ids:
+`ToolCall["id"]` is optional, and comparing a possibly-`None` owner id would return
+"allowed" for every sibling — disabling the guard exactly when the history is
+malformed. An id-less owner still owns.
+
+### The refusal is not a delegation result
+
+It travels as a `task` ToolMessage and lands **after** the owner's (parallel siblings
+are written in `tool_calls` order), so every consumer that reads "the latest `task`
+result" would read it instead of the real answer. It carries
+`additional_kwargs["concurrent_task_refusal"]` and those consumers skip it
+(`app/middleware/task_refusal.py`):
+
+| Consumer | Untagged consequence |
+|----------|----------------------|
+| `StreamHandler.parse_agent_response` (`include_subagent_output`) | the user's whole visible reply becomes *"This call was NOT executed…"* and the real answer is dropped |
+| `StreamHandler._extract_recently_called_subagents` | a turn whose only `task` output is a refusal counts as a delegation, skipping the executor's re-entry nudge |
+| `A2ATaskTrackingMiddleware.before_model` | the owner's `a2a_metadata` is never read, so a parked `input-required`/`auth-required` owner loses the `task_id` needed to resume it |
+
+`before_model` now folds in **every** real result of the step rather than the trailing
+message alone, keyed by `subagent_type`. That also fixes the same loss for two
+*different* agents delegated in parallel: both return in one step, and reading only
+the last one silently dropped the earlier agent's ids — leaving a parked task there
+unresumable.
+
+The refusal's wording must also never say a task *"does not exist"* — that phrase is
+the stale-task heuristic in `a2a_tracking.py`, which would delete the **owner's** live
+`task_id`. Pinned by a test.
+
+### Why not just isolate the threads?
+
+Because separate threads make two parked tasks *distinguishable* but still not
+*addressable*, and two layers downstream need to address them:
+
+| Layer | With two parked tasks for one agent |
+|-------|-------------------------------------|
+| Sub-agent checkpoint / interrupt id | collide — fixable by isolation |
+| Client → orchestrator auth answer | `authorizationDataPart` sends a verdict with no interrupt id, so one "Done, continue" answers **both** prompts — including one whose card the user never saw |
+| Model → orchestrator continuation | nothing can name which parked task a follow-up continues: `TaskToolSchema` (description, subagent_type) belongs to deepagents |
+
+The last two each need a contract change — in every client, and in a library we do not
+own. One live task per agent removes the need for either: there is never a second
+candidate to address.
+
+### What still works
+
+- **Different agents in parallel** — untouched, including two that both need authorization.
+- **Sequential re-delegation** — a later `task` call with a new `tool_call_id` continues
+  the agent's thread, which is how a sub-agent remembers earlier delegations and how a
+  parked `input-required`/`auth-required` task is resumed (`a2a_tracking` keeps
+  `context_id` and clears `task_id` only once the task completes).
+
+The guard reads only the assistant message that issued the call, which LangGraph replays
+unchanged, so the sibling that won the first attempt wins the resume replay too — a
+refusal cannot become a second execution part way through a turn.
+
+### What this does NOT cover
+
+The invariant is enforced *within one assistant message*. Other routes to the same
+thread remain open, and each needs a claim on the thread itself (the
+`StreamCoordinator.try_register/release` pattern in
+`ringier-a2a-sdk/server/executor.py` is the shape that would subsume all of them):
+
+- **Two orchestrator turns on one conversation** — a second user message arriving
+  mid-turn, or a scheduled run landing on the same `context_id`. Each sees a lone
+  sibling.
+- **A stall-timeout abort** — the consumer is cancelled, but a remote A2A sub-agent
+  keeps executing on `{conv}::{agent}` while the model is told the task failed and
+  may retry.
+- **Re-delegation into a parked task** — the refusal advises "wait for the running
+  task's result and delegate the remainder afterwards". If the owner is still parked
+  when that follow-up lands, the pre-call pending-interrupt probe turns the dispatch
+  into `Command(resume=…)`, which *replaces* the freshly built `HumanMessage`: the
+  follow-up's description is silently dropped and the old task resumes instead. Safe
+  in the common case (the parked owner is resumed first, in the same turn), but not
+  by construction.
 
 ---
 

@@ -73,3 +73,22 @@ def test_unknown_double_brace_token_left_intact(monkeypatch):
 def test_passthrough_when_nothing_to_resolve(prompt):
     """Empty or placeholder-free prompts are returned unchanged."""
     assert resolve_prompt_placeholders(prompt) == prompt
+
+
+def test_orchestrator_is_told_not_to_deny_a_subagents_tool():
+    """It answered "github_get_me is not available in this environment's toolset".
+
+    The sub-agent had just reported the opposite — the tool exists, it needed
+    approval — and the orchestrator overrode that by enumerating its OWN `tools.*`
+    namespace, which never contains a sub-agent's tools.
+    """
+    from app.models.config import AgentSettings as Config
+
+    handling = Config.SYSTEM_INSTRUCTION
+    assert "authoritative account of that attempt" in handling
+    assert "NEVER tell the user that a tool is missing, unavailable, or absent" in handling
+    assert "answer that question" in handling
+
+    ptc = Config.PTC_ORCHESTRATOR_GUIDANCE
+    assert "not an inventory of what exists" in ptc
+    assert "never report a tool as unavailable on that basis" in ptc

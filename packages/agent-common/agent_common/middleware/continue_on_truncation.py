@@ -40,11 +40,20 @@ logger = logging.getLogger(__name__)
 _RETRY_MAX_TOKENS: tuple[int, ...] = (32000, 48000)
 _DEFAULT_MAX_RETRIES = 2
 
-_NUDGE = (
+_WRAP_UP = (
+    "You have already reasoned more than enough. Do NOT think further. Produce your final "
+    "answer now by calling the FinalResponseSchema tool (or, if no tool applies, respond "
+    "directly). Be decisive and concise."
+)
+
+_NUDGE_TRUNCATED = (
     "SYSTEM: Your previous response was cut off — it exhausted the output token budget while "
-    "thinking, before producing any answer. You have already reasoned more than enough. Do "
-    "NOT think further. Produce your final answer now by calling the FinalResponseSchema "
-    "tool (or, if no tool applies, respond directly). Be decisive and concise."
+    f"thinking, before producing any answer. {_WRAP_UP}"
+)
+
+_NUDGE_EMPTY = (
+    "SYSTEM: Your previous response was EMPTY — you spent the turn thinking and returned no "
+    f"answer and no tool call. The user saw nothing. {_WRAP_UP}"
 )
 
 
@@ -55,40 +64,76 @@ def _last_ai_message(messages: list[BaseMessage]) -> AIMessage | None:
     return None
 
 
-def _is_truncated(response: ModelResponse) -> bool:
-    """True when the turn was cut off mid-generation with no usable output.
+def _has_text(msg: AIMessage) -> bool:
+    """True when the message carries something the user could actually read.
 
-    Truncation that still produced a tool call is a normal agentic continuation (the graph
-    runs the tool and loops) — we only recover the dead case: cut off with no tool call and
-    no parsed structured response.
+    Reasoning is not an answer: it arrives as ``reasoning_content`` in
+    ``additional_kwargs`` or as reasoning blocks, and the user never sees it.
+    """
+    content = msg.content
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str) and block.strip():
+                return True
+            if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text", "")).strip():
+                return True
+    return False
+
+
+def _dead_turn(response: ModelResponse) -> str | None:
+    """Why this turn produced nothing usable — ``"truncated"``, ``"empty"``, or None.
+
+    A turn that produced a tool call is a normal agentic continuation (the graph runs the
+    tool and loops), and one that produced text or a structured response is an answer.
+    What is left are the two dead ends, both of which reach the user as the hardcoded
+    "Task completed successfully":
+
+    - **truncated** — cut off mid-thought (``finish_reason == "length"``);
+    - **empty** — a clean stop that spent the whole turn on reasoning and returned no
+      content and no tool call. Observed with 69/69 output tokens billed as reasoning.
     """
     if getattr(response, "structured_response", None) is not None:
-        return False
+        return None
     msg = _last_ai_message(response.result or [])
-    if msg is None:
-        return False
-    if getattr(msg, "tool_calls", None):
-        return False
-    return msg.response_metadata.get("finish_reason") == "length"
+    if msg is None or getattr(msg, "tool_calls", None):
+        return None
+    if msg.response_metadata.get("finish_reason") == "length":
+        return "truncated"
+    return None if _has_text(msg) else "empty"
 
 
 class ContinueOnTruncationMiddleware(AgentMiddleware):
-    """Re-run a ``finish_reason == "length"`` turn with a wrap-up nudge and more budget."""
+    """Re-run a turn that produced no answer, with a wrap-up nudge.
+
+    Two shapes qualify: cut off mid-thought (``finish_reason == "length"``, which also gets
+    more budget) and stopped cleanly with nothing to show (all output tokens spent on
+    reasoning). Both otherwise reach the user as "Task completed successfully".
+    """
 
     def __init__(self, max_retries: int = _DEFAULT_MAX_RETRIES) -> None:
         self._max_retries = max_retries
 
-    def _nudged(self, request: ModelRequest, attempt: int) -> ModelRequest:
-        """Append the wrap-up nudge and raise ``max_tokens`` for the retry.
+    def _nudged(self, request: ModelRequest, attempt: int, reason: str) -> ModelRequest:
+        """Append the wrap-up nudge for ``reason`` and, if truncated, raise ``max_tokens``.
 
         The nudge goes in ``messages`` (not ``system_message``, which would change the cached
         prefix). ``model_settings`` is bound over the model at invocation, so the raised
-        ``max_tokens`` reaches the gateway without rebuilding the model.
+        ``max_tokens`` reaches the gateway without rebuilding the model — but only for a
+        turn that actually ran out of room. An empty turn stopped cleanly inside its budget,
+        so more budget is not the remedy and would only buy more thinking.
         """
-        ceiling = _RETRY_MAX_TOKENS[min(attempt, len(_RETRY_MAX_TOKENS) - 1)]
+        if reason == "truncated":
+            ceiling = _RETRY_MAX_TOKENS[min(attempt, len(_RETRY_MAX_TOKENS) - 1)]
+            settings = {**request.model_settings, "max_tokens": ceiling}
+            nudge = _NUDGE_TRUNCATED
+        else:
+            settings = request.model_settings
+            nudge = _NUDGE_EMPTY
         return request.override(
-            messages=[*request.messages, HumanMessage(content=_NUDGE)],
-            model_settings={**request.model_settings, "max_tokens": ceiling},
+            messages=[*request.messages, HumanMessage(content=nudge)],
+            model_settings=settings,
         )
 
     def wrap_model_call(
@@ -98,15 +143,16 @@ class ContinueOnTruncationMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         response = handler(request)
         for attempt in range(self._max_retries):
-            if not _is_truncated(response):
+            reason = _dead_turn(response)
+            if reason is None:
                 return response
             logger.warning(
-                "Model turn truncated (finish_reason=length, no tool call); "
-                "nudging to wrap up (retry %d/%d)",
+                "Model turn produced no answer (%s, no tool call); nudging to wrap up (retry %d/%d)",
+                reason,
                 attempt + 1,
                 self._max_retries,
             )
-            response = handler(self._nudged(request, attempt))
+            response = handler(self._nudged(request, attempt, reason))
         return response
 
     async def awrap_model_call(
@@ -116,13 +162,14 @@ class ContinueOnTruncationMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         response = await handler(request)
         for attempt in range(self._max_retries):
-            if not _is_truncated(response):
+            reason = _dead_turn(response)
+            if reason is None:
                 return response
             logger.warning(
-                "Model turn truncated (finish_reason=length, no tool call); "
-                "nudging to wrap up (retry %d/%d)",
+                "Model turn produced no answer (%s, no tool call); nudging to wrap up (retry %d/%d)",
+                reason,
                 attempt + 1,
                 self._max_retries,
             )
-            response = await handler(self._nudged(request, attempt))
+            response = await handler(self._nudged(request, attempt, reason))
         return response

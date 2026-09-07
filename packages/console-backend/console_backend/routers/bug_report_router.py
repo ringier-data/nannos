@@ -1,8 +1,9 @@
 """API routes for bug reports."""
 
 import logging
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..authorization import check_capability
 from ..db.session import DbSession
@@ -14,7 +15,6 @@ from ..models.bug_report import (
     BugReportStatus,
     BugReportStatusUpdate,
 )
-from ..models.user import PaginationMeta
 from ..services.bug_report_service import BugReportService
 from ..services.debug_agent_service import DebugAgentService
 
@@ -50,28 +50,23 @@ async def create_bug_report(
 async def list_bug_reports(
     request: Request,
     db: DbSession,
-    page: int = 1,
-    limit: int = 50,
+    # Bounded rather than clamped: `page=0` used to reach the repository as
+    # `OFFSET -50` and answer 500, and `limit` was only capped from above. The MCP
+    # twin declares the same bounds, so both surfaces now reject the same inputs.
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
     status_filter: BugReportStatus | None = None,
+    created_after: datetime | None = None,
     user: User = Depends(require_auth),
 ) -> BugReportListResponse:
     service = get_bug_report_service(request)
-    if limit > 100:
-        limit = 100
-
-    # Admin users see all reports; regular users see only their own
-    user_id_filter = None if user.is_administrator else user.id
-
-    reports, total = await service.list_bug_reports(
+    return await service.list_for_user(
         db=db,
-        user_id=user_id_filter,
+        user=user,
         status=status_filter,
+        created_after=created_after,
         page=page,
         limit=limit,
-    )
-    return BugReportListResponse(
-        data=reports,
-        meta=PaginationMeta(page=page, limit=limit, total=total),
     )
 
 

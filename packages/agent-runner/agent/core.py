@@ -12,7 +12,8 @@ Follows the same A2A pattern as the other A2A agents (e.g. alloy-agent):
 
 Execution flow per call:
 1. Extract scheduler metadata from the A2A message (task.history)
-2. For watch jobs: call the check_tool via MCP and evaluate the JSONPath condition
+2. Nothing watch-specific: the scheduler decides whether a watch acts and what it says,
+   then dispatches a plain prompt like any other job
 3. If condition met (or task job): fetch sub-agent config from agent-console backend and
    dispatch to the appropriate agent runner (LangGraph / Foundry / remote A2A),
    capture result
@@ -26,8 +27,9 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from a2a.types import AgentCard, Message, Task, TaskState
@@ -40,55 +42,56 @@ from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM, SubAgent
 from agent_common.agents.foundry_agent import create_foundry_local_subagent
 from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
+from agent_common.core.message_formatting import (
+    formatting_prompt_block,
+    formatting_rules,
+    normalize_message_formatting,
+)
 from agent_common.core.model_factory import (
     create_model,
-    get_default_fast_model,
     get_default_model,
     is_valid_model,
     require_default_model,
 )
 from agent_common.core.stream_watchdog import watch_stream_with_resume
-from google.protobuf.json_format import ParseDict
+from agent_common.core.token_provider import DEFAULT_LEEWAY_S, UserTokenProvider
+from agent_common.core.tool_catalogue import sanitize_tool_name
+from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.struct_pb2 import Struct
 from object_storage import get_object_storage_service
 
 if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
-from jsonpath_ng.ext import parse as jsonpath_parse
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.sessions import StreamableHttpConnection
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel as PydanticBaseModel
 from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
+from agent.mcp_tools import McpToolResolver
+
 logger = logging.getLogger(__name__)
 
 _CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
 _CONSOLE_BACKEND_CLIENT_ID = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")
-_MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
+_MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://nannos.gatana.nannos.ringier.ch/mcp")
+_MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
+# Stateless JSON-RPC tools/list (no SDK handshake/parse); off = always list through the SDK.
+_MCP_CATALOGUE_STATELESS_LIST = os.getenv("MCP_CATALOGUE_STATELESS_LIST", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+# How much validity a memoised exchanged bearer must keep to be reused for a tool call. Set it
+# above the exchanged tokens' lifetime to force one exchange per call (QA lever, see #170).
+_MCP_TOKEN_LEEWAY_SECONDS = max(0.0, float(os.getenv("MCP_TOKEN_LEEWAY_SECONDS", str(DEFAULT_LEEWAY_S))))
 _MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "300"))
 _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
 _MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
-
-
-# Structured output models for LLM operations
-class ConditionEvaluationResult(PydanticBaseModel):
-    """Structured output for LLM-based condition evaluation."""
-
-    condition_met: bool
-    reasoning: str
-
-
-class GeneratedMessage(PydanticBaseModel):
-    """Structured output for LLM-generated notification message."""
-
-    message: str
 
 
 def _build_postgres_conn() -> str | None:
@@ -174,11 +177,50 @@ def _a2a_messages_to_human_messages(messages: list[Message]) -> list[HumanMessag
     return result
 
 
+def _current_time_context(timezone_name: str | None) -> str:
+    """Render "now" for tool-less LLM prompts (condition eval, message generation).
+
+    Those calls cannot consult date tools, so without an anchor the model latches
+    onto whatever timestamp appears in the data (e.g. a stale snapshot date).
+    """
+    now_utc = datetime.now(UTC)
+    line = f"Current time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    if timezone_name:
+        try:
+            local = now_utc.astimezone(ZoneInfo(timezone_name))
+            line += f" ({local.strftime('%Y-%m-%d %H:%M:%S')} {timezone_name})"
+        except Exception:
+            pass
+    return line
+
+
+def _build_sub_agent_system_prompt(system_prompt: str, message_formatting: str) -> str:
+    """The sub-agent's own prompt, plus the response protocol and the channel's rules.
+
+    The rendering rules cannot live in the stored system prompt: it is written once and
+    reused across every job, while the same agent may notify Slack for one job and the
+    web console for the next. Assembling them per run is what makes correct formatting
+    built in rather than something each job's author has to remember to ask for.
+
+    This is the stand-alone case, and the only one that wants the rules. A scheduled run
+    has no orchestrator in between: whatever the sub-agent writes here is delivered to
+    the channel verbatim. When the orchestrator routes instead, it composes the delivered
+    message and applies the channel's rules to that, so its sub-agents are given no
+    formatting instructions at all — theirs is raw material for an answer someone else
+    writes, and rules about a medium they never write to would only spend their prompt.
+    """
+    parts = [system_prompt, A2A_PROTOCOL_ADDENDUM]
+    formatting_block = formatting_prompt_block(message_formatting)
+    if formatting_block:
+        parts.append(formatting_block)
+    return "\n\n".join(parts)
+
+
 def _extract_message_metadata(task: Task) -> dict[str, Any]:
     """Extract scheduler metadata from the A2A task's message history.
 
     The scheduler engine injects metadata (user_access_token, sub_agent_id,
-    watch, job_type, scheduled_job_id, scheduled_job_run_id) into the A2A message.
+    scheduled_job_id, scheduled_job_run_id) into the A2A message.
     These end up in task.history[-1].metadata when the message is processed.
 
     SECURITY NOTE: user_id is NOT extracted from message metadata as it would be
@@ -195,13 +237,30 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
         if task.history:
             last_msg = task.history[-1]
             if hasattr(last_msg, "metadata") and last_msg.metadata:
-                return dict(last_msg.metadata)
+                meta = last_msg.metadata
+                # Over gRPC the metadata is a protobuf Struct; dict() would only
+                # convert the top level, leaving nested values as
+                # Structs that support ["key"] but not .get(). Convert the whole
+                # tree to plain Python instead.
+                if isinstance(meta, Struct):
+                    return MessageToDict(meta)
+                return dict(meta)
     except Exception:
         pass
     return {}
 
 
-async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> str | None:
+# A2A task states worth reporting as a run's terminal task_state (see
+# _collect_stream_text). Non-terminal states (working, ...) map to None:
+# they carry no information about how the run ended.
+_TERMINAL_TASK_STATE_NAMES = {
+    TaskState.TASK_STATE_COMPLETED: "completed",
+    TaskState.TASK_STATE_INPUT_REQUIRED: "input_required",
+    TaskState.TASK_STATE_FAILED: "failed",
+}
+
+
+async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> tuple[str | None, str | None]:
     """Collect the final text result from an A2A runnable's stream.
 
     Accumulates non-intermediate ``ArtifactUpdate`` content (the main
@@ -209,8 +268,12 @@ async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> str 
     to extracting text from the last ``TaskResponseData`` messages when
     neither artifact nor message content was streamed.
 
-    Returns the accumulated text, or None if the stream produced no
-    readable content.
+    Returns ``(text, task_state)``: the accumulated text (None if the stream
+    produced no readable content) and the run's terminal task state as a
+    scheduler-facing string (``completed`` | ``input_required`` | ``failed``),
+    or None when the stream never reported one. ``input_required`` matters
+    downstream: it tells a conversation adopting this run that the sub-agent
+    asked the user a question and is waiting for the answer.
     """
     parts: list[str] = []
     last_data: TaskResponseData = TaskResponseData()
@@ -222,13 +285,15 @@ async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> str 
         elif isinstance(item, TaskUpdate):
             last_data = item.data
         elif isinstance(item, ErrorEvent):
-            return f"Error: {item.error}" if item.error else None
+            return (f"Error: {item.error}" if item.error else None), "failed"
+
+    task_state = _TERMINAL_TASK_STATE_NAMES.get(last_data.state)
 
     if parts:
-        return "".join(parts).strip() or None
+        return ("".join(parts).strip() or None), task_state
 
     # Fallback: extract text from the last TaskResponseData messages
-    return _extract_text_from_messages(last_data.messages)
+    return _extract_text_from_messages(last_data.messages), task_state
 
 
 def _extract_text_from_messages(messages: list) -> str | None:
@@ -599,11 +664,35 @@ class AgentRunner(BaseAgent):
         # Extract scheduler-specific metadata from the message
         message_meta = _extract_message_metadata(task)
 
-        sub_agent_id: int | None = message_meta.get("sub_agent_id")
-        job_type: str = message_meta.get("job_type", "task")
-        watch: dict | None = message_meta.get("watch")
-        scheduled_job_id: int | None = message_meta.get("scheduled_job_id")
-        scheduled_job_run_id: int = message_meta.get("scheduled_job_run_id", "")
+        # Struct numbers arrive as floats (protobuf doubles); coerce the ids back
+        # to int — e.g. the sub-agent config URL path rejects "42.0". Numeric strings are
+        # accepted too: a caller that stringifies the id must not silently turn into a
+        # no-op run (the sub-agent branch below is skipped when this returns None).
+        def _meta_int(key: str) -> int | None:
+            value = message_meta.get(key)
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int | float):
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    return int(float(value))
+                except ValueError:
+                    logger.warning("Ignoring non-numeric %s in message metadata: %r", key, value)
+            return None
+
+        # How the delivering channel renders text. A scheduled run has no client on the
+        # other end to say so per turn, so the scheduler resolves it from the job's
+        # delivery channel and sends it here under the same key an interactive client
+        # uses. Nothing downstream rewrites the agent's output, so an unset/unknown value
+        # means Markdown — which is what a Slack notification used to arrive as.
+        message_formatting = normalize_message_formatting(
+            message_meta.get("messageFormatting") or message_meta.get("message_formatting")
+        )
+
+        sub_agent_id: int | None = _meta_int("sub_agent_id")
+        scheduled_job_id: int | None = _meta_int("scheduled_job_id")
+        scheduled_job_run_id: int | str = _meta_int("scheduled_job_run_id") or ""
 
         # SECURITY: Use verified access token from JWT (validated by JWTValidatorMiddleware)
         # and fetch user_id from backend API to prevent privilege escalation
@@ -611,43 +700,30 @@ class AgentRunner(BaseAgent):
         user_id: str | None = await self._fetch_user_id_from_backend(user_access_token) if user_access_token else None
 
         message_text = "\n".join(_extract_text_from_message(m) for m in messages).strip()
-        last_check_result: dict | None = None
         agent_message: str | None = None
+        sub_agent_task_state: str | None = None
+        sub_agent_name: str | None = None
+        prompt: str | None = None
 
-        # --- 1. Watch condition evaluation (skips LLM if condition not met) ---
-        if job_type == "watch" and watch:
-            condition_met, check_result = await self._evaluate_watch(watch, user_access_token)
-            last_check_result = check_result
-            if not condition_met:
-                logger.info(f"Watch condition NOT met for job {scheduled_job_id} — skipping execution")
-                result_meta = {
-                    "scheduler_status": "condition_not_met",
-                    "last_check_result": last_check_result,
-                    "user_sub": user_config.user_sub,
-                }
-                yield AgentStreamResponse(
-                    state=TaskState.TASK_STATE_COMPLETED,
-                    content=json.dumps(result_meta, default=str),
-                )
-                return
+        # Correlation ids echoed back in every result so the delivery channel can
+        # link a notification (and later thread replies) to this job/run/sub-agent.
+        correlation_meta = {
+            "scheduled_job_id": scheduled_job_id,
+            "scheduled_job_run_id": scheduled_job_run_id or None,
+            "sub_agent_id": sub_agent_id,
+        }
 
-            # Generate agent message if none was provided
-            # This is what gets delivered to the user
-            agent_message = message_text or await self._generate_watch_message(check_result, user_config.user_sub)
-            logger.info(f"Watch notification: {agent_message[:100]}...")
-
-        # --- 2. Sub-agent execution (dispatched by type) ---
+        # --- 2. Sub-agent execution ---
         if sub_agent_id:
-            # For tasks, use the message_text as the prompt
-            # For watches with sub-agents, use a generic prompt (notification is separate)
-            if job_type == "watch":
-                prompt = f"Watch condition triggered. Take appropriate action based on: {json.dumps(last_check_result, default=str)}"
-            else:
-                prompt = message_text or "Execute your configured task."
+            prompt = message_text or "Execute your configured task."
 
             try:
-                agent_message = await self._execute_sub_agent(
-                    sub_agent_id=sub_agent_id,
+                # Fetched here (not inside _execute_sub_agent) so the failure
+                # branch below still knows which sub-agent was targeted.
+                sub_agent_cfg = await self._fetch_sub_agent_config(sub_agent_id, user_access_token)
+                sub_agent_name = sub_agent_cfg["name"]
+                agent_message, sub_agent_task_state = await self._execute_sub_agent(
+                    sub_agent_cfg=sub_agent_cfg,
                     prompt=prompt,
                     raw_a2a_messages=messages,
                     user_access_token=user_access_token,
@@ -656,6 +732,7 @@ class AgentRunner(BaseAgent):
                     user_config=user_config,
                     user_id=user_id,
                     context_id=task.context_id,
+                    message_formatting=message_formatting,
                 )
             except Exception as exc:
                 logger.exception(f"Sub-agent execution failed for job {scheduled_job_id}")
@@ -663,9 +740,11 @@ class AgentRunner(BaseAgent):
                 result_meta = {
                     "scheduler_status": "failed",
                     "error_message": error_message,
-                    "last_check_result": last_check_result,
                     "agent_message": agent_message,
                     "user_sub": user_config.user_sub,
+                    "sub_agent_name": sub_agent_name,
+                    "prompt": prompt,
+                    **correlation_meta,
                 }
                 yield AgentStreamResponse(
                     state=TaskState.TASK_STATE_FAILED,
@@ -675,9 +754,21 @@ class AgentRunner(BaseAgent):
 
         result_meta = {
             "scheduler_status": "success",
-            "agent_message": agent_message,
-            "last_check_result": last_check_result,
+            # No sub-agent means there is nothing to run: the dispatch carries the text
+            # to deliver and echoing it back is what the delivery channel picks up. That
+            # is a watch whose outcome is a notification — the scheduler decided the
+            # condition was met and wrote what to say before dispatching.
+            "agent_message": agent_message or message_text or None,
+            # The sub-agent's terminal A2A task state — notably
+            # "input_required" (the run asked the user a question and is
+            # waiting). Delivery channels persist it with the run's provenance
+            # and forward it in the conversation-origin DataPart so the
+            # adopting orchestrator can frame the user's reply correctly.
+            "task_state": sub_agent_task_state,
             "user_sub": user_config.user_sub,
+            "sub_agent_name": sub_agent_name,
+            "prompt": prompt,
+            **correlation_meta,
         }
         yield AgentStreamResponse(
             state=TaskState.TASK_STATE_COMPLETED,
@@ -719,204 +810,6 @@ class AgentRunner(BaseAgent):
             logger.error(f"[SECURITY] Failed to fetch user_id from backend: {exc}")
             return None
 
-    async def _evaluate_watch(self, watch: dict, user_access_token: str) -> tuple[bool, dict]:
-        """Call the check_tool via MCP gateway and evaluate the condition.
-
-        Args:
-            watch: Dict with keys check_tool, check_args, condition_expr, expected_value, llm_condition, last_check_result.
-            user_access_token: orchestrator token for MCP gateway authentication.
-
-        Returns:
-            (condition_met, check_result_dict)
-        """
-        check_tool: str = watch["check_tool"]
-        check_args: dict = watch.get("check_args") or {}
-        condition_expr: str | None = watch.get("condition_expr")
-        expected_value: str | None = watch.get("expected_value")
-        llm_condition: str | None = watch.get("llm_condition")
-
-        mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
-
-        # Build MCP connections based on the check_tool prefix
-        connections: dict[str, StreamableHttpConnection] = {}
-
-        if check_tool.startswith("console_"):
-            # Console backend MCP — exchange token for agent-console audience
-            console_mcp_url = f"{_CONSOLE_BACKEND_URL}/mcp"
-            console_token = await (self._get_oauth2_client()).exchange_token(
-                user_access_token, _CONSOLE_BACKEND_CLIENT_ID
-            )
-            connections["console"] = StreamableHttpConnection(
-                transport="streamable_http",
-                url=console_mcp_url,
-                headers={"Authorization": f"Bearer {console_token}"},
-                timeout=mcp_timeout,
-                sse_read_timeout=mcp_timeout,
-            )
-        else:
-            # Gatana gateway — requires token exchange
-            gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
-            connections["gateway"] = StreamableHttpConnection(
-                transport="streamable_http",
-                url=_MCP_GATEWAY_URL,
-                headers={"Authorization": f"Bearer {gatana_access_token}"},
-                timeout=mcp_timeout,
-                sse_read_timeout=mcp_timeout,
-            )
-
-        check_result: dict = {}
-        try:
-            mcp_client = MultiServerMCPClient(connections)
-            async with mcp_client:
-                tools = await mcp_client.get_tools()
-                tool_map = {t.name: t for t in tools}
-
-                if check_tool not in tool_map:
-                    raise ValueError(f"Watch check_tool '{check_tool}' not found in MCP gateway")
-
-                raw = await tool_map[check_tool].ainvoke(check_args)
-                # ainvoke returns list[TextContentBlock | ImageContentBlock | FileContentBlock]
-                # (langchain_core TypedDicts, already converted from raw MCP content blocks).
-                if isinstance(raw, list):
-                    text_parts: list[str] = [
-                        block["text"] for block in raw if isinstance(block, dict) and block.get("type") == "text"
-                    ]
-                    combined = "\n".join(text_parts) if text_parts else ""
-                    try:
-                        check_result = json.loads(combined) if combined else {}
-                    except json.JSONDecodeError:
-                        check_result = {"output": combined}
-                elif isinstance(raw, dict):
-                    check_result = raw
-                elif isinstance(raw, str):
-                    try:
-                        check_result = json.loads(raw)
-                    except json.JSONDecodeError:
-                        check_result = {"output": raw}
-                else:
-                    check_result = {"output": str(raw)}
-
-        except Exception as exc:
-            logger.exception("Watch check_tool '%s' call failed", check_tool)
-            raise RuntimeError(f"Watch check failed: {exc}") from exc
-
-        # Evaluate the JSONPath condition expression
-        if not condition_expr:
-            return True, check_result
-
-        try:
-            expr = jsonpath_parse(condition_expr)
-            matches = expr.find(check_result)
-
-            # Extract the value from JSONPath
-            extracted_value = None
-            if matches:
-                extracted_value = matches[0].value if len(matches) == 1 else [m.value for m in matches]
-
-            # Evaluate condition: LLM takes precedence if provided
-            if llm_condition:
-                # Use LLM-based evaluation on the fleet's cheap/fast chat tier
-                try:
-                    llm = create_model(get_default_fast_model() or require_default_model()).bind(temperature=0)
-                    structured_llm = llm.with_structured_output(ConditionEvaluationResult)
-
-                    system_prompt = (
-                        "You are a condition evaluator for a scheduling system. "
-                        "Evaluate whether the given condition is met based on the provided data. "
-                        "Be precise and objective in your evaluation."
-                    )
-
-                    user_prompt = f"""Evaluate this condition:
-{llm_condition}
-
-Extracted value from JSONPath:
-{json.dumps(extracted_value, indent=2)}
-
-Full tool response:
-{json.dumps(check_result, indent=2)}
-
-Evaluate whether the condition is met and provide brief reasoning."""
-
-                    # Cost tracking callback (if cost logger is available)
-                    callbacks = self.get_langchain_callbacks() or []
-
-                    messages = [
-                        SystemMessage(content=system_prompt),
-                        HumanMessage(content=user_prompt),
-                    ]
-
-                    result: ConditionEvaluationResult = await structured_llm.ainvoke(
-                        messages, config={"callbacks": callbacks}
-                    )
-                    condition_met = result.condition_met
-                    logger.info(
-                        "LLM condition '%s' met=%s (reasoning: %s)",
-                        llm_condition,
-                        condition_met,
-                        result.reasoning,
-                    )
-                except Exception as exc:
-                    logger.error("LLM condition evaluation failed: %s", exc)
-                    condition_met = False
-            elif expected_value is not None:
-                # Use exact string comparison
-                extracted_str = str(extracted_value) if extracted_value is not None else ""
-                condition_met = extracted_str.lower() == expected_value.lower()
-            else:
-                # Default: check that extracted value is not null/empty
-                condition_met = extracted_value is not None and extracted_value not in ("", 0, False, [], {})
-
-        except Exception as exc:
-            logger.error("JSONPath condition '%s' evaluation failed: %s", condition_expr, exc)
-            condition_met = False
-
-        logger.info("Watch condition met=%s", condition_met)
-        return condition_met, check_result
-
-    async def _generate_watch_message(self, check_result: dict, user_sub: str) -> str:
-        """Generate a notification message using LLM when no explicit message was provided.
-
-        Args:
-            check_result: The watch check result dictionary from the MCP tool.
-            user_sub: User subject from JWT for cost tracking (fallback when user_id unavailable).
-
-        Returns:
-            Generated notification message string.
-        """
-        try:
-            llm = create_model(get_default_fast_model() or require_default_model()).bind(
-                temperature=0.7
-            )  # Slightly creative for message generation
-            structured_llm = llm.with_structured_output(GeneratedMessage)
-
-            # Cost tracking callback (if cost logger is available)
-            callbacks = self.get_langchain_callbacks() or []
-
-            system_prompt = (
-                "You are a notification message generator for a scheduling system. "
-                "Generate clear, concise, and informative notification messages based on watch condition results. "
-                "The message should be human-readable and highlight the key information from the result."
-            )
-
-            user_prompt = f"""Generate a notification message for this watch condition result:
-
-{json.dumps(check_result, indent=2)}
-
-Create a brief, actionable message (1-2 sentences) that a user would want to receive as a notification."""
-
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-
-            result: GeneratedMessage = await structured_llm.ainvoke(messages, config={"callbacks": callbacks})
-            logger.info("Generated watch message: %s", result.message)
-            return result.message
-        except Exception as exc:
-            logger.error("LLM message generation failed: %s", exc)
-            # Fallback to a simple default message
-            return f"Watch condition triggered. Result: {json.dumps(check_result, default=str)[:200]}"
-
     async def _fetch_sub_agent_config(self, sub_agent_id: int, user_access_token: str) -> dict:
         """Fetch sub-agent configuration from the agent-console API.
 
@@ -951,7 +844,11 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             "sub_agent_config_version_id": cfg_version.get("id"),
             "description": cfg_version.get("description", ""),
             "system_prompt": cfg_version.get("system_prompt", ""),
-            "mcp_tools": cfg_version.get("mcp_tools") or [],
+            # Sanitised here, the boundary where the job's whitelist enters the run: a
+            # stored name may be a tool's wire name, while the catalogue exposes it under
+            # its sanitised one (see ``sanitize_tool_name``). Everything downstream then
+            # compares exposed names only.
+            "mcp_tools": [sanitize_tool_name(n) for n in (cfg_version.get("mcp_tools") or [])],
             # Prefer effective_model: the backend (annotate_models) resolves a tier-bound config
             # (model is None, model_tier set) to its current alias here, so a tier-bound sub-agent
             # honors its tier instead of silently falling back to the standard default.
@@ -973,7 +870,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
 
     async def _execute_sub_agent(
         self,
-        sub_agent_id: int,
+        sub_agent_cfg: dict,
         prompt: str,
         user_access_token: str,
         scheduled_job_id: int,
@@ -982,11 +879,12 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
-    ) -> str | None:
-        """Fetch sub-agent config and dispatch to the appropriate execution method.
+        message_formatting: str = "markdown",
+    ) -> tuple[str | None, str | None]:
+        """Dispatch a sub-agent config to the appropriate execution method.
 
         Args:
-            sub_agent_id: ID of the sub-agent to run.
+            sub_agent_cfg: Result of _fetch_sub_agent_config().
             prompt: The user message to process (used for local/foundry agents).
             user_access_token: Token passed through for authentication.
             scheduled_job_id: The ID of the scheduled job.
@@ -995,11 +893,16 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             user_id: Verified database user UUID (fetched from backend, not from message metadata).
             context_id: Natural A2A context_id for thread isolation (conversation_id).
             raw_a2a_messages: Original A2A messages (used for remote agents to preserve DataParts).
+            message_formatting: Rendering rules of the channel this run's message is
+                delivered to ("slack", "google-chat", "plain", "markdown").
 
         Returns:
-            agent_message (str | None)
+            (agent_message, task_state) — task_state is the sub-agent's
+            terminal A2A task state ("completed" | "input_required" |
+            "failed") when it reported one, else None. It rides the result
+            metadata so a conversation later adopting this run knows whether
+            the run finished or is waiting for the user's answer.
         """
-        sub_agent_cfg = await self._fetch_sub_agent_config(sub_agent_id, user_access_token)
         agent_type = sub_agent_cfg["type"]
 
         if agent_type in ("automated", "local"):
@@ -1013,11 +916,13 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 scheduled_job_id=scheduled_job_id,
                 scheduled_job_run_id=scheduled_job_run_id,
                 context_id=context_id,
+                message_formatting=message_formatting,
             )
         elif agent_type == "foundry":
             return await self._run_foundry_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 prompt=prompt,
+                message_formatting=message_formatting,
                 user_config=user_config,
                 scheduled_job_id=scheduled_job_id,
                 scheduled_job_run_id=scheduled_job_run_id,
@@ -1030,9 +935,13 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 user_access_token=user_access_token,
                 scheduled_job_id=scheduled_job_id,
                 scheduled_job_run_id=scheduled_job_run_id,
+                context_id=context_id,
+                message_formatting=message_formatting,
             )
         else:
-            raise ValueError(f"Unsupported sub-agent type '{agent_type}' for sub-agent {sub_agent_id}")
+            raise ValueError(
+                f"Unsupported sub-agent type '{agent_type}' for sub-agent {sub_agent_cfg.get('sub_agent_id')}"
+            )
 
     async def _run_langgraph_agent(
         self,
@@ -1045,7 +954,8 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_id: str | None = None,
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
-    ) -> str | None:
+        message_formatting: str = "markdown",
+    ) -> tuple[str | None, str | None]:
         """Run a one-shot LangGraph agent using agent-common's model factory.
 
         Uses create_model() for multi-provider support (Bedrock, OpenAI, Google)
@@ -1062,7 +972,9 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             context_id: Natural A2A context_id for thread isolation (conversation_id).
 
         Returns:
-            agent_message (str | None)
+            (agent_message, task_state) — task_state is the sub-agent's
+            structured-response state ("completed" | "input_required" |
+            "failed"), or None when no structured response was produced.
         """
         # Ensure the document store is ready before building the graph (which binds self.store).
         # Idempotent and cheap once set up; on a cold start it retries until the gateway/embedding
@@ -1093,8 +1005,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
 
         llm = create_model(model_name, thinking_level=thinking_level)
 
-        # Append the A2A response protocol addendum so the LLM knows to use SubAgentResponseSchema
-        full_system_prompt = system_prompt + "\n\n" + A2A_PROTOCOL_ADDENDUM
+        full_system_prompt = _build_sub_agent_system_prompt(system_prompt, message_formatting)
 
         mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
 
@@ -1106,6 +1017,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         thread_id = context_id
 
         result_summary: str | None = None
+        task_state: str | None = None
 
         # Sandbox lifecycle
         sandbox_active = sub_agent_cfg.get("sandbox_enabled", False) and self._sandbox_pool is not None
@@ -1120,7 +1032,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         pooled_sandbox = None
 
         async def _run_graph(tools: list) -> None:
-            nonlocal result_summary, pooled_sandbox
+            nonlocal result_summary, task_state, pooled_sandbox
 
             extra_middlewares = None
             sandbox_backend_factory = None
@@ -1205,6 +1117,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             structured_response = final_state.get("structured_response") if final_state else None
             if structured_response and isinstance(structured_response, SubAgentResponseSchema):
                 result_summary = structured_response.message
+                task_state = structured_response.task_state
             elif isinstance(output_messages, list):
                 # 2. Check message tool_calls for SubAgentResponseSchema (Bedrock + thinking)
                 for msg in reversed(output_messages):
@@ -1214,6 +1127,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                                 try:
                                     schema = SubAgentResponseSchema(**tool_call.get("args", {}))
                                     result_summary = schema.message
+                                    task_state = schema.task_state
                                 except Exception:
                                     pass
                     if result_summary:
@@ -1256,49 +1170,23 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
 
         try:
             if mcp_tool_names:
-                # Keep the MCP session open for the entire graph execution so that
-                # tool closures can call back into the session when invoked.
-                allowed = set(mcp_tool_names)
-                has_console_tools = any(name.startswith("console_") for name in allowed)
-                has_gateway_tools = any(not name.startswith("console_") for name in allowed)
-
-                connections: dict[str, StreamableHttpConnection] = {}
-
-                # Add Gatana gateway connection for non-console tools
-                if has_gateway_tools:
-                    gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
-                    connections["gateway"] = StreamableHttpConnection(
-                        transport="streamable_http",
-                        url=_MCP_GATEWAY_URL,
-                        headers={"Authorization": f"Bearer {gatana_access_token}"},
-                        timeout=mcp_timeout,
-                        sse_read_timeout=mcp_timeout,
-                    )
-
-                # Add console backend MCP connection for console_ tools
-                if has_console_tools:
-                    console_mcp_url = f"{_CONSOLE_BACKEND_URL}/mcp"
-                    console_token = await (self._get_oauth2_client()).exchange_token(
-                        user_access_token, _CONSOLE_BACKEND_CLIENT_ID
-                    )
-                    connections["console"] = StreamableHttpConnection(
-                        transport="streamable_http",
-                        url=console_mcp_url,
-                        headers={"Authorization": f"Bearer {console_token}"},
-                        timeout=mcp_timeout,
-                        sse_read_timeout=mcp_timeout,
-                    )
-
-                mcp_client = MultiServerMCPClient(connections)
-                all_tools = await mcp_client.get_tools()
-                tools = [t for t in all_tools if t.name in allowed]
-                logger.info(
-                    "Loaded %d/%d MCP tools for job %s: %s",
-                    len(tools),
-                    len(all_tools),
-                    scheduled_job_id,
-                    [t.name for t in tools],
+                # Tools come from the shared catalogue (stateless tools/list, SDK fallback) as
+                # LazyMcpTools on token-free connections; a per-run UserTokenProvider mints
+                # the bearer at call time, so a token expiring mid-run is re-exchanged.
+                resolver = McpToolResolver(
+                    token_provider=UserTokenProvider(
+                        user_access_token,
+                        self._get_oauth2_client().exchange_token,
+                        leeway_seconds=_MCP_TOKEN_LEEWAY_SECONDS,
+                    ),
+                    gateway_url=_MCP_GATEWAY_URL,
+                    gateway_client_id=_MCP_GATEWAY_CLIENT_ID,
+                    console_mcp_url=f"{_CONSOLE_BACKEND_URL}/mcp",
+                    console_client_id=_CONSOLE_BACKEND_CLIENT_ID,
+                    timeout=mcp_timeout,
+                    stateless_list=_MCP_CATALOGUE_STATELESS_LIST,
                 )
+                tools = await resolver.resolve(mcp_tool_names)  # logs what was resolved and how
                 await _run_graph(tools + docstore_tools)
             else:
                 await _run_graph(docstore_tools)
@@ -1307,11 +1195,12 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 await self._sandbox_pool.release(thread_id, sub_agent_cfg["name"])
 
         logger.info(
-            "LangGraph agent execution complete for job %s: %d chars",
+            "LangGraph agent execution complete for job %s: %d chars (task_state=%s)",
             scheduled_job_id,
             len(result_summary or ""),
+            task_state,
         )
-        return result_summary
+        return result_summary, task_state
 
     def int_to_uuid(self, value: int) -> str:
         """Convert an integer ID to a UUID string format used by Foundry.
@@ -1328,7 +1217,8 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_config: UserConfig,
         scheduled_job_id: int,
         scheduled_job_run_id: int,
-    ) -> str | None:
+        message_formatting: str = "markdown",
+    ) -> tuple[str | None, str | None]:
         """Run a Foundry query-API agent using agent-common's foundry module.
 
         Args:
@@ -1337,8 +1227,12 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             user_config: Authenticated user context.
             scheduled_job_id: For logging.
             scheduled_job_run_id: For tracking the conversation.
+            message_formatting: Rendering rules of the delivery channel. The query API
+                takes a single `userInput` string and no system prompt, so they can only
+                go into the prompt; whether the Foundry-side agent honours them is its
+                own business, but a run that is never told cannot get it right.
         Returns:
-            result_summary (str | None)
+            (result_summary, task_state) — see _collect_stream_text.
         """
         # Build LocalFoundrySubAgentConfig from the backend response
         foundry_config = LocalFoundrySubAgentConfig(
@@ -1367,18 +1261,22 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
         )
 
+        formatting_block = formatting_prompt_block(message_formatting)
+        foundry_prompt = f"{prompt}\n\n{formatting_block}" if formatting_block else prompt
+
         # Stream the foundry runnable via the A2A SubAgentInput interface
         input_data = SubAgentInput(
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": foundry_prompt}],
         )
-        result_summary = await _collect_stream_text(compiled_subagent["runnable"], input_data)
+        result_summary, task_state = await _collect_stream_text(compiled_subagent["runnable"], input_data)
 
         logger.info(
-            "Foundry agent execution complete for job %d: %d chars",
+            "Foundry agent execution complete for job %d: %d chars (task_state=%s)",
             scheduled_job_id,
             len(result_summary or ""),
+            task_state,
         )
-        return result_summary
+        return result_summary, task_state
 
     def _get_oauth2_client(self) -> OidcOAuth2Client:
         """Lazily create an OAuth2 client for outbound A2A agent communication.
@@ -1405,7 +1303,9 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_access_token: str,
         scheduled_job_id: int,
         scheduled_job_run_id: int,
-    ) -> str | None:
+        context_id: str | None = None,
+        message_formatting: str = "markdown",
+    ) -> tuple[str | None, str | None]:
         """Run a remote A2A agent by discovering its agent card and invoking it.
 
         Uses lossless A2A→HumanMessage conversion so DataParts and TextParts
@@ -1423,9 +1323,17 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             user_access_token: User's token for auth (passed to SmartTokenInterceptor).
             scheduled_job_id: For logging.
             scheduled_job_run_id: ID of the scheduled job run.
+            context_id: The run task's own contextId. Sent as the outgoing A2A
+                message's contextId so the remote agent checkpoints the run's
+                conversation under an id this side actually stores
+                (scheduled_job_runs.conversation_id) — the prerequisite for a
+                later orchestrator delegation to resume that conversation via
+                the conversation-origin extension.
+            message_formatting: Rendering rules of the delivery channel, forwarded as
+                A2A message metadata so the remote agent applies them itself.
 
         Returns:
-            result_summary (str | None)
+            (result_summary, task_state) — see _collect_stream_text.
         """
         agent_url: str | None = sub_agent_cfg.get("agent_url")
         if not agent_url:
@@ -1467,15 +1375,31 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             # Fallback to plain text prompt
             messages_input = [{"role": "user", "content": prompt}]
 
+        # orchestrator_conversation_id feeds A2AClientRunnable's contextId
+        # waterfall (_extract_tracking_ids), putting the run task's contextId on
+        # the wire. The remote keys its checkpoints by the contextId it
+        # receives, so the run's stored conversation_id then names a real,
+        # resumable conversation on the executing side.
+        # The channel's rendering rules travel as message metadata, not as an extra
+        # message: a remote agent owns its system prompt, and A2AClientRunnable puts
+        # `messageFormatting` on the wire under the key an interactive client uses, so the
+        # remote applies them through its own request-metadata path. Appending an
+        # instruction message instead would land in the remote's checkpointed
+        # conversation, where a later turn can read it as part of the task.
         input_data = SubAgentInput(
             messages=messages_input,
             scheduled_job_id=scheduled_job_id,
+            orchestrator_conversation_id=context_id,
+            # Only when there is something to say: plain Markdown is the remote's default
+            # too, so sending it would put a no-op instruction on the wire.
+            message_formatting=message_formatting if formatting_rules(message_formatting) else None,
         )
-        result_summary = await _collect_stream_text(runnable, input_data)
+        result_summary, task_state = await _collect_stream_text(runnable, input_data)
 
         logger.info(
-            "Remote agent execution complete for job %d: %d chars",
+            "Remote agent execution complete for job %d: %d chars (task_state=%s)",
             scheduled_job_id,
             len(result_summary or ""),
+            task_state,
         )
-        return result_summary
+        return result_summary, task_state

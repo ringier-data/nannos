@@ -650,3 +650,19 @@ class NannosCostLogger(CustomLogger):
 
 
 proxy_handler_instance = NannosCostLogger()
+
+
+# Trim trace chatter as a side effect of the callback import. This module is the
+# only product code the proxy image loads, so it is the one startup hook we have:
+# LiteLLM imports it when it resolves `callbacks:` from config.yaml, by which
+# point the injected OTel agent has already built the tracer provider.
+#
+# Best-effort by design. The file is baked by the Dockerfile, but a bad mount or
+# an older image must degrade to noisy traces, never to a proxy that will not
+# start.
+try:
+    from nannos_span_filter import install_span_export_filter
+
+    install_span_export_filter()
+except Exception as exc:  # noqa: BLE001 - telemetry must never block startup
+    logger.info("[trace] span export filter not installed: %s", exc)

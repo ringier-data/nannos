@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import types
 from typing import Any
 
-from langchain_core.tools import BaseTool, StructuredTool
+import pytest
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.prebuilt import ToolRuntime
 from pydantic import BaseModel, Field
 
@@ -14,7 +16,9 @@ from agent_common.middleware.ptc_guard import (
     HiddenToolsFromModelMiddleware,
     _inject_for_inner,
     _resolve_server_slug,
+    annotate_need_credentials,
     approval_required_payload,
+    rejection_payload,
     wrap_tool_for_ptc,
 )
 
@@ -257,6 +261,41 @@ def test_resolve_server_slug_precedence():
     assert _resolve_server_slug("t", None, None) == "_self"
 
 
+def test_resolve_server_slug_falls_back_to_tool_metadata():
+    """When neither context map nor static map has the tool, resolve from the
+    tool's own metadata['server_name'] — mirrors ConditionalHITL so a tool scored
+    inside eval keys under the same slug as at the model boundary (not '_self')."""
+
+    class _T(BaseTool):
+        name: str = "alloy-riad_delete_campaign_by_id"
+        description: str = "x"
+
+        def _run(self, *a, **k):  # pragma: no cover - not executed
+            return None
+
+    tool = _T(metadata={"server_name": "alloy-riad"})
+    # No map anywhere → without the tool it would be _self; with it, the slug.
+    assert _resolve_server_slug(tool.name, None, None) == "_self"
+    assert _resolve_server_slug(tool.name, None, None, tool) == "alloy-riad"
+    # A populated map still wins over metadata (higher precedence).
+    ctx = types.SimpleNamespace(tool_server_map={tool.name: "from_ctx"})
+    assert _resolve_server_slug(tool.name, ctx, None, tool) == "from_ctx"
+
+
+def test_derive_mcp_server_slug():
+    from agent_common.agents.dynamic_agent import derive_mcp_server_slug as d
+
+    assert d("alloy-riad_delete_campaign_by_id") == "alloy-riad"
+    assert d("alloy-riad_get_data_service_customers") == "alloy-riad"
+    assert d("console_list_sub_agents") == "console"
+    assert d("scheduler_create_job") == "console"
+    assert d("read_file") is None  # in-process platform tool → left unstamped (_self)
+    # Earliest method token wins, even when a later-listed verb appears first in the tuple.
+    assert d("alloy_post_get_report") == "alloy"
+    assert d("crm_delete_get_token_by_id") == "crm"
+    assert d("nometh_tool") is None
+
+
 # ---------------------------------------------------------------------------
 # _inject_for_inner
 # ---------------------------------------------------------------------------
@@ -463,3 +502,66 @@ def test_apply_ptc_decisions_positional_fallback_without_ids():
 
     assert turn.decisions[a] == "approve"
     assert turn.decisions[b] == "reject"
+
+
+# ── Naming the tool behind a sandbox authorization error ────────────────────────
+#
+# A `need-credentials` raised by an MCP call made inside `eval` escapes as an
+# `eval` failure, so the middleware that reads it saw only the sandbox tool. The
+# user was asked to "authorize eval", and the agent, told `eval` had been
+# declined, answered "github_get_me is not available in the current environment"
+# — a false statement about a tool that merely lacks a credential.
+
+NEED_CREDENTIALS = json.dumps(
+    {
+        "errorCode": "need-credentials",
+        "authorizeUrl": "https://gatana.example/oauth/gt_x/begin",
+        "message": "This tool requires secondary authorization.",
+    }
+)
+
+
+def test_annotate_need_credentials_names_the_inner_tool_and_server():
+    annotated = annotate_need_credentials(ToolException(NEED_CREDENTIALS), "github_get_me", "github")
+    payload = json.loads(str(annotated))
+    assert payload["tool"] == "github_get_me"
+    assert payload["service"] == "github"
+    # Everything the detector already keys on survives untouched.
+    assert payload["errorCode"] == "need-credentials"
+    assert payload["authorizeUrl"] == "https://gatana.example/oauth/gt_x/begin"
+
+
+def test_annotate_need_credentials_does_not_overwrite_a_named_producer():
+    original = json.dumps({"errorCode": "need-credentials", "tool": "real_tool", "service": "real_service"})
+    payload = json.loads(str(annotate_need_credentials(ToolException(original), "wrapper", "wrapper_slug")))
+    assert (payload["tool"], payload["service"]) == ("real_tool", "real_service")
+
+
+def test_annotate_leaves_an_unnamed_server_alone():
+    payload = json.loads(str(annotate_need_credentials(ToolException(NEED_CREDENTIALS), "github_get_me", None)))
+    assert "service" not in payload
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ToolException("plain failure"),
+        ToolException('{"errorCode":"rate-limited"}'),
+        ToolException('not json but mentions need-credentials and "errorCode"'),
+        ValueError("not even a tool exception"),
+    ],
+)
+def test_annotate_returns_anything_else_untouched(exc):
+    """Best effort only: it must never swallow or reshape another error."""
+    assert annotate_need_credentials(exc, "github_get_me", "github") is exc
+
+
+def test_rejection_payload_carries_the_reason():
+    payload = rejection_payload("github_get_me", "The user skipped the authorization this call needs.")
+    assert payload["error"] == "human_rejected"
+    assert payload["message"].startswith("The user skipped the authorization")
+    assert "github_get_me" in payload["message"]
+
+
+def test_rejection_payload_without_a_reason_is_unchanged():
+    assert rejection_payload("github_get_me")["message"].startswith("Tool 'github_get_me' was not approved")

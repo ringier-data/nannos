@@ -24,13 +24,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,21 +35,21 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { SubAgentSelect } from '@/components/SubAgentSelect';
+import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
+import { LastCheckPanel } from '@/components/LastCheckPanel';
+import { argsModeFor, resolveArgs } from '@/lib/watchArgs';
+import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
 import { config } from '@/config';
 import {
   type JobRunStatus,
   type ScheduledJob,
   type ScheduledJobRun,
   getDeliveryChannels,
-  generateWatchParams,
+  generateJobDraft,
+  formatApiError,
   updateScheduledJob,
   runJobNow,
   type DeliveryChannel,
@@ -65,10 +59,7 @@ import {
   resumeJob,
   deleteJob,
 } from '@/api/scheduler';
-import {
-  consoleListSubAgentsOptions,
-  consoleListMcpToolsOptions,
-} from '@/api/generated/@tanstack/react-query.gen';
+import { consoleListSubAgentsOptions, consoleListMcpToolsOptions } from '@/api/generated/@tanstack/react-query.gen';
 import { useAuth } from '@/contexts/AuthContext';
 import { CronField } from '@/components/CronField';
 import { describeCron } from '@/lib/cron';
@@ -96,16 +87,12 @@ interface RunNowResult {
 // Helpers
 // ---------------------------------------------------------------------------
 
-
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   return new Date(iso).toLocaleString();
 }
 
-function formatDuration(
-  start: string | null | undefined,
-  end: string | null | undefined,
-): string {
+function formatDuration(start: string | null | undefined, end: string | null | undefined): string {
   if (!start || !end) return '—';
   const ms = new Date(end).getTime() - new Date(start).getTime();
   if (ms < 1000) return `${ms}ms`;
@@ -115,24 +102,46 @@ function formatDuration(
 
 function scheduleLabel(job: ScheduledJob): string {
   if (job.schedule_kind === 'cron') return job.cron_expr ?? '—';
-  if (job.schedule_kind === 'interval')
-    return job.interval_seconds ? `every ${job.interval_seconds}s` : '—';
-  if (job.schedule_kind === 'once' && job.run_at)
-    return new Date(job.run_at).toLocaleString();
+  if (job.schedule_kind === 'interval') return job.interval_seconds ? `every ${job.interval_seconds}s` : '—';
+  if (job.schedule_kind === 'once' && job.run_at) return new Date(job.run_at).toLocaleString();
   return '—';
 }
 
-/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now". */
-function nowDatetimeLocal(): string {
-  const d = new Date();
-  d.setSeconds(0, 0);
+/** Format an instant as YYYY-MM-DDTHH:mm wall-clock in the given IANA timezone
+ * (browser-local when omitted or unresolvable). The backend interprets the naive
+ * string the form submits in the job's timezone, so prefilling in any other zone
+ * would silently shift the run instant on save. */
+function toDatetimeLocal(iso: string | Date, timeZone?: string | null): string {
+  const d = new Date(iso);
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+        .formatToParts(d)
+        .reduce<Record<string, string>>((acc, p) => {
+          acc[p.type] = p.value;
+          return acc;
+        }, {});
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    } catch {
+      // Unresolvable zone name — fall through to browser-local.
+    }
+  }
   return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
-/** Convert an ISO string from the backend into YYYY-MM-DDTHH:mm for datetime-local input. */
-function toDatetimeLocal(iso: string): string {
-  const d = new Date(iso);
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+/** Date-time string in YYYY-MM-DDTHH:mm format suitable for datetime-local input, clamped to "now". */
+function nowDatetimeLocal(timeZone?: string | null): string {
+  const d = new Date();
+  d.setSeconds(0, 0);
+  return toDatetimeLocal(d, timeZone);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +214,7 @@ function JobHeader({
             {job.schedule_kind}
           </Badge>
           <span className="font-mono">{scheduleLabel(job)}</span>
+          {job.schedule_kind === 'cron' && job.timezone && <span className="text-xs">({job.timezone})</span>}
           <span>·</span>
           {job.enabled ? (
             <span className="flex items-center gap-1 text-green-600">
@@ -213,9 +223,7 @@ function JobHeader({
           ) : (
             <span className="flex items-center gap-1 text-muted-foreground">
               <Pause className="h-3.5 w-3.5" /> Paused
-              {job.paused_reason && (
-                <span className="text-xs">({job.paused_reason})</span>
-              )}
+              {job.paused_reason && <span className="text-xs">({job.paused_reason})</span>}
             </span>
           )}
         </div>
@@ -224,12 +232,7 @@ function JobHeader({
       <div className="flex gap-2">
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button
-              variant="default"
-              size="sm"
-              disabled={isRunningNow}
-              onClick={onRunNow}
-            >
+            <Button variant="default" size="sm" disabled={isRunningNow} onClick={onRunNow}>
               {isRunningNow ? (
                 <>
                   <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
@@ -243,36 +246,22 @@ function JobHeader({
               )}
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Trigger a full test run right now — resolves token, calls agent-runner, delivers webhook</TooltipContent>
+          <TooltipContent>
+            Trigger a full test run right now — resolves token, calls agent-runner, delivers webhook
+          </TooltipContent>
         </Tooltip>
         {job.enabled ? (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={isPendingPause}
-            onClick={onPause}
-          >
+          <Button variant="outline" size="sm" disabled={isPendingPause} onClick={onPause}>
             <Pause className="mr-1.5 h-4 w-4" />
             Pause
           </Button>
         ) : (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={isPendingResume}
-            onClick={onResume}
-          >
+          <Button variant="outline" size="sm" disabled={isPendingResume} onClick={onResume}>
             <Play className="mr-1.5 h-4 w-4" />
             Resume
           </Button>
         )}
-        <Button
-          variant="destructive"
-          size="sm"
-          className="ml-2"
-          disabled={isPendingDelete}
-          onClick={onDelete}
-        >
+        <Button variant="destructive" size="sm" className="ml-2" disabled={isPendingDelete} onClick={onDelete}>
           <Trash2 className="mr-1.5 h-4 w-4" />
           Delete
         </Button>
@@ -285,6 +274,40 @@ function JobHeader({
 // Edit form
 // ---------------------------------------------------------------------------
 
+/**
+ * The watch fields as one value, so this page can render the same component the create
+ * dialog does. Reading them back out of a stored job means deciding two things the job
+ * does not state outright: whether the condition is a rule or a judgement, and whether the
+ * outcome is a notification or an agent run.
+ */
+function watchValueFromJob(job: ScheduledJob): WatchFieldsValue {
+  return {
+    check_tool: job.check_tool ?? '',
+    check_args: (job.check_args ?? {}) as Record<string, unknown>,
+    check_args_text: job.check_args ? JSON.stringify(job.check_args, null, 2) : '',
+    args_mode: 'fields',
+    check_args_exprs: (job.check_args_exprs ?? {}) as Record<string, string>,
+    cel_expr: job.cel_expr ?? '',
+    llm_condition: job.llm_condition ?? '',
+    destroy_after_trigger: job.destroy_after_trigger ?? true,
+    // A sub-agent is what makes the outcome an agent run; its reply replaces the message.
+    outcome: job.sub_agent_id != null ? 'agent' : 'notify',
+    notification_message: job.notification_message ?? '',
+    sub_agent_mode: 'existing',
+    sub_agent_id: job.sub_agent_id != null ? String(job.sub_agent_id) : '',
+    prompt: job.prompt ?? '',
+    // Only relevant while defining an agent inline, which an existing job never is.
+    automated_name: '',
+    automated_description: '',
+    automated_model: 'tier:standard',
+    automated_system_prompt: '',
+    automated_mcp_tools: [],
+    automated_enable_thinking: false,
+    automated_thinking_level: 'low',
+  };
+}
+
+
 function EditForm({ job }: { job: ScheduledJob }) {
   const qc = useQueryClient();
 
@@ -293,38 +316,31 @@ function EditForm({ job }: { job: ScheduledJob }) {
   const [maxFailures, setMaxFailures] = useState(job.max_failures ?? 3);
   const [cronExpr, setCronExpr] = useState(job.cron_expr ?? '');
   const [intervalSeconds, setIntervalSeconds] = useState(
-    job.interval_seconds != null ? String(job.interval_seconds) : '',
+    job.interval_seconds != null ? String(job.interval_seconds) : ''
   );
-  const [runAt, setRunAt] = useState(
-    job.run_at ? toDatetimeLocal(job.run_at) : '',
-  );
-  const [message, setMessage] = useState(
-    job.job_type === 'task' ? (job.prompt ?? '') : (job.notification_message ?? '')
-  );
-  const [subAgentId, setSubAgentId] = useState(
-    job.sub_agent_id != null ? String(job.sub_agent_id) : '',
-  );
-  const [checkTool, setCheckTool] = useState(job.check_tool ?? '');
-  const [checkArgsText, setCheckArgsText] = useState(
-    job.check_args ? JSON.stringify(job.check_args, null, 2) : '',
-  );
-  const [conditionExpr, setConditionExpr] = useState(job.condition_expr ?? '');
-  const [expectedValue, setExpectedValue] = useState(job.expected_value ?? '');
+  const initialRunAt = job.run_at ? toDatetimeLocal(job.run_at, job.timezone) : '';
+  const [runAt, setRunAt] = useState(initialRunAt);
+  // Task jobs only: a watch's message lives in the watch value, which owns the exclusive
+  // choice between notifying and running an agent.
+  const [taskPrompt, setTaskPrompt] = useState(job.prompt ?? '');
+  const initialSubAgentId = job.sub_agent_id != null ? String(job.sub_agent_id) : '';
+  const [subAgentId, setSubAgentId] = useState(initialSubAgentId);
   const [deliveryChannel, setDeliveryChannel] = useState(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : '',
+    (job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : ''
   );
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [voiceCall, setVoiceCall] = useState((job as any).voice_call ?? false);
+  const [voiceCall, setVoiceCall] = useState(job.voice_call ?? false);
   const [dirty, setDirty] = useState(false);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [watch, setWatch] = useState<WatchFieldsValue>(() => watchValueFromJob(job));
   const [aiQuery, setAiQuery] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
 
   // ── Data queries ──────────────────────────────────────────────────────────
   const { data: subAgentsData } = useQuery(
-    consoleListSubAgentsOptions({ query: { owned_only: true } }),
+    // Same as the create dialog: a job may run any sub-agent shared with the user.
+    consoleListSubAgentsOptions({})
   );
   const subAgents = subAgentsData?.items ?? [];
 
@@ -344,7 +360,6 @@ function EditForm({ job }: { job: ScheduledJob }) {
     }
   }, [channels]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const selectedTool = mcpTools.find((t) => t.name === checkTool);
 
   function touch() {
     setDirty(true);
@@ -356,17 +371,13 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setMaxFailures(job.max_failures ?? 3);
     setCronExpr(job.cron_expr ?? '');
     setIntervalSeconds(job.interval_seconds != null ? String(job.interval_seconds) : '');
-    setRunAt(job.run_at ? toDatetimeLocal(job.run_at) : '');
-    setMessage(job.job_type === 'task' ? (job.prompt ?? '') : (job.notification_message ?? ''));
-    setSubAgentId(job.sub_agent_id != null ? String(job.sub_agent_id) : '');
-    setCheckTool(job.check_tool ?? '');
-    setCheckArgsText(job.check_args ? JSON.stringify(job.check_args, null, 2) : '');
-    setConditionExpr(job.condition_expr ?? '');
-    setExpectedValue(job.expected_value ?? '');
+    setRunAt(initialRunAt);
+    setTaskPrompt(job.prompt ?? '');
+    setSubAgentId(initialSubAgentId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     setDeliveryChannel((job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : '');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    setVoiceCall((job as any).voice_call ?? false);
+    setVoiceCall(job.voice_call ?? false);
+    setWatch(watchValueFromJob(job));
     setDirty(false);
     setError(null);
   }
@@ -377,18 +388,36 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setAiLoading(true);
     setError(null);
     try {
-      const result = await generateWatchParams(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        mcpTools as unknown as Record<string, unknown>[],
-        aiQuery,
-      );
-      if (result.check_tool) { setCheckTool(result.check_tool); touch(); }
-      if (result.check_args) { setCheckArgsText(JSON.stringify(result.check_args, null, 2)); touch(); }
-      if (result.condition_expr) { setConditionExpr(result.condition_expr); touch(); }
-      if (result.expected_value) { setExpectedValue(result.expected_value); touch(); }
-      if (result.notification_message) { setMessage(result.notification_message); touch(); }
-    } catch {
-      setError('AI generation failed. Please fill in the fields manually.');
+      const draft = await generateJobDraft(mcpTools as unknown as Record<string, unknown>[], aiQuery);
+      setWatch((w) => {
+        const next = { ...w };
+        if (draft.check_tool) next.check_tool = draft.check_tool;
+        if (draft.check_args) {
+          const args = draft.check_args as Record<string, unknown>;
+          next.check_args = args;
+          next.check_args_text = JSON.stringify(args, null, 2);
+          next.args_mode = argsModeFor(
+            args,
+            mcpTools.find((t) => t.name === (draft.check_tool ?? next.check_tool)),
+          );
+        }
+        if (draft.check_args_exprs && Object.keys(draft.check_args_exprs).length > 0) {
+          next.check_args_exprs = draft.check_args_exprs as Record<string, string>;
+        }
+        if (draft.cel_expr) next.cel_expr = draft.cel_expr;
+        if (draft.llm_condition) next.llm_condition = draft.llm_condition;
+        if (draft.notification_message) {
+          next.notification_message = draft.notification_message;
+          next.outcome = 'notify';
+        }
+        if (draft.destroy_after_trigger != null) {
+          next.destroy_after_trigger = draft.destroy_after_trigger;
+        }
+        return next;
+      });
+      touch();
+    } catch (e) {
+      setError(`AI generation failed: ${formatApiError(e)}. Please edit the fields manually.`);
     } finally {
       setAiLoading(false);
     }
@@ -415,13 +444,31 @@ function EditForm({ job }: { job: ScheduledJob }) {
       return;
     }
 
-    let check_args: Record<string, unknown> | undefined;
-    if (checkArgsText.trim()) {
-      try {
-        check_args = JSON.parse(checkArgsText);
-      } catch {
-        setError('Check arguments must be valid JSON');
+    // Arguments are resolved the same way the fields read them, so a JSON editor left
+    // mid-edit is reported here rather than being silently dropped on save.
+    if (job.job_type === 'watch') {
+      const { error: argsError } = resolveArgs(watch);
+      if (argsError) {
+        setError(argsError);
         return;
+      }
+      // Both halves are sent as explicit nulls, so emptying both would ask the backend
+      // for a watch with nothing to decide with. It refuses; say so here, against the
+      // fields the user is looking at.
+      if (!watch.cel_expr.trim() && !watch.llm_condition.trim()) {
+        setError('Write an expression, a condition for the model to judge, or both.');
+        return;
+      }
+      // The same standard the create dialog holds an agent outcome to. Without it,
+      // outcome "agent" with nothing selected saved silently as notify-only — the
+      // downgrade this page was already fixed for on the sending side — and an
+      // incomplete inline definition surfaced as a raw 422 instead of the message.
+      if (watch.outcome === 'agent') {
+        const agentError = agentActionError(watch);
+        if (agentError) {
+          setError(agentError);
+          return;
+        }
       }
     }
 
@@ -432,17 +479,50 @@ function EditForm({ job }: { job: ScheduledJob }) {
       ...(job.schedule_kind === 'interval' && {
         interval_seconds: intervalSeconds ? parseInt(intervalSeconds) : undefined,
       }),
-      ...(job.schedule_kind === 'once' && { run_at: runAt || undefined }),
+      // Only send run_at when the user actually changed it: the backend
+      // reinterprets any submitted naive value in the job's timezone, so
+      // resending the prefill on an unrelated edit would needlessly re-touch
+      // the schedule.
+      ...(job.schedule_kind === 'once' && runAt !== initialRunAt && { run_at: runAt || undefined }),
+      // Only send sub_agent_id when it actually changed: an unchanged value
+      // would still re-run the backend's access check on every save, and would
+      // reject unrelated edits outright once the agent is no longer accessible.
+      // For watches an explicit null clears it back to notify-only; task jobs
+      // require one, so an emptied value is simply not sent.
+      ...(job.job_type === 'watch'
+        ? watch.outcome === 'agent' && watch.sub_agent_mode === 'automated'
+          ? // An inline definition is a valid outcome for a watch; it used to be dropped
+            // here, so switching to "agent" with one silently PATCHed sub_agent_id: null
+            // and left the job notify-only.
+            { sub_agent_parameters: automatedSubAgentParameters(watch) }
+          : watch.sub_agent_id !== initialSubAgentId && {
+              sub_agent_id:
+                watch.outcome === 'agent' && watch.sub_agent_id
+                  ? parseInt(watch.sub_agent_id)
+                  : null,
+            }
+        : subAgentId !== initialSubAgentId && {
+            sub_agent_id: subAgentId ? parseInt(subAgentId) : undefined,
+          }),
       ...(job.job_type === 'task' && {
-        sub_agent_id: subAgentId ? parseInt(subAgentId) : undefined,
-        prompt: message.trim() ? message.trim() : null, // Task jobs use prompt field
+        prompt: taskPrompt.trim() ? taskPrompt.trim() : null,
       }),
       ...(job.job_type === 'watch' && {
-        notification_message: message.trim() ? message.trim() : null, // Watch jobs use notification_message field
-        check_tool: checkTool || undefined,
-        check_args,
-        condition_expr: conditionExpr || undefined,
-        expected_value: expectedValue || undefined,
+        check_tool: watch.check_tool || undefined,
+        check_args: resolveArgs(watch).args ?? null,
+        check_args_exprs:
+          Object.keys(watch.check_args_exprs).length > 0 ? watch.check_args_exprs : null,
+        // The two halves of one condition: the expression gates deterministically,
+        // the judgement is the semantic stage on what it returned. Cleared halves are
+        // sent as null so a stale one cannot silently keep deciding the job.
+        cel_expr: watch.cel_expr.trim() || null,
+        llm_condition: watch.llm_condition.trim() || null,
+        destroy_after_trigger: watch.destroy_after_trigger,
+        // Exclusive outcomes: an agent's reply replaces the notification, so sending both
+        // would leave one of them dead.
+        ...(watch.outcome === 'agent'
+          ? { prompt: watch.prompt.trim() || null, notification_message: null }
+          : { notification_message: watch.notification_message.trim() || null, prompt: null }),
       }),
       ...(deliveryChannel && { delivery_channel_id: parseInt(deliveryChannel) }),
       voice_call: voiceCall,
@@ -468,17 +548,16 @@ function EditForm({ job }: { job: ScheduledJob }) {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => { resetForm(); setEditing(false); }}
+                onClick={() => {
+                  resetForm();
+                  setEditing(false);
+                }}
                 disabled={mutation.isPending}
               >
                 <Undo2 className="mr-1.5 h-4 w-4" />
                 Discard
               </Button>
-              <Button
-                size="sm"
-                onClick={handleSave}
-                disabled={!dirty || mutation.isPending}
-              >
+              <Button size="sm" onClick={handleSave} disabled={!dirty || mutation.isPending}>
                 <Save className="mr-1.5 h-4 w-4" />
                 {mutation.isPending ? 'Saving…' : 'Save changes'}
               </Button>
@@ -493,319 +572,234 @@ function EditForm({ job }: { job: ScheduledJob }) {
       </CardHeader>
       <CardContent>
         <fieldset disabled={!editing} className="m-0 grid min-w-0 gap-4 border-0 p-0">
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="grid gap-1.5">
-          <Label>Name</Label>
-          <Input
-            value={name}
-            onChange={(e) => { setName(e.target.value); touch(); }}
-          />
-        </div>
-        <div className="grid gap-1.5">
-          <Label>Max failures before pause</Label>
-          <Input
-            type="number"
-            min={1}
-            max={20}
-            value={maxFailures}
-            onChange={(e) => { setMaxFailures(parseInt(e.target.value) || 3); touch(); }}
-          />
-        </div>
-      </div>
-
-      {job.schedule_kind === 'cron' && (
-        <CronField
-          value={cronExpr}
-          onChange={(v) => { setCronExpr(v); touch(); }}
-        />
-      )}
-
-      {job.schedule_kind === 'interval' && (
-        <div className="grid gap-1.5">
-          <Label>Interval (seconds)</Label>
-          <Input
-            type="number"
-            min={60}
-            value={intervalSeconds}
-            onChange={(e) => { setIntervalSeconds(e.target.value); touch(); }}
-          />
-        </div>
-      )}
-
-      {job.schedule_kind === 'once' && (
-        <div className="grid gap-1.5">
-          <Label>Run at</Label>
-          <Input
-            type="datetime-local"
-            min={nowDatetimeLocal()}
-            value={runAt}
-            onChange={(e) => { setRunAt(e.target.value); touch(); }}
-          />
-        </div>
-      )}
-
-      {/* Sub-agent picker (task jobs) */}
-      {job.job_type === 'task' && (
-        <>
-          <div className="grid gap-1.5">
-            <Label>Sub-agent</Label>
-            <Select
-              value={subAgentId}
-              onValueChange={(v) => { setSubAgentId(v); touch(); }}
-              disabled={!editing}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select a sub-agent…" />
-              </SelectTrigger>
-              <SelectContent>
-                {subAgents.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-muted-foreground">
-                    No sub-agents found
-                  </div>
-                ) : (
-                  subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
-                    <SelectItem key={sa.id} value={String(sa.id)}>
-                      <span>{sa.name}</span>
-                      {sa.type === 'automated' && (
-                        <span className="ml-2 text-xs text-muted-foreground">(automated)</span>
-                      )}
-                    </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              {subAgents.find(sa => sa.id === parseInt(subAgentId))?.type === 'automated' 
-                ? 'This automated sub-agent has a predefined system prompt.'
-                : 'Select a sub-agent to execute for this scheduled job.'}
-            </p>
-          </div>
-
-          {/* Task instruction - always shown for task jobs */}
-          <div className="grid gap-1.5">
-            <Label>
-              Task instruction{' '}
-              <span className="text-muted-foreground text-xs">(optional)</span>
-            </Label>
-            <Textarea
-              rows={3}
-              value={message}
-              onChange={(e) => { setMessage(e.target.value); touch(); }}
-              placeholder="Specific task or instruction for this execution (leave empty for default behavior)…"
-            />
-            <p className="text-xs text-muted-foreground">
-              {subAgents.find(sa => sa.id === parseInt(subAgentId))?.type === 'automated'
-                ? 'Optional task-specific instruction. If empty, the agent will follow its configured system prompt.'
-                : 'This instruction will be sent to the sub-agent. If empty, defaults to "Execute your configured task."'}
-            </p>
-          </div>
-        </>
-      )}
-
-      {/* Watch-specific fields */}
-      {job.job_type === 'watch' && (
-        <>
-          {/* AI generate */}
-          <div className="grid gap-2 rounded-lg border border-dashed px-3 py-3">
-            <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <Sparkles className="h-3.5 w-3.5" />
-              AI-fill all watch fields
-            </p>
-            <div className="flex gap-2">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label>Name</Label>
               <Input
-                placeholder="Describe the condition to watch (e.g. 'price drops below 100')"
-                value={aiQuery}
-                onChange={(e) => setAiQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAiGenerate()}
-                className="flex-1 text-sm"
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  touch();
+                }}
               />
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                disabled={!aiQuery.trim() || aiLoading || mcpTools.length === 0}
-                onClick={handleAiGenerate}
-              >
-                {aiLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  'Generate'
-                )}
-              </Button>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>Max failures before pause</Label>
+              <Input
+                type="number"
+                min={1}
+                max={20}
+                value={maxFailures}
+                onChange={(e) => {
+                  setMaxFailures(parseInt(e.target.value) || 3);
+                  touch();
+                }}
+              />
             </div>
           </div>
 
-          {/* Check tool */}
-          <div className="grid gap-1.5">
-            <Label>Check tool</Label>
-            <Select
-              value={checkTool}
-              onValueChange={(v) => { setCheckTool(v); touch(); }}
+          {job.schedule_kind === 'cron' && (
+            <CronField
+              value={cronExpr}
+              onChange={(v) => {
+                setCronExpr(v);
+                touch();
+              }}
+              timezone={job.timezone}
+            />
+          )}
+
+          {job.schedule_kind === 'interval' && (
+            <div className="grid gap-1.5">
+              <Label>Interval (seconds)</Label>
+              <Input
+                type="number"
+                min={60}
+                value={intervalSeconds}
+                onChange={(e) => {
+                  setIntervalSeconds(e.target.value);
+                  touch();
+                }}
+              />
+            </div>
+          )}
+
+          {job.schedule_kind === 'once' && (
+            <div className="grid gap-1.5">
+              <Label>Run at</Label>
+              <Input
+                type="datetime-local"
+                min={nowDatetimeLocal(job.timezone)}
+                value={runAt}
+                onChange={(e) => {
+                  setRunAt(e.target.value);
+                  touch();
+                }}
+              />
+              {job.timezone && <p className="text-xs text-muted-foreground">Interpreted in {job.timezone}</p>}
+            </div>
+          )}
+
+          {/* Sub-agent picker (task jobs) */}
+          {job.job_type === 'task' && (
+            <>
+              <div className="grid gap-1.5">
+                <Label>Sub-agent</Label>
+                <SubAgentSelect
+                  value={subAgentId}
+                  onChange={(v) => {
+                    setSubAgentId(v);
+                    touch();
+                  }}
+                  subAgents={subAgents}
+                  disabled={!editing}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {subAgents.find((sa) => sa.id === parseInt(subAgentId))?.type === 'automated'
+                    ? 'This automated sub-agent has a predefined system prompt.'
+                    : 'Select a sub-agent to execute for this scheduled job.'}
+                </p>
+              </div>
+
+              {/* Task instruction - always shown for task jobs */}
+              <div className="grid gap-1.5">
+                <Label>
+                  Task instruction <span className="text-muted-foreground text-xs">(optional)</span>
+                </Label>
+                <Textarea
+                  rows={3}
+                  value={taskPrompt}
+                  onChange={(e) => {
+                    setTaskPrompt(e.target.value);
+                    touch();
+                  }}
+                  placeholder="Specific task or instruction for this execution (leave empty for default behavior)…"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {subAgents.find((sa) => sa.id === parseInt(subAgentId))?.type === 'automated'
+                    ? 'Optional task-specific instruction. If empty, the agent will follow its configured system prompt.'
+                    : 'This instruction will be sent to the sub-agent. If empty, defaults to "Execute your configured task."'}
+                </p>
+              </div>
+            </>
+          )}
+
+          {/* Watch-specific fields */}
+          {job.job_type === 'watch' && (
+            <>
+              {/* Describe-the-job entry point, above the fields it writes into. */}
+              {editing && (
+                <div className="bg-muted grid gap-2.5 rounded-md border p-3.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Sparkles className="size-3.5" />
+                    <span className="text-[13px] font-semibold">Describe the change</span>
+                    <span className="text-muted-foreground text-xs">
+                      rewrites the fields below — review before saving
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    <Input
+                      className="bg-background flex-1"
+                      placeholder="e.g. also tell me when a meeting is cancelled"
+                      value={aiQuery}
+                      onChange={(e) => setAiQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAiGenerate()}
+                    />
+                    <Button
+                      type="button"
+                      disabled={!aiQuery.trim() || aiLoading || mcpTools.length === 0}
+                      onClick={handleAiGenerate}
+                    >
+                      {aiLoading ? <Loader2 className="size-4 animate-spin" /> : 'Generate'}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* The same fields the create dialog renders. `read` shows values as text;
+                  the check only runs while editing, since it is a real call. */}
+              <WatchFields
+                mode={editing ? 'edit' : 'read'}
+                value={watch}
+                onChange={(next) => {
+                  setWatch((w) => ({ ...w, ...next }));
+                  touch();
+                }}
+                mcpTools={mcpTools}
+                subAgents={subAgents}
+                storedResult={job.last_check_result as Record<string, unknown> | null}
+                onError={setError}
+              />
+            </>
+          )}
+
+      {/* Voice call toggle. Not task-only any more: the scheduler evaluates a watch's
+          condition before dispatching, so a call happens because something happened. */}
+          <div className="flex items-center gap-3 rounded-lg border px-3 py-2">
+            <Switch
+              id="voice-call-edit"
+              checked={voiceCall}
+              onCheckedChange={(v) => {
+                setVoiceCall(v);
+                touch();
+              }}
               disabled={!editing}
+            />
+            <Label htmlFor="voice-call-edit" className="cursor-pointer text-sm">
+              Deliver as a phone call
+            </Label>
+            <span className="text-xs text-muted-foreground">
+              When enabled, the agent response is delivered as a phone call instead of a text message.
+            </span>
+          </div>
+
+          {/* Delivery channel */}
+          <div className="grid gap-1.5">
+            <Label>Delivery channel</Label>
+            <Select
+              value={deliveryChannel}
+              disabled={!editing}
+              onValueChange={(v) => {
+                setDeliveryChannel(v);
+                touch();
+              }}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Select an MCP tool…" />
+                <SelectValue placeholder="Select a delivery channel…" />
               </SelectTrigger>
               <SelectContent>
-                {mcpTools.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-muted-foreground">
-                    No MCP tools available
-                  </div>
+                {channels.length === 0 ? (
+                  <div className="px-3 py-2 text-sm text-muted-foreground">No delivery channels registered</div>
                 ) : (
-                  mcpTools.map((tool) => (
-                    <SelectItem key={tool.name} value={tool.name}>
-                      <span>{tool.name}</span>
-                      {tool.server && (
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          ({tool.server})
-                        </span>
-                      )}
+                  channels.map((ch) => (
+                    <SelectItem key={ch.id} value={String(ch.id)}>
+                      {ch.name}
+                      {ch.description && <span className="ml-2 text-xs text-muted-foreground">— {ch.description}</span>}
                     </SelectItem>
                   ))
                 )}
               </SelectContent>
             </Select>
-            {selectedTool?.description && (
-              <p className="text-xs text-muted-foreground">{selectedTool.description}</p>
-            )}
           </div>
 
-          {/* Check arguments */}
-          <div className="grid gap-1.5">
-            <Label>
-              Check arguments{' '}
-              <span className="text-muted-foreground text-xs">(JSON, optional)</span>
-            </Label>
-            <Textarea
-              rows={2}
-              value={checkArgsText}
-              onChange={(e) => { setCheckArgsText(e.target.value); touch(); }}
-              placeholder='{"key": "value"}'
-              className="font-mono text-xs"
-            />
-          </div>
-
-          {/* Condition expression */}
-          <div className="grid gap-1.5">
-            <Label>
-              Condition expression{' '}
-              <span className="text-muted-foreground text-xs">(JSONPath)</span>
-            </Label>
-            <Input
-              value={conditionExpr}
-              onChange={(e) => { setConditionExpr(e.target.value); touch(); }}
-              placeholder="$.status"
-            />
-          </div>
-
-          {/* Expected value */}
-          <div className="grid gap-1.5">
-            <Label>
-              Expected value{' '}
-              <span className="text-muted-foreground text-xs">(leave empty to check "is not null")</span>
-            </Label>
-            <Input
-              value={expectedValue}
-              onChange={(e) => { setExpectedValue(e.target.value); touch(); }}
-              placeholder="success"
-            />
-          </div>
-
-        </>
-      )}
-
-      {/* Notification text for watch jobs */}
-      {job.job_type === 'watch' && (
-        <div className="grid gap-1.5">
-          <Label>Notification text</Label>
-          <Textarea
-            rows={3}
-            value={message}
-            onChange={(e) => { setMessage(e.target.value); touch(); }}
-            placeholder="Message sent when the condition is met."
-          />
-          <p className="text-xs text-muted-foreground">
-            Custom notification message delivered when the condition is met. If left empty, an LLM will generate a message based on the check result.
-          </p>
-        </div>
-      )}
-
-      {/* Voice call toggle (task jobs) */}
-      {job.job_type === 'task' && (
-        <div className="flex items-center gap-3 rounded-lg border px-3 py-2">
-          <Switch
-            id="voice-call-edit"
-            checked={voiceCall}
-            onCheckedChange={(v) => { setVoiceCall(v); touch(); }}
-            disabled={!editing}
-          />
-          <Label htmlFor="voice-call-edit" className="cursor-pointer text-sm">
-            Deliver via voice call
-          </Label>
-          <span className="text-xs text-muted-foreground">
-            When enabled, the agent response is delivered as a phone call instead of a text message.
-          </span>
-        </div>
-      )}
-
-      {/* Delivery channel */}
-      <div className="grid gap-1.5">
-        <Label>Delivery channel</Label>
-        <Select
-          value={deliveryChannel}
-          disabled={!editing}
-          onValueChange={(v) => {
-            setDeliveryChannel(v);
-            touch();
-          }}
-        >
-          <SelectTrigger>
-            <SelectValue placeholder="Select a delivery channel…" />
-          </SelectTrigger>
-          <SelectContent>
-            {channels.length === 0 ? (
-              <div className="px-3 py-2 text-sm text-muted-foreground">
-                No delivery channels registered
-              </div>
-            ) : (
-              channels.map((ch) => (
-                <SelectItem key={ch.id} value={String(ch.id)}>
-                  {ch.name}
-                  {ch.description && (
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      — {ch.description}
-                    </span>
-                  )}
-                </SelectItem>
-              ))
-            )}
-          </SelectContent>
-        </Select>
-      </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </fieldset>
 
-      {/* Read-only info — always visible */}
-      <div className="mt-4 grid gap-2 rounded-lg bg-muted/30 p-3 text-sm text-muted-foreground sm:grid-cols-2">
-        <div>
-          <span className="font-medium text-foreground">Created:</span>{' '}
-          {formatDate(job.created_at)}
+        {/* Read-only info — always visible */}
+        <div className="mt-4 grid gap-2 rounded-lg bg-muted/30 p-3 text-sm text-muted-foreground sm:grid-cols-2">
+          <div>
+            <span className="font-medium text-foreground">Created:</span> {formatDate(job.created_at)}
+          </div>
+          <div>
+            <span className="font-medium text-foreground">Last updated:</span> {formatDate(job.updated_at)}
+          </div>
+          <div>
+            <span className="font-medium text-foreground">Next run:</span> {formatDate(job.next_run_at)}
+          </div>
+          <div>
+            <span className="font-medium text-foreground">Consecutive failures:</span> {job.consecutive_failures}
+          </div>
         </div>
-        <div>
-          <span className="font-medium text-foreground">Last updated:</span>{' '}
-          {formatDate(job.updated_at)}
-        </div>
-        <div>
-          <span className="font-medium text-foreground">Next run:</span>{' '}
-          {formatDate(job.next_run_at)}
-        </div>
-        <div>
-          <span className="font-medium text-foreground">Consecutive failures:</span>{' '}
-          {job.consecutive_failures}
-        </div>
-      </div>
       </CardContent>
     </Card>
   );
@@ -817,7 +811,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
 
 function RunHistoryTable({ runs }: { runs: ScheduledJobRun[] }) {
   const { isAdmin } = useAuth();
-  
+
   if (runs.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center">
@@ -847,24 +841,16 @@ function RunHistoryTable({ runs }: { runs: ScheduledJobRun[] }) {
         <tbody>
           {runs.map((run) => (
             <tr key={run.id} className="border-b last:border-0 hover:bg-muted/30">
-              <td className="px-4 py-3 text-muted-foreground">
-                {formatDate(run.started_at)}
-              </td>
-              <td className="px-4 py-3 text-muted-foreground">
-                {formatDuration(run.started_at, run.completed_at)}
-              </td>
+              <td className="px-4 py-3 text-muted-foreground">{formatDate(run.started_at)}</td>
+              <td className="px-4 py-3 text-muted-foreground">{formatDuration(run.started_at, run.completed_at)}</td>
               <td className="px-4 py-3">
                 <RunStatusBadge status={run.status} />
               </td>
               <td className="px-4 py-3 max-w-xs">
                 {run.status === 'failed' && run.error_message ? (
-                  <span className="text-destructive text-xs line-clamp-2">
-                    {run.error_message}
-                  </span>
+                  <span className="text-destructive text-xs line-clamp-2">{run.error_message}</span>
                 ) : (
-                  <span className="text-muted-foreground text-xs line-clamp-2">
-                    {run.result_summary ?? '—'}
-                  </span>
+                  <span className="text-muted-foreground text-xs line-clamp-2">{run.result_summary ?? '—'}</span>
                 )}
               </td>
               <td className="px-4 py-3 text-center">
@@ -972,7 +958,9 @@ export function SchedulerJobDetailPage() {
         qc.invalidateQueries({ queryKey: ['scheduler-runs', jobId] });
       }
     });
-    return () => { socket.disconnect(); };
+    return () => {
+      socket.disconnect();
+    };
   }, [jobId, qc]);
 
   const {
@@ -1017,12 +1005,7 @@ export function SchedulerJobDetailPage() {
   return (
     <div className="flex flex-col gap-6 p-4">
       {/* Back button */}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="-ml-1 w-fit"
-        onClick={() => navigate('/app/scheduler')}
-      >
+      <Button variant="ghost" size="sm" className="-ml-1 w-fit" onClick={() => navigate('/app/scheduler')}>
         <ArrowLeft className="mr-1.5 h-4 w-4" />
         Back to Scheduler
       </Button>
@@ -1071,24 +1054,33 @@ export function SchedulerJobDetailPage() {
                   <span>Dispatched{runNowRunId ? ` (run #${runNowRunId})` : ''} — waiting for result…</span>
                 </div>
               ) : runNowError ? (
-                <p><strong>Run failed:</strong> {runNowError}</p>
-              ) : runNowResult && (
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <RunStatusBadge status={runNowResult.status} />
-                    {runNowResult.result_summary && (
-                      <span className="text-xs">{runNowResult.result_summary}</span>
-                    )}
-                    {runNowResult.error_message && (
-                      <span className="text-xs">{runNowResult.error_message}</span>
-                    )}
+                <p>
+                  <strong>Run failed:</strong> {runNowError}
+                </p>
+              ) : (
+                runNowResult && (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <RunStatusBadge status={runNowResult.status} />
+                      {runNowResult.result_summary && <span className="text-xs">{runNowResult.result_summary}</span>}
+                      {runNowResult.error_message && <span className="text-xs">{runNowResult.error_message}</span>}
+                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      {runNowResult.delivered ? '↗ Webhook notified (best effort)' : '○ No webhook configured'}
+                    </span>
                   </div>
-                  <span className="text-xs text-muted-foreground">
-                    {runNowResult.delivered ? '↗ Webhook notified (best effort)' : '○ No webhook configured'}
-                  </span>
-                </div>
+                )
               )}
             </div>
+          )}
+
+          {/* Why the last run did what it did. Above the configuration because on this
+              page that is the question being asked, and the answer is already stored. */}
+          {job.job_type === 'watch' && (
+            <LastCheckPanel
+              run={runs.find((r) => r.condition_evaluation) ?? runs[0]}
+              result={job.last_check_result as Record<string, unknown> | null}
+            />
           )}
 
           <EditForm job={job} />
@@ -1097,9 +1089,7 @@ export function SchedulerJobDetailPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 Run history
-                {runsLoading && (
-                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                )}
+                {runsLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -1113,20 +1103,19 @@ export function SchedulerJobDetailPage() {
               <AlertDialogHeader>
                 <AlertDialogTitle>Delete scheduled job?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  The job <strong>{job.name}</strong> will be permanently deleted.
-                  This action cannot be undone.
+                  The job <strong>{job.name}</strong> will be permanently deleted. This action cannot be undone.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
-                <AlertDialogCancel disabled={deleteMutation.isPending}>
-                  Cancel
-                </AlertDialogCancel>
+                <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
                 <AlertDialogAction
                   className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                   disabled={deleteMutation.isPending}
                   onClick={() => deleteMutation.mutate()}
                 >
-                  {deleteMutation.isPending ? 'Deleting…' : (
+                  {deleteMutation.isPending ? (
+                    'Deleting…'
+                  ) : (
                     <>
                       <Trash2 className="mr-1.5 h-4 w-4" />
                       Delete

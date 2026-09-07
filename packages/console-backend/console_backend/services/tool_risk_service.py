@@ -43,6 +43,14 @@ class ToolRiskService:
         """Get a single risk score by tool_name and server_slug."""
         return await self.repo.get_score(db, tool_name, server_slug)
 
+    async def get_scores_by_tool(
+        self,
+        db: AsyncSession,
+        tool_name: str,
+    ) -> list[dict[str, Any]]:
+        """All scores recorded for a tool name, across servers."""
+        return await self.repo.get_scores_by_tool(db, tool_name)
+
     async def get_scores_paginated(
         self,
         db: AsyncSession,
