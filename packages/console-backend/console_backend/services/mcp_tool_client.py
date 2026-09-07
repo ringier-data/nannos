@@ -50,7 +50,7 @@ def _console_mcp_url() -> str:
     Deliberately loopback rather than a configured public URL: the call must reach *this*
     instance, and it has no business leaving the pod to do it.
     """
-    return f"http://127.0.0.1:{os.getenv('API_PORT', '5001')}/mcp"
+    return f"http://127.0.0.1:{os.getenv('API_PORT', '5001')}/mcp/"
 
 
 async def token_for(tool_name: str, user_access_token: str) -> str:
@@ -221,6 +221,7 @@ async def call_tool(
                 "params": {"name": tool_name, "arguments": arguments or {}},
             },
             timeout=timeout,
+            # follow_redirects=True,
         )
         response.raise_for_status()
         data = parse_envelope(response, expect_id=_CALL_ID)
