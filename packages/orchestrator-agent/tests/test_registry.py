@@ -207,7 +207,10 @@ class TestRegistryService:
                         "description": "Reads OKRs",
                         "model": "gpt-4o",
                         "system_prompt": "You read OKRs.",
-                        "mcp_tools": ["authrion-atp-v1_okrs.v1.search_okrs", "gcal_list_events"],
+                        "mcp_tools": [
+                            "authrion-atp-v1_okrs.v1.search_okrs",
+                            "gcal_list_events",
+                        ],
                         "status": "approved",
                         "created_at": "2024-01-01T00:00:00",
                     },
@@ -224,7 +227,10 @@ class TestRegistryService:
                 "language": "en",
                 "custom_prompt": None,
                 "timezone": "Europe/Zurich",
-                "mcp_tools": ["authrion-atp-v1_okrs.v1.search_okrs", "gcal_list_events"],
+                "mcp_tools": [
+                    "authrion-atp-v1_okrs.v1.search_okrs",
+                    "gcal_list_events",
+                ],
                 "created_at": "2026-01-01T00:00:00",
                 "updated_at": "2026-01-01T00:00:00",
             }
@@ -233,7 +239,10 @@ class TestRegistryService:
         with mock_registry_service(mock_sub_agents_response, mock_settings_response) as registry_service:
             user = await registry_service.get_user(user_sub="test-user-sub", access_token="test-token")
 
-        assert user.tool_names == ["authrion-atp-v1_okrs_v1_search_okrs", "gcal_list_events"]
+        assert user.tool_names == [
+            "authrion-atp-v1_okrs_v1_search_okrs",
+            "gcal_list_events",
+        ]
         assert user.local_subagents[0].mcp_tools == [
             "authrion-atp-v1_okrs_v1_search_okrs",
             "gcal_list_events",
@@ -446,7 +455,10 @@ class TestRegistryService:
     @pytest.mark.asyncio
     async def test_get_user_timeout_error(self, registry_service, caplog):
         """Test get_user handles timeout errors gracefully."""
-        with patch.object(registry_service, "_get_client") as mock_get_client, caplog.at_level("ERROR"):
+        with (
+            patch.object(registry_service, "_get_client") as mock_get_client,
+            caplog.at_level("ERROR"),
+        ):
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=httpx.TimeoutException("Request timed out"))
             mock_get_client.return_value = mock_client
@@ -460,7 +472,10 @@ class TestRegistryService:
     @pytest.mark.asyncio
     async def test_get_user_connection_error(self, registry_service, caplog):
         """Test get_user handles connection errors gracefully."""
-        with patch.object(registry_service, "_get_client") as mock_get_client, caplog.at_level("ERROR"):
+        with (
+            patch.object(registry_service, "_get_client") as mock_get_client,
+            caplog.at_level("ERROR"),
+        ):
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=httpx.ConnectError("Failed to connect"))
             mock_get_client.return_value = mock_client
@@ -611,8 +626,16 @@ class TestUserModel:
             id="test-id",
             sub="test-sub",
             agent_metadata={
-                "https://agent1.example.com": {"sub_agent_id": 1, "name": "Agent 1", "description": "First agent"},
-                "https://agent2.example.com": {"sub_agent_id": 2, "name": "Agent 2", "description": "Second agent"},
+                "https://agent1.example.com": {
+                    "sub_agent_id": 1,
+                    "name": "Agent 1",
+                    "description": "First agent",
+                },
+                "https://agent2.example.com": {
+                    "sub_agent_id": 2,
+                    "name": "Agent 2",
+                    "description": "Second agent",
+                },
             },
             tool_names=["tool1", "tool2"],
             language="de",
@@ -776,3 +799,38 @@ class TestPersistBypassRules:
             },
             headers={"Authorization": "Bearer test-token"},
         )
+
+
+class TestGetEntitlementVersion:
+    """The per-turn stamp fetch must never raise and must return None on anything but a 200 with a version."""
+
+    @pytest.mark.asyncio
+    async def test_returns_version_on_200(self, registry_service):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"version": "abc123"}
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        with patch.object(registry_service, "_get_client", AsyncMock(return_value=client)):
+            assert await registry_service.get_entitlement_version("tok") == "abc123"
+        url, kwargs = client.get.call_args.args[0], client.get.call_args.kwargs
+        assert url == "/api/v1/auth/me/entitlement-version"
+        assert kwargs["headers"]["Authorization"] == "Bearer tok"
+
+    @pytest.mark.asyncio
+    async def test_none_on_non_200(self, registry_service):
+        resp = MagicMock(status_code=503)
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        with patch.object(registry_service, "_get_client", AsyncMock(return_value=client)):
+            assert await registry_service.get_entitlement_version("tok") is None
+
+    @pytest.mark.asyncio
+    async def test_none_on_transport_error(self, registry_service):
+        client = AsyncMock()
+        client.get = AsyncMock(side_effect=httpx.ConnectError("down"))
+        with patch.object(registry_service, "_get_client", AsyncMock(return_value=client)):
+            assert await registry_service.get_entitlement_version("tok") is None
+
+    @pytest.mark.asyncio
+    async def test_none_without_token(self, registry_service):
+        assert await registry_service.get_entitlement_version(None) is None

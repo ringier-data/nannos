@@ -60,6 +60,8 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 **CRITICAL: All database write operations (INSERT/UPDATE/DELETE) MUST use the repository pattern to ensure automatic audit logging.**
 
+The one deliberate exemption is cache bookkeeping that carries no business meaning: `users.entitlements_touched_at` (`services/entitlement_version.py`), bumped so the orchestrator's per-user entitlement version moves for gateway-held state. The admin action that triggers it is audited on its own.
+
 #### How to Add New Data Operations
 
 1. **Extend or create a repository** in `console_backend/repositories/`:
@@ -181,7 +183,7 @@ Activity-log events ARE persisted so the frontend can reconstruct timelines from
 
 ## Database Migrations
 
-- Migrations use Rambler and are located in `infrastructure/roles/basis/files/ddl/scripts/`
+- Migrations use Rambler and are located in `sqlmigrations/ddl/`
 - Name format: `###_description.sql` (e.g., `016_add_secret_to_audit_enums.sql`)
 - Migrations run automatically in test containers
 - Always include `-- rambler up` and `-- rambler down` comments
