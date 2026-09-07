@@ -39,6 +39,7 @@ async def _touch_group_members(db: DbSession, group_id: int, reason: str) -> Non
         await db.commit()
     except Exception as e:  # noqa: BLE001 — must never fail an already-applied gateway grant
         logger.warning("Failed to bump entitlement version for members of group %s (%s): %s", group_id, reason, e)
+        await db.rollback()  # leave the session usable for the dependency's teardown commit
 
 
 @router.get(

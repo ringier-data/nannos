@@ -569,15 +569,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         # Extract caller identity early for steering authorization
         caller_sub: str | None = None
-        entitlement_fetch: asyncio.Task[str | None] | None = None
         if context.call_context and hasattr(context.call_context, "state"):
             caller_sub = context.call_context.state.get("user_sub")
-            # Kick off the per-turn entitlement-version fetch now so it overlaps the turn
-            # registration below instead of sitting alone on the time-to-first-token path;
-            # it is awaited (and folded into the cache keys) once the turn is claimed.
-            entitlement_fetch = asyncio.create_task(
-                self.registry_service.get_entitlement_version(context.call_context.state.get("user_token"))
-            )
 
         # Attribute this request's gateway LLM calls so the proxy CostLogger can bill them.
         # The orchestrator's own (top-level) model calls reach the gateway via
@@ -643,8 +636,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 f"[STEERING] Active stream found for context_id={context_id}, "
                 f"queuing message for running orchestrator (queue depth: {active.message_queue.qsize() + 1})"
             )
-            if entitlement_fetch is not None:
-                entitlement_fetch.cancel()  # steering into a running turn: no cache lookups here
             active.message_queue.put_nowait(context.message)
             # Also put into orchestrator-local queue (read by SteeringMiddleware)
             steering_queue = get_steering_queue(context_id)
@@ -697,9 +688,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # One cheap call per turn: the user's entitlement version. It goes into every per-user
         # cache key below, so a changed entitlement (activated sub-agent, whitelist, role,
         # group default, gateway server access, ...) makes the stale entries unreachable on
-        # this turn — on every replica, with no push-based invalidation.
+        # this turn — on every replica, with no push-based invalidation. Awaited inline: the
+        # only awaits it could overlap (turn registration) are in-memory, and an inline call
+        # has no lifetime to manage across the raise paths above.
         entitlement_version = resolve_entitlement_version(
-            user_sub, await entitlement_fetch if entitlement_fetch is not None else None
+            user_sub, await self.registry_service.get_entitlement_version(user_token)
         )
 
         # Fetch user from registry to get stable database ID (user.id). Memoized per-user
