@@ -48,9 +48,9 @@ def _completions_url() -> str:
     return f"{config.model_gateway.url.rstrip('/')}/v1/chat/completions"
 
 
-def _first_message(resp_json: dict) -> dict:
-    """The first choice's ``message`` from an OpenAI-shaped completion, or ``{}`` when the
-    provider returned no choices.
+def _first_choice(resp_json: dict) -> dict:
+    """The first ``choice`` of an OpenAI-shaped completion, or ``{}`` when the provider
+    returned no choices.
 
     A 2xx with ``choices: []`` is a *successful* response with no output (content-filter block,
     moderation refusal, a provider error the gateway mapped to 200) — not a transport failure,
@@ -58,7 +58,38 @@ def _first_message(resp_json: dict) -> dict:
     empty-output handling instead of raising IndexError on ``choices[0]``.
     """
     choices = resp_json.get("choices") or []
-    return choices[0].get("message", {}) if choices else {}
+    return choices[0] if choices else {}
+
+
+def _first_message(resp_json: dict) -> dict:
+    """The first choice's ``message``, or ``{}`` — see `_first_choice`."""
+    return _first_choice(resp_json).get("message", {})
+
+
+class GatewayText(str):
+    """The assistant text of a completion, carrying the provider's ``finish_reason``.
+
+    A plain ``str`` to every caller — the utility paths do string work on it and tests
+    stub it with literals — but a reply that was cut off (``finish_reason == "length"``)
+    reads exactly like one that simply said little, and only the finish reason tells the
+    two apart. That was the difference between "the model answered nothing usable" and
+    "the model ran out of output budget mid-object" going unlogged for a month.
+    """
+
+    finish_reason: str | None
+
+    def __new__(cls, content: str, finish_reason: str | None = None) -> "GatewayText":
+        text = super().__new__(cls, content)
+        text.finish_reason = finish_reason
+        return text
+
+
+class GatewayReplyTruncated(RuntimeError):
+    """The model's reply hit ``max_tokens`` before it finished, so there is no object to read.
+
+    Distinct from "no object found" because the remedy is different: the request was fine,
+    the output budget was not — typically because a reasoning model spent it thinking.
+    """
 
 
 async def gateway_registered_aliases(timeout: float = 10.0) -> set[str] | None:
@@ -149,9 +180,10 @@ async def gateway_chat(
     # *successful* response with no text, not a transport failure. Return "" so callers'
     # str ops (re.sub/.strip) don't crash; they treat empty as "no usable output" and
     # apply their own fallback, distinct from the gateway error path (which raises above).
-    # _first_message tolerates an empty choices array the same way (returns {} → "").
-    content = _first_message(resp.json()).get("content")
-    return content or ""
+    # _first_choice tolerates an empty choices array the same way (returns {} → "").
+    choice = _first_choice(resp.json())
+    content = choice.get("message", {}).get("content")
+    return GatewayText(content or "", finish_reason=choice.get("finish_reason"))
 
 
 async def gateway_chat_json(
@@ -160,6 +192,7 @@ async def gateway_chat_json(
     model: str,
     max_tokens: int = 1024,
     metadata: dict | None = None,
+    reasoning_effort: str | None = None,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """`gateway_chat`, for the common case of asking for a single JSON object.
@@ -171,28 +204,58 @@ async def gateway_chat_json(
     would let one path succeed while another silently read `{}`.
 
     Returns `{}` when there is no object to be found, which every caller already treats as
-    "no usable output" and answers with its own fallback.
+    "no usable output" and answers with its own fallback. Raises `GatewayReplyTruncated`
+    instead when the reason there is no object is that the reply hit `max_tokens` — a
+    reasoning model on a small budget spends it thinking and is stopped a few tokens into
+    the answer, which is a budget problem, not a content miss, and callers word it
+    differently. Pass ``reasoning_effort="none"`` for mechanical JSON-filling so that
+    budget goes to the answer.
     """
     text = await gateway_chat(
-        prompt, model=model, max_tokens=max_tokens, metadata=metadata, timeout=timeout
+        prompt,
+        model=model,
+        max_tokens=max_tokens,
+        metadata=metadata,
+        reasoning_effort=reasoning_effort,
+        timeout=timeout,
     )
+    # Tests stub gateway_chat with plain strings; a plain str simply has no finish reason.
+    finish_reason = getattr(text, "finish_reason", None)
     cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        # The caller decides what an empty answer means; this is the only place that
-        # knows why it is empty, so the shape of the reply is recorded here.
-        logger.warning("No JSON object in the model's reply (%d chars) for model %s", len(text), model)
-        return {}
-    try:
-        parsed = json.loads(match.group())
-    except json.JSONDecodeError as exc:
-        # The match is greedy, so prose holding two objects spans from the first `{`
-        # to the last `}` and is not JSON. Same contract as above: no object found.
-        logger.warning(
-            "Unparseable JSON in the model's reply (%d chars) for model %s: %s", len(text), model, exc
+    if match:
+        try:
+            parsed = json.loads(match.group())
+        except json.JSONDecodeError as exc:
+            # The match is greedy, so prose holding two objects spans from the first `{`
+            # to the last `}` and is not JSON. Same contract as below: no object found.
+            problem = f"unparseable JSON ({exc})"
+        else:
+            return parsed if isinstance(parsed, dict) else {}
+    else:
+        problem = "no JSON object"
+    # The caller decides what an empty answer means; this is the only place that knows
+    # why it is empty, so the reply's shape — finish reason and how it starts — is
+    # recorded here. The snippet is what makes the next occurrence diagnosable without
+    # reproducing the call.
+    logger.warning(
+        "%s in the model's reply for model %s (finish_reason=%s, %d chars): %r",
+        problem[0].upper() + problem[1:],
+        model,
+        finish_reason,
+        len(text),
+        text[:_REPLY_SNIPPET_CHARS],
+    )
+    if finish_reason == "length":
+        raise GatewayReplyTruncated(
+            f"The reply from {model} was cut off at max_tokens={max_tokens} before it finished"
         )
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+#: How much of an unusable reply goes into the log. Enough to see what the model was
+#: doing (prose, a refusal, the opening of an object) without logging the whole thing.
+_REPLY_SNIPPET_CHARS = 200
 
 
 def _extract_citations(resp_json: dict) -> list[dict]:

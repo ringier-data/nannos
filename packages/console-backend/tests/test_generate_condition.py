@@ -177,3 +177,21 @@ class TestGenerateCondition:
                 GenerateConditionRequest(query="x"), AsyncMock(), _user()
             )
         assert exc.value.status_code == 503
+
+
+class TestReasoningBudget:
+    """The generator turns thinking off and names a cut-off reply for what it is."""
+
+    @pytest.mark.asyncio
+    async def test_thinking_is_off(self, monkeypatch):
+        _, chat = await _call(monkeypatch, ['{"cel_expr": "%s"}' % GOOD], query="q", result=PAYLOAD)
+        assert chat.await_args.kwargs["reasoning_effort"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_reply_is_a_422_that_says_so(self, monkeypatch):
+        from console_backend.services.llm_gateway import GatewayText
+
+        with pytest.raises(HTTPException) as exc:
+            await _call(monkeypatch, [GatewayText('{"cel_expr": "resu', finish_reason="length")], query="q", result=PAYLOAD)
+        assert exc.value.status_code == 422
+        assert "cut off" in exc.value.detail
