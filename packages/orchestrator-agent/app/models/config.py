@@ -354,9 +354,9 @@ class AgentSettings:
     # turn is part of the cache key (see discovery_cache). Entries are additionally bounded
     # by the user token's expiry.
     AGENT_DISCOVERY_CACHE_TTL = _int_env("AGENT_DISCOVERY_CACHE_TTL", 60)
-    # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env)
-    # or call discovery_cache.invalidate_all() for a fleet-wide flush, e.g. after a gateway
-    # catalogue change the console cannot see.
+    # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env,
+    # i.e. a redeploy) for a fleet-wide flush that cannot wait out the TTL, e.g. after a
+    # gateway catalogue change the console cannot see. Entitlement changes never need it.
     ENTITLEMENT_POLICY_VERSION = os.getenv("ENTITLEMENT_POLICY_VERSION", "0")
 
     # PostgreSQL checkpoint configuration.

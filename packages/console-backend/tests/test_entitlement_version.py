@@ -98,6 +98,79 @@ class TestComputeEntitlementVersion:
         )
         assert await compute_entitlement_version(pg_session, test_user_db.id) != before
 
+    async def test_moves_when_system_public_agent_gets_new_version(self, pg_session, test_user_db):
+        # Every user gets system-owned public agents without an activation row; a new
+        # approved version of one must still move the stamp.
+        await pg_session.execute(
+            text(
+                "INSERT INTO users (id, sub, email, first_name, last_name) VALUES ('system', 'system', 's@x', 's', 's') ON CONFLICT (id) DO NOTHING"
+            )
+        )
+        row = await pg_session.execute(
+            text(
+                "INSERT INTO sub_agents (name, owner_user_id, type, default_version, is_public) "
+                "VALUES ('sys-public', 'system', 'local', 1, TRUE) RETURNING id"
+            )
+        )
+        sub_agent_id = row.scalar_one()
+        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        await pg_session.execute(
+            text("UPDATE sub_agents SET default_version = 2 WHERE id = :s"),
+            {"s": sub_agent_id},
+        )
+        assert await compute_entitlement_version(pg_session, test_user_db.id) != before
+
+    async def test_moves_on_group_share_and_unshare_of_agent_and_catalog(self, pg_session, test_user_db):
+        group_id = await _create_group(pg_session, "share-group")
+        await pg_session.execute(
+            text("INSERT INTO user_group_members (user_id, user_group_id) VALUES (:u, :g)"),
+            {"u": test_user_db.id, "g": group_id},
+        )
+        sub_agent_id = await _create_sub_agent(pg_session, test_user_db.id, "shared-agent")
+        before = await compute_entitlement_version(pg_session, test_user_db.id)
+
+        await pg_session.execute(
+            text("INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id) VALUES (:s, :g)"),
+            {"s": sub_agent_id, "g": group_id},
+        )
+        shared = await compute_entitlement_version(pg_session, test_user_db.id)
+        assert shared != before
+        await pg_session.execute(
+            text("DELETE FROM sub_agent_permissions WHERE sub_agent_id = :s AND user_group_id = :g"),
+            {"s": sub_agent_id, "g": group_id},
+        )
+        unshared = await compute_entitlement_version(pg_session, test_user_db.id)
+        assert unshared != shared
+
+        row = await pg_session.execute(
+            text(
+                "INSERT INTO catalogs (name, owner_user_id, source_type) "
+                "VALUES ('cat', :u, (SELECT enum_range(NULL::catalog_source_type))[1]) RETURNING id"
+            ),
+            {"u": test_user_db.id},
+        )
+        catalog_id = row.scalar_one()
+        owned = await compute_entitlement_version(pg_session, test_user_db.id)
+        assert owned != unshared
+        await pg_session.execute(
+            text("INSERT INTO catalog_permissions (catalog_id, user_group_id) VALUES (:c, :g)"),
+            {"c": catalog_id, "g": group_id},
+        )
+        assert await compute_entitlement_version(pg_session, test_user_db.id) != owned
+
+    async def test_stable_across_non_entitlement_writes(self, pg_session, test_user_db):
+        # A login re-upsert or a timezone change must not evict the user's cache.
+        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        await pg_session.execute(
+            text("UPDATE users SET updated_at = NOW() + interval '1 hour', first_name = 'Renamed' WHERE id = :u"),
+            {"u": test_user_db.id},
+        )
+        await pg_session.execute(
+            text("INSERT INTO user_settings (user_id, timezone) VALUES (:u, 'Europe/Rome')"),
+            {"u": test_user_db.id},
+        )
+        assert await compute_entitlement_version(pg_session, test_user_db.id) == before
+
     async def test_moves_on_group_membership_and_group_default_agent(self, pg_session, test_user_db):
         group_id = await _create_group(pg_session, "ev-group")
         before = await compute_entitlement_version(pg_session, test_user_db.id)

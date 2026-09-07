@@ -1,5 +1,7 @@
 """Admin router for MCP gateway server access management."""
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..db.session import DbSession
@@ -14,6 +16,8 @@ from ..services.entitlement_version import touch_group_member_entitlements
 from ..services.mcp_gateway_server_access_service import McpGatewayServerAccessService
 from ..utils.gatana_auth import get_gatana_token
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-mcp-gateway"])
 
 
@@ -22,14 +26,19 @@ def get_mcp_gateway_service(request: Request) -> McpGatewayServerAccessService:
     return request.app.state.mcp_gateway_server_access_service
 
 
-async def _touch_group_members(db: DbSession, group_id: int) -> None:
+async def _touch_group_members(db: DbSession, group_id: int, reason: str) -> None:
     """Move the members' entitlement version so the orchestrator re-discovers their tools.
 
     Group → MCP-server access lives in the gateway, so the version fingerprint cannot see
     the change on its own — this is the one entitlement that needs an explicit bump.
+    Best-effort: the gateway write it follows cannot be rolled back, so a failure here is
+    logged and the members converge within the orchestrator's cache TTL instead.
     """
-    await touch_group_member_entitlements(db, group_id)
-    await db.commit()
+    try:
+        await touch_group_member_entitlements(db, group_id)
+        await db.commit()
+    except Exception as e:  # noqa: BLE001 — must never fail an already-applied gateway grant
+        logger.warning("Failed to bump entitlement version for members of group %s (%s): %s", group_id, reason, e)
 
 
 @router.get(
@@ -88,7 +97,7 @@ async def grant_mcp_gateway_server_access(
         await service.grant_server_access(gatana_token, group_id, server_slug, body.role)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    await _touch_group_members(db, group_id)
+    await _touch_group_members(db, group_id, f"grant server '{server_slug}'")
 
 
 @router.delete(
@@ -110,4 +119,4 @@ async def revoke_mcp_gateway_server_access(
         await service.revoke_server_access(gatana_token, group_id, server_slug)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    await _touch_group_members(db, group_id)
+    await _touch_group_members(db, group_id, f"revoke server '{server_slug}'")

@@ -325,8 +325,9 @@ class RegistryService:
 
         Called once per turn *before* the per-user cache lookups and folded into their key
         (see ``discovery_cache``), so an entitlement change is picked up on the next turn
-        without any push-based invalidation. Deliberately short timeout and never raises:
-        None means "unknown this turn" and the caller falls back to the last known stamp.
+        without any push-based invalidation. It sits on the time-to-first-token path, so the
+        timeout is tight and it never raises: None means "unknown this turn" and the caller
+        falls back to the last known stamp (a degraded console costs at most this budget).
         """
         if not access_token:
             return None
@@ -335,7 +336,7 @@ class RegistryService:
             response = await client.get(
                 "/api/v1/auth/me/entitlement-version",
                 headers={"Authorization": f"Bearer {access_token}"},
-                timeout=5.0,
+                timeout=2.0,
             )
             if response.status_code != 200:
                 logger.warning(f"Failed to fetch entitlement version: status={response.status_code}")

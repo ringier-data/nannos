@@ -11,8 +11,9 @@ Validated end-to-end against Bedrock: cache/cost fidelity and attribution round-
 
 Phase status:
   - Extraction + billing-unit mapping + per-event POST: implemented.
-  - Service-to-service auth token (OIDC client-credentials, like console-backend's
-    orchestrator_cache): TODO(phase-2) — currently uses CONSOLE_BACKEND_TOKEN if set.
+  - Service-to-service auth token (OIDC client-credentials via the shared
+    OidcOAuth2Client, ``get_token(audience=...)``): TODO(phase-2) — currently uses
+    CONSOLE_BACKEND_TOKEN if set.
 """
 
 import asyncio

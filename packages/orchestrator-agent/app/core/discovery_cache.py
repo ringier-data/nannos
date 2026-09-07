@@ -34,8 +34,9 @@ entry rather than a cold miss or an error.
 change moves the stamp too, but the JWT view is the one that gates authorization.
 ``sub_agent_config_hash`` is **playground-only**: the console's "test this exact config
 version" mode sends it, and it is None on a normal turn — it is not a digest of the
-user's sub-agent set. ``policy_version`` (``AgentSettings.ENTITLEMENT_POLICY_VERSION``)
-is the cross-cutting lever for a fleet-wide flush without per-user targeting.
+user's sub-agent set. ``policy_version`` (``AgentSettings.ENTITLEMENT_POLICY_VERSION``,
+env, needs a redeploy) is the cross-cutting lever for a fleet-wide flush without per-user
+targeting; the TTL is the other one.
 
 The per-user *tool whitelist* (``tool_names``) is deliberately NOT part of the key:
 discovery runs unfiltered (``white_list=None``) and the whitelist is applied later in
@@ -106,26 +107,35 @@ def cache_key(
 
 # Last entitlement version successfully fetched per user_sub. Only consulted when the
 # per-turn fetch fails, so a console-backend blip degrades to "reuse the current entry
-# until the TTL" instead of a cold re-discovery (or an error) on every turn.
-_last_entitlement_version: dict[str, str] = {}
+# until the TTL" instead of a cold re-discovery (or an error) on every turn. Bounded in
+# size like every store here, and in age: a day-old stamp is not worth falling back to.
+_LAST_STAMP_TTL_S = 24 * 3600.0
+_last_entitlement_version: "TtlTokenCache | None" = None
+
+
+def _last_stamps() -> "TtlTokenCache":
+    global _last_entitlement_version
+    if _last_entitlement_version is None:
+        _last_entitlement_version = TtlTokenCache(_LAST_STAMP_TTL_S, name="ENTITLEMENT-VERSION")
+    return _last_entitlement_version
 
 
 def resolve_entitlement_version(user_sub: str, fetched: str | None) -> str | None:
     """Return the stamp to key on this turn: ``fetched`` if present, else the last one seen.
 
     Remembers a successful fetch for the fallback. Returns None only when the fetch failed
-    and the user has never had a stamp in this process — the key then carries an empty
+    and the user has no recent stamp in this process — the key then carries an empty
     stamp and the entry is simply TTL-bounded, exactly the pre-stamp behaviour.
     """
     if fetched:
-        _last_entitlement_version[user_sub] = fetched
+        _last_stamps().put(user_sub, fetched, None)
         return fetched
-    last = _last_entitlement_version.get(user_sub)
-    if last is not None:
-        logger.warning(
-            "[ENTITLEMENT-VERSION] fetch failed for user_sub=%s; reusing last known stamp",
-            user_sub,
-        )
+    last = _last_stamps().get(user_sub)
+    logger.warning(
+        "[ENTITLEMENT-VERSION] fetch failed for user_sub=%s; %s",
+        user_sub,
+        "reusing last known stamp" if last is not None else "no known stamp, entry will be TTL-bounded only",
+    )
     return last
 
 
@@ -239,19 +249,3 @@ def get_embedded_runnable_cache(ttl_seconds: float | None = None) -> TtlTokenCac
             name="EMBEDDED-RUNNABLE-CACHE",
         )
     return _embedded_runnable_cache
-
-
-def invalidate_all() -> None:
-    """Drop all cached discovery + user records and forgotten stamps (fleet-wide flush).
-
-    Entitlement changes never need this — they move the per-user stamp in the key. It is a
-    maintenance lever for the one thing the stamp cannot see: a catalogue change made on
-    the gateway itself (which the TTL otherwise bounds).
-    """
-    if _discovery_cache is not None:
-        _discovery_cache.clear()
-    if _user_cache is not None:
-        _user_cache.clear()
-    if _embedded_runnable_cache is not None:
-        _embedded_runnable_cache.clear()
-    _last_entitlement_version.clear()

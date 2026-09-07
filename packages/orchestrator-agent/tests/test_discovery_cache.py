@@ -8,9 +8,6 @@ from app.core import discovery_cache as dc
 from app.core.discovery_cache import (
     TtlTokenCache,
     cache_key,
-    get_discovery_cache,
-    get_user_cache,
-    invalidate_all,
     resolve_entitlement_version,
     token_exp,
 )
@@ -59,11 +56,11 @@ class TestCacheKey:
 
 class TestResolveEntitlementVersion:
     def setup_method(self):
-        dc._last_entitlement_version.clear()
+        dc._last_entitlement_version = None
 
     def test_fetched_wins_and_is_remembered(self):
         assert resolve_entitlement_version("alice", "v1") == "v1"
-        assert dc._last_entitlement_version["alice"] == "v1"
+        assert dc._last_stamps().get("alice") == "v1"
 
     def test_fetch_failure_falls_back_to_last_known(self):
         resolve_entitlement_version("alice", "v1")
@@ -76,10 +73,10 @@ class TestResolveEntitlementVersion:
         resolve_entitlement_version("alice", "v1")
         assert resolve_entitlement_version("bob", None) is None
 
-    def test_invalidate_all_forgets_stamps(self):
-        resolve_entitlement_version("alice", "v1")
-        invalidate_all()
-        assert resolve_entitlement_version("alice", None) is None
+    def test_remembered_stamps_are_bounded(self):
+        # Same bounding policy as every other store in the module: size-capped, TTL-aged.
+        assert dc._last_stamps()._max_entries == dc._DEFAULT_MAX_ENTRIES
+        assert dc._last_stamps()._ttl == dc._LAST_STAMP_TTL_S
 
 
 class TestTokenExp:
@@ -138,19 +135,3 @@ class TestTtlTokenCache:
         for i in range(10):
             c.put(f"k{i}", i, None)
         assert len(c._store) <= 3
-
-
-class TestInvalidateAll:
-    def test_clears_both_singletons(self):
-        get_discovery_cache(300).put("d", ("t", "s"), None)
-        get_user_cache(300).put("u", object(), None)
-        assert get_discovery_cache().get("d") is not None
-        assert get_user_cache().get("u") is not None
-        invalidate_all()
-        assert get_discovery_cache().get("d") is None
-        assert get_user_cache().get("u") is None
-
-    def teardown_method(self):
-        # reset module singletons so tests don't bleed
-        dc._discovery_cache = None
-        dc._user_cache = None

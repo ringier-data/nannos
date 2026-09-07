@@ -93,8 +93,7 @@ logger = logging.getLogger(__name__)
 # run — and the model has to be told, or it assumes the call succeeded.
 _UNREADABLE_AUTHORIZATION_MESSAGE = (
     "The user's answer to the authorization prompt could not be read as an approval "
-    "of this call, so it was NOT executed. Ask for it again if it is still needed. "
-    + NOT_APPROVED_CLAUSE
+    "of this call, so it was NOT executed. Ask for it again if it is still needed. " + NOT_APPROVED_CLAUSE
 )
 
 # Bounded re-entries to recover from an "eager completion" where the model sets
@@ -358,11 +357,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         None,
                     )
                 result = decision.get("client_action_result") if isinstance(decision, dict) else None
-                resume_map[intr.id] = (
-                    result
-                    if isinstance(result, dict)
-                    else {"ok": False, "reason": "no-result"}
-                )
+                resume_map[intr.id] = result if isinstance(result, dict) else {"ok": False, "reason": "no-result"}
                 logger.info(
                     f"Resuming client-action interrupt {intr.id} "
                     f"({'with result' if isinstance(result, dict) else 'WITHOUT result'})"
@@ -574,8 +569,15 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         # Extract caller identity early for steering authorization
         caller_sub: str | None = None
+        entitlement_fetch: asyncio.Task[str | None] | None = None
         if context.call_context and hasattr(context.call_context, "state"):
             caller_sub = context.call_context.state.get("user_sub")
+            # Kick off the per-turn entitlement-version fetch now so it overlaps the turn
+            # registration below instead of sitting alone on the time-to-first-token path;
+            # it is awaited (and folded into the cache keys) once the turn is claimed.
+            entitlement_fetch = asyncio.create_task(
+                self.registry_service.get_entitlement_version(context.call_context.state.get("user_token"))
+            )
 
         # Attribute this request's gateway LLM calls so the proxy CostLogger can bill them.
         # The orchestrator's own (top-level) model calls reach the gateway via
@@ -595,9 +597,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if caller_sub or caller_installation:
             from ringier_a2a_sdk.cost_tracking.attribution import set_attribution
 
-            set_attribution(
-                user_sub=caller_sub, conversation_id=context_id, installation=caller_installation
-            )
+            set_attribution(user_sub=caller_sub, conversation_id=context_id, installation=caller_installation)
         # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
         if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
@@ -643,6 +643,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 f"[STEERING] Active stream found for context_id={context_id}, "
                 f"queuing message for running orchestrator (queue depth: {active.message_queue.qsize() + 1})"
             )
+            if entitlement_fetch is not None:
+                entitlement_fetch.cancel()  # steering into a running turn: no cache lookups here
             active.message_queue.put_nowait(context.message)
             # Also put into orchestrator-local queue (read by SteeringMiddleware)
             steering_queue = get_steering_queue(context_id)
@@ -697,7 +699,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # group default, gateway server access, ...) makes the stale entries unreachable on
         # this turn — on every replica, with no push-based invalidation.
         entitlement_version = resolve_entitlement_version(
-            user_sub, await self.registry_service.get_entitlement_version(user_token)
+            user_sub, await entitlement_fetch if entitlement_fetch is not None else None
         )
 
         # Fetch user from registry to get stable database ID (user.id). Memoized per-user
@@ -1264,7 +1266,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # Emit feedback request for complex tasks before terminal event
                 if (
                     deferred_terminal_item is not None
-                    and deferred_terminal_item.state in (TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED)
+                    and deferred_terminal_item.state
+                    in (TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED)
                     and requested_extensions is not None
                     and FEEDBACK_REQUEST_EXTENSION in requested_extensions
                 ):
@@ -1423,9 +1426,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # "note" marks a mid-turn note the agent wrote for the user (notify_user);
             # ordinary tool/delegation lines carry no kind.
             kind = metadata.get("kind")
-            logger.info(
-                f"[ACTIVITY_LOG] Emitting status update: source={source}, kind={kind}, content: {content[:50]}"
-            )
+            logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, kind={kind}, content: {content[:50]}")
             await updater.update_status(
                 TaskState.TASK_STATE_WORKING,
                 new_activity_log_message(
@@ -1785,9 +1786,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # ("Please sign in to Jira to continue.") after a long streamed answer —
         # and a length check alone would call that already-delivered and drop a
         # prompt the client has to render. So compare the text itself there.
-        terminal_text = "".join(
-            part.text for part in msg.parts if part.WhichOneof("content") == "text"
-        ).strip()
+        terminal_text = "".join(part.text for part in msg.parts if part.WhichOneof("content") == "text").strip()
         answer_fully_streamed = (
             first_chunk_sent
             and final_message_len > 0
