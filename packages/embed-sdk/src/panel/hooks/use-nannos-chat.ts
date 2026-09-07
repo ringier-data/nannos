@@ -163,9 +163,12 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
     assistant.clearSeededPrompt();
     void sendMessage({
       text: seededPrompt.text,
-      ...(seededPrompt.displayText && {
-        metadata: { display: { kind: 'context' as const, label: seededPrompt.displayText } },
-      }),
+      metadata: {
+        sentAt: Date.now(),
+        ...(seededPrompt.displayText && {
+          display: { kind: 'context' as const, label: seededPrompt.displayText },
+        }),
+      },
     });
     engine.conversations.noteTitle(conversationId, seededPrompt.displayText ?? seededPrompt.text);
   }, [seededPrompt, conversationId, isReadOnly, engine, assistant, sendMessage]);
@@ -183,6 +186,7 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         void sendMessage({
           text,
           metadata: {
+            sentAt: Date.now(),
             ...(opts?.displayText && {
               display: {
                 kind: opts.displayKind ?? ('context' as const),

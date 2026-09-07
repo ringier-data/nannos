@@ -68,6 +68,11 @@ export type NannosDataParts = {
 export interface NannosMessageMetadata {
   /** DB id the backend injects mid-turn; used as the history dedupe key. */
   persistedMessageId?: string;
+  /** When the user's message left this browser — for a restored one, the time
+   *  of its stored row. The send's own place in the turn's timeline, the way
+   *  `textArrival` stamps the answer; dev mode is the only reader. Nothing
+   *  crosses the wire: `buildNewTurnPayload` assembles its own metadata. */
+  sentAt?: number;
   /** Host-injected prompt rendered as a muted context chip instead of a user bubble. */
   /** How a user message renders when the panel, not the person, composed its
    *  text. `context` is a host-injected chip; `receipt` is a decision the user

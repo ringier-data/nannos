@@ -183,7 +183,7 @@ function CopyMessageButton({ text, className }: { text: string; className?: stri
   );
 }
 
-function UserMessage({ message }: { message: NannosUIMessage }) {
+function UserMessage({ message, showTime }: { message: NannosUIMessage; showTime: boolean }) {
   const text = message.parts
     .filter((part): part is Extract<MessagePart, { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
@@ -212,7 +212,8 @@ function UserMessage({ message }: { message: NannosUIMessage }) {
   return (
     <div className="group/nannos-message flex w-full flex-col items-end gap-0.5">
       <Message from="user">
-        <MessageContent>
+        <MessageContent className={showTime ? 'gap-1' : undefined}>
+          {showTime && <DevTimestamp ts={message.metadata?.sentAt} />}
           {text && <span className="whitespace-pre-wrap break-words">{text}</span>}
           {files.length > 0 && (
             <span className="flex flex-wrap gap-1.5">
@@ -238,10 +239,11 @@ function UserMessage({ message }: { message: NannosUIMessage }) {
 }
 
 /**
- * Arrival time, dev mode only. Every event the agent sends carries one — the
- * activity lines in `data.ts`, the answer in its provider metadata — so the
- * turn reads as a timeline down the thread. Callers gate on dev mode; an
- * unstamped part (older history) renders nothing.
+ * Arrival time, dev mode only. Every event of a turn carries one — the user's
+ * own send in `metadata.sentAt`, the activity lines in `data.ts`, the answer in
+ * its provider metadata — so the turn reads as a timeline down the thread, from
+ * the question to the answer. Callers gate on dev mode; an unstamped part or
+ * message (older history) renders nothing.
  */
 function DevTimestamp({ ts }: { ts?: number }) {
   if (ts === undefined) return null;
@@ -928,7 +930,7 @@ function ThreadMessage({
       ) : message.metadata?.display ? (
         <ContextChip message={message} />
       ) : (
-        <UserMessage message={message} />
+        <UserMessage message={message} showTime={devMode} />
       );
     if (!devMode) return rendered;
     // The badge wraps even a message whose bubble renders nothing (a HITL
@@ -941,7 +943,7 @@ function ThreadMessage({
       <DevWirePart
         label={message.metadata?.display ? 'message · user · context' : 'message · user'}
         payload={{ id: message.id, parts: message.parts, metadata: message.metadata }}
-        needle={userText ? { text: userText } : undefined}
+        needle={userText ? { text: userText, ts: message.metadata?.sentAt } : undefined}
         dir="out"
         conversationId={conversationId}
       >

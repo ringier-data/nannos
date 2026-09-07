@@ -152,13 +152,19 @@ function userMessage(row: RestMessageRow, index: number): NannosUIMessage {
     }
   }
   const injectedDisplayText = row.metadata?.injectedDisplayText;
+  const display =
+    typeof injectedDisplayText === 'string' && injectedDisplayText
+      ? injectedDisplay(row, injectedDisplayText)
+      : undefined;
+  // 0 = the row carried no readable time; leave it unstamped rather than put a
+  // 1970 clock in the thread.
+  const sentAt = rowTime(row);
+  const metadata = { ...(sentAt > 0 && { sentAt }), ...(display && { display }) };
   return {
     id: rowId(row, `hist-u-${index}`),
     role: 'user',
     parts,
-    ...(typeof injectedDisplayText === 'string' && injectedDisplayText
-      ? { metadata: { display: injectedDisplay(row, injectedDisplayText) } }
-      : {}),
+    ...(Object.keys(metadata).length > 0 && { metadata }),
   };
 }
 
