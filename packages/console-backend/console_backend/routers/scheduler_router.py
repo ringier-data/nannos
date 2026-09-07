@@ -254,6 +254,22 @@ def _coerce_id(value: object, allowed: set[int]) -> int | None:
     return candidate
 
 
+def _coerce_name(value: object, allowed: set[str]) -> str | None:
+    """A generated name, or None when it is not a string or not among the offered ones.
+
+    The string guard matters: a model asked for "the single best-matching tool" answers
+    with a list when several match, and a bare `in` on a set would raise on it.
+    """
+    if not isinstance(value, str):
+        if value is not None:
+            logger.info("Discarding generated name %r: not a string", value)
+        return None
+    if value not in allowed:
+        logger.info("Discarding generated name %r outside the offered set", value)
+        return None
+    return value
+
+
 def _agent_choices(sub_agents: list[SubAgent]) -> list[dict[str, Any]]:
     """The sub-agents a generated job may pick from, as the prompt sees them.
 
@@ -309,19 +325,38 @@ async def _candidate_tools(request: Request, user: User, query: str) -> list[MCP
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Could not read the tool catalogue for draft generation: %s", exc)
+        # When the gateway starts failing this is the only line an operator gets, so
+        # it carries the upstream status where there is one, and the traceback.
+        upstream = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "Could not read the tool catalogue for draft generation (%s, upstream status %s)",
+            type(exc).__name__,
+            upstream,
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not read the tool catalogue — try again shortly.",
         ) from exc
     candidates = rank_mcp_tools(catalogue.tools, query, _DRAFT_TOOL_CANDIDATES)
-    logger.info(
-        "Draft generation offers %d of %d tools for query %r: %s",
-        len(candidates),
-        len(catalogue.tools),
-        query,
-        [t.name for t in candidates],
-    )
+    # An empty offer is legitimate — a task job needs no tool, and the request may
+    # simply share no vocabulary with the catalogue — but it is worth its own line, since
+    # the model can then only name a tool from memory, which is discarded afterwards.
+    if not candidates:
+        logger.info(
+            "Draft generation offers no tools for query %r (%d in the catalogue%s)",
+            query,
+            len(catalogue.tools),
+            "" if catalogue.tools else " — empty, e.g. under impersonation",
+        )
+    else:
+        logger.info(
+            "Draft generation offers %d of %d tools for query %r: %s",
+            len(candidates),
+            len(catalogue.tools),
+            query,
+            [t.name for t in candidates],
+        )
     return candidates
 
 
@@ -351,9 +386,11 @@ async def generate_job_draft(
     request and cut to a handful — see `_DRAFT_TOOL_CANDIDATES`.
     """
     candidate_tools = await _candidate_tools(request, current_user, data.query)
+    # Compact on purpose: pretty-printed schema is a third more tokens for whitespace the
+    # model does not need, and the whole prompt is re-sent on every CEL repair round.
     tools_summary = json.dumps(
         [{"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in candidate_tools],
-        indent=2,
+        separators=(",", ":"),
     )
     allowed_tool_names = {t.name for t in candidate_tools}
     # Offer only what this user can reach: the model picks from these, and anything
@@ -506,11 +543,14 @@ async def generate_job_draft(
     generated["sub_agent_id"] = _coerce_id(result.get("sub_agent_id"), allowed_agent_ids)
     generated["delivery_channel_id"] = _coerce_id(result.get("delivery_channel_id"), allowed_channel_ids)
     # A tool name outside the offered set is an invention — the model saw only the
-    # candidates — and would produce a job whose check fails on its first run.
-    check_tool = result.get("check_tool")
-    if check_tool is not None and check_tool not in allowed_tool_names:
-        logger.info("Discarding generated check_tool %r: not among the offered tools", check_tool)
-        generated["check_tool"] = None
+    # candidates — and would produce a job whose check fails on its first run. The
+    # arguments and condition were written against that invented tool, so they go with
+    # it: the form applies each of them independently, and pre-filled arguments under a
+    # tool the user then picks by hand are exactly the first-run failure being avoided.
+    generated["check_tool"] = _coerce_name(result.get("check_tool"), allowed_tool_names)
+    if generated["check_tool"] is None and result.get("check_tool") is not None:
+        for key in ("check_args", "check_args_exprs", "cel_expr", "llm_condition"):
+            generated.pop(key, None)
     if isinstance(generated.get("check_args"), str):
         try:
             generated["check_args"] = json.loads(generated["check_args"])
@@ -522,8 +562,9 @@ async def generate_job_draft(
     # generation that produced no usable output (no JSON in the reply, or none of the
     # fields asked for). Rendering that as a 200 left the form silently empty and the
     # logs silent with it. A draft the model filled only partly is a different outcome
-    # and stays a success.
-    if not draft.model_dump(exclude_none=True):
+    # and stays a success. 422 rather than 503, as /generate-condition answers the same
+    # case: the service is up, and a retry-on-503 layer must not re-run a content miss.
+    if not draft.model_fields_set:
         logger.warning(
             "Draft generation produced nothing usable for query %r (model %s, %d candidate tools, raw keys %s)",
             data.query,
@@ -532,8 +573,8 @@ async def generate_job_draft(
             sorted(result),
         )
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The model produced no usable draft — try again or rephrase the request.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The model produced no usable draft — rephrase the request.",
         )
     return draft
 

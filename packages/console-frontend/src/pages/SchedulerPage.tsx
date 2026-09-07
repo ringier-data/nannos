@@ -53,6 +53,7 @@ import {
   type ScheduleKind,
   type ScheduledJobCreateExtended,
   getDeliveryChannels,
+  formatApiError,
   generateJobDraft,
   createScheduledJob,
   type DeliveryChannel,
@@ -415,8 +416,10 @@ function CreateJobDialog({
       });
       setAiFilled(filled);
       setFieldErrors({});
-    } catch {
-      setError('AI generation failed. Please fill in the fields manually.');
+    } catch (e) {
+      // The backend's detail says which remedy applies — rephrase, retry later, or
+      // have an admin configure a model — so it is shown rather than swallowed.
+      setError(`AI generation failed: ${formatApiError(e)}. Please fill in the fields manually.`);
     } finally {
       setAiLoading(false);
     }
