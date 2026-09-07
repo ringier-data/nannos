@@ -3493,7 +3493,7 @@ export const markAllNotificationsAsReadApiV1NotificationsMarkAllReadPutMutation 
 /**
  * Draft a whole scheduled job from a one-line description.
  *
- * Given the available MCP tools and a natural-language request, returns a partial ScheduledJobCreate: job type, schedule, check tool and arguments, condition, outcome and delivery. Fields it cannot infer are omitted for the caller to fill in.
+ * Given a natural-language request, returns a partial ScheduledJobCreate: job type, schedule, check tool and arguments, condition, outcome and delivery. The tools, sub-agents and channels the draft may reference are the caller's own, read server-side. Fields it cannot infer are omitted for the caller to fill in; a generation that infers nothing at all is an error, not an empty draft.
  */
 export const generateJobDraftApiV1SchedulerGenerateJobDraftPostMutation = (options?: Partial<Options<GenerateJobDraftApiV1SchedulerGenerateJobDraftPostData>>): UseMutationOptions<GenerateJobDraftApiV1SchedulerGenerateJobDraftPostResponse, GenerateJobDraftApiV1SchedulerGenerateJobDraftPostError, Options<GenerateJobDraftApiV1SchedulerGenerateJobDraftPostData>> => {
     const mutationOptions: UseMutationOptions<GenerateJobDraftApiV1SchedulerGenerateJobDraftPostResponse, GenerateJobDraftApiV1SchedulerGenerateJobDraftPostError, Options<GenerateJobDraftApiV1SchedulerGenerateJobDraftPostData>> = {

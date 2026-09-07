@@ -2025,9 +2025,11 @@ export type GenerateJobDraftRequest = {
     /**
      * Tools
      *
-     * List of available MCP tool objects (name, description, input_schema.)
+     * Ignored. The candidate tools are selected server-side from the caller's own catalogue; the field is kept so an older UI can still post to this endpoint.
+     *
+     * @deprecated
      */
-    tools: Array<{
+    tools?: Array<{
         [key: string]: unknown;
     }>;
     /**

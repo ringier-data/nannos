@@ -159,14 +159,13 @@ export type { ScheduledJobDraft } from './generated/types.gen';
 /**
  * Draft a whole scheduled job from a one-line description: job type, schedule, check
  * tool and arguments, condition, outcome and delivery. Fields the generator cannot infer
- * are omitted for the form to fill in.
+ * are omitted for the form to fill in. The tools the draft may pick from are the user's
+ * own catalogue, ranked against the query on the backend — nothing is posted from here.
+ * A generation that infers nothing at all is an error, not an empty draft.
  */
-export async function generateJobDraft(
-  tools: Record<string, unknown>[],
-  query: string,
-): Promise<ScheduledJobDraft> {
+export async function generateJobDraft(query: string): Promise<ScheduledJobDraft> {
   const { data, error } = await generateJobDraftApiV1SchedulerGenerateJobDraftPost({
-    body: { tools, query },
+    body: { query },
   });
   if (error) throw error;
   return data as ScheduledJobDraft;

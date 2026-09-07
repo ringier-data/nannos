@@ -1860,7 +1860,7 @@ export const markAllNotificationsAsReadApiV1NotificationsMarkAllReadPut = <Throw
 /**
  * Draft a whole scheduled job from a one-line description.
  *
- * Given the available MCP tools and a natural-language request, returns a partial ScheduledJobCreate: job type, schedule, check tool and arguments, condition, outcome and delivery. Fields it cannot infer are omitted for the caller to fill in.
+ * Given a natural-language request, returns a partial ScheduledJobCreate: job type, schedule, check tool and arguments, condition, outcome and delivery. The tools, sub-agents and channels the draft may reference are the caller's own, read server-side. Fields it cannot infer are omitted for the caller to fill in; a generation that infers nothing at all is an error, not an empty draft.
  */
 export const generateJobDraftApiV1SchedulerGenerateJobDraftPost = <ThrowOnError extends boolean = false>(options: Options<GenerateJobDraftApiV1SchedulerGenerateJobDraftPostData, ThrowOnError>) => (options.client ?? client).post<GenerateJobDraftApiV1SchedulerGenerateJobDraftPostResponses, GenerateJobDraftApiV1SchedulerGenerateJobDraftPostErrors, ThrowOnError>({
     url: '/api/v1/scheduler/generate-job-draft',

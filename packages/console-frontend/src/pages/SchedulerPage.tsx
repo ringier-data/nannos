@@ -323,10 +323,7 @@ function CreateJobDialog({
     setAiLoading(true);
     setError(null);
     try {
-      const result = await generateJobDraft(
-        mcpTools as unknown as Record<string, unknown>[],
-        aiQuery,
-      );
+      const result = await generateJobDraft(aiQuery);
       const filled = new Set<string>();
       setAiUndo(form);
       setForm((f) => {
@@ -594,7 +591,7 @@ function CreateJobDialog({
                 />
                 <Button
                   type="button"
-                  disabled={!aiQuery.trim() || aiLoading || mcpTools.length === 0}
+                  disabled={!aiQuery.trim() || aiLoading}
                   onClick={handleAiGenerate}
                 >
                   {aiLoading ? <Loader2 className="size-4 animate-spin" /> : 'Generate'}

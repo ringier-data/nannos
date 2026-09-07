@@ -393,7 +393,12 @@ class GenerateJobDraftRequest(BaseModel):
     """Request body for generating a scheduled job from a one-line description."""
 
     tools: list[dict[str, Any]] = Field(
-        description="List of available MCP tool objects (name, description, input_schema.)"
+        default_factory=list,
+        deprecated=True,
+        description=(
+            "Ignored. The candidate tools are selected server-side from the caller's own "
+            "catalogue; the field is kept so an older UI can still post to this endpoint."
+        ),
     )
     query: str = Field(
         min_length=1,

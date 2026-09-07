@@ -170,6 +170,24 @@ async def grep_mcp_tools(
             detail=f"Failed to fetch MCP tools: {type(e).__name__}",
         )
 
+    filtered_tools = rank_mcp_tools(all_tools.tools, query, top_k)
+
+    logger.info(
+        f"Grep MCP tools: query='{query}', server='{server_slug}', "
+        f"found {len(filtered_tools)}/{len(all_tools.tools)} matches (top {top_k})"
+    )
+
+    return MCPToolsResponse(tools=filtered_tools)
+
+
+def rank_mcp_tools(tools: list[MCPTool], query: str, top_k: int) -> list[MCPTool]:
+    """The `top_k` tools most relevant to `query`, best first; tools that match nothing are left out.
+
+    Pure and side-effect free so it can serve any caller that has a catalogue and a
+    sentence — the search endpoint above and the scheduled-job draft generator, which
+    uses it to pick the handful of tools worth showing a model instead of the whole
+    registry. Weights are documented on `grep_mcp_tools`.
+    """
     # Tokenize query and filter stop words
     query_lower = query.lower().strip()
     stop_words = {"the", "a", "an", "of", "in", "on", "for", "with", "and", "or", "to", "from"}
@@ -182,7 +200,7 @@ async def grep_mcp_tools(
     # Score each tool (using list of tuples instead of dict since Pydantic models aren't hashable)
     tool_scores = []
 
-    for tool in all_tools.tools:
+    for tool in tools:
         score = 0
 
         # Prepare searchable text fields
@@ -228,14 +246,7 @@ async def grep_mcp_tools(
 
     # Sort by score (descending) and take top_k
     tool_scores.sort(key=lambda x: x[0], reverse=True)
-    filtered_tools = [tool for score, tool in tool_scores[:top_k]]
-
-    logger.info(
-        f"Grep MCP tools: query='{query}', server='{server_slug}', "
-        f"found {len(filtered_tools)}/{len(all_tools.tools)} matches (top {top_k})"
-    )
-
-    return MCPToolsResponse(tools=filtered_tools)
+    return [tool for score, tool in tool_scores[:top_k]]
 
 
 def _get_console_mcp_tools(request: Request, user: User | None = None) -> list[MCPTool]:
