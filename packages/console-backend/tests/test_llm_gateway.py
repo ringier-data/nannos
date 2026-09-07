@@ -32,16 +32,34 @@ class TestGatewayChatPayload:
         assert body["reasoning_effort"] == "none"
 
     @pytest.mark.asyncio
-    async def test_omits_reasoning_effort_by_default(self):
-        """Unset means "say nothing" — the model keeps whatever it does by default,
-        rather than us sending a value the provider may reject."""
+    async def test_thinking_is_off_unless_a_caller_asks_for_it(self):
+        """Every console-backend call through this helper is a mechanical utility call on
+        a small budget, so thinking is opt-in. A caller that says nothing gets none."""
         fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
         with patch.object(llm_gateway._client, "get", return_value=fake_client):
             await llm_gateway.gateway_chat("hello", model="chat-low")
 
         body = fake_client.post.call_args.kwargs["json"]
-        assert "reasoning_effort" not in body
+        assert body["reasoning_effort"] == "none"
         assert body["messages"] == [{"role": "user", "content": "hello"}]
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_none_leaves_the_model_to_itself(self):
+        """The escape hatch from the default: send no value at all and let the model
+        reason however it normally would."""
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            await llm_gateway.gateway_chat("hello", model="chat-low", reasoning_effort=None)
+
+        assert "reasoning_effort" not in fake_client.post.call_args.kwargs["json"]
+
+    @pytest.mark.asyncio
+    async def test_json_calls_are_unthinking_by_default_too(self):
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion("{}")))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            await llm_gateway.gateway_chat_json("x", model="m")
+
+        assert fake_client.post.call_args.kwargs["json"]["reasoning_effort"] == "none"
 
 
 def _completion_with(content, finish_reason):
@@ -97,6 +115,27 @@ class TestFinishReason:
         # Every existing test stubs gateway_chat with a literal; the contract holds for it.
         with patch.object(llm_gateway, "gateway_chat", AsyncMock(return_value="nothing here")):
             assert await llm_gateway.gateway_chat_json("x", model="m") == {}
+
+    @pytest.mark.asyncio
+    async def test_a_cut_off_reply_is_logged_for_every_caller(self, caplog):
+        """Not only the JSON path: a prose caller stores what it was handed, so a
+        half-sentence summary or a truncated judgement has to leave a trace here."""
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion_with("The campaign is pac", "length")))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client), caplog.at_level("WARNING"):
+            await llm_gateway.gateway_chat("x", model="chat-low", max_tokens=256)
+
+        message = caplog.records[-1].getMessage()
+        assert "cut off" in message
+        assert "max_tokens=256" in message
+        assert "The campaign is pac" in message
+
+    @pytest.mark.asyncio
+    async def test_a_reply_that_finished_logs_nothing(self, caplog):
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion_with("All done.", "stop")))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client), caplog.at_level("WARNING"):
+            await llm_gateway.gateway_chat("x", model="chat-low")
+
+        assert caplog.records == []
 
     @pytest.mark.asyncio
     async def test_json_calls_forward_reasoning_effort(self):

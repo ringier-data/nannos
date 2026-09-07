@@ -23,14 +23,13 @@ Rules this module keeps:
   the answer is already saved and streamed.
 """
 
-import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..db.connection import get_async_session_factory
-from .llm_gateway import gateway_chat
+from .llm_gateway import gateway_chat_json
 
 logger = logging.getLogger(__name__)
 
@@ -91,26 +90,16 @@ async def resolve_summary_model() -> str | None:
         return None
 
 
-def parse_summary_response(raw: str) -> tuple[str, str] | None:
-    """Read ``{"title", "summary"}`` out of a completion, or None if it isn't there.
+def parse_summary_response(data: dict[str, Any]) -> tuple[str, str] | None:
+    """Read ``{"title", "summary"}`` out of a parsed completion, or None if it isn't there.
 
-    Tolerates the two things models do to JSON: wrap it in a ``` fence, and add a
-    sentence before or after it. Both fields must survive trimming — half an
-    answer is not worth overwriting a title with.
+    Digging the object out of fences and prose is `gateway_chat_json`'s job — this used
+    to carry its own copy of that salvage, which is exactly the duplication the helper
+    was introduced to remove, and it meant this path missed the finish-reason logging
+    and the truncation signal the helper gained later. What is left here is the part
+    that is specific to a title: both fields must be present, be strings, and survive
+    trimming — half an answer is not worth overwriting a title with.
     """
-    if not raw or not raw.strip():
-        return None
-    cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group())
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-
     title = data.get("title")
     summary = data.get("summary")
     if not isinstance(title, str) or not isinstance(summary, str):
@@ -167,13 +156,14 @@ async def generate_summary(
         return None
     prompt = _PROMPT.format(user_text=user_text, assistant_text=assistant_text)
     try:
-        raw = await gateway_chat(
+        data = await gateway_chat_json(
             prompt,
             model=model,
-            # Thinking off. Naming a conversation from two short strings needs no
-            # reasoning, and thinking tokens are billed like any other generated
-            # token — on every new conversation. Turning them off is the whole
-            # saving here; it also cuts the latency that made this a background task.
+            # Thinking off (the helper's default, stated here because it is the whole
+            # saving on this path). Naming a conversation from two short strings needs
+            # no reasoning, and thinking tokens are billed like any other generated
+            # token — on every new conversation. It also cuts the latency that made
+            # this a background task.
             reasoning_effort="none",
             # Kept high on purpose, as the fallback for when the line above does not
             # take: a reasoning model spends completion tokens on thinking BEFORE any
@@ -188,16 +178,16 @@ async def generate_summary(
             timeout=20.0,
         )
     except Exception as e:
+        # Includes GatewayReplyTruncated: a cut-off reply is a failed titling like any
+        # other here — the conversation keeps its first-message title — and the helper
+        # has already logged the reply's shape and finish reason.
         logger.warning("Conversation titling call failed: %s", e)
         return None
-    parsed = parse_summary_response(raw)
+    parsed = parse_summary_response(data)
     if parsed is None:
-        logger.warning(
-            "Conversation titling response unparseable (model=%s, %d chars): %.200r",
-            model,
-            len(raw),
-            raw,
-        )
+        # The helper logs an unreadable reply; this logs a readable one that did not
+        # carry both fields, which is the failure it cannot see.
+        logger.warning("Conversation titling reply had no usable title/summary (model=%s): %.200r", model, data)
     return parsed
 
 

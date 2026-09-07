@@ -124,8 +124,15 @@ class WatchEvaluator:
         db: AsyncSession,
         job: ScheduledJob,
         access_token: str,
+        owner_sub: str | None = None,
     ) -> WatchOutcome:
-        """Call the job's check tool and decide whether its condition holds."""
+        """Call the job's check tool and decide whether its condition holds.
+
+        `owner_sub` is the OIDC subject of the job's owner, carried down to the judge's
+        gateway call so the spend is attributed. The engine resolves it once per dispatch
+        (it already reads the owner to mint the access token); None means it could not be
+        resolved, and the call proceeds unattributed rather than failing the run.
+        """
         tool_name = job.check_tool or ""
         try:
             token = await token_for(tool_name, access_token)
@@ -167,7 +174,7 @@ class WatchEvaluator:
             )
 
         if job.cel_expr:
-            return await self._evaluate_cel(db, job, check_result)
+            return await self._evaluate_cel(db, job, check_result, owner_sub)
 
         if not job.llm_condition:
             # Validation refuses to store a watch like this, so reaching here means the
@@ -180,7 +187,7 @@ class WatchEvaluator:
                 error="This watch has no condition (neither cel_expr nor llm_condition) and can never fire.",
             )
 
-        met, reasoning = await self._judge(db, job, check_result, check_result)
+        met, reasoning = await self._judge(db, job, check_result, check_result, owner_sub)
         evaluation = ConditionEvaluation(
             met=met,
             mode="judge",
@@ -195,6 +202,7 @@ class WatchEvaluator:
         db: AsyncSession,
         job: ScheduledJob,
         check_result: dict[str, Any],
+        owner_sub: str | None = None,
     ) -> WatchOutcome:
         """Decide a CEL-conditioned watch: the expression extracts and gates in one.
 
@@ -235,7 +243,7 @@ class WatchEvaluator:
             logger.info("Job %d: CEL gate met=%s (judged=no)", job.id, cel.gate)
             return WatchOutcome(condition_met=cel.gate, check_result=check_result, evaluation=evaluation)
 
-        met, reasoning = await self._judge(db, job, cel.value, check_result)
+        met, reasoning = await self._judge(db, job, cel.value, check_result, owner_sub)
         evaluation = ConditionEvaluation(
             met=met,
             mode="cel+judge",
@@ -252,6 +260,7 @@ class WatchEvaluator:
         job: ScheduledJob,
         extracted: Any,
         check_result: dict[str, Any],
+        owner_sub: str | None = None,
     ) -> tuple[bool, str | None]:
         """Ask a small model whether a natural-language condition holds.
 
@@ -292,7 +301,16 @@ class WatchEvaluator:
             + f"Full tool response:\n{json.dumps(check_result, indent=2, default=str)[:8000]}"
         )
         try:
-            parsed = await gateway_chat_json(prompt, model=model, max_tokens=512)
+            # The gateway logs cost only for a call that names a subject, and this one
+            # runs unattended on every poll of every judged watch — the spend that most
+            # needs attributing was the spend it recorded nothing about. The job id rides
+            # along so the bill can be read per watch, not just per owner.
+            parsed = await gateway_chat_json(
+                prompt,
+                model=model,
+                max_tokens=512,
+                metadata={"user_sub": owner_sub, "scheduled_job_id": job.id} if owner_sub else None,
+            )
             met = bool(parsed.get("condition_met"))
             reasoning = parsed.get("reasoning")
             reasoning = str(reasoning)[:_MAX_REASONING_CHARS] if reasoning else None

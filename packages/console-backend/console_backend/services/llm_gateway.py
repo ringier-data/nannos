@@ -140,7 +140,7 @@ async def gateway_chat(
     model: str,
     max_tokens: int = 1024,
     metadata: dict | None = None,
-    reasoning_effort: str | None = None,
+    reasoning_effort: str | None = "none",
     timeout: float = 60.0,
 ) -> str:
     """Single-turn completion through the gateway; returns the assistant text.
@@ -150,10 +150,15 @@ async def gateway_chat(
 
     `reasoning_effort` is LiteLLM's unified extended-thinking control, in the same
     vocabulary agent-common's `get_reasoning_effort` and the console's `thinking_levels_for`
-    use — with ``"none"`` meaning thinking off. Pass it when the call is mechanical enough
-    that reasoning only burns generated tokens (conversation titling does). Left unset it is
-    omitted entirely and the model reasons however it normally would. The proxy runs
-    `drop_params: true`, so a model that takes no such param is unaffected either way.
+    use — with ``"none"`` meaning thinking off, which is the DEFAULT here. Thinking is
+    opt-in, not opt-out: every console-backend call through this helper is a mechanical
+    utility call (title a conversation, summarize a document, judge a stated condition)
+    running on the cheap tier with a small `max_tokens`, and reasoning tokens count
+    against that budget — a reasoning model spends it thinking and is cut off partway
+    into the answer. A caller that genuinely wants the model to reason says so; passing
+    ``None`` omits the parameter entirely and leaves the model to reason as it normally
+    would. The proxy runs `drop_params: true`, so a model that takes no such param is
+    unaffected either way.
 
     Note: the canonical attribution-header builder lives in agent-common
     (`attribution.attribution_header`, used by the chat client + embeddings adapter). It is
@@ -183,7 +188,21 @@ async def gateway_chat(
     # _first_choice tolerates an empty choices array the same way (returns {} → "").
     choice = _first_choice(resp.json())
     content = choice.get("message", {}).get("content")
-    return GatewayText(content or "", finish_reason=choice.get("finish_reason"))
+    finish_reason = choice.get("finish_reason")
+    if finish_reason == "length":
+        # Logged here, for every caller, rather than in `gateway_chat_json` alone: a reply
+        # that was cut off looks like a short one to a prose caller too — a half-sentence
+        # stored as a document summary, a truncated judgement read as "condition not met".
+        # The callers differ in what they do about it; none of them should have to notice
+        # it for themselves, and before this it went unlogged on four of the six paths.
+        logger.warning(
+            "Reply from %s was cut off at max_tokens=%d (%d chars): %r",
+            model,
+            max_tokens,
+            len(content or ""),
+            (content or "")[:_REPLY_SNIPPET_CHARS],
+        )
+    return GatewayText(content or "", finish_reason=finish_reason)
 
 
 async def gateway_chat_json(
@@ -192,7 +211,7 @@ async def gateway_chat_json(
     model: str,
     max_tokens: int = 1024,
     metadata: dict | None = None,
-    reasoning_effort: str | None = None,
+    reasoning_effort: str | None = "none",
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """`gateway_chat`, for the common case of asking for a single JSON object.
@@ -208,8 +227,8 @@ async def gateway_chat_json(
     instead when the reason there is no object is that the reply hit `max_tokens` — a
     reasoning model on a small budget spends it thinking and is stopped a few tokens into
     the answer, which is a budget problem, not a content miss, and callers word it
-    differently. Pass ``reasoning_effort="none"`` for mechanical JSON-filling so that
-    budget goes to the answer.
+    differently. Thinking is off by default (see `gateway_chat`), which is what JSON-filling
+    wants: the whole budget goes to the object.
     """
     text = await gateway_chat(
         prompt,

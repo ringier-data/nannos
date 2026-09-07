@@ -1086,6 +1086,46 @@ class TestVoiceCallDispatch:
         dispatch.assert_not_called()
 
 
+class TestOwnerSubResolution:
+    """Who a scheduled LLM call is billed to.
+
+    `job.user_id` is the internal user id; the gateway attributes by OIDC subject, and
+    the two diverged when users stopped being keyed by their sub. Passing the id through
+    would have attributed the spend to a subject that does not exist.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_reads_the_subject_not_the_internal_id(self):
+        engine = _make_engine()
+        job = _make_job()
+        db = AsyncMock()
+        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value="oidc-subject"))
+
+        assert await engine._owner_sub(db, job) == "oidc-subject"
+
+    @pytest.mark.asyncio
+    async def test_an_owner_without_a_subject_is_a_warning_not_a_failure(self, caplog):
+        engine = _make_engine()
+        job = _make_job()
+        db = AsyncMock()
+        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+
+        with caplog.at_level("WARNING"):
+            assert await engine._owner_sub(db, job) is None
+        assert "unattributed" in caplog.records[-1].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_lookup_does_not_stop_the_job(self, caplog):
+        engine = _make_engine()
+        job = _make_job()
+        db = AsyncMock()
+        db.execute.side_effect = RuntimeError("db down")
+
+        with caplog.at_level("WARNING"):
+            assert await engine._owner_sub(db, job) is None
+        assert "unattributed" in caplog.records[-1].getMessage()
+
+
 class TestWriteNotification:
     """Writing the notification for a watch whose author left it empty.
 
@@ -1112,6 +1152,42 @@ class TestWriteNotification:
         # Thinking off: a reasoning model on the low tier would otherwise spend the
         # 256-token budget thinking and send a cut-off sentence to the person.
         assert chat.await_args.kwargs["reasoning_effort"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_it_is_billed_to_the_job_owner(self):
+        """Written once per trigger with nobody watching. Without a subject on the call
+        the gateway records no cost at all, so this spend was invisible where it
+        accumulated; the job id makes the bill readable per watch."""
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        chat = AsyncMock(return_value="Campaign 4821 stopped syncing.")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                await engine._write_notification(
+                    job,
+                    WatchOutcome(condition_met=True, check_result={"status": "FAILED"}),
+                    owner_sub="owner-sub-1",
+                )
+        assert chat.await_args.kwargs["metadata"] == {"user_sub": "owner-sub-1", "scheduled_job_id": job.id}
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_owner_still_gets_the_notification_written(self):
+        engine = _make_engine()
+        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        chat = AsyncMock(return_value="Campaign 4821 stopped syncing.")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                written = await engine._write_notification(
+                    job, WatchOutcome(condition_met=True, check_result={"status": "FAILED"}), owner_sub=None
+                )
+        assert written == "Campaign 4821 stopped syncing."
+        assert chat.await_args.kwargs["metadata"] is None
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_still_says_something(self):

@@ -195,13 +195,21 @@ class SchedulerEngine:
                     )
                     return
 
+                # Who the job runs as, in the gateway's vocabulary. The proxy attributes
+                # spend by OIDC subject and logs nothing without one, and both LLM calls
+                # on this path (the watch judge, the notification writer) run unattended
+                # on a schedule — exactly where cost accumulates unseen. `job.user_id` is
+                # the internal user id, which is not the subject for anyone onboarded
+                # after the id/sub split, so it is looked up rather than passed through.
+                owner_sub = await self._owner_sub(db, job)
+
                 # Watch jobs: decide here whether anything is happening. A poll that
                 # does not trigger dispatches nothing at all — and knowing the outcome
                 # before dispatch is what lets the trigger choose its target (an agent,
                 # or a phone call).
                 watch_outcome: WatchOutcome | None = None
                 if self._watch_evaluator.can_evaluate(job):
-                    watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token)
+                    watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token, owner_sub)
 
                     if watch_outcome.error:
                         await self._finalize(
@@ -228,7 +236,7 @@ class SchedulerEngine:
 
                 # Build the A2A message args for agent-runner
                 parts, metadata, push_config = await self._build_message_args(
-                    job, run_id, access_token, db, watch_outcome=watch_outcome
+                    job, run_id, access_token, db, watch_outcome=watch_outcome, owner_sub=owner_sub
                 )
 
             # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client. SSE keeps
@@ -296,12 +304,16 @@ class SchedulerEngine:
         access_token: str,
         db: Any,
         watch_outcome: WatchOutcome | None = None,
+        owner_sub: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str] | None]:
         """Build the (message parts, metadata, push_config) for the A2A SDK dispatch.
 
         `watch_outcome` is set when the condition was already evaluated here, which is the
         normal path for a watch job. It is passed on so agent-runner does not call the
         tool a second time or reach a different verdict than the one that got us here.
+
+        `owner_sub` only reaches the notification writer's gateway call, for cost
+        attribution — see `_dispatch_job`.
         """
         metadata: dict[str, Any] = {
             "scheduled_job_id": job.id,
@@ -336,7 +348,9 @@ class SchedulerEngine:
             # A triggered watch that only notifies: the text is the notification, written
             # here when the author left it empty. It used to be written inside the agent
             # run, which is why a notification-only watch needed one at all.
-            message_text = job.notification_message or await self._write_notification(job, watch_outcome)
+            message_text = job.notification_message or await self._write_notification(
+                job, watch_outcome, owner_sub=owner_sub
+            )
 
         # Voice-call dispatch: the target becomes the voice-agent, which reads its
         # configuration from a DataPart and injects any TextParts into the live session
@@ -419,7 +433,9 @@ class SchedulerEngine:
 
         return parts, metadata, push_config
 
-    async def _write_notification(self, job: ScheduledJob, outcome: WatchOutcome | None) -> str:
+    async def _write_notification(
+        self, job: ScheduledJob, outcome: WatchOutcome | None, owner_sub: str | None = None
+    ) -> str:
         """Write the notification for a triggered watch whose author left it empty.
 
         Moved here from agent-runner along with the rest of the decision: the scheduler
@@ -456,7 +472,15 @@ class SchedulerEngine:
             # Thinking off: two sentences of plain text need no reasoning, and on the low
             # tier a reasoning model spends the budget thinking and is cut off mid-sentence
             # — which would then be sent to the person verbatim.
-            message = await gateway_chat(prompt, model=model, max_tokens=256, reasoning_effort="none")
+            message = await gateway_chat(
+                prompt,
+                model=model,
+                max_tokens=256,
+                reasoning_effort="none",
+                # Unattended spend, once per trigger: without a subject the gateway logs
+                # nothing at all. The job id makes the bill readable per watch.
+                metadata={"user_sub": owner_sub, "scheduled_job_id": job.id} if owner_sub else None,
+            )
             written = message.strip().strip('"')
             if written:
                 logger.info("Job %d: wrote notification %r", job.id, written[:100])
@@ -464,6 +488,22 @@ class SchedulerEngine:
         except Exception:
             logger.warning("Job %d: writing the notification failed", job.id, exc_info=True)
         return f"The watch '{job.name}' triggered. Result: {json.dumps(check_result, default=str)[:300]}"
+
+    async def _owner_sub(self, db: Any, job: ScheduledJob) -> str | None:
+        """The OIDC subject of the job's owner, or None when it cannot be read.
+
+        None is not a failure: an unattributed LLM call is worse accounting than an
+        attributed one, but a job must not stop running because a lookup came back empty.
+        """
+        try:
+            result = await db.execute(text("SELECT sub FROM users WHERE id = :user_id"), {"user_id": job.user_id})
+            sub = result.scalar_one_or_none()
+        except Exception:
+            logger.warning("Job %d: could not resolve the owner's subject; LLM spend goes unattributed", job.id)
+            return None
+        if not sub:
+            logger.warning("Job %d: owner %s has no subject on file; LLM spend goes unattributed", job.id, job.user_id)
+        return sub
 
     async def _resolve_voice_agent_id(self, db: Any) -> int | None:
         """Look up the voice-agent sub_agent_id from the DB (system-owned)."""
