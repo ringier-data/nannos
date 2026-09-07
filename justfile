@@ -112,7 +112,9 @@ changed:
 # Detect changed packages, bump versions, commit, tag, docker(build&push)
 release bump="":
     #!/usr/bin/env bash
-    set -euo pipefail
+    # -E: the rollback ERR trap must also fire for failures inside helper
+    # functions (publish_npm_package), not only for top-level commands.
+    set -Eeuo pipefail
     source scripts/release-helpers.sh
     source scripts/host-helpers.sh
 
@@ -260,7 +262,9 @@ release bump="":
 # Release a single package (bump version, commit, tag, build, push)
 release-pkg pkg bump="":
     #!/usr/bin/env bash
-    set -euo pipefail
+    # -E: the rollback ERR trap must also fire for failures inside helper
+    # functions (publish_npm_package), not only for top-level commands.
+    set -Eeuo pipefail
     source scripts/release-helpers.sh
     source scripts/host-helpers.sh
 
