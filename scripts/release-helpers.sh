@@ -15,7 +15,7 @@
 #
 
 # Mind that the order is critical for correct dependency bumping: if package A depends on package B, then A must come after B in the list so that B's version is bumped before A's.
-ALL_PACKAGES="ringier-a2a-sdk soffice-worker console-backend voice-agent agent-runner orchestrator-agent console-frontend client-slack client-slack-frontend client-email client-google-chat litellm-proxy"
+ALL_PACKAGES="ringier-a2a-sdk soffice-worker console-backend voice-agent agent-runner orchestrator-agent embed-sdk console-frontend client-slack client-slack-frontend client-email client-google-chat litellm-proxy"
 
 # Packages that only build Docker images but share another package's version (not independently released)
 VIRTUAL_PACKAGES="catalog-worker"
@@ -36,6 +36,7 @@ pkg_dir() {
     console-backend)         echo "packages/console-backend" ;;
     catalog-worker)          echo "packages/console-backend" ;;
     console-frontend)        echo "packages/console-frontend" ;;
+    embed-sdk)               echo "packages/embed-sdk" ;;
     ringier-a2a-sdk)         echo "packages/ringier-a2a-sdk" ;;
     agent-common)            echo "packages/agent-common" ;;
     object-storage)          echo "packages/object-storage" ;;
@@ -52,13 +53,14 @@ pkg_dir() {
 
 pkg_type() {
   case "$1" in
-    console-frontend|client-slack-frontend|client-slack|client-email|client-google-chat) echo "node" ;;
+    console-frontend|client-slack-frontend|client-slack|client-email|client-google-chat|embed-sdk) echo "node" ;;
     agent-runner|orchestrator-agent|console-backend|catalog-worker|ringier-a2a-sdk|voice-agent|soffice-worker|litellm-proxy) echo "python" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }
 
-# Direct editable path-dependencies of a package (from its pyproject [tool.uv.sources]).
+# Direct source-dependencies of a package (python: the editable entries in its
+# pyproject [tool.uv.sources]; node: the npm-workspace members it builds from source).
 # Used to make release selection dependency-aware: a consumer must be rebuilt when
 # any of its (transitive) editable deps change, because those deps are bundled into
 # the consumer's image at build time via --build-context. Keep in sync with the
@@ -66,6 +68,7 @@ pkg_type() {
 pkg_deps() {
   case "$1" in
     agent-common)        echo "ringier-a2a-sdk object-storage" ;;
+    console-frontend)    echo "embed-sdk" ;;
     console-backend)     echo "ringier-a2a-sdk object-storage" ;;
     catalog-worker)      echo "ringier-a2a-sdk object-storage" ;;
     voice-agent)         echo "ringier-a2a-sdk" ;;
@@ -208,6 +211,71 @@ refresh_shared_lockfiles() {
       (cd "$dir" && uv lock --quiet)
     fi
   done
+}
+
+# Refresh the root npm-workspace lockfile after a node package bump. The lockfile
+# records every workspace member's version, so a bump leaves it stale — and the
+# console-frontend image build runs `npm ci`, which refuses a package.json /
+# package-lock.json mismatch. Call after all version bumps, before `git add`.
+refresh_node_lockfile() {
+  [[ -f package-lock.json ]] || return 0
+  npm install --package-lock-only --ignore-scripts --no-audit --no-fund --silent
+}
+
+# ── npm registry publishing ─────────────────────────────────────────
+#
+# Packages released to the public npm registry instead of (or as well as) a
+# Docker image. Their version is the package.json version bumped above, and the
+# per-package publishConfig carries the registry + access.
+
+NPM_PACKAGES="embed-sdk"
+NPM_REGISTRY="https://registry.npmjs.org/"
+
+is_npm_package() {
+  case " $NPM_PACKAGES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+npm_package_name() {
+  local dir
+  dir="$(pkg_dir "$1")"
+  node -p "require('./${dir}/package.json').name"
+}
+
+# Fail before anything is committed or tagged: `npm publish` is the one step of a
+# release that cannot be rolled back, so missing credentials must stop the run
+# while the working tree is still untouched.
+require_npm_auth() {
+  if npm whoami --registry "$NPM_REGISTRY" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "❌ Not authenticated against ${NPM_REGISTRY}" >&2
+  echo "   Run 'npm login --registry ${NPM_REGISTRY}', or put an automation token in ~/.npmrc:" >&2
+  echo "     //registry.npmjs.org/:_authToken=<token>" >&2
+  return 1
+}
+
+npm_version_published() {
+  npm view "${1}@${2}" version --registry "$NPM_REGISTRY" >/dev/null 2>&1
+}
+
+# Publish one package to the npm registry. Its `prepublishOnly` script rebuilds
+# dist, so the tarball always matches the committed source. Already-published
+# versions are skipped rather than failed: a re-run of a partly finished release
+# must be able to get through.
+publish_npm_package() {
+  local pkg="$1"
+  shift
+  local dir name version
+  dir="$(pkg_dir "$pkg")"
+  name="$(npm_package_name "$pkg")"
+  version="$(get_package_version "$pkg")"
+
+  if npm_version_published "$name" "$version"; then
+    echo "⏭️  ${name}@${version} is already on the registry — skipping publish"
+    return 0
+  fi
+
+  (cd "$dir" && npm publish "$@")
 }
 
 # Determine bump action (major/minor/patch) from conventional commits since last tag

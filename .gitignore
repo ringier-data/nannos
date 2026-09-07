@@ -334,6 +334,8 @@ pnpm-debug.log*
 .local-db-data
 alloy-infra-agents
 gitops
+# per-machine symlinks to external @nannos/embed-sdk consumers (see justfile: hosts)
+hosts
 
 # Local LiteLLM gateway model_list (deployment-specific; example template is committed)
 litellm-local-models.yaml

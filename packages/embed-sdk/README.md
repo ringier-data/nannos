@@ -21,6 +21,17 @@ chrome: launcher, placement, pin/dock), and the chat state machine runs on the
 `ai`/`@ai-sdk/react` are exact-pinned, bundled dependencies — hosts never
 install or version-manage them.
 
+## Install
+
+```bash
+npm install @nannos/embed-sdk
+```
+
+Published to the public npm registry from the nannos monorepo — `just release`
+bumps, tags and publishes it together with the services (see
+[Releasing](#releasing)). `react`, `react-dom` (>=18) and `zod` (^4) are peer
+dependencies: the host supplies them, and there is exactly one copy of each.
+
 ## Package map
 
 | entry | what | weight |
@@ -368,6 +379,53 @@ Remote backends must allowlist the host origin (`EMBED_ALLOWED_ORIGINS`).
 - `npm run build`: preserveModules ESM + d.ts + `dist/styles.css`.
 - `scripts/vendor-ai-elements.mjs` re-vendors the AI Elements set (codemod
   applied automatically; keep local patches minimal).
+
+### Working on the SDK from a host app
+
+Inside the monorepo nothing needs linking: console-frontend consumes the SDK
+through the npm workspace, so it always sees this checkout, and its image is
+built from source at the very commit `just release` tags.
+
+Apps in **other** repos (the cockpit frontend) install the published package. To
+develop both sides at once, register the host once per machine and link it:
+
+```bash
+mkdir -p hosts && ln -s /path/to/rcplus-alloy-cockpit-frontend/app hosts/cockpit   # once
+just host-link cockpit        # host's node_modules/@nannos/embed-sdk → this checkout
+npm run build:watch           # in packages/embed-sdk: re-emits dist on every save
+```
+
+`host-link` swaps only the installed copy. The host's `package.json` and lockfile
+stay untouched, so no machine-local path can reach a commit — and a plain
+`npm install` (or `just host-unlink cockpit`) brings the registry copy back.
+`just hosts` shows where every host stands: declared range, lockfile pin,
+what is in `node_modules`, and what to do about it.
+
+Once the SDK is released, every registered host is moved onto the new version
+(`just release` does it as its last step; `just host-bump cockpit` does one by
+hand): range in `package.json`, lockfile pin and `node_modules`, all from the
+registry. Commit those two files in the host. The host now runs the registry
+copy — link again to keep developing.
+
+### Releasing
+
+`just release` picks the SDK up like any other package: it bumps the version
+from the conventional commits touching `packages/embed-sdk`, tags
+`embed-sdk/v<version>`, and runs `npm publish` (which rebuilds `dist` through
+`prepublishOnly`, so the tarball always matches the tag). It needs npm
+credentials — `npm login`, or `//registry.npmjs.org/:_authToken=…` in `~/.npmrc`
+— and checks for them **before** touching the working tree, because a publish
+cannot be rolled back the way a commit or a tag can.
+
+After the push it bumps the registered hosts (see above); a host failure is
+reported with the command to retry, never rolled into the release.
+
+To publish the current version on its own (a retry, or a dry run):
+
+```bash
+just publish-npm embed-sdk            # skips silently if that version is already up
+just publish-npm embed-sdk --dry-run
+```
 
 Integration planning (ontology → client objects → tools → brain) lives in
 [`INTEGRATION-PLAYBOOK.md`](./INTEGRATION-PLAYBOOK.md). Known gaps and their

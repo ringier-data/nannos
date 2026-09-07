@@ -16,6 +16,10 @@ default:
 #   just release patch                       → force bump level for all changed packages
 #   just release-pkg orchestrator-agent       → auto-bump & tag a single package
 #   just release-pkg orchestrator-agent patch → force bump level for a single package
+#   just publish-npm embed-sdk               → publish a package's current version to npm
+#   just hosts                              → how external apps (cockpit, …) consume @nannos/embed-sdk
+#   just host-link cockpit                  → develop a host against this SDK checkout
+#   just host-bump cockpit                  → move a host onto the published SDK (also done by `just release`)
 #   just build                              → build Docker images for all buildable packages
 #   just push=true build                    → build & push Docker images
 #   just build-pkg orchestrator-agent       → build a single package image
@@ -110,6 +114,7 @@ release bump="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/release-helpers.sh
+    source scripts/host-helpers.sh
 
     CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
 
@@ -132,6 +137,21 @@ release bump="":
     just changed
     echo ""
 
+    # `npm publish` is the one release step that cannot be rolled back, so its
+    # credentials are checked while the working tree is still untouched.
+    SDK_RELEASED=false
+    for pkg in "${CHANGED[@]}"; do
+      if is_npm_package "$pkg"; then
+        require_npm_auth
+      fi
+      [[ "$pkg" == "$SDK_PKG" ]] && SDK_RELEASED=true
+    done
+    # Releasing the SDK moves its hosts (Phase 5) — show where they stand first.
+    if [[ "$SDK_RELEASED" == "true" && -n "$(host_names)" ]]; then
+      just hosts
+      echo ""
+    fi
+
     # Phase 1: Bump versions, commit & tag
     RELEASES=()
     TAGS=()
@@ -150,8 +170,11 @@ release bump="":
     echo ""
 
     # Refresh non-released shared libs' lockfiles so their editable path-dep
-    # versions stay in sync with the packages we just bumped.
+    # versions stay in sync with the packages we just bumped, and the root
+    # npm-workspace lockfile so its member versions match (console-frontend's
+    # image build runs `npm ci`, which rejects a mismatch).
     refresh_shared_lockfiles
+    refresh_node_lockfile
 
     RELEASE_MSG="release: $(IFS=', '; echo "${RELEASES[*]}")"
     git add -A
@@ -192,7 +215,7 @@ release bump="":
       done
     done
 
-    # Phase 3: Push all (reuses cached builds)
+    # Phase 3: Push all (reuses cached builds), then publish to npm
     for pkg in "${CHANGED[@]}"; do
       if [[ " $BUILDABLE " =~ " $pkg " ]]; then
         just push=true build-pkg "$pkg"
@@ -208,17 +231,38 @@ release bump="":
       done
     done
 
+    for pkg in "${CHANGED[@]}"; do
+      if is_npm_package "$pkg"; then
+        printf "${CYAN}📦 Publishing %s to npm...${RESET}\n" "$pkg"
+        publish_npm_package "$pkg"
+        printf "${GREEN}✅ Published %s@%s${RESET}\n" "$(npm_package_name "$pkg")" "$(get_package_version "$pkg")"
+      fi
+    done
+
     # Phase 4: Push git commit and tags to remote
-    trap - ERR  # Clear rollback — images are already pushed
+    trap - ERR  # Clear rollback — images are pushed and npm versions are permanent
     printf "${CYAN}🚀 Pushing release commit and tags...${RESET}"
     git push && git push --tags
     printf "${GREEN} ✓${RESET}\n"
+
+    # Phase 5: Move registered hosts onto the SDK version just published. The
+    # release is already out, so a host problem is reported with a retry command
+    # rather than failing the run.
+    if [[ "$SDK_RELEASED" == "true" ]]; then
+      echo ""
+      if [[ -n "$(host_names)" ]]; then
+        bump_all_hosts
+      else
+        printf "${DIM}No hosts registered — external consumers of %s bump manually (see: just hosts).${RESET}\n" "$SDK_NAME"
+      fi
+    fi
 
 # Release a single package (bump version, commit, tag, build, push)
 release-pkg pkg bump="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/release-helpers.sh
+    source scripts/host-helpers.sh
 
     CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
     PKG="{{ pkg }}"
@@ -229,6 +273,17 @@ release-pkg pkg bump="":
       echo "❌ Unknown package: $PKG"
       echo "   Available: $ALL_PACKAGES"
       exit 1
+    fi
+
+    # `npm publish` is the one release step that cannot be rolled back, so its
+    # credentials are checked while the working tree is still untouched.
+    if is_npm_package "$PKG"; then
+      require_npm_auth
+    fi
+    # Releasing the SDK moves its hosts (Phase 5) — show where they stand first.
+    if [[ "$PKG" == "$SDK_PKG" && -n "$(host_names)" ]]; then
+      just hosts
+      echo ""
     fi
 
     if [[ -z "$BUMP" ]]; then
@@ -245,8 +300,11 @@ release-pkg pkg bump="":
     printf "   → v%s\n\n" "$NEW_VERSION"
 
     # Refresh non-released shared libs' lockfiles so their editable path-dep
-    # versions stay in sync with the package we just bumped.
+    # versions stay in sync with the package we just bumped, and the root
+    # npm-workspace lockfile so its member versions match (console-frontend's
+    # image build runs `npm ci`, which rejects a mismatch).
     refresh_shared_lockfiles
+    refresh_node_lockfile
 
     git add -A
     git commit -m "release: $TAG_NAME" --quiet
@@ -270,16 +328,275 @@ release-pkg pkg bump="":
       just build-pkg "$PKG"
     fi
 
-    # Phase 3: Push (reuses cached build)
+    # Phase 3: Push (reuses cached build), then publish to npm
     if [[ -n "$IMAGE" ]]; then
       just push=true build-pkg "$PKG"
     fi
+    if is_npm_package "$PKG"; then
+      printf "${CYAN}📦 Publishing %s to npm...${RESET}\n" "$PKG"
+      publish_npm_package "$PKG"
+      printf "${GREEN}✅ Published %s@%s${RESET}\n" "$(npm_package_name "$PKG")" "$NEW_VERSION"
+    fi
 
     # Phase 4: Push git commit and tag to remote
-    trap - ERR  # Clear rollback — image is already pushed
+    trap - ERR  # Clear rollback — the image is pushed and npm versions are permanent
     printf "${CYAN}🚀 Pushing release commit and tag...${RESET}"
     git push && git push --tags
     printf "${GREEN} ✓${RESET}\n"
+
+    # Phase 5: Move registered hosts onto the SDK version just published (the
+    # release is out — a host problem is reported with a retry command, not fatal).
+    if [[ "$PKG" == "$SDK_PKG" ]]; then
+      echo ""
+      if [[ -n "$(host_names)" ]]; then
+        bump_all_hosts
+      else
+        printf "${DIM}No hosts registered — external consumers of %s bump manually (see: just hosts).${RESET}\n" "$SDK_NAME"
+      fi
+    fi
+
+# Normally part of `just release`; use this to retry a failed publish or to
+# dry-run one:  just publish-npm embed-sdk --dry-run
+#
+# Publish an npm package at its CURRENT version (no bump, no tag)
+publish-npm pkg *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RESET='\033[0m'
+    PKG="{{ pkg }}"
+
+    if ! is_npm_package "$PKG"; then
+      echo "❌ '$PKG' is not published to npm."
+      echo "   npm packages: $NPM_PACKAGES"
+      exit 1
+    fi
+
+    require_npm_auth
+    printf "${CYAN}📦 Publishing %s@%s to npm...${RESET}\n" "$(npm_package_name "$PKG")" "$(get_package_version "$PKG")"
+    publish_npm_package "$PKG" {{ args }}
+    printf "${GREEN}✅ Done${RESET}\n"
+
+# ─── SDK Hosts (apps outside this repo that install @nannos/embed-sdk) ──
+#
+# Inside the monorepo, console-frontend consumes the SDK through the npm
+# workspace: always the checkout, built from source into its image at the same
+# commit `just release` tags. Nothing to link there.
+#
+# Apps in OTHER repos (the cockpit frontend) install the published package. For
+# local development of both at once, `host-link` swaps the installed copy for a
+# symlink to packages/embed-sdk — package.json and the lockfile stay untouched, so
+# no local path can leak into a commit, and `npm install` (or `host-unlink`)
+# restores the registry copy. After `just release` publishes a new SDK version,
+# `host-bump` moves each host onto it: range in package.json, lockfile, and
+# node_modules. `just release` runs that for every registered host.
+#
+# Register a host once per machine (gitignored symlink to the dir with the package.json):
+#   mkdir -p hosts && ln -s /path/to/rcplus-alloy-cockpit-frontend/app hosts/cockpit
+
+# Show how each registered host consumes @nannos/embed-sdk (package.json ↔ lockfile ↔ node_modules)
+hosts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+    source scripts/host-helpers.sh
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
+
+    printf "${CYAN}%s${RESET} checkout: %s\n" "$SDK_NAME" "$(sdk_checkout_summary)"
+    NAMES="$(host_names)"
+    if [[ -z "$NAMES" ]]; then
+      printf "${DIM}No hosts registered. Register one with:${RESET}\n"
+      printf "${DIM}  mkdir -p hosts && ln -s /path/to/rcplus-alloy-cockpit-frontend/app hosts/cockpit${RESET}\n"
+      exit 0
+    fi
+
+    SDK_VERSION="$(get_package_version "$SDK_PKG")"
+    for name in $NAMES; do
+      echo ""
+      DIR="$(host_dir "$name")" || continue
+      RANGE="$(host_range "$DIR")"
+      INSTALLED="$(host_installed "$DIR")"
+      LOCKED="$(host_locked "$DIR")"
+      printf "${GREEN}● %s${RESET}  ${DIM}%s${RESET}\n" "$name" "$DIR"
+      printf "   package.json   %s\n" "${RANGE:-—}"
+      case "$INSTALLED" in
+        linked*)   printf "   node_modules   ${YELLOW}linked${RESET} → %s\n" "${INSTALLED#linked }" ;;
+        registry*) printf "   node_modules   registry v%s\n" "${INSTALLED#registry }" ;;
+        *)         printf "   node_modules   ${RED}missing${RESET}\n" ;;
+      esac
+      case "$LOCKED" in
+        registry*)   printf "   lockfile       v%s\n" "${LOCKED#registry }" ;;
+        file*)       printf "   lockfile       ${RED}%s${RESET}\n" "$LOCKED" ;;
+        *)           printf "   lockfile       ${RED}%s${RESET}\n" "$LOCKED" ;;
+      esac
+
+      # Verdict: what, if anything, the developer has to do next.
+      if [[ -z "$RANGE" ]]; then
+        printf "   ${RED}✗ no dependency on %s in package.json${RESET}\n" "$SDK_NAME"
+        continue
+      fi
+      case "$LOCKED" in
+        file*)
+          printf "   ${RED}✗ the lockfile pins a local path — CI cannot install it.${RESET}  Fix: ${DIM}just host-bump %s${RESET}\n" "$name"
+          continue ;;
+        registry*)
+          LOCKED_V="${LOCKED#registry }"
+          if [[ "$(host_range_satisfied "$DIR" "$RANGE" "$LOCKED_V")" == "false" ]]; then
+            printf "   ${RED}✗ lockfile v%s does not satisfy %s.${RESET}  Fix: ${DIM}just host-bump %s${RESET}\n" "$LOCKED_V" "$RANGE" "$name"
+            continue
+          fi ;;
+        *)
+          printf "   ${RED}✗ %s not in the lockfile.${RESET}  Fix: ${DIM}just host-bump %s${RESET}\n" "$SDK_NAME" "$name"
+          continue ;;
+      esac
+      case "$INSTALLED" in
+        linked*)
+          printf "   ${YELLOW}⚠ linked for development${RESET} — commits are safe (lockfile pins v%s). Back to the registry: ${DIM}just host-unlink %s${RESET}\n" "$LOCKED_V" "$name"
+          if [[ "$(has_changes "$SDK_PKG")" == "true" ]]; then
+            printf "   ${YELLOW}⚠ the checkout has unreleased SDK changes${RESET} — release them (${DIM}just release${RESET}) before merging host code that needs them\n"
+          fi ;;
+        registry*)
+          if [[ "${INSTALLED#registry }" != "$LOCKED_V" ]]; then
+            printf "   ${YELLOW}⚠ node_modules v%s ≠ lockfile v%s.${RESET}  Fix: ${DIM}cd %s && npm install${RESET}\n" "${INSTALLED#registry }" "$LOCKED_V" "$DIR"
+          else
+            printf "   ${GREEN}✓ in sync with the registry (v%s)${RESET}\n" "$LOCKED_V"
+          fi
+          if [[ "$SDK_VERSION" != "$LOCKED_V" ]]; then
+            printf "   ${DIM}SDK checkout is v%s — after its release: just host-bump %s${RESET}\n" "$SDK_VERSION" "$name"
+          fi ;;
+        *)
+          printf "   ${RED}✗ not installed.${RESET}  Fix: ${DIM}cd %s && npm install${RESET}\n" "$DIR" ;;
+      esac
+    done
+
+# Point a host at this SDK checkout for local development (symlink swap; package.json/lockfile untouched)
+host-link name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+    source scripts/host-helpers.sh
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
+
+    NAME="{{ name }}"
+    DIR="$(host_dir "$NAME")"
+    SDK_DIR="$(pwd -P)/$(pkg_dir "$SDK_PKG")"
+    MOD="${DIR}/node_modules/${SDK_NAME}"
+
+    if [[ -z "$(host_range "$DIR")" ]]; then
+      printf "${RED}❌ %s does not depend on %s${RESET}\n" "$DIR" "$SDK_NAME"; exit 1
+    fi
+    if [[ ! -d "${DIR}/node_modules" ]]; then
+      printf "${RED}❌ %s has no node_modules — run npm install there first${RESET}\n" "$DIR"; exit 1
+    fi
+
+    # The host imports the built entry points, so a checkout without dist is unusable.
+    if [[ ! -f "${SDK_DIR}/dist/index.js" ]]; then
+      printf "${CYAN}🏗️  No dist in the SDK checkout — building...${RESET}\n"
+      (cd "$SDK_DIR" && npm run build --silent)
+    fi
+
+    if [[ -L "$MOD" && "$(cd "$MOD" && pwd -P)" == "$SDK_DIR" ]]; then
+      printf "${GREEN}✓ %s is already linked to this checkout${RESET}\n" "$NAME"
+    else
+      rm -rf "$MOD"
+      mkdir -p "$(dirname "$MOD")"
+      ln -s "$SDK_DIR" "$MOD"
+      printf "${GREEN}✓ %s → %s${RESET}\n" "${MOD#${DIR}/}" "$SDK_DIR"
+    fi
+    echo ""
+    printf "${DIM}Rebuild on save:   cd %s && npm run build:watch${RESET}\n" "$(pkg_dir "$SDK_PKG")"
+    printf "${DIM}Tracked files in the host are untouched — commit freely.${RESET}\n"
+    printf "${DIM}Back to the registry copy:   just host-unlink %s${RESET}\n" "$NAME"
+
+# Restore the registry copy of @nannos/embed-sdk that the host's lockfile pins
+host-unlink name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+    source scripts/host-helpers.sh
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
+
+    NAME="{{ name }}"
+    DIR="$(host_dir "$NAME")"
+    MOD="${DIR}/node_modules/${SDK_NAME}"
+
+    if [[ ! -L "$MOD" ]]; then
+      printf "${GREEN}✓ %s is not linked (%s)${RESET}\n" "$NAME" "$(host_installed "$DIR")"; exit 0
+    fi
+    LOCKED="$(host_locked "$DIR")"
+    case "$LOCKED" in
+      registry*) ;;
+      *)
+        printf "${RED}❌ The lockfile does not pin a registry version (%s), so npm install has nothing to restore.${RESET}\n" "$LOCKED"
+        printf "   Use: ${DIM}just host-bump %s${RESET} (needs the SDK version on the registry)\n" "$NAME"
+        exit 1 ;;
+    esac
+
+    rm "$MOD"
+    printf "${CYAN}📥 npm install in %s (restores %s@%s from the lockfile)...${RESET}\n" "$DIR" "$SDK_NAME" "${LOCKED#registry }"
+    (cd "$DIR" && npm install --no-audit --no-fund)
+    printf "${GREEN}✓ %s: %s${RESET}\n" "$NAME" "$(host_installed "$DIR")"
+
+# Move a host onto a published SDK version (package.json range, lockfile, node_modules); default: this checkout's version
+host-bump name version="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+    source scripts/host-helpers.sh
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
+
+    NAME="{{ name }}"
+    DIR="$(host_dir "$NAME")"
+    VERSION="{{ version }}"
+    [[ -n "$VERSION" ]] || VERSION="$(get_package_version "$SDK_PKG")"
+    MOD="${DIR}/node_modules/${SDK_NAME}"
+
+    SECTION="$(host_dep_section "$DIR")"
+    if [[ -z "$SECTION" ]]; then
+      printf "${RED}❌ %s does not depend on %s${RESET}\n" "$DIR" "$SDK_NAME"; exit 1
+    fi
+
+    if [[ "$(host_locked "$DIR")" == "registry ${VERSION}" && "$(host_installed "$DIR")" == "registry ${VERSION}" \
+          && "$(host_range_satisfied "$DIR" "$(host_range "$DIR")" "$VERSION")" == "true" ]]; then
+      printf "${GREEN}✓ %s already at %s@%s${RESET}\n" "$NAME" "$SDK_NAME" "$VERSION"; exit 0
+    fi
+
+    printf "${CYAN}📦 %s → %s@%s${RESET}\n" "$NAME" "$SDK_NAME" "$VERSION"
+    wait_for_npm_version "$VERSION" 90
+
+    WAS_LINKED=false
+    if [[ -L "$MOD" ]]; then
+      rm "$MOD"
+      WAS_LINKED=true
+    fi
+
+    # `npm install <name>@<version>` pins exactly that version in the lockfile and
+    # writes the range in the host's own save style (caret unless its .npmrc says
+    # otherwise). Editing package.json by hand and running a bare `npm install`
+    # would let npm pick the newest version the range allows instead.
+    SAVE_FLAG=""
+    [[ "$SECTION" == "devDependencies" ]] && SAVE_FLAG="--save-dev"
+    printf "${CYAN}📥 npm install %s@%s in %s...${RESET}\n" "$SDK_NAME" "$VERSION" "$DIR"
+    (cd "$DIR" && npm install $SAVE_FLAG "${SDK_NAME}@${VERSION}" --no-audit --no-fund)
+
+    INSTALLED="$(host_installed "$DIR")"
+    LOCKED="$(host_locked "$DIR")"
+    if [[ "$INSTALLED" != "registry ${VERSION}" || "$LOCKED" != "registry ${VERSION}" ]]; then
+      printf "${RED}❌ Expected %s@%s from the registry, got: node_modules '%s', lockfile '%s'${RESET}\n" "$SDK_NAME" "$VERSION" "$INSTALLED" "$LOCKED"
+      exit 1
+    fi
+    printf "   package.json   %s\n   lockfile       v%s\n   node_modules   registry v%s\n" "$(host_range "$DIR")" "$VERSION" "$VERSION"
+    printf "${GREEN}✓ %s is on %s@%s${RESET}\n" "$NAME" "$SDK_NAME" "$VERSION"
+
+    echo ""
+    if git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git -C "$DIR" status --short -- package.json package-lock.json | sed 's/^/   /'
+      printf "${DIM}Commit it in the host:  git -C %s commit -am \"chore: bump %s to %s\"${RESET}\n" "$DIR" "$SDK_NAME" "$VERSION"
+    fi
+    if [[ "$WAS_LINKED" == "true" ]]; then
+      printf "${YELLOW}The host now runs the registry copy. Keep developing against the checkout with:  just host-link %s${RESET}\n" "$NAME"
+    fi
 
 # ─── Docker Build & Push ──────────────────────────────────────────
 

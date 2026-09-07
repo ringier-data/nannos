@@ -14,6 +14,8 @@ When implementing new features or refactoring existing code, consider if these i
 - **Docker Registry**: `ghcr.io/ringier-data/nannos-<package-name>`
 - **Git Tags**: `<package-name>/v<semver>` (e.g., `orchestrator-agent/v0.10.0`)
 - **Versioning**: Each package is versioned independently. Version lives in `pyproject.toml` (Python) or `package.json` (Node). Use `just changed` to see what needs release, `just release` to bump+tag+build all changed packages.
+- **npm**: `embed-sdk` is released to the public npm registry as `@nannos/embed-sdk` — `just release` publishes it after the image pushes (needs npm credentials; `just publish-npm embed-sdk` retries a publish alone).
+- **SDK hosts**: apps in other repos that install `@nannos/embed-sdk` (cockpit) are registered as gitignored `hosts/<name>` symlinks. `just hosts` shows their state, `just host-link <name>` develops them against this checkout (node_modules only — never package.json/lockfile), and `just release` / `just host-bump <name>` moves them onto the published version.
 
 ## Repository Overview
 
@@ -150,3 +152,4 @@ Manifests in `example-k8s-deployment/base/`. Uses Kustomize with overlays for im
 
 - **add-package** (`.github/skills/add-package/SKILL.md`): Checklist and procedure for adding a new package to the monorepo — covers directory setup, release-helpers.sh, justfile, and optional k8s manifests.
 - **deploy** (`.github/skills/deploy/SKILL.md`): Deploy a package to dev via FluxCD — covers `just deploy-dev`, gitops symlink requirements, Flux image automation with `-next` tag filtering, and troubleshooting.
+- **embed-sdk-hosts** (`.github/skills/embed-sdk-hosts/SKILL.md`): Develop and release `@nannos/embed-sdk` together with the apps that install it — covers the `hosts/` symlink registry, `just hosts` / `host-link` / `host-unlink` / `host-bump`, npm publishing inside `just release`, and reading `just hosts` verdicts.

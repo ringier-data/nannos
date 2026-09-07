@@ -1,9 +1,29 @@
 {
   "name": "@nannos/embed-sdk",
-  "private": true,
   "version": "0.2.0",
   "type": "module",
   "description": "Embeddable Nannos: headless core (protocol + object registration + client-action) and a styleable React UI kit, distributed as a Shadow-DOM web component.",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ringier-data/nannos.git",
+    "directory": "packages/embed-sdk"
+  },
+  "homepage": "https://github.com/ringier-data/nannos/tree/main/packages/embed-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/ringier-data/nannos/issues"
+  },
+  "keywords": [
+    "nannos",
+    "a2a",
+    "agent",
+    "chat",
+    "ai-sdk",
+    "react",
+    "web-component",
+    "shadow-dom",
+    "embed"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -33,9 +53,14 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "dev": "vite",
     "build": "rm -rf dist && vite build && tsc && tailwindcss -i src/styles/theme.css -o dist/styles.css --minify",
+    "prepublishOnly": "npm run build",
     "build:watch": "tsc --watch --preserveWatchOutput & vite build --watch",
     "dev:link": "tsc --watch --preserveWatchOutput & tailwindcss -i src/styles/theme.css -o dist/styles.css --watch",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.dev.json",
