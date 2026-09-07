@@ -14,21 +14,34 @@ Keying
 ``cache_key`` folds in the inputs that determine *which* tools/sub-agents a user is
 entitled to *and* that the cached value actually depends on::
 
-    user_sub, sorted(groups), sub_agent_config_hash, policy_version
+    user_sub, sorted(groups), entitlement_version, sub_agent_config_hash, policy_version
 
-Note that the per-user *tool whitelist* (``tool_names``) is deliberately NOT part of the
-key: discovery runs unfiltered (``white_list=None``) and the whitelist is applied later in
-``build_runtime_context``, so the cached ``(tools, sub_agents, token_provider)`` value does not depend
-on it. Keying on it would only fragment the cache. A whitelist change (or any other per-user
-entitlement field carried on the cached ``User`` — role, bypass rules, catalog access) is
-propagated by console-backend calling ``invalidate_users`` for the affected user(s); see
-``main.invalidate_discovery_cache``.
+``entitlement_version`` is the load-bearing part. It is an opaque stamp console-backend
+derives from every row that decides the user's entitlements — role, settings (tool
+whitelist, bypass rules), group memberships, group default agents, sub-agent activations
+and their approved versions, plus a marker the console bumps for gateway-held state such
+as group → MCP-server access. The executor fetches it once per turn (one cheap in-cluster
+call, ``RegistryService.get_entitlement_version``) *before* the cache lookup, so any
+entitlement change makes the stale entry unreachable on the user's next turn — on every
+replica, with no push-based invalidation and nothing for a mutation site to remember.
+See console-backend ``services/entitlement_version.py`` for what the stamp covers.
 
-Group-membership changes invalidate **automatically** (the next request carries a
-different group set → different key → miss). ``policy_version`` is a cross-cutting
-invalidation lever (see ``AgentSettings.ENTITLEMENT_POLICY_VERSION`` and ``invalidate_all``)
-for a fleet-wide flush without per-user targeting — bump it (or call ``invalidate_all``)
-and every entry is recomputed.
+If the stamp cannot be fetched (console-backend blip), ``resolve_entitlement_version``
+falls back to the last one seen for that user, so the turn degrades to a TTL-bounded
+entry rather than a cold miss or an error.
+
+``groups`` (free, from the JWT) are kept in the key as belt-and-braces: a membership
+change moves the stamp too, but the JWT view is the one that gates authorization.
+``sub_agent_config_hash`` is **playground-only**: the console's "test this exact config
+version" mode sends it, and it is None on a normal turn — it is not a digest of the
+user's sub-agent set. ``policy_version`` (``AgentSettings.ENTITLEMENT_POLICY_VERSION``)
+is the cross-cutting lever for a fleet-wide flush without per-user targeting.
+
+The per-user *tool whitelist* (``tool_names``) is deliberately NOT part of the key:
+discovery runs unfiltered (``white_list=None``) and the whitelist is applied later in
+``build_runtime_context``, so the cached ``(tools, sub_agents, token_provider)`` value
+does not depend on it (a whitelist change still moves the stamp, which is what refreshes
+the cached ``User`` record that carries it).
 
 Token-expiry safety
 -------------------
@@ -38,8 +51,8 @@ tools and given the user's current token at the start of every turn. The registr
 however, was fetched with the user token and reflects entitlements tied to it, so a cache
 entry is still bounded by ``min(ttl, user_token.exp - margin)``: it never outlives the user
 token it was built for. The TTL itself is therefore purely a *catalogue-freshness* knob (how
-long before a changed gateway catalogue or group→server policy is picked up), not a
-credential bound.
+long a change made on the gateway itself, invisible to the console, may go unnoticed), not a
+credential bound and not an entitlement bound.
 """
 
 from __future__ import annotations
@@ -70,18 +83,50 @@ def cache_key(
     groups: list[str] | None,
     sub_agent_config_hash: str | None,
     policy_version: str = "0",
+    entitlement_version: str | None = None,
 ) -> str:
     """Build a cache key from the inputs the cached value actually depends on.
 
-    Shared by both the discovery cache and the user cache (they live in separate stores,
-    so an identical key string never collides across them). ``tool_names`` is intentionally
-    excluded — see the module docstring.
+    Shared by the discovery, user and embedded-runnable caches (they live in separate
+    stores, so an identical key string never collides across them). ``tool_names`` is
+    intentionally excluded — see the module docstring.
     """
     payload = json.dumps(
-        {"u": user_sub, "g": sorted(groups or []), "c": sub_agent_config_hash or "", "v": policy_version},
+        {
+            "u": user_sub,
+            "g": sorted(groups or []),
+            "e": entitlement_version or "",
+            "c": sub_agent_config_hash or "",
+            "v": policy_version,
+        },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# Last entitlement version successfully fetched per user_sub. Only consulted when the
+# per-turn fetch fails, so a console-backend blip degrades to "reuse the current entry
+# until the TTL" instead of a cold re-discovery (or an error) on every turn.
+_last_entitlement_version: dict[str, str] = {}
+
+
+def resolve_entitlement_version(user_sub: str, fetched: str | None) -> str | None:
+    """Return the stamp to key on this turn: ``fetched`` if present, else the last one seen.
+
+    Remembers a successful fetch for the fallback. Returns None only when the fetch failed
+    and the user has never had a stamp in this process — the key then carries an empty
+    stamp and the entry is simply TTL-bounded, exactly the pre-stamp behaviour.
+    """
+    if fetched:
+        _last_entitlement_version[user_sub] = fetched
+        return fetched
+    last = _last_entitlement_version.get(user_sub)
+    if last is not None:
+        logger.warning(
+            "[ENTITLEMENT-VERSION] fetch failed for user_sub=%s; reusing last known stamp",
+            user_sub,
+        )
+    return last
 
 
 def token_exp(access_token: str | None) -> float | None:
@@ -102,13 +147,17 @@ def token_exp(access_token: str | None) -> float | None:
 class _Entry:
     value: Any
     expires_at: float
-    owner: str | None = None  # user_sub this entry belongs to, for scoped invalidation
 
 
 class TtlTokenCache:
     """A TTL cache whose entries are additionally bounded by a bearer token's expiry."""
 
-    def __init__(self, ttl_seconds: float, name: str = "cache", max_entries: int = _DEFAULT_MAX_ENTRIES) -> None:
+    def __init__(
+        self,
+        ttl_seconds: float,
+        name: str = "cache",
+        max_entries: int = _DEFAULT_MAX_ENTRIES,
+    ) -> None:
         self._ttl = ttl_seconds
         self._name = name
         self._max_entries = max_entries
@@ -123,14 +172,14 @@ class TtlTokenCache:
             return None
         return entry.value
 
-    def put(self, key: str, value: Any, access_token: str | None, owner: str | None = None) -> None:
+    def put(self, key: str, value: Any, access_token: str | None) -> None:
         expires_at = time.time() + self._ttl
         exp = token_exp(access_token)
         if exp is not None:
             expires_at = min(expires_at, exp - _TOKEN_EXP_MARGIN_S)
         if expires_at <= time.time():
             return  # token already (nearly) expired — don't cache a stale entry
-        self._store[key] = _Entry(value=value, expires_at=expires_at, owner=owner)
+        self._store[key] = _Entry(value=value, expires_at=expires_at)
         if len(self._store) > self._max_entries:
             self._evict()
 
@@ -143,15 +192,6 @@ class TtlTokenCache:
         while len(self._store) > self._max_entries:
             oldest = min(self._store, key=lambda k: self._store[k].expires_at)
             self._store.pop(oldest, None)
-
-    def invalidate_owner(self, owner: str) -> int:
-        """Drop every entry belonging to ``owner`` (a user_sub). Returns the count removed."""
-        keys = [k for k, e in self._store.items() if e.owner == owner]
-        for k in keys:
-            self._store.pop(k, None)
-        if keys:
-            logger.info("[%s] invalidated %d entries for owner=%s", self._name, len(keys), owner)
-        return len(keys)
 
     def clear(self) -> None:
         n = len(self._store)
@@ -190,40 +230,23 @@ def get_embedded_runnable_cache(ttl_seconds: float | None = None) -> TtlTokenCac
     while the non-embedded path reuses ``GraphFactory._graphs``. Entries are keyed like
     the discovery cache (entitlements + sub-agent config hash + target id): the runnable's
     tools embed exchanged bearer tokens, so entries are token-bounded exactly like
-    discovery entries, and the same owner-scoped ``invalidate_users`` flush applies.
+    discovery entries.
     """
     global _embedded_runnable_cache
     if _embedded_runnable_cache is None:
         _embedded_runnable_cache = TtlTokenCache(
-            ttl_seconds if ttl_seconds is not None else 300.0, name="EMBEDDED-RUNNABLE-CACHE"
+            ttl_seconds if ttl_seconds is not None else 300.0,
+            name="EMBEDDED-RUNNABLE-CACHE",
         )
     return _embedded_runnable_cache
 
 
-def invalidate_users(user_subs: list[str]) -> int:
-    """Drop cached discovery + user records for the given users only. Returns total removed.
-
-    This is the targeted path: console-backend computes the set of users whose entitlements
-    changed (the members of an affected group, or a single user whose role/whitelist/bypass
-    rules changed) and asks the orchestrator to flush just those, so an entitlement change
-    for one group cannot trigger an expensive re-discovery storm for every active user.
-    """
-    removed = 0
-    for sub in user_subs:
-        if _discovery_cache is not None:
-            removed += _discovery_cache.invalidate_owner(sub)
-        if _user_cache is not None:
-            removed += _user_cache.invalidate_owner(sub)
-        if _embedded_runnable_cache is not None:
-            removed += _embedded_runnable_cache.invalidate_owner(sub)
-    return removed
-
-
 def invalidate_all() -> None:
-    """Drop all cached discovery + user records (fleet-wide flush, no per-user targeting).
+    """Drop all cached discovery + user records and forgotten stamps (fleet-wide flush).
 
-    Used for the unscoped admin/maintenance flush. Prefer ``invalidate_users`` for routine
-    entitlement changes so a single group edit does not evict every user's cache.
+    Entitlement changes never need this — they move the per-user stamp in the key. It is a
+    maintenance lever for the one thing the stamp cannot see: a catalogue change made on
+    the gateway itself (which the TTL otherwise bounds).
     """
     if _discovery_cache is not None:
         _discovery_cache.clear()
@@ -231,3 +254,4 @@ def invalidate_all() -> None:
         _user_cache.clear()
     if _embedded_runnable_cache is not None:
         _embedded_runnable_cache.clear()
+    _last_entitlement_version.clear()

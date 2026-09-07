@@ -11,7 +11,7 @@ from app.core.discovery_cache import (
     get_discovery_cache,
     get_user_cache,
     invalidate_all,
-    invalidate_users,
+    resolve_entitlement_version,
     token_exp,
 )
 
@@ -41,6 +41,45 @@ class TestCacheKey:
         # tool_names is intentionally not part of the key (discovery is unfiltered); equal
         # inputs always collide regardless of any per-user tool whitelist.
         assert cache_key("u", ["a"], "cfg", "0") == cache_key("u", ["a"], "cfg", "0")
+
+    def test_changes_with_entitlement_version(self):
+        # The load-bearing input: an activated sub-agent, whitelist, role or group-default
+        # change moves the stamp and must make the previous entry unreachable.
+        assert cache_key("u", ["a"], None, "0", entitlement_version="v1") != cache_key(
+            "u", ["a"], None, "0", entitlement_version="v2"
+        )
+
+    def test_missing_entitlement_version_equals_empty(self):
+        # None and "" are the same "unknown" stamp (pre-stamp behaviour, TTL-bounded).
+        assert cache_key("u", [], None, "0", entitlement_version=None) == cache_key(
+            "u", [], None, "0", entitlement_version=""
+        )
+        assert cache_key("u", [], None, "0") != cache_key("u", [], None, "0", entitlement_version="v1")
+
+
+class TestResolveEntitlementVersion:
+    def setup_method(self):
+        dc._last_entitlement_version.clear()
+
+    def test_fetched_wins_and_is_remembered(self):
+        assert resolve_entitlement_version("alice", "v1") == "v1"
+        assert dc._last_entitlement_version["alice"] == "v1"
+
+    def test_fetch_failure_falls_back_to_last_known(self):
+        resolve_entitlement_version("alice", "v1")
+        assert resolve_entitlement_version("alice", None) == "v1"
+
+    def test_fetch_failure_without_history_is_none(self):
+        assert resolve_entitlement_version("nobody", None) is None
+
+    def test_fallback_is_per_user(self):
+        resolve_entitlement_version("alice", "v1")
+        assert resolve_entitlement_version("bob", None) is None
+
+    def test_invalidate_all_forgets_stamps(self):
+        resolve_entitlement_version("alice", "v1")
+        invalidate_all()
+        assert resolve_entitlement_version("alice", None) is None
 
 
 class TestTokenExp:
@@ -94,46 +133,11 @@ class TestTtlTokenCache:
         c.clear()
         assert c.get("k") is None
 
-    def test_invalidate_owner_drops_only_matching(self):
-        c = TtlTokenCache(300)
-        c.put("k1", "v1", None, owner="alice")
-        c.put("k2", "v2", None, owner="bob")
-        c.put("k3", "v3", None, owner="alice")
-        removed = c.invalidate_owner("alice")
-        assert removed == 2
-        assert c.get("k1") is None and c.get("k3") is None
-        assert c.get("k2") == "v2"
-
-    def test_invalidate_owner_unknown_is_noop(self):
-        c = TtlTokenCache(300)
-        c.put("k", "v", None, owner="alice")
-        assert c.invalidate_owner("nobody") == 0
-        assert c.get("k") == "v"
-
     def test_max_entries_bounds_size(self):
         c = TtlTokenCache(ttl_seconds=300, max_entries=3)
         for i in range(10):
             c.put(f"k{i}", i, None)
         assert len(c._store) <= 3
-
-
-class TestScopedInvalidation:
-    def test_invalidate_users_targets_only_given_subs(self):
-        get_discovery_cache(300).put("d-alice", ("t", "s"), None, owner="alice")
-        get_discovery_cache().put("d-bob", ("t", "s"), None, owner="bob")
-        get_user_cache(300).put("u-alice", object(), None, owner="alice")
-        get_user_cache().put("u-bob", object(), None, owner="bob")
-
-        removed = invalidate_users(["alice"])
-        assert removed == 2  # one discovery + one user entry for alice
-        assert get_discovery_cache().get("d-alice") is None
-        assert get_user_cache().get("u-alice") is None
-        assert get_discovery_cache().get("d-bob") is not None
-        assert get_user_cache().get("u-bob") is not None
-
-    def teardown_method(self):
-        dc._discovery_cache = None
-        dc._user_cache = None
 
 
 class TestInvalidateAll:

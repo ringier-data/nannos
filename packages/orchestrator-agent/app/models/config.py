@@ -268,6 +268,10 @@ class UserConfig(BaseModel):
         default=None,
         description="Sub-agent config hash for console testing mode (single sub-agent isolation)",
     )
+    entitlement_version: Optional[str] = Field(
+        default=None,
+        description="Opaque per-user entitlement stamp from console-backend; part of the per-user cache keys",
+    )
     agent_metadata: Optional[dict[str, dict[str, Any]]] = Field(
         default=None,
         description="Agent metadata from registry: Maps agent_url -> {sub_agent_id, name, description}",
@@ -345,14 +349,14 @@ class AgentSettings:
     # Per-user discovery + registry cache TTL (seconds). Discovered tools carry no credential
     # (bearers are minted at call time by the per-user token provider), so this is purely a
     # freshness bound: how long a catalogue change made *outside* the console (on the MCP
-    # gateway itself) may go unnoticed, and how long an entitlement change may lag on replicas
-    # the console's invalidation POST did not reach (it is in-process, one replica). Changes
-    # made through the console invalidate the receiving replica immediately. Entries are
-    # additionally bounded by the user token's expiry.
+    # gateway itself, invisible to the console) may go unnoticed. Entitlement changes made
+    # through the console do not wait for it: the per-user entitlement version fetched each
+    # turn is part of the cache key (see discovery_cache). Entries are additionally bounded
+    # by the user token's expiry.
     AGENT_DISCOVERY_CACHE_TTL = _int_env("AGENT_DISCOVERY_CACHE_TTL", 60)
     # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env)
-    # or call discovery_cache.invalidate_all() when a group→server/tool access policy
-    # changes without the user's own groups/config changing.
+    # or call discovery_cache.invalidate_all() for a fleet-wide flush, e.g. after a gateway
+    # catalogue change the console cannot see.
     ENTITLEMENT_POLICY_VERSION = os.getenv("ENTITLEMENT_POLICY_VERSION", "0")
 
     # PostgreSQL checkpoint configuration.
