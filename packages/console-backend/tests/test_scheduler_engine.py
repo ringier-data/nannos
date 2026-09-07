@@ -1123,7 +1123,31 @@ class TestOwnerSubResolution:
 
         with caplog.at_level("WARNING"):
             assert await engine._owner_sub(db, job) is None
-        assert "unattributed" in caplog.records[-1].getMessage()
+        assert "unattributed" in caplog.records[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_lookup_rolls_the_shared_session_back(self):
+        """Swallowing the error is not enough. This session is the one the rest of the
+        dispatch runs on, and a failed statement leaves it refusing every next one — so a
+        lookup that only wanted to name the payer would have killed the run it rode along
+        with, on every job type."""
+        engine = _make_engine()
+        job = _make_job()
+        db = AsyncMock()
+        db.execute.side_effect = RuntimeError("db down")
+
+        assert await engine._owner_sub(db, job) is None
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_rollback_that_fails_too_is_still_not_fatal(self):
+        engine = _make_engine()
+        job = _make_job()
+        db = AsyncMock()
+        db.execute.side_effect = RuntimeError("db down")
+        db.rollback.side_effect = RuntimeError("connection gone")
+
+        assert await engine._owner_sub(db, job) is None
 
 
 class TestWriteNotification:

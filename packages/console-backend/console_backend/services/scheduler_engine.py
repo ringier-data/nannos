@@ -500,6 +500,15 @@ class SchedulerEngine:
             sub = result.scalar_one_or_none()
         except Exception:
             logger.warning("Job %d: could not resolve the owner's subject; LLM spend goes unattributed", job.id)
+            # Swallowing the error is not enough to keep the promise above: this session is
+            # shared with everything that follows in `_dispatch_job`, and a failed statement
+            # leaves it in a transaction that refuses the next one (PendingRollbackError).
+            # Rolling back is what actually lets the dispatch continue — and it discards
+            # nothing, because the token refresh before this commits its own writes.
+            try:
+                await db.rollback()
+            except Exception:
+                logger.warning("Job %d: rollback after the owner lookup failed too", job.id, exc_info=True)
             return None
         if not sub:
             logger.warning("Job %d: owner %s has no subject on file; LLM spend goes unattributed", job.id, job.user_id)

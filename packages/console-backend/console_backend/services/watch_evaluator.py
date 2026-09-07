@@ -130,8 +130,9 @@ class WatchEvaluator:
 
         `owner_sub` is the OIDC subject of the job's owner, carried down to the judge's
         gateway call so the spend is attributed. The engine resolves it once per dispatch
-        (it already reads the owner to mint the access token); None means it could not be
-        resolved, and the call proceeds unattributed rather than failing the run.
+        and passes it in — it is not derivable here, since `job.user_id` is the internal
+        user id rather than the subject. None means it could not be resolved, and the
+        call proceeds unattributed rather than failing the run.
         """
         tool_name = job.check_tool or ""
         try:

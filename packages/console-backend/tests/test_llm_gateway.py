@@ -62,6 +62,47 @@ class TestGatewayChatPayload:
         assert fake_client.post.call_args.kwargs["json"]["reasoning_effort"] == "none"
 
 
+class TestSalvagingTheObject:
+    """Models wrap JSON in fences and pad it with prose however firmly they are told not
+    to, so the object has to be dug out of the text. This is the shared salvage — the
+    copy conversation titling used to carry, and the reason it now calls through here."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            '{"title": "Invoice mismatch", "summary": "It does not match."}',
+            'Sure!\n```json\n{"title": "Invoice mismatch", "summary": "It does not match."}\n```',
+            '```\n{"title": "Invoice mismatch", "summary": "It does not match."}\n```\nHope that helps!',
+        ],
+    )
+    async def test_fences_and_chatter_are_stripped(self, reply):
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion(reply)))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            assert await llm_gateway.gateway_chat_json("x", model="m") == {
+                "title": "Invoice mismatch",
+                "summary": "It does not match.",
+            }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "",
+            "   ",
+            "I could not summarize that.",
+            '{"broken": ',
+            "[1, 2, 3]",  # valid JSON, but not an object
+            '{"a": 1} and then {"b": 2}',  # the greedy match spans both and parses as neither
+        ],
+    )
+    async def test_a_reply_with_no_object_in_it_is_empty_not_an_error(self, reply):
+        # `{}` is the contract every caller answers with its own fallback.
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion(reply)))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            assert await llm_gateway.gateway_chat_json("x", model="m") == {}
+
+
 def _completion_with(content, finish_reason):
     resp = MagicMock()
     resp.raise_for_status = MagicMock()

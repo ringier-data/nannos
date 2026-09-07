@@ -163,9 +163,9 @@ async def gateway_chat(
     Note: the canonical attribution-header builder lives in agent-common
     (`attribution.attribution_header`, used by the chat client + embeddings adapter). It is
     intentionally NOT imported here — console-backend is dependency-light (httpx only, no
-    agent-common), and gateway_chat's only callers (watch-param generation, catalog
-    summarization) run outside any sub-agent / scheduled-job context, so the richer
-    attribution dimensions would always be empty. The caller passes whatever applies.
+    agent-common). The callers that do run under a scheduled job (the watch judge, the
+    trigger-notification writer) pass the dimensions that apply to them as `metadata`,
+    which is all the proxy reads.
     """
     payload: dict = {
         "model": model,
