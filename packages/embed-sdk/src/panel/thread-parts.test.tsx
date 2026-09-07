@@ -9,9 +9,10 @@
  * tool reads exactly like a tool that never needed approval (its activity
  * lines, then the answer), while dev mode keeps the raw part for inspection.
  *
- * Dev timestamps: every agent event carries its arrival time — activity lines
- * in `data.ts`, the answer in its provider metadata — so dev mode reads the
- * turn as one timeline, and the end-user view shows none of it.
+ * Dev timestamps: every event of a turn carries its time — the user's send in
+ * `metadata.sentAt`, activity lines in `data.ts`, the answer in its provider
+ * metadata — so dev mode reads the turn as one timeline from question to
+ * answer, and the end-user view shows none of it.
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -65,6 +66,18 @@ function message(toolPart: Record<string, unknown>): NannosUIMessage {
     id: 'msg-1',
     role: 'assistant',
     parts: [ACTIVITY, toolPart as NannosUIMessage['parts'][number]],
+  };
+}
+
+const SENT_TEXT = 'What is in memories?';
+
+/** The send that opens a turn, stamped the way the composer's `send` stamps it. */
+function userTurn(stamped = true): NannosUIMessage {
+  return {
+    id: 'msg-0',
+    role: 'user',
+    parts: [{ type: 'text', text: SENT_TEXT }],
+    ...(stamped && { metadata: { sentAt: TS } }),
   };
 }
 
@@ -258,6 +271,27 @@ describe('dev timestamps', () => {
 
     // The activity line still has its own stamp; the answer simply has none.
     expect(screen.getAllByText(CLOCK)).toHaveLength(1);
+  });
+
+  it('times the send as well, so the turn reads from question to answer', () => {
+    mountThread([userTurn(), answeredTurn()], true);
+
+    // Three events on the one clock: the question, the tool call, the answer.
+    expect(screen.getAllByText(CLOCK)).toHaveLength(3);
+  });
+
+  it('shows no clock on the send in the end-user view', () => {
+    mountThread([userTurn()]);
+
+    expect(screen.getByText(SENT_TEXT)).toBeTruthy();
+    expect(screen.queryByText(CLOCK)).toBeNull();
+  });
+
+  it('leaves an unstamped send (older history) alone', () => {
+    mountThread([userTurn(false)], true);
+
+    expect(screen.getByText(SENT_TEXT)).toBeTruthy();
+    expect(screen.queryByText(CLOCK)).toBeNull();
   });
 });
 

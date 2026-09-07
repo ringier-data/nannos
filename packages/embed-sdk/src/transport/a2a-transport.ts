@@ -329,6 +329,7 @@ export class A2AChatTransport implements ChatTransport<NannosUIMessage> {
       id: sendId,
       role: 'user',
       parts: [{ type: 'text', text }],
+      metadata: { sentAt: Date.now() },
     };
     const payload = buildNewTurnPayload({
       messageId: sendId,
