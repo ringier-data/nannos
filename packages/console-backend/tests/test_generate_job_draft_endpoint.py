@@ -115,16 +115,12 @@ class TestToolsAreSelectedServerSide:
         catalogue.assert_awaited_once()
         assert catalogue.await_args.args[1].id == "user-1"
 
-    def test_the_request_body_tools_are_ignored(self, draft_client, gateway, catalogue):
-        # An older UI still posts the field; a caller may also try to offer the model
-        # tools this user cannot reach. Neither makes it into the prompt.
-        gateway.return_value = {"job_type": "watch", "check_tool": "console_list_bug_reports"}
-        smuggled = [{"name": "admin_delete_everything", "description": "bug report", "input_schema": {}}]
+    def test_the_request_body_carries_no_tools(self):
+        # The body used to carry the whole catalogue, and with it the chance to offer
+        # the model tools this user cannot reach. The field is gone, not just ignored.
+        from console_backend.models.scheduled_job import GenerateJobDraftRequest
 
-        resp = draft_client.post(URL, json={"query": QUERY, "tools": smuggled})
-
-        assert resp.status_code == 200
-        assert "admin_delete_everything" not in _prompt(gateway)
+        assert set(GenerateJobDraftRequest.model_fields) == {"query"}
 
     def test_the_relevant_tool_is_offered_and_chosen(self, draft_client, gateway, catalogue):
         gateway.return_value = {

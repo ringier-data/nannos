@@ -390,16 +390,12 @@ class ScheduledJobCreate(BaseModel):
 
 
 class GenerateJobDraftRequest(BaseModel):
-    """Request body for generating a scheduled job from a one-line description."""
+    """Request body for generating a scheduled job from a one-line description.
 
-    tools: list[dict[str, Any]] = Field(
-        default_factory=list,
-        deprecated=True,
-        description=(
-            "Ignored. The candidate tools are selected server-side from the caller's own "
-            "catalogue; the field is kept so an older UI can still post to this endpoint."
-        ),
-    )
+    Only the request itself: the tools, sub-agents and channels the draft may reference
+    are the caller's own and are read server-side, never accepted from the body.
+    """
+
     query: str = Field(
         min_length=1,
         max_length=500,
