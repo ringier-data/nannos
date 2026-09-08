@@ -114,7 +114,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Sub-agent recursion limit — prevents runaway loops when the model ignores
-# tool errors and keeps retrying.  Mirrors the orchestrator's MAX_RECURSION_LIMIT.
+# tool errors and keeps retrying. Counted in LangGraph super-steps, not model
+# calls; the orchestrator no longer shares this budget (it derives its own from
+# its compiled graph, see orchestrator-agent app/core/step_budget.py), so this is
+# now the sub-agent bound only. Binding it also matters: langgraph propagates
+# `recursion_limit` into a child graph that does not set its own, so without the
+# `with_config` below every sub-agent would inherit the orchestrator's.
 _SUB_AGENT_RECURSION_LIMIT = int(
     os.getenv(
         "SUB_AGENT_RECURSION_LIMIT",

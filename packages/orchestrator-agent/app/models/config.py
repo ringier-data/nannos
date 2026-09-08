@@ -46,33 +46,46 @@ SANE_MAX_MODEL_CALLS_PER_TURN = 200
 """Not a limit — only the point above which a value is more likely a typo than an
 intent, and worth a warning because the runaway guard stops being one."""
 
-# Deliberately *not* read any more. `MAX_RECURSION_LIMIT` is a shared env name:
-# ringier-a2a-sdk and agent-runner default it to 50, agent-common's dynamic_agent
-# to 75. One value cannot serve all four -- a deployment pinning 50 (the
-# orchestrator's own former default) would silently reinstate the turn truncation
-# this budget exists to prevent, while an operator exporting a value large enough
-# for the orchestrator would quadruple every sub-agent's runaway-loop bound.
+# Deliberately *not* read by the orchestrator any more, but still live elsewhere.
+# `MAX_RECURSION_LIMIT` is a shared env name: ringier-a2a-sdk and agent-runner
+# default it to 50, agent-common's dynamic_agent to 75 (as the fallback behind
+# `SUB_AGENT_RECURSION_LIMIT`). One value cannot serve all four -- a deployment
+# pinning 50, the orchestrator's own former default, would silently reinstate the
+# turn truncation this budget exists to prevent, while a value large enough for
+# the orchestrator would quadruple every sub-agent's runaway-loop bound.
+#
+# That the name remains live for sub-agents is also what keeps them off the
+# orchestrator's derived limit: langgraph propagates `recursion_limit` into a
+# child graph that does not bind its own, and dynamic_agent.py binds one.
 LEGACY_RECURSION_LIMIT_ENV = "MAX_RECURSION_LIMIT"
 
 
 def _resolve_max_model_calls_per_turn() -> int:
     """Model calls allowed per turn, warning if the old shared env var is set.
 
-    The legacy name is not honoured, because inheriting it is the bug. Silence
-    would be worse than either choice, so an operator who set it is told that it
-    no longer applies here and what to set instead.
+    The legacy name is not honoured here, because inheriting it is the bug. But it
+    is emphatically *not* dead: agent-common's ``dynamic_agent`` still reads it as
+    the fallback bound for every local sub-agent in this same process, and
+    agent-runner and ringier-a2a-sdk read it too. So the warning must not read as
+    "this variable is obsolete" -- an operator who unsets it on that advice
+    silently changes every sub-agent's recursion bound. It says what to set for
+    the orchestrator *and* what still depends on the old name.
     """
     legacy = os.getenv(LEGACY_RECURSION_LIMIT_ENV)
     if legacy and legacy.strip():
         logger.warning(
-            "%s=%s is set but no longer configures the orchestrator: it is a shared "
-            "name used by agent-runner, agent-common and ringier-a2a-sdk with "
-            "different defaults, and inheriting a sub-agent's super-step budget is "
-            "what truncated orchestrator turns. Use %s instead -- it is counted in "
-            "model calls, not super-steps.",
+            "%s=%s no longer configures the orchestrator -- use %s instead, which is "
+            "counted in model calls rather than LangGraph super-steps. Do NOT unset "
+            "%s on that basis: it is a shared name and still sets the recursion bound "
+            "for local sub-agents in this process (agent-common dynamic_agent, "
+            "default 75) as well as for agent-runner and ringier-a2a-sdk. To decouple "
+            "them, set SUB_AGENT_RECURSION_LIMIT for the sub-agents and leave %s to "
+            "the sibling services.",
             LEGACY_RECURSION_LIMIT_ENV,
             legacy,
             MAX_MODEL_CALLS_PER_TURN_ENV,
+            LEGACY_RECURSION_LIMIT_ENV,
+            LEGACY_RECURSION_LIMIT_ENV,
         )
 
     value = _int_env(MAX_MODEL_CALLS_PER_TURN_ENV, DEFAULT_MAX_MODEL_CALLS_PER_TURN)
