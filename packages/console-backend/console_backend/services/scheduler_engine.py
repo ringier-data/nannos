@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
+
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from .llm_gateway import gateway_chat
 from .watch_evaluator import WatchEvaluator, WatchOutcome
@@ -195,49 +197,56 @@ class SchedulerEngine:
                     )
                     return
 
-                # Who the job runs as, in the gateway's vocabulary. The proxy attributes
-                # spend by OIDC subject and logs nothing without one, and both LLM calls
-                # on this path (the watch judge, the notification writer) run unattended
-                # on a schedule — exactly where cost accumulates unseen. `job.user_id` is
-                # the internal user id, which is not the subject for anyone onboarded
-                # after the id/sub split, so it is looked up rather than passed through.
+                # Who this run bills to, for every gateway call under it. The two LLM calls
+                # below (the watch judge, the notification writer) used to run inside the
+                # agent, where these same ContextVars carried the owner and the job id for
+                # free; moving the decision here in #166 took them out of that context and
+                # nothing replaced it, so the proxy's logger dropped their records
+                # (`custom_logger._build_record` needs a user_sub) and the spend left
+                # `usage_logs` altogether. `scheduled_job_id` is half the point:
+                # `usage_repository` derives the service dimension from it, so without it
+                # this recurring overhead reads as the user's own 'orchestrator' spend.
+                #
+                # A scope, not `set_attribution`: `_tick` dispatches each job in its own
+                # task, but `run_job_now` awaits this inline from a request handler, where
+                # a job id left set would follow the rest of that request.
                 owner_sub = await self._owner_sub(db, job)
+                with attribution_scope(user_sub=owner_sub, scheduled_job_id=job.id):
+                    # Watch jobs: decide here whether anything is happening. A poll that
+                    # does not trigger dispatches nothing at all — and knowing the outcome
+                    # before dispatch is what lets the trigger choose its target (an agent,
+                    # or a phone call).
+                    watch_outcome: WatchOutcome | None = None
+                    if self._watch_evaluator.can_evaluate(job):
+                        watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token)
 
-                # Watch jobs: decide here whether anything is happening. A poll that
-                # does not trigger dispatches nothing at all — and knowing the outcome
-                # before dispatch is what lets the trigger choose its target (an agent,
-                # or a phone call).
-                watch_outcome: WatchOutcome | None = None
-                if self._watch_evaluator.can_evaluate(job):
-                    watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token, owner_sub)
+                        if watch_outcome.error:
+                            await self._finalize(
+                                run_id=run_id,
+                                job=job,
+                                status=JobRunStatus.FAILED,
+                                error_message=watch_outcome.error,
+                                delivered=False,
+                                last_check_result=watch_outcome.check_result,
+                                condition_evaluation=watch_outcome.evaluation,
+                            )
+                            return
 
-                    if watch_outcome.error:
-                        await self._finalize(
-                            run_id=run_id,
-                            job=job,
-                            status=JobRunStatus.FAILED,
-                            error_message=watch_outcome.error,
-                            delivered=False,
-                            last_check_result=watch_outcome.check_result,
-                            condition_evaluation=watch_outcome.evaluation,
-                        )
-                        return
+                        if not watch_outcome.condition_met:
+                            await self._finalize(
+                                run_id=run_id,
+                                job=job,
+                                status=JobRunStatus.CONDITION_NOT_MET,
+                                delivered=False,
+                                last_check_result=watch_outcome.check_result,
+                                condition_evaluation=watch_outcome.evaluation,
+                            )
+                            return
 
-                    if not watch_outcome.condition_met:
-                        await self._finalize(
-                            run_id=run_id,
-                            job=job,
-                            status=JobRunStatus.CONDITION_NOT_MET,
-                            delivered=False,
-                            last_check_result=watch_outcome.check_result,
-                            condition_evaluation=watch_outcome.evaluation,
-                        )
-                        return
-
-                # Build the A2A message args for agent-runner
-                parts, metadata, push_config = await self._build_message_args(
-                    job, run_id, access_token, db, watch_outcome=watch_outcome, owner_sub=owner_sub
-                )
+                    # Build the A2A message args for agent-runner
+                    parts, metadata, push_config = await self._build_message_args(
+                        job, run_id, access_token, db, watch_outcome=watch_outcome
+                    )
 
             # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client. SSE keeps
             # bytes flowing so CloudFront/ALB idle-timeout never fires for long-running jobs.
@@ -304,16 +313,12 @@ class SchedulerEngine:
         access_token: str,
         db: Any,
         watch_outcome: WatchOutcome | None = None,
-        owner_sub: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str] | None]:
         """Build the (message parts, metadata, push_config) for the A2A SDK dispatch.
 
         `watch_outcome` is set when the condition was already evaluated here, which is the
         normal path for a watch job. It is passed on so agent-runner does not call the
         tool a second time or reach a different verdict than the one that got us here.
-
-        `owner_sub` only reaches the notification writer's gateway call, for cost
-        attribution — see `_dispatch_job`.
         """
         metadata: dict[str, Any] = {
             "scheduled_job_id": job.id,
@@ -348,9 +353,7 @@ class SchedulerEngine:
             # A triggered watch that only notifies: the text is the notification, written
             # here when the author left it empty. It used to be written inside the agent
             # run, which is why a notification-only watch needed one at all.
-            message_text = job.notification_message or await self._write_notification(
-                job, watch_outcome, owner_sub=owner_sub
-            )
+            message_text = job.notification_message or await self._write_notification(job, watch_outcome)
 
         # Voice-call dispatch: the target becomes the voice-agent, which reads its
         # configuration from a DataPart and injects any TextParts into the live session
@@ -433,9 +436,7 @@ class SchedulerEngine:
 
         return parts, metadata, push_config
 
-    async def _write_notification(
-        self, job: ScheduledJob, outcome: WatchOutcome | None, owner_sub: str | None = None
-    ) -> str:
+    async def _write_notification(self, job: ScheduledJob, outcome: WatchOutcome | None) -> str:
         """Write the notification for a triggered watch whose author left it empty.
 
         Moved here from agent-runner along with the rest of the decision: the scheduler
@@ -472,15 +473,9 @@ class SchedulerEngine:
             # Thinking off: two sentences of plain text need no reasoning, and on the low
             # tier a reasoning model spends the budget thinking and is cut off mid-sentence
             # — which would then be sent to the person verbatim.
-            message = await gateway_chat(
-                prompt,
-                model=model,
-                max_tokens=256,
-                reasoning_effort="none",
-                # Unattended spend, once per trigger: without a subject the gateway logs
-                # nothing at all. The job id makes the bill readable per watch.
-                metadata={"user_sub": owner_sub, "scheduled_job_id": job.id} if owner_sub else None,
-            )
+            # Cost attribution comes from the scope `_dispatch_job` opened, not from an
+            # argument here — the header is stamped by `_gateway_headers`.
+            message = await gateway_chat(prompt, model=model, max_tokens=256, reasoning_effort="none")
             written = message.strip().strip('"')
             if written:
                 logger.info("Job %d: wrote notification %r", job.id, written[:100])
@@ -492,8 +487,10 @@ class SchedulerEngine:
     async def _owner_sub(self, db: Any, job: ScheduledJob) -> str | None:
         """The OIDC subject of the job's owner, or None when it cannot be read.
 
-        None is not a failure: an unattributed LLM call is worse accounting than an
-        attributed one, but a job must not stop running because a lookup came back empty.
+        The gateway bills by subject and `job.user_id` is not one — it is the internal
+        `users.id`, which stopped being the sub at the id/sub split. None is not a
+        failure: an unattributed LLM call is worse accounting than an attributed one,
+        but a job must not stop running because a lookup came back empty.
         """
         try:
             result = await db.execute(text("SELECT sub FROM users WHERE id = :user_id"), {"user_id": job.user_id})

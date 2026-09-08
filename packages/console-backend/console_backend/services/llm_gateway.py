@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 import httpx
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_header
 from ringier_a2a_sdk.utils.http_pool import LazyClient
 
 from ..config import config
@@ -31,16 +32,26 @@ def _gateway_headers(metadata: dict | None = None) -> dict[str, str]:
 
     The Bearer default mirrors agent-common._gateway_api_key / the embeddings adapter — a
     consistent key avoids silent 401s when the env is unset. console-backend is dependency-light
-    (no agent-common), so the value is duplicated here rather than imported. ``metadata`` (e.g.
-    {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the proxy attributes the cost;
-    without it the proxy logs nothing.
+    (no agent-common), so the value is duplicated here rather than imported.
+
+    Cost attribution rides on x-litellm-spend-logs-metadata, built by the SDK's canonical
+    ``attribution_header`` — the same builder the embeddings adapter uses, rather than a
+    hand-rolled copy that could drift from the field set the proxy's logger reads. It merges
+    two sources, which is what lets both console-backend styles work through one path:
+
+      * the ambient attribution ContextVars, for a caller that runs *as* somebody for a
+        whole block of work (the scheduler's dispatch opens such a scope);
+      * ``metadata``, for a caller that names the payer per call (an HTTP request handler
+        with the authenticated user in hand) — explicit values win over the ambient ones.
+
+    Attribution is not cosmetic: the proxy's logger drops a record with no ``user_sub``
+    outright, so an unattributed call leaves no usage row at all.
     """
     headers = {
         "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
         "Content-Type": "application/json",
     }
-    if metadata:
-        headers["x-litellm-spend-logs-metadata"] = json.dumps({k: v for k, v in metadata.items() if v is not None})
+    headers.update(attribution_header(**(metadata or {})))
     return headers
 
 
@@ -145,8 +156,10 @@ async def gateway_chat(
 ) -> str:
     """Single-turn completion through the gateway; returns the assistant text.
 
-    `metadata` (e.g. {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the
-    proxy attributes the cost. Without a user_sub the proxy logs nothing.
+    `metadata` (e.g. {"user_sub": ...}) names the payer for this one call. A caller that
+    runs as somebody for a whole block of work sets an `attribution_scope` instead and
+    passes nothing here — see `_gateway_headers`. Without either, the proxy's logger drops
+    the record and the call leaves no usage row.
 
     `reasoning_effort` is LiteLLM's unified extended-thinking control, in the same
     vocabulary agent-common's `get_reasoning_effort` and the console's `thinking_levels_for`
@@ -160,12 +173,6 @@ async def gateway_chat(
     would. The proxy runs `drop_params: true`, so a model that takes no such param is
     unaffected either way.
 
-    Note: the canonical attribution-header builder lives in agent-common
-    (`attribution.attribution_header`, used by the chat client + embeddings adapter). It is
-    intentionally NOT imported here — console-backend is dependency-light (httpx only, no
-    agent-common). The callers that do run under a scheduled job (the watch judge, the
-    trigger-notification writer) pass the dimensions that apply to them as `metadata`,
-    which is all the proxy reads.
     """
     payload: dict = {
         "model": model,

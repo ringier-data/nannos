@@ -4,10 +4,12 @@
 params) — no langchain, one OpenAI-shaped POST. These cover the request body it builds.
 """
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 
 import console_backend.services.llm_gateway as llm_gateway
 
@@ -101,6 +103,55 @@ class TestSalvagingTheObject:
         fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion(reply)))
         with patch.object(llm_gateway._client, "get", return_value=fake_client):
             assert await llm_gateway.gateway_chat_json("x", model="m") == {}
+
+
+class TestAttributionOnTheWire:
+    """Who a gateway call bills to. Two sources, one header: an ambient scope for a caller
+    that runs *as* somebody for a block of work (the scheduler's dispatch), and explicit
+    `metadata` for one that names the payer per call (a request handler). The proxy's
+    logger drops a record carrying no `user_sub`, so an unattributed call leaves no usage
+    row at all."""
+
+    @staticmethod
+    def _stamped(fake_client) -> dict:
+        raw = fake_client.post.call_args.kwargs["headers"].get("x-litellm-spend-logs-metadata")
+        return json.loads(raw) if raw else {}
+
+    @pytest.mark.asyncio
+    async def test_it_stamps_the_ambient_scope(self):
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            with attribution_scope(user_sub="owner-1", scheduled_job_id=42):
+                await llm_gateway.gateway_chat("x", model="m")
+
+        assert self._stamped(fake_client) == {"user_sub": "owner-1", "scheduled_job_id": 42}
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_payer_wins_over_the_ambient_one(self):
+        """A request handler bills the authenticated user, whatever context it inherited."""
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            with attribution_scope(user_sub="owner-1", scheduled_job_id=42):
+                await llm_gateway.gateway_chat("x", model="m", metadata={"user_sub": "the-caller"})
+
+        assert self._stamped(fake_client) == {"user_sub": "the-caller", "scheduled_job_id": 42}
+
+    @pytest.mark.asyncio
+    async def test_explicit_metadata_alone_still_works(self):
+        # The four callers that name their payer per call keep working unchanged.
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            await llm_gateway.gateway_chat("x", model="m", metadata={"user_sub": "u1", "conversation_id": "c1"})
+
+        assert self._stamped(fake_client) == {"user_sub": "u1", "conversation_id": "c1"}
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_attribute_stamps_no_header(self):
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            await llm_gateway.gateway_chat("x", model="m")
+
+        assert "x-litellm-spend-logs-metadata" not in fake_client.post.call_args.kwargs["headers"]
 
 
 def _completion_with(content, finish_reason):

@@ -278,26 +278,6 @@ class TestJudgedConditions:
         assert outcome.evaluation.reasoning == "external attendee"
 
     @pytest.mark.asyncio
-    async def test_the_judgement_is_billed_to_the_job_owner(self, monkeypatch):
-        """This call runs on every poll of every judged watch, unattended. The gateway
-        logs nothing for a call that names no subject, so this was the recurring spend
-        it recorded least about."""
-        _gateway(monkeypatch, {"attendees": ["a@x.com"]})
-        chat = AsyncMock(return_value='{"condition_met": false, "reasoning": "no"}')
-        with patch("console_backend.services.llm_gateway.gateway_chat", chat):
-            with patch(
-                "console_backend.services.watch_evaluator.ModelDefaultsRepository.get_all",
-                AsyncMock(return_value={"chat:low": "some-model"}),
-            ):
-                await WatchEvaluator().evaluate(
-                    AsyncMock(),
-                    _job(id=42, cel_expr=None, llm_condition="anything"),
-                    "tok",
-                    "owner-sub-1",
-                )
-        assert chat.await_args.kwargs["metadata"] == {"user_sub": "owner-sub-1", "scheduled_job_id": 42}
-
-    @pytest.mark.asyncio
     async def test_the_judge_does_not_think_on_its_own_budget(self, monkeypatch):
         """The judge is the one caller here that makes a semantic decision, so it is the
         one where thinking is arguable — and it still runs with thinking off, deliberately:
@@ -312,25 +292,9 @@ class TestJudgedConditions:
                 AsyncMock(return_value={"chat:low": "some-model"}),
             ):
                 await WatchEvaluator().evaluate(
-                    AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok", "owner-sub-1"
+                    AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok"
                 )
         assert chat.await_args.kwargs["reasoning_effort"] == "none"
-
-    @pytest.mark.asyncio
-    async def test_an_unresolvable_owner_does_not_stop_the_judgement(self, monkeypatch):
-        """Worse accounting, not a failed run: the watch still gets decided."""
-        _gateway(monkeypatch, {"attendees": ["a@x.com"]})
-        chat = AsyncMock(return_value='{"condition_met": true, "reasoning": "yes"}')
-        with patch("console_backend.services.llm_gateway.gateway_chat", chat):
-            with patch(
-                "console_backend.services.watch_evaluator.ModelDefaultsRepository.get_all",
-                AsyncMock(return_value={"chat:low": "some-model"}),
-            ):
-                outcome = await WatchEvaluator().evaluate(
-                    AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok", None
-                )
-        assert outcome.condition_met is True
-        assert chat.await_args.kwargs["metadata"] is None
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_fails_closed(self, monkeypatch):
