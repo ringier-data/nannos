@@ -127,60 +127,38 @@ _INPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_input_tokens", "TEXT": "base_input_to
 _OUTPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_output_tokens", "TEXT": "base_output_tokens"}
 
 # Tool-use prompt tokens get their OWN unit rather than being folded into
-# base_input_tokens. Folding them in was a bug: base_input_tokens is a gauge, so a small
-# per-turn tool contribution was max()'d against a much larger context count and vanished
-# entirely. Priced the same as ordinary input (see the rate-card seed migration).
+# base_input_tokens, so they stay visible in the breakdown and can be priced separately.
+# Priced the same as ordinary input (see the rate-card seed migration).
 _TOOL_USE_UNIT = "tool_use_input_tokens"
 _CACHE_READ_UNIT = "cache_read_input_tokens"
-
-# How to fold a session's successive usage reports into one billable total.
-#
-# Gemini Live reports the two sides with DIFFERENT semantics — measured on a real 10-turn
-# call (2026-09-01), not assumed:
-#
-#   response_token_count is a PER-TURN DELTA. It decreases between turns
-#     (250 → 118 → 112 → 28 → …), which a cumulative counter cannot do. Summing is the
-#     only correct fold; taking the last value dropped 71% of the output tokens.
-#
-#   prompt_token_count is a CUMULATIVE GAUGE of the context. It rises monotonically, and
-#     every rise equals (previous response + a little new audio) — i.e. the conversation
-#     being appended to the context and re-presented each turn. Its final value is
-#     therefore the total distinct input the model ever saw.
-#
-# So input-side units take the max and output-side units sum. `max` rather than `last`
-# because context-window compression (configured at 128k → 32k) can *shrink* the context
-# mid-call, and the tokens before a compression were still processed.
-#
-# Tool-use and cache-read sit on the prompt side and are therefore treated as gauges too.
-# NOTE: that is inference from prompt_token_count's measured behaviour, not measurement —
-# the call we measured ran tool-less and uncached. Both have their own unit precisely so a
-# tool-enabled call can be measured later without disturbing anything else.
-_GAUGE_UNITS = frozenset(
-    {"audio_input_tokens", "base_input_tokens", _CACHE_READ_UNIT, _TOOL_USE_UNIT}
-)
-_DELTA_UNITS = frozenset({"audio_output_tokens", "base_output_tokens"})
 
 
 def fold_usage_into(totals: dict[str, int], units: dict[str, int]) -> None:
     """Fold one usage report's billing units into a session's running totals.
 
-    Gauge units take the maximum seen; delta units accumulate. The classification is
-    exhaustive on purpose: a unit in neither set is accumulated AND warned about, so a
-    newly-reported token type picks up a loud default rather than a silent one.
+    EVERY unit accumulates, because the Live API re-bills the whole context on every turn.
+    Google documents this on the Vertex pricing page (footnote to the Live API tables):
+
+        "You are charged per turn for all tokens present in the Session Context Window.
+         The Session Context Window includes new tokens (current turn) + all accumulated
+         tokens from previous turns. This means tokens from past turns are re-processed
+         and accounted for in each new turn."
+
+    and again in the Live API best-practices pages, under a heading literally called
+    "Re-billing": "As a session lengthens, the cost per turn increases because the
+    conversational history is re-processed." So ``sum(promptTokenCount)`` over the
+    session's reports IS the billed input — even though each individual report is a
+    cumulative view of the context, the charge recurs per turn.
+
+    This also makes ``contextWindowCompression`` fall out correctly for free: after a
+    compression ``promptTokenCount`` drops, and the docs confirm the API "then bills
+    subsequent turns only for the retained history plus any new tokens" — which summing
+    tracks exactly. (An earlier version took the max on the input side, on the theory that
+    the counter was a gauge to be read rather than a recurring charge. That under-billed a
+    measured 10-turn call by 2.6x, and would have over-billed after a compression.)
     """
     for unit, count in units.items():
-        if unit in _GAUGE_UNITS:
-            totals[unit] = max(totals.get(unit, 0), count)
-        else:
-            if unit not in _DELTA_UNITS:
-                # Accumulating is the safer default (under-reporting spend is worse), but
-                # the fold policy for a new unit is a judgement call — surface it.
-                logger.warning(
-                    "Billing unit %r has no fold policy; accumulating. Classify it in "
-                    "_GAUGE_UNITS or _DELTA_UNITS.",
-                    unit,
-                )
-            totals[unit] = totals.get(unit, 0) + count
+        totals[unit] = totals.get(unit, 0) + count
 
 
 def _accumulate_modalities(
@@ -221,6 +199,13 @@ def _discount_cached_from_input(breakdown: dict[str, int], usage_metadata: objec
     usage; the convention there is that base input EXCLUDES cache
     (``litellm-proxy/custom_logger.py`` — ``base_input = total_input - cache_read -
     cache_creation``), so this matches it.
+
+    On the LIVE path this is defensive only: ``gemini-live-2.5-flash-native-audio`` states
+    "Context caching: Not supported", no Live SKU has a caching variant, and the pricing
+    table shows N/A for its cached column — so no cache discount softens the per-turn
+    re-billing of history, and ``cached_content_token_count`` should never be non-zero.
+    Do NOT delete this as dead code: the risk scorer (``gemini-2.5-flash``) DOES support
+    caching and goes through the same mapping.
 
     Cached tokens are subtracted from the matching modality where
     ``cache_tokens_details`` says so, else from text then audio. If the numbers don't
@@ -270,9 +255,18 @@ def _discount_cached_from_input(breakdown: dict[str, int], usage_metadata: objec
 def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
     """Convert a Gemini ``UsageMetadata`` into a billing-unit breakdown.
 
-    Prefers the per-modality detail lists so audio and text tokens are billed at their
-    own rates. Falls back to the flat prompt/response counts as text units when the
-    detail lists are absent — under-reporting audio would be worse than approximating.
+    Prefers the per-modality detail lists so audio and text are billed at their own rates
+    (audio input is 6x text on this model, so the split is what makes voice billable at
+    all).
+
+    When the detail lists are absent entirely, falls back to the flat prompt/response
+    counts as TEXT units. That is a deliberate trade, not a neutral default: it bills
+    audio content at the text rate, so it under-bills those tokens ~6x. Counting them
+    cheaply still beats dropping them, but a fallback means the modality split was
+    unavailable and the figures for that turn are approximate.
+
+    Returns a breakdown for ONE report. Session totals are accumulated by
+    ``fold_usage_into``, so every key here is written exactly once and assigned directly.
 
     Zero counts are omitted: the backend rejects non-positive unit counts.
     """
@@ -288,20 +282,40 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
         getattr(usage_metadata, "response_tokens_details", None), _OUTPUT_UNIT_BY_MODALITY, breakdown
     )
 
-    if not prompt_counted:
-        prompt_total = getattr(usage_metadata, "prompt_token_count", None) or 0
-        if prompt_total > 0:
-            breakdown["base_input_tokens"] = breakdown.get("base_input_tokens", 0) + prompt_total
-    if not response_counted:
-        response_total = getattr(usage_metadata, "response_token_count", None) or 0
-        if response_total > 0:
-            breakdown["base_output_tokens"] = breakdown.get("base_output_tokens", 0) + response_total
+    prompt_total = getattr(usage_metadata, "prompt_token_count", None) or 0
+    response_total = getattr(usage_metadata, "response_token_count", None) or 0
 
-    # Tool-use prompt tokens keep their own unit — folding them into base_input_tokens
-    # let the gauge fold swallow them (see _TOOL_USE_UNIT).
+    # Direct assignment, not `+=`: these branches only run when the modality pass counted
+    # nothing, so the key provably cannot already be set. (`+=` read as though it could
+    # double-add, which is how this becomes a bug later.)
+    if not prompt_counted and prompt_total > 0:
+        breakdown["base_input_tokens"] = prompt_total
+    if not response_counted and response_total > 0:
+        breakdown["base_output_tokens"] = response_total
+
+    # Details that only partly explain the total would leave the remainder unbilled — the
+    # all-or-nothing checks above suppress the fallback as soon as anything was counted.
+    # This cannot happen today: the only unmapped modalities are IMAGE/VIDEO/DOCUMENT, and
+    # the Live session sends audio and receives audio. Warned rather than handled, so the
+    # assumption fails loudly instead of quietly shrinking the bill.
+    if prompt_counted and prompt_total > prompt_counted:
+        logger.warning(
+            "Prompt token details account for only %d of %d tokens — %d unbilled. An "
+            "unmapped input modality is in use; extend _INPUT_UNIT_BY_MODALITY.",
+            prompt_counted, prompt_total, prompt_total - prompt_counted,
+        )
+    if response_counted and response_total > response_counted:
+        logger.warning(
+            "Response token details account for only %d of %d tokens — %d unbilled. An "
+            "unmapped output modality is in use; extend _OUTPUT_UNIT_BY_MODALITY.",
+            response_counted, response_total, response_total - response_counted,
+        )
+
+    # Tool-use prompt tokens keep their own unit so they stay visible and separately
+    # priceable rather than disappearing into the context total (see _TOOL_USE_UNIT).
     tool_use = getattr(usage_metadata, "tool_use_prompt_token_count", None) or 0
     if tool_use > 0:
-        breakdown[_TOOL_USE_UNIT] = breakdown.get(_TOOL_USE_UNIT, 0) + tool_use
+        breakdown[_TOOL_USE_UNIT] = tool_use
 
     # Must run AFTER the input units are populated: it moves cached tokens out of them
     # rather than adding a unit on top, which would double-bill them.
@@ -445,8 +459,9 @@ async def _llm_score_tool_risk(
         ),
     )
     if usage_sink is not None:
-        # Distinct one-shot generate_content calls, so every unit here is a true delta —
-        # fold_usage_into's gauge rule must NOT apply. Accumulate directly.
+        # Distinct one-shot generate_content calls, each billed independently — so these
+        # accumulate for their own reason, unrelated to the Live session's per-turn
+        # re-billing. Kept separate from fold_usage_into deliberately.
         for unit, count in usage_metadata_to_billing_units(
             getattr(response, "usage_metadata", None)
         ).items():
@@ -658,8 +673,8 @@ class GeminiLiveAgent:
         self.mcp_status: asyncio.Future[bool] | None = None
         # Updated during the session when Gemini sends resumption handle updates.
         self.latest_resumption_handle: str | None = session_resumption_handle
-        # Billable totals for the Live session, folded per `fold_usage_into` (input side
-        # is a gauge → max, output side is a delta → sum; measured, not assumed).
+        # Billable totals for the Live session — every usage report accumulates, because
+        # the API re-bills the whole context each turn (see `fold_usage_into`).
         self.live_usage_totals: dict[str, int] = {}
         # Tool risk-scoring spend (a separate model, direct to Vertex). These ARE
         # per-call deltas, so they accumulate.
