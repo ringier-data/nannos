@@ -25,6 +25,7 @@ from ..models.scheduled_job import (
     ValidateArgsExprRequest,
     ValidateArgsExprResponse,
     RunNowResponse,
+    RunTrigger,
     ScheduledJob,
     ScheduledJobCreate,
     ScheduledJobDraft,
@@ -1023,7 +1024,9 @@ async def run_job_now(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     engine: SchedulerEngine = request.app.state.scheduler_engine
-    run_id: int = await engine._repo.create_run(db, job_id)
+    # Recorded as MANUAL so that, should it be interrupted, neither _finalize nor the
+    # healer treats a test press as a scheduled occurrence owed a retry.
+    run_id: int = await engine._repo.create_run(db, job_id, trigger=RunTrigger.MANUAL)
     await db.commit()
     background_tasks.add_task(engine.run_job_now, job, run_id)
     return RunNowResponse(job_id=job_id, run_id=run_id)

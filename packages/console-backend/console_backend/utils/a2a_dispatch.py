@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 from a2a.client import A2ACardResolver
+from a2a.client.errors import A2AClientError
 from a2a.client.client import ClientConfig
 from a2a.client.client_factory import ClientFactory
 from a2a.types import (
@@ -45,6 +46,37 @@ _TERMINAL_STATES: dict[int, str] = {
 
 # Agent cards are static per URL; cache them so we don't refetch on every dispatch.
 _card_cache: dict[str, AgentCard] = {}
+
+# Gateway statuses that mean nothing was there to answer, as opposed to an agent that
+# answered with an error of its own.
+_UNREACHABLE_STATUSES = frozenset({502, 503, 504})
+
+
+class AgentUnreachable(Exception):
+    """The agent could not be reached, or stopped answering mid-stream.
+
+    Raised by :func:`dispatch_streaming` in place of the transport's own errors so a
+    caller can tell "the agent died" from "the agent failed" without knowing how the
+    a2a SDK wraps httpx. The scheduler records the former as an interruption of the
+    run and the latter as a failure of the job; the distinction decides whether the
+    run counts against the job (see docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md).
+    """
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """Whether *exc*, or the httpx error the SDK wrapped in it, means nobody answered.
+
+    The SDK wraps every httpx error: the card resolver in AgentCardResolutionError, the
+    transports in A2AClientError / A2AClientTimeoutError, all ``from e``. The wrapped
+    cause is where the evidence is, so this looks through one level of wrapping.
+    A 500 from a running agent is a genuine failure and stays one.
+    """
+    for candidate in (exc, exc.__cause__):
+        if isinstance(candidate, httpx.TransportError):
+            return True
+        if isinstance(candidate, httpx.HTTPStatusError):
+            return candidate.response.status_code in _UNREACHABLE_STATUSES
+    return False
 
 
 async def _resolve_card(agent_url: str, http_client: httpx.AsyncClient) -> AgentCard:
@@ -109,8 +141,36 @@ async def dispatch_streaming(
         ``contextId``, ``status.state``, and a single text artifact carrying the final output.
 
     Raises:
-        Transport/HTTP/JSON-RPC errors propagate to the caller (which marks the run FAILED).
+        AgentUnreachable: nothing answered — connect refused, the stream dropped or timed
+            out, or a 502/503/504 from a gateway — whether the SDK wrapped it or not.
+        Other transport/HTTP/JSON-RPC errors propagate as raised.
     """
+    try:
+        return await _dispatch_streaming(
+            agent_url=agent_url,
+            access_token=access_token,
+            parts=parts,
+            metadata=metadata,
+            context_id=context_id,
+            push_config=push_config,
+            timeout_read=timeout_read,
+        )
+    except (httpx.HTTPError, A2AClientError) as e:
+        if _is_unreachable(e):
+            raise AgentUnreachable(f"{agent_url}: {e}") from e
+        raise
+
+
+async def _dispatch_streaming(
+    *,
+    agent_url: str,
+    access_token: str,
+    parts: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    context_id: str | None,
+    push_config: dict[str, str] | None,
+    timeout_read: float,
+) -> dict[str, Any]:
     last_text: str | None = None
     result_context_id: str | None = context_id
     final_state = "completed"

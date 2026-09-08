@@ -12,7 +12,7 @@ It owns:
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -24,23 +24,62 @@ from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from .llm_gateway import gateway_chat
 from .spend_attribution import SERVICE_SCHEDULER, billing_subject
 from .watch_evaluator import WatchEvaluator, WatchOutcome
-from ..models.scheduled_job import ConditionEvaluation, JobRunStatus, JobType, ScheduledJob
+from ..models.delivery_channel import DEFAULT_MESSAGE_FORMATTING
+from ..models.scheduled_job import ConditionEvaluation, JobRunStatus, JobType, RunTrigger, ScheduledJob
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
 from ..services.scheduler_token_service import SchedulerTokenService
 from ..services.socket_notification_manager import SocketNotificationManager
-from ..utils.a2a_dispatch import dispatch_streaming
+from ..utils.a2a_dispatch import AgentUnreachable, dispatch_streaming
 
 logger = logging.getLogger(__name__)
 
-# How long a run may sit in 'running' before the healer calls it interrupted.
+# How long a run may go without a heartbeat before the healer calls it interrupted.
 #
-# Generous on purpose. The healer now sweeps on every tick, so this bound is the only
-# thing standing between a legitimately slow dispatch and a run record that says it
-# failed while the agent is still working. Runs this process started are excluded
-# outright (_in_flight), so the window only has to cover dispatches this process cannot
-# see: another instance's, or a crashed predecessor's.
-STUCK_RUN_THRESHOLD = "30 minutes"
+# The dispatching process refreshes last_seen_at every HEARTBEAT_INTERVAL_SECONDS for as
+# long as it holds the run's stream, so this is a miss count, not a guess about how long
+# a job should take: a legitimately slow run keeps reporting and is never swept, however
+# many hours it takes. Three missed beats is the tolerance for a GC pause, a slow query
+# or a brief database blip.
+#
+# This replaced an age-based bound of 30 minutes, which could only ever be a compromise
+# between catching a strand quickly and not shooting a healthy long run. Staleness has no
+# such tension, which is also what makes the healer correct with more than one scheduler
+# process: _in_flight is only the local view, so age alone cannot tell another process's
+# healthy run from an abandoned one.
+HEARTBEAT_INTERVAL_SECONDS = 20
+STALE_RUN_AFTER_SECONDS = 3 * HEARTBEAT_INTERVAL_SECONDS
+
+# The bound for runs that carry no heartbeat at all: rows written by a process on the
+# release before heartbeats existed, which may still be executing them during a rolling
+# deploy. Judging those by the heartbeat window would sweep a healthy run and fire a
+# duplicate, so they keep the age-based bound they were written under.
+HEARTBEATLESS_RUN_AFTER_SECONDS = 30 * 60
+
+# How long after an interruption the fresh attempt becomes claimable. Long enough that a
+# runner still restarting is not immediately handed the same work, short enough that a
+# scheduled result is not meaningfully late.
+RETRY_DELAY_SECONDS = 60
+
+# Read timeout for the ephemeral notification-only dispatch. Nothing is computed on the
+# other side, so the long inter-event timeout that covers a working agent would only make
+# an unreachable runner take five minutes to say so.
+NOTIFY_TIMEOUT_SECONDS = 20.0
+
+# When the notice that a run was lost becomes deliverable, and how often it is retried.
+#
+# Not immediately: the loss is detected exactly when the agent is least able to answer.
+# If the runner is what died it is restarting right now, and delivery would fail at
+# connect — no read timeout helps when there is nothing listening. The first attempt waits
+# long enough for it to come back.
+#
+# Retries are cheap here in a way the job's own retry is not: this is a POST of one
+# sentence, not an agent turn, so attempting it again costs nothing worth counting. It is
+# still bounded — past NOTICE_GIVE_UP_AFTER_SECONDS the news has stopped being useful, and
+# a notifier still trying through a long outage is its own small stampede.
+NOTICE_FIRST_ATTEMPT_SECONDS = 90
+NOTICE_RETRY_INTERVAL_SECONDS = 300
+NOTICE_GIVE_UP_AFTER_SECONDS = 3600
 
 
 class SchedulerEngine:
@@ -86,39 +125,150 @@ class SchedulerEngine:
         )
 
     async def _heal_stuck_runs(self) -> None:
-        """Fail runs left in 'running' longer than STUCK_RUN_THRESHOLD.
+        """Interrupt runs whose dispatcher stopped reporting, and owe each one a retry.
 
         A run gets stranded when the process is killed mid-dispatch, or when recording
         its outcome fails. Nothing else ever revisits the row: it reads as work in
         progress forever, with no duration and no error.
 
-        This used to run only at startup, which meant a stranded run cleared on the next
-        restart or never. It now runs on every tick, so a strand self-clears within the
-        threshold wherever it came from. Runs this process is still dispatching are
-        excluded — see _in_flight.
+        Runs this process is still dispatching are excluded outright (_in_flight) so a
+        local run is never swept on the strength of a heartbeat that merely lost a race
+        with the sweep. For everyone else's, the heartbeat is the evidence.
         """
         try:
+            now = datetime.now(timezone.utc)
             async with self._db_session_factory() as db:
-                result = await db.execute(
-                    text(f"""
-                        UPDATE scheduled_job_runs
-                        SET
-                            status       = 'failed',
-                            completed_at = NOW(),
-                            error_message = 'Run was interrupted before completing (process restart or unhandled error)'
-                        WHERE status = 'running'
-                          AND started_at < NOW() - INTERVAL '{STUCK_RUN_THRESHOLD}'
-                          AND NOT (id = ANY(:in_flight))
-                        RETURNING id
-                    """),
-                    {"in_flight": list(self._in_flight)},
+                healed = await self._repo.interrupt_stale_runs(
+                    db,
+                    stale_after_seconds=STALE_RUN_AFTER_SECONDS,
+                    heartbeatless_after_seconds=HEARTBEATLESS_RUN_AFTER_SECONDS,
+                    exclude_run_ids=list(self._in_flight),
+                    retry_at=now + timedelta(seconds=RETRY_DELAY_SECONDS),
+                    notice_due_at=now + timedelta(seconds=NOTICE_FIRST_ATTEMPT_SECONDS),
                 )
-                healed = [r["id"] for r in result.mappings().all()]
                 await db.commit()
             if healed:
-                logger.warning("Healed %d stuck 'running' run(s): %s", len(healed), healed)
+                logger.warning(
+                    "Interrupted %d run(s) whose dispatcher stopped reporting: %s",
+                    len(healed),
+                    healed,
+                )
         except Exception:
-            logger.exception("Failed to heal stuck runs")
+            logger.exception("Failed to sweep stale runs")
+
+    async def _notify_recovery_exhausted(self, job: ScheduledJob) -> bool:
+        """Tell the user a run was lost, after the retry was interrupted too.
+
+        Returns whether the debt is settled — delivered, or owed to nobody. False means
+        the attempt failed and the notice stays owed for a later round.
+
+        Dispatched as an ephemeral notification-only job: an A2A message carrying the
+        text and the job's push config but no ``sub_agent_id``, which agent-runner
+        delivers without running an agent (see its ``if sub_agent_id:`` branch). This is
+        the same path a notification-only watch already takes, and using it keeps the
+        number of processes that post to a delivery channel at three — posting from here
+        would duplicate the A2A envelope and its token contract across every receiver.
+
+        That it needs the runner is deliberate and survivable: the runner restarts in
+        seconds, the notice carries no tools, no context and no sandbox, so it lives
+        where the job that died did not.
+
+        Deliberately outside the run machinery it reports on. It records no run, and it
+        is never retried. A notify dispatch that created a run row would go stale, be
+        swept by the healer, and earn the job another retry — a loop built out of the
+        recovery mechanism. Every failure here is logged and dropped: the run row already
+        carries the truth, and a notifier that retries during an incident is how one
+        unhealthy process becomes a stampede.
+        """
+        if job.delivery_channel_id is None:
+            logger.info("Job %d has no delivery channel; recovery notice not sent", job.id)
+            return True
+
+        try:
+            async with self._db_session_factory() as db:
+                channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
+                if not channel:
+                    logger.warning("Job %d: delivery channel %d is gone", job.id, job.delivery_channel_id)
+                    return True
+                access_token = await self._token_service.get_access_token(db, job.user_id)
+
+            # Plain text, like every other notification the scheduler writes itself: it
+            # goes out verbatim on whichever channel the job notifies, and Slack renders
+            # Markdown literally.
+            text_body = (
+                f"'{job.name}' could not run. The process handling it stopped before it finished, "
+                f"twice in a row, so there is no result for this run. The schedule is unchanged and "
+                f"the next run will go ahead as normal."
+            )
+
+            # No sub_agent_id: the runner delivers and runs nothing. No
+            # scheduled_job_run_id either — this notice is not a run.
+            metadata = self._base_metadata(job)
+            metadata["messageFormatting"] = self._message_formatting(channel)
+            await dispatch_streaming(
+                agent_url=self._agent_runner_url,
+                access_token=access_token,
+                parts=[{"kind": "text", "text": text_body}],
+                metadata=metadata,
+                push_config=self._push_config(channel),
+                # Nothing is being computed, so the long inter-event timeout that covers a
+                # working agent would only make a dead runner take five minutes to admit it.
+                timeout_read=NOTIFY_TIMEOUT_SECONDS,
+            )
+            logger.info("Job %d: told the user the run was lost", job.id)
+            return True
+        except Exception:
+            logger.warning("Job %d: could not deliver the recovery notice", job.id, exc_info=True)
+            return False
+
+    async def _deliver_due_notices(self) -> None:
+        """Deliver the notices owed to users whose runs were lost for good.
+
+        Claiming pushes each notice's due time forward, so an attempt happens once per
+        round across every scheduler, and a failed one is simply tried again later.
+        Whoever ticks next does the work — which is the point: the process that recorded
+        the debt may be the one that went away.
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            async with self._db_session_factory() as db:
+                due = await self._repo.claim_due_notices(
+                    db,
+                    next_attempt_at=now + timedelta(seconds=NOTICE_RETRY_INTERVAL_SECONDS),
+                    give_up_before=now - timedelta(seconds=NOTICE_GIVE_UP_AFTER_SECONDS),
+                    limit=self._claim_limit,
+                )
+                await db.commit()
+
+            for item in due:
+                async with self._db_session_factory() as db:
+                    job = await self._repo.get_job(db, item["job_id"])
+                    # A deleted job settles the debt too: there is nobody left to tell,
+                    # and the obligation should not outlive its subject.
+                    settled = job is None or await self._notify_recovery_exhausted(job)
+                    if settled:
+                        await self._repo.clear_notice(db, item["run_id"])
+                        await db.commit()
+        except Exception:
+            logger.exception("Failed to deliver recovery notices")
+
+    async def _heartbeat(self, run_id: int) -> None:
+        """Report this process alive for *run_id* until cancelled.
+
+        Runs for as long as the dispatch holds the agent's stream. Losing a beat is
+        survivable — the healer tolerates several — so a failed write is logged at debug
+        and the loop continues rather than taking the dispatch down with it.
+        """
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                async with self._db_session_factory() as db:
+                    await self._repo.touch_run(db, run_id)
+                    await db.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Heartbeat failed for run %s", run_id, exc_info=True)
 
     async def stop(self) -> None:
         """Stop the background tick loop gracefully."""
@@ -137,13 +287,15 @@ class SchedulerEngine:
         Bypasses the claim mechanism — use only for on-demand test runs triggered
         by a user.  The execution is identical to a regular scheduled dispatch:
         offline-token resolution, A2A call to agent-runner, webhook delivery, and
-        run-record creation.
+        run-record creation — except that an interrupted manual run earns no retry.
+        The user is present and can press again, and reviving a test press through
+        the claim path would turn it into a scheduled execution of the job.
 
-        If run_id is provided (pre-created by the caller) the engine will skip
-        creating a new run record and use the supplied ID instead.
+        If run_id is provided (pre-created by the caller, with RunTrigger.MANUAL) the
+        engine will skip creating a new run record and use the supplied ID instead.
         """
         logger.info("Manual run-now triggered for job %d by user request", job.id)
-        await self._dispatch_job(job, run_id=run_id)
+        await self._dispatch_job(job, run_id=run_id, trigger=RunTrigger.MANUAL)
 
     async def _loop(self) -> None:
         while self._running:
@@ -155,32 +307,46 @@ class SchedulerEngine:
 
     async def _tick(self) -> None:
         await self._heal_stuck_runs()
+        await self._deliver_due_notices()
 
         async with self._db_session_factory() as db:
-            jobs = await self._repo.claim_due_jobs(db, limit=self._claim_limit)
+            claimed = await self._repo.claim_due_jobs(db, limit=self._claim_limit)
             await db.commit()
 
-        if not jobs:
+        if not claimed:
             return
 
-        logger.info("Scheduler claiming %d due job(s)", len(jobs))
-        tasks = [asyncio.create_task(self._dispatch_job(job)) for job in jobs]
+        logger.info("Scheduler claiming %d due job(s)", len(claimed))
+        tasks = [asyncio.create_task(self._dispatch_job(c.job, trigger=c.trigger)) for c in claimed]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for job, result in zip(jobs, results):
+        for c, result in zip(claimed, results):
             if isinstance(result, Exception):
-                logger.error("Job %d dispatch raised an unhandled exception: %s", job.id, result)
+                logger.error("Job %d dispatch raised an unhandled exception: %s", c.job.id, result)
 
-    async def _dispatch_job(self, job: ScheduledJob, run_id: int | None = None) -> None:
-        """Resolve user token, build A2A payload, call agent-runner, record result."""
+    async def _dispatch_job(
+        self,
+        job: ScheduledJob,
+        run_id: int | None = None,
+        trigger: RunTrigger = RunTrigger.SCHEDULED,
+    ) -> None:
+        """Resolve user token, build A2A payload, call agent-runner, record result.
+
+        *trigger* is why this run exists, and decides what its interruption is worth:
+        a SCHEDULED run earns one RETRY, a RETRY earns the user a notice, a MANUAL run
+        earns neither.
+        """
         if run_id is None:
             async with self._db_session_factory() as db:
-                run_id = await self._repo.create_run(db, job.id)
+                run_id = await self._repo.create_run(db, job.id, trigger=trigger)
                 await db.commit()
 
-        logger.info("Dispatching job %d (run %d) to agent-runner", job.id, run_id)
+        logger.info("Dispatching job %d (run %d, %s) to agent-runner", job.id, run_id, trigger.value)
 
         self._in_flight.add(run_id)
+        # Report liveness for as long as this dispatch holds the stream, so another
+        # scheduler's healer can tell a slow run from an abandoned one.
+        heartbeat = asyncio.create_task(self._heartbeat(run_id), name=f"scheduler-heartbeat-{run_id}")
         try:
             # Resolve user access token and build payload in a single DB session
             async with self._db_session_factory() as db:
@@ -283,31 +449,42 @@ class SchedulerEngine:
                 condition_evaluation=watch_outcome.evaluation if watch_outcome else None,
             )
 
-        except httpx.HTTPStatusError as e:
-            logger.error("agent-runner HTTP error for job %d: %s", job.id, e)
-            try:
-                await self._finalize(
-                    run_id=run_id,
-                    job=job,
-                    status=JobRunStatus.FAILED,
-                    error_message=f"agent-runner HTTP {e.response.status_code}: {e.response.text[:500]}",
-                    delivered=False,
-                )
-            except Exception:
-                logger.exception("Failed to finalize run %s for job %d after HTTP error", run_id, job.id)
         except Exception as e:
-            logger.exception("Unexpected error dispatching job %d", job.id)
+            # Only the dispatch itself can say the agent died: dispatch_streaming raises
+            # AgentUnreachable for that and nothing else does, so a Keycloak or database
+            # error on the way there is a failure of this run, not an interruption.
+            if isinstance(e, AgentUnreachable):
+                logger.warning("agent-runner unreachable for job %d: %s", job.id, e)
+                status = JobRunStatus.INTERRUPTED
+                error_message = str(e)
+            elif isinstance(e, httpx.HTTPStatusError):
+                logger.error("agent-runner HTTP error for job %d: %s", job.id, e)
+                status = JobRunStatus.FAILED
+                error_message = f"agent-runner HTTP {e.response.status_code}: {e.response.text[:500]}"
+            else:
+                logger.exception("Unexpected error dispatching job %d", job.id)
+                status = JobRunStatus.FAILED
+                error_message = str(e)
             try:
                 await self._finalize(
                     run_id=run_id,
                     job=job,
-                    status=JobRunStatus.FAILED,
-                    error_message=str(e),
+                    status=status,
+                    error_message=error_message,
                     delivered=False,
+                    trigger=trigger,
                 )
             except Exception:
                 logger.exception("Failed to finalize run %s for job %d after dispatch error", run_id, job.id)
         finally:
+            # Await the cancellation: the heartbeat may be inside a session commit, and
+            # letting it unwind after this dispatch has reported completion makes
+            # shutdown non-deterministic.
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
             self._in_flight.discard(run_id)
 
     async def _build_message_args(
@@ -324,14 +501,8 @@ class SchedulerEngine:
         normal path for a watch job. It is passed on so agent-runner does not call the
         tool a second time or reach a different verdict than the one that got us here.
         """
-        metadata: dict[str, Any] = {
-            "scheduled_job_id": job.id,
-            "scheduled_job_run_id": run_id,
-            "job_type": job.job_type.value,
-            # The job's IANA timezone, so the runner's tool-less LLM calls
-            # (condition eval, notification generation) can be told "now".
-            "timezone": job.timezone or None,
-        }
+        metadata = self._base_metadata(job)
+        metadata["scheduled_job_run_id"] = run_id
 
         # The channel this job notifies, needed twice below: for how it renders text, and
         # as the push target. Fetched once.
@@ -421,9 +592,7 @@ class SchedulerEngine:
         # notification and runs no agent: delivery is the push sender's job, and the
         # payload is an A2A Task envelope that the delivery channels normalise. Posting
         # it from here would duplicate that contract across three receivers.
-        push_config: dict[str, str] | None = None
-        if channel:
-            push_config = {"url": channel["webhook_url"], "token": channel["secret"]}
+        push_config = self._push_config(channel) if channel else None
 
         # How the channel this job notifies renders text, sent under the key an interactive
         # client uses (`messageFormatting`) so agent-runner and the orchestrator apply the
@@ -436,9 +605,30 @@ class SchedulerEngine:
         # asked for one and found no voice agent falls back to a text dispatch, and that
         # text still lands on the channel and still has to be written for it.
         if not is_voice_dispatch:
-            metadata["messageFormatting"] = (channel or {}).get("message_formatting") or "markdown"
+            metadata["messageFormatting"] = self._message_formatting(channel)
 
         return parts, metadata, push_config
+
+    @staticmethod
+    def _base_metadata(job: ScheduledJob) -> dict[str, Any]:
+        """The A2A message metadata every dispatch on behalf of *job* carries."""
+        return {
+            "scheduled_job_id": job.id,
+            "job_type": job.job_type.value,
+            # The job's IANA timezone, so the runner's tool-less LLM calls
+            # (condition eval, notification generation) can be told "now".
+            "timezone": job.timezone or None,
+        }
+
+    @staticmethod
+    def _push_config(channel: dict[str, Any]) -> dict[str, str]:
+        """The push-notification target for a delivery channel, as the A2A task registers it."""
+        return {"url": channel["webhook_url"], "token": channel["secret"]}
+
+    @staticmethod
+    def _message_formatting(channel: dict[str, Any] | None) -> str:
+        """How the channel renders text, under the key an interactive client uses."""
+        return (channel or {}).get("message_formatting") or DEFAULT_MESSAGE_FORMATTING
 
     async def _write_notification(self, job: ScheduledJob, outcome: WatchOutcome | None) -> str:
         """Write the notification for a triggered watch whose author left it empty.
@@ -585,9 +775,37 @@ class SchedulerEngine:
         last_check_result: dict | None = None,
         paused_reason: str | None = None,
         condition_evaluation: ConditionEvaluation | None = None,
+        trigger: RunTrigger = RunTrigger.SCHEDULED,
     ) -> None:
-        """Persist run outcome and advance job state."""
-        success = status in (JobRunStatus.SUCCESS, JobRunStatus.CONDITION_NOT_MET)
+        """Persist run outcome and advance job state.
+
+        An interrupted SCHEDULED run earns the job one fresh attempt. The marker goes
+        in the database rather than being retried here: the process that noticed the
+        interruption is often the one dying, and a retry that dies with it is no
+        retry at all. An interrupted RETRY has exhausted recovery and owes the user a
+        notice instead. An interrupted MANUAL run earns neither — the user is present.
+        """
+        interrupted = status == JobRunStatus.INTERRUPTED
+        now = datetime.now(timezone.utc)
+        retry_at = now + timedelta(seconds=RETRY_DELAY_SECONDS) if interrupted and trigger == RunTrigger.SCHEDULED else None
+        # Recovery is exhausted: an interrupted run that was already the retry. Only this
+        # terminal case is worth a message — an interruption the system absorbed is not
+        # news, and a notice per interruption would be loudest exactly during an incident.
+        #
+        # Recorded as owed, not delivered here. Sending it now would aim at an agent that
+        # is, by construction, in the middle of dying or restarting; and if this process
+        # is the one going away, an in-process attempt goes with it. The tick loop
+        # delivers it once the dust has settled.
+        notice_due_at = (
+            now + timedelta(seconds=NOTICE_FIRST_ATTEMPT_SECONDS) if interrupted and trigger == RunTrigger.RETRY else None
+        )
+        if interrupted:
+            consequence = {
+                RunTrigger.SCHEDULED: f"retrying at {retry_at.isoformat()}" if retry_at else "",
+                RunTrigger.RETRY: "already the retry, giving up and owing the user a notice",
+                RunTrigger.MANUAL: "a manual run, not retried",
+            }[trigger]
+            logger.warning("Run %s of job %d was interrupted (%s); %s", run_id, job.id, error_message, consequence)
 
         try:
             next_run_at = compute_next_run(
@@ -645,8 +863,9 @@ class SchedulerEngine:
             await self._repo.complete_job(
                 db=db,
                 job_id=job.id,
-                success=success,
+                status=status,
                 next_run_at=next_run_at,
+                retry_at=retry_at,
                 last_check_result=last_check_result,
                 paused_reason=paused_reason,
             )
@@ -663,12 +882,21 @@ class SchedulerEngine:
                     conversation_id=conversation_id,
                     delivered=delivered,
                     condition_evaluation=condition_evaluation,
+                    notice_due_at=notice_due_at,
                 )
                 await db.commit()
         except Exception:
-            # The schedule is already advanced, so this cannot loop. The run is left for
-            # the healer, and the job keeps working while somebody reads this.
+            # The schedule is already advanced, so this cannot loop. But a run left
+            # 'running' is no longer harmless: the healer would call it interrupted and
+            # re-execute a job whose result was delivered. Close it with the columns the
+            # table has always had, which is what the write that shaped this code lacked.
             logger.exception("Job %d: failed to record run %d; the job itself advanced", job.id, run_id)
+            try:
+                async with self._db_session_factory() as db:
+                    await self._repo.close_run_minimally(db, run_id, status, error_message)
+                    await db.commit()
+            except Exception:
+                logger.exception("Job %d: could not close run %d at all; the healer will sweep it", job.id, run_id)
 
         logger.info(
             "Job %d run %d finished: status=%s delivered=%s",

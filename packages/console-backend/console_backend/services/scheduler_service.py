@@ -279,6 +279,20 @@ class SchedulerService:
             if val is not None:
                 fields[attr] = val
 
+        # Toggling `enabled` here is a deliberate stop or start, and the scheduler
+        # tells those apart from one-shot retirement by `paused_reason`: the retry
+        # branch of claim_due_jobs ignores `enabled` (a retired once-job is disabled
+        # too) and trusts the reason instead. A disable that wrote none would leave
+        # the job claimable by a retry; an enable that kept one would look paused.
+        # Either direction also drops a pending retry — the user has made a decision
+        # about the job, and a fresh attempt for an earlier interruption is not it.
+        if fields.get("enabled") is False:
+            fields["paused_reason"] = "Disabled by user"
+            fields["retry_at"] = None
+        elif fields.get("enabled") is True:
+            fields["paused_reason"] = None
+            fields["retry_at"] = None
+
         # A watch must keep at least one condition. Create rejects a watch with neither,
         # and WatchEvaluator treats that combination as unreachable — but a PATCH clearing
         # both produces exactly it, leaving a job that calls its check tool on every poll
@@ -362,7 +376,14 @@ class SchedulerService:
             db=db,
             actor=actor,
             job_id=job_id,
-            fields={"enabled": False, "paused_reason": reason, "updated_at": datetime.now(timezone.utc)},
+            # A pending retry dies with the pause: a job somebody stopped is not resumed
+            # by a fresh attempt for an interruption that happened before they did.
+            fields={
+                "enabled": False,
+                "paused_reason": reason,
+                "retry_at": None,
+                "updated_at": datetime.now(timezone.utc),
+            },
         )
         await db.commit()
         return True
@@ -388,6 +409,10 @@ class SchedulerService:
             "enabled": True,
             "consecutive_failures": 0,
             "paused_reason": None,
+            # A retry earned while the job was paused must not fire the moment it is
+            # resumed: the resume computes the next occurrence, and that is the run
+            # the user asked for.
+            "retry_at": None,
             "updated_at": datetime.now(timezone.utc),
         }
         if next_run_at:

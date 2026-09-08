@@ -174,6 +174,20 @@ function RunStatusBadge({ status }: { status: ScheduledJobRun['status'] }) {
           <AlertCircle className="h-3 w-3" /> Condition not met
         </Badge>
       );
+    case 'interrupted':
+      // The process running it died; it does not count against the job.
+      return (
+        <Badge variant="outline" className="gap-1 text-muted-foreground">
+          <AlertCircle className="h-3 w-3" /> Interrupted
+        </Badge>
+      );
+    default:
+      // A status this build does not know yet must still show *something*.
+      return (
+        <Badge variant="outline" className="gap-1">
+          {status}
+        </Badge>
+      );
   }
 }
 
