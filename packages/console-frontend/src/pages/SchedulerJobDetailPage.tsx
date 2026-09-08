@@ -439,11 +439,28 @@ function EditForm({ job }: { job: ScheduledJob }) {
 
   // ── Save ──────────────────────────────────────────────────────────────────
   const mutation = useMutation({
-    mutationFn: (body: Record<string, unknown>) => updateScheduledJob(job.id, body),
+    mutationFn: async ({ body, resume }: { body: Record<string, unknown>; resume: boolean }) => {
+      await updateScheduledJob(job.id, body);
+      if (!resume) return;
+      try {
+        // After the update, never before: resuming recomputes next_run_at, and it has
+        // to compute it from the schedule that was just saved.
+        await resumeJob(job.id);
+      } catch (e) {
+        // The edit is already persisted; only the resume failed — a one-time job that
+        // has already run refuses to resume. Reporting this as a failed save would be
+        // a lie, and the user would try again on changes that are already stored.
+        throw new Error(
+          `Changes saved, but the job could not be resumed: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+    },
     onSuccess: () => {
       qc.invalidateQueries({
         queryKey: ['scheduler-job', job.id],
       });
+      // Resuming changes the job's status, which the list renders too.
+      qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
       setDirty(false);
       setEditing(false);
     },
@@ -451,6 +468,10 @@ function EditForm({ job }: { job: ScheduledJob }) {
       setError(e instanceof Error ? e.message : String(e));
     },
   });
+
+  // Set while a paused job's save waits for the user to say whether to resume it.
+  // Holds the built body so the answer costs one click rather than a re-submit.
+  const [pendingSave, setPendingSave] = useState<Record<string, unknown> | null>(null);
 
   function handleSave() {
     if (job.schedule_kind === 'cron' && cronExpr.trim() && !describeCron(cronExpr).ok) {
@@ -542,7 +563,15 @@ function EditForm({ job }: { job: ScheduledJob }) {
       voice_call: voiceCall,
     };
 
-    mutation.mutate(body);
+    // A paused job does not run whatever you save, and nothing on the way out says so:
+    // the fix you just made looks applied while the scheduler keeps skipping the job.
+    // Ask, rather than saving into a job that will not act on it.
+    if (!job.enabled) {
+      setPendingSave(body);
+      return;
+    }
+
+    mutation.mutate({ body, resume: false });
   }
 
   return (
@@ -808,12 +837,54 @@ function EditForm({ job }: { job: ScheduledJob }) {
             <span className="font-medium text-foreground">Last updated:</span> {formatDate(job.updated_at)}
           </div>
           <div>
-            <span className="font-medium text-foreground">Next run:</span> {formatDate(job.next_run_at)}
+            <span className="font-medium text-foreground">Next run:</span>{' '}
+            {/* A paused job's stored next_run_at is a leftover: resuming recomputes it.
+                Printing it anyway is how a paused job reads as one that is about to run. */}
+            {job.enabled ? formatDate(job.next_run_at) : '— paused'}
           </div>
           <div>
             <span className="font-medium text-foreground">Consecutive failures:</span> {job.consecutive_failures}
           </div>
         </div>
+
+        {/* Saving a paused job stores an edit the scheduler will not act on, and nothing
+            downstream says so. Ask instead of letting the fix look applied. */}
+        <AlertDialog open={pendingSave !== null} onOpenChange={(open) => !open && setPendingSave(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>This job is paused</AlertDialogTitle>
+              <AlertDialogDescription>
+                <strong>{job.name}</strong> is paused{job.paused_reason ? ` (${job.paused_reason})` : ''}, so it
+                will not run on its schedule whatever you save. Resume it now, or keep it paused and resume it
+                later.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={mutation.isPending}>Cancel</AlertDialogCancel>
+              <Button
+                variant="outline"
+                disabled={mutation.isPending}
+                onClick={() => {
+                  const body = pendingSave;
+                  setPendingSave(null);
+                  if (body) mutation.mutate({ body, resume: false });
+                }}
+              >
+                Save, keep paused
+              </Button>
+              <Button
+                disabled={mutation.isPending}
+                onClick={() => {
+                  const body = pendingSave;
+                  setPendingSave(null);
+                  if (body) mutation.mutate({ body, resume: true });
+                }}
+              >
+                Save and resume
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </CardContent>
     </Card>
   );
