@@ -72,6 +72,7 @@ from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
 from .steering_state import get_all_active_subagent_dispatches, get_orchestrator_pending_messages
+from .step_budget import recursion_limit_for
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
@@ -909,10 +910,19 @@ class GraphFactory:
             context_schema=GraphRuntimeContext,
             response_format=response_format,
         )
-        # Override deepagents default recursion_limit (1000) with configured value
-        # This prevents infinite loops from reaching the high default limit
-        compiled_graph = compiled_graph.with_config({"recursion_limit": self.config.MAX_RECURSION_LIMIT})
-        logger.info(f"Graph created for model: {model_type} with recursion_limit={self.config.MAX_RECURSION_LIMIT}")
+        # Override deepagents' recursion_limit default of 1000, which is too high to
+        # catch a runaway loop. The budget is configured in model calls and converted
+        # here, against *this* graph: the multiplier is the middleware stack's per-call
+        # node cost, so it goes stale the moment a middleware with model hooks is added
+        # or removed — which is why it is counted rather than written down.
+        recursion_limit = recursion_limit_for(compiled_graph, self.config.MAX_MODEL_CALLS_PER_TURN)
+        compiled_graph = compiled_graph.with_config({"recursion_limit": recursion_limit})
+        logger.info(
+            "Graph created for model: %s with recursion_limit=%d (%d model calls per turn)",
+            model_type,
+            recursion_limit,
+            self.config.MAX_MODEL_CALLS_PER_TURN,
+        )
 
         return compiled_graph
 
