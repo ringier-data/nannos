@@ -18,6 +18,19 @@ class OidcConfig(BaseModel):
     scope: str = Field(default="openid profile email offline_access")
 
 
+def _read_cors_allowed_chat_origins() -> list[str]:
+    """CORS_ALLOWED_CHAT_ORIGINS, falling back to the pre-rename EMBED_ALLOWED_ORIGINS.
+
+    The fallback bridges the image/gitops rollout gap and is logged so it gets
+    cleaned up; remove it once every cluster substitutes the new name.
+    """
+    raw = os.getenv("CORS_ALLOWED_CHAT_ORIGINS")
+    if raw is None and os.getenv("EMBED_ALLOWED_ORIGINS") is not None:
+        _config_logger.warning("EMBED_ALLOWED_ORIGINS is deprecated; rename it to CORS_ALLOWED_CHAT_ORIGINS")
+        raw = os.getenv("EMBED_ALLOWED_ORIGINS")
+    return [o.strip() for o in (raw or "").split(",") if o.strip()]
+
+
 class FederatedIdp(BaseModel):
     """A single external IdP trusted for cross-IdP token exchange (ADR-0002
     Amendment 2, browser leg). Its tokens are validated OFFLINE against the
@@ -381,15 +394,14 @@ class Config(BaseModel):
 
     environment: str = Field(default_factory=lambda: os.getenv("ENVIRONMENT", "local"))
     base_domain: str = Field(default_factory=lambda: os.getenv("BASE_DOMAIN", "localhost:5001"))
-    # Embedded Nannos (ADR-0004): extra origins allowed to reach the REST API and
-    # Socket.IO cross-origin — the embed-sdk host pages (e.g. the Alloy cockpit),
-    # which authenticate with bearer tokens, not cookies. Comma-separated EXACT
-    # origins (scheme + host [+ port], no paths, no wildcards — both CORS layers
-    # match exactly), e.g.:
-    #   EMBED_ALLOWED_ORIGINS=https://riad.alloy.ch,https://demo.alloy.ch
-    embed_allowed_origins: list[str] = Field(
-        default_factory=lambda: [o.strip() for o in os.getenv("EMBED_ALLOWED_ORIGINS", "").split(",") if o.strip()]
-    )
+    # Chat front-ends other than the console itself (the embed SDK inside the Alloy
+    # cockpit, ADR-0004) run on their own origin and reach the REST API and Socket.IO
+    # cross-origin with bearer tokens. Browsers allow that only if we name their
+    # origin. Comma-separated; exact origins (scheme + host [+ port]) or wildcard
+    # patterns where `*` matches one hostname-label fragment, e.g.:
+    #   CORS_ALLOWED_CHAT_ORIGINS=https://riad.alloy.ch,https://pr-*-riad.d.alloy.ch
+    # Parsed by console_backend.cors_origins; both CORS layers share the result.
+    cors_allowed_chat_origins: list[str] = Field(default_factory=lambda: _read_cors_allowed_chat_origins())
     secret_key: str = Field(default_factory=lambda: os.getenv("SECRET_KEY", "change-me-in-production"))
     session_ttl_seconds: int = Field(default=2592000)  # 30 days
     cookie_name: str = Field(default="a2a-chatui")

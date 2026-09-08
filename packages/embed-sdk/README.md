@@ -270,6 +270,13 @@ Unchanged from v1 (ADR-0002): supply exactly one of
   inside `useAssistant().open()`'s gesture. Serve `redirectUri` yourself and
   mount `<NannosAuthCallback />` there (or a static HTML page doing the
   postMessage — see the cockpit's `public/nannos-auth-callback.html`).
+  - **Brokered SSO** — `pkce({ ..., idpHint: 'alloy' })`: when the nannos IdP
+    brokers the host's own IdP, `idpHint` is sent as `kc_idp_hint`, so the popup
+    skips the nannos login page. With a live host SSO session it flashes and
+    closes (no credentials typed), and the first visit creates + links the
+    nannos user. Realm setup is code in `rcplus-nannos-keycloak`
+    (`app/keycloak-client-provisioning`, `--idp alloy`); see ADR-0002 Amendment 4.
+    `extraAuthParams` appends any other authorize params.
 
 `useNannosStatus()` separates `unauthenticated` (fix = login) from
 `disconnected` (network) — plus `connecting | connected | authError`.
@@ -366,7 +373,7 @@ untouched. The cockpit ships en+de this way.
 | PKCE login popup → OIDC | `connect-src` | the `issuer` origin |
 | Shadow-DOM styles | none | constructed sheets (`adoptedStyleSheets`), no `style-src` needed |
 
-Remote backends must allowlist the host origin (`EMBED_ALLOWED_ORIGINS`).
+Remote backends must allowlist the host origin (`CORS_ALLOWED_CHAT_ORIGINS`; exact origins or `*` patterns such as `https://pr-*-riad.d.alloy.ch`).
 
 ## Development
 

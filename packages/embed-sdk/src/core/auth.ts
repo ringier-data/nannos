@@ -15,6 +15,12 @@
 // { code, state } back to this opener (see the cockpit's public callback page).
 // The code→token exchange runs HERE, so the PKCE code_verifier never leaves the
 // opener.
+//
+// Brokered SSO (ADR-0002 Amendment 4): when the nannos IdP brokers the HOST's own
+// IdP, pass `idpHint` and the popup skips the nannos login page and goes straight
+// to the host IdP (Keycloak `kc_idp_hint`). With a live host SSO session it
+// flashes and closes — no credentials typed — and the first visit also creates +
+// links the nannos user (the realm's first-broker-login flow).
 
 export interface PkceAuthConfig {
   /** OIDC issuer (e.g. https://login.p.nannos.rcplus.io/realms/nannos). */
@@ -25,6 +31,13 @@ export interface PkceAuthConfig {
   redirectUri: string;
   /** OAuth scope. Default: "openid profile email". */
   scope?: string;
+  /** Identity-provider alias to pre-select at the IdP, sent as `kc_idp_hint`
+   *  (Keycloak). Use when nannos brokers the host's own IdP: the popup skips the
+   *  nannos login page and, with a live host SSO session, completes without input. */
+  idpHint?: string;
+  /** Extra query parameters for the authorization request (e.g. `login_hint`,
+   *  `ui_locales`). The standard PKCE parameters always win on a name clash. */
+  extraAuthParams?: Record<string, string>;
   /** sessionStorage key prefix (for the persisted token across reloads). Default "nannos-embed-auth". */
   storageKey?: string;
 }
@@ -189,6 +202,8 @@ export function createPkceAuth(config: PkceAuthConfig): PkceAuth {
       const state = randomVerifier();
       const authUrl = new URL(meta.authorization_endpoint);
       authUrl.search = new URLSearchParams({
+        ...config.extraAuthParams,
+        ...(config.idpHint ? { kc_idp_hint: config.idpHint } : {}),
         response_type: 'code',
         client_id: config.clientId,
         redirect_uri: config.redirectUri,
