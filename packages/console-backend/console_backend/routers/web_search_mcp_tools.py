@@ -63,6 +63,10 @@ async def web_search_mcp(
     # comes from the validated token (user.sub), NOT the header: the onward gateway call uses the
     # app virtual key, so the proxy needs user_sub in spend_logs_metadata to attribute cost, and we
     # source it authoritatively from the token rather than trusting whatever the header carried.
+    # Explicit `metadata` rather than an `attribution_scope`, which is what console-backend's
+    # own work uses: this call is not console-backend's own work. It is a step in an agent's
+    # turn that the console happens to serve, so the context is the caller's (forwarded) and
+    # the service is theirs to declare, not ours — see `spend_attribution`.
     metadata = forwarded_attribution(request)
     metadata["user_sub"] = user.sub
     try:

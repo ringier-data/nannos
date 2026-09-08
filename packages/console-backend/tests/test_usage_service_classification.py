@@ -64,6 +64,40 @@ async def test_console_work_used_to_read_as_an_agent_run(pg_session):
 
 
 @pytest.mark.asyncio
+async def test_the_declared_service_survives_the_whole_read_path(pg_session):
+    """The row is written, listed, and rendered as an API model. `/my-logs` builds
+    `UsageLog` field by field, so a column the query returns is still dropped unless it is
+    named there — which is exactly how the detail table kept saying 'Orchestrator' for
+    console work after the dimension existed everywhere else."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from console_backend.routers.usage_router import get_my_usage_logs
+
+    user_id = await _a_user(pg_session, "u-readpath")
+    await _log(pg_session, user_id, service="console")
+
+    from console_backend.repositories.usage_repository import UsageRepository
+    from console_backend.services.usage_service import UsageService
+
+    request = MagicMock()
+    request.app.state.usage_service = UsageService(usage_repository=UsageRepository())
+    # Query(...) defaults are not applied when the endpoint is called directly.
+    result = await get_my_usage_logs(
+        request=request,
+        db=pg_session,
+        current_user=SimpleNamespace(id=user_id, sub=f"sub-of-{user_id}"),
+        page=1,
+        limit=50,
+        days=30,
+        conversation_id=None,
+        sub_agent_id=None,
+    )
+
+    assert [log.service for log in result.logs] == ["console"]
+
+
+@pytest.mark.asyncio
 async def test_rows_that_declare_nothing_still_derive_as_before(pg_session):
     """Every row written before the column existed, and every agent-path row."""
     user_id = await _a_user(pg_session)

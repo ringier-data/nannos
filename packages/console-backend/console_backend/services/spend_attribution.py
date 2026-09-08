@@ -18,6 +18,15 @@ so console-backend's own overhead was booked as agent spend. Callers that know w
 are declare it with the constants below; the derivation in
 ``usage_repository.get_usage_by_service`` stays as the fallback for everything else, so
 these strings must keep agreeing with the ones it produces.
+
+**Which mechanism.** Console-backend's own work runs inside an ``attribution_scope`` — the
+scheduler's dispatch, a catalog sync, a titling task, a console request handler. The scope
+is set once where the work begins, so every gateway call under it is attributed by
+construction and a call added later cannot forget: forgetting does not misclassify the
+spend, it loses it, because the proxy discards a record carrying no subject. Per-call
+``metadata`` is for the exception — a call billed to someone other than whoever the
+enclosing block runs as, which today means ``console_web_search``: a step in an agent's
+turn that this service merely hosts, carrying the caller's forwarded context.
 """
 
 import logging

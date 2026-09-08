@@ -97,6 +97,40 @@ def _filled(resp) -> dict:
     return {k: v for k, v in resp.json().items() if v is not None}
 
 
+class TestTheDraftIsBilledToTheCaller:
+    """Console-backend's own work, billed to the requester and labelled as the console's.
+
+    It carries no scheduled_job_id — the job it drafts does not exist yet — so without a
+    declared service the usage views could only classify it as agent spend. The scope, not
+    the call, states both: a second gateway call added to this handler is attributed
+    without anyone remembering, and forgetting would not misclassify the spend but lose
+    it, since the proxy discards a record with no subject.
+    """
+
+    def test_the_handler_runs_in_the_callers_attribution(self, draft_client, gateway, catalogue):
+        from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+        seen: dict = {}
+
+        async def _snapshot(*args, **kwargs):
+            seen.update(current_attribution())
+            return {"job_type": "watch", "check_tool": "console_list_bug_reports"}
+
+        gateway.side_effect = _snapshot
+
+        assert draft_client.post(URL, json={"query": QUERY}).status_code == 200
+        assert seen == {"user_sub": "sub-1", "service": "console"}
+
+    def test_the_scope_does_not_outlive_the_request(self, draft_client, gateway, catalogue):
+        from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+        gateway.return_value = {"job_type": "watch"}
+
+        draft_client.post(URL, json={"query": QUERY})
+
+        assert current_attribution() == {}
+
+
 class TestToolsAreSelectedServerSide:
     def test_the_prompt_carries_a_ranked_handful_not_the_registry(self, draft_client, gateway, catalogue):
         gateway.return_value = {"job_type": "watch", "check_tool": "console_list_bug_reports"}
