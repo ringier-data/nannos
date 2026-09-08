@@ -28,13 +28,13 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from agent_common.models.base import ThinkingLevel
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field, PrivateAttr
 
 from app.core.graph_factory import GraphFactory
 from app.core.step_budget import (
-    base_steps,
     classify_nodes,
     recursion_limit_for,
     steps_per_model_call,
@@ -44,6 +44,7 @@ from app.models.config import (
     DEFAULT_MAX_MODEL_CALLS_PER_TURN,
     LEGACY_RECURSION_LIMIT_ENV,
     MAX_MODEL_CALLS_PER_TURN_ENV,
+    MIN_MAX_MODEL_CALLS_PER_TURN,
     AgentSettings,
     GraphRuntimeContext,
     _resolve_max_model_calls_per_turn,
@@ -87,7 +88,7 @@ class _ScriptedModel(BaseChatModel):
         return self
 
 
-def _compiled_graph(model: BaseChatModel | None = None):
+def _compiled_graph(model: BaseChatModel | None = None, *, thinking: ThinkingLevel | None = None):
     """A real compiled orchestrator graph with test doubles for the stores.
 
     Reaches past the public API because GraphFactory offers no injection seam.
@@ -105,7 +106,7 @@ def _compiled_graph(model: BaseChatModel | None = None):
     factory._store_setup_complete = True
     factory._static_tools_cache = [create_time_tool()]
     factory._create_model = lambda *_a, **_k: model or _ScriptedModel(responses=[])  # type: ignore[method-assign]
-    return factory._create_graph(MODEL_TYPE, None)
+    return factory._create_graph(MODEL_TYPE, thinking)
 
 
 def _runtime_context() -> GraphRuntimeContext:
@@ -141,19 +142,19 @@ def _final_turn() -> AIMessage:
     )
 
 
-async def _measure_super_steps(model_calls: int) -> int:
+async def _measure_super_steps(model_calls: int, thinking: ThinkingLevel | None = None) -> int:
     """Run a turn spending exactly *model_calls* model calls; count super-steps.
 
     `stream_mode="updates"` yields once per node execution, which is what
     `recursion_limit` counts.
     """
     script = [_tool_turn(i) for i in range(model_calls - 1)] + [_final_turn()]
-    graph = _compiled_graph(_ScriptedModel(responses=script))
+    graph = _compiled_graph(_ScriptedModel(responses=script), thinking=thinking)
 
     steps = 0
     async for _ in graph.astream(
         {"messages": [HumanMessage("go")]},
-        config={"configurable": {"thread_id": f"budget-{model_calls}"}},
+        config={"configurable": {"thread_id": f"budget-{thinking}-{model_calls}"}},
         context=_runtime_context(),
         stream_mode="updates",
     ):
@@ -166,17 +167,22 @@ async def _measure_super_steps(model_calls: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def test_marginal_cost_of_a_model_call_matches_the_derivation():
+@pytest.mark.parametrize("thinking", [None, ThinkingLevel.high], ids=["tool_strategy", "thinking"])
+async def test_marginal_cost_of_a_model_call_matches_the_derivation(thinking):
     """The load-bearing assertion of this whole module.
 
     Every extra model call must cost exactly what `steps_per_model_call` counted
     from the node names. Measured across several turn lengths, because a single
     data point cannot distinguish a per-call cost from a fixed overhead.
+
+    Both structured-output strategies are covered. They build the *same* nodes but
+    traverse them differently, and an earlier version of this test only ran the
+    `thinking=None` path — which is how the base-step off-by-one below survived.
     """
-    graph = _compiled_graph(_ScriptedModel(responses=[_final_turn()]))
+    graph = _compiled_graph(thinking=thinking)
     derived = steps_per_model_call(graph)
 
-    measurements = {n: await _measure_super_steps(n) for n in (1, 2, 3, 4)}
+    measurements = {n: await _measure_super_steps(n, thinking) for n in (1, 2, 3, 4)}
     marginals = [measurements[n + 1] - measurements[n] for n in (1, 2, 3)]
 
     assert set(marginals) == {derived}, (
@@ -185,22 +191,73 @@ async def test_marginal_cost_of_a_model_call_matches_the_derivation():
     )
 
 
-async def test_base_steps_matches_the_measured_fixed_overhead():
-    """The part of a turn that does not scale with model calls.
+@pytest.mark.parametrize("thinking", [None, ThinkingLevel.high], ids=["tool_strategy", "thinking"])
+@pytest.mark.parametrize("model_calls", [1, 2, 3])
+async def test_the_budget_is_never_below_what_a_turn_actually_costs(thinking, model_calls):
+    """The invariant that matters, on every path.
 
-    Notably one less than the per-turn hook count: the closing model call emits
-    `FinalResponseSchema` and ends the turn without entering `tools`, so the last
-    cycle is a step short. That `- 1` is measured here rather than trusted.
+    A budget one step short is a `GraphRecursionError` fired *after* the answer is
+    composed — the exact user-visible bug this PR fixes — so the derived limit must
+    cover the real cost with slack to spare, never the reverse.
+
+    This is why `base_steps` counts all per-turn hooks instead of subtracting the
+    `tools` step the closing call skips. It skips it only under `ToolStrategy`:
+    with thinking enabled, `FinalResponseSchema` is bound as a `return_direct`
+    tool and the closing call routes through `tools` like any other. Subtracting
+    would be exact for the first and one short for the second.
     """
-    graph = _compiled_graph(_ScriptedModel(responses=[_final_turn()]))
-    per_call = steps_per_model_call(graph)
+    graph = _compiled_graph(thinking=thinking)
+    derived = recursion_limit_for(graph, model_calls)
 
-    measured_for_one = await _measure_super_steps(1)
+    measured = await _measure_super_steps(model_calls, thinking)
 
-    assert base_steps(graph) == measured_for_one - per_call, (
-        f"base_steps()={base_steps(graph)} but a 1-call turn measured {measured_for_one} "
-        f"super-steps against {per_call} per call"
+    assert derived >= measured, (
+        f"derived budget {derived} is below the measured cost {measured} for "
+        f"{model_calls} model call(s) at thinking={thinking}. A turn would die one "
+        f"step from the end, after composing its answer."
     )
+    # Slack is expected, but a whole extra cycle would mean the derivation has
+    # drifted into guesswork rather than counting.
+    assert derived - measured < steps_per_model_call(graph), (
+        f"derived budget {derived} exceeds the measured {measured} by a full model "
+        f"call or more; the derivation is over-counting, not rounding up."
+    )
+
+
+def test_an_unknown_node_inflates_the_budget_and_warns(caplog):
+    """Production must not treat a node it does not understand as free.
+
+    A `.before_tools`, an async-named hook, a renamed core node: anything
+    unrecognised is charged at the per-model-call rate, so the budget errs large,
+    and logged so it gets fixed. Counting it as zero would shrink the budget
+    toward the truncation this module exists to prevent — and unlike
+    `test_every_node_is_classified` below, this holds for stacks that only exist
+    in a deployment, not in CI.
+    """
+
+    class _GraphWithMysteryNode:
+        nodes = ["__start__", "model", "tools", "Some.before_model", "Mystery.before_tools"]
+
+    with caplog.at_level("WARNING"):
+        per_call = steps_per_model_call(_GraphWithMysteryNode())
+
+    # 1 known hook + 2 core + 1 unknown, charged as if it ran every cycle.
+    assert per_call == 4
+    assert "Mystery.before_tools" in caplog.text
+
+
+def test_the_core_cycle_cost_is_counted_not_assumed():
+    """`model` and `tools` are counted from the classification, not hardcoded to 2.
+
+    langchain only adds a `tools` node when the graph has tools, and a rename
+    would land both in `unclassified` — either way an assumed 2 would be a
+    plausible-looking wrong number.
+    """
+
+    class _GraphWithoutTools:
+        nodes = ["__start__", "model", "Some.after_model"]
+
+    assert steps_per_model_call(_GraphWithoutTools()) == 2  # model + 1 hook, no tools
 
 
 def test_every_node_is_classified():
@@ -219,21 +276,6 @@ def test_every_node_is_classified():
     )
     assert buckets["core"], "neither `model` nor `tools` was found — node naming changed"
     assert buckets["per_model_call"], "no per-model-call hooks found — hook naming changed"
-
-
-def test_fifty_steps_was_six_model_calls():
-    """The reported bug, in the unit that makes it obvious.
-
-    Keeps the finding legible: the old default was not "50 of something
-    generous", it was six model calls, which an ordinary two-delegation turn
-    exceeds. If this number ever climbs to something comfortable, the middleware
-    stack got cheaper and the incident is worth re-reading.
-    """
-    graph = _compiled_graph()
-
-    affordable = (50 - base_steps(graph)) // steps_per_model_call(graph)
-
-    assert affordable == 6
 
 
 def test_the_graph_is_compiled_with_the_derived_limit():
@@ -293,3 +335,33 @@ def test_an_empty_budget_falls_back(monkeypatch, raw):
     monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, raw)
 
     assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+
+
+@pytest.mark.parametrize("raw", ["0", "-1"])
+def test_a_non_positive_budget_is_clamped_rather_than_bricking_every_turn(monkeypatch, caplog, raw):
+    """0 is not a small budget, it is a broken deployment.
+
+    The derived limit would collapse to the per-turn overhead, so every request
+    would exhaust it in its first super-steps and answer "I've been working on
+    this for a while and need to take a break" having done nothing — with nothing
+    in the logs pointing at the env var.
+    """
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, raw)
+
+    with caplog.at_level("WARNING"):
+        resolved = _resolve_max_model_calls_per_turn()
+
+    assert resolved == MIN_MAX_MODEL_CALLS_PER_TURN
+    assert MAX_MODEL_CALLS_PER_TURN_ENV in caplog.text
+
+
+def test_an_implausibly_large_budget_is_honoured_but_flagged(monkeypatch, caplog):
+    """Not clamped — a long budget can be deliberate — but a typo'd 2500 leaves no
+    runaway protection at all, which is worth noticing before it costs money."""
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "2500")
+
+    with caplog.at_level("WARNING"):
+        resolved = _resolve_max_model_calls_per_turn()
+
+    assert resolved == 2500
+    assert "runaway" in caplog.text.lower()

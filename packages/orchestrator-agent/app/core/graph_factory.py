@@ -913,8 +913,8 @@ class GraphFactory:
         # Override deepagents' recursion_limit default of 1000, which is too high to
         # catch a runaway loop. The budget is configured in model calls and converted
         # here, against *this* graph: the multiplier is the middleware stack's per-call
-        # node cost, which differs between configurations (the PTC middlewares come and
-        # go with CODE_INTERPRETER_PTC), so it cannot be a constant.
+        # node cost, so it goes stale the moment a middleware with model hooks is added
+        # or removed — which is why it is counted rather than written down.
         recursion_limit = recursion_limit_for(compiled_graph, self.config.MAX_MODEL_CALLS_PER_TURN)
         compiled_graph = compiled_graph.with_config({"recursion_limit": recursion_limit})
         logger.info(

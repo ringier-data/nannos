@@ -206,10 +206,10 @@ class TestGraphCreationWithThinking:
         ):
             # `_create_graph` now derives the recursion limit by counting the compiled
             # graph's nodes, so a bare Mock is no longer enough — it must expose an
-            # iterable node list. The names only need to be classifiable; this test is
+            # iterable `nodes`. The names only need to be classifiable; this test is
             # about caching, not about the budget arithmetic.
             mock_graph = Mock()
-            mock_graph.get_graph.return_value.nodes = ["__start__", "model", "tools", "__end__"]
+            mock_graph.nodes = ["__start__", "model", "tools"]
             mock_create_deep_agent.return_value = mock_graph
 
             factory = GraphFactory(mock_config)
