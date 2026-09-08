@@ -1717,6 +1717,16 @@ export type EngagementResponse = {
 };
 
 /**
+ * EntitlementVersionResponse
+ */
+export type EntitlementVersionResponse = {
+    /**
+     * Version
+     */
+    version: string;
+};
+
+/**
  * FederatedExchangeRequest
  *
  * A foreign (trusted external IdP) access token to exchange for a nannos one.
@@ -1903,6 +1913,10 @@ export type GatewayUsageLogCreate = {
      * Catalog Id
      */
     catalog_id?: string | null;
+    /**
+     * Service
+     */
+    service?: string | null;
     /**
      * Provider
      */
@@ -6862,6 +6876,10 @@ export type UsageLog = {
      */
     catalog_name?: string | null;
     /**
+     * Service
+     */
+    service?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;
@@ -6935,6 +6953,10 @@ export type UsageLogCreate = {
      * Catalog Id
      */
     catalog_id?: string | null;
+    /**
+     * Service
+     */
+    service?: string | null;
     /**
      * Provider
      */
@@ -8087,6 +8109,22 @@ export type UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses = {
 };
 
 export type UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponse = UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses[keyof UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses];
+
+export type GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/me/entitlement-version';
+};
+
+export type GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: EntitlementVersionResponse;
+};
+
+export type GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponse = GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses[keyof GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses];
 
 export type UpsertToolBypassRuleApiV1AuthMeSettingsToolBypassPutData = {
     body: ToolBypassRuleRequest;

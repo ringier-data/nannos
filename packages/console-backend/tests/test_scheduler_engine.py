@@ -22,6 +22,8 @@ from console_backend.models.scheduled_job import (
 )
 from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
+from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
 from console_backend.services.watch_evaluator import WatchOutcome
 from console_backend.services.scheduler_engine import SchedulerEngine
 from console_backend.services.scheduler_token_service import SchedulerTokenService
@@ -1084,6 +1086,92 @@ class TestVoiceCallDispatch:
                 await engine._dispatch_job(self._watch_job())
 
         dispatch.assert_not_called()
+
+
+class TestAttributionScope:
+    """Every gateway call a dispatch makes bills to the job's owner and the job.
+
+    Both LLM calls on this path (the watch judge, the notification writer) used to run
+    inside the agent, where the SDK's attribution ContextVars carried the owner and the
+    job id for free. Moving the decision into the scheduler (#166) took them out of that
+    context and nothing replaced it, so the proxy's logger dropped their records and the
+    spend left `usage_logs` entirely. The scope puts them back in it — and covers whatever
+    gateway call this path grows next, without a parameter threaded to it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_dispatch_runs_as_the_job_s_owner(self):
+        seen: dict = {}
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 11
+        engine = _make_engine(repo=repo)
+        job = _make_job()
+
+        async def _snapshot(*args, **kwargs):
+            # What a gateway call made anywhere under the dispatch would stamp.
+            seen.update(current_attribution())
+            return [], {}, None
+
+        with patch("console_backend.services.scheduler_engine.billing_subject", AsyncMock(return_value="oidc-subject")):
+            with patch.object(engine, "_build_message_args", _snapshot):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ):
+                    await engine._dispatch_job(job)
+
+        # scheduled_job_id is not decoration: usage_repository derives the service
+        # dimension from it, so without it this recurring overhead is booked as the
+        # user's own 'orchestrator' spend.
+        assert seen == {"user_sub": "oidc-subject", "scheduled_job_id": job.id, "service": "scheduler"}
+
+    @pytest.mark.asyncio
+    async def test_the_scope_does_not_outlive_the_dispatch(self):
+        """`run_job_now` awaits the dispatch inline from a request handler — a scope left
+        open there would bill the rest of that request to the job."""
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 12
+        engine = _make_engine(repo=repo)
+
+        with patch("console_backend.services.scheduler_engine.billing_subject", AsyncMock(return_value="oidc-subject")):
+            with patch.object(engine, "_build_message_args", AsyncMock(return_value=([], {}, None))):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ):
+                    await engine.run_job_now(_make_job())
+
+        assert current_attribution() == {}
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_owner_still_dispatches(self):
+        """Worse accounting, not a dead job — and the internal id still bills the right
+        person, because the ingest resolves either. Dropping to no subject at all would
+        lose the usage row entirely, which is the failure this whole path is about."""
+        seen: dict = {}
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 13
+        engine = _make_engine(repo=repo)
+        job = _make_job()
+
+        async def _snapshot(*args, **kwargs):
+            seen.update(current_attribution())
+            return [], {}, None
+
+        # What `billing_subject` returns when the subject cannot be read.
+        with patch(
+            "console_backend.services.scheduler_engine.billing_subject",
+            AsyncMock(return_value=job.user_id),
+        ):
+            with patch.object(engine, "_build_message_args", _snapshot):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ) as dispatch:
+                    await engine._dispatch_job(job)
+
+        dispatch.assert_awaited_once()
+        assert seen == {"user_sub": job.user_id, "scheduled_job_id": job.id, "service": "scheduler"}
 
 
 class TestWriteNotification:

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 from sqlalchemy import text
 
 logging.basicConfig(
@@ -185,6 +186,7 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     from console_backend.catalog.token_service import CatalogTokenService
     from console_backend.config import config
     from console_backend.db.connection import get_async_session_factory
+    from console_backend.services.spend_attribution import SERVICE_CATALOG, billing_subject
 
     session_factory = get_async_session_factory()
 
@@ -246,83 +248,92 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     # vs generic). None (unknown) degrades to the generic profile, never blocks the sync.
     embedding_provider = await pipeline.resolve_embedding_provider(embedding_alias)
 
-    pipeline.setup_job(
-        sync_job_id=sync_job_id,
-        user_sub=catalog.owner_user_id,
-        catalog_id=catalog_id,
-        progress_callback=progress_callback,
-        embedding_model=embedding_alias,
-        embedding_provider=embedding_provider,
-        summarization_model=summarization_alias,
-    )
+    # The whole job runs as its owner: every gateway call under it — the document
+    # summaries today, whatever the pipeline adds next — is attributed without being
+    # handed the payer. `catalog.owner_user_id` is the internal `users.id`, not the
+    # OIDC subject the gateway bills by (they diverged at the id/sub split), so it is
+    # resolved rather than passed through; the usage ingest has been quietly covering
+    # for that with an id fallback.
+    async with session_factory() as db:
+        billing_sub = await billing_subject(db, catalog.owner_user_id, context=f"catalog {catalog_id}")
+    with attribution_scope(user_sub=billing_sub, catalog_id=catalog_id, service=SERVICE_CATALOG):
+        pipeline.setup_job(
+            sync_job_id=sync_job_id,
+            user_sub=billing_sub,
+            catalog_id=catalog_id,
+            progress_callback=progress_callback,
+            embedding_model=embedding_alias,
+            embedding_provider=embedding_provider,
+            summarization_model=summarization_alias,
+        )
 
-    try:
-        # Get OAuth credentials
-        async with session_factory() as db:
-            credentials = await token_service.get_credentials(db, catalog_id)
-
-        if not credentials:
-            logger.error("No active Google connection for catalog %s", catalog_id)
-            async with session_factory() as db:
-                await pipeline._update_sync_job(
-                    db,
-                    sync_job_id,
-                    status="failed",
-                    completed_at=datetime.now(timezone.utc),
-                    error_details={"error": "No active Google connection"},
-                )
-            return
-
-        source_config = catalog.source_config or {}
-        sources = normalize_source_config(source_config)
-        has_change_tokens = any(s.get("change_token") for s in sources)
-
-        # Check for prior completed sync
-        async with session_factory() as db:
-            result = await db.execute(
-                text("""
-                    SELECT id FROM catalog_sync_jobs
-                    WHERE catalog_id = :cid AND status = 'completed'
-                    ORDER BY completed_at DESC LIMIT 1
-                """),
-                {"cid": catalog_id},
-            )
-            has_prior_sync = result.first() is not None
-
-        if has_prior_sync and has_change_tokens:
-            new_tokens = await pipeline.run_incremental_sync(
-                catalog_id=catalog_id,
-                source_config=source_config,
-                sync_job_id=sync_job_id,
-                credentials=credentials,
-            )
-            if new_tokens:
-                await _persist_change_tokens(catalog_id, source_config, new_tokens, session_factory)
-        else:
-            await pipeline.run_full_sync(
-                catalog_id=catalog_id,
-                source_config=source_config,
-                sync_job_id=sync_job_id,
-                credentials=credentials,
-            )
-
-        logger.info("Sync completed for catalog %s (job %s)", catalog_id, sync_job_id)
-
-    except Exception:
-        logger.exception("Sync failed for catalog %s (job %s)", catalog_id, sync_job_id)
         try:
+            # Get OAuth credentials
             async with session_factory() as db:
-                await pipeline._update_sync_job(
-                    db,
-                    sync_job_id,
-                    status="failed",
-                    completed_at=datetime.now(timezone.utc),
-                    error_details={"error": "Unexpected sync failure. Check worker logs."},
+                credentials = await token_service.get_credentials(db, catalog_id)
+
+            if not credentials:
+                logger.error("No active Google connection for catalog %s", catalog_id)
+                async with session_factory() as db:
+                    await pipeline._update_sync_job(
+                        db,
+                        sync_job_id,
+                        status="failed",
+                        completed_at=datetime.now(timezone.utc),
+                        error_details={"error": "No active Google connection"},
+                    )
+                return
+
+            source_config = catalog.source_config or {}
+            sources = normalize_source_config(source_config)
+            has_change_tokens = any(s.get("change_token") for s in sources)
+
+            # Check for prior completed sync
+            async with session_factory() as db:
+                result = await db.execute(
+                    text("""
+                        SELECT id FROM catalog_sync_jobs
+                        WHERE catalog_id = :cid AND status = 'completed'
+                        ORDER BY completed_at DESC LIMIT 1
+                    """),
+                    {"cid": catalog_id},
                 )
+                has_prior_sync = result.first() is not None
+
+            if has_prior_sync and has_change_tokens:
+                new_tokens = await pipeline.run_incremental_sync(
+                    catalog_id=catalog_id,
+                    source_config=source_config,
+                    sync_job_id=sync_job_id,
+                    credentials=credentials,
+                )
+                if new_tokens:
+                    await _persist_change_tokens(catalog_id, source_config, new_tokens, session_factory)
+            else:
+                await pipeline.run_full_sync(
+                    catalog_id=catalog_id,
+                    source_config=source_config,
+                    sync_job_id=sync_job_id,
+                    credentials=credentials,
+                )
+
+            logger.info("Sync completed for catalog %s (job %s)", catalog_id, sync_job_id)
+
         except Exception:
-            logger.exception("Failed to mark sync job %s as failed", sync_job_id)
-    finally:
-        pipeline.teardown_job(sync_job_id)
+            logger.exception("Sync failed for catalog %s (job %s)", catalog_id, sync_job_id)
+            try:
+                async with session_factory() as db:
+                    await pipeline._update_sync_job(
+                        db,
+                        sync_job_id,
+                        status="failed",
+                        completed_at=datetime.now(timezone.utc),
+                        error_details={"error": "Unexpected sync failure. Check worker logs."},
+                    )
+            except Exception:
+                logger.exception("Failed to mark sync job %s as failed", sync_job_id)
+        finally:
+            pipeline.teardown_job(sync_job_id)
 
 
 async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
@@ -331,6 +342,7 @@ async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
     from console_backend.catalog.sync import CatalogSyncPipeline
     from console_backend.db.connection import get_async_session_factory
     from console_backend.repositories.catalog_repository import CatalogRepository
+    from console_backend.services.spend_attribution import SERVICE_CATALOG, billing_subject
 
     session_factory = get_async_session_factory()
     repo = CatalogRepository()
@@ -379,46 +391,55 @@ async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
     summarization_alias = await pipeline.resolve_summarization_alias()
     embedding_provider = await pipeline.resolve_embedding_provider(embedding_alias)
 
-    pipeline.setup_job(
-        sync_job_id=sync_job_id,
-        user_sub=catalog.owner_user_id,
-        catalog_id=catalog_id,
-        embedding_model=embedding_alias,
-        embedding_provider=embedding_provider,
-        summarization_model=summarization_alias,
-    )
-
-    try:
-        result = await pipeline.reindex_unindexed_pages(
-            catalog_id,
-            progress_callback=progress_callback,
+    # The whole job runs as its owner: every gateway call under it — the document
+    # summaries today, whatever the pipeline adds next — is attributed without being
+    # handed the payer. `catalog.owner_user_id` is the internal `users.id`, not the
+    # OIDC subject the gateway bills by (they diverged at the id/sub split), so it is
+    # resolved rather than passed through; the usage ingest has been quietly covering
+    # for that with an id fallback.
+    async with session_factory() as db:
+        billing_sub = await billing_subject(db, catalog.owner_user_id, context=f"catalog {catalog_id}")
+    with attribution_scope(user_sub=billing_sub, catalog_id=catalog_id, service=SERVICE_CATALOG):
+        pipeline.setup_job(
             sync_job_id=sync_job_id,
+            user_sub=billing_sub,
+            catalog_id=catalog_id,
+            embedding_model=embedding_alias,
+            embedding_provider=embedding_provider,
+            summarization_model=summarization_alias,
         )
-        async with session_factory() as db:
-            await pipeline._update_sync_job(
-                db,
-                sync_job_id,
-                status="completed",
-                completed_at=datetime.now(timezone.utc),
-                processed_files=result.get("indexed", 0),
-                failed_files=result.get("failed", 0),
-            )
-        logger.info("Reindex completed for catalog %s (job %s)", catalog_id, sync_job_id)
-    except Exception:
-        logger.exception("Reindex failed for catalog %s (job %s)", catalog_id, sync_job_id)
+
         try:
+            result = await pipeline.reindex_unindexed_pages(
+                catalog_id,
+                progress_callback=progress_callback,
+                sync_job_id=sync_job_id,
+            )
             async with session_factory() as db:
                 await pipeline._update_sync_job(
                     db,
                     sync_job_id,
-                    status="failed",
+                    status="completed",
                     completed_at=datetime.now(timezone.utc),
-                    error_details={"error": "Unexpected reindex failure. Check worker logs."},
+                    processed_files=result.get("indexed", 0),
+                    failed_files=result.get("failed", 0),
                 )
+            logger.info("Reindex completed for catalog %s (job %s)", catalog_id, sync_job_id)
         except Exception:
-            logger.exception("Failed to mark reindex job %s as failed", sync_job_id)
-    finally:
-        pipeline.teardown_job(sync_job_id)
+            logger.exception("Reindex failed for catalog %s (job %s)", catalog_id, sync_job_id)
+            try:
+                async with session_factory() as db:
+                    await pipeline._update_sync_job(
+                        db,
+                        sync_job_id,
+                        status="failed",
+                        completed_at=datetime.now(timezone.utc),
+                        error_details={"error": "Unexpected reindex failure. Check worker logs."},
+                    )
+            except Exception:
+                logger.exception("Failed to mark reindex job %s as failed", sync_job_id)
+        finally:
+            pipeline.teardown_job(sync_job_id)
 
 
 def _make_reindex_progress_callback(catalog_id: str, sync_job_id: str, owner_user_id: str | None) -> Any:

@@ -18,8 +18,11 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
+
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from .llm_gateway import gateway_chat
+from .spend_attribution import SERVICE_SCHEDULER, billing_subject
 from .watch_evaluator import WatchEvaluator, WatchOutcome
 from ..models.scheduled_job import ConditionEvaluation, JobRunStatus, JobType, ScheduledJob
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
@@ -195,41 +198,59 @@ class SchedulerEngine:
                     )
                     return
 
-                # Watch jobs: decide here whether anything is happening. A poll that
-                # does not trigger dispatches nothing at all — and knowing the outcome
-                # before dispatch is what lets the trigger choose its target (an agent,
-                # or a phone call).
-                watch_outcome: WatchOutcome | None = None
-                if self._watch_evaluator.can_evaluate(job):
-                    watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token)
+                # Who this run bills to, for every gateway call under it. The two LLM calls
+                # below (the watch judge, the notification writer) used to run inside the
+                # agent, where these same ContextVars carried the owner and the job id for
+                # free; moving the decision here in #166 took them out of that context and
+                # nothing replaced it, so the proxy's logger dropped their records
+                # (`custom_logger._build_record` needs a user_sub) and the spend left
+                # `usage_logs` altogether. `scheduled_job_id` is half the point:
+                # `usage_repository` classifies by it, so without it this recurring overhead
+                # reads as the user's own 'orchestrator' spend — and the scope says
+                # `service` outright rather than leaving that to be inferred from an id.
+                #
+                # A scope, not `set_attribution`: `_tick` dispatches each job in its own
+                # task, but `run_job_now` awaits this inline from a request handler, where
+                # a job id left set would follow the rest of that request.
+                owner_sub = await billing_subject(db, job.user_id, context=f"job {job.id}")
+                with attribution_scope(
+                    user_sub=owner_sub, scheduled_job_id=job.id, service=SERVICE_SCHEDULER
+                ):
+                    # Watch jobs: decide here whether anything is happening. A poll that
+                    # does not trigger dispatches nothing at all — and knowing the outcome
+                    # before dispatch is what lets the trigger choose its target (an agent,
+                    # or a phone call).
+                    watch_outcome: WatchOutcome | None = None
+                    if self._watch_evaluator.can_evaluate(job):
+                        watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token)
 
-                    if watch_outcome.error:
-                        await self._finalize(
-                            run_id=run_id,
-                            job=job,
-                            status=JobRunStatus.FAILED,
-                            error_message=watch_outcome.error,
-                            delivered=False,
-                            last_check_result=watch_outcome.check_result,
-                            condition_evaluation=watch_outcome.evaluation,
-                        )
-                        return
+                        if watch_outcome.error:
+                            await self._finalize(
+                                run_id=run_id,
+                                job=job,
+                                status=JobRunStatus.FAILED,
+                                error_message=watch_outcome.error,
+                                delivered=False,
+                                last_check_result=watch_outcome.check_result,
+                                condition_evaluation=watch_outcome.evaluation,
+                            )
+                            return
 
-                    if not watch_outcome.condition_met:
-                        await self._finalize(
-                            run_id=run_id,
-                            job=job,
-                            status=JobRunStatus.CONDITION_NOT_MET,
-                            delivered=False,
-                            last_check_result=watch_outcome.check_result,
-                            condition_evaluation=watch_outcome.evaluation,
-                        )
-                        return
+                        if not watch_outcome.condition_met:
+                            await self._finalize(
+                                run_id=run_id,
+                                job=job,
+                                status=JobRunStatus.CONDITION_NOT_MET,
+                                delivered=False,
+                                last_check_result=watch_outcome.check_result,
+                                condition_evaluation=watch_outcome.evaluation,
+                            )
+                            return
 
-                # Build the A2A message args for agent-runner
-                parts, metadata, push_config = await self._build_message_args(
-                    job, run_id, access_token, db, watch_outcome=watch_outcome
-                )
+                    # Build the A2A message args for agent-runner
+                    parts, metadata, push_config = await self._build_message_args(
+                        job, run_id, access_token, db, watch_outcome=watch_outcome
+                    )
 
             # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client. SSE keeps
             # bytes flowing so CloudFront/ALB idle-timeout never fires for long-running jobs.
@@ -456,6 +477,8 @@ class SchedulerEngine:
             # Thinking off: two sentences of plain text need no reasoning, and on the low
             # tier a reasoning model spends the budget thinking and is cut off mid-sentence
             # — which would then be sent to the person verbatim.
+            # Cost attribution comes from the scope `_dispatch_job` opened, not from an
+            # argument here — the header is stamped by `_gateway_headers`.
             message = await gateway_chat(prompt, model=model, max_tokens=256, reasoning_effort="none")
             written = message.strip().strip('"')
             if written:

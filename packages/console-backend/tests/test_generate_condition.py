@@ -43,6 +43,29 @@ async def _call(monkeypatch, replies: list[str], **request):
     return response, chat
 
 
+class TestConditionGenerationIsBilledToTheCaller:
+    @pytest.mark.asyncio
+    async def test_every_attempt_runs_in_the_callers_attribution(self, monkeypatch):
+        """Including the retries: the loop can call the model several times, and the scope
+        covers all of them without the payer being restated per call."""
+        from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+        seen: list[dict] = []
+
+        async def _snapshot(*args, **kwargs):
+            seen.append(current_attribution())
+            return '{"cel_expr": null, "llm_condition": "something semantic"}'
+
+        _defaults(monkeypatch)
+        with patch("console_backend.services.llm_gateway.gateway_chat", _snapshot):
+            await generate_condition(
+                GenerateConditionRequest(query="anything"), AsyncMock(), _user()
+            )
+
+        assert seen and all(a == {"user_sub": "sub-1", "service": "console"} for a in seen)
+        assert current_attribution() == {}
+
+
 class TestGenerateCondition:
     @pytest.mark.asyncio
     async def test_a_working_expression_is_verified_against_the_payload(self, monkeypatch):

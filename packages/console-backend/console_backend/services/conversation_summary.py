@@ -23,14 +23,16 @@ Rules this module keeps:
   the answer is already saved and streamed.
 """
 
-import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
+
 from ..db.connection import get_async_session_factory
-from .llm_gateway import gateway_chat
+from .llm_gateway import gateway_chat_json
+from .spend_attribution import SERVICE_CONSOLE, billing_subject
 
 logger = logging.getLogger(__name__)
 
@@ -91,26 +93,16 @@ async def resolve_summary_model() -> str | None:
         return None
 
 
-def parse_summary_response(raw: str) -> tuple[str, str] | None:
-    """Read ``{"title", "summary"}`` out of a completion, or None if it isn't there.
+def parse_summary_response(data: dict[str, Any]) -> tuple[str, str] | None:
+    """Read ``{"title", "summary"}`` out of a parsed completion, or None if it isn't there.
 
-    Tolerates the two things models do to JSON: wrap it in a ``` fence, and add a
-    sentence before or after it. Both fields must survive trimming — half an
-    answer is not worth overwriting a title with.
+    Digging the object out of fences and prose is `gateway_chat_json`'s job — this used
+    to carry its own copy of that salvage, which is exactly the duplication the helper
+    was introduced to remove, and it meant this path missed the finish-reason logging
+    and the truncation signal the helper gained later. What is left here is the part
+    that is specific to a title: both fields must be present, be strings, and survive
+    trimming — half an answer is not worth overwriting a title with.
     """
-    if not raw or not raw.strip():
-        return None
-    cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group())
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-
     title = data.get("title")
     summary = data.get("summary")
     if not isinstance(title, str) or not isinstance(summary, str):
@@ -146,13 +138,7 @@ def usable_answer(text: str | None) -> str:
     return cleaned[:MAX_INPUT_CHARS]
 
 
-async def generate_summary(
-    user_text: str,
-    assistant_text: str,
-    *,
-    user_sub: str | None = None,
-    conversation_id: str | None = None,
-) -> tuple[str, str] | None:
+async def generate_summary(user_text: str, assistant_text: str) -> tuple[str, str] | None:
     """Ask the model for (title, summary). None on any failure — callers skip."""
     model = await resolve_summary_model()
     if not model:
@@ -167,37 +153,34 @@ async def generate_summary(
         return None
     prompt = _PROMPT.format(user_text=user_text, assistant_text=assistant_text)
     try:
-        raw = await gateway_chat(
+        data = await gateway_chat_json(
             prompt,
             model=model,
-            # Thinking off. Naming a conversation from two short strings needs no
-            # reasoning, and thinking tokens are billed like any other generated
-            # token — on every new conversation. Turning them off is the whole
-            # saving here; it also cuts the latency that made this a background task.
+            # Thinking off (the helper's default, stated here because it is the whole
+            # saving on this path). Naming a conversation from two short strings needs
+            # no reasoning, and thinking tokens are billed like any other generated
+            # token — on every new conversation. It also cuts the latency that made
+            # this a background task.
             reasoning_effort="none",
             # Kept high on purpose, as the fallback for when the line above does not
             # take: a reasoning model spends completion tokens on thinking BEFORE any
             # text, and 200 left the JSON truncated or empty. An unused ceiling is
             # free (billing is per generated token, and the timeout bounds latency).
             max_tokens=4000,
-            # The gateway attributes cost by OIDC subject; without it nothing is
-            # logged. conversation_id lands the row on the conversation it names,
-            # so per-conversation cost views include this call rather than
-            # showing it as an orphan under the user. None values are dropped.
-            metadata={"user_sub": user_sub, "conversation_id": conversation_id} if user_sub else None,
+            # Attribution comes from the scope `maybe_summarize_conversation` opened.
             timeout=20.0,
         )
     except Exception as e:
+        # Includes GatewayReplyTruncated: a cut-off reply is a failed titling like any
+        # other here — the conversation keeps its first-message title — and the helper
+        # has already logged the reply's shape and finish reason.
         logger.warning("Conversation titling call failed: %s", e)
         return None
-    parsed = parse_summary_response(raw)
+    parsed = parse_summary_response(data)
     if parsed is None:
-        logger.warning(
-            "Conversation titling response unparseable (model=%s, %d chars): %.200r",
-            model,
-            len(raw),
-            raw,
-        )
+        # The helper logs an unreadable reply; this logs a readable one that did not
+        # carry both fields, which is the failure it cannot see.
+        logger.warning("Conversation titling reply had no usable title/summary (model=%s): %.200r", model, data)
     return parsed
 
 
@@ -207,7 +190,6 @@ async def maybe_summarize_conversation(
     user_id: str,
     *,
     answer: str,
-    user_sub: str | None = None,
     on_stored: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> bool:
     """Title and summarize a conversation once, from the answer just produced.
@@ -227,6 +209,12 @@ async def maybe_summarize_conversation(
     Returns True when a summary was stored. Swallows everything: this runs as a
     detached background task, so an exception here would only surface as an
     unretrieved-task warning at shutdown.
+
+    Bills to the conversation's owner, resolved here rather than taken from the caller:
+    the socket session's `user_id` is the internal `users.id`, not the OIDC subject the
+    gateway attributes by, and this used to be handed straight through as one. It landed
+    anyway — the usage ingest falls back to an id lookup — but on the legacy path, and it
+    put a non-subject into the gateway's own spend table.
     """
     try:
         conversation = await conversation_service.get_conversation(conversation_id, user_id=user_id)
@@ -257,7 +245,16 @@ async def maybe_summarize_conversation(
             )
             return False
 
-        generated = await generate_summary(question, reply, user_sub=user_sub, conversation_id=conversation_id)
+        # Naming a conversation is the console's own work, not the agent's: it carries no
+        # scheduled_job_id or catalog_id, so without saying so it would be classified as
+        # 'orchestrator' — an agent run the user never made.
+        session_factory = get_async_session_factory()
+        async with session_factory() as db:
+            user_sub = await billing_subject(db, user_id, context=f"conversation {conversation_id}")
+        with attribution_scope(
+            user_sub=user_sub, conversation_id=conversation_id, service=SERVICE_CONSOLE
+        ):
+            generated = await generate_summary(question, reply)
         if not generated:
             return False
 
