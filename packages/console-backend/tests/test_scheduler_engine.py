@@ -1112,7 +1112,7 @@ class TestAttributionScope:
             seen.update(current_attribution())
             return [], {}, None
 
-        with patch("console_backend.services.scheduler_engine.resolve_user_sub", AsyncMock(return_value="oidc-subject")):
+        with patch("console_backend.services.scheduler_engine.billing_subject", AsyncMock(return_value="oidc-subject")):
             with patch.object(engine, "_build_message_args", _snapshot):
                 with patch(
                     "console_backend.services.scheduler_engine.dispatch_streaming",
@@ -1133,7 +1133,7 @@ class TestAttributionScope:
         repo.create_run.return_value = 12
         engine = _make_engine(repo=repo)
 
-        with patch("console_backend.services.scheduler_engine.resolve_user_sub", AsyncMock(return_value="oidc-subject")):
+        with patch("console_backend.services.scheduler_engine.billing_subject", AsyncMock(return_value="oidc-subject")):
             with patch.object(engine, "_build_message_args", AsyncMock(return_value=([], {}, None))):
                 with patch(
                     "console_backend.services.scheduler_engine.dispatch_streaming",
@@ -1145,7 +1145,9 @@ class TestAttributionScope:
 
     @pytest.mark.asyncio
     async def test_an_unresolvable_owner_still_dispatches(self):
-        """Worse accounting, not a dead job: the run proceeds, carrying what it does know."""
+        """Worse accounting, not a dead job — and the internal id still bills the right
+        person, because the ingest resolves either. Dropping to no subject at all would
+        lose the usage row entirely, which is the failure this whole path is about."""
         seen: dict = {}
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run.return_value = 13
@@ -1156,7 +1158,11 @@ class TestAttributionScope:
             seen.update(current_attribution())
             return [], {}, None
 
-        with patch("console_backend.services.scheduler_engine.resolve_user_sub", AsyncMock(return_value=None)):
+        # What `billing_subject` returns when the subject cannot be read.
+        with patch(
+            "console_backend.services.scheduler_engine.billing_subject",
+            AsyncMock(return_value=job.user_id),
+        ):
             with patch.object(engine, "_build_message_args", _snapshot):
                 with patch(
                     "console_backend.services.scheduler_engine.dispatch_streaming",
@@ -1165,7 +1171,7 @@ class TestAttributionScope:
                     await engine._dispatch_job(job)
 
         dispatch.assert_awaited_once()
-        assert seen == {"scheduled_job_id": job.id, "service": "scheduler"}
+        assert seen == {"user_sub": job.user_id, "scheduled_job_id": job.id, "service": "scheduler"}
 
 
 class TestWriteNotification:

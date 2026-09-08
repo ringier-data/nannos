@@ -23,7 +23,7 @@ def _resolvable_owner(monkeypatch):
     the unit tests do not have.
     """
     monkeypatch.setattr(cs, "get_async_session_factory", lambda: _null_session)
-    monkeypatch.setattr(cs, "resolve_user_sub", AsyncMock(return_value="oidc-subject"))
+    monkeypatch.setattr(cs, "billing_subject", AsyncMock(return_value="oidc-subject"))
 
 
 @asynccontextmanager
@@ -186,7 +186,8 @@ async def test_an_unresolvable_subject_falls_back_to_the_internal_id(monkeypatch
     seen: dict = {}
     conversation_service = fake_services()
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
-    monkeypatch.setattr(cs, "resolve_user_sub", AsyncMock(return_value=None))
+    # What `billing_subject` falls back to when the subject cannot be read.
+    monkeypatch.setattr(cs, "billing_subject", AsyncMock(return_value="user-1"))
 
     async def _snapshot(*args, **kwargs):
         seen.update(current_attribution())

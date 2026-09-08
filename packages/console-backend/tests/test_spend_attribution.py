@@ -14,6 +14,7 @@ from console_backend.services.spend_attribution import (
     SERVICE_CATALOG,
     SERVICE_CONSOLE,
     SERVICE_SCHEDULER,
+    billing_subject,
     resolve_user_sub,
 )
 
@@ -70,6 +71,21 @@ async def test_the_context_reaches_the_log(caplog):
     with caplog.at_level("WARNING"):
         await resolve_user_sub(_db(None), "u1", context="job 42")
     assert "job 42" in caplog.records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_what_gets_billed_is_the_subject_when_there_is_one():
+    assert await billing_subject(_db("oidc-subject"), "internal-uuid") == "oidc-subject"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unreadable", [{"sub": None}, {"fails": True}])
+async def test_an_unreadable_subject_bills_the_internal_id_rather_than_nobody(unreadable):
+    """The ingest resolves either, so the id still bills the right person. `None` would
+    not: the proxy's logger discards a record carrying no subject, so the spend would
+    vanish from usage_logs — the failure this attribution work exists to stop."""
+    db = _db(unreadable.get("sub"), fails=unreadable.get("fails", False))
+    assert await billing_subject(db, "internal-uuid") == "internal-uuid"
 
 
 def test_the_service_names_match_what_the_usage_view_derives():

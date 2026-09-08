@@ -22,7 +22,7 @@ from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from .llm_gateway import gateway_chat
-from .spend_attribution import SERVICE_SCHEDULER, resolve_user_sub
+from .spend_attribution import SERVICE_SCHEDULER, billing_subject
 from .watch_evaluator import WatchEvaluator, WatchOutcome
 from ..models.scheduled_job import ConditionEvaluation, JobRunStatus, JobType, ScheduledJob
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
@@ -212,7 +212,7 @@ class SchedulerEngine:
                 # A scope, not `set_attribution`: `_tick` dispatches each job in its own
                 # task, but `run_job_now` awaits this inline from a request handler, where
                 # a job id left set would follow the rest of that request.
-                owner_sub = await resolve_user_sub(db, job.user_id, context=f"job {job.id}")
+                owner_sub = await billing_subject(db, job.user_id, context=f"job {job.id}")
                 with attribution_scope(
                     user_sub=owner_sub, scheduled_job_id=job.id, service=SERVICE_SCHEDULER
                 ):

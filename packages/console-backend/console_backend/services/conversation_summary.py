@@ -32,7 +32,7 @@ from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 
 from ..db.connection import get_async_session_factory
 from .llm_gateway import gateway_chat_json
-from .spend_attribution import SERVICE_CONSOLE, resolve_user_sub
+from .spend_attribution import SERVICE_CONSOLE, billing_subject
 
 logger = logging.getLogger(__name__)
 
@@ -250,12 +250,9 @@ async def maybe_summarize_conversation(
         # 'orchestrator' — an agent run the user never made.
         session_factory = get_async_session_factory()
         async with session_factory() as db:
-            user_sub = await resolve_user_sub(db, user_id, context=f"conversation {conversation_id}")
-        # Falling back to the internal id keeps a lookup failure from being a regression:
-        # the ingest still resolves an id (the legacy path this call has ridden all along),
-        # and a wrong-shaped-but-resolvable value beats no usage row at all.
+            user_sub = await billing_subject(db, user_id, context=f"conversation {conversation_id}")
         with attribution_scope(
-            user_sub=user_sub or user_id, conversation_id=conversation_id, service=SERVICE_CONSOLE
+            user_sub=user_sub, conversation_id=conversation_id, service=SERVICE_CONSOLE
         ):
             generated = await generate_summary(question, reply)
         if not generated:

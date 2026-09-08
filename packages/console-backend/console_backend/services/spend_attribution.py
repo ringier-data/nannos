@@ -39,6 +39,22 @@ SERVICE_SCHEDULER = "scheduler"
 SERVICE_CATALOG = "catalog"
 
 
+async def billing_subject(db: Any, user_id: str, *, context: str = "") -> str:
+    """What to bill ``user_id``'s work to: their OIDC subject, or the internal id itself
+    when the subject cannot be read.
+
+    The fallback is deliberate and is the reason this exists as its own function. The
+    subject is the field's contract and what LiteLLM's own spend table keeps, so it is
+    always preferred — but the usage ingest resolves *either* (`get_user_by_sub(...) or
+    get_user(...)`, a fallback whose comment names the callers that pass an internal id).
+    Given a failed lookup, a wrong-shaped-but-resolvable value bills the right person,
+    while `None` drops the record on the floor: the proxy's logger discards anything with
+    no subject at all. That trade is the same on every path, so it is made once here
+    rather than remembered at three call sites.
+    """
+    return await resolve_user_sub(db, user_id, context=context) or user_id
+
+
 async def resolve_user_sub(db: Any, user_id: str, *, context: str = "") -> str | None:
     """The OIDC subject of ``users.id``, or None when it cannot be read.
 

@@ -186,7 +186,7 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     from console_backend.catalog.token_service import CatalogTokenService
     from console_backend.config import config
     from console_backend.db.connection import get_async_session_factory
-    from console_backend.services.spend_attribution import SERVICE_CATALOG, resolve_user_sub
+    from console_backend.services.spend_attribution import SERVICE_CATALOG, billing_subject
 
     session_factory = get_async_session_factory()
 
@@ -255,11 +255,7 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     # resolved rather than passed through; the usage ingest has been quietly covering
     # for that with an id fallback.
     async with session_factory() as db:
-        owner_sub = await resolve_user_sub(db, catalog.owner_user_id, context=f"catalog {catalog_id}")
-    # Falling back to the internal id keeps a lookup failure from being a regression: the
-    # ingest still resolves an id (that legacy path is what this call has ridden all along),
-    # and a wrong-shaped-but-resolvable value beats no usage row at all.
-    billing_sub = owner_sub or catalog.owner_user_id
+        billing_sub = await billing_subject(db, catalog.owner_user_id, context=f"catalog {catalog_id}")
     with attribution_scope(user_sub=billing_sub, catalog_id=catalog_id, service=SERVICE_CATALOG):
         pipeline.setup_job(
             sync_job_id=sync_job_id,
@@ -346,7 +342,7 @@ async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
     from console_backend.catalog.sync import CatalogSyncPipeline
     from console_backend.db.connection import get_async_session_factory
     from console_backend.repositories.catalog_repository import CatalogRepository
-    from console_backend.services.spend_attribution import SERVICE_CATALOG, resolve_user_sub
+    from console_backend.services.spend_attribution import SERVICE_CATALOG, billing_subject
 
     session_factory = get_async_session_factory()
     repo = CatalogRepository()
@@ -402,11 +398,7 @@ async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
     # resolved rather than passed through; the usage ingest has been quietly covering
     # for that with an id fallback.
     async with session_factory() as db:
-        owner_sub = await resolve_user_sub(db, catalog.owner_user_id, context=f"catalog {catalog_id}")
-    # Falling back to the internal id keeps a lookup failure from being a regression: the
-    # ingest still resolves an id (that legacy path is what this call has ridden all along),
-    # and a wrong-shaped-but-resolvable value beats no usage row at all.
-    billing_sub = owner_sub or catalog.owner_user_id
+        billing_sub = await billing_subject(db, catalog.owner_user_id, context=f"catalog {catalog_id}")
     with attribution_scope(user_sub=billing_sub, catalog_id=catalog_id, service=SERVICE_CATALOG):
         pipeline.setup_job(
             sync_job_id=sync_job_id,
