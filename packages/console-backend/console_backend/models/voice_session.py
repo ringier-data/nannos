@@ -6,9 +6,9 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
-from .usage import UsageLogCreate
+from .usage import BillingUnitBreakdownDict
 
 
 class VoiceSessionStatus(str, Enum):
@@ -52,22 +52,18 @@ class VoiceSessionResponse(BaseModel):
 class VoiceUsageEntry(BaseModel):
     """One model's measured consumption during a voice call.
 
-    Inherits `billing_unit_breakdown`'s validation (snake_case names, no zeros, no
-    reserved names) from the usage models rather than re-implementing it. Carries no
+    Reuses `BillingUnitBreakdownDict` (snake_case names, no zeros, no reserved names) so
+    this payload validates identically to every other usage write. Carries no
     attribution: the endpoint derives user + sub-agent from the voice session record,
     so the voice agent cannot mis-attribute spend.
     """
 
     provider: str = Field(..., description="Provider family, e.g. 'vertex_ai'")
     model_name: str = Field(..., description="Model the tokens were spent on")
-    billing_unit_breakdown: dict[str, int] = Field(
+    billing_unit_breakdown: BillingUnitBreakdownDict = Field(
         ...,
         description="Mapping of billing_unit to count (only non-zero values)",
         examples=[{"audio_input_tokens": 1234, "audio_output_tokens": 5678}],
-    )
-
-    _validate_breakdown = field_validator("billing_unit_breakdown")(
-        UsageLogCreate.validate_billing_unit_breakdown.__func__
     )
 
 

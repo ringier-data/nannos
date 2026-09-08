@@ -66,16 +66,78 @@ def test_flat_fallback_is_per_direction():
     }
 
 
-def test_tool_use_and_cache_tokens_are_billed():
+def test_tool_use_tokens_get_their_own_unit():
+    """Folded into base_input_tokens they were swallowed by the gauge fold: a small
+    per-turn tool count max()'d against a much larger context count vanishes."""
     um = types.UsageMetadata(
         prompt_tokens_details=[_modality("TEXT", 10)],
         tool_use_prompt_token_count=30,
-        cached_content_token_count=200,
     )
     assert usage_metadata_to_billing_units(um) == {
-        "base_input_tokens": 40,  # 10 text + 30 tool-use
-        "cache_read_input_tokens": 200,
+        "base_input_tokens": 10,
+        "tool_use_input_tokens": 30,
     }
+
+
+def test_cached_tokens_are_discounted_from_input_not_added_on_top():
+    """promptTokenCount is cache-INCLUSIVE, so emitting a cache unit alongside the full
+    prompt count billed the cached tokens twice — once at full rate, once at cache rate.
+
+    Same defect the Model Gateway already fixed for normalized Anthropic usage; the
+    convention there is that base input EXCLUDES cache.
+    """
+    um = types.UsageMetadata(
+        prompt_token_count=1000,
+        prompt_tokens_details=[_modality("TEXT", 1000)],
+        cached_content_token_count=400,
+        cache_tokens_details=[_modality("TEXT", 400)],
+    )
+    units = usage_metadata_to_billing_units(um)
+
+    assert units == {"base_input_tokens": 600, "cache_read_input_tokens": 400}
+    # The invariant that makes it not-double-counted:
+    assert units["base_input_tokens"] + units["cache_read_input_tokens"] == 1000
+
+
+def test_cached_audio_tokens_are_discounted_from_the_audio_unit():
+    """Audio is 6x text, so discounting the wrong modality would mis-bill badly."""
+    um = types.UsageMetadata(
+        prompt_token_count=900,
+        prompt_tokens_details=[_modality("AUDIO", 900)],
+        cached_content_token_count=300,
+        cache_tokens_details=[_modality("AUDIO", 300)],
+    )
+    assert usage_metadata_to_billing_units(um) == {
+        "audio_input_tokens": 600,
+        "cache_read_input_tokens": 300,
+    }
+
+
+def test_cached_tokens_without_modality_details_still_come_off_the_input():
+    """No cache_tokens_details — the tokens must still be discounted, or they double-bill."""
+    um = types.UsageMetadata(
+        prompt_token_count=500,
+        prompt_tokens_details=[_modality("AUDIO", 500)],
+        cached_content_token_count=200,
+    )
+    units = usage_metadata_to_billing_units(um)
+
+    assert units["cache_read_input_tokens"] == 200
+    assert units.get("audio_input_tokens", 0) == 300
+    assert sum(v for k, v in units.items() if k != "cache_read_input_tokens") == 300
+
+
+def test_unexplainable_cache_count_never_under_bills():
+    """If the numbers don't admit the subtraction, leave the input at full price."""
+    um = types.UsageMetadata(
+        prompt_token_count=100,
+        prompt_tokens_details=[_modality("TEXT", 100)],
+        cached_content_token_count=900,  # nonsensical: more cached than prompt
+    )
+    units = usage_metadata_to_billing_units(um)
+
+    assert units["cache_read_input_tokens"] == 900
+    assert units.get("base_input_tokens", 0) == 0  # discounted as far as it could go
 
 
 def test_zero_and_missing_counts_are_omitted():
@@ -166,3 +228,30 @@ def test_gauge_survives_a_context_compression_shrink():
     assert agent.build_usage_entries()[0]["billing_unit_breakdown"] == {
         "base_input_tokens": 128_000
     }
+
+
+def test_tool_tokens_survive_the_fold_alongside_a_large_context():
+    """The bug this guards: with tool-use folded into base_input_tokens, the gauge fold
+    max()'d 30 tool tokens against a 5000-token context and they disappeared entirely."""
+    agent = GeminiLiveAgent(session_id="call-6")
+    for ctx in (1000, 3000, 5000):
+        _record(agent, types.UsageMetadata(
+            prompt_tokens_details=[_modality("TEXT", ctx)],
+            tool_use_prompt_token_count=30,
+        ))
+
+    units = agent.build_usage_entries()[0]["billing_unit_breakdown"]
+
+    assert units["base_input_tokens"] == 5000       # gauge → max
+    assert units["tool_use_input_tokens"] == 30     # its own gauge, not swallowed
+
+
+def test_unclassified_unit_is_accumulated_and_warned(caplog):
+    """A newly-reported token type must pick a loud default, not a silent one."""
+    totals: dict[str, int] = {}
+    with caplog.at_level("WARNING"):
+        fold_usage_into(totals, {"some_new_tokens": 5})
+        fold_usage_into(totals, {"some_new_tokens": 7})
+
+    assert totals == {"some_new_tokens": 12}        # accumulated (never under-bill)
+    assert "no fold policy" in caplog.text

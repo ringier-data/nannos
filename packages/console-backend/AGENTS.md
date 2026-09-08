@@ -500,16 +500,19 @@ functions — do not fold them back into one with a mode flag:
   that very prefix. An unroutable prefix is caught by the mandatory post-registration test call,
   which rolls it back.
 
-#### Voice-agent rate cards must be created by hand
+#### Voice-agent rate cards are seeded — the one exception to "no seeding"
 
 The voice agent calls Vertex AI directly, so its models are keyed on the real family
-`vertex_ai` — no exception needed — but nothing creates their cards: no rate cards are seeded
-(migration 076) and no registration flow runs for them, because they never touch the gateway.
-They must be created once per environment via the Rate Cards page or
-`POST /api/v1/admin/rate-cards/model`. Until then voice usage rows are written with correct
-units and attribution but cost **$0.00** (`calculate_cost` failure → `Decimal("0.00")`).
+`vertex_ai` (no provider exception needed). But **nothing else would ever create their
+cards**: migration 076 stopped seeding on the premise that every model gets its card at
+registration, and these two never touch the gateway, so no registration runs for them.
+Without a card `calculate_cost` fails closed to `Decimal("0.00")`, so every voice call
+would silently bill nothing.
 
-Two cards, prices in USD per **million** tokens (Vertex Standard tier, verified 2026-08-19 at
+That is why **migration 092 seeds them** — a deliberate, documented exception to 076, not
+an oversight. Anything else billed outside the gateway needs the same treatment.
+
+Prices in USD per **million** tokens (Vertex Standard tier, verified 2026-08-19 at
 cloud.google.com/vertex-ai/generative-ai/pricing — the page lists the Live model as
 "Gemini 2.5 Flash Live API", never "native audio"):
 
@@ -519,18 +522,32 @@ cloud.google.com/vertex-ai/generative-ai/pricing — the page lists the Live mod
 | | | `audio_output_tokens` | output | 12.00 |
 | | | `base_input_tokens` | input | 0.50 |
 | | | `base_output_tokens` | output | 2.00 |
+| | | `tool_use_input_tokens` | input | 0.50 |
 | `vertex_ai` | `gemini-2.5-flash` | `base_input_tokens` | input | 0.30 |
 | (MCP tool risk scorer) | | `base_output_tokens` | output | 2.50 |
 | | | `cache_read_input_tokens` | input | 0.03 |
+| | | `tool_use_input_tokens` | input | 0.30 |
 
 `model_name` must match what the agent reports — `GEMINI_MODEL_ID` and
 `GEMINI_RISK_SCORER_MODEL` in `voice-agent/voice_agent/agent.py`.
 
-Deliberately unpriced: **`cache_read_input_tokens` on the Live model**. Vertex prints "N/A" for
-its cached-input column and the model is absent from the cache-storage table, so no rate exists
-to enter. `usage_metadata_to_billing_units` still reports the unit if Gemini ever returns
-`cached_content_token_count > 0` — that surfaces as a "missing rate card / partial cost" warning,
-which is the signal to go find the published rate, not a bug to silence.
+**`tool_use_input_tokens`** is the voice agent's own unit for `tool_use_prompt_token_count`,
+priced as ordinary input. It exists because folding those tokens into `base_input_tokens`
+let the input-side gauge fold (`max`) swallow them — a small per-turn tool count compared
+against a much larger context count contributes nothing.
+
+**Cached input is discounted, never added on top.** `promptTokenCount` is cache-INCLUSIVE
+per Google's docs, so emitting a cache unit alongside the full prompt count bills the
+cached tokens twice. `_discount_cached_from_input` moves them out of the full-price units
+first, matching the convention the gateway already established (`base_input = total_input -
+cache_read - cache_creation`, `litellm-proxy/custom_logger.py`) after hitting the identical
+bug on normalized Anthropic usage.
+
+Deliberately unpriced: **`cache_read_input_tokens` on the Live model**. Vertex prints "N/A"
+for its cached-input column and the model is absent from the cache-storage table, so no
+rate exists to enter. The unit is still reported if Gemini returns cached tokens — that
+surfaces as a "missing rate card / partial cost" warning, which is the signal to go find
+the published rate, not a bug to silence.
 
 Both models have retirement dates (Live: 2026-12-13, flash: 2026-10-20). Cards are
 time-versioned, so a successor model needs its own card — usage on an unpriced model bills $0

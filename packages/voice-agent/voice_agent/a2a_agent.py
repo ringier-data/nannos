@@ -967,19 +967,36 @@ class VoiceAgent(BaseAgent):
         logger.info("Outbound voice session created: id=%s call_sid=%s", session.id, call_sid)
         return session.id
 
-    def collect_usage_entries(self, session_key: str) -> list[dict]:
-        """Snapshot a live session's measured spend as voice-usage report entries.
+    def get_session_agent(self, session_key: str):
+        """Return the live GeminiLiveAgent for a session, or None if not active.
 
-        Must be called BEFORE ``_end_session``, which pops the session from
-        ``_active_sessions`` and would leave nothing to read. Returns [] for an unknown
-        key so callers can report unconditionally.
+        Held across ``_end_session`` so usage can be read AFTER the session finishes:
+        ``_end_session`` only pops the registry entry, the agent object itself stays
+        alive. Reading before it returns loses the final turn — end-of-stream makes
+        Gemini emit one last response and its usage report (see collect_usage_entries).
         """
         session = self._active_sessions.get(session_key)
-        if session is None:
-            logger.warning("collect_usage_entries: no active session for %s", session_key)
+        return session["agent"] if session else None
+
+    def collect_usage_entries(self, session_key: str, agent=None) -> list[dict]:
+        """Measured spend for a session, as voice-usage report entries.
+
+        Pass `agent` (from ``get_session_agent`` before teardown) to read usage AFTER
+        ``_end_session`` has drained the session — that ordering matters, because
+        ``_end_session`` sends ``audio_stream_end`` and only then cancels the receive
+        loop, so Gemini's final response and its usage_metadata arrive during teardown.
+        Reading beforehand silently dropped that last turn.
+
+        Falls back to the registry for callers that still read mid-session. Returns []
+        when neither yields an agent, so callers can report unconditionally.
+        """
+        if agent is None:
+            agent = self.get_session_agent(session_key)
+        if agent is None:
+            logger.warning("collect_usage_entries: no agent for session %s", session_key)
             return []
         try:
-            return session["agent"].build_usage_entries()
+            return agent.build_usage_entries()
         except Exception:
             logger.exception("Failed to collect usage entries for session %s", session_key)
             return []
