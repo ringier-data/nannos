@@ -73,6 +73,34 @@ status: accepted (mechanism refined 2026-07-06 — see Amendments 1 & 2)
 > one-time login silent SSO AND relocates the email-trust into Keycloak, which
 > **retires the hand-built Tier-B exchange service entirely**. So Tier A now +
 > IdP-brokering later dominates building and operating the broker.
+>
+> **Amendment 4 (2026-09-07) — brokering chosen; Tier A becomes silent SSO.**
+> Decision: broker the cockpit's IdP (Alloy Keycloak, realm `cockpit-riad` — the
+> only live tenant) into the nannos Keycloak as identity provider `alloy`, and
+> have the widget's PKCE login pass `kc_idp_hint=alloy` (SDK `pkce({ idpHint })`).
+> The popup then skips the nannos login page; with the user's existing Alloy SSO
+> session it flashes and closes with no credentials typed. The **one-time user
+> link** (nannos user ↔ Alloy `sub`) is created by Keycloak's first-broker-login
+> flow — a dedicated flow *Review Profile (off)* → *Create User If Unique* →
+> *Automatically Set Existing User*, `trustEmail` on — so nobody sees a review or
+> confirm-link screen. Chosen over server-side provisioning through the Keycloak
+> admin API (which the console-backend already wraps) because it is pure realm
+> configuration and Keycloak owns creation, linking and profile sync. Both sides
+> are code in the Keycloak infra repos: the `alloy` identity provider + flow in
+> `rcplus-nannos-keycloak` (`app/keycloak-client-provisioning`, `--idp alloy`),
+> the `nannos-broker` client in `rcplus-alloy-keycloak` (realm-setup,
+> `getCockpitNannosBrokerClient`).
+>
+> Consequences: the hand-built `/api/v1/auth/federated-exchange` (Amendment 2) is
+> superseded and should be retired; the `FEDERATED_IDPS` seam stays inert. The
+> follow-up that removes the popup entirely is the Keycloak-native cross-domain
+> chain: standard token exchange on the Alloy realm → JWT assertion → **JWT
+> Authorization Grant** (supported since Keycloak 26.6) on the nannos realm as a
+> *confidential* client `cockpit-embed`, driven by cockpit-backend behind its
+> session cookie and handed to the SDK via `getToken`. It reuses the same `alloy`
+> identity provider (toggle *JWT Authorization Grant* on it, alongside the new
+> client, in the provisioning tool) and the user links this amendment creates. Both
+> Keycloaks can be upgraded to any version, so no preview feature is on the path.
 
 When PTC code calls a host application's MCP server, it runs under the **end
 user's own OIDC identity**, carried end-to-end (host → embed widget →
