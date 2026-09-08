@@ -1088,70 +1088,6 @@ class TestVoiceCallDispatch:
         dispatch.assert_not_called()
 
 
-class TestOwnerSubResolution:
-    """Who a scheduled LLM call is billed to.
-
-    `job.user_id` is the internal user id; the gateway attributes by OIDC subject, and
-    the two diverged when users stopped being keyed by their sub. Passing the id through
-    would have attributed the spend to a subject that does not exist.
-    """
-
-    @pytest.mark.asyncio
-    async def test_it_reads_the_subject_not_the_internal_id(self):
-        engine = _make_engine()
-        job = _make_job()
-        db = AsyncMock()
-        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value="oidc-subject"))
-
-        assert await engine._owner_sub(db, job) == "oidc-subject"
-
-    @pytest.mark.asyncio
-    async def test_an_owner_without_a_subject_is_a_warning_not_a_failure(self, caplog):
-        engine = _make_engine()
-        job = _make_job()
-        db = AsyncMock()
-        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
-
-        with caplog.at_level("WARNING"):
-            assert await engine._owner_sub(db, job) is None
-        assert "unattributed" in caplog.records[-1].getMessage()
-
-    @pytest.mark.asyncio
-    async def test_a_failed_lookup_does_not_stop_the_job(self, caplog):
-        engine = _make_engine()
-        job = _make_job()
-        db = AsyncMock()
-        db.execute.side_effect = RuntimeError("db down")
-
-        with caplog.at_level("WARNING"):
-            assert await engine._owner_sub(db, job) is None
-        assert "unattributed" in caplog.records[0].getMessage()
-
-    @pytest.mark.asyncio
-    async def test_a_failed_lookup_rolls_the_shared_session_back(self):
-        """Swallowing the error is not enough. This session is the one the rest of the
-        dispatch runs on, and a failed statement leaves it refusing every next one — so a
-        lookup that only wanted to name the payer would have killed the run it rode along
-        with, on every job type."""
-        engine = _make_engine()
-        job = _make_job()
-        db = AsyncMock()
-        db.execute.side_effect = RuntimeError("db down")
-
-        assert await engine._owner_sub(db, job) is None
-        db.rollback.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_a_rollback_that_fails_too_is_still_not_fatal(self):
-        engine = _make_engine()
-        job = _make_job()
-        db = AsyncMock()
-        db.execute.side_effect = RuntimeError("db down")
-        db.rollback.side_effect = RuntimeError("connection gone")
-
-        assert await engine._owner_sub(db, job) is None
-
-
 class TestAttributionScope:
     """Every gateway call a dispatch makes bills to the job's owner and the job.
 
@@ -1176,7 +1112,7 @@ class TestAttributionScope:
             seen.update(current_attribution())
             return [], {}, None
 
-        with patch.object(engine, "_owner_sub", AsyncMock(return_value="oidc-subject")):
+        with patch("console_backend.services.scheduler_engine.resolve_user_sub", AsyncMock(return_value="oidc-subject")):
             with patch.object(engine, "_build_message_args", _snapshot):
                 with patch(
                     "console_backend.services.scheduler_engine.dispatch_streaming",
@@ -1187,7 +1123,7 @@ class TestAttributionScope:
         # scheduled_job_id is not decoration: usage_repository derives the service
         # dimension from it, so without it this recurring overhead is booked as the
         # user's own 'orchestrator' spend.
-        assert seen == {"user_sub": "oidc-subject", "scheduled_job_id": job.id}
+        assert seen == {"user_sub": "oidc-subject", "scheduled_job_id": job.id, "service": "scheduler"}
 
     @pytest.mark.asyncio
     async def test_the_scope_does_not_outlive_the_dispatch(self):
@@ -1197,7 +1133,7 @@ class TestAttributionScope:
         repo.create_run.return_value = 12
         engine = _make_engine(repo=repo)
 
-        with patch.object(engine, "_owner_sub", AsyncMock(return_value="oidc-subject")):
+        with patch("console_backend.services.scheduler_engine.resolve_user_sub", AsyncMock(return_value="oidc-subject")):
             with patch.object(engine, "_build_message_args", AsyncMock(return_value=([], {}, None))):
                 with patch(
                     "console_backend.services.scheduler_engine.dispatch_streaming",
@@ -1220,7 +1156,7 @@ class TestAttributionScope:
             seen.update(current_attribution())
             return [], {}, None
 
-        with patch.object(engine, "_owner_sub", AsyncMock(return_value=None)):
+        with patch("console_backend.services.scheduler_engine.resolve_user_sub", AsyncMock(return_value=None)):
             with patch.object(engine, "_build_message_args", _snapshot):
                 with patch(
                     "console_backend.services.scheduler_engine.dispatch_streaming",
@@ -1229,7 +1165,7 @@ class TestAttributionScope:
                     await engine._dispatch_job(job)
 
         dispatch.assert_awaited_once()
-        assert seen == {"scheduled_job_id": job.id}
+        assert seen == {"scheduled_job_id": job.id, "service": "scheduler"}
 
 
 class TestWriteNotification:

@@ -22,6 +22,7 @@ from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from .llm_gateway import gateway_chat
+from .spend_attribution import SERVICE_SCHEDULER, resolve_user_sub
 from .watch_evaluator import WatchEvaluator, WatchOutcome
 from ..models.scheduled_job import ConditionEvaluation, JobRunStatus, JobType, ScheduledJob
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
@@ -204,14 +205,17 @@ class SchedulerEngine:
                 # nothing replaced it, so the proxy's logger dropped their records
                 # (`custom_logger._build_record` needs a user_sub) and the spend left
                 # `usage_logs` altogether. `scheduled_job_id` is half the point:
-                # `usage_repository` derives the service dimension from it, so without it
-                # this recurring overhead reads as the user's own 'orchestrator' spend.
+                # `usage_repository` classifies by it, so without it this recurring overhead
+                # reads as the user's own 'orchestrator' spend — and the scope says
+                # `service` outright rather than leaving that to be inferred from an id.
                 #
                 # A scope, not `set_attribution`: `_tick` dispatches each job in its own
                 # task, but `run_job_now` awaits this inline from a request handler, where
                 # a job id left set would follow the rest of that request.
-                owner_sub = await self._owner_sub(db, job)
-                with attribution_scope(user_sub=owner_sub, scheduled_job_id=job.id):
+                owner_sub = await resolve_user_sub(db, job.user_id, context=f"job {job.id}")
+                with attribution_scope(
+                    user_sub=owner_sub, scheduled_job_id=job.id, service=SERVICE_SCHEDULER
+                ):
                     # Watch jobs: decide here whether anything is happening. A poll that
                     # does not trigger dispatches nothing at all — and knowing the outcome
                     # before dispatch is what lets the trigger choose its target (an agent,
@@ -483,33 +487,6 @@ class SchedulerEngine:
         except Exception:
             logger.warning("Job %d: writing the notification failed", job.id, exc_info=True)
         return f"The watch '{job.name}' triggered. Result: {json.dumps(check_result, default=str)[:300]}"
-
-    async def _owner_sub(self, db: Any, job: ScheduledJob) -> str | None:
-        """The OIDC subject of the job's owner, or None when it cannot be read.
-
-        The gateway bills by subject and `job.user_id` is not one — it is the internal
-        `users.id`, which stopped being the sub at the id/sub split. None is not a
-        failure: an unattributed LLM call is worse accounting than an attributed one,
-        but a job must not stop running because a lookup came back empty.
-        """
-        try:
-            result = await db.execute(text("SELECT sub FROM users WHERE id = :user_id"), {"user_id": job.user_id})
-            sub = result.scalar_one_or_none()
-        except Exception:
-            logger.warning("Job %d: could not resolve the owner's subject; LLM spend goes unattributed", job.id)
-            # Swallowing the error is not enough to keep the promise above: this session is
-            # shared with everything that follows in `_dispatch_job`, and a failed statement
-            # leaves it in a transaction that refuses the next one (PendingRollbackError).
-            # Rolling back is what actually lets the dispatch continue — and it discards
-            # nothing, because the token refresh before this commits its own writes.
-            try:
-                await db.rollback()
-            except Exception:
-                logger.warning("Job %d: rollback after the owner lookup failed too", job.id, exc_info=True)
-            return None
-        if not sub:
-            logger.warning("Job %d: owner %s has no subject on file; LLM spend goes unattributed", job.id, job.user_id)
-        return sub
 
     async def _resolve_voice_agent_id(self, db: Any) -> int | None:
         """Look up the voice-agent sub_agent_id from the DB (system-owned)."""

@@ -269,6 +269,7 @@ def test_dead_letter_emits_parseable_redacted_line(caplog):
         "scheduled_job_id": None,
         "sub_agent_config_version_id": "cfg-1",
         "catalog_id": "cat-1",
+        "service": "scheduler",
     }
     logger = cl.NannosCostLogger()
     with caplog.at_level(_logging.ERROR, logger="nannos.litellm.custom_logger"):
@@ -292,6 +293,8 @@ def test_dead_letter_emits_parseable_redacted_line(caplog):
         "scheduled_job_id": None,
         "sub_agent_config_version_id": "cfg-1",
         "catalog_id": "cat-1",
+        # Not PII, and it says which service's spend was lost — worth having in a loss alert.
+        "service": "scheduler",
     }
 
 
@@ -362,6 +365,30 @@ def test_provider_falls_back_to_deployment_prefix_when_unset():
     rec = cl._build_record(_record_kwargs(), _Resp())
     assert rec is not None
     assert rec["provider"] == "bedrock"
+
+
+def test_the_declared_service_reaches_the_record():
+    """Console-backend says which of its own workloads a call was; without carrying it here
+    the ingest can only fall back to deriving it from whichever id happens to be set."""
+
+    class _Resp:
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    kwargs = _record_kwargs(
+        litellm_params={"metadata": {"spend_logs_metadata": {"user_sub": "u1", "service": "console"}}}
+    )
+    rec = cl._build_record(kwargs, _Resp())
+    assert rec is not None
+    assert rec["service"] == "console"
+
+
+def test_a_record_without_a_declared_service_carries_none():
+    class _Resp:
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    rec = cl._build_record(_record_kwargs(), _Resp())
+    assert rec is not None
+    assert rec["service"] is None
 
 
 def test_provider_uses_explicit_custom_llm_provider_when_present():

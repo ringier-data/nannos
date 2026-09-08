@@ -647,9 +647,6 @@ async def _title_conversation(conversation_id: str, user_id: str, answer: str) -
             conversation_id,
             user_id,
             answer=answer,
-            # The socket session's user_id IS the OIDC sub, which is what the
-            # gateway attributes spend by.
-            user_sub=user_id,
             on_stored=_conversation_title_notifier(conversation_id),
         )
     finally:

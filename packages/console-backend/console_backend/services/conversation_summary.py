@@ -28,8 +28,11 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
+
 from ..db.connection import get_async_session_factory
 from .llm_gateway import gateway_chat_json
+from .spend_attribution import SERVICE_CONSOLE, resolve_user_sub
 
 logger = logging.getLogger(__name__)
 
@@ -135,13 +138,7 @@ def usable_answer(text: str | None) -> str:
     return cleaned[:MAX_INPUT_CHARS]
 
 
-async def generate_summary(
-    user_text: str,
-    assistant_text: str,
-    *,
-    user_sub: str | None = None,
-    conversation_id: str | None = None,
-) -> tuple[str, str] | None:
+async def generate_summary(user_text: str, assistant_text: str) -> tuple[str, str] | None:
     """Ask the model for (title, summary). None on any failure — callers skip."""
     model = await resolve_summary_model()
     if not model:
@@ -170,11 +167,7 @@ async def generate_summary(
             # text, and 200 left the JSON truncated or empty. An unused ceiling is
             # free (billing is per generated token, and the timeout bounds latency).
             max_tokens=4000,
-            # The gateway attributes cost by OIDC subject; without it nothing is
-            # logged. conversation_id lands the row on the conversation it names,
-            # so per-conversation cost views include this call rather than
-            # showing it as an orphan under the user. None values are dropped.
-            metadata={"user_sub": user_sub, "conversation_id": conversation_id} if user_sub else None,
+            # Attribution comes from the scope `maybe_summarize_conversation` opened.
             timeout=20.0,
         )
     except Exception as e:
@@ -197,7 +190,6 @@ async def maybe_summarize_conversation(
     user_id: str,
     *,
     answer: str,
-    user_sub: str | None = None,
     on_stored: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> bool:
     """Title and summarize a conversation once, from the answer just produced.
@@ -217,6 +209,12 @@ async def maybe_summarize_conversation(
     Returns True when a summary was stored. Swallows everything: this runs as a
     detached background task, so an exception here would only surface as an
     unretrieved-task warning at shutdown.
+
+    Bills to the conversation's owner, resolved here rather than taken from the caller:
+    the socket session's `user_id` is the internal `users.id`, not the OIDC subject the
+    gateway attributes by, and this used to be handed straight through as one. It landed
+    anyway — the usage ingest falls back to an id lookup — but on the legacy path, and it
+    put a non-subject into the gateway's own spend table.
     """
     try:
         conversation = await conversation_service.get_conversation(conversation_id, user_id=user_id)
@@ -247,7 +245,19 @@ async def maybe_summarize_conversation(
             )
             return False
 
-        generated = await generate_summary(question, reply, user_sub=user_sub, conversation_id=conversation_id)
+        # Naming a conversation is the console's own work, not the agent's: it carries no
+        # scheduled_job_id or catalog_id, so without saying so it would be classified as
+        # 'orchestrator' — an agent run the user never made.
+        session_factory = get_async_session_factory()
+        async with session_factory() as db:
+            user_sub = await resolve_user_sub(db, user_id, context=f"conversation {conversation_id}")
+        # Falling back to the internal id keeps a lookup failure from being a regression:
+        # the ingest still resolves an id (the legacy path this call has ridden all along),
+        # and a wrong-shaped-but-resolvable value beats no usage row at all.
+        with attribution_scope(
+            user_sub=user_sub or user_id, conversation_id=conversation_id, service=SERVICE_CONSOLE
+        ):
+            generated = await generate_summary(question, reply)
         if not generated:
             return False
 

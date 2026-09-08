@@ -46,6 +46,7 @@ from ..services.cel_condition import (
     validate_cel_expression,
 )
 from ..services.llm_gateway import GatewayReplyTruncated, gateway_chat_json
+from ..services.spend_attribution import SERVICE_CONSOLE
 from ..services.scheduler_engine import SchedulerEngine
 from ..services.scheduler_service import _UNSET, SchedulerService
 from ..utils.timezones import resolve_timezone
@@ -501,7 +502,10 @@ async def generate_job_draft(
             instruction,
             model=model,
             max_tokens=1024,
-            metadata={"user_sub": current_user.sub},  # OIDC subject — the gateway/proxy attributes by sub, not internal id
+            # OIDC subject — the gateway/proxy attributes by sub, not internal id. `service`
+            # because a draft carries no job id (the job it drafts does not exist yet), so
+            # without it this console utility call is classified as agent spend.
+            metadata={"user_sub": current_user.sub, "service": SERVICE_CONSOLE},
             reasoning_effort=_GENERATION_REASONING,
         )
 
@@ -659,7 +663,7 @@ async def generate_condition(
             instruction,
             model=model,
             max_tokens=1024,
-            metadata={"user_sub": current_user.sub},
+            metadata={"user_sub": current_user.sub, "service": SERVICE_CONSOLE},
             reasoning_effort=_GENERATION_REASONING,
         )
 

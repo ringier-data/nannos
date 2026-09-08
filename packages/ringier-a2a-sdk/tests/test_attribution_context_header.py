@@ -21,6 +21,23 @@ def test_context_header_uses_dedicated_name_and_carries_context_not_identity():
     assert payload == {"conversation_id": "c1", "sub_agent_id": "sa1"}
 
 
+def test_the_callers_service_is_not_forwarded():
+    """`service` labels whose own work a call was. The receiver is a different service
+    doing its own work, so forwarding it would label the callee's spend with the caller's
+    name — unlike conversation_id, which is shared context both ends mean the same by."""
+    with attribution_scope(user_sub="u1", conversation_id="c1", service="console"):
+        payload = json.loads(context_header()[NANNOS_CONTEXT_HEADER])
+    assert payload == {"conversation_id": "c1"}
+
+
+def test_the_gateway_header_does_carry_the_service():
+    from ringier_a2a_sdk.cost_tracking.attribution import attribution_header
+
+    with attribution_scope(user_sub="u1", service="scheduler"):
+        payload = json.loads(attribution_header()["x-litellm-spend-logs-metadata"])
+    assert payload == {"user_sub": "u1", "service": "scheduler"}
+
+
 def test_context_header_empty_when_no_attribution():
     # Outside any attribution scope nothing is stamped, so headers.update() is a no-op.
     assert context_header() == {} or "conversation_id" not in json.loads(

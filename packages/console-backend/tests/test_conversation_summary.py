@@ -1,6 +1,7 @@
 """Conversation titling: parsing, the first-exchange pick, the run-once guard, and
 the page-context stamp that tells the list where a conversation started."""
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,23 @@ from console_backend.services.conversation_service import conversation_page_cont
 
 #: The answer a turn just produced — what the caller hands the titler.
 ANSWER = "Its daily cap was lowered on Monday, so it stopped spending."
+
+
+@pytest.fixture(autouse=True)
+def _resolvable_owner(monkeypatch):
+    """Titling resolves the conversation owner's OIDC subject before it bills anything.
+
+    The socket session hands it `users.id`, which is not the subject for anyone onboarded
+    after the id/sub split, so the lookup is the module's own — and needs a database that
+    the unit tests do not have.
+    """
+    monkeypatch.setattr(cs, "get_async_session_factory", lambda: _null_session)
+    monkeypatch.setattr(cs, "resolve_user_sub", AsyncMock(return_value="oidc-subject"))
+
+
+@asynccontextmanager
+async def _null_session():
+    yield AsyncMock()
 
 
 # ---- parsing ---------------------------------------------------------------
@@ -106,9 +124,7 @@ async def test_titles_a_conversation_and_stores_both_fields(monkeypatch):
     gateway = AsyncMock(return_value={"title": "Campaign 42 pacing", "summary": "Why campaign 42 under-delivered."})
     monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
-    assert await cs.maybe_summarize_conversation(
-        conversation_service, "conv-1", "user-1", answer=ANSWER, user_sub="user-1"
-    )
+    assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
     conversation_service.update_summary.assert_awaited_once_with(
         "conv-1",
         "user-1",
@@ -116,12 +132,11 @@ async def test_titles_a_conversation_and_stores_both_fields(monkeypatch):
         summary="Why campaign 42 under-delivered.",
         title_source="llm",
     )
-    # Both halves reached the model — the title as the question, the answer the
-    # caller passed — and cost is attributed to the OIDC sub.
+    # Both halves reached the model — the title as the question, the answer the caller
+    # passed. Attribution rides the scope, not the call (see the attribution test below).
     prompt = gateway.await_args.args[0]
     assert "Why is campaign 42 und" in prompt
     assert "daily cap was lowered" in prompt
-    assert gateway.await_args.kwargs["metadata"] == {"user_sub": "user-1", "conversation_id": "conv-1"}
 
 
 @pytest.mark.asyncio
@@ -138,6 +153,49 @@ async def test_asks_for_no_thinking_but_keeps_the_token_headroom(monkeypatch):
     assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
     assert gateway.await_args.kwargs["reasoning_effort"] == "none"
     assert gateway.await_args.kwargs["max_tokens"] >= 4000
+
+
+@pytest.mark.asyncio
+async def test_it_bills_the_resolved_subject_as_console_work(monkeypatch):
+    """Two things this used to get wrong. It billed the socket session's `user_id`, which
+    is the internal id and not a subject — it landed only because the usage ingest falls
+    back to an id lookup. And carrying no service, it was classified as 'orchestrator':
+    an agent run the user never made."""
+    from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+    seen: dict = {}
+    conversation_service = fake_services()
+    monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
+
+    async def _snapshot(*args, **kwargs):
+        seen.update(current_attribution())
+        return {"title": "T", "summary": "S"}
+
+    monkeypatch.setattr(cs, "gateway_chat_json", _snapshot)
+
+    assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
+    assert seen == {"user_sub": "oidc-subject", "conversation_id": "conv-1", "service": "console"}
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_subject_falls_back_to_the_internal_id(monkeypatch):
+    """Not a regression for the sake of correctness: the ingest still resolves an id, so
+    a failed lookup should cost the right *shape*, not the usage row."""
+    from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+    seen: dict = {}
+    conversation_service = fake_services()
+    monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
+    monkeypatch.setattr(cs, "resolve_user_sub", AsyncMock(return_value=None))
+
+    async def _snapshot(*args, **kwargs):
+        seen.update(current_attribution())
+        return {"title": "T", "summary": "S"}
+
+    monkeypatch.setattr(cs, "gateway_chat_json", _snapshot)
+
+    assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
+    assert seen["user_sub"] == "user-1"
 
 
 @pytest.mark.asyncio
