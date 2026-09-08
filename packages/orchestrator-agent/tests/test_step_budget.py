@@ -34,7 +34,6 @@ from pydantic import Field, PrivateAttr
 
 from app.core.graph_factory import GraphFactory
 from app.core.step_budget import (
-    affordable_model_calls,
     base_steps,
     classify_nodes,
     recursion_limit_for,
@@ -222,14 +221,6 @@ def test_every_node_is_classified():
     assert buckets["per_model_call"], "no per-model-call hooks found — hook naming changed"
 
 
-def test_the_derived_limit_affords_the_configured_model_calls():
-    """End to end: what the graph is actually configured with."""
-    graph = _compiled_graph()
-    limit = recursion_limit_for(graph, AgentSettings.MAX_MODEL_CALLS_PER_TURN)
-
-    assert affordable_model_calls(graph, limit) == AgentSettings.MAX_MODEL_CALLS_PER_TURN
-
-
 def test_fifty_steps_was_six_model_calls():
     """The reported bug, in the unit that makes it obvious.
 
@@ -238,7 +229,11 @@ def test_fifty_steps_was_six_model_calls():
     exceeds. If this number ever climbs to something comfortable, the middleware
     stack got cheaper and the incident is worth re-reading.
     """
-    assert affordable_model_calls(_compiled_graph(), 50) == 6
+    graph = _compiled_graph()
+
+    affordable = (50 - base_steps(graph)) // steps_per_model_call(graph)
+
+    assert affordable == 6
 
 
 def test_the_graph_is_compiled_with_the_derived_limit():

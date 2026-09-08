@@ -101,15 +101,3 @@ def recursion_limit_for(graph: Any, max_model_calls: int) -> int:
         max_model_calls,
     )
     return limit
-
-
-def affordable_model_calls(graph: Any, recursion_limit: int) -> int:
-    """Inverse of :func:`recursion_limit_for` -- what a given limit actually buys.
-
-    Exists to make the old failure legible: it answers "50 steps was how many
-    model calls?" (six), which is the number nobody could see at the call site.
-    """
-    per_call = steps_per_model_call(graph)
-    if per_call <= 0:
-        return 0
-    return max((recursion_limit - base_steps(graph)) // per_call, 0)
