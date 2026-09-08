@@ -126,6 +126,13 @@ USAGE_PROVIDER = "vertex_ai"
 _INPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_input_tokens", "TEXT": "base_input_tokens"}
 _OUTPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_output_tokens", "TEXT": "base_output_tokens"}
 
+# Tool-use prompt tokens get their OWN unit rather than being folded into
+# base_input_tokens. Folding them in was a bug: base_input_tokens is a gauge, so a small
+# per-turn tool contribution was max()'d against a much larger context count and vanished
+# entirely. Priced the same as ordinary input (see the rate-card seed migration).
+_TOOL_USE_UNIT = "tool_use_input_tokens"
+_CACHE_READ_UNIT = "cache_read_input_tokens"
+
 # How to fold a session's successive usage reports into one billable total.
 #
 # Gemini Live reports the two sides with DIFFERENT semantics — measured on a real 10-turn
@@ -143,20 +150,36 @@ _OUTPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_output_tokens", "TEXT": "base_output
 # So input-side units take the max and output-side units sum. `max` rather than `last`
 # because context-window compression (configured at 128k → 32k) can *shrink* the context
 # mid-call, and the tokens before a compression were still processed.
-_GAUGE_UNITS = frozenset({"audio_input_tokens", "base_input_tokens", "cache_read_input_tokens"})
+#
+# Tool-use and cache-read sit on the prompt side and are therefore treated as gauges too.
+# NOTE: that is inference from prompt_token_count's measured behaviour, not measurement —
+# the call we measured ran tool-less and uncached. Both have their own unit precisely so a
+# tool-enabled call can be measured later without disturbing anything else.
+_GAUGE_UNITS = frozenset(
+    {"audio_input_tokens", "base_input_tokens", _CACHE_READ_UNIT, _TOOL_USE_UNIT}
+)
 _DELTA_UNITS = frozenset({"audio_output_tokens", "base_output_tokens"})
 
 
 def fold_usage_into(totals: dict[str, int], units: dict[str, int]) -> None:
     """Fold one usage report's billing units into a session's running totals.
 
-    Gauge units (input side) take the maximum seen; delta units (output side) accumulate.
-    An unrecognised unit accumulates — under-reporting spend is the worse failure.
+    Gauge units take the maximum seen; delta units accumulate. The classification is
+    exhaustive on purpose: a unit in neither set is accumulated AND warned about, so a
+    newly-reported token type picks up a loud default rather than a silent one.
     """
     for unit, count in units.items():
         if unit in _GAUGE_UNITS:
             totals[unit] = max(totals.get(unit, 0), count)
         else:
+            if unit not in _DELTA_UNITS:
+                # Accumulating is the safer default (under-reporting spend is worse), but
+                # the fold policy for a new unit is a judgement call — surface it.
+                logger.warning(
+                    "Billing unit %r has no fold policy; accumulating. Classify it in "
+                    "_GAUGE_UNITS or _DELTA_UNITS.",
+                    unit,
+                )
             totals[unit] = totals.get(unit, 0) + count
 
 
@@ -183,6 +206,65 @@ def _accumulate_modalities(
         out[unit] = out.get(unit, 0) + token_count
         counted += token_count
     return counted
+
+
+def _discount_cached_from_input(breakdown: dict[str, int], usage_metadata: object) -> None:
+    """Move cached prompt tokens out of the full-price input units.
+
+    ``promptTokenCount`` is cache-INCLUSIVE — per
+    https://ai.google.dev/api/generate-content#UsageMetadata it "includes the number of
+    tokens in the cached content" — and so are ``prompt_tokens_details``. Emitting a
+    separate cache_read unit on top therefore bills the cached tokens twice: once at the
+    full input rate and again at the cache-read rate.
+
+    This is the same defect the Model Gateway already fixed for normalized Anthropic
+    usage; the convention there is that base input EXCLUDES cache
+    (``litellm-proxy/custom_logger.py`` — ``base_input = total_input - cache_read -
+    cache_creation``), so this matches it.
+
+    Cached tokens are subtracted from the matching modality where
+    ``cache_tokens_details`` says so, else from text then audio. If the numbers don't
+    admit the subtraction the input is left untouched and a warning is emitted: an
+    unexpected shape must not silently under-bill.
+    """
+    cached = getattr(usage_metadata, "cached_content_token_count", None) or 0
+    if cached <= 0:
+        return
+
+    # Per-modality cached amounts when reported, else attribute the lot to text.
+    per_modality: dict[str, int] = {}
+    _accumulate_modalities(
+        getattr(usage_metadata, "cache_tokens_details", None),
+        _INPUT_UNIT_BY_MODALITY,
+        per_modality,
+    )
+    if not per_modality:
+        per_modality = {"base_input_tokens": cached}
+
+    remaining = cached
+    for unit, amount in per_modality.items():
+        take = min(amount, breakdown.get(unit, 0), remaining)
+        if take > 0:
+            breakdown[unit] -= take
+            remaining -= take
+
+    # Fallback sweep: cached tokens the details mis-attributed still have to come off
+    # SOME input unit, or they stay double-billed.
+    if remaining > 0:
+        for unit in ("base_input_tokens", "audio_input_tokens"):
+            take = min(breakdown.get(unit, 0), remaining)
+            if take > 0:
+                breakdown[unit] -= take
+                remaining -= take
+
+    if remaining > 0:
+        logger.warning(
+            "Could not discount %d of %d cached tokens from the input units (%s) — "
+            "leaving them at full price rather than under-billing",
+            remaining, cached, breakdown,
+        )
+
+    breakdown[_CACHE_READ_UNIT] = cached
 
 
 def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
@@ -215,15 +297,15 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
         if response_total > 0:
             breakdown["base_output_tokens"] = breakdown.get("base_output_tokens", 0) + response_total
 
-    # Tool-use prompt tokens are billed as ordinary input; they are reported separately
-    # by the API but priced the same.
+    # Tool-use prompt tokens keep their own unit — folding them into base_input_tokens
+    # let the gauge fold swallow them (see _TOOL_USE_UNIT).
     tool_use = getattr(usage_metadata, "tool_use_prompt_token_count", None) or 0
     if tool_use > 0:
-        breakdown["base_input_tokens"] = breakdown.get("base_input_tokens", 0) + tool_use
+        breakdown[_TOOL_USE_UNIT] = breakdown.get(_TOOL_USE_UNIT, 0) + tool_use
 
-    cached = getattr(usage_metadata, "cached_content_token_count", None) or 0
-    if cached > 0:
-        breakdown["cache_read_input_tokens"] = cached
+    # Must run AFTER the input units are populated: it moves cached tokens out of them
+    # rather than adding a unit on top, which would double-bill them.
+    _discount_cached_from_input(breakdown, usage_metadata)
 
     return {unit: count for unit, count in breakdown.items() if count > 0}
 

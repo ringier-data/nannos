@@ -3,13 +3,47 @@
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field, field_validator
+from pydantic import AfterValidator, AwareDatetime, BaseModel, Field, field_validator
 
 # Billing unit validation
 BILLING_UNIT_PATTERN = re.compile(r"^[a-z][a-z0-9_]*[a-z0-9]$")
 RESERVED_BILLING_UNITS = {"id", "cost", "total", "timestamp", "count"}
+
+def validate_billing_unit_breakdown(v: dict[str, int]) -> dict[str, int]:
+    """Ensure all unit counts are positive and billing unit names are valid."""
+    for billing_unit, count in v.items():
+        if count <= 0:
+            raise ValueError(f"Unit count for {billing_unit} must be positive (don't send zeros)")
+
+        # Validate billing unit name format
+        if not BILLING_UNIT_PATTERN.match(billing_unit):
+            raise ValueError(
+                f"Invalid billing unit name '{billing_unit}'. "
+                "Use snake_case (lowercase letters, numbers, underscores), "
+                "starting and ending with alphanumeric characters. "
+                "Examples: input_tokens, premium_api_calls, vector_searches"
+            )
+
+        # Check against reserved names
+        if billing_unit in RESERVED_BILLING_UNITS:
+            raise ValueError(
+                f"Billing unit name '{billing_unit}' is reserved. "
+                f"Reserved names: {', '.join(sorted(RESERVED_BILLING_UNITS))}"
+            )
+
+        # Check length
+        if len(billing_unit) < 3 or len(billing_unit) > 64:
+            raise ValueError(f"Billing unit name '{billing_unit}' must be between 3 and 64 characters")
+
+    return v
+
+
+# One shared type for every payload carrying a billing-unit breakdown, so a new caller
+# cannot accidentally skip the validation (and nobody has to re-decorate the validator).
+BillingUnitBreakdownDict = Annotated[dict[str, int], AfterValidator(validate_billing_unit_breakdown)]
+
 
 # Rate Card Models
 
@@ -229,7 +263,7 @@ class UsageLogCreate(BaseModel):
     service: str | None = None
     provider: str | None = None
     model_name: str | None = None
-    billing_unit_breakdown: dict[str, int] = Field(
+    billing_unit_breakdown: BillingUnitBreakdownDict = Field(
         ...,
         description="Mapping of billing_unit to count (only non-zero values)",
         examples=[{"input_tokens": 1234, "output_tokens": 567, "requests": 1}],
@@ -237,36 +271,6 @@ class UsageLogCreate(BaseModel):
     langsmith_run_id: str | None = None
     langsmith_trace_id: str | None = None
     invoked_at: datetime
-
-    @field_validator("billing_unit_breakdown")
-    @classmethod
-    def validate_billing_unit_breakdown(cls, v: dict[str, int]) -> dict[str, int]:
-        """Ensure all unit counts are positive and billing unit names are valid."""
-        for billing_unit, count in v.items():
-            if count <= 0:
-                raise ValueError(f"Unit count for {billing_unit} must be positive (don't send zeros)")
-
-            # Validate billing unit name format
-            if not BILLING_UNIT_PATTERN.match(billing_unit):
-                raise ValueError(
-                    f"Invalid billing unit name '{billing_unit}'. "
-                    "Use snake_case (lowercase letters, numbers, underscores), "
-                    "starting and ending with alphanumeric characters. "
-                    "Examples: input_tokens, premium_api_calls, vector_searches"
-                )
-
-            # Check against reserved names
-            if billing_unit in RESERVED_BILLING_UNITS:
-                raise ValueError(
-                    f"Billing unit name '{billing_unit}' is reserved. "
-                    f"Reserved names: {', '.join(sorted(RESERVED_BILLING_UNITS))}"
-                )
-
-            # Check length
-            if len(billing_unit) < 3 or len(billing_unit) > 64:
-                raise ValueError(f"Billing unit name '{billing_unit}' must be between 3 and 64 characters")
-
-        return v
 
 
 class UsageLogBatchCreate(BaseModel):
