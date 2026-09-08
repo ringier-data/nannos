@@ -531,23 +531,41 @@ cloud.google.com/vertex-ai/generative-ai/pricing — the page lists the Live mod
 `model_name` must match what the agent reports — `GEMINI_MODEL_ID` and
 `GEMINI_RISK_SCORER_MODEL` in `voice-agent/voice_agent/agent.py`.
 
+**Live sessions re-bill the whole context every turn**, so voice call cost compounds with
+call length. Google's Vertex pricing page states it in a footnote to the Live API tables —
+"You are charged per turn for all tokens present in the Session Context Window… tokens from
+past turns are re-processed and accounted for in each new turn" — and the Live API
+best-practices pages repeat it under a heading called "Re-billing". Consequences:
+
+- `fold_usage_into` **sums every unit**. Each `usageMetadata` report shows the context
+  cumulatively, but the charge recurs per turn, so the sum is the billed total. An earlier
+  version took the max on the input side and under-billed a measured 10-turn call by 2.6x.
+- **`contextWindowCompression` is the only documented lever** against the compounding: after
+  a compression the API "bills subsequent turns only for the retained history plus any new
+  tokens". `build_live_config` currently sets `trigger_tokens=128000`, which never fires at
+  realistic call lengths (a measured call peaked at 1,490) — so it provides no mitigation
+  today. Lowering it trades conversational memory for cost and is a product decision.
+- **Context caching does not apply.** The model page says "Context caching: Not supported",
+  no Live SKU has a caching variant, and pricing shows N/A — so no cache discount softens
+  the re-billed history.
+
 **`tool_use_input_tokens`** is the voice agent's own unit for `tool_use_prompt_token_count`,
-priced as ordinary input. It exists because folding those tokens into `base_input_tokens`
-let the input-side gauge fold (`max`) swallow them — a small per-turn tool count compared
-against a much larger context count contributes nothing.
+priced as ordinary input. Kept separate from `base_input_tokens` so it stays visible in the
+breakdown and can be repriced on its own line.
 
 **Cached input is discounted, never added on top.** `promptTokenCount` is cache-INCLUSIVE
 per Google's docs, so emitting a cache unit alongside the full prompt count bills the
 cached tokens twice. `_discount_cached_from_input` moves them out of the full-price units
 first, matching the convention the gateway already established (`base_input = total_input -
 cache_read - cache_creation`, `litellm-proxy/custom_logger.py`) after hitting the identical
-bug on normalized Anthropic usage.
+bug on normalized Anthropic usage. On the Live path this is **defensive only** (caching is
+unsupported there, per above) but it must stay: the risk scorer `gemini-2.5-flash` does
+support caching and shares the same mapping.
 
-Deliberately unpriced: **`cache_read_input_tokens` on the Live model**. Vertex prints "N/A"
-for its cached-input column and the model is absent from the cache-storage table, so no
-rate exists to enter. The unit is still reported if Gemini returns cached tokens — that
-surfaces as a "missing rate card / partial cost" warning, which is the signal to go find
-the published rate, not a bug to silence.
+Deliberately unpriced: **`cache_read_input_tokens` on the Live model** — no published rate
+exists to enter. The unit is still reported if Gemini ever returns cached tokens, which
+surfaces as a "missing rate card / partial cost" warning: the signal to go find the rate,
+not a bug to silence.
 
 Both models have retirement dates (Live: 2026-12-13, flash: 2026-10-20). Cards are
 time-versioned, so a successor model needs its own card — usage on an unpriced model bills $0

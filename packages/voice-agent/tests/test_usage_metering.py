@@ -67,8 +67,8 @@ def test_flat_fallback_is_per_direction():
 
 
 def test_tool_use_tokens_get_their_own_unit():
-    """Folded into base_input_tokens they were swallowed by the gauge fold: a small
-    per-turn tool count max()'d against a much larger context count vanishes."""
+    """Kept separate from base_input_tokens so they stay visible in the breakdown and can
+    be priced on their own line rather than merged into the context total."""
     um = types.UsageMetadata(
         prompt_tokens_details=[_modality("TEXT", 10)],
         tool_use_prompt_token_count=30,
@@ -199,13 +199,11 @@ def test_build_usage_entries_is_empty_when_nothing_was_captured():
     assert GeminiLiveAgent(session_id="call-3").build_usage_entries() == []
 
 
-def test_input_side_is_a_gauge_and_output_side_accumulates():
-    """Measured on a real call (2026-09-01): the two sides differ.
-
-    `prompt_token_count` is a cumulative gauge of the context (rises monotonically, each
-    rise = previous response + new audio), so it must NOT be summed. `response_token_count`
-    is a per-turn delta (it decreases between turns), so it MUST be summed — snapshotting
-    it dropped 71% of the output tokens, the expensive side at $12/1M.
+def test_every_side_accumulates_because_context_is_re_billed_per_turn():
+    """Both sides sum. Google documents that the Live API re-bills the whole context
+    every turn ("You are charged per turn for all tokens present in the Session Context
+    Window"), so each report's cumulative view of the context is a recurring charge, not
+    a gauge to be read once.
     """
     agent = GeminiLiveAgent(session_id="call-4")
     _record(agent, types.UsageMetadata(prompt_token_count=100, response_token_count=250))
@@ -214,25 +212,45 @@ def test_input_side_is_a_gauge_and_output_side_accumulates():
     entries = agent.build_usage_entries()
 
     assert entries[0]["billing_unit_breakdown"] == {
-        "base_input_tokens": 250,   # gauge → max, NOT 350
-        "base_output_tokens": 368,  # delta → sum
+        "base_input_tokens": 350,   # 100 + 250 — re-billed, NOT max(100, 250)
+        "base_output_tokens": 368,
     }
 
 
-def test_gauge_survives_a_context_compression_shrink():
-    """Sliding-window compression can shrink the context; the peak was still processed."""
+def test_compression_reduces_billed_input():
+    """After a sliding-window compression the context shrinks, and the docs say the API
+    "then bills subsequent turns only for the retained history plus any new tokens" —
+    summing tracks that. Taking the max would have over-billed the compressed turns."""
     agent = GeminiLiveAgent(session_id="call-5")
     _record(agent, types.UsageMetadata(prompt_token_count=128_000))
     _record(agent, types.UsageMetadata(prompt_token_count=32_000))
 
     assert agent.build_usage_entries()[0]["billing_unit_breakdown"] == {
-        "base_input_tokens": 128_000
+        "base_input_tokens": 160_000  # 128k + 32k, not max() == 128k
     }
 
 
-def test_tool_tokens_survive_the_fold_alongside_a_large_context():
-    """The bug this guards: with tool-use folded into base_input_tokens, the gauge fold
-    max()'d 30 tool tokens against a 5000-token context and they disappeared entirely."""
+def test_replays_the_measured_dev_call():
+    """The real 10-turn call from 2026-09-01, as audio. Guards the whole fold end to end
+    against the numbers we actually observed."""
+    turns = [(126, 250), (509, 118), (764, 112), (968, 28), (1037, 187),
+             (1321, 15), (1362, 6), (1397, 9), (1436, 0), (1490, 293)]
+    agent = GeminiLiveAgent(session_id="call-real")
+    for prompt, response in turns:
+        _record(agent, types.UsageMetadata(
+            prompt_tokens_details=[_modality("AUDIO", prompt)],
+            response_tokens_details=([_modality("AUDIO", response)] if response else None),
+        ))
+
+    assert agent.build_usage_entries()[0]["billing_unit_breakdown"] == {
+        "audio_input_tokens": 10_410,   # sum, not the 1_490 final context reading
+        "audio_output_tokens": 1_018,
+    }
+
+
+def test_tool_tokens_stay_separate_from_the_context_total():
+    """Tool-use tokens keep their own unit so they remain visible in the breakdown and
+    separately priceable, instead of disappearing into the context count."""
     agent = GeminiLiveAgent(session_id="call-6")
     for ctx in (1000, 3000, 5000):
         _record(agent, types.UsageMetadata(
@@ -242,16 +260,49 @@ def test_tool_tokens_survive_the_fold_alongside_a_large_context():
 
     units = agent.build_usage_entries()[0]["billing_unit_breakdown"]
 
-    assert units["base_input_tokens"] == 5000       # gauge → max
-    assert units["tool_use_input_tokens"] == 30     # its own gauge, not swallowed
+    assert units["base_input_tokens"] == 9000        # 1000 + 3000 + 5000
+    assert units["tool_use_input_tokens"] == 90      # 30 x 3, tracked separately
 
 
-def test_unclassified_unit_is_accumulated_and_warned(caplog):
-    """A newly-reported token type must pick a loud default, not a silent one."""
+def test_fold_needs_no_per_unit_policy():
+    """Every unit accumulates, including one we've never seen — so a newly-reported token
+    type is billed rather than silently dropped, with no classification to maintain."""
     totals: dict[str, int] = {}
-    with caplog.at_level("WARNING"):
-        fold_usage_into(totals, {"some_new_tokens": 5})
-        fold_usage_into(totals, {"some_new_tokens": 7})
+    fold_usage_into(totals, {"some_new_tokens": 5, "audio_input_tokens": 100})
+    fold_usage_into(totals, {"some_new_tokens": 7, "audio_input_tokens": 250})
 
-    assert totals == {"some_new_tokens": 12}        # accumulated (never under-bill)
-    assert "no fold policy" in caplog.text
+    assert totals == {"some_new_tokens": 12, "audio_input_tokens": 350}
+
+
+def test_partial_modality_details_warn_with_the_shortfall(caplog):
+    """Details that only partly explain prompt_token_count leave the rest unbilled: the
+    all-or-nothing fallback check is suppressed as soon as anything was counted.
+
+    Unreachable today (the only unmapped modalities are IMAGE/VIDEO/DOCUMENT and the Live
+    session is audio-only), so this is deliberately warned rather than handled — the point
+    is that the assumption fails loudly instead of quietly shrinking the bill.
+    """
+    um = types.UsageMetadata(
+        prompt_tokens_details=[_modality("AUDIO", 300), _modality("VIDEO", 200)],
+        prompt_token_count=500,
+    )
+    with caplog.at_level("WARNING"):
+        units = usage_metadata_to_billing_units(um)
+
+    assert units == {"audio_input_tokens": 300}
+    assert "only 300 of 500" in caplog.text
+    assert "200 unbilled" in caplog.text
+
+
+def test_complete_details_do_not_warn(caplog):
+    """The normal audio turn must stay silent — a warning that cries wolf is worthless."""
+    um = types.UsageMetadata(
+        prompt_tokens_details=[_modality("AUDIO", 1490)],
+        response_tokens_details=[_modality("AUDIO", 293)],
+        prompt_token_count=1490,
+        response_token_count=293,
+    )
+    with caplog.at_level("WARNING"):
+        usage_metadata_to_billing_units(um)
+
+    assert caplog.text == ""
