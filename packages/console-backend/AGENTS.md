@@ -509,7 +509,7 @@ registration, and these two never touch the gateway, so no registration runs for
 Without a card `calculate_cost` fails closed to `Decimal("0.00")`, so every voice call
 would silently bill nothing.
 
-That is why **migration 092 seeds them** — a deliberate, documented exception to 076, not
+That is why **migration 093 seeds them** — a deliberate, documented exception to 076, not
 an oversight. Anything else billed outside the gateway needs the same treatment.
 
 Prices in USD per **million** tokens (Vertex Standard tier, verified 2026-08-19 at
