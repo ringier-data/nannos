@@ -29,7 +29,12 @@ ON CONFLICT (provider, model_name) DO NOTHING;
 -- ── Gemini Live native audio (the voice session model) ───────────────────────
 -- audio in $3.00 / audio out $12.00 / text in $0.50 / text out $2.00 per 1M.
 -- tool_use_input_tokens is the agent's own unit for tool-use prompt tokens, priced as
--- ordinary input. Cached input is deliberately NOT priced: Vertex prints "N/A" for this
+-- ordinary input. reasoning_output_tokens (the platform's unit for thinking tokens, priced
+-- on the gemini-3.x cards since migration 023) is set ONLY on the risk scorer: measured
+-- 2026-09-09, gemini-live-2.5-flash-native-audio REJECTS thinking_config outright (1007
+-- "not supported by this model") and reports thoughtsTokenCount=0 on every turn, so the
+-- Live card would price a unit that never arrives. gemini-2.5-flash does think — 476 of
+-- 520 output tokens on a real tool classification — and needs it or 86% of the call is $0. Cached input is deliberately NOT priced: Vertex prints "N/A" for this
 -- model's cached column, so there is no published rate to enter. If a call ever reports
 -- cached tokens it surfaces as a "missing rate card / partial cost" warning — the signal
 -- to go find the rate, not a silent $0.
@@ -54,6 +59,7 @@ FROM rate_cards rc
 CROSS JOIN (VALUES
     ('base_input_tokens',       'input',  0.30),
     ('base_output_tokens',      'output', 2.50),
+    ('reasoning_output_tokens', 'output', 2.50),
     ('cache_read_input_tokens', 'input',  0.03),
     ('tool_use_input_tokens',   'input',  0.30)
 ) AS u(billing_unit, flow_direction, price)

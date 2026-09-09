@@ -344,43 +344,70 @@ def test_risk_scorer_output_falls_back_to_flat_candidates_count():
     }
 
 
-def test_thinking_tokens_are_billed_as_output():
-    """thoughts_token_count is billed by Vertex at the output rate and never appears in
-    the modality details. gemini-2.5-flash thinks by default, so leaving it unread
-    under-billed the risk scorer on every single call."""
-    um = _gc_usage(prompt_token_count=900, candidates_token_count=40, thoughts_token_count=250)
+def test_thinking_tokens_use_the_platform_reasoning_unit():
+    """Thoughts belong in `reasoning_output_tokens` — the platform's existing unit, priced
+    on the gemini-3.x cards and labelled "Reasoning" in the console — not folded into base
+    output. Thinking is on by default on both models, so leaving this unread under-billed
+    the risk scorer on every call.
+    """
+    um = _gc_usage(
+        prompt_token_count=900, candidates_token_count=40, thoughts_token_count=250,
+        total_token_count=1190,  # 900 + 40 + 250 -> exclusive, the documented identity
+    )
     assert usage_metadata_to_billing_units(um) == {
         "base_input_tokens": 900,
-        "base_output_tokens": 290,  # 40 candidates + 250 thoughts
+        "base_output_tokens": 40,
+        "reasoning_output_tokens": 250,
     }
 
 
-def test_thinking_tokens_are_billed_on_the_live_path_too():
-    """The native-audio model supports thinking as well. Thoughts are text-rate output,
-    so they land in base_output_tokens even when the audio split is present."""
-    um = types.UsageMetadata(
-        prompt_tokens_details=[_modality("AUDIO", 1490)],
-        response_tokens_details=[_modality("AUDIO", 293)],
-        prompt_token_count=1490,
-        response_token_count=293,
-        thoughts_token_count=120,
+def test_inclusive_response_count_does_not_double_bill_thoughts():
+    """Google documents thoughts as a separate addend, but LiteLLM checks the arithmetic
+    rather than trusting it, having hit endpoints that disagree. So do we: when
+    prompt + candidates + tool_use == total, thoughts are already inside the candidates
+    count and must come OUT of base output.
+
+    The invariant that matters: billed output is the same under both provider behaviours.
+    """
+    inclusive = _gc_usage(
+        prompt_token_count=900, candidates_token_count=290, thoughts_token_count=250,
+        total_token_count=1190,  # 900 + 290 == 1190 -> thoughts already inside
     )
+    exclusive = _gc_usage(
+        prompt_token_count=900, candidates_token_count=40, thoughts_token_count=250,
+        total_token_count=1190,  # 900 + 40 + 250 -> thoughts additive
+    )
+    assert usage_metadata_to_billing_units(inclusive) == usage_metadata_to_billing_units(
+        exclusive
+    ) == {
+        "base_input_tokens": 900,
+        "base_output_tokens": 40,
+        "reasoning_output_tokens": 250,
+    }
+
+
+def test_missing_total_falls_back_to_the_documented_exclusive_reading():
+    """No total_token_count means the arithmetic check can't run; Google documents the
+    exclusive identity, so thoughts are additive."""
+    um = _gc_usage(prompt_token_count=900, candidates_token_count=40, thoughts_token_count=250)
     assert usage_metadata_to_billing_units(um) == {
-        "audio_input_tokens": 1490,
-        "audio_output_tokens": 293,
-        "base_output_tokens": 120,
+        "base_input_tokens": 900,
+        "base_output_tokens": 40,
+        "reasoning_output_tokens": 250,
     }
 
 
 def test_thoughts_do_not_trigger_a_false_shortfall_warning(caplog):
-    """response_token_count can exclude thoughts, so the shortfall check must count them
-    as accounted-for or it cries wolf on every thinking turn."""
-    um = types.UsageMetadata(
-        prompt_tokens_details=[_modality("AUDIO", 500)],
-        response_tokens_details=[_modality("AUDIO", 100)],
-        prompt_token_count=500,
-        response_token_count=350,
-        thoughts_token_count=250,
+    """The candidates count excludes thoughts, so the shortfall check must count them as
+    accounted-for or it cries wolf on every thinking call — which is every risk-scorer
+    call. Uses the generate_content shape because that is the only path that thinks.
+    """
+    um = _gc_usage(
+        prompt_tokens_details=[_modality("TEXT", 272)],
+        candidates_tokens_details=[_modality("TEXT", 44)],
+        prompt_token_count=272,
+        candidates_token_count=520,   # a count that exceeds the details by exactly thoughts
+        thoughts_token_count=476,
     )
     with caplog.at_level("WARNING"):
         usage_metadata_to_billing_units(um)

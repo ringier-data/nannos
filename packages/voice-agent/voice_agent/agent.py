@@ -132,6 +132,36 @@ _OUTPUT_UNIT_BY_MODALITY = {"AUDIO": "audio_output_tokens", "TEXT": "base_output
 _TOOL_USE_UNIT = "tool_use_input_tokens"
 _CACHE_READ_UNIT = "cache_read_input_tokens"
 
+# Thinking tokens. `reasoning_output_tokens` is the platform's existing unit for these —
+# labelled "Reasoning" in the console and priced on the gemini-3.x cards since migration
+# 023 — so voice must use it too rather than folding them into base output. The Gateway's
+# convention is that reasoning is reported on its own line and taken OUT of base output
+# (`litellm-proxy/custom_logger.py`: `base_output = total_output - reasoning`).
+_REASONING_UNIT = "reasoning_output_tokens"
+
+
+def _response_count_includes_thoughts(
+    prompt: int, response: int, tool_use: int, total: int
+) -> bool:
+    """True when the response/candidates count already contains the thought tokens.
+
+    Mirrors LiteLLM's ``VertexGeminiConfig.is_candidate_token_count_inclusive``: if the
+    non-thinking counts already add up to the reported total, thoughts must be inside the
+    response count; otherwise they are a separate addend.
+
+    Google documents the EXCLUSIVE identity — the Gemini API reference gives
+    ``totalTokenCount`` as "(prompt + thoughts + response candidates)", and the thinking
+    docs say "response pricing is the sum of output tokens and thinking tokens". But
+    LiteLLM checks the arithmetic rather than trusting it, having hit endpoints that
+    disagree, so we do the same: a wrong guess here is a 2x error on the most expensive
+    part of a thinking call.
+
+    Returns False when ``total`` is absent — the documented default is exclusive.
+    """
+    if not total:
+        return False
+    return prompt + response + tool_use == total
+
 
 def fold_usage_into(totals: dict[str, int], units: dict[str, int]) -> None:
     """Fold one usage report's billing units into a session's running totals.
@@ -300,11 +330,21 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
         or getattr(usage_metadata, "candidates_token_count", None)
         or 0
     )
-    # Reasoning tokens. Present on both shapes, billed by Vertex at the OUTPUT rate, and
-    # gemini-2.5-flash thinks by default — so the risk scorer under-billed on every call
-    # while this went unread. Never appears in the modality details, so it is always added
-    # on top rather than being part of the fallback.
+    # Reasoning tokens, billed by Vertex at the output rate.
+    #
+    # In practice only the RISK SCORER thinks. Measured 2026-09-09 against Vertex:
+    #   gemini-2.5-flash               prompt=272 candidates=44 thoughts=476 total=792
+    #     -> thoughts are 92% of output and 86% of the call's cost. Note
+    #        response_token_count is None on this shape, which is how the output went
+    #        entirely unbilled before the candidates_* fallback above.
+    #   gemini-live-2.5-flash-native-audio  REJECTS thinking_config (1007 "not supported
+    #     by this model") and reports thoughtsTokenCount=0 on every turn, including on
+    #     deliberately hard reasoning prompts. So this branch never fires on Live, and
+    #     the Live rate card deliberately does not price reasoning.
+    # The handling stays shape-agnostic because one mapper serves both models — and the
+    # Live model retires 2026-12-13, so its successor may well think.
     thoughts = getattr(usage_metadata, "thoughts_token_count", None) or 0
+    tool_use = getattr(usage_metadata, "tool_use_prompt_token_count", None) or 0
 
     # Direct assignment, not `+=`: these branches only run when the modality pass counted
     # nothing, so the key provably cannot already be set. (`+=` read as though it could
@@ -313,8 +353,23 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
         breakdown["base_input_tokens"] = prompt_total
     if not response_counted and response_total > 0:
         breakdown["base_output_tokens"] = response_total
+
     if thoughts > 0:
-        breakdown["base_output_tokens"] = breakdown.get("base_output_tokens", 0) + thoughts
+        breakdown[_REASONING_UNIT] = thoughts
+        # The inclusivity check is only meaningful on the generate_content shape. The Live
+        # reference gives its own totalTokenCount identity as "(prompt + response
+        # candidates)" — omitting thoughts, and contradicting the SDK's own Live docstring
+        # — so `total` is NOT a trustworthy oracle there. On Live we take the documented
+        # exclusive reading and leave base output alone.
+        is_generate_content = hasattr(usage_metadata, "candidates_token_count")
+        total = getattr(usage_metadata, "total_token_count", None) or 0
+        if is_generate_content and _response_count_includes_thoughts(
+            prompt_total, response_total, tool_use, total
+        ):
+            # Thoughts were already inside the response count, so take them out of base
+            # output — otherwise they would be billed twice, once per unit.
+            base = breakdown.get("base_output_tokens", 0)
+            breakdown["base_output_tokens"] = max(0, base - thoughts)
 
     # Details that only partly explain the total would leave the remainder unbilled — the
     # all-or-nothing checks above suppress the fallback as soon as anything was counted.
@@ -327,8 +382,8 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
             "unmapped input modality is in use; extend _INPUT_UNIT_BY_MODALITY.",
             prompt_counted, prompt_total, prompt_total - prompt_counted,
         )
-    # Thoughts are billed above and never appear in the details, so they count as
-    # accounted-for on both sides of this comparison.
+    # Thoughts are billed on their own line above and never appear in the modality
+    # details, so they count as accounted-for in this comparison.
     if response_counted and response_total > response_counted:
         response_billed = response_counted + thoughts
         if response_total > response_billed:
@@ -342,7 +397,6 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
 
     # Tool-use prompt tokens keep their own unit so they stay visible and separately
     # priceable rather than disappearing into the context total (see _TOOL_USE_UNIT).
-    tool_use = getattr(usage_metadata, "tool_use_prompt_token_count", None) or 0
     if tool_use > 0:
         breakdown[_TOOL_USE_UNIT] = tool_use
 
@@ -1331,10 +1385,18 @@ class GeminiLiveAgent:
                                 self.live_usage_totals,
                                 usage_metadata_to_billing_units(usage),
                             )
+                            # `thoughts` is logged because whether it is a per-turn delta
+                            # or a cumulative gauge is UNDOCUMENTED for the Live API — we
+                            # sum it like everything else, which inflates ~quadratically
+                            # in turn count if it turns out cumulative. One thinking call
+                            # settles it: if thoughts ever DECREASES between turns it is a
+                            # delta (as response_token_count is); monotonic growth across
+                            # many turns means gauge, and the fold needs revisiting.
                             logger.debug(
-                                "Gemini usage: prompt=%s response=%s (turn=%d) → billable %s",
+                                "Gemini usage: prompt=%s response=%s thoughts=%s (turn=%d) → billable %s",
                                 getattr(usage, "prompt_token_count", None),
                                 getattr(usage, "response_token_count", None),
+                                getattr(usage, "thoughts_token_count", None),
                                 turn,
                                 self.live_usage_totals,
                             )
