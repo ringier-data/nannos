@@ -42,6 +42,24 @@ class JobRunStatus(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     CONDITION_NOT_MET = "condition_not_met"  # Watch check ran but the condition was false
+    #: The process executing the run died — the agent was killed mid-run, or this
+    #: scheduler restarted and dropped the run's stream. Distinct from FAILED
+    #: because a failure is evidence about the job while an interruption is
+    #: evidence about the runtime: it does not count toward ``max_failures``, and
+    #: it earns one fresh attempt. See
+    #: docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md.
+    INTERRUPTED = "interrupted"
+
+
+class RunTrigger(str, Enum):
+    """Why a run was started. Decides what its interruption is worth: a SCHEDULED
+    run earns one RETRY, a RETRY earns the user a notice, a MANUAL run earns
+    neither — the user is present and can press again. See
+    docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md."""
+
+    SCHEDULED = "scheduled"
+    RETRY = "retry"
+    MANUAL = "manual"
 
 
 class ConditionEvaluation(BaseModel):
@@ -91,6 +109,16 @@ class ScheduledJobRun(BaseModel):
     conversation_id: str | None = None
     delivered: bool
     condition_evaluation: ConditionEvaluation | None = None
+    #: Last heartbeat from the process dispatching this run. The healer sweeps on
+    #: staleness of this rather than on age, so a slow-but-healthy run is never
+    #: mistaken for an abandoned one. None on rows written before recovery existed.
+    last_seen_at: datetime | None = None
+    #: Why this run was started; see RunTrigger.
+    trigger: RunTrigger = RunTrigger.SCHEDULED
+    #: When the user is owed the notice that this run was lost for good. Set only on an
+    #: interrupted run that was already the retry; cleared once the notice is delivered
+    #: or abandoned.
+    notice_due_at: datetime | None = None
 
 
 class RunNowResponse(BaseModel):
@@ -118,6 +146,10 @@ class ScheduledJob(BaseModel):
     run_at: datetime | None = None
     next_run_at: datetime
     last_run_at: datetime | None = None
+    #: When a fresh attempt is owed after an interrupted run. A second wake-up
+    #: reason for the claim loop, kept out of next_run_at so the schedule users
+    #: read is never rewritten by a retry.
+    retry_at: datetime | None = None
     prompt: str | None = None
     notification_message: str | None = None
     # Watch fields

@@ -34,6 +34,13 @@ current_sub_agent_config_version_id: contextvars.ContextVar = contextvars.Contex
     "nannos_sub_agent_config_version_id", default=None
 )
 current_catalog_id: contextvars.ContextVar = contextvars.ContextVar("nannos_catalog_id", default=None)
+# Which service's own work this call is, when that is not inferable from the ids above.
+# The usage views classify spend by service, and used to *derive* it from which id happened
+# to be set (a scheduled_job_id meant "scheduler", anything else fell through to
+# "orchestrator") — so a console utility call that legitimately carries no id at all, like
+# naming a conversation or drafting a job, was booked as agent spend. A caller that knows
+# what it is says so; the derivation stays as the fallback for everything that does not.
+current_service: contextvars.ContextVar = contextvars.ContextVar("nannos_service", default=None)
 # The installation (tenant) the inbound request came from — e.g. the Slack/GChat botName the
 # bot client stamps on its A2A message metadata. Carried as request *context* so console MCP
 # tools can scope delivery channels to the calling installation (see context_header below).
@@ -46,6 +53,7 @@ _FIELDS = {
     "scheduled_job_id": current_scheduled_job_id,
     "sub_agent_config_version_id": current_sub_agent_config_version_id,
     "catalog_id": current_catalog_id,
+    "service": current_service,
     "installation": current_installation,
 }
 
@@ -163,6 +171,10 @@ def context_header(**overrides) -> dict[str, str]:
     there's nothing to stamp; read back with ``parse_context_header``."""
     attrib = _merged_attribution(overrides)
     attrib.pop("user_sub", None)
+    # `service` says which service's own work the *caller's* call was. The receiver is a
+    # different service doing its own work, so forwarding it would label the callee's spend
+    # with the caller's name — the receiver sets its own (or leaves it derived).
+    attrib.pop("service", None)
     return {NANNOS_CONTEXT_HEADER: json.dumps(attrib)} if attrib else {}
 
 

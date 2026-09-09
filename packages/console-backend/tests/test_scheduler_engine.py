@@ -17,49 +17,21 @@ import pytest
 from console_backend.models.scheduled_job import (
     JobRunStatus,
     JobType,
+    RunTrigger,
     ScheduledJob,
     ScheduleKind,
 )
 from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
+from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
 from console_backend.services.watch_evaluator import WatchOutcome
 from console_backend.services.scheduler_engine import SchedulerEngine
 from console_backend.services.scheduler_token_service import SchedulerTokenService
+from console_backend.utils.a2a_dispatch import AgentUnreachable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-
-def _make_job(
-    job_id: int = 1,
-    user_id: str = "user-abc",
-    job_type: JobType = JobType.TASK,
-    sub_agent_id: int | None = 42,
-    schedule_kind: ScheduleKind = ScheduleKind.INTERVAL,
-    interval_seconds: int | None = 3600,
-    destroy_after_trigger: bool = True,
-    max_failures: int = 3,
-    consecutive_failures: int = 0,
-    delivery_channel_id: int | None = None,
-) -> ScheduledJob:
-    now = datetime.now(timezone.utc)
-    return ScheduledJob(
-        id=job_id,
-        user_id=user_id,
-        sub_agent_id=sub_agent_id,
-        name="Test Job",
-        job_type=job_type,
-        schedule_kind=schedule_kind,
-        interval_seconds=interval_seconds,
-        next_run_at=now + timedelta(hours=1),
-        prompt="Do something",
-        destroy_after_trigger=destroy_after_trigger,
-        enabled=True,
-        max_failures=max_failures,
-        consecutive_failures=consecutive_failures,
-        delivery_channel_id=delivery_channel_id,
-        created_at=now,
-        updated_at=now,
-    )
+from tests.scheduler_helpers import job_retry_at, make_job, run_status, seed_job, seed_run
 
 
 def _make_engine(
@@ -214,160 +186,144 @@ class TestParseResult:
         assert status == JobRunStatus.FAILED
 
 
+def _pg_engine(pg_session: AsyncSession) -> SchedulerEngine:
+    """An engine on a real repository: the sweep is SQL, and a mocked repo would assert nothing."""
+    return _make_engine(repo=ScheduledJobRepository(), db_session_factory=make_pg_session_factory(pg_session))
+
+
 class TestHealStuckRuns:
     """Tests for SchedulerEngine._heal_stuck_runs() using pg_session."""
 
     @pytest.mark.asyncio
-    async def test_marks_old_running_runs_as_failed(self, pg_session: AsyncSession):
-        """Runs stuck in 'running' past STUCK_RUN_THRESHOLD are marked 'failed'."""
-        # Insert prerequisite: user + job
-        user_id = "heal-user-1"
-        await pg_session.execute(
-            text(
-                "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status) VALUES (:id, :sub, :email, :fn, :ln, false, 'member', 'active')"
-            ),
-            {"id": user_id, "sub": "heal-sub-1", "email": "heal1@test.com", "fn": "Heal", "ln": "Test"},
+    async def test_sweeps_on_staleness_not_age(self, pg_session: AsyncSession):
+        """A run is swept when its heartbeat goes stale — not merely because it is old."""
+        job_id = await seed_job(pg_session, "heal-stale")
+        # Dispatcher stopped reporting an hour ago.
+        stale_run_id = await seed_run(
+            pg_session, job_id, started_at="NOW() - INTERVAL '2 hours'", last_seen_at="NOW() - INTERVAL '1 hour'"
         )
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO scheduled_jobs
-                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, cel_expr)
-                VALUES
-                    (:uid, 'Heal Job', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result != null')
-                RETURNING id
-            """),
-            {"uid": user_id},
+        # Running for two hours and still reporting: a slow job, not an abandoned one.
+        # Under the old age-based bound this run was swept while the agent worked.
+        long_lived_run_id = await seed_run(
+            pg_session, job_id, started_at="NOW() - INTERVAL '2 hours'", last_seen_at="NOW() - INTERVAL '5 seconds'"
         )
-        job_id = result.mappings().first()["id"]
-
-        # Insert a run that started well past the threshold (stuck)
-        stale_started = datetime.now(timezone.utc) - timedelta(minutes=45)
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO scheduled_job_runs (job_id, started_at, status)
-                VALUES (:job_id, :started_at, 'running')
-                RETURNING id
-            """),
-            {"job_id": job_id, "started_at": stale_started},
-        )
-        stale_run_id = result.mappings().first()["id"]
-
-        # Insert a fresh run (only 1 minute ago — should not be healed)
-        fresh_started = datetime.now(timezone.utc) - timedelta(minutes=1)
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO scheduled_job_runs (job_id, started_at, status)
-                VALUES (:job_id, :started_at, 'running')
-                RETURNING id
-            """),
-            {"job_id": job_id, "started_at": fresh_started},
-        )
-        fresh_run_id = result.mappings().first()["id"]
         await pg_session.commit()
 
-        engine = _make_engine(db_session_factory=make_pg_session_factory(pg_session))
+        await _pg_engine(pg_session)._heal_stuck_runs()
 
+        assert await run_status(pg_session, stale_run_id) == "interrupted"
+        assert await run_status(pg_session, long_lived_run_id) == "running"
+        # The interruption owes the job a fresh attempt.
+        assert await job_retry_at(pg_session, job_id) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_heartbeatless_run_keeps_the_old_age_bound(self, pg_session: AsyncSession):
+        """A row with no heartbeat was written by the previous release, whose process may
+        still be executing it during a rolling deploy. It is judged by age, generously."""
+        job_id = await seed_job(pg_session, "heal-legacy")
+        recent_legacy = await seed_run(pg_session, job_id, started_at="NOW() - INTERVAL '5 minutes'", last_seen_at=None)
+        old_legacy = await seed_run(pg_session, job_id, started_at="NOW() - INTERVAL '2 hours'", last_seen_at=None)
+        await pg_session.commit()
+
+        await _pg_engine(pg_session)._heal_stuck_runs()
+
+        assert await run_status(pg_session, recent_legacy) == "running", "60s stale would have swept a live run"
+        assert await run_status(pg_session, old_legacy) == "interrupted"
+
+    @pytest.mark.asyncio
+    async def test_in_flight_runs_are_never_swept(self, pg_session: AsyncSession):
+        """A run this process is dispatching is excluded regardless of its heartbeat."""
+        job_id = await seed_job(pg_session, "heal-inflight")
+        run_id = await seed_run(
+            pg_session, job_id, started_at="NOW() - INTERVAL '2 hours'", last_seen_at="NOW() - INTERVAL '1 hour'"
+        )
+        await pg_session.commit()
+
+        engine = _pg_engine(pg_session)
+        engine._in_flight.add(run_id)
         await engine._heal_stuck_runs()
 
-        # Stale run should now be 'failed'
-        r = await pg_session.execute(text("SELECT status FROM scheduled_job_runs WHERE id = :id"), {"id": stale_run_id})
-        assert r.scalar_one() == "failed"
+        assert await run_status(pg_session, run_id) == "running"
 
-        # Fresh run should remain 'running'
-        r = await pg_session.execute(text("SELECT status FROM scheduled_job_runs WHERE id = :id"), {"id": fresh_run_id})
-        assert r.scalar_one() == "running"
+    @pytest.mark.asyncio
+    async def test_interrupted_retry_earns_no_second_retry(self, pg_session: AsyncSession):
+        """An interruption buys one fresh attempt; a retry that is interrupted buys none,
+        and owes the user a notice instead."""
+        job_id = await seed_job(pg_session, "heal-retry")
+        retry_run_id = await seed_run(
+            pg_session,
+            job_id,
+            started_at="NOW() - INTERVAL '2 hours'",
+            last_seen_at="NOW() - INTERVAL '1 hour'",
+            trigger="retry",
+        )
+        await pg_session.commit()
+
+        await _pg_engine(pg_session)._heal_stuck_runs()
+
+        assert await run_status(pg_session, retry_run_id) == "interrupted"
+        assert await job_retry_at(pg_session, job_id) is None
+        r = await pg_session.execute(
+            text("SELECT notice_due_at FROM scheduled_job_runs WHERE id = :id"), {"id": retry_run_id}
+        )
+        assert r.scalar_one() is not None
+
+    @pytest.mark.asyncio
+    async def test_interrupted_manual_run_earns_nothing(self, pg_session: AsyncSession):
+        """The user was present for a run-now and can press again; reviving it through the
+        claim path would turn a test press into a scheduled execution."""
+        job_id = await seed_job(pg_session, "heal-manual")
+        manual_run_id = await seed_run(
+            pg_session,
+            job_id,
+            started_at="NOW() - INTERVAL '2 hours'",
+            last_seen_at="NOW() - INTERVAL '1 hour'",
+            trigger="manual",
+        )
+        await pg_session.commit()
+
+        await _pg_engine(pg_session)._heal_stuck_runs()
+
+        assert await run_status(pg_session, manual_run_id) == "interrupted"
+        assert await job_retry_at(pg_session, job_id) is None
+        r = await pg_session.execute(
+            text("SELECT notice_due_at FROM scheduled_job_runs WHERE id = :id"), {"id": manual_run_id}
+        )
+        assert r.scalar_one() is None
 
     @pytest.mark.asyncio
     async def test_heal_does_not_touch_completed_runs(self, pg_session: AsyncSession):
         """Completed runs are not affected by healing."""
-        user_id = "heal-user-2"
-        await pg_session.execute(
-            text(
-                "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status) VALUES (:id, :sub, :email, :fn, :ln, false, 'member', 'active')"
-            ),
-            {"id": user_id, "sub": "heal-sub-2", "email": "heal2@test.com", "fn": "Heal", "ln": "Two"},
+        job_id = await seed_job(pg_session, "heal-done")
+        old_success_run_id = await seed_run(
+            pg_session, job_id, status="success", started_at="NOW() - INTERVAL '45 minutes'", completed_at="NOW()"
         )
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO scheduled_jobs
-                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, cel_expr)
-                VALUES
-                    (:uid, 'Heal Job 2', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result != null')
-                RETURNING id
-            """),
-            {"uid": user_id},
-        )
-        job_id = result.mappings().first()["id"]
-
-        stale_started = datetime.now(timezone.utc) - timedelta(minutes=45)
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO scheduled_job_runs (job_id, started_at, completed_at, status)
-                VALUES (:job_id, :started_at, NOW(), 'success')
-                RETURNING id
-            """),
-            {"job_id": job_id, "started_at": stale_started},
-        )
-        old_success_run_id = result.mappings().first()["id"]
         await pg_session.commit()
 
-        engine = _make_engine(db_session_factory=make_pg_session_factory(pg_session))
-        await engine._heal_stuck_runs()
+        await _pg_engine(pg_session)._heal_stuck_runs()
 
-        # Old success run should remain 'success'
-        r = await pg_session.execute(
-            text("SELECT status FROM scheduled_job_runs WHERE id = :id"), {"id": old_success_run_id}
-        )
-        assert r.scalar_one() == "success"
+        assert await run_status(pg_session, old_success_run_id) == "success"
 
     @pytest.mark.asyncio
-    async def test_in_flight_run_is_never_healed(self, pg_session: AsyncSession):
-        """A dispatch this process is still running is not stuck, however long it takes.
-
-        The healer runs on every tick now, so without this exclusion a slow agent would
-        have its own run marked failed underneath it — and then overwrite that verdict
-        when it finished.
-        """
-        user_id = "heal-user-3"
-        await pg_session.execute(
-            text(
-                "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status) VALUES (:id, :sub, :email, :fn, :ln, false, 'member', 'active')"
-            ),
-            {"id": user_id, "sub": "heal-sub-3", "email": "heal3@test.com", "fn": "Heal", "ln": "Three"},
+    async def test_a_swept_run_stays_swept_when_its_dispatcher_finishes(self, pg_session: AsyncSession):
+        """If the healer was wrong and the dispatcher was merely slow to report, its late
+        completion must not flip the row back: the retry is already on its way, and a
+        row reading 'success' would hide that the job ran twice."""
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "heal-late")
+        run_id = await seed_run(
+            pg_session, job_id, started_at="NOW() - INTERVAL '10 minutes'", last_seen_at="NOW() - INTERVAL '5 minutes'"
         )
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO scheduled_jobs
-                    (user_id, name, job_type, schedule_kind, interval_seconds, next_run_at, enabled, max_failures, consecutive_failures, destroy_after_trigger, check_tool, cel_expr)
-                VALUES
-                    (:uid, 'Heal Job 3', 'watch', 'interval', 3600, NOW() + INTERVAL '1 hour', true, 3, 0, true, 'ping_tool', 'result != null')
-                RETURNING id
-            """),
-            {"uid": user_id},
-        )
-        job_id = result.mappings().first()["id"]
-
-        long_started = datetime.now(timezone.utc) - timedelta(hours=3)
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO scheduled_job_runs (job_id, started_at, status)
-                VALUES (:job_id, :started_at, 'running')
-                RETURNING id
-            """),
-            {"job_id": job_id, "started_at": long_started},
-        )
-        live_run_id = result.mappings().first()["id"]
         await pg_session.commit()
 
-        engine = _make_engine(db_session_factory=make_pg_session_factory(pg_session))
-        engine._in_flight.add(live_run_id)
+        await _pg_engine(pg_session)._heal_stuck_runs()
+        assert await run_status(pg_session, run_id) == "interrupted"
 
-        await engine._heal_stuck_runs()
+        changed = await repo.complete_run(pg_session, run_id, JobRunStatus.SUCCESS, delivered=True)
+        await pg_session.commit()
 
-        r = await pg_session.execute(
-            text("SELECT status FROM scheduled_job_runs WHERE id = :id"), {"id": live_run_id}
-        )
-        assert r.scalar_one() == "running"
+        assert changed is False
+        assert await run_status(pg_session, run_id) == "interrupted"
 
 
 class TestFinalizeAdvancesDespiteRunWriteFailure:
@@ -386,7 +342,7 @@ class TestFinalizeAdvancesDespiteRunWriteFailure:
         repo.complete_run = AsyncMock(side_effect=RuntimeError("column does not exist"))
 
         engine = _make_engine(repo=repo)
-        job = _make_job(job_id=77, schedule_kind=ScheduleKind.INTERVAL, interval_seconds=3600)
+        job = make_job(job_id=77, schedule_kind=ScheduleKind.INTERVAL, interval_seconds=3600)
 
         # Must not raise: the caller has nothing useful to do with a bookkeeping failure.
         await engine._finalize(run_id=99, job=job, status=JobRunStatus.SUCCESS)
@@ -397,6 +353,22 @@ class TestFinalizeAdvancesDespiteRunWriteFailure:
         assert kwargs["next_run_at"] > datetime.now(timezone.utc)
 
     @pytest.mark.asyncio
+    async def test_a_run_that_cannot_be_recorded_is_still_closed(self):
+        """Left 'running', the healer would call it interrupted and re-execute a job whose
+        result the user already has. The fallback touches only columns the table has
+        always had — the write that shaped this code failed on a column it did not."""
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.complete_job = AsyncMock()
+        repo.complete_run = AsyncMock(side_effect=RuntimeError("column does not exist"))
+        repo.close_run_minimally = AsyncMock()
+
+        engine = _make_engine(repo=repo)
+        await engine._finalize(run_id=99, job=make_job(), status=JobRunStatus.SUCCESS)
+
+        repo.close_run_minimally.assert_awaited_once()
+        assert repo.close_run_minimally.call_args[0][1:3] == (99, JobRunStatus.SUCCESS)
+
+    @pytest.mark.asyncio
     async def test_schedule_advances_before_the_run_is_recorded(self):
         """Ordering, not just independence — the advance cannot be the write's hostage."""
         calls: list[str] = []
@@ -405,7 +377,7 @@ class TestFinalizeAdvancesDespiteRunWriteFailure:
         repo.complete_run = AsyncMock(side_effect=lambda **_: calls.append("run"))
 
         engine = _make_engine(repo=repo)
-        await engine._finalize(run_id=1, job=_make_job(), status=JobRunStatus.SUCCESS)
+        await engine._finalize(run_id=1, job=make_job(), status=JobRunStatus.SUCCESS)
 
         assert calls == ["job", "run"]
 
@@ -425,7 +397,7 @@ class TestDispatchJobNoToken:
         token_service.get_access_token.side_effect = ValueError("No offline token stored")
 
         engine = _make_engine(repo=repo, token_service=token_service)
-        job = _make_job()
+        job = make_job()
 
         await engine._dispatch_job(job)
 
@@ -478,22 +450,24 @@ class TestFinalizeJobState:
         kwargs = repo.complete_job.call_args[1]
         # Once job: compute_next_run returns None → next_run_at=None → disabled
         assert kwargs["next_run_at"] is None
-        assert kwargs["success"] is True
+        assert kwargs["status"] is JobRunStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_failure_increments_passed_to_repo(self):
-        """On failure, success=False is passed so the repo can increment consecutive_failures."""
+        """On failure the status reaches the repo, which is what increments consecutive_failures."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
         repo.complete_job = AsyncMock()
 
         engine = _make_engine(repo=repo)
-        interval_job = _make_job(schedule_kind=ScheduleKind.INTERVAL, interval_seconds=300)
+        interval_job = make_job(schedule_kind=ScheduleKind.INTERVAL, interval_seconds=300)
 
         await engine._finalize(run_id=5, job=interval_job, status=JobRunStatus.FAILED, error_message="Oops")
 
         kwargs = repo.complete_job.call_args[1]
-        assert kwargs["success"] is False
+        assert kwargs["status"] is JobRunStatus.FAILED
+        # A failure is not an interruption: no fresh attempt is owed.
+        assert kwargs["retry_at"] is None
 
     @pytest.mark.asyncio
     async def test_condition_not_met_counts_as_success(self):
@@ -503,12 +477,12 @@ class TestFinalizeJobState:
         repo.complete_job = AsyncMock()
 
         engine = _make_engine(repo=repo)
-        watch_job = _make_job(job_type=JobType.WATCH, schedule_kind=ScheduleKind.INTERVAL, interval_seconds=60)
+        watch_job = make_job(job_type=JobType.WATCH, schedule_kind=ScheduleKind.INTERVAL, interval_seconds=60)
 
         await engine._finalize(run_id=2, job=watch_job, status=JobRunStatus.CONDITION_NOT_MET)
 
         kwargs = repo.complete_job.call_args[1]
-        assert kwargs["success"] is True
+        assert kwargs["status"] is JobRunStatus.CONDITION_NOT_MET
 
     @pytest.mark.asyncio
     async def test_destroy_after_trigger_disables_watch_job(self):
@@ -527,7 +501,7 @@ class TestFinalizeJobState:
 
         engine = _make_engine(repo=repo, db_session_factory=factory)
 
-        watch_job = _make_job(
+        watch_job = make_job(
             job_type=JobType.WATCH,
             schedule_kind=ScheduleKind.INTERVAL,
             interval_seconds=60,
@@ -559,7 +533,7 @@ class TestFinalizeJobState:
 
         engine = _make_engine(repo=repo, db_session_factory=factory)
 
-        watch_job = _make_job(
+        watch_job = make_job(
             job_type=JobType.WATCH,
             schedule_kind=ScheduleKind.INTERVAL,
             interval_seconds=60,
@@ -581,7 +555,7 @@ class TestFinalizeJobState:
         repo.complete_job = AsyncMock()
 
         engine = _make_engine(repo=repo)
-        interval_job = _make_job()
+        interval_job = make_job()
 
         reason = "No offline token stored. User must re-grant scheduler consent."
         await engine._finalize(
@@ -605,7 +579,7 @@ class TestFinalizeJobState:
         socket_manager.send_notification = AsyncMock(return_value=True)
 
         engine = _make_engine(repo=repo, socket_manager=socket_manager)
-        job = _make_job(user_id="notify-user")
+        job = make_job(user_id="notify-user")
 
         await engine._finalize(run_id=8, job=job, status=JobRunStatus.SUCCESS)
 
@@ -643,7 +617,7 @@ class TestDispatchErrorHandling:
             "console_backend.services.scheduler_engine.dispatch_streaming",
             new=AsyncMock(side_effect=http_error),
         ):
-            await engine._dispatch_job(_make_job(), run_id=99)
+            await engine._dispatch_job(make_job(), run_id=99)
 
         repo.complete_run.assert_awaited_once()
         kwargs = repo.complete_run.await_args.kwargs
@@ -667,12 +641,83 @@ class TestDispatchErrorHandling:
             "console_backend.services.scheduler_engine.dispatch_streaming",
             new=AsyncMock(side_effect=RuntimeError("assessor exploded")),
         ):
-            await engine._dispatch_job(_make_job(), run_id=99)
+            await engine._dispatch_job(make_job(), run_id=99)
 
         repo.complete_run.assert_awaited_once()
         kwargs = repo.complete_run.await_args.kwargs
         assert kwargs["status"] == JobRunStatus.FAILED
         assert "assessor exploded" in (kwargs["error_message"] or "")
+
+
+class TestInterruptionIsDecidedByTheDispatch:
+    """Only dispatch_streaming can say the agent died. It says so with AgentUnreachable;
+    everything else that goes wrong on the way to it is a failure of the run."""
+
+    @staticmethod
+    def _engine(token_error: Exception | None = None) -> tuple[SchedulerEngine, AsyncMock]:
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run = AsyncMock(return_value=99)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        if token_error is None:
+            token_service.get_access_token = AsyncMock(return_value="token-xyz")
+        else:
+            token_service.get_access_token = AsyncMock(side_effect=token_error)
+        return _make_engine(repo=repo, token_service=token_service), repo
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_runner_interrupts_a_scheduled_run_and_earns_a_retry(self):
+        engine, repo = self._engine()
+        with patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            new=AsyncMock(side_effect=AgentUnreachable("connection refused")),
+        ):
+            await engine._dispatch_job(make_job(), run_id=99)
+
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.INTERRUPTED
+        assert repo.complete_run.await_args.kwargs["notice_due_at"] is None, "the first loss is not news"
+        assert repo.complete_job.await_args.kwargs["retry_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_an_interrupted_retry_owes_a_notice_and_no_further_retry(self):
+        engine, repo = self._engine()
+        with patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            new=AsyncMock(side_effect=AgentUnreachable("connection refused")),
+        ):
+            await engine._dispatch_job(make_job(), run_id=99, trigger=RunTrigger.RETRY)
+
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.INTERRUPTED
+        assert repo.complete_run.await_args.kwargs["notice_due_at"] is not None
+        assert repo.complete_job.await_args.kwargs["retry_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_interrupted_manual_run_earns_neither(self):
+        """The user pressed Run Now and is present; a retry would turn a test press into a
+        scheduled execution, and a notice would tell them what they watched happen."""
+        engine, repo = self._engine()
+        with patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            new=AsyncMock(side_effect=AgentUnreachable("connection refused")),
+        ):
+            await engine.run_job_now(make_job(), run_id=99)
+
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.INTERRUPTED
+        assert repo.complete_run.await_args.kwargs["notice_due_at"] is None
+        assert repo.complete_job.await_args.kwargs["retry_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_transport_error_before_the_dispatch_is_a_failure(self):
+        """Keycloak refusing the token refresh is not the agent dying: nothing was
+        running, so it counts against the job like any other failure."""
+        engine, repo = self._engine(
+            token_error=httpx.ConnectError("keycloak down", request=httpx.Request("POST", "http://keycloak/"))
+        )
+        with patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+            await engine._dispatch_job(make_job(), run_id=99)
+
+        dispatch.assert_not_called()
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.FAILED
+        assert repo.complete_job.await_args.kwargs["retry_at"] is None
 
 
 class TestFinalizeInvalidTimezone:
@@ -689,7 +734,7 @@ class TestFinalizeInvalidTimezone:
         repo.complete_job = AsyncMock()
 
         engine = _make_engine(repo=repo)
-        job = _make_job(schedule_kind=ScheduleKind.CRON, interval_seconds=None)
+        job = make_job(schedule_kind=ScheduleKind.CRON, interval_seconds=None)
         job.cron_expr = "0 8 * * *"
         job.timezone = "Zurich"  # migrated verbatim from unvalidated user settings
 
@@ -716,7 +761,7 @@ class TestBuildMessageArgs:
     @pytest.mark.asyncio
     async def test_a_triggered_watch_with_an_agent_carries_instruction_and_result(self):
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH)
+        job = make_job(job_type=JobType.WATCH)
         job.check_tool = "ping_tool"
         job.cel_expr = "result.status != ''"
         job.timezone = "Europe/Zurich"
@@ -740,7 +785,7 @@ class TestBuildMessageArgs:
     @pytest.mark.asyncio
     async def test_an_agent_without_an_instruction_gets_a_default(self):
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH)
+        job = make_job(job_type=JobType.WATCH)
         job.prompt = ""
         job.check_tool = "ping_tool"
 
@@ -756,7 +801,7 @@ class TestBuildMessageArgs:
     @pytest.mark.asyncio
     async def test_a_notification_only_watch_carries_the_written_message(self):
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
         job.check_tool = "ping_tool"
         job.notification_message = "Sync broke again."
 
@@ -775,7 +820,7 @@ class TestBuildMessageArgs:
         # It used to be written inside the agent run, which is why a watch that only
         # notifies needed an agent at all.
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
         job.check_tool = "ping_tool"
         job.notification_message = ""
 
@@ -804,7 +849,7 @@ class TestBuildMessageArgs:
             "secret": "s3cret",
             "message_formatting": "slack",
         }
-        job = _make_job(delivery_channel_id=3)
+        job = make_job(delivery_channel_id=3)
 
         _, metadata, push_config = await engine._build_message_args(
             job, run_id=7, access_token="tok", db=AsyncMock()
@@ -818,7 +863,7 @@ class TestBuildMessageArgs:
     @pytest.mark.asyncio
     async def test_a_job_without_a_channel_writes_markdown(self):
         engine = _make_engine()
-        job = _make_job(delivery_channel_id=None)
+        job = make_job(delivery_channel_id=None)
 
         _, metadata, push_config = await engine._build_message_args(
             job, run_id=7, access_token="tok", db=AsyncMock()
@@ -836,7 +881,7 @@ class TestBuildMessageArgs:
             "secret": "s3cret",
             "message_formatting": "slack",
         }
-        job = _make_job(delivery_channel_id=3).model_copy(update={"voice_call": True})
+        job = make_job(delivery_channel_id=3).model_copy(update={"voice_call": True})
 
         with patch.object(engine, "_resolve_voice_agent_id", AsyncMock(return_value=77)):
             _, metadata, _ = await engine._build_message_args(
@@ -854,7 +899,7 @@ class TestBuildMessageArgs:
             "secret": "s3cret",
             "message_formatting": "slack",
         }
-        job = _make_job(delivery_channel_id=3).model_copy(update={"voice_call": True})
+        job = make_job(delivery_channel_id=3).model_copy(update={"voice_call": True})
 
         with patch.object(engine, "_resolve_voice_agent_id", AsyncMock(return_value=None)):
             _, metadata, _ = await engine._build_message_args(
@@ -873,7 +918,7 @@ class TestWatchEvaluatedBeforeDispatch:
 
     @staticmethod
     def _watch_job(**overrides) -> ScheduledJob:
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None, **overrides)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None, **overrides)
         return job.model_copy(
             update={
                 "check_tool": "naonous_get_campaign",
@@ -1001,7 +1046,7 @@ class TestVoiceCallDispatch:
 
     @staticmethod
     def _watch_job(**overrides) -> ScheduledJob:
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None, **overrides)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None, **overrides)
         return job.model_copy(
             update={"check_tool": "naonous_get_campaign", "cel_expr": "result.status", "voice_call": True}
         )
@@ -1062,7 +1107,7 @@ class TestVoiceCallDispatch:
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run.return_value = 22
         engine = _make_engine(repo=repo)
-        job = _make_job(job_type=JobType.TASK, sub_agent_id=42).model_copy(update={"voice_call": True})
+        job = make_job(job_type=JobType.TASK, sub_agent_id=42).model_copy(update={"voice_call": True})
         call = await self._dispatch(engine, job, None)
 
         assert call["metadata"]["sub_agent_id"] == 99
@@ -1086,6 +1131,92 @@ class TestVoiceCallDispatch:
         dispatch.assert_not_called()
 
 
+class TestAttributionScope:
+    """Every gateway call a dispatch makes bills to the job's owner and the job.
+
+    Both LLM calls on this path (the watch judge, the notification writer) used to run
+    inside the agent, where the SDK's attribution ContextVars carried the owner and the
+    job id for free. Moving the decision into the scheduler (#166) took them out of that
+    context and nothing replaced it, so the proxy's logger dropped their records and the
+    spend left `usage_logs` entirely. The scope puts them back in it — and covers whatever
+    gateway call this path grows next, without a parameter threaded to it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_dispatch_runs_as_the_job_s_owner(self):
+        seen: dict = {}
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 11
+        engine = _make_engine(repo=repo)
+        job = _make_job()
+
+        async def _snapshot(*args, **kwargs):
+            # What a gateway call made anywhere under the dispatch would stamp.
+            seen.update(current_attribution())
+            return [], {}, None
+
+        with patch("console_backend.services.scheduler_engine.billing_subject", AsyncMock(return_value="oidc-subject")):
+            with patch.object(engine, "_build_message_args", _snapshot):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ):
+                    await engine._dispatch_job(job)
+
+        # scheduled_job_id is not decoration: usage_repository derives the service
+        # dimension from it, so without it this recurring overhead is booked as the
+        # user's own 'orchestrator' spend.
+        assert seen == {"user_sub": "oidc-subject", "scheduled_job_id": job.id, "service": "scheduler"}
+
+    @pytest.mark.asyncio
+    async def test_the_scope_does_not_outlive_the_dispatch(self):
+        """`run_job_now` awaits the dispatch inline from a request handler — a scope left
+        open there would bill the rest of that request to the job."""
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 12
+        engine = _make_engine(repo=repo)
+
+        with patch("console_backend.services.scheduler_engine.billing_subject", AsyncMock(return_value="oidc-subject")):
+            with patch.object(engine, "_build_message_args", AsyncMock(return_value=([], {}, None))):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ):
+                    await engine.run_job_now(_make_job())
+
+        assert current_attribution() == {}
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_owner_still_dispatches(self):
+        """Worse accounting, not a dead job — and the internal id still bills the right
+        person, because the ingest resolves either. Dropping to no subject at all would
+        lose the usage row entirely, which is the failure this whole path is about."""
+        seen: dict = {}
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 13
+        engine = _make_engine(repo=repo)
+        job = _make_job()
+
+        async def _snapshot(*args, **kwargs):
+            seen.update(current_attribution())
+            return [], {}, None
+
+        # What `billing_subject` returns when the subject cannot be read.
+        with patch(
+            "console_backend.services.scheduler_engine.billing_subject",
+            AsyncMock(return_value=job.user_id),
+        ):
+            with patch.object(engine, "_build_message_args", _snapshot):
+                with patch(
+                    "console_backend.services.scheduler_engine.dispatch_streaming",
+                    AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+                ) as dispatch:
+                    await engine._dispatch_job(job)
+
+        dispatch.assert_awaited_once()
+        assert seen == {"user_sub": job.user_id, "scheduled_job_id": job.id, "service": "scheduler"}
+
+
 class TestWriteNotification:
     """Writing the notification for a watch whose author left it empty.
 
@@ -1097,7 +1228,7 @@ class TestWriteNotification:
     @pytest.mark.asyncio
     async def test_the_model_writes_it(self):
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
         chat = AsyncMock(return_value='  "Campaign 4821 stopped syncing."  ')
         with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
             with patch(
@@ -1118,7 +1249,7 @@ class TestWriteNotification:
         # A watch that triggered has something to report; silence would be the worst
         # possible outcome, so the raw result is reported instead.
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
         with patch(
             "console_backend.services.scheduler_engine.gateway_chat",
             AsyncMock(side_effect=RuntimeError("gateway down")),
@@ -1136,7 +1267,7 @@ class TestWriteNotification:
     @pytest.mark.asyncio
     async def test_no_configured_model_still_says_something(self):
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
         with patch(
             "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
             AsyncMock(return_value={}),
@@ -1149,7 +1280,7 @@ class TestWriteNotification:
     @pytest.mark.asyncio
     async def test_an_empty_result_needs_no_model(self):
         engine = _make_engine()
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
         with patch(
             "console_backend.services.scheduler_engine.gateway_chat", AsyncMock()
         ) as chat:
@@ -1163,7 +1294,7 @@ class TestConditionEvaluationIsPersisted:
 
     @staticmethod
     def _watch_job() -> ScheduledJob:
-        job = _make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
         return job.model_copy(update={"check_tool": "t", "cel_expr": "result.status"})
 
     @pytest.mark.asyncio
@@ -1238,6 +1369,6 @@ class TestConditionEvaluationIsPersisted:
             "console_backend.services.scheduler_engine.dispatch_streaming",
             AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
         ):
-            await engine._dispatch_job(_make_job(job_type=JobType.TASK, sub_agent_id=42))
+            await engine._dispatch_job(make_job(job_type=JobType.TASK, sub_agent_id=42))
 
         assert repo.complete_run.call_args[1]["condition_evaluation"] is None

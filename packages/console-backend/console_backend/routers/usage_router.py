@@ -273,6 +273,7 @@ async def get_my_usage_logs(
                     scheduled_job_name=log.get("scheduled_job_name"),
                     catalog_id=str(log["catalog_id"]) if log.get("catalog_id") else None,
                     catalog_name=log.get("catalog_name"),
+                    service=log.get("service"),
                     provider=log["provider"],
                     model_name=log["model_name"],
                     total_cost_usd=log["total_cost_usd"],

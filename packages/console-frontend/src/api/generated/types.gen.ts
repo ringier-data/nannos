@@ -215,6 +215,8 @@ export type AuditLogListResponse = {
 export type AutomatedSubAgentConfig = {
     /**
      * Name
+     *
+     * Agent name must be 1-64 characters, start with a letter, and contain only letters, digits, hyphens and underscores (no spaces)
      */
     name: string;
     /**
@@ -2059,6 +2061,10 @@ export type GatewayUsageLogCreate = {
      */
     catalog_id?: string | null;
     /**
+     * Service
+     */
+    service?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;
@@ -2278,7 +2284,7 @@ export type ImpersonateStartRequest = {
  *
  * Terminal status of a single job execution attempt.
  */
-export type JobRunStatus = 'running' | 'success' | 'failed' | 'condition_not_met';
+export type JobRunStatus = 'running' | 'success' | 'failed' | 'condition_not_met' | 'interrupted';
 
 /**
  * JobType
@@ -4056,6 +4062,16 @@ export type RunNowResponse = {
 };
 
 /**
+ * RunTrigger
+ *
+ * Why a run was started. Decides what its interruption is worth: a SCHEDULED
+ * run earns one RETRY, a RETRY earns the user a notice, a MANUAL run earns
+ * neither — the user is present and can press again. See
+ * docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md.
+ */
+export type RunTrigger = 'scheduled' | 'retry' | 'manual';
+
+/**
  * ScheduleKind
  *
  * How the job is scheduled.
@@ -4110,6 +4126,10 @@ export type ScheduledJob = {
      * Last Run At
      */
     last_run_at?: string | null;
+    /**
+     * Retry At
+     */
+    retry_at?: string | null;
     /**
      * Prompt
      */
@@ -4462,6 +4482,15 @@ export type ScheduledJobRun = {
      */
     delivered: boolean;
     condition_evaluation?: ConditionEvaluation | null;
+    /**
+     * Last Seen At
+     */
+    last_seen_at?: string | null;
+    trigger?: RunTrigger;
+    /**
+     * Notice Due At
+     */
+    notice_due_at?: string | null;
 };
 
 /**
@@ -6158,6 +6187,8 @@ export type SubAgentConfigVersionSummary = {
 export type SubAgentCreate = {
     /**
      * Name
+     *
+     * Agent name must be 1-64 characters, start with a letter, and contain only letters, digits, hyphens and underscores (no spaces)
      */
     name: string;
     /**
@@ -6484,6 +6515,8 @@ export type SubAgentType = 'remote' | 'local' | 'foundry' | 'automated';
 export type SubAgentUpdate = {
     /**
      * Name
+     *
+     * Agent name must be 1-64 characters, start with a letter, and contain only letters, digits, hyphens and underscores (no spaces)
      */
     name?: string | null;
     /**
@@ -7018,6 +7051,10 @@ export type UsageLog = {
      */
     catalog_name?: string | null;
     /**
+     * Service
+     */
+    service?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;
@@ -7091,6 +7128,10 @@ export type UsageLogCreate = {
      * Catalog Id
      */
     catalog_id?: string | null;
+    /**
+     * Service
+     */
+    service?: string | null;
     /**
      * Provider
      */

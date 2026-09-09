@@ -36,6 +36,79 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+# How many model calls one turn may spend. This is the unit the budget is
+# expressed in; app/core/step_budget.py converts it to LangGraph super-steps
+# using the compiled graph, so no multiplier is written down anywhere.
+MAX_MODEL_CALLS_PER_TURN_ENV = "ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN"
+DEFAULT_MAX_MODEL_CALLS_PER_TURN = 25
+MIN_MAX_MODEL_CALLS_PER_TURN = 1
+SANE_MAX_MODEL_CALLS_PER_TURN = 200
+"""Not a limit — only the point above which a value is more likely a typo than an
+intent, and worth a warning because the runaway guard stops being one."""
+
+# Deliberately *not* read any more. `MAX_RECURSION_LIMIT` is a shared env name:
+# ringier-a2a-sdk and agent-runner default it to 50, agent-common's dynamic_agent
+# to 75. One value cannot serve all four -- a deployment pinning 50 (the
+# orchestrator's own former default) would silently reinstate the turn truncation
+# this budget exists to prevent, while an operator exporting a value large enough
+# for the orchestrator would quadruple every sub-agent's runaway-loop bound.
+LEGACY_RECURSION_LIMIT_ENV = "MAX_RECURSION_LIMIT"
+
+
+def _resolve_max_model_calls_per_turn() -> int:
+    """Model calls allowed per turn, warning if the old shared env var is set.
+
+    The legacy name is not honoured, because inheriting it is the bug. Silence
+    would be worse than either choice, so an operator who set it is told that it
+    no longer applies here and what to set instead.
+    """
+    legacy = os.getenv(LEGACY_RECURSION_LIMIT_ENV)
+    if legacy and legacy.strip():
+        logger.warning(
+            "%s=%s is set but no longer configures the orchestrator: it is a shared "
+            "name used by agent-runner, agent-common and ringier-a2a-sdk with "
+            "different defaults, and inheriting a sub-agent's super-step budget is "
+            "what truncated orchestrator turns. Use %s instead -- it is counted in "
+            "model calls, not super-steps.",
+            LEGACY_RECURSION_LIMIT_ENV,
+            legacy,
+            MAX_MODEL_CALLS_PER_TURN_ENV,
+        )
+
+    value = _int_env(MAX_MODEL_CALLS_PER_TURN_ENV, DEFAULT_MAX_MODEL_CALLS_PER_TURN)
+
+    # A budget of 0 or less is not a small budget, it is a broken deployment: the
+    # derived limit collapses to the per-turn overhead, so every request exhausts
+    # it within its first super-steps and the user gets "I've been working on this
+    # for a while and need to take a break" having had no work done at all. Clamp
+    # rather than crash, matching how a malformed value is handled above, but say
+    # so — nothing else in the logs would point at this variable.
+    if value < MIN_MAX_MODEL_CALLS_PER_TURN:
+        logger.warning(
+            "%s=%d is below the minimum of %d and would exhaust the turn budget "
+            "immediately; using %d.",
+            MAX_MODEL_CALLS_PER_TURN_ENV,
+            value,
+            MIN_MAX_MODEL_CALLS_PER_TURN,
+            MIN_MAX_MODEL_CALLS_PER_TURN,
+        )
+        return MIN_MAX_MODEL_CALLS_PER_TURN
+
+    # No clamp at the top end — an operator may legitimately want a long budget —
+    # but a typo'd 2500 becomes ~20k super-steps, which is no runaway protection
+    # at all, and that is worth noticing before it costs a fortune.
+    if value > SANE_MAX_MODEL_CALLS_PER_TURN:
+        logger.warning(
+            "%s=%d is unusually high (over %d model calls per turn). Honouring it, but "
+            "the runaway-loop guard is effectively disabled at this size.",
+            MAX_MODEL_CALLS_PER_TURN_ENV,
+            value,
+            SANE_MAX_MODEL_CALLS_PER_TURN,
+        )
+
+    return value
+
+
 # Message formatting literal for type safety
 
 if TYPE_CHECKING:
@@ -331,8 +404,12 @@ class AgentSettings:
     MAX_RETRIES = 3
     BACKOFF_FACTOR = 3.0
 
-    # Recursion limit configuration (overrides deepagents default of 1000)
-    MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
+    # Turn budget, in model calls (overrides deepagents' recursion_limit default of
+    # 1000). GraphFactory converts this to a super-step limit per compiled graph via
+    # app/core/step_budget.py — the multiplier is the middleware stack's per-call node
+    # cost, which changes whenever a middleware with model hooks is added or removed,
+    # so it is counted from the graph rather than written here.
+    MAX_MODEL_CALLS_PER_TURN = _resolve_max_model_calls_per_turn()
 
     # Toolset selection configuration (used by ToolsetSelectorMiddleware in custom GP graph)
     TOOLSET_SELECTION_THRESHOLD = int(os.getenv("TOOLSET_SELECTION_THRESHOLD", "50"))

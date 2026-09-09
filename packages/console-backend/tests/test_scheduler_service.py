@@ -18,6 +18,7 @@ from console_backend.models.scheduled_job import (
 )
 from console_backend.models.user import User, UserRole, UserSettings, UserStatus
 from console_backend.services.scheduler_service import SchedulerService
+from tests.scheduler_helpers import make_job
 
 
 def _make_user(user_id: str = "user-123") -> User:
@@ -29,36 +30,6 @@ def _make_user(user_id: str = "user-123") -> User:
         last_name="User",
         role=UserRole.MEMBER,
         status=UserStatus.ACTIVE,
-    )
-
-
-def _make_job(
-    job_id: int = 1,
-    user_id: str = "user-123",
-    sub_agent_id: int | None = 42,
-    job_type: JobType = JobType.TASK,
-    schedule_kind: ScheduleKind = ScheduleKind.INTERVAL,
-    interval_seconds: int | None = 3600,
-    cel_expr: str | None = None,
-    llm_condition: str | None = None,
-) -> ScheduledJob:
-    now = datetime.now(timezone.utc)
-    return ScheduledJob(
-        id=job_id,
-        user_id=user_id,
-        sub_agent_id=sub_agent_id,
-        name="Test Job",
-        job_type=job_type,
-        schedule_kind=schedule_kind,
-        interval_seconds=interval_seconds,
-        cel_expr=cel_expr,
-        llm_condition=llm_condition,
-        next_run_at=now + timedelta(hours=1),
-        enabled=True,
-        max_failures=3,
-        consecutive_failures=0,
-        created_at=now,
-        updated_at=now,
     )
 
 
@@ -136,7 +107,7 @@ class TestCreateJobAutoSubAgent:
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
 
         mock_repo.create_job.return_value = 1
-        expected_job = _make_job(job_id=1, sub_agent_id=99)
+        expected_job = make_job(job_id=1, sub_agent_id=99)
         mock_repo.get_job.return_value = expected_job
 
         create_data = ScheduledJobCreate(
@@ -178,7 +149,7 @@ class TestCreateJobAutoSubAgent:
         mock_sub_agent_service.create_sub_agent.return_value = created_agent
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1, sub_agent_id=77)
+        mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=77)
 
         create_data = ScheduledJobCreate(
             sub_agent_id=None,
@@ -214,7 +185,7 @@ class TestCreateJobAutoSubAgent:
         mock_sub_agent_service.create_sub_agent.return_value = created_agent
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1, sub_agent_id=55)
+        mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=55)
 
         create_data = ScheduledJobCreate(
             sub_agent_id=None,
@@ -267,7 +238,7 @@ class TestCreateJobAccessControl:
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1, sub_agent_id=42)
+        mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=42)
 
         result = await service.create_job(
             db=db,
@@ -355,7 +326,7 @@ class TestCreateJobNextRunAt:
         mock_repo.create_job.return_value = 1
 
         before = datetime.now(timezone.utc)
-        returned_job = _make_job(job_id=1)
+        returned_job = make_job(job_id=1)
         mock_repo.get_job.return_value = returned_job
 
         await service.create_job(db=db, data=_make_interval_create(), actor=actor)
@@ -374,7 +345,7 @@ class TestCreateJobNextRunAt:
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1)
+        mock_repo.get_job.return_value = make_job(job_id=1)
 
         run_at = datetime(2027, 6, 15, 8, 0, 0, tzinfo=timezone.utc)
         once_data = ScheduledJobCreate(
@@ -400,10 +371,10 @@ class TestUpdateJobUnsetSentinel:
     ):
         """Fields not passed to update_job() are excluded from the update payload."""
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)
+        existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.return_value = existing_job
         mock_repo.update_job.return_value = None
-        mock_repo.get_job.side_effect = [existing_job, _make_job(user_id=actor.id)]
+        mock_repo.get_job.side_effect = [existing_job, make_job(user_id=actor.id)]
 
         update_data = ScheduledJobUpdate()  # no fields set
         await service.update_job(db=db, job_id=1, data=update_data, actor=actor)
@@ -420,10 +391,10 @@ class TestUpdateJobUnsetSentinel:
     ):
         """Passing name=None explicitly sets the field to None in the update."""
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)
+        existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.return_value = existing_job
         mock_repo.update_job.return_value = None
-        mock_repo.get_job.side_effect = [existing_job, _make_job(user_id=actor.id)]
+        mock_repo.get_job.side_effect = [existing_job, make_job(user_id=actor.id)]
 
         update_data = ScheduledJobUpdate()
         # We pass name=None explicitly — should be included in fields
@@ -443,7 +414,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """update_job() validates delivery_channel_id before the DB FK constraint."""
         db = AsyncMock()
-        mock_repo.get_job.return_value = _make_job(user_id=actor.id)
+        mock_repo.get_job.return_value = make_job(user_id=actor.id)
         mock_delivery_channel_repo.get_channel_by_id.return_value = None
 
         with pytest.raises(ValueError, match="Delivery channel 1 not found"):
@@ -462,7 +433,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """Setting delivery_channel_id=None (clearing) must not trigger an existence check."""
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)
+        existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         mock_repo.update_job.return_value = None
 
@@ -484,7 +455,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """A watch job can be given a sub_agent_id, subject to the access check."""
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id, job_type=JobType.WATCH, sub_agent_id=None)
+        existing_job = make_job(user_id=actor.id, job_type=JobType.WATCH, sub_agent_id=None)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         mock_repo.update_job.return_value = None
         accessible = MagicMock()
@@ -509,7 +480,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """Setting sub_agent_id=None on a watch clears it back to notify-only."""
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id, job_type=JobType.WATCH)
+        existing_job = make_job(user_id=actor.id, job_type=JobType.WATCH)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         mock_repo.update_job.return_value = None
 
@@ -527,7 +498,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """Task jobs require a sub-agent, so clearing it must fail."""
         db = AsyncMock()
-        mock_repo.get_job.return_value = _make_job(user_id=actor.id, job_type=JobType.TASK)
+        mock_repo.get_job.return_value = make_job(user_id=actor.id, job_type=JobType.TASK)
 
         with pytest.raises(ValueError, match="cannot be cleared on a task job"):
             await service.update_job(
@@ -546,7 +517,7 @@ class TestUpdateJobUnsetSentinel:
         check tool on every poll and then fails until it auto-pauses.
         """
         db = AsyncMock()
-        mock_repo.get_job.return_value = _make_job(
+        mock_repo.get_job.return_value = make_job(
             user_id=actor.id, job_type=JobType.WATCH, cel_expr="result.items", llm_condition=None
         )
 
@@ -567,7 +538,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """The guard is about the effective pair, not about clearing as such."""
         db = AsyncMock()
-        existing_job = _make_job(
+        existing_job = make_job(
             user_id=actor.id,
             job_type=JobType.WATCH,
             cel_expr="result.items",
@@ -589,7 +560,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """A task has no condition to keep — the guard is watch-only."""
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id, job_type=JobType.TASK)
+        existing_job = make_job(user_id=actor.id, job_type=JobType.TASK)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         mock_repo.update_job.return_value = None
 
@@ -610,7 +581,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """update_job() returns None when job belongs to a different user."""
         db = AsyncMock()
-        other_user_job = _make_job(user_id="other-user")
+        other_user_job = make_job(user_id="other-user")
         mock_repo.get_job.return_value = other_user_job  # different user
 
         result = await service.update_job(db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor)
@@ -630,7 +601,7 @@ class TestUpdateJobScheduleSwitch:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         db = AsyncMock()
-        existing_job = _make_job(
+        existing_job = make_job(
             user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None
         )
         existing_job.cron_expr = "0 8 * * *"
@@ -654,7 +625,7 @@ class TestUpdateJobScheduleSwitch:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)  # interval job
+        existing_job = make_job(user_id=actor.id)  # interval job
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         mock_repo.update_job.return_value = None
 
@@ -673,7 +644,7 @@ class TestUpdateJobScheduleSwitch:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)  # interval job, run_at unset
+        existing_job = make_job(user_id=actor.id)  # interval job, run_at unset
         mock_repo.get_job.return_value = existing_job
 
         with pytest.raises(ValueError, match="'once' requires run_at"):
@@ -687,7 +658,7 @@ class TestUpdateJobScheduleSwitch:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)  # interval job, cron_expr unset
+        existing_job = make_job(user_id=actor.id)  # interval job, cron_expr unset
         mock_repo.get_job.return_value = existing_job
 
         with pytest.raises(ValueError, match="'cron' requires cron_expr"):
@@ -703,7 +674,7 @@ class TestUpdateJobScheduleSwitch:
         """Regression: the old code checked for schedule fields in the update payload
         BEFORE adding them, so next_run_at was never recomputed on a schedule change."""
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)  # interval 3600s
+        existing_job = make_job(user_id=actor.id)  # interval 3600s
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         mock_repo.update_job.return_value = None
 
@@ -722,7 +693,7 @@ class TestUpdateJobScheduleSwitch:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         db = AsyncMock()
-        existing_job = _make_job(user_id=actor.id)
+        existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         mock_repo.update_job.return_value = None
 
@@ -764,7 +735,7 @@ class TestJobTimezone:
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1)
+        mock_repo.get_job.return_value = make_job(job_id=1)
 
         await service.create_job(db=db, data=self._cron_create(), actor=actor)
 
@@ -786,7 +757,7 @@ class TestJobTimezone:
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1)
+        mock_repo.get_job.return_value = make_job(job_id=1)
 
         await service.create_job(db=db, data=self._cron_create("America/New_York"), actor=actor)
 
@@ -806,7 +777,7 @@ class TestJobTimezone:
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1)
+        mock_repo.get_job.return_value = make_job(job_id=1)
 
         await service.create_job(db=db, data=self._cron_create(), actor=actor)
 
@@ -826,7 +797,7 @@ class TestJobTimezone:
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1)
+        mock_repo.get_job.return_value = make_job(job_id=1)
 
         once_data = ScheduledJobCreate(
             sub_agent_id=42,
@@ -849,7 +820,7 @@ class TestJobTimezone:
         from zoneinfo import ZoneInfo
 
         db = AsyncMock()
-        existing_job = _make_job(
+        existing_job = make_job(
             user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None
         )
         existing_job.cron_expr = "0 8 * * *"
@@ -874,7 +845,7 @@ class TestResumeJob:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         now = datetime.now(timezone.utc)
-        job = _make_job(user_id=actor.id, schedule_kind=ScheduleKind.ONCE, interval_seconds=None)
+        job = make_job(user_id=actor.id, schedule_kind=ScheduleKind.ONCE, interval_seconds=None)
         job.run_at = now - timedelta(hours=1)
         job.next_run_at = job.run_at
         job.enabled = False
@@ -889,7 +860,7 @@ class TestResumeJob:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         now = datetime.now(timezone.utc)
-        job = _make_job(user_id=actor.id, schedule_kind=ScheduleKind.ONCE, interval_seconds=None)
+        job = make_job(user_id=actor.id, schedule_kind=ScheduleKind.ONCE, interval_seconds=None)
         job.run_at = now + timedelta(days=1)
         job.next_run_at = job.run_at
         job.enabled = False
@@ -904,7 +875,7 @@ class TestResumeJob:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         """An unresolvable stored timezone surfaces as ValueError (→ 400), not KeyError (→ 500)."""
-        job = _make_job(user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None)
+        job = make_job(user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None)
         job.cron_expr = "0 8 * * *"
         job.timezone = "Zurich"  # migrated verbatim from unvalidated user settings
         job.enabled = False
@@ -934,7 +905,7 @@ class TestSettingsTimezoneFallback:
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
         mock_repo.create_job.return_value = 1
-        mock_repo.get_job.return_value = _make_job(job_id=1)
+        mock_repo.get_job.return_value = make_job(job_id=1)
 
         data = ScheduledJobCreate(
             sub_agent_id=42,
@@ -984,7 +955,7 @@ class TestGetRun:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         db = AsyncMock()
-        mock_repo.get_job.return_value = _make_job(user_id=actor.id)
+        mock_repo.get_job.return_value = make_job(user_id=actor.id)
         sentinel_run = object()
         mock_repo.get_run.return_value = sentinel_run
 
@@ -998,9 +969,83 @@ class TestGetRun:
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
         db = AsyncMock()
-        mock_repo.get_job.return_value = _make_job(user_id="other-user")
+        mock_repo.get_job.return_value = make_job(user_id="other-user")
 
         result = await service.get_run(db=db, job_id=1, run_id=42, user_id=actor.id)
 
         assert result is None
         mock_repo.get_run.assert_not_awaited()
+
+
+class TestEnabledToggleIsADeliberateStop:
+    """The scheduler tells a deliberate stop from one-shot retirement by paused_reason,
+    and the retry branch of claim_due_jobs trusts that rather than `enabled`. So a
+    PATCH that flips `enabled` must write the reason — and drop any pending retry."""
+
+    @pytest.mark.asyncio
+    async def test_disabling_writes_a_reason_and_drops_the_retry(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        mock_repo.get_job.return_value = make_job(user_id=actor.id)
+
+        await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(enabled=False), actor=actor)
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["enabled"] is False
+        assert fields["paused_reason"], "without a reason a retry would resurrect the disabled job"
+        assert fields["retry_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_enabling_clears_the_reason_and_the_retry(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        job = make_job(user_id=actor.id)
+        job.enabled = False
+        job.paused_reason = "Disabled by user"
+        mock_repo.get_job.return_value = job
+
+        await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(enabled=True), actor=actor)
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["enabled"] is True
+        assert fields["paused_reason"] is None
+        assert fields["retry_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_unrelated_patch_leaves_both_alone(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        mock_repo.get_job.return_value = make_job(user_id=actor.id)
+
+        await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(), actor=actor, name="Renamed")
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert "paused_reason" not in fields
+        assert "retry_at" not in fields
+
+
+class TestPauseAndResumeDropThePendingRetry:
+    """A retry earned while the job was paused must not fire the moment it is resumed."""
+
+    @pytest.mark.asyncio
+    async def test_pause_clears_retry_at(self, service: SchedulerService, mock_repo: AsyncMock, actor: User):
+        mock_repo.get_job.return_value = make_job(user_id=actor.id)
+
+        assert await service.pause_job(db=AsyncMock(), job_id=1, actor=actor) is True
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["retry_at"] is None
+        assert fields["paused_reason"]
+
+    @pytest.mark.asyncio
+    async def test_resume_clears_retry_at(self, service: SchedulerService, mock_repo: AsyncMock, actor: User):
+        job = make_job(user_id=actor.id)
+        job.enabled = False
+        job.paused_reason = "Manually paused"
+        mock_repo.get_job.return_value = job
+
+        assert await service.resume_job(db=AsyncMock(), job_id=1, actor=actor) is True
+
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["retry_at"] is None
+        assert fields["enabled"] is True

@@ -25,6 +25,7 @@ from ..models.scheduled_job import (
     ValidateArgsExprRequest,
     ValidateArgsExprResponse,
     RunNowResponse,
+    RunTrigger,
     ScheduledJob,
     ScheduledJobCreate,
     ScheduledJobDraft,
@@ -46,6 +47,9 @@ from ..services.cel_condition import (
     validate_cel_expression,
 )
 from ..services.llm_gateway import GatewayReplyTruncated, gateway_chat_json
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
+
+from ..services.spend_attribution import SERVICE_CONSOLE
 from ..services.scheduler_engine import SchedulerEngine
 from ..services.scheduler_service import _UNSET, SchedulerService
 from ..utils.timezones import resolve_timezone
@@ -496,101 +500,108 @@ async def generate_job_draft(
             detail="No chat model is configured. An admin must set the 'chat' default in the console.",
         )
 
-    async def _generate(instruction: str) -> dict[str, Any]:
-        return await gateway_chat_json(
-            instruction,
-            model=model,
-            max_tokens=1024,
-            metadata={"user_sub": current_user.sub},  # OIDC subject — the gateway/proxy attributes by sub, not internal id
-            reasoning_effort=_GENERATION_REASONING,
-        )
+    # Everything below is console-backend doing this user's work, so it runs in their
+    # attribution rather than each gateway call being handed a payer: a call added here
+    # later is attributed by construction, and forgetting would not misclassify the spend
+    # but lose it — the proxy discards a record with no subject. `service` because a draft
+    # carries no job id (the job it drafts does not exist yet) and would otherwise be
+    # derived as agent spend.
+    with attribution_scope(user_sub=current_user.sub, service=SERVICE_CONSOLE):
+        async def _generate(instruction: str) -> dict[str, Any]:
+            return await gateway_chat_json(
+                instruction,
+                model=model,
+                max_tokens=1024,
+                # Payer and service come from the scope above.
+                reasoning_effort=_GENERATION_REASONING,
+            )
 
-    try:
-        result = await _generate(prompt)
-    except GatewayReplyTruncated as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_TRUNCATED_DETAIL) from exc
-    except Exception as exc:
-        logger.warning("Watch-param generation via gateway failed: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI generation service unavailable",
-        ) from exc
-
-    # Check the generated expression before it reaches the form. Stating the language
-    # in the prompt reduces the mistake but does not remove it, and an expression that
-    # cannot compile produces a job that looks configured and never fires.
-    result = await _repair_cel(result, prompt, _generate, data.query)
-
-    # A broken dynamic-argument expression is dropped rather than repaired: unlike
-    # the condition, the job is usable without it (the field is simply left for the
-    # user), and the form's live resolution is where the author would refine it.
-    args_exprs = result.get("check_args_exprs")
-    if isinstance(args_exprs, dict):
-        kept: dict[str, str] = {}
-        for key, expr in args_exprs.items():
-            if not isinstance(expr, str) or not expr.strip():
-                continue
-            try:
-                validate_cel_expression(expr)
-                kept[key] = expr
-            except CelSyntaxError as exc:
-                logger.info("Discarding uncompilable generated check_args_exprs[%r] %r: %s", key, expr, exc)
-        result["check_args_exprs"] = kept or None
-
-    # Fields the model is never allowed to set: an inline sub-agent would be created for
-    # real, a voice call places an outbound phone call and is left for the person to tick
-    # deliberately, and the rest are deployment concerns rather than things a sentence
-    # implies. (voice_call was excluded because the old runner would have rung on every
-    # poll; that is no longer true — evaluation happens before dispatch now, so a watch
-    # rings only when its condition is met. It stays excluded for the reason above.)
-    generated = {
-        key: value
-        for key, value in result.items()
-        if key in ScheduledJobDraft.model_fields
-        and key not in ("sub_agent_parameters", "voice_call", "max_failures", "timezone")
-    }
-    # Values that cannot be trusted as given: enums may be invented, ids may point at
-    # something this user cannot reach, and check_args arrives as a JSON string often
-    # enough that ScheduledJobCreate carries a validator for it.
-    generated["job_type"] = _coerce_enum(JobType, result.get("job_type"))
-    generated["schedule_kind"] = _coerce_enum(ScheduleKind, result.get("schedule_kind"))
-    generated["sub_agent_id"] = _coerce_id(result.get("sub_agent_id"), allowed_agent_ids)
-    generated["delivery_channel_id"] = _coerce_id(result.get("delivery_channel_id"), allowed_channel_ids)
-    # A tool name outside the offered set is an invention — the model saw only the
-    # candidates — and would produce a job whose check fails on its first run. The
-    # arguments and condition were written against that invented tool, so they go with
-    # it: the form applies each of them independently, and pre-filled arguments under a
-    # tool the user then picks by hand are exactly the first-run failure being avoided.
-    generated["check_tool"] = _coerce_name(result.get("check_tool"), allowed_tool_names)
-    if generated["check_tool"] is None and result.get("check_tool") is not None:
-        for key in ("check_args", "check_args_exprs", "cel_expr", "llm_condition"):
-            generated.pop(key, None)
-    if isinstance(generated.get("check_args"), str):
         try:
-            generated["check_args"] = json.loads(generated["check_args"])
-        except json.JSONDecodeError:
-            generated["check_args"] = None
+            result = await _generate(prompt)
+        except GatewayReplyTruncated as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_TRUNCATED_DETAIL) from exc
+        except Exception as exc:
+            logger.warning("Watch-param generation via gateway failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="AI generation service unavailable",
+            ) from exc
 
-    draft = _build_draft(generated)
-    # A draft with nothing in it is not "the request implied nothing" — it is a
-    # generation that produced no usable output (no JSON in the reply, or none of the
-    # fields asked for). Rendering that as a 200 left the form silently empty and the
-    # logs silent with it. A draft the model filled only partly is a different outcome
-    # and stays a success. 422 rather than 503, as /generate-condition answers the same
-    # case: the service is up, and a retry-on-503 layer must not re-run a content miss.
-    if not draft.model_fields_set:
-        logger.warning(
-            "Draft generation produced nothing usable for query %r (model %s, %d candidate tools, raw keys %s)",
-            data.query,
-            model,
-            len(candidate_tools),
-            sorted(result),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="The model produced no usable draft — rephrase the request.",
-        )
-    return draft
+        # Check the generated expression before it reaches the form. Stating the language
+        # in the prompt reduces the mistake but does not remove it, and an expression that
+        # cannot compile produces a job that looks configured and never fires.
+        result = await _repair_cel(result, prompt, _generate, data.query)
+
+        # A broken dynamic-argument expression is dropped rather than repaired: unlike
+        # the condition, the job is usable without it (the field is simply left for the
+        # user), and the form's live resolution is where the author would refine it.
+        args_exprs = result.get("check_args_exprs")
+        if isinstance(args_exprs, dict):
+            kept: dict[str, str] = {}
+            for key, expr in args_exprs.items():
+                if not isinstance(expr, str) or not expr.strip():
+                    continue
+                try:
+                    validate_cel_expression(expr)
+                    kept[key] = expr
+                except CelSyntaxError as exc:
+                    logger.info("Discarding uncompilable generated check_args_exprs[%r] %r: %s", key, expr, exc)
+            result["check_args_exprs"] = kept or None
+
+        # Fields the model is never allowed to set: an inline sub-agent would be created for
+        # real, a voice call places an outbound phone call and is left for the person to tick
+        # deliberately, and the rest are deployment concerns rather than things a sentence
+        # implies. (voice_call was excluded because the old runner would have rung on every
+        # poll; that is no longer true — evaluation happens before dispatch now, so a watch
+        # rings only when its condition is met. It stays excluded for the reason above.)
+        generated = {
+            key: value
+            for key, value in result.items()
+            if key in ScheduledJobDraft.model_fields
+            and key not in ("sub_agent_parameters", "voice_call", "max_failures", "timezone")
+        }
+        # Values that cannot be trusted as given: enums may be invented, ids may point at
+        # something this user cannot reach, and check_args arrives as a JSON string often
+        # enough that ScheduledJobCreate carries a validator for it.
+        generated["job_type"] = _coerce_enum(JobType, result.get("job_type"))
+        generated["schedule_kind"] = _coerce_enum(ScheduleKind, result.get("schedule_kind"))
+        generated["sub_agent_id"] = _coerce_id(result.get("sub_agent_id"), allowed_agent_ids)
+        generated["delivery_channel_id"] = _coerce_id(result.get("delivery_channel_id"), allowed_channel_ids)
+        # A tool name outside the offered set is an invention — the model saw only the
+        # candidates — and would produce a job whose check fails on its first run. The
+        # arguments and condition were written against that invented tool, so they go with
+        # it: the form applies each of them independently, and pre-filled arguments under a
+        # tool the user then picks by hand are exactly the first-run failure being avoided.
+        generated["check_tool"] = _coerce_name(result.get("check_tool"), allowed_tool_names)
+        if generated["check_tool"] is None and result.get("check_tool") is not None:
+            for key in ("check_args", "check_args_exprs", "cel_expr", "llm_condition"):
+                generated.pop(key, None)
+        if isinstance(generated.get("check_args"), str):
+            try:
+                generated["check_args"] = json.loads(generated["check_args"])
+            except json.JSONDecodeError:
+                generated["check_args"] = None
+
+        draft = _build_draft(generated)
+        # A draft with nothing in it is not "the request implied nothing" — it is a
+        # generation that produced no usable output (no JSON in the reply, or none of the
+        # fields asked for). Rendering that as a 200 left the form silently empty and the
+        # logs silent with it. A draft the model filled only partly is a different outcome
+        # and stays a success. 422 rather than 503, as /generate-condition answers the same
+        # case: the service is up, and a retry-on-503 layer must not re-run a content miss.
+        if not draft.model_fields_set:
+            logger.warning(
+                "Draft generation produced nothing usable for query %r (model %s, %d candidate tools, raw keys %s)",
+                data.query,
+                model,
+                len(candidate_tools),
+                sorted(result),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The model produced no usable draft — rephrase the request.",
+            )
+        return draft
 
 
 @router.post(
@@ -654,65 +665,67 @@ async def generate_condition(
         "semantic part of the request, if any."
     )
 
-    async def _generate(instruction: str) -> dict[str, Any]:
-        return await gateway_chat_json(
-            instruction,
-            model=model,
-            max_tokens=1024,
-            metadata={"user_sub": current_user.sub},
-            reasoning_effort=_GENERATION_REASONING,
-        )
+    # As in `generate_job_draft`: the request's own work runs in the caller's attribution.
+    with attribution_scope(user_sub=current_user.sub, service=SERVICE_CONSOLE):
+        async def _generate(instruction: str) -> dict[str, Any]:
+            return await gateway_chat_json(
+                instruction,
+                model=model,
+                max_tokens=1024,
+                # Payer and service come from the scope above.
+                reasoning_effort=_GENERATION_REASONING,
+            )
 
-    notes: list[str] = []
-    candidate: dict[str, Any] = {}
-    instruction = prompt
-    verified = False
-    evaluation: dict[str, Any] | None = None
-    for _ in range(1 + _GENERATE_CONDITION_RETRIES):
-        try:
-            candidate = await _generate(instruction)
-        except GatewayReplyTruncated as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_TRUNCATED_DETAIL) from exc
-        except Exception as exc:
-            logger.warning("Condition generation via gateway failed: %s", exc)
+        notes: list[str] = []
+        candidate: dict[str, Any] = {}
+        instruction = prompt
+        verified = False
+        evaluation: dict[str, Any] | None = None
+        for _ in range(1 + _GENERATE_CONDITION_RETRIES):
+            try:
+                candidate = await _generate(instruction)
+            except GatewayReplyTruncated as exc:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_TRUNCATED_DETAIL) from exc
+            except Exception as exc:
+                logger.warning("Condition generation via gateway failed: %s", exc)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="AI generation service unavailable",
+                ) from exc
+            cel_expr = candidate.get("cel_expr")
+            cel_expr = cel_expr if isinstance(cel_expr, str) and cel_expr.strip() else None
+            candidate["cel_expr"] = cel_expr
+            verified, evaluation, error = await _verify_candidate(cel_expr, data.result)
+            if verified:
+                break
+            logger.info("Generated cel_expr %r rejected: %s — retrying", cel_expr, error)
+            instruction = (
+                f"{prompt}\n\nYour previous answer used cel_expr {cel_expr!r}, but {error}\n"
+                "Return the whole JSON object again with a corrected expression."
+            )
+        else:
+            notes.append(
+                "The expression could not be verified — it is returned as the best "
+                "candidate, but check it in the tester before saving."
+            )
+
+        llm_condition = candidate.get("llm_condition")
+        llm_condition = llm_condition if isinstance(llm_condition, str) and llm_condition.strip() else None
+        if not candidate.get("cel_expr") and not llm_condition:
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="AI generation service unavailable",
-            ) from exc
-        cel_expr = candidate.get("cel_expr")
-        cel_expr = cel_expr if isinstance(cel_expr, str) and cel_expr.strip() else None
-        candidate["cel_expr"] = cel_expr
-        verified, evaluation, error = await _verify_candidate(cel_expr, data.result)
-        if verified:
-            break
-        logger.info("Generated cel_expr %r rejected: %s — retrying", cel_expr, error)
-        instruction = (
-            f"{prompt}\n\nYour previous answer used cel_expr {cel_expr!r}, but {error}\n"
-            "Return the whole JSON object again with a corrected expression."
-        )
-    else:
-        notes.append(
-            "The expression could not be verified — it is returned as the best "
-            "candidate, but check it in the tester before saving."
-        )
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The model produced no usable condition — rephrase the request.",
+            )
+        if verified and evaluation is None and candidate.get("cel_expr") and data.result is None:
+            notes.append("Compiled, but not evaluated: run the check first to verify against a real response.")
 
-    llm_condition = candidate.get("llm_condition")
-    llm_condition = llm_condition if isinstance(llm_condition, str) and llm_condition.strip() else None
-    if not candidate.get("cel_expr") and not llm_condition:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="The model produced no usable condition — rephrase the request.",
+        return GenerateConditionResponse(
+            cel_expr=candidate.get("cel_expr"),
+            llm_condition=llm_condition,
+            verified=verified,
+            evaluation=evaluation,
+            notes=notes,
         )
-    if verified and evaluation is None and candidate.get("cel_expr") and data.result is None:
-        notes.append("Compiled, but not evaluated: run the check first to verify against a real response.")
-
-    return GenerateConditionResponse(
-        cel_expr=candidate.get("cel_expr"),
-        llm_condition=llm_condition,
-        verified=verified,
-        evaluation=evaluation,
-        notes=notes,
-    )
 
 
 @router.post(
@@ -1011,7 +1024,9 @@ async def run_job_now(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     engine: SchedulerEngine = request.app.state.scheduler_engine
-    run_id: int = await engine._repo.create_run(db, job_id)
+    # Recorded as MANUAL so that, should it be interrupted, neither _finalize nor the
+    # healer treats a test press as a scheduled occurrence owed a retry.
+    run_id: int = await engine._repo.create_run(db, job_id, trigger=RunTrigger.MANUAL)
     await db.commit()
     background_tasks.add_task(engine.run_job_now, job, run_id)
     return RunNowResponse(job_id=job_id, run_id=run_id)
