@@ -30,6 +30,7 @@ class UsageRepository:
         langsmith_run_id: str | None = None,
         langsmith_trace_id: str | None = None,
         catalog_id: str | None = None,
+        service: str | None = None,
     ) -> int:
         """
         Create a usage log with billing unit details.
@@ -48,6 +49,7 @@ class UsageRepository:
             sub_agent_config_version_id: Optional sub-agent config version ID
             langsmith_run_id: Optional LangSmith run ID
             langsmith_trace_id: Optional LangSmith trace ID
+            service: Optional service whose own work this was; None → derived at read time
 
         Returns:
             ID of created usage log
@@ -57,12 +59,12 @@ class UsageRepository:
             INSERT INTO usage_logs (
                 user_id, conversation_id, sub_agent_id, scheduled_job_id, sub_agent_config_version_id,
                 provider, model_name, total_cost_usd,
-                langsmith_run_id, langsmith_trace_id, invoked_at, catalog_id
+                langsmith_run_id, langsmith_trace_id, invoked_at, catalog_id, service
             )
             VALUES (
                 :user_id, :conversation_id, :sub_agent_id, :scheduled_job_id, :sub_agent_config_version_id,
                 :provider, :model_name, :total_cost_usd,
-                :langsmith_run_id, :langsmith_trace_id, :invoked_at, :catalog_id
+                :langsmith_run_id, :langsmith_trace_id, :invoked_at, :catalog_id, :service
             )
             RETURNING id
         """)
@@ -82,6 +84,7 @@ class UsageRepository:
                 "langsmith_trace_id": langsmith_trace_id,
                 "invoked_at": invoked_at,
                 "catalog_id": catalog_id,
+                "service": service,
             },
         )
         usage_log_id = result.scalar_one()
@@ -406,10 +409,15 @@ class UsageRepository:
         """
         Get usage breakdown by service type (orchestrator, catalog, scheduler).
 
-        Classification logic:
-        - scheduled_job_id IS NOT NULL → 'scheduler'
-        - catalog_id IS NOT NULL AND conversation_id IS NULL → 'catalog'
-        - otherwise → 'orchestrator'
+        Classification: the `service` a caller declared, else derived from whichever id is
+        set — `scheduled_job_id` → 'scheduler', `catalog_id` without a conversation →
+        'catalog', otherwise 'orchestrator'.
+
+        The derivation is the fallback, not the rule. It classifies every row written before
+        `service` existed, and every agent-path row (the orchestrator declares none), exactly
+        as it did before. What it cannot classify is a console-backend utility call that
+        carries no id at all — naming a conversation, drafting a job — which fell through to
+        'orchestrator' and read as agent spend; those now say what they are.
         """
         where_conditions = ["user_id = :user_id"]
         params: dict[str, Any] = {"user_id": user_id}
@@ -424,16 +432,24 @@ class UsageRepository:
 
         query = text(f"""
             SELECT
-                CASE
-                    WHEN scheduled_job_id IS NOT NULL THEN 'scheduler'
-                    WHEN catalog_id IS NOT NULL AND conversation_id IS NULL THEN 'catalog'
-                    ELSE 'orchestrator'
-                END as service,
+                COALESCE(
+                    service,
+                    CASE
+                        WHEN scheduled_job_id IS NOT NULL THEN 'scheduler'
+                        WHEN catalog_id IS NOT NULL AND conversation_id IS NULL THEN 'catalog'
+                        ELSE 'orchestrator'
+                    END
+                ) as service,
                 SUM(total_cost_usd) as total_cost_usd,
                 COUNT(*) as total_requests
             FROM usage_logs
             WHERE {" AND ".join(where_conditions)}
-            GROUP BY service
+            -- By ordinal, not by name: `service` is now both an output alias and a real
+            -- column, and on that ambiguity Postgres binds GROUP BY to the INPUT column —
+            -- which groups by the declared value alone and leaves the derivation's other
+            -- inputs ungrouped (a hard error, and a silently different answer if they were
+            -- ever aggregated away).
+            GROUP BY 1
             ORDER BY total_cost_usd DESC
         """)
 

@@ -12,6 +12,7 @@ import pytest
 from agent_common.core.model_factory import (
     _DEFAULT_REASONING_MAX_TOKENS,
     _MAX_TOKENS_BY_EFFORT,
+    REASONING_OFF,
     max_tokens_for_effort,
 )
 
@@ -39,3 +40,10 @@ def test_xhigh_gets_the_most_headroom():
 
 def test_unknown_effort_falls_back_to_default():
     assert max_tokens_for_effort("mystery-tier") == _DEFAULT_REASONING_MAX_TOKENS
+
+
+def test_reasoning_off_leaves_max_tokens_unset():
+    # REASONING_OFF is the explicit off switch, not a tier: it has no thinking budget to
+    # make room for, so it must not raise the ceiling (it used to hit the unknown-effort
+    # fallback and quietly request _DEFAULT_REASONING_MAX_TOKENS).
+    assert max_tokens_for_effort(REASONING_OFF) is None

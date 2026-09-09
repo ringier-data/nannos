@@ -1,181 +1,388 @@
-"""The recursion budget is spent in super-steps, not model calls.
+"""The turn budget: model calls in, LangGraph super-steps out.
 
-``MAX_RECURSION_LIMIT`` bounds LangGraph *super-steps*. Every middleware hook is
-its own graph node, so a single model call costs several steps — currently ~8.
-That multiplier is invisible at the call site, which is how the limit came to be
-set to 50: a sensible number of model calls, and a crippling number of steps. A
-two-delegation request exhausted it and the user was told the task needed more
-steps, discarding an answer the orchestrator had already produced correctly.
+The reported bug was that `MAX_RECURSION_LIMIT=50` capped a turn at six model
+calls, because the limit counts super-steps and every middleware hook is its own
+node. The fix expresses the budget in model calls and derives the multiplier from
+the compiled graph.
 
-These tests make the multiplier visible. They run a real graph with a scripted
-model, so the step counts are the ones production pays. If someone adds a
-middleware, the per-call cost rises here and the headroom assertion tightens —
-at review time rather than in production.
+These tests exist to stop the derivation going quietly wrong, which is the only
+way this bug can come back. Two of them do real work:
 
-No LLM, no gateway.
+- `test_marginal_cost_of_a_model_call_matches_the_derivation` measures the
+  super-steps of an actual graph run and compares them against what
+  `step_budget` computed from the node names. If LangGraph renames a hook, or
+  starts running one twice per cycle, the measurement and the derivation diverge
+  and this fails.
+- `test_every_node_is_classified` fails when the graph grows a node shape the
+  derivation does not understand, rather than silently mis-counting it.
+
+Everything here runs offline: no gateway, no credentials, no model.
 """
 
 from __future__ import annotations
 
-import logging
+from typing import Any
 
 import pytest
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from agent_common.models.base import ThinkingLevel
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
+from pydantic import Field, PrivateAttr
 
+from app.core.graph_factory import GraphFactory
+from app.core.step_budget import (
+    classify_nodes,
+    recursion_limit_for,
+    steps_per_model_call,
+)
+from app.core.time_tools import create_time_tool
 from app.models.config import (
     DEFAULT_MAX_MODEL_CALLS_PER_TURN,
     LEGACY_RECURSION_LIMIT_ENV,
     MAX_MODEL_CALLS_PER_TURN_ENV,
+    MIN_MAX_MODEL_CALLS_PER_TURN,
     AgentSettings,
+    GraphRuntimeContext,
     _resolve_max_model_calls_per_turn,
 )
-from tests.support.graph_harness import (
-    final_response,
-    runtime_context,
-    scripted_graph,
-    task_call,
-    turn_config,
-    user_turn,
-)
-from tests.support.mock_subagents import MockSubAgent
-from tests.support.scripted_model import ScriptedChatModel
 
-# The app's own constants, not a private copy. The limit is derived from them, so
-# a copy here could agree with the tests while disagreeing with production — and
-# the arithmetic would have three homes again. What makes these a *pin* rather
-# than a tautology is that `_super_steps` counts the steps of a real graph run:
-# add a middleware and the measurement diverges from the constant.
-STEPS_PER_MODEL_CALL = AgentSettings.STEPS_PER_MODEL_CALL
-BASE_STEPS = AgentSettings.BASE_STEPS
+MODEL_TYPE = "claude-sonnet-4.5"
 
 
-async def _super_steps(delegations: int) -> int:
-    """Count graph super-steps for a turn with N delegations plus a final response."""
-    agents = [MockSubAgent(f"agent-{i}", f"Agent {i}.", reply="ok") for i in range(max(delegations, 1))]
-    responses = [task_call(f"agent-{i}", f"step {i}", call_id=f"c{i}") for i in range(delegations)]
-    responses.append(final_response("Done."))
+class _ScriptedModel(BaseChatModel):
+    """Replays canned turns. Deliberately local to this module.
 
-    graph = scripted_graph(ScriptedChatModel(responses=responses))
+    langchain's stock fakes inherit a `bind_tools` that raises
+    NotImplementedError, and the orchestrator graph always binds tools, so a turn
+    dies before it starts. This is the minimum needed to drive a real graph and
+    count its steps.
+    """
+
+    responses: list[AIMessage] = Field(default_factory=list)
+    _cursor: int = PrivateAttr(default=0)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-step-budget"
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        if self._cursor >= len(self.responses):
+            raise AssertionError(
+                f"scripted model exhausted after {self._cursor} calls; the turn took an unexpected path"
+            )
+        message = self.responses[self._cursor]
+        self._cursor += 1
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> BaseChatModel:
+        return self
+
+
+def _compiled_graph(model: BaseChatModel | None = None, *, thinking: ThinkingLevel | None = None):
+    """A real compiled orchestrator graph with test doubles for the stores.
+
+    Reaches past the public API because GraphFactory offers no injection seam.
+    Only the persistence layer and the model are substituted; the middleware
+    stack, and therefore the node count this module measures, is production's.
+
+    A model is always substituted, even for the tests that never run a turn:
+    `_create_graph` builds one eagerly, and the real factory refuses without
+    `LLM_GATEWAY_URL` — which would make these tests need a gateway to count
+    nodes.
+    """
+    factory = GraphFactory(config=AgentSettings(), cost_logger=None)
+    factory._checkpointer = MemorySaver()
+    factory._store = InMemoryStore()
+    factory._store_setup_complete = True
+    factory._static_tools_cache = [create_time_tool()]
+    factory._create_model = lambda *_a, **_k: model or _ScriptedModel(responses=[])  # type: ignore[method-assign]
+    return factory._create_graph(MODEL_TYPE, thinking)
+
+
+def _runtime_context() -> GraphRuntimeContext:
+    return GraphRuntimeContext(
+        user_id="test-user",
+        user_sub="test-sub",
+        name="Test User",
+        email="test@local",
+        tool_registry={},
+        subagent_registry={},
+    )
+
+
+def _tool_turn(index: int) -> AIMessage:
+    """A model turn that calls a real static tool, so the cycle enters `tools`."""
+    return AIMessage(
+        content="",
+        tool_calls=[{"id": f"c{index}", "name": "get_current_time", "args": {}, "type": "tool_call"}],
+    )
+
+
+def _final_turn() -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "final",
+                "name": "FinalResponseSchema",
+                "args": {"task_state": "completed", "message": "Done.", "include_subagent_output": False},
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+async def _measure_super_steps(model_calls: int, thinking: ThinkingLevel | None = None) -> int:
+    """Run a turn spending exactly *model_calls* model calls; count super-steps.
+
+    `stream_mode="updates"` yields once per node execution, which is what
+    `recursion_limit` counts.
+    """
+    script = [_tool_turn(i) for i in range(model_calls - 1)] + [_final_turn()]
+    graph = _compiled_graph(_ScriptedModel(responses=script), thinking=thinking)
+
     steps = 0
     async for _ in graph.astream(
-        user_turn("go"),
-        config=turn_config(f"budget-{delegations}"),
-        context=runtime_context(*agents),
+        {"messages": [HumanMessage("go")]},
+        config={"configurable": {"thread_id": f"budget-{thinking}-{model_calls}"}},
+        context=_runtime_context(),
         stream_mode="updates",
     ):
         steps += 1
     return steps
 
 
-@pytest.mark.parametrize("delegations", [0, 1, 2, 3])
-async def test_step_cost_is_linear_in_model_calls(delegations):
-    """steps = BASE + PER_CALL * model_calls, where model_calls = delegations + 1.
-
-    A failure here means the middleware stack changed. That is allowed — but the
-    constants above and the headroom check below must be updated deliberately,
-    because every middleware hook silently reduces everyone's turn budget.
-    """
-    model_calls = delegations + 1
-    expected = BASE_STEPS + STEPS_PER_MODEL_CALL * model_calls
-
-    assert await _super_steps(delegations) == expected
-
-
-async def test_configured_limit_affords_a_realistic_multi_step_turn():
-    """The regression that mattered.
-
-    A real two-delegation turn is not 3 model calls — the orchestrator spends
-    calls on write_todos between delegations and on filesystem exploration
-    before them. Observed on live models: 6 calls for two delegations, 6 for one.
-    Budget for at least 12 so ordinary work is not truncated.
-    """
-    affordable_model_calls = (AgentSettings.MAX_RECURSION_LIMIT - BASE_STEPS) // STEPS_PER_MODEL_CALL
-
-    assert affordable_model_calls >= 12, (
-        f"MAX_RECURSION_LIMIT={AgentSettings.MAX_RECURSION_LIMIT} affords only "
-        f"{affordable_model_calls} model calls at {STEPS_PER_MODEL_CALL} super-steps each. "
-        "Real turns spend calls on todo bookkeeping and file exploration as well as "
-        "delegation; at 6 an ordinary two-delegation request is truncated mid-turn."
-    )
-
-
-async def test_limit_still_bounds_a_runaway_loop():
-    """The limit exists to stop infinite loops, so raising it must not disable it.
-
-    deepagents defaults to 1000; staying well under that keeps a stuck graph from
-    burning a large amount of tokens before it is cut off.
-    """
-    assert AgentSettings.MAX_RECURSION_LIMIT < 500, (
-        "the recursion limit is the only backstop against a runaway agent loop; "
-        "keep it well below the deepagents default of 1000"
-    )
-
-
 # ---------------------------------------------------------------------------
-# The limit is derived, and derived from an unshared env var
+# The derivation, checked against reality
 # ---------------------------------------------------------------------------
 
 
-def test_the_limit_is_derived_from_the_step_cost():
-    """One source of truth for the arithmetic.
+@pytest.mark.parametrize("thinking", [None, ThinkingLevel.high], ids=["tool_strategy", "thinking"])
+async def test_marginal_cost_of_a_model_call_matches_the_derivation(thinking):
+    """The load-bearing assertion of this whole module.
 
-    It used to live in three places — this module, the config comment and
-    AGENTS.md — and the AGENTS.md copy was wrong within a commit of the config
-    changing.
+    Every extra model call must cost exactly what `steps_per_model_call` counted
+    from the node names. Measured across several turn lengths, because a single
+    data point cannot distinguish a per-call cost from a fixed overhead.
+
+    Both structured-output strategies are covered. They build the *same* nodes but
+    traverse them differently, and an earlier version of this test only ran the
+    `thinking=None` path — which is how the base-step off-by-one below survived.
     """
-    assert AgentSettings.MAX_RECURSION_LIMIT == (
-        AgentSettings.BASE_STEPS
-        + AgentSettings.STEPS_PER_MODEL_CALL * AgentSettings.MAX_MODEL_CALLS_PER_TURN
+    graph = _compiled_graph(thinking=thinking)
+    derived = steps_per_model_call(graph)
+
+    measurements = {n: await _measure_super_steps(n, thinking) for n in (1, 2, 3, 4)}
+    marginals = [measurements[n + 1] - measurements[n] for n in (1, 2, 3)]
+
+    assert set(marginals) == {derived}, (
+        f"derived {derived} steps per model call, but measured marginals {marginals} "
+        f"from {measurements}. The middleware stack and the derivation disagree."
     )
 
 
-def test_the_derived_limit_affords_exactly_the_configured_model_calls():
-    """The round trip: super-steps back to the unit that was actually chosen."""
-    affordable = (AgentSettings.MAX_RECURSION_LIMIT - AgentSettings.BASE_STEPS) // AgentSettings.STEPS_PER_MODEL_CALL
+@pytest.mark.parametrize("thinking", [None, ThinkingLevel.high], ids=["tool_strategy", "thinking"])
+@pytest.mark.parametrize("model_calls", [1, 2, 3])
+async def test_the_budget_is_never_below_what_a_turn_actually_costs(thinking, model_calls):
+    """The invariant that matters, on every path.
 
-    assert affordable == AgentSettings.MAX_MODEL_CALLS_PER_TURN
+    A budget one step short is a `GraphRecursionError` fired *after* the answer is
+    composed — the exact user-visible bug this PR fixes — so the derived limit must
+    cover the real cost with slack to spare, never the reverse.
+
+    This is why `base_steps` counts all per-turn hooks instead of subtracting the
+    `tools` step the closing call skips. It skips it only under `ToolStrategy`:
+    with thinking enabled, `FinalResponseSchema` is bound as a `return_direct`
+    tool and the closing call routes through `tools` like any other. Subtracting
+    would be exact for the first and one short for the second.
+    """
+    graph = _compiled_graph(thinking=thinking)
+    derived = recursion_limit_for(graph, model_calls)
+
+    measured = await _measure_super_steps(model_calls, thinking)
+
+    assert derived >= measured, (
+        f"derived budget {derived} is below the measured cost {measured} for "
+        f"{model_calls} model call(s) at thinking={thinking}. A turn would die one "
+        f"step from the end, after composing its answer."
+    )
+    # Slack is expected, but a whole extra cycle would mean the derivation has
+    # drifted into guesswork rather than counting.
+    assert derived - measured < steps_per_model_call(graph), (
+        f"derived budget {derived} exceeds the measured {measured} by a full model "
+        f"call or more; the derivation is over-counting, not rounding up."
+    )
+
+
+def test_an_unknown_node_inflates_the_budget_and_warns(caplog):
+    """Production must not treat a node it does not understand as free.
+
+    A `.before_tools`, an async-named hook, a renamed core node: anything
+    unrecognised is charged at the per-model-call rate, so the budget errs large,
+    and logged so it gets fixed. Counting it as zero would shrink the budget
+    toward the truncation this module exists to prevent — and unlike
+    `test_every_node_is_classified` below, this holds for stacks that only exist
+    in a deployment, not in CI.
+    """
+
+    class _GraphWithMysteryNode:
+        nodes = ["__start__", "model", "tools", "Some.before_model", "Mystery.before_tools"]
+
+    with caplog.at_level("WARNING"):
+        per_call = steps_per_model_call(_GraphWithMysteryNode())
+
+    # 1 known hook + 2 core + 1 unknown, charged as if it ran every cycle.
+    assert per_call == 4
+    assert "Mystery.before_tools" in caplog.text
+
+
+def test_the_core_cycle_cost_is_counted_not_assumed():
+    """`model` and `tools` are counted from the classification, not hardcoded to 2.
+
+    langchain only adds a `tools` node when the graph has tools, and a rename
+    would land both in `unclassified` — either way an assumed 2 would be a
+    plausible-looking wrong number.
+    """
+
+    class _GraphWithoutTools:
+        nodes = ["__start__", "model", "Some.after_model"]
+
+    assert steps_per_model_call(_GraphWithoutTools()) == 2  # model + 1 hook, no tools
+
+
+def test_every_node_is_classified():
+    """An unclassified node means the derivation is silently mis-counting.
+
+    This is the guard that makes the whole approach safe to leave unattended: if
+    LangGraph adds a hook type (a `.before_tools`, say) it lands in
+    `unclassified` and this fails, instead of being quietly omitted from the
+    per-call cost and tightening every turn's budget.
+    """
+    buckets = classify_nodes(_compiled_graph())
+
+    assert buckets["unclassified"] == [], (
+        f"unrecognised graph nodes: {buckets['unclassified']}. "
+        "app/core/step_budget.py needs to learn how often they run."
+    )
+    assert buckets["core"], "neither `model` nor `tools` was found — node naming changed"
+    assert buckets["per_model_call"], "no per-model-call hooks found — hook naming changed"
+
+
+def test_the_graph_is_compiled_with_the_derived_limit():
+    """The wiring, not just the arithmetic: GraphFactory must apply it."""
+    graph = _compiled_graph()
+    expected = recursion_limit_for(graph, AgentSettings.MAX_MODEL_CALLS_PER_TURN)
+
+    assert graph.config is not None
+    assert graph.config.get("recursion_limit") == expected
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 
 def test_the_shared_env_var_no_longer_configures_the_orchestrator(monkeypatch):
     """The reported design bug.
 
-    `MAX_RECURSION_LIMIT` is read by agent-runner and ringier-a2a-sdk (default 50)
-    and agent-common (75). A deployment pinning 50 — the orchestrator's own former
-    default — used to silently reinstate the truncation, and CI could not catch it:
-    the env var is unset there, so the tests stayed green against 200.
+    `MAX_RECURSION_LIMIT` is read by agent-runner and ringier-a2a-sdk (default
+    50) and agent-common (75). A deployment pinning 50 — the orchestrator's own
+    former default — used to silently reinstate the truncation, and CI could not
+    catch it: the env var is unset there, so the tests stayed green against the
+    intended budget.
     """
     monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
 
     assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
 
 
-def test_setting_the_shared_env_var_warns_that_it_is_ignored(monkeypatch, caplog):
-    """Ignoring it silently would be its own trap."""
+def test_setting_the_legacy_name_warns(monkeypatch, caplog):
+    """Ignoring it silently would be worse than either honouring or refusing it —
+    an operator who set it must be told it no longer applies, and what to set."""
     monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level("WARNING"):
         _resolve_max_model_calls_per_turn()
 
-    assert LEGACY_RECURSION_LIMIT_ENV in caplog.text
     assert MAX_MODEL_CALLS_PER_TURN_ENV in caplog.text
 
 
-def test_nothing_is_warned_about_when_the_shared_var_is_unset(monkeypatch, caplog):
-    monkeypatch.delenv(LEGACY_RECURSION_LIMIT_ENV, raising=False)
+def test_the_legacy_warning_does_not_read_as_obsolete(monkeypatch, caplog):
+    """The wording is the whole point of this warning, so it is pinned.
 
-    with caplog.at_level(logging.WARNING):
+    `MAX_RECURSION_LIMIT` is not dead: agent-common's `dynamic_agent` reads it as
+    the fallback bound for every local sub-agent in this same process, and
+    agent-runner and ringier-a2a-sdk read it too. An operator who takes "no longer
+    configures the orchestrator" as "safe to remove" silently changes every
+    sub-agent's recursion bound — so the warning has to say both things and name
+    the variable that decouples them.
+    """
+    monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
+
+    with caplog.at_level("WARNING"):
         _resolve_max_model_calls_per_turn()
 
-    assert caplog.text == ""
+    text = caplog.text
+    assert "do not unset" in text.lower(), "the warning must not read as 'this is obsolete'"
+    assert "SUB_AGENT_RECURSION_LIMIT" in text, "must name the variable that decouples the two"
+    assert "sub-agent" in text.lower()
 
 
-def test_the_budget_is_configured_in_model_calls(monkeypatch):
-    """The knob is in the unit a human can reason about."""
+def test_the_orchestrator_budget_is_configurable(monkeypatch):
     monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "40")
 
     assert _resolve_max_model_calls_per_turn() == 40
 
 
-def test_a_malformed_value_falls_back_rather_than_crashing_at_import(monkeypatch):
-    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "twenty")
+def test_a_malformed_budget_falls_back_rather_than_crashing(monkeypatch):
+    """This is read at import time, so raising would take the process down."""
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "40s")
 
     assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_an_empty_budget_falls_back(monkeypatch, raw):
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, raw)
+
+    assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+
+
+@pytest.mark.parametrize("raw", ["0", "-1"])
+def test_a_non_positive_budget_is_clamped_rather_than_bricking_every_turn(monkeypatch, caplog, raw):
+    """0 is not a small budget, it is a broken deployment.
+
+    The derived limit would collapse to the per-turn overhead, so every request
+    would exhaust it in its first super-steps and answer "I've been working on
+    this for a while and need to take a break" having done nothing — with nothing
+    in the logs pointing at the env var.
+    """
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, raw)
+
+    with caplog.at_level("WARNING"):
+        resolved = _resolve_max_model_calls_per_turn()
+
+    assert resolved == MIN_MAX_MODEL_CALLS_PER_TURN
+    assert MAX_MODEL_CALLS_PER_TURN_ENV in caplog.text
+
+
+def test_an_implausibly_large_budget_is_honoured_but_flagged(monkeypatch, caplog):
+    """Not clamped — a long budget can be deliberate — but a typo'd 2500 leaves no
+    runaway protection at all, which is worth noticing before it costs money."""
+    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "2500")
+
+    with caplog.at_level("WARNING"):
+        resolved = _resolve_max_model_calls_per_turn()
+
+    assert resolved == 2500
+    assert "runaway" in caplog.text.lower()

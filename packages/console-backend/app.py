@@ -108,6 +108,7 @@ from console_backend.utils.socket_errors import (
 )
 from console_backend.utils.socket_events import SocketEvents
 from console_backend.utils.socketio_auth import require_auth as require_socket_auth
+from console_backend.cors_origins import parse_origin_allowlist
 from console_backend.validators import validate_agent_card, validate_message
 
 # NOTE: Apply fastapi_mcp patch (waiting for https://github.com/tadata-org/fastapi_mcp/pull/156)
@@ -346,8 +347,10 @@ if not config.is_local():
 #  - local: the localhost dev frontends (console 5001/5173, cockpit 3000)
 #  - deployed: the console's own domain (same-origin console-frontend needs no
 #    CORS, but Socket.IO checks the Origin header on every handshake)
-#  - ALL environments: + EMBED_ALLOWED_ORIGINS (exact origins, from env) for
-#    embed-sdk hosts, which connect cross-origin with bearer tokens (ADR-0002).
+#  - ALL environments: + CORS_ALLOWED_CHAT_ORIGINS (from env; exact origins and
+#    `*` wildcard patterns, see console_backend.cors_origins) for chat front-ends
+#    such as the embed SDK in the cockpit, which connect cross-origin with bearer
+#    tokens (ADR-0002/0004).
 if config.is_local():
     cors_origins = [
         "http://localhost:5001",
@@ -363,16 +366,25 @@ if config.is_local():
     ]
 else:
     cors_origins = [f"https://{os.environ['BASE_DOMAIN']}"]
-cors_origins += [o for o in config.embed_allowed_origins if o not in cors_origins]
+chat_origins = parse_origin_allowlist(config.cors_allowed_chat_origins)
+cors_origins += [o for o in chat_origins.exact if o not in cors_origins]
+
+
+def _is_allowed_origin(origin: str | None, environ: dict[str, Any] | None = None) -> bool:
+    """Single origin decision for both CORS layers: exact list or a wildcard pattern."""
+    return bool(origin) and (origin in cors_origins or chat_origins.is_allowed(origin))
+
 
 # REST CORS: registered in EVERY environment — the embed widget's REST legs
 # (sub-agent lookup, conversations, feedback, uploads) are cross-origin wherever
-# the host page lives, production included. Explicit origins only: the browser
-# requires an exact Access-Control-Allow-Origin echo in credentials mode (the
-# ALB affinity cookie rides on these requests), so no wildcard.
+# the host page lives, production included. Starlette echoes the REQUESTING origin
+# back (never `*`), which credentials mode requires (the ALB affinity cookie rides
+# on these requests) — so wildcard patterns are safe: they only widen which
+# origins get echoed, e.g. per-PR cockpit environments.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_origin_regex=chat_origins.regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -573,7 +585,9 @@ app.mount("/mcp", _mcp_streamable_asgi)
 # the same orchestrator thread. Cross-pod coordination is planned (Postgres lease-lock).
 sio = socketio.AsyncServer(
     async_mode="asgi",
-    cors_allowed_origins=cors_origins,
+    # A callable, so wildcard patterns apply here too: engineio asks per handshake
+    # and echoes only the requesting origin when we say yes.
+    cors_allowed_origins=_is_allowed_origin,
     compression_threshold=1024,  # Compress messages larger than 1KB
     max_http_buffer_size=10_000_000,  # 10MB max payload size
 )
@@ -647,9 +661,6 @@ async def _title_conversation(conversation_id: str, user_id: str, answer: str) -
             conversation_id,
             user_id,
             answer=answer,
-            # The socket session's user_id IS the OIDC sub, which is what the
-            # gateway attributes spend by.
-            user_sub=user_id,
             on_stored=_conversation_title_notifier(conversation_id),
         )
     finally:
@@ -1650,13 +1661,16 @@ async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any]
     Two accepted credentials:
     - the signed session cookie (same-origin console — primary path), and
     - a nannos bearer token in the socket.io ``auth`` payload (embedded/cross-origin
-      hosts; non-production only for now — see ADR-0002 Amendment 2).
+      hosts — see ADR-0002 Amendments 2 and 4). Accepted in EVERY environment: the
+      token is validated against the nannos issuer's JWKS like the HTTP bearer paths
+      the embed SDK already uses in production, and the handshake is additionally
+      gated by the shared CORS origin allowlist (CORS_ALLOWED_CHAT_ORIGINS).
 
     Returns False to reject unauthenticated connections.
     """
     http_session_id = await _resolve_socket_user_via_cookie(environ)
 
-    if not http_session_id and not config.is_production():
+    if not http_session_id:
         token = auth.get("token") if isinstance(auth, dict) else None
         if token:
             http_session_id = await _resolve_socket_user_via_token(token)

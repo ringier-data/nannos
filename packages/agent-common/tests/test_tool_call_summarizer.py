@@ -152,10 +152,14 @@ class TestSummarizerCostAttribution:
         class _FakeStructured:
             async def ainvoke(self, _msgs):
                 seen["sub_agent_id"] = current_sub_agent_id.get()
-                return tcs.ToolCallSummaries(summaries=["lists the folder"])
+                return {
+                    "raw": None,
+                    "parsed": tcs.ToolCallSummaries(summaries=["lists the folder"]),
+                    "parsing_error": None,
+                }
 
         class _FakeModel:
-            def with_structured_output(self, _schema):
+            def with_structured_output(self, _schema, include_raw=False):
                 return _FakeStructured()
 
         async def run(_: object):
@@ -173,3 +177,154 @@ class TestSummarizerCostAttribution:
             assert current_sub_agent_id.get() is None
         finally:
             current_sub_agent_id.reset(prev)
+
+
+class TestSummaryTimeout:
+    """The card is what the user is waiting for; the prose is a nicety.
+
+    A slow gateway must not hold the approval card open indefinitely — past the budget the
+    call is abandoned and the documented ``None`` fallback (render raw args) applies.
+    """
+
+    def _slow_model(self):
+        import asyncio
+
+        class _SlowStructured:
+            async def ainvoke(self, _msgs):
+                await asyncio.sleep(5)
+                raise AssertionError("the timeout should have abandoned this call")
+
+        class _SlowModel:
+            def with_structured_output(self, _schema, include_raw=False):
+                return _SlowStructured()
+
+        return _SlowModel()
+
+    @pytest.mark.asyncio
+    async def test_a_slow_model_gives_up_and_falls_back(self):
+        with (
+            patch("agent_common.core.model_factory.create_fast_model", return_value=self._slow_model()),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+            patch.object(tcs, "_SUMMARY_TIMEOUT_SECONDS", 0.01),
+        ):
+            assert await tcs.summarize_action_requests([("ls", {"path": "/x"}, "list files")]) is None
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_batch_leaves_the_action_request_untouched(self):
+        """End to end: a slow model must leave the card renderable, not half-populated.
+
+        Drives the real ``summarize_action_requests`` — only the model is faked. The earlier
+        version of this test stubbed that function out, so it only re-tested
+        ``attach_summaries``' None branch and would still have passed if the timeout handler
+        started returning ``[]`` or mutating args before giving up.
+        """
+        request = {"name": "ls", "args": {"path": "/x", "_call_id": "c1"}}
+        with (
+            patch.object(tcs, "_resume_pending", return_value=False),
+            patch("agent_common.core.model_factory.create_fast_model", return_value=self._slow_model()),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+            patch.object(tcs, "_SUMMARY_TIMEOUT_SECONDS", 0.01),
+        ):
+            await tcs.attach_summaries([request])
+        assert request["args"] == {"path": "/x", "_call_id": "c1"}
+
+
+class TestUnusableReply:
+    """A reply with no summaries in it must say WHY in the log, then fall back to raw args.
+
+    `create_fast_model` asks for a short output cap, so this path owns the truncation risk:
+    console-backend's `gateway_chat`/`GatewayText` exist because a reply stopped at
+    `max_tokens` reads exactly like one that said little. Only `finish_reason` separates
+    them, and the remedy (raise the cap, split the batch) differs from a content miss.
+    """
+
+    def _model(self, envelope):
+        class _Structured:
+            async def ainvoke(self, _msgs):
+                return envelope
+
+        class _Model:
+            def with_structured_output(self, _schema, include_raw=False):
+                assert include_raw, "the finish reason has to survive to the failure path"
+                return _Structured()
+
+        return _Model()
+
+    async def _summarize(self, envelope):
+        with (
+            patch("agent_common.core.model_factory.create_fast_model", return_value=self._model(envelope)),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+        ):
+            return await tcs.summarize_action_requests([("ls", {"path": "/x"}, "list files")])
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_reply_names_the_cap(self, caplog):
+        raw = types.SimpleNamespace(response_metadata={"finish_reason": "length"})
+        with caplog.at_level("WARNING"):
+            out = await self._summarize({"raw": raw, "parsed": None, "parsing_error": ValueError("boom")})
+        assert out is None
+        # "hit the output cap" is the actionable half — a generic parse failure would send
+        # the reader looking at the prompt instead of the budget.
+        assert "output cap" in caplog.text
+        assert "finish_reason=length" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_reply_is_reported_as_such(self, caplog):
+        raw = types.SimpleNamespace(response_metadata={"finish_reason": "stop"})
+        with caplog.at_level("WARNING"):
+            out = await self._summarize({"raw": raw, "parsed": None, "parsing_error": ValueError("not json")})
+        assert out is None
+        assert "unreadable" in caplog.text
+        assert "not json" in caplog.text
+        # Not the truncation message: the budget was fine, the content wasn't.
+        assert "output cap" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_missing_raw_message_still_falls_back_cleanly(self):
+        # Nothing about the envelope is guaranteed; the fallback must not depend on it.
+        assert await self._summarize({"raw": None, "parsed": None, "parsing_error": None}) is None
+
+
+class TestBatchTokenBudget:
+    """The cap has to scale with the batch, which `attach_summaries` does not bound.
+
+    A flat cap fails backwards: the largest approval batches — the ones whose raw args are
+    hardest for a non-technical user to read — would be the ones that lose their prose.
+    """
+
+    def test_a_small_batch_keeps_the_fast_model_floor(self):
+        from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS
+
+        assert tcs._summary_token_budget(1) == FAST_MODEL_MAX_TOKENS
+        assert tcs._summary_token_budget(3) == FAST_MODEL_MAX_TOKENS
+
+    def test_a_large_batch_scales_past_the_floor(self):
+        from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS
+
+        budget = tcs._summary_token_budget(20)
+        assert budget > FAST_MODEL_MAX_TOKENS
+        assert budget == 20 * tcs._TOKENS_PER_SUMMARY
+
+    def test_the_budget_never_shrinks_as_the_batch_grows(self):
+        budgets = [tcs._summary_token_budget(n) for n in range(1, 40)]
+        assert budgets == sorted(budgets)
+
+    async def test_the_batch_budget_reaches_the_model(self):
+        # The scaling is worthless if the call site doesn't pass it.
+        seen: dict = {}
+
+        class _Structured:
+            async def ainvoke(self, _msgs):
+                return {"raw": None, "parsed": tcs.ToolCallSummaries(summaries=["a"] * 12), "parsing_error": None}
+
+        def _create(_alias, *, max_tokens=None, **_kw):
+            seen["max_tokens"] = max_tokens
+            return types.SimpleNamespace(with_structured_output=lambda _s, include_raw=False: _Structured())
+
+        calls = [("ls", {"path": f"/{i}"}, "list files") for i in range(12)]
+        with (
+            patch("agent_common.core.model_factory.create_fast_model", _create),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+        ):
+            assert await tcs.summarize_action_requests(calls) == ["a"] * 12
+        assert seen["max_tokens"] == tcs._summary_token_budget(12)

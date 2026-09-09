@@ -46,6 +46,27 @@ import { useAuth } from '@/contexts/AuthContext';
 import { config } from '@/config';
 import { PageHeaderSkeleton, StatCardsSkeleton, ChartSkeleton, TableSkeleton } from '@/components/skeletons';
 
+// Constants, so module scope: rebuilt per render they are a value the compiler cannot see
+// through in the chart's useMemo below.
+const SERVICE_LABELS: Record<string, string> = {
+  orchestrator: 'Orchestrator',
+  catalog: 'Catalog',
+  scheduler: 'Scheduler',
+  console: 'Console',
+};
+
+const SERVICE_COLORS: Record<string, string> = {
+  orchestrator: '#8b5cf6',
+  catalog: '#f59e0b',
+  scheduler: '#10b981',
+  console: '#3b82f6',
+};
+
+// What a row says under "Agent" when no sub-agent ran it. A call the console made for
+// itself — naming a conversation, drafting a job — is not an agent run, and saying
+// "Orchestrator" for everything unattributed is the same guess the backend stopped making.
+const serviceLabel = (service?: string | null) => SERVICE_LABELS[service ?? ''] || 'Orchestrator';
+
 export function UsagePage() {
   const { isAdmin } = useAuth();
   const [searchParams] = useSearchParams();
@@ -197,18 +218,6 @@ export function UsagePage() {
     })) || [];
   }, [detailed]);
 
-  const SERVICE_LABELS: Record<string, string> = {
-    orchestrator: 'Orchestrator',
-    catalog: 'Catalog',
-    scheduler: 'Scheduler',
-  };
-
-  const SERVICE_COLORS: Record<string, string> = {
-    orchestrator: '#8b5cf6',
-    catalog: '#f59e0b',
-    scheduler: '#10b981',
-  };
-
   const byServiceChartData = useMemo(() => {
     return detailed?.by_service?.map((item: UsageByService) => ({
       name: SERVICE_LABELS[item.service] || item.service,
@@ -339,7 +348,7 @@ export function UsagePage() {
         <Card>
           <CardHeader>
             <CardTitle>Cost by Service</CardTitle>
-            <CardDescription>Orchestrator vs Catalog vs Scheduler</CardDescription>
+            <CardDescription>Orchestrator vs Catalog vs Scheduler vs Console</CardDescription>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={300}>
@@ -530,7 +539,9 @@ export function UsagePage() {
                 <TableRow>
                   <TableHead className="w-10"></TableHead>
                   <TableHead>Conversation / Call</TableHead>
-                  <TableHead>Agent</TableHead>
+                  {/* Not "Agent": the column holds a sub-agent, a scheduled job, or the
+                      service that made the call on its own (Console, Catalog). */}
+                  <TableHead>Source</TableHead>
                   <TableHead>Provider / Model</TableHead>
                   <TableHead>Unit Breakdown</TableHead>
                   <TableHead className="text-right">Units</TableHead>
@@ -585,7 +596,7 @@ export function UsagePage() {
                                 {isCatalogGroup ? (
                                   <span className="text-muted-foreground">Catalog: {catalogName || catalogId}</span>
                                 ) : isNoConversation ? (
-                                  <span className="text-muted-foreground">Direct API Calls</span>
+                                  <span className="text-muted-foreground">Calls outside a conversation</span>
                                 ) : (
                                   <>
                                     <span className="font-mono text-sm">{conversationId}</span>
@@ -633,7 +644,9 @@ export function UsagePage() {
                           </div>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
-                          {logs.length > 1 ? `${logs.length} calls` : logs[0].sub_agent_name || 'Orchestrator'}
+                          {logs.length > 1
+                            ? `${logs.length} calls`
+                            : logs[0].sub_agent_name || serviceLabel(logs[0].service)}
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {new Set(logs.map(l => l.provider).filter(Boolean)).size} provider{new Set(logs.map(l => l.provider).filter(Boolean)).size !== 1 ? 's' : ''}
@@ -709,7 +722,7 @@ export function UsagePage() {
                                   <span>{log.scheduled_job_name || `Job #${log.scheduled_job_id}`}</span>
                                 </div>
                               ) : (
-                                <span className="text-muted-foreground">Orchestrator</span>
+                                <span className="text-muted-foreground">{serviceLabel(log.service)}</span>
                               )}
                             </TableCell>
                             <TableCell>

@@ -68,7 +68,13 @@ from .a2a_extensions import (
 from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
-from .discovery_cache import cache_key, get_discovery_cache, get_embedded_runnable_cache, get_user_cache
+from .discovery_cache import (
+    cache_key,
+    get_discovery_cache,
+    get_embedded_runnable_cache,
+    get_user_cache,
+    resolve_entitlement_version,
+)
 from .registry import RegistryService, User
 from .turn_state import TurnState, count_tool_messages
 from .steering_state import (
@@ -87,8 +93,7 @@ logger = logging.getLogger(__name__)
 # run — and the model has to be told, or it assumes the call succeeded.
 _UNREADABLE_AUTHORIZATION_MESSAGE = (
     "The user's answer to the authorization prompt could not be read as an approval "
-    "of this call, so it was NOT executed. Ask for it again if it is still needed. "
-    + NOT_APPROVED_CLAUSE
+    "of this call, so it was NOT executed. Ask for it again if it is still needed. " + NOT_APPROVED_CLAUSE
 )
 
 # Bounded re-entries to recover from an "eager completion" where the model sets
@@ -352,11 +357,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         None,
                     )
                 result = decision.get("client_action_result") if isinstance(decision, dict) else None
-                resume_map[intr.id] = (
-                    result
-                    if isinstance(result, dict)
-                    else {"ok": False, "reason": "no-result"}
-                )
+                resume_map[intr.id] = result if isinstance(result, dict) else {"ok": False, "reason": "no-result"}
                 logger.info(
                     f"Resuming client-action interrupt {intr.id} "
                     f"({'with result' if isinstance(result, dict) else 'WITHOUT result'})"
@@ -408,6 +409,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         thinking_level: str | None = None,
         client_objects: list | None = None,
         page_context: dict | None = None,
+        entitlement_version: str | None = None,
     ) -> UserConfig:
         """Build complete UserConfig with all data and discovered capabilities.
 
@@ -425,6 +427,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             preferred_model: Optional preferred model from registry
             enable_thinking: Optional thinking configuration from client
             thinking_level: Optional thinking level from client
+            entitlement_version: Per-user entitlement stamp fetched this turn (cache key input)
 
         Returns:
             UserConfig: Fully initialized with static data and discovered tools/agents
@@ -441,6 +444,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             message_formatting=message_formatting,
             client_user_handle=client_user_handle,
             sub_agent_config_hash=sub_agent_config_hash,
+            entitlement_version=entitlement_version,
             language=user.language,
             custom_prompt=user.custom_prompt,
             local_subagents=user.local_subagents,
@@ -457,14 +461,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         # Discover capabilities (tools and sub-agents), memoized per-user to avoid
         # re-running the ~3s discovery (gatana token exchange + fetch servers + per-server
-        # list_tools) on every turn. Keyed by the entitlement-determining inputs so group
-        # changes invalidate automatically; entries are bounded by the token expiry.
+        # list_tools) on every turn. Keyed by the entitlement-determining inputs (incl. the
+        # per-turn entitlement version) so any entitlement change invalidates automatically;
+        # entries are bounded by the token expiry.
         cache = get_discovery_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
         dkey = cache_key(
             user_sub=user_config.user_sub,
             groups=user_config.groups,
             sub_agent_config_hash=user_config.sub_agent_config_hash,
             policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
+            entitlement_version=user_config.entitlement_version,
         )
         cached = cache.get(dkey)
         user_token_value = user_config.access_token.get_secret_value()
@@ -496,12 +502,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 white_list=None,  # Don't filter here - GP agent needs access to all tools
                 token_provider=token_provider,
             )
-            cache.put(
-                dkey,
-                (tools, sub_agents, token_provider),
-                user_token_value,
-                owner=user_config.user_sub,
-            )
+            cache.put(dkey, (tools, sub_agents, token_provider), user_token_value)
             logger.info(
                 "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
                 len(tools),
@@ -589,9 +590,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if caller_sub or caller_installation:
             from ringier_a2a_sdk.cost_tracking.attribution import set_attribution
 
-            set_attribution(
-                user_sub=caller_sub, conversation_id=context_id, installation=caller_installation
-            )
+            set_attribution(user_sub=caller_sub, conversation_id=context_id, installation=caller_installation)
         # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
         if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
@@ -686,15 +685,26 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if sub_agent_config_hash:
             logger.info(f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}")
 
+        # One cheap call per turn: the user's entitlement version. It goes into every per-user
+        # cache key below, so a changed entitlement (activated sub-agent, whitelist, role,
+        # group default, gateway server access, ...) makes the stale entries unreachable on
+        # this turn — on every replica, with no push-based invalidation. Awaited inline: the
+        # only awaits it could overlap (turn registration) are in-memory, and an inline call
+        # has no lifetime to manage across the raise paths above.
+        entitlement_version = resolve_entitlement_version(
+            user_sub, await self.registry_service.get_entitlement_version(user_token)
+        )
+
         # Fetch user from registry to get stable database ID (user.id). Memoized per-user
-        # (keyed incl. groups + policy_version) to avoid the ~1s of console-backend calls
-        # on every turn; entry bounded by the user token's expiry.
+        # (keyed incl. groups + entitlement version + policy_version) to avoid the ~1s of
+        # console-backend calls on every turn; entry bounded by the user token's expiry.
         ucache = get_user_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
         ukey = cache_key(
             user_sub=user_sub,
             groups=user_groups,
             sub_agent_config_hash=sub_agent_config_hash,
             policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
+            entitlement_version=entitlement_version,
         )
         user = ucache.get(ukey)
         if user is not None:
@@ -705,7 +715,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 access_token=user_token,
                 sub_agent_config_hash=sub_agent_config_hash,
             )
-            ucache.put(ukey, user, user_token, owner=user_sub)
+            ucache.put(ukey, user, user_token)
             logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
 
         # Extract metadata from both message-level and params-level (message takes priority)
@@ -881,6 +891,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 thinking_level=thinking_level,
                 client_objects=client_objects,
                 page_context=page_context,
+                entitlement_version=entitlement_version,
             )
 
             # Extract message parts for multimodal support (text + files)
@@ -942,10 +953,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # Reuse the built runnable across turns: _ensure_agent() re-runs the
                 # OAuth exchange + MCP gateway list_tools + graph compilation, which is
                 # seconds of time-to-first-token per message. Keyed like the discovery
-                # cache (entitlements + sub-agent config hash) plus the target id;
-                # entries are token-bounded and flushed by the same owner-scoped
-                # invalidation. The per-turn <client_objects> manifest is NOT baked in —
-                # ClientObjectsMiddleware reads it from config metadata per invocation.
+                # cache (entitlements incl. the per-turn entitlement version + sub-agent
+                # config hash) plus the target id; entries are token-bounded. The per-turn
+                # <client_objects> manifest is NOT baked in — ClientObjectsMiddleware reads
+                # it from config metadata per invocation.
                 ecache = get_embedded_runnable_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
                 ekey = (
                     cache_key(
@@ -953,6 +964,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         groups=user_config.groups,
                         sub_agent_config_hash=user_config.sub_agent_config_hash,
                         policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
+                        entitlement_version=user_config.entitlement_version,
                     )
                     + f":{embedded_sub_agent_id}"
                 )
@@ -1004,12 +1016,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         return
                     # Only a fully-built runnable (graph compiled, tools discovered) is
                     # cached, so a hit can use ._agent directly.
-                    ecache.put(
-                        ekey,
-                        embedded_runnable,
-                        user_config.access_token.get_secret_value(),
-                        owner=user_config.user_sub,
-                    )
+                    ecache.put(ekey, embedded_runnable, user_config.access_token.get_secret_value())
                     logger.info(
                         f"[EMBEDDED] Built sub-agent '{embedded_target.name}' "
                         f"(id={embedded_sub_agent_id}) execute-only (cached for reuse)"
@@ -1252,7 +1259,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # Emit feedback request for complex tasks before terminal event
                 if (
                     deferred_terminal_item is not None
-                    and deferred_terminal_item.state in (TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED)
+                    and deferred_terminal_item.state
+                    in (TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED)
                     and requested_extensions is not None
                     and FEEDBACK_REQUEST_EXTENSION in requested_extensions
                 ):
@@ -1411,9 +1419,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # "note" marks a mid-turn note the agent wrote for the user (notify_user);
             # ordinary tool/delegation lines carry no kind.
             kind = metadata.get("kind")
-            logger.info(
-                f"[ACTIVITY_LOG] Emitting status update: source={source}, kind={kind}, content: {content[:50]}"
-            )
+            logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, kind={kind}, content: {content[:50]}")
             await updater.update_status(
                 TaskState.TASK_STATE_WORKING,
                 new_activity_log_message(
@@ -1773,9 +1779,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # ("Please sign in to Jira to continue.") after a long streamed answer —
         # and a length check alone would call that already-delivered and drop a
         # prompt the client has to render. So compare the text itself there.
-        terminal_text = "".join(
-            part.text for part in msg.parts if part.WhichOneof("content") == "text"
-        ).strip()
+        terminal_text = "".join(part.text for part in msg.parts if part.WhichOneof("content") == "text").strip()
         answer_fully_streamed = (
             first_chunk_sent
             and final_message_len > 0

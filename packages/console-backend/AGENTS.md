@@ -60,6 +60,8 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 **CRITICAL: All database write operations (INSERT/UPDATE/DELETE) MUST use the repository pattern to ensure automatic audit logging.**
 
+The one deliberate exemption is cache bookkeeping that carries no business meaning: `users.entitlements_touched_at` (`services/entitlement_version.py`), bumped so the orchestrator's per-user entitlement version moves for gateway-held state. The admin action that triggers it is audited on its own.
+
 #### How to Add New Data Operations
 
 1. **Extend or create a repository** in `console_backend/repositories/`:
@@ -181,7 +183,7 @@ Activity-log events ARE persisted so the frontend can reconstruct timelines from
 
 ## Database Migrations
 
-- Migrations use Rambler and are located in `infrastructure/roles/basis/files/ddl/scripts/`
+- Migrations use Rambler and are located in `sqlmigrations/ddl/`
 - Name format: `###_description.sql` (e.g., `016_add_secret_to_audit_enums.sql`)
 - Migrations run automatically in test containers
 - Always include `-- rambler up` and `-- rambler down` comments
@@ -629,6 +631,61 @@ The activation service manages the lifecycle:
 - `self_update()` — Auto-called when author edits own skill
 - `upsert_locked()` — Called by config version approval workflow
 - `list_for_agent()` — All activations for a sub-agent (with update-available status)
+
+### Scheduled Run Vocabulary and Interruption (services/scheduler_engine.py)
+
+The reasoning lives in `docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md`; this section is
+the vocabulary and the contract the code implements (migrations 091/092, `scheduler_engine.py`,
+`scheduled_job_repository.py`, `utils/a2a_dispatch.py`).
+
+A **job** is the user's standing instruction (`scheduled_jobs`) — a schedule plus a prompt. A
+**run** is one recorded execution of it (`scheduled_job_runs`), created at dispatch and closed by
+`_finalize`. Runs of the same job are independent **attempts**: nothing is carried between them, and
+they never overlap — `claim_due_jobs` skips a job while any of its runs is still `running`.
+
+Every run records a **trigger** (`RunTrigger`): `scheduled` for an ordinary occurrence, `retry` for
+the one fresh attempt an interruption earns, `manual` for a user's run-now. The trigger is decided
+where the run is created — by the claim (which returns it as `ClaimedJob.trigger`) or by the run-now
+route — and the healer reads it off the row, so both paths that notice an interruption agree on
+what it is worth.
+
+An **interrupted run** (`JobRunStatus.INTERRUPTED`) is one that ended because the process executing
+it died. It is *not* a failure: `complete_job` leaves `consecutive_failures` untouched, so process
+churn can never trip `max_failures`. Only `dispatch_streaming` can say the agent died — it raises
+`AgentUnreachable` for a transport error, a dropped or timed-out stream, or a 502/503/504, looking
+through the a2a SDK's wrapping — and `_dispatch_job` classifies on that exception alone. A Keycloak
+or database error on the way to the dispatch is a failure of the run.
+
+What an interruption earns depends on the trigger:
+
+- `scheduled` → the job gets `retry_at` (a **retry marker**, `RETRY_DELAY_SECONDS` out). It is a
+  separate column from `next_run_at` so the schedule users read is never rewritten, and it is the
+  claim loop's second wake-up reason. `complete_job` only ever *writes* it (COALESCE), because runs
+  of one job can complete out of order; the claim consumes it, and pause/resume/PATCH-disable clear
+  it. The retry branch ignores `enabled` (a retired `once` job is disabled too) and trusts
+  `paused_reason IS NULL`, so every deliberate stop — pause, auto-pause, PATCH `enabled=false`,
+  an unresolvable timezone — writes a reason.
+- `retry` → recovery is exhausted. The run is marked as owing the user a notice (`notice_due_at`,
+  written in the same statement as the run's outcome) and no further attempt is scheduled.
+- `manual` → nothing. The user is present and can press again.
+
+**Liveness.** A dead `agent-runner` is seen by the dispatcher through the stream (`read=300.0` is
+the inter-event timeout). A dead `console-backend` is seen by the healer: the dispatcher heartbeats
+`last_seen_at` every `HEARTBEAT_INTERVAL_SECONDS`, and `interrupt_stale_runs` sweeps on staleness
+(`STALE_RUN_AFTER_SECONDS`), never on age, so a slow run is never shot and the healer stays correct
+with several scheduler processes. A run with *no* heartbeat was written by the previous release and
+may still be executing there during a rolling deploy; it keeps the old age bound
+(`HEARTBEATLESS_RUN_AFTER_SECONDS`). `complete_run` only finalises a run still `running`, so a run the
+healer already called interrupted stays interrupted if its dispatcher turns out to be alive; if
+`complete_run` itself fails, `close_run_minimally` still closes the row, because a finished run left
+`running` would be swept and re-executed.
+
+**The user is told only when recovery is exhausted**, via `_notify_recovery_exhausted`: an
+ephemeral notification-only A2A dispatch (text plus the job's push config, no `sub_agent_id`, no
+run row) that agent-runner delivers while running no agent. Result delivery otherwise stays with
+the executing agent — do not add a fourth deliverer. Notices are owed, not sent, where the loss is
+detected; `_deliver_due_notices` claims them on a later tick, retries a failed delivery, and abandons
+one that is older than `NOTICE_GIVE_UP_AFTER_SECONDS` or superseded by a later completed run.
 
 ## Important Notes
 

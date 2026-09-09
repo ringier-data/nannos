@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 import httpx
+from ringier_a2a_sdk.cost_tracking.attribution import attribution_header
 from ringier_a2a_sdk.utils.http_pool import LazyClient
 
 from ..config import config
@@ -31,16 +32,26 @@ def _gateway_headers(metadata: dict | None = None) -> dict[str, str]:
 
     The Bearer default mirrors agent-common._gateway_api_key / the embeddings adapter — a
     consistent key avoids silent 401s when the env is unset. console-backend is dependency-light
-    (no agent-common), so the value is duplicated here rather than imported. ``metadata`` (e.g.
-    {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the proxy attributes the cost;
-    without it the proxy logs nothing.
+    (no agent-common), so the value is duplicated here rather than imported.
+
+    Cost attribution rides on x-litellm-spend-logs-metadata, built by the SDK's canonical
+    ``attribution_header`` — the same builder the embeddings adapter uses, rather than a
+    hand-rolled copy that could drift from the field set the proxy's logger reads. It merges
+    two sources, which is what lets both console-backend styles work through one path:
+
+      * the ambient attribution ContextVars, for a caller that runs *as* somebody for a
+        whole block of work (the scheduler's dispatch opens such a scope);
+      * ``metadata``, for a caller that names the payer per call (an HTTP request handler
+        with the authenticated user in hand) — explicit values win over the ambient ones.
+
+    Attribution is not cosmetic: the proxy's logger drops a record with no ``user_sub``
+    outright, so an unattributed call leaves no usage row at all.
     """
     headers = {
         "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
         "Content-Type": "application/json",
     }
-    if metadata:
-        headers["x-litellm-spend-logs-metadata"] = json.dumps({k: v for k, v in metadata.items() if v is not None})
+    headers.update(attribution_header(**(metadata or {})))
     return headers
 
 
@@ -48,9 +59,9 @@ def _completions_url() -> str:
     return f"{config.model_gateway.url.rstrip('/')}/v1/chat/completions"
 
 
-def _first_message(resp_json: dict) -> dict:
-    """The first choice's ``message`` from an OpenAI-shaped completion, or ``{}`` when the
-    provider returned no choices.
+def _first_choice(resp_json: dict) -> dict:
+    """The first ``choice`` of an OpenAI-shaped completion, or ``{}`` when the provider
+    returned no choices.
 
     A 2xx with ``choices: []`` is a *successful* response with no output (content-filter block,
     moderation refusal, a provider error the gateway mapped to 200) — not a transport failure,
@@ -58,7 +69,38 @@ def _first_message(resp_json: dict) -> dict:
     empty-output handling instead of raising IndexError on ``choices[0]``.
     """
     choices = resp_json.get("choices") or []
-    return choices[0].get("message", {}) if choices else {}
+    return choices[0] if choices else {}
+
+
+def _first_message(resp_json: dict) -> dict:
+    """The first choice's ``message``, or ``{}`` — see `_first_choice`."""
+    return _first_choice(resp_json).get("message", {})
+
+
+class GatewayText(str):
+    """The assistant text of a completion, carrying the provider's ``finish_reason``.
+
+    A plain ``str`` to every caller — the utility paths do string work on it and tests
+    stub it with literals — but a reply that was cut off (``finish_reason == "length"``)
+    reads exactly like one that simply said little, and only the finish reason tells the
+    two apart. That was the difference between "the model answered nothing usable" and
+    "the model ran out of output budget mid-object" going unlogged for a month.
+    """
+
+    finish_reason: str | None
+
+    def __new__(cls, content: str, finish_reason: str | None = None) -> "GatewayText":
+        text = super().__new__(cls, content)
+        text.finish_reason = finish_reason
+        return text
+
+
+class GatewayReplyTruncated(RuntimeError):
+    """The model's reply hit ``max_tokens`` before it finished, so there is no object to read.
+
+    Distinct from "no object found" because the remedy is different: the request was fine,
+    the output budget was not — typically because a reasoning model spent it thinking.
+    """
 
 
 async def gateway_registered_aliases(timeout: float = 10.0) -> set[str] | None:
@@ -109,27 +151,28 @@ async def gateway_chat(
     model: str,
     max_tokens: int = 1024,
     metadata: dict | None = None,
-    reasoning_effort: str | None = None,
+    reasoning_effort: str | None = "none",
     timeout: float = 60.0,
 ) -> str:
     """Single-turn completion through the gateway; returns the assistant text.
 
-    `metadata` (e.g. {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the
-    proxy attributes the cost. Without a user_sub the proxy logs nothing.
+    `metadata` (e.g. {"user_sub": ...}) names the payer for this one call. A caller that
+    runs as somebody for a whole block of work sets an `attribution_scope` instead and
+    passes nothing here — see `_gateway_headers`. Without either, the proxy's logger drops
+    the record and the call leaves no usage row.
 
     `reasoning_effort` is LiteLLM's unified extended-thinking control, in the same
     vocabulary agent-common's `get_reasoning_effort` and the console's `thinking_levels_for`
-    use — with ``"none"`` meaning thinking off. Pass it when the call is mechanical enough
-    that reasoning only burns generated tokens (conversation titling does). Left unset it is
-    omitted entirely and the model reasons however it normally would. The proxy runs
-    `drop_params: true`, so a model that takes no such param is unaffected either way.
+    use — with ``"none"`` meaning thinking off, which is the DEFAULT here. Thinking is
+    opt-in, not opt-out: every console-backend call through this helper is a mechanical
+    utility call (title a conversation, summarize a document, judge a stated condition)
+    running on the cheap tier with a small `max_tokens`, and reasoning tokens count
+    against that budget — a reasoning model spends it thinking and is cut off partway
+    into the answer. A caller that genuinely wants the model to reason says so; passing
+    ``None`` omits the parameter entirely and leaves the model to reason as it normally
+    would. The proxy runs `drop_params: true`, so a model that takes no such param is
+    unaffected either way.
 
-    Note: the canonical attribution-header builder lives in agent-common
-    (`attribution.attribution_header`, used by the chat client + embeddings adapter). It is
-    intentionally NOT imported here — console-backend is dependency-light (httpx only, no
-    agent-common), and gateway_chat's only callers (watch-param generation, catalog
-    summarization) run outside any sub-agent / scheduled-job context, so the richer
-    attribution dimensions would always be empty. The caller passes whatever applies.
     """
     payload: dict = {
         "model": model,
@@ -149,9 +192,24 @@ async def gateway_chat(
     # *successful* response with no text, not a transport failure. Return "" so callers'
     # str ops (re.sub/.strip) don't crash; they treat empty as "no usable output" and
     # apply their own fallback, distinct from the gateway error path (which raises above).
-    # _first_message tolerates an empty choices array the same way (returns {} → "").
-    content = _first_message(resp.json()).get("content")
-    return content or ""
+    # _first_choice tolerates an empty choices array the same way (returns {} → "").
+    choice = _first_choice(resp.json())
+    content = choice.get("message", {}).get("content")
+    finish_reason = choice.get("finish_reason")
+    if finish_reason == "length":
+        # Logged here, for every caller, rather than in `gateway_chat_json` alone: a reply
+        # that was cut off looks like a short one to a prose caller too — a half-sentence
+        # stored as a document summary, a truncated judgement read as "condition not met".
+        # The callers differ in what they do about it; none of them should have to notice
+        # it for themselves, and before this it went unlogged on four of the six paths.
+        logger.warning(
+            "Reply from %s was cut off at max_tokens=%d (%d chars): %r",
+            model,
+            max_tokens,
+            len(content or ""),
+            (content or "")[:_REPLY_SNIPPET_CHARS],
+        )
+    return GatewayText(content or "", finish_reason=finish_reason)
 
 
 async def gateway_chat_json(
@@ -160,6 +218,7 @@ async def gateway_chat_json(
     model: str,
     max_tokens: int = 1024,
     metadata: dict | None = None,
+    reasoning_effort: str | None = "none",
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """`gateway_chat`, for the common case of asking for a single JSON object.
@@ -171,17 +230,58 @@ async def gateway_chat_json(
     would let one path succeed while another silently read `{}`.
 
     Returns `{}` when there is no object to be found, which every caller already treats as
-    "no usable output" and answers with its own fallback.
+    "no usable output" and answers with its own fallback. Raises `GatewayReplyTruncated`
+    instead when the reason there is no object is that the reply hit `max_tokens` — a
+    reasoning model on a small budget spends it thinking and is stopped a few tokens into
+    the answer, which is a budget problem, not a content miss, and callers word it
+    differently. Thinking is off by default (see `gateway_chat`), which is what JSON-filling
+    wants: the whole budget goes to the object.
     """
     text = await gateway_chat(
-        prompt, model=model, max_tokens=max_tokens, metadata=metadata, timeout=timeout
+        prompt,
+        model=model,
+        max_tokens=max_tokens,
+        metadata=metadata,
+        reasoning_effort=reasoning_effort,
+        timeout=timeout,
     )
+    # Tests stub gateway_chat with plain strings; a plain str simply has no finish reason.
+    finish_reason = getattr(text, "finish_reason", None)
     cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        return {}
-    parsed = json.loads(match.group())
-    return parsed if isinstance(parsed, dict) else {}
+    if match:
+        try:
+            parsed = json.loads(match.group())
+        except json.JSONDecodeError as exc:
+            # The match is greedy, so prose holding two objects spans from the first `{`
+            # to the last `}` and is not JSON. Same contract as below: no object found.
+            problem = f"unparseable JSON ({exc})"
+        else:
+            return parsed if isinstance(parsed, dict) else {}
+    else:
+        problem = "no JSON object"
+    # The caller decides what an empty answer means; this is the only place that knows
+    # why it is empty, so the reply's shape — finish reason and how it starts — is
+    # recorded here. The snippet is what makes the next occurrence diagnosable without
+    # reproducing the call.
+    logger.warning(
+        "%s in the model's reply for model %s (finish_reason=%s, %d chars): %r",
+        problem[0].upper() + problem[1:],
+        model,
+        finish_reason,
+        len(text),
+        text[:_REPLY_SNIPPET_CHARS],
+    )
+    if finish_reason == "length":
+        raise GatewayReplyTruncated(
+            f"The reply from {model} was cut off at max_tokens={max_tokens} before it finished"
+        )
+    return {}
+
+
+#: How much of an unusable reply goes into the log. Enough to see what the model was
+#: doing (prose, a refusal, the opening of an object) without logging the whole thing.
+_REPLY_SNIPPET_CHARS = 200
 
 
 def _extract_citations(resp_json: dict) -> list[dict]:

@@ -53,6 +53,7 @@ import {
   type ScheduleKind,
   type ScheduledJobCreateExtended,
   getDeliveryChannels,
+  formatApiError,
   generateJobDraft,
   createScheduledJob,
   type DeliveryChannel,
@@ -323,10 +324,7 @@ function CreateJobDialog({
     setAiLoading(true);
     setError(null);
     try {
-      const result = await generateJobDraft(
-        mcpTools as unknown as Record<string, unknown>[],
-        aiQuery,
-      );
+      const result = await generateJobDraft(aiQuery);
       const filled = new Set<string>();
       setAiUndo(form);
       setForm((f) => {
@@ -418,8 +416,10 @@ function CreateJobDialog({
       });
       setAiFilled(filled);
       setFieldErrors({});
-    } catch {
-      setError('AI generation failed. Please fill in the fields manually.');
+    } catch (e) {
+      // The backend's detail says which remedy applies — rephrase, retry later, or
+      // have an admin configure a model — so it is shown rather than swallowed.
+      setError(`AI generation failed: ${formatApiError(e)}. Please fill in the fields manually.`);
     } finally {
       setAiLoading(false);
     }
@@ -594,7 +594,7 @@ function CreateJobDialog({
                 />
                 <Button
                   type="button"
-                  disabled={!aiQuery.trim() || aiLoading || mcpTools.length === 0}
+                  disabled={!aiQuery.trim() || aiLoading}
                   onClick={handleAiGenerate}
                 >
                   {aiLoading ? <Loader2 className="size-4 animate-spin" /> : 'Generate'}

@@ -244,10 +244,20 @@ def assert_gateway_configured() -> None:
 # this runtime mapping never disagree.
 _NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
 
+# LiteLLM's explicit "no extended thinking" value, portable across providers (the gateway
+# drops it for models with no reasoning to disable). NOT a `ThinkingLevel` member: the app
+# models thinking-off as a toggle rather than a tier, so it can only be requested through
+# `create_model(reasoning_effort=...)` — which is what `create_fast_model` does.
+#
+# console-backend's `llm_gateway.gateway_chat` defaults to this same value, and states the
+# same policy (thinking is opt-in for mechanical utility calls). That copy is deliberate —
+# console-backend stays dependency-light and imports neither agent-common nor langchain, the
+# way it also duplicates the gateway Bearer-key default — but the two are one decision:
+# change the policy here and change it there.
+REASONING_OFF = "none"
 
-def get_reasoning_effort(
-    thinking_level: ThinkingLevel | None, model_type: ModelType | None = None
-) -> str | None:
+
+def get_reasoning_effort(thinking_level: ThinkingLevel | None, model_type: ModelType | None = None) -> str | None:
     """Map the app `thinking_level` to LiteLLM's `reasoning_effort`.
 
     low/medium/high are accepted by every reasoning provider and pass through. The
@@ -293,8 +303,11 @@ def max_tokens_for_effort(effort: str | None) -> int | None:
     Returns ``None`` when no effort is active (reasoning off) — callers should leave
     ``max_tokens`` unset so the gateway default applies and we don't lower a non-reasoning
     model's own output cap. See ``_MAX_TOKENS_BY_EFFORT`` for the rationale.
+
+    ``REASONING_OFF`` counts as no effort: it is the explicit off switch, so it must not
+    raise the ceiling the way a real tier does (it has no thinking budget to make room for).
     """
-    if not effort:
+    if not effort or effort == REASONING_OFF:
         return None
     return _MAX_TOKENS_BY_EFFORT.get(effort, _DEFAULT_REASONING_MAX_TOKENS)
 
@@ -304,13 +317,37 @@ def create_model(
     thinking_level: ThinkingLevel | None = None,
     callbacks: list | None = None,
     streaming: bool = True,
+    *,
+    reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
 ) -> BaseChatModel:
     """Create a gateway-backed chat model for the given alias.
 
     `thinking_level` becomes `reasoning_effort` and is always forwarded; the gateway
     drops it for models that don't support reasoning (`drop_params`), so no per-model
     capability check is needed here.
+
+    `reasoning_effort` overrides that mapping with a raw LiteLLM value. It exists for
+    ``REASONING_OFF`` — `ThinkingLevel` has no `none` member (the app models thinking-off as
+    a toggle, not a tier), so without this there was no way to say "off" and the call
+    inherited the PROVIDER default instead. See `create_fast_model`.
+
+    `max_tokens` overrides the effort-derived output ceiling for callers that know their
+    answer is short.
+
+    Both overrides are validated rather than normalized: an empty `reasoning_effort` would
+    take the override branch and then fail the `if effort:` test below, sending nothing and
+    silently inheriting the provider default — the exact regression `REASONING_OFF` exists to
+    prevent, with no error to notice. A non-positive `max_tokens` would reach the gateway as
+    a 400 or an empty completion. ValueError, not assert: asserts vanish under `-O`.
     """
+    if reasoning_effort is not None and not reasoning_effort:
+        raise ValueError(
+            f"reasoning_effort must be a LiteLLM effort value or None, not {reasoning_effort!r} — "
+            f"pass REASONING_OFF ({REASONING_OFF!r}) to turn thinking off."
+        )
+    if max_tokens is not None and max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive when given, not {max_tokens!r}")
     # Gateway-aware subclass: preserves reasoning_content that base ChatOpenAI (>=1.2) drops.
     ChatOpenAI = _gateway_chat_openai_cls()
 
@@ -325,7 +362,7 @@ def create_model(
         callbacks = [cb for cb in callbacks if type(cb).__name__ != "CostTrackingCallback"] or None
 
     model_kwargs: dict = {}
-    effort = get_reasoning_effort(thinking_level, model_type)
+    effort = reasoning_effort if reasoning_effort is not None else get_reasoning_effort(thinking_level, model_type)
     if effort:
         model_kwargs["reasoning_effort"] = effort
 
@@ -333,7 +370,7 @@ def create_model(
     # whole (low) gateway-default max_tokens and truncate the answer. Unset for reasoning-off
     # turns (leave the gateway default). ContinueOnTruncationMiddleware raises this further
     # per-retry when a turn still gets cut off. See max_tokens_for_effort.
-    max_tokens = max_tokens_for_effort(effort)
+    max_tokens = max_tokens if max_tokens is not None else max_tokens_for_effort(effort)
 
     # NOTE: Native Gemini server-side web search (googleSearch) is NOT enabled here.
     # Enabling it for a tool-using deep agent requires `include_server_side_tool_invocations`
@@ -736,6 +773,62 @@ def get_default_fast_model() -> ModelType | None:
     Returns ``None`` only when no chat default is configured at all; runtime callers that must
     actually run a model pair this with require_default_model()."""
     return _default_alias_for("chat:low") or get_default_model()
+
+
+# Floor for a single short answer: one risk score, one condition verdict, a sentence or two.
+# Low enough that a model ignoring "ONE short sentence" cannot stretch the call, and utility
+# work never inherits the reasoning tiers' 8k-32k ceiling. Same value as
+# `llm_gateway.gateway_chat`'s default for the same reason (see REASONING_OFF on why that
+# module keeps its own copy).
+#
+# PUBLIC because it is a floor, not a ceiling: a caller whose answer scales with its input
+# (the tool-call summarizer batches one sentence per pending call) must raise it in
+# proportion, and needs this value to scale *from*. With thinking off the cap binds only
+# real output, so the risk of it being too low is silent truncation — see
+# `tool_call_summarizer._summary_token_budget`.
+FAST_MODEL_MAX_TOKENS = 1024
+
+
+def create_fast_model(
+    model_type: ModelType,
+    *,
+    max_tokens: int = FAST_MODEL_MAX_TOKENS,
+    callbacks: list | None = None,
+) -> BaseChatModel:
+    """A cheap-tier model configured for LOW LATENCY: thinking off, no streaming, short cap.
+
+    For the utility calls that ride `get_default_fast_model()`: they want the cheap tier's
+    speed, not its reasoning, and several sit on a user-visible critical path.
+
+    Currently used by ONE of them — `tool_call_summarizer`, the worst-placed, sitting between
+    the model's tool call and the HITL approval card. The other agent-common fast-model
+    callers still build their own client and still inherit provider-default thinking:
+    `tool_risk_scorer` (which gates that same card), `hitl_resume` (between the user\'s reply
+    and the resume) and `indexing_store` (per chunk, so it multiplies by corpus size).
+    Converting them is a quality judgement — reasoning may be buying something in a score or
+    a classification — not a mechanical swap, so they are deliberately left alone here.
+    (Watch conditions are NOT in this set: they run through console-backend\'s `gateway_chat`,
+    which has defaulted to thinking off since #209.)
+
+    Thinking off is the whole point. `create_model` sends `reasoning_effort` only when a
+    caller passes a `thinking_level`, so these calls sent nothing and inherited the PROVIDER
+    default — dynamic thinking on Gemini 3.x flash, the current `chat:low`. Measured on
+    tool-call summaries (LangSmith, 2026-09-09): 2.7-25.5 s, median ~8 s, to produce one
+    sentence about one `ls` call — all of it in front of the HITL approval card. Same failure
+    as the `gateway_chat` fix in #209, which is why console-backend's `llm_gateway` already
+    defaults to `reasoning_effort="none"`; agent-common had no way to express it.
+
+    Streaming is off because every one of these callers awaits the whole answer before doing
+    anything with it (structured output, a score, a verdict) — a token stream buys nothing
+    and costs a per-chunk callback trip.
+    """
+    return create_model(
+        model_type,
+        callbacks=callbacks,
+        streaming=False,
+        reasoning_effort=REASONING_OFF,
+        max_tokens=max_tokens,
+    )
 
 
 def get_default_indexing_model() -> ModelType | None:

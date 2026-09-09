@@ -125,7 +125,11 @@ class WatchEvaluator:
         job: ScheduledJob,
         access_token: str,
     ) -> WatchOutcome:
-        """Call the job's check tool and decide whether its condition holds."""
+        """Call the job's check tool and decide whether its condition holds.
+
+        The judge's gateway spend is attributed by the `attribution_scope` the engine
+        opens around the dispatch, so nothing about billing is threaded through here.
+        """
         tool_name = job.check_tool or ""
         try:
             token = await token_for(tool_name, access_token)

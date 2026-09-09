@@ -20,23 +20,6 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 logger = logging.getLogger(__name__)
 
 
-# --- Environment ----------------------------------------------------------
-
-# How many model calls one turn may spend. The orchestrator's turn budget is
-# expressed here, in model calls, and converted to LangGraph super-steps by
-# AgentSettings — see the comment there.
-MAX_MODEL_CALLS_PER_TURN_ENV = "ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN"
-DEFAULT_MAX_MODEL_CALLS_PER_TURN = 25
-
-# Deliberately *not* read any more. `MAX_RECURSION_LIMIT` is a shared env name:
-# ringier-a2a-sdk and agent-runner default it to 50, agent-common's dynamic_agent
-# to 75. One value cannot serve all four — a deployment pinning 50 (the
-# orchestrator's own former default) would silently reinstate the turn truncation
-# this budget exists to prevent, while an operator exporting a value large enough
-# for the orchestrator would quadruple every sub-agent's runaway-loop bound.
-LEGACY_RECURSION_LIMIT_ENV = "MAX_RECURSION_LIMIT"
-
-
 def _int_env(name: str, default: int) -> int:
     """Parse an int env var, falling back to ``default`` (with a warning) on a bad value.
 
@@ -53,26 +36,90 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+# How many model calls one turn may spend. This is the unit the budget is
+# expressed in; app/core/step_budget.py converts it to LangGraph super-steps
+# using the compiled graph, so no multiplier is written down anywhere.
+MAX_MODEL_CALLS_PER_TURN_ENV = "ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN"
+DEFAULT_MAX_MODEL_CALLS_PER_TURN = 25
+MIN_MAX_MODEL_CALLS_PER_TURN = 1
+SANE_MAX_MODEL_CALLS_PER_TURN = 200
+"""Not a limit — only the point above which a value is more likely a typo than an
+intent, and worth a warning because the runaway guard stops being one."""
+
+# Deliberately *not* read by the orchestrator any more, but still live elsewhere.
+# `MAX_RECURSION_LIMIT` is a shared env name: ringier-a2a-sdk and agent-runner
+# default it to 50, agent-common's dynamic_agent to 75 (as the fallback behind
+# `SUB_AGENT_RECURSION_LIMIT`). One value cannot serve all four -- a deployment
+# pinning 50, the orchestrator's own former default, would silently reinstate the
+# turn truncation this budget exists to prevent, while a value large enough for
+# the orchestrator would quadruple every sub-agent's runaway-loop bound.
+#
+# That the name remains live for sub-agents is also what keeps them off the
+# orchestrator's derived limit: langgraph propagates `recursion_limit` into a
+# child graph that does not bind its own, and dynamic_agent.py binds one.
+LEGACY_RECURSION_LIMIT_ENV = "MAX_RECURSION_LIMIT"
+
+
 def _resolve_max_model_calls_per_turn() -> int:
     """Model calls allowed per turn, warning if the old shared env var is set.
 
-    The legacy name is not honoured, because inheriting it is the bug. Silence
-    would be worse than either choice, so an operator who set it is told that it
-    no longer applies here and what to set instead.
+    The legacy name is not honoured here, because inheriting it is the bug. But it
+    is emphatically *not* dead: agent-common's ``dynamic_agent`` still reads it as
+    the fallback bound for every local sub-agent in this same process, and
+    agent-runner and ringier-a2a-sdk read it too. So the warning must not read as
+    "this variable is obsolete" -- an operator who unsets it on that advice
+    silently changes every sub-agent's recursion bound. It says what to set for
+    the orchestrator *and* what still depends on the old name.
     """
     legacy = os.getenv(LEGACY_RECURSION_LIMIT_ENV)
     if legacy and legacy.strip():
         logger.warning(
-            "%s=%s is set but no longer configures the orchestrator: it is a shared "
-            "name used by agent-runner, agent-common and ringier-a2a-sdk with "
-            "different defaults, and inheriting a sub-agent's super-step budget is "
-            "what truncated orchestrator turns. Use %s instead — it is counted in "
-            "model calls, not super-steps.",
+            "%s=%s no longer configures the orchestrator -- use %s instead, which is "
+            "counted in model calls rather than LangGraph super-steps. Do NOT unset "
+            "%s on that basis: it is a shared name and still sets the recursion bound "
+            "for local sub-agents in this process (agent-common dynamic_agent, "
+            "default 75) as well as for agent-runner and ringier-a2a-sdk. To decouple "
+            "them, set SUB_AGENT_RECURSION_LIMIT for the sub-agents and leave %s to "
+            "the sibling services.",
             LEGACY_RECURSION_LIMIT_ENV,
             legacy,
             MAX_MODEL_CALLS_PER_TURN_ENV,
+            LEGACY_RECURSION_LIMIT_ENV,
+            LEGACY_RECURSION_LIMIT_ENV,
         )
-    return _int_env(MAX_MODEL_CALLS_PER_TURN_ENV, DEFAULT_MAX_MODEL_CALLS_PER_TURN)
+
+    value = _int_env(MAX_MODEL_CALLS_PER_TURN_ENV, DEFAULT_MAX_MODEL_CALLS_PER_TURN)
+
+    # A budget of 0 or less is not a small budget, it is a broken deployment: the
+    # derived limit collapses to the per-turn overhead, so every request exhausts
+    # it within its first super-steps and the user gets "I've been working on this
+    # for a while and need to take a break" having had no work done at all. Clamp
+    # rather than crash, matching how a malformed value is handled above, but say
+    # so — nothing else in the logs would point at this variable.
+    if value < MIN_MAX_MODEL_CALLS_PER_TURN:
+        logger.warning(
+            "%s=%d is below the minimum of %d and would exhaust the turn budget "
+            "immediately; using %d.",
+            MAX_MODEL_CALLS_PER_TURN_ENV,
+            value,
+            MIN_MAX_MODEL_CALLS_PER_TURN,
+            MIN_MAX_MODEL_CALLS_PER_TURN,
+        )
+        return MIN_MAX_MODEL_CALLS_PER_TURN
+
+    # No clamp at the top end — an operator may legitimately want a long budget —
+    # but a typo'd 2500 becomes ~20k super-steps, which is no runaway protection
+    # at all, and that is worth noticing before it costs a fortune.
+    if value > SANE_MAX_MODEL_CALLS_PER_TURN:
+        logger.warning(
+            "%s=%d is unusually high (over %d model calls per turn). Honouring it, but "
+            "the runaway-loop guard is effectively disabled at this size.",
+            MAX_MODEL_CALLS_PER_TURN_ENV,
+            value,
+            SANE_MAX_MODEL_CALLS_PER_TURN,
+        )
+
+    return value
 
 
 # Message formatting literal for type safety
@@ -307,6 +354,10 @@ class UserConfig(BaseModel):
         default=None,
         description="Sub-agent config hash for console testing mode (single sub-agent isolation)",
     )
+    entitlement_version: Optional[str] = Field(
+        default=None,
+        description="Opaque per-user entitlement stamp from console-backend; part of the per-user cache keys",
+    )
     agent_metadata: Optional[dict[str, dict[str, Any]]] = Field(
         default=None,
         description="Agent metadata from registry: Maps agent_url -> {sub_agent_id, name, description}",
@@ -366,28 +417,12 @@ class AgentSettings:
     MAX_RETRIES = 3
     BACKOFF_FACTOR = 3.0
 
-    # Recursion limit configuration (overrides deepagents default of 1000)
-    #
-    # LangGraph counts this budget in *super-steps*, not model calls: every
-    # middleware hook is its own graph node, so one model call costs
-    # STEPS_PER_MODEL_CALL of them. That multiplier is invisible at the call site,
-    # which is how the limit came to be 50 — a sensible number of model calls and a
-    # crippling number of steps. At 50 a turn was capped at six model calls, and the
-    # orchestrator spends calls on write_todos bookkeeping and filesystem
-    # exploration between delegations, so an ordinary two-delegation request ("look
-    # up X and post it to Slack") exhausted the budget and the user was asked to
-    # continue a task that had already completed correctly.
-    #
-    # So the limit is derived from the unit that has meaning, rather than written as
-    # a super-step number nobody can sanity-check. Adding a middleware raises
-    # STEPS_PER_MODEL_CALL and the limit follows it, instead of silently tightening
-    # every turn's budget. tests/test_step_budget.py counts the steps of a real
-    # graph run against these two constants, so a change to the middleware stack
-    # fails there rather than in production.
-    BASE_STEPS = 2
-    STEPS_PER_MODEL_CALL = 8
+    # Turn budget, in model calls (overrides deepagents' recursion_limit default of
+    # 1000). GraphFactory converts this to a super-step limit per compiled graph via
+    # app/core/step_budget.py — the multiplier is the middleware stack's per-call node
+    # cost, which changes whenever a middleware with model hooks is added or removed,
+    # so it is counted from the graph rather than written here.
     MAX_MODEL_CALLS_PER_TURN = _resolve_max_model_calls_per_turn()
-    MAX_RECURSION_LIMIT = BASE_STEPS + STEPS_PER_MODEL_CALL * MAX_MODEL_CALLS_PER_TURN
 
     # Toolset selection configuration (used by ToolsetSelectorMiddleware in custom GP graph)
     TOOLSET_SELECTION_THRESHOLD = int(os.getenv("TOOLSET_SELECTION_THRESHOLD", "50"))
@@ -404,14 +439,14 @@ class AgentSettings:
     # Per-user discovery + registry cache TTL (seconds). Discovered tools carry no credential
     # (bearers are minted at call time by the per-user token provider), so this is purely a
     # freshness bound: how long a catalogue change made *outside* the console (on the MCP
-    # gateway itself) may go unnoticed, and how long an entitlement change may lag on replicas
-    # the console's invalidation POST did not reach (it is in-process, one replica). Changes
-    # made through the console invalidate the receiving replica immediately. Entries are
-    # additionally bounded by the user token's expiry.
+    # gateway itself, invisible to the console) may go unnoticed. Entitlement changes made
+    # through the console do not wait for it: the per-user entitlement version fetched each
+    # turn is part of the cache key (see discovery_cache). Entries are additionally bounded
+    # by the user token's expiry.
     AGENT_DISCOVERY_CACHE_TTL = _int_env("AGENT_DISCOVERY_CACHE_TTL", 60)
-    # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env)
-    # or call discovery_cache.invalidate_all() when a group→server/tool access policy
-    # changes without the user's own groups/config changing.
+    # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env,
+    # i.e. a redeploy) for a fleet-wide flush that cannot wait out the TTL, e.g. after a
+    # gateway catalogue change the console cannot see. Entitlement changes never need it.
     ENTITLEMENT_POLICY_VERSION = os.getenv("ENTITLEMENT_POLICY_VERSION", "0")
 
     # PostgreSQL checkpoint configuration.

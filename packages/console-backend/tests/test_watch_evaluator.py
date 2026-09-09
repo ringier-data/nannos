@@ -278,6 +278,25 @@ class TestJudgedConditions:
         assert outcome.evaluation.reasoning == "external attendee"
 
     @pytest.mark.asyncio
+    async def test_the_judge_does_not_think_on_its_own_budget(self, monkeypatch):
+        """The judge is the one caller here that makes a semantic decision, so it is the
+        one where thinking is arguable — and it still runs with thinking off, deliberately:
+        512 tokens is a budget a reasoning model spends on thinking and is then cut off
+        inside, and a truncated judgement (swallowed as "condition not met") is worse than
+        an unreasoned one. Pinned because it now comes from the helper's default."""
+        _gateway(monkeypatch, {"attendees": ["a@x.com"]})
+        chat = AsyncMock(return_value='{"condition_met": true, "reasoning": "yes"}')
+        with patch("console_backend.services.llm_gateway.gateway_chat", chat):
+            with patch(
+                "console_backend.services.watch_evaluator.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                await WatchEvaluator().evaluate(
+                    AsyncMock(), _job(cel_expr=None, llm_condition="anything"), "tok"
+                )
+        assert chat.await_args.kwargs["reasoning_effort"] == "none"
+
+    @pytest.mark.asyncio
     async def test_an_unreachable_model_fails_closed(self, monkeypatch):
         # A false trigger notifies about something that did not happen, and repeats every
         # poll until somebody notices.

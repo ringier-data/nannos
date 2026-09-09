@@ -1,6 +1,8 @@
 """Admin router for MCP gateway server access management."""
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..db.session import DbSession
 from ..dependencies import require_admin
@@ -10,9 +12,11 @@ from ..models.mcp_gateway_server_access import (
     McpGatewayStatusResponse,
 )
 from ..models.user import User
+from ..services.entitlement_version import touch_group_member_entitlements
 from ..services.mcp_gateway_server_access_service import McpGatewayServerAccessService
-from ..services.orchestrator_cache import schedule_orchestrator_discovery_cache_invalidation
 from ..utils.gatana_auth import get_gatana_token
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-mcp-gateway"])
 
@@ -22,12 +26,20 @@ def get_mcp_gateway_service(request: Request) -> McpGatewayServerAccessService:
     return request.app.state.mcp_gateway_server_access_service
 
 
-async def _invalidate_group_members_cache(
-    background_tasks: BackgroundTasks, request: Request, db: DbSession, group_id: int, reason: str
-) -> None:
-    """Schedule a scoped discovery-cache invalidation for the members of ``group_id``."""
-    member_subs = await request.app.state.user_group_service.get_group_member_subs(db, group_id)
-    schedule_orchestrator_discovery_cache_invalidation(background_tasks, request, reason, member_subs)
+async def _touch_group_members(db: DbSession, group_id: int, reason: str) -> None:
+    """Move the members' entitlement version so the orchestrator re-discovers their tools.
+
+    Group → MCP-server access lives in the gateway, so the version fingerprint cannot see
+    the change on its own — this is the one entitlement that needs an explicit bump.
+    Best-effort: the gateway write it follows cannot be rolled back, so a failure here is
+    logged and the members converge within the orchestrator's cache TTL instead.
+    """
+    try:
+        await touch_group_member_entitlements(db, group_id)
+        await db.commit()
+    except Exception as e:  # noqa: BLE001 — must never fail an already-applied gateway grant
+        logger.warning("Failed to bump entitlement version for members of group %s (%s): %s", group_id, reason, e)
+        await db.rollback()  # leave the session usable for the dependency's teardown commit
 
 
 @router.get(
@@ -78,7 +90,6 @@ async def grant_mcp_gateway_server_access(
     body: McpGatewayGrantServerAccessRequest,
     request: Request,
     db: DbSession,
-    background_tasks: BackgroundTasks,
     user: User = Depends(require_admin),
     service: McpGatewayServerAccessService = Depends(get_mcp_gateway_service),
 ) -> None:
@@ -87,9 +98,7 @@ async def grant_mcp_gateway_server_access(
         await service.grant_server_access(gatana_token, group_id, server_slug, body.role)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    await _invalidate_group_members_cache(
-        background_tasks, request, db, group_id, f"grant server '{server_slug}' to group {group_id}"
-    )
+    await _touch_group_members(db, group_id, f"grant server '{server_slug}'")
 
 
 @router.delete(
@@ -103,7 +112,6 @@ async def revoke_mcp_gateway_server_access(
     server_slug: str,
     request: Request,
     db: DbSession,
-    background_tasks: BackgroundTasks,
     user: User = Depends(require_admin),
     service: McpGatewayServerAccessService = Depends(get_mcp_gateway_service),
 ) -> None:
@@ -112,6 +120,4 @@ async def revoke_mcp_gateway_server_access(
         await service.revoke_server_access(gatana_token, group_id, server_slug)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    await _invalidate_group_members_cache(
-        background_tasks, request, db, group_id, f"revoke server '{server_slug}' from group {group_id}"
-    )
+    await _touch_group_members(db, group_id, f"revoke server '{server_slug}'")

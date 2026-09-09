@@ -201,6 +201,7 @@ class UsageLog(BaseModel):
     scheduled_job_name: str | None = None
     catalog_id: str | None = None
     catalog_name: str | None = None
+    service: str | None = None
     provider: str | None = None
     model_name: str | None = None
     total_cost_usd: Decimal
@@ -221,6 +222,10 @@ class UsageLogCreate(BaseModel):
     sub_agent_config_version_id: int | None = None
     scheduled_job_id: int | None = None
     catalog_id: str | None = None
+    #: Which service's own work this call was, when the ids above don't imply it — a console
+    #: utility call (titling, job drafting) carries none of them. None → the usage views fall
+    #: back to deriving it, which is how every agent-path row is still classified.
+    service: str | None = None
     provider: str | None = None
     model_name: str | None = None
     billing_unit_breakdown: dict[str, int] = Field(

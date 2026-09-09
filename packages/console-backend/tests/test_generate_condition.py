@@ -43,6 +43,29 @@ async def _call(monkeypatch, replies: list[str], **request):
     return response, chat
 
 
+class TestConditionGenerationIsBilledToTheCaller:
+    @pytest.mark.asyncio
+    async def test_every_attempt_runs_in_the_callers_attribution(self, monkeypatch):
+        """Including the retries: the loop can call the model several times, and the scope
+        covers all of them without the payer being restated per call."""
+        from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+        seen: list[dict] = []
+
+        async def _snapshot(*args, **kwargs):
+            seen.append(current_attribution())
+            return '{"cel_expr": null, "llm_condition": "something semantic"}'
+
+        _defaults(monkeypatch)
+        with patch("console_backend.services.llm_gateway.gateway_chat", _snapshot):
+            await generate_condition(
+                GenerateConditionRequest(query="anything"), AsyncMock(), _user()
+            )
+
+        assert seen and all(a == {"user_sub": "sub-1", "service": "console"} for a in seen)
+        assert current_attribution() == {}
+
+
 class TestGenerateCondition:
     @pytest.mark.asyncio
     async def test_a_working_expression_is_verified_against_the_payload(self, monkeypatch):
@@ -177,3 +200,21 @@ class TestGenerateCondition:
                 GenerateConditionRequest(query="x"), AsyncMock(), _user()
             )
         assert exc.value.status_code == 503
+
+
+class TestReasoningBudget:
+    """The generator turns thinking off and names a cut-off reply for what it is."""
+
+    @pytest.mark.asyncio
+    async def test_thinking_is_off(self, monkeypatch):
+        _, chat = await _call(monkeypatch, ['{"cel_expr": "%s"}' % GOOD], query="q", result=PAYLOAD)
+        assert chat.await_args.kwargs["reasoning_effort"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_reply_is_a_422_that_says_so(self, monkeypatch):
+        from console_backend.services.llm_gateway import GatewayText
+
+        with pytest.raises(HTTPException) as exc:
+            await _call(monkeypatch, [GatewayText('{"cel_expr": "resu', finish_reason="length")], query="q", result=PAYLOAD)
+        assert exc.value.status_code == 422
+        assert "cut off" in exc.value.detail

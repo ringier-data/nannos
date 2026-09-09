@@ -11,8 +11,9 @@ Validated end-to-end against Bedrock: cache/cost fidelity and attribution round-
 
 Phase status:
   - Extraction + billing-unit mapping + per-event POST: implemented.
-  - Service-to-service auth token (OIDC client-credentials, like console-backend's
-    orchestrator_cache): TODO(phase-2) — currently uses CONSOLE_BACKEND_TOKEN if set.
+  - Service-to-service auth token (OIDC client-credentials via the shared
+    OidcOAuth2Client, ``get_token(audience=...)``): TODO(phase-2) — currently uses
+    CONSOLE_BACKEND_TOKEN if set.
 """
 
 import asyncio
@@ -440,6 +441,9 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
         "scheduled_job_id": attribution.get("scheduled_job_id"),
         "sub_agent_config_version_id": attribution.get("sub_agent_config_version_id"),
         "catalog_id": attribution.get("catalog_id"),
+        # Which service's own work this was, when the ids above don't imply it (a console
+        # utility call carries none). None → console-backend falls back to deriving it.
+        "service": attribution.get("service"),
     }
 
 
@@ -478,6 +482,7 @@ _DEAD_LETTER_SAFE_KEYS = (
     "provider",
     "model_name",
     "billing_unit_breakdown",
+    "service",
     "sub_agent_id",
     "scheduled_job_id",
     "sub_agent_config_version_id",

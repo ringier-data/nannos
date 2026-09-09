@@ -189,6 +189,9 @@ class TestGraphCreationWithThinking:
         mock_config.POSTGRES_SCHEMA = "public"
         mock_config.MAX_RETRIES = 3
         mock_config.BACKOFF_FACTOR = 2
+        # The turn budget is converted to a super-step limit from the compiled graph
+        # (app/core/step_budget.py), so a Mock(spec=AgentSettings) needs a real int here.
+        mock_config.MAX_MODEL_CALLS_PER_TURN = 25
 
         # Graph creation resolves the model's provider via the gateway. Keep it hermetic:
         # LLM_GATEWAY_URL lets create_model build its client, and get_model_provider is
@@ -201,7 +204,13 @@ class TestGraphCreationWithThinking:
             patch("agent_common.core.model_factory.get_model_provider", return_value="bedrock_converse"),
             patch("agent_common.a2a.structured_response.get_model_provider", return_value="bedrock_converse"),
         ):
-            mock_create_deep_agent.return_value = Mock()
+            # `_create_graph` now derives the recursion limit by counting the compiled
+            # graph's nodes, so a bare Mock is no longer enough — it must expose an
+            # iterable `nodes`. The names only need to be classifiable; this test is
+            # about caching, not about the budget arithmetic.
+            mock_graph = Mock()
+            mock_graph.nodes = ["__start__", "model", "tools"]
+            mock_create_deep_agent.return_value = mock_graph
 
             factory = GraphFactory(mock_config)
 

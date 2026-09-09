@@ -1,6 +1,7 @@
 """Conversation titling: parsing, the first-exchange pick, the run-once guard, and
 the page-context stamp that tells the list where a conversation started."""
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -13,30 +14,43 @@ from console_backend.services.conversation_service import conversation_page_cont
 ANSWER = "Its daily cap was lowered on Monday, so it stopped spending."
 
 
+@pytest.fixture(autouse=True)
+def _resolvable_owner(monkeypatch):
+    """Titling resolves the conversation owner's OIDC subject before it bills anything.
+
+    The socket session hands it `users.id`, which is not the subject for anyone onboarded
+    after the id/sub split, so the lookup is the module's own — and needs a database that
+    the unit tests do not have.
+    """
+    monkeypatch.setattr(cs, "get_async_session_factory", lambda: _null_session)
+    monkeypatch.setattr(cs, "billing_subject", AsyncMock(return_value="oidc-subject"))
+
+
+@asynccontextmanager
+async def _null_session():
+    yield AsyncMock()
+
+
 # ---- parsing ---------------------------------------------------------------
 
 
-def test_parses_plain_json():
-    parsed = cs.parse_summary_response('{"title": "Campaign 42 pacing", "summary": "Why campaign 42 under-delivered."}')
+# Digging the object out of fences and prose belongs to `gateway_chat_json` and is
+# covered there; what is left here is the title-specific validation.
+
+
+def test_takes_both_fields():
+    parsed = cs.parse_summary_response({"title": "Campaign 42 pacing", "summary": "Why campaign 42 under-delivered."})
     assert parsed == ("Campaign 42 pacing", "Why campaign 42 under-delivered.")
 
 
-def test_parses_through_fences_and_chatter():
-    raw = 'Sure!\n```json\n{"title": "Invoice mismatch", "summary": "The August invoice does not match the booking."}\n```'
-    assert cs.parse_summary_response(raw) == (
-        "Invoice mismatch",
-        "The August invoice does not match the booking.",
-    )
-
-
 def test_normalizes_a_messy_title():
-    parsed = cs.parse_summary_response('{"title": "  \\"Campaign\\n 42  pacing.\\"  ", "summary": "  A  sentence.  "}')
+    parsed = cs.parse_summary_response({"title": '  "Campaign\n 42  pacing."  ', "summary": "  A  sentence.  "})
     assert parsed == ("Campaign 42 pacing", "A sentence.")
 
 
 def test_caps_what_it_stores():
     long_title = "word " * 40
-    parsed = cs.parse_summary_response(f'{{"title": "{long_title}", "summary": "{long_title}"}}')
+    parsed = cs.parse_summary_response({"title": long_title, "summary": long_title})
     assert parsed is not None
     title, summary = parsed
     assert len(title) <= cs.MAX_TITLE_CHARS
@@ -44,21 +58,18 @@ def test_caps_what_it_stores():
 
 
 @pytest.mark.parametrize(
-    "raw",
+    "data",
     [
-        "",
-        "   ",
-        "I could not summarize that.",
-        '{"title": "Only a title"}',
-        '{"title": "", "summary": "empty title"}',
-        '{"title": 42, "summary": "wrong type"}',
-        '{"broken": ',
-        "[1, 2, 3]",
+        {},  # what the helper returns when there was no object to find
+        {"title": "Only a title"},
+        {"title": "", "summary": "empty title"},
+        {"title": 42, "summary": "wrong type"},
+        {"title": " . ", "summary": "nothing survives trimming"},
     ],
 )
-def test_rejects_anything_incomplete(raw):
+def test_rejects_anything_incomplete(data):
     # Half an answer must never overwrite an existing title.
-    assert cs.parse_summary_response(raw) is None
+    assert cs.parse_summary_response(data) is None
 
 
 # ---- what counts as an answer ---------------------------------------------
@@ -110,12 +121,10 @@ def fake_services(metadata=None, title="Why is campaign 42 und"):
 async def test_titles_a_conversation_and_stores_both_fields(monkeypatch):
     conversation_service = fake_services()
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
-    gateway = AsyncMock(return_value='{"title": "Campaign 42 pacing", "summary": "Why campaign 42 under-delivered."}')
-    monkeypatch.setattr(cs, "gateway_chat", gateway)
+    gateway = AsyncMock(return_value={"title": "Campaign 42 pacing", "summary": "Why campaign 42 under-delivered."})
+    monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
-    assert await cs.maybe_summarize_conversation(
-        conversation_service, "conv-1", "user-1", answer=ANSWER, user_sub="user-1"
-    )
+    assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
     conversation_service.update_summary.assert_awaited_once_with(
         "conv-1",
         "user-1",
@@ -123,12 +132,11 @@ async def test_titles_a_conversation_and_stores_both_fields(monkeypatch):
         summary="Why campaign 42 under-delivered.",
         title_source="llm",
     )
-    # Both halves reached the model — the title as the question, the answer the
-    # caller passed — and cost is attributed to the OIDC sub.
+    # Both halves reached the model — the title as the question, the answer the caller
+    # passed. Attribution rides the scope, not the call (see the attribution test below).
     prompt = gateway.await_args.args[0]
     assert "Why is campaign 42 und" in prompt
     assert "daily cap was lowered" in prompt
-    assert gateway.await_args.kwargs["metadata"] == {"user_sub": "user-1", "conversation_id": "conv-1"}
 
 
 @pytest.mark.asyncio
@@ -139,12 +147,56 @@ async def test_asks_for_no_thinking_but_keeps_the_token_headroom(monkeypatch):
     costs the title."""
     conversation_service = fake_services()
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
-    gateway = AsyncMock(return_value='{"title": "T", "summary": "S"}')
-    monkeypatch.setattr(cs, "gateway_chat", gateway)
+    gateway = AsyncMock(return_value={"title": "T", "summary": "S"})
+    monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
     assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
     assert gateway.await_args.kwargs["reasoning_effort"] == "none"
     assert gateway.await_args.kwargs["max_tokens"] >= 4000
+
+
+@pytest.mark.asyncio
+async def test_it_bills_the_resolved_subject_as_console_work(monkeypatch):
+    """Two things this used to get wrong. It billed the socket session's `user_id`, which
+    is the internal id and not a subject — it landed only because the usage ingest falls
+    back to an id lookup. And carrying no service, it was classified as 'orchestrator':
+    an agent run the user never made."""
+    from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+    seen: dict = {}
+    conversation_service = fake_services()
+    monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
+
+    async def _snapshot(*args, **kwargs):
+        seen.update(current_attribution())
+        return {"title": "T", "summary": "S"}
+
+    monkeypatch.setattr(cs, "gateway_chat_json", _snapshot)
+
+    assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
+    assert seen == {"user_sub": "oidc-subject", "conversation_id": "conv-1", "service": "console"}
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_subject_falls_back_to_the_internal_id(monkeypatch):
+    """Not a regression for the sake of correctness: the ingest still resolves an id, so
+    a failed lookup should cost the right *shape*, not the usage row."""
+    from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
+
+    seen: dict = {}
+    conversation_service = fake_services()
+    monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
+    # What `billing_subject` falls back to when the subject cannot be read.
+    monkeypatch.setattr(cs, "billing_subject", AsyncMock(return_value="user-1"))
+
+    async def _snapshot(*args, **kwargs):
+        seen.update(current_attribution())
+        return {"title": "T", "summary": "S"}
+
+    monkeypatch.setattr(cs, "gateway_chat_json", _snapshot)
+
+    assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
+    assert seen["user_sub"] == "user-1"
 
 
 @pytest.mark.asyncio
@@ -153,8 +205,8 @@ async def test_notifies_viewers_once_the_name_is_stored(monkeypatch):
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
     monkeypatch.setattr(
         cs,
-        "gateway_chat",
-        AsyncMock(return_value='{"title": "Campaign 42 pacing", "summary": "Why it under-delivered."}'),
+        "gateway_chat_json",
+        AsyncMock(return_value={"title": "Campaign 42 pacing", "summary": "Why it under-delivered."}),
     )
     notified = AsyncMock()
 
@@ -170,7 +222,7 @@ async def test_no_notification_when_nothing_was_stored(monkeypatch):
     conversation_service.update_summary = AsyncMock(return_value=False)  # row vanished
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
     monkeypatch.setattr(
-        cs, "gateway_chat", AsyncMock(return_value='{"title": "T", "summary": "S"}')
+        cs, "gateway_chat_json", AsyncMock(return_value={"title": "T", "summary": "S"})
     )
     notified = AsyncMock()
 
@@ -186,7 +238,7 @@ async def test_a_placeholder_answer_is_not_worth_a_title(monkeypatch):
     burning the one attempt on a title written from "Status: completed"."""
     conversation_service = fake_services()
     gateway = AsyncMock()
-    monkeypatch.setattr(cs, "gateway_chat", gateway)
+    monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
     assert not await cs.maybe_summarize_conversation(
         conversation_service, "conv-1", "user-1", answer="Status: completed at 2026-08-26T12:00:00Z"
@@ -201,7 +253,7 @@ async def test_an_untitled_conversation_has_no_question_to_work_from(monkeypatch
     so there is nothing to name it after yet."""
     conversation_service = fake_services(title="")
     gateway = AsyncMock()
-    monkeypatch.setattr(cs, "gateway_chat", gateway)
+    monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
     assert not await cs.maybe_summarize_conversation(
         conversation_service, "conv-1", "user-1", answer=ANSWER
@@ -213,7 +265,7 @@ async def test_an_untitled_conversation_has_no_question_to_work_from(monkeypatch
 async def test_runs_only_once_per_conversation(monkeypatch):
     conversation_service = fake_services(metadata={"title_source": "llm"})
     gateway = AsyncMock()
-    monkeypatch.setattr(cs, "gateway_chat", gateway)
+    monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
     assert not await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
     gateway.assert_not_awaited()
@@ -225,7 +277,7 @@ async def test_no_model_configured_keeps_the_existing_title(monkeypatch):
     conversation_service = fake_services()
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value=None))
     gateway = AsyncMock()
-    monkeypatch.setattr(cs, "gateway_chat", gateway)
+    monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
     assert not await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
     gateway.assert_not_awaited()
@@ -236,9 +288,23 @@ async def test_no_model_configured_keeps_the_existing_title(monkeypatch):
 async def test_a_gateway_failure_is_swallowed(monkeypatch):
     conversation_service = fake_services()
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
-    monkeypatch.setattr(cs, "gateway_chat", AsyncMock(side_effect=RuntimeError("gateway down")))
+    monkeypatch.setattr(cs, "gateway_chat_json", AsyncMock(side_effect=RuntimeError("gateway down")))
 
     # Detached task: it must never raise, and never touch the title.
+    assert not await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
+    conversation_service.update_summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_by_the_budget_keeps_the_existing_title(monkeypatch):
+    """The salvage is shared now, so the truncation signal reaches this path too — and
+    it means the same thing as any other failure here: leave the title alone."""
+    from console_backend.services.llm_gateway import GatewayReplyTruncated
+
+    conversation_service = fake_services()
+    monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
+    monkeypatch.setattr(cs, "gateway_chat_json", AsyncMock(side_effect=GatewayReplyTruncated("cut off")))
+
     assert not await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
     conversation_service.update_summary.assert_not_awaited()
 
@@ -311,8 +377,8 @@ async def test_a_name_the_user_typed_is_never_overwritten(monkeypatch):
     monkeypatch.setattr(cs, "resolve_summary_model", AsyncMock(return_value="chat-low"))
     monkeypatch.setattr(
         cs,
-        "gateway_chat",
-        AsyncMock(return_value='{"title": "Campaign 42 pacing", "summary": "Why it under-delivered."}'),
+        "gateway_chat_json",
+        AsyncMock(return_value={"title": "Campaign 42 pacing", "summary": "Why it under-delivered."}),
     )
 
     assert await cs.maybe_summarize_conversation(conversation_service, "conv-1", "user-1", answer=ANSWER)
@@ -333,7 +399,7 @@ async def test_a_user_named_conversation_that_already_has_a_summary_is_done(monk
         metadata={"title_source": "user", "summary": "Already written."}
     )
     gateway = AsyncMock()
-    monkeypatch.setattr(cs, "gateway_chat", gateway)
+    monkeypatch.setattr(cs, "gateway_chat_json", gateway)
 
     assert not await cs.maybe_summarize_conversation(
         conversation_service, "conv-1", "user-1", answer=ANSWER

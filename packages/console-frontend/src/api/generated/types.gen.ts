@@ -1717,6 +1717,16 @@ export type EngagementResponse = {
 };
 
 /**
+ * EntitlementVersionResponse
+ */
+export type EntitlementVersionResponse = {
+    /**
+     * Version
+     */
+    version: string;
+};
+
+/**
  * FederatedExchangeRequest
  *
  * A foreign (trusted external IdP) access token to exchange for a nannos one.
@@ -1904,6 +1914,10 @@ export type GatewayUsageLogCreate = {
      */
     catalog_id?: string | null;
     /**
+     * Service
+     */
+    service?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;
@@ -2020,16 +2034,11 @@ export type GenerateConditionResponse = {
  * GenerateJobDraftRequest
  *
  * Request body for generating a scheduled job from a one-line description.
+ *
+ * Only the request itself: the tools, sub-agents and channels the draft may reference
+ * are the caller's own and are read server-side, never accepted from the body.
  */
 export type GenerateJobDraftRequest = {
-    /**
-     * Tools
-     *
-     * List of available MCP tool objects (name, description, input_schema.)
-     */
-    tools: Array<{
-        [key: string]: unknown;
-    }>;
     /**
      * Query
      *
@@ -2128,7 +2137,7 @@ export type ImpersonateStartRequest = {
  *
  * Terminal status of a single job execution attempt.
  */
-export type JobRunStatus = 'running' | 'success' | 'failed' | 'condition_not_met';
+export type JobRunStatus = 'running' | 'success' | 'failed' | 'condition_not_met' | 'interrupted';
 
 /**
  * JobType
@@ -3906,6 +3915,16 @@ export type RunNowResponse = {
 };
 
 /**
+ * RunTrigger
+ *
+ * Why a run was started. Decides what its interruption is worth: a SCHEDULED
+ * run earns one RETRY, a RETRY earns the user a notice, a MANUAL run earns
+ * neither — the user is present and can press again. See
+ * docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md.
+ */
+export type RunTrigger = 'scheduled' | 'retry' | 'manual';
+
+/**
  * ScheduleKind
  *
  * How the job is scheduled.
@@ -3960,6 +3979,10 @@ export type ScheduledJob = {
      * Last Run At
      */
     last_run_at?: string | null;
+    /**
+     * Retry At
+     */
+    retry_at?: string | null;
     /**
      * Prompt
      */
@@ -4312,6 +4335,15 @@ export type ScheduledJobRun = {
      */
     delivered: boolean;
     condition_evaluation?: ConditionEvaluation | null;
+    /**
+     * Last Seen At
+     */
+    last_seen_at?: string | null;
+    trigger?: RunTrigger;
+    /**
+     * Notice Due At
+     */
+    notice_due_at?: string | null;
 };
 
 /**
@@ -6867,6 +6899,10 @@ export type UsageLog = {
      */
     catalog_name?: string | null;
     /**
+     * Service
+     */
+    service?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;
@@ -6940,6 +6976,10 @@ export type UsageLogCreate = {
      * Catalog Id
      */
     catalog_id?: string | null;
+    /**
+     * Service
+     */
+    service?: string | null;
     /**
      * Provider
      */
@@ -8092,6 +8132,22 @@ export type UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses = {
 };
 
 export type UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponse = UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses[keyof UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses];
+
+export type GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/me/entitlement-version';
+};
+
+export type GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: EntitlementVersionResponse;
+};
+
+export type GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponse = GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses[keyof GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses];
 
 export type UpsertToolBypassRuleApiV1AuthMeSettingsToolBypassPutData = {
     body: ToolBypassRuleRequest;
