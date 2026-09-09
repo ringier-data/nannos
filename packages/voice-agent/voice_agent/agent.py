@@ -265,6 +265,13 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
     cheaply still beats dropping them, but a fallback means the modality split was
     unavailable and the figures for that turn are approximate.
 
+    Handles BOTH usage shapes, because one mapper serves two models. The Live session
+    yields ``UsageMetadata`` (``response_token_count`` / ``response_tokens_details``); the
+    tool risk scorer calls ``generate_content`` and yields
+    ``GenerateContentResponseUsageMetadata``, which names the same thing
+    ``candidates_token_count`` / ``candidates_tokens_details``. Reading only the Live names
+    billed every risk-scorer call with input and ZERO output.
+
     Returns a breakdown for ONE report. Session totals are accumulated by
     ``fold_usage_into``, so every key here is written exactly once and assigned directly.
 
@@ -278,12 +285,26 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
     prompt_counted = _accumulate_modalities(
         getattr(usage_metadata, "prompt_tokens_details", None), _INPUT_UNIT_BY_MODALITY, breakdown
     )
+    # Live shape first, then the generate_content shape — never both, they are different
+    # classes, so this cannot double-count.
+    response_details = getattr(usage_metadata, "response_tokens_details", None) or getattr(
+        usage_metadata, "candidates_tokens_details", None
+    )
     response_counted = _accumulate_modalities(
-        getattr(usage_metadata, "response_tokens_details", None), _OUTPUT_UNIT_BY_MODALITY, breakdown
+        response_details, _OUTPUT_UNIT_BY_MODALITY, breakdown
     )
 
     prompt_total = getattr(usage_metadata, "prompt_token_count", None) or 0
-    response_total = getattr(usage_metadata, "response_token_count", None) or 0
+    response_total = (
+        getattr(usage_metadata, "response_token_count", None)
+        or getattr(usage_metadata, "candidates_token_count", None)
+        or 0
+    )
+    # Reasoning tokens. Present on both shapes, billed by Vertex at the OUTPUT rate, and
+    # gemini-2.5-flash thinks by default — so the risk scorer under-billed on every call
+    # while this went unread. Never appears in the modality details, so it is always added
+    # on top rather than being part of the fallback.
+    thoughts = getattr(usage_metadata, "thoughts_token_count", None) or 0
 
     # Direct assignment, not `+=`: these branches only run when the modality pass counted
     # nothing, so the key provably cannot already be set. (`+=` read as though it could
@@ -292,6 +313,8 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
         breakdown["base_input_tokens"] = prompt_total
     if not response_counted and response_total > 0:
         breakdown["base_output_tokens"] = response_total
+    if thoughts > 0:
+        breakdown["base_output_tokens"] = breakdown.get("base_output_tokens", 0) + thoughts
 
     # Details that only partly explain the total would leave the remainder unbilled — the
     # all-or-nothing checks above suppress the fallback as soon as anything was counted.
@@ -304,12 +327,18 @@ def usage_metadata_to_billing_units(usage_metadata: object) -> dict[str, int]:
             "unmapped input modality is in use; extend _INPUT_UNIT_BY_MODALITY.",
             prompt_counted, prompt_total, prompt_total - prompt_counted,
         )
+    # Thoughts are billed above and never appear in the details, so they count as
+    # accounted-for on both sides of this comparison.
     if response_counted and response_total > response_counted:
-        logger.warning(
-            "Response token details account for only %d of %d tokens — %d unbilled. An "
-            "unmapped output modality is in use; extend _OUTPUT_UNIT_BY_MODALITY.",
-            response_counted, response_total, response_total - response_counted,
-        )
+        response_billed = response_counted + thoughts
+        if response_total > response_billed:
+            logger.warning(
+                "Response token details account for only %d of %d tokens (+%d thoughts) — "
+                "%d unbilled. An unmapped output modality is in use; extend "
+                "_OUTPUT_UNIT_BY_MODALITY.",
+                response_counted, response_total, thoughts,
+                response_total - response_billed,
+            )
 
     # Tool-use prompt tokens keep their own unit so they stay visible and separately
     # priceable rather than disappearing into the context total (see _TOOL_USE_UNIT).
