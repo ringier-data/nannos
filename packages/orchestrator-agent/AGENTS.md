@@ -347,27 +347,29 @@ Learned the hard way; each cost real debugging time.
   actually is; production only works because `executor.py` assigns after construction,
   bypassing validation. Passing them to the constructor raises.
 - **A turn's budget is counted in LangGraph super-steps, not model calls.** Every
-  middleware hook is its own graph node, so one model call costs several super-steps
-  and the affordable calls are
-  `(MAX_RECURSION_LIMIT - BASE_STEPS) // STEPS_PER_MODEL_CALL`. Multi-step scenarios
-  can exhaust the budget even when the orchestrator behaves correctly.
+  middleware hook is its own graph node, so one model call costs a whole lap of the
+  graph. Multi-step scenarios can exhaust the budget even when the orchestrator
+  behaves correctly.
 
-  `MAX_RECURSION_LIMIT` is **derived**, not written down: all four constants live on
-  `AgentSettings` (`app/models/config.py`). Read them there; deliberately not
-  restated here, since the last version of this bullet hardcoded them and was wrong
-  within one commit of the config changing.
+  The limit is **derived from the compiled graph** by `app/core/step_budget.py`,
+  which classifies nodes by hook suffix (`.before_model` / `.after_model` per model
+  call, `.before_agent` / `.after_agent` per turn, plus `model` and `tools`). There
+  is no constant to maintain: adding a middleware raises the per-call cost and the
+  limit follows it. Read that module rather than trusting a number restated here —
+  the previous version of this bullet hardcoded three and was wrong within one commit
+  of the config changing.
 
   Configure the budget with `ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN`, in model calls.
-  The shared `MAX_RECURSION_LIMIT` env var is **not** read — `agent-runner`,
+  The shared `MAX_RECURSION_LIMIT` env var is **not** read here — `agent-runner`,
   `agent-common` and `ringier-a2a-sdk` all read that name with different defaults
   (50, 75, 50), so one value cannot serve all four; setting it logs a warning and
-  otherwise does nothing here.
+  otherwise does nothing here. It stays live for sub-agents in this same process, so
+  it must not be unset on that basis.
 
-  `tests/test_step_budget.py` counts the super-steps of a real graph run against
-  `BASE_STEPS` / `STEPS_PER_MODEL_CALL`. Those assertions are a *pin* on measured
-  behaviour, so if one fails a middleware was added and the per-call cost genuinely
-  rose. Update the constant — which raises the derived limit with it, preserving the
-  model-call headroom — rather than adjusting the test.
+  `tests/test_step_budget.py` measures the super-steps of a real graph run and
+  asserts the derived budget covers them with under one model call of slack. A
+  failure there means the *derivation* is wrong — most likely a new node the
+  classifier does not recognise — not a number to bump.
 
 ### Adding a scenario
 
