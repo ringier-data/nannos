@@ -768,3 +768,25 @@ class TestResponseToolsExempt:
         # The untracked call did not loop — it simply never ran.
         untracked = next(m for m in result["messages"] if m.tool_call_id == "tc-untracked")
         assert "not executed" in untracked.content
+
+
+def test_evaluate_program_call_skips_only_the_same_tool_cap():
+    """A program's iteration over distinct items is not a loop; its identical re-issues are."""
+    from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+
+    mw = RepeatedToolCallMiddleware(max_repeats=2, max_tool_repeats=3, window_size=10)
+    history: list[str] = []
+    for i in range(8):
+        verdict = mw.evaluate("get", {"id": i}, history, program_call=True)
+        assert not verdict.blocked
+        history = verdict.history
+    # The same 8 distinct calls at the model boundary trip the same-tool cap.
+    assert mw.evaluate("get", {"id": 99}, history).blocked
+    assert mw.evaluate("get", {"id": 99}, history).loop_type == "same_tool"
+    # Identical arguments still bind for program calls, at the configured threshold.
+    history = []
+    for _ in range(2):
+        history = mw.evaluate("get", {"id": 1}, history, program_call=True).history
+    verdict = mw.evaluate("get", {"id": 1}, history, program_call=True)
+    assert verdict.blocked and verdict.loop_type == "same_args"
+    assert mw.blocked_message("get", verdict).startswith("BLOCKED: 'get' — Tool 'get' called 2 times with identical")

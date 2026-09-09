@@ -717,6 +717,9 @@ class GraphFactory:
             expose_context_registry=True,
             risk_scorer=score_tool_risk,
             default_risk_threshold=0.8,
+            # The stack's loop policy also judges the calls a program makes inside
+            # ``eval`` — same instance, same thresholds, same ``tool_call_history``.
+            loop_detection=self._loop_detection_middleware,
         )
 
         middleware_stack: list[Any] = [
