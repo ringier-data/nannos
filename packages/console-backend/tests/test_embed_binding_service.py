@@ -328,6 +328,16 @@ async def test_upsert_refuses_http_outside_local(monkeypatch):
         )
 
 
+def test_default_client_allows_private_authorities_only_in_local(monkeypatch):
+    monkeypatch.setattr(ebs.config, "environment", "dev")
+    service = EmbedBindingService(MagicMock(), MagicMock(), session_factory=MagicMock())
+    assert service._client._allow_private is False
+
+    monkeypatch.setattr(ebs.config, "environment", "local")
+    service = EmbedBindingService(MagicMock(), MagicMock(), session_factory=MagicMock())
+    assert service._client._allow_private is True
+
+
 @pytest.mark.asyncio
 async def test_upsert_refuses_non_local_sub_agent_and_taken_azp(monkeypatch):
     service, sas, _, _ = make_service()

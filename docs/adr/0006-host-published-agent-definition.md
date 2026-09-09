@@ -202,7 +202,8 @@ Base URLs for the cockpit: `https://riad.d.alloy.ch` (dev), `https://riad.s.allo
 
 ### Fetcher — `services/well_known_agent.py`
 
-`WellKnownAgentClient.fetch(base_url, force=False) → WellKnownDefinition`. Streams
+`WellKnownAgentClient.fetch(base_url, force=False) → WellKnownDefinition`. Refuses
+an authority that resolves to a non-public address (outside local development), streams
 every file with a size cap (index 64 KiB, files 256 KiB, ≤ 20 skills), follows at
 most 3 redirects and only within the origin, verifies digests, parses frontmatter
 with `yaml.safe_load`, validates names, tools, tiers and levels, and caches per base
@@ -358,6 +359,13 @@ exclusivity). Migration 091 is applied by the database fixtures.
 - The base URL is admin input, validated to `https://` and an origin only, and the
   fetch follows redirects only within that origin. Timeouts and size caps on every
   response.
+- Outside local development the authority must resolve to public addresses only.
+  Private, loopback and link-local destinations (cloud metadata included) are
+  refused before the first request, on every fetch, so an admin cannot use the
+  probe or a binding to reach the cluster's own services. The host is resolved for
+  the check and again by the HTTP client, so a DNS answer that changes in between
+  is not caught; the input is admin-only, so this is defence in depth. Local
+  development lifts the rule for localhost and docker networks.
 - Digest verification on every file, every fetch. The index is not trusted more
   than the files it points at.
 - The prompt is host-authored prose. That is acceptable exactly because the host

@@ -26,6 +26,25 @@ BASE = "https://riad.example"
 WK = "/.well-known/agent-skills"
 INDEX_URL = f"{BASE}{WK}/index.json"
 SCHEMA = "https://schemas.agentskills.io/discovery/0.2.0/schema.json"
+PUBLIC_IP = "93.184.216.34"
+REAL_RESOLVE_HOST = wk.resolve_host
+
+
+def resolver(outcome):
+    """A stand-in for DNS: `outcome` is the address list to return, or an exception to raise."""
+
+    async def resolve(host: str) -> list[str]:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return list(outcome)
+
+    return resolve
+
+
+@pytest.fixture(autouse=True)
+def riad_example_is_public(monkeypatch):
+    """riad.example has no DNS record; resolve it to a public address unless a test says otherwise."""
+    monkeypatch.setattr(wk, "resolve_host", resolver([PUBLIC_IP]))
 
 
 def digest(data: bytes) -> str:
@@ -467,3 +486,75 @@ def test_well_known_agent_keeps_the_published_name_for_display():
     assert agent.name == "Alloy AI Assistant"
     assert agent.sub_agent_name == "Alloy-AI-Assistant"
     assert '"Alloy AI Assistant"' in compose_system_prompt(BASE, agent, "abc123")
+
+
+# ------------------------------------------------------------------------ destinations
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "addresses",
+    [
+        ["10.0.0.5"],  # private
+        ["127.0.0.1"],  # loopback
+        ["169.254.169.254"],  # link-local: cloud metadata
+        ["fd00::1"],  # IPv6 unique local
+        ["::ffff:10.0.0.1"],  # IPv4-mapped IPv6
+        [PUBLIC_IP, "10.0.0.5"],  # one non-public record is enough to refuse
+    ],
+)
+async def test_authority_resolving_to_a_non_public_address_is_refused(
+    monkeypatch, addresses
+):
+    monkeypatch.setattr(wk, "resolve_host", resolver(addresses))
+    client = WellKnownAgentClient()
+    index_bytes, files = build_tree()
+    with respx.mock(assert_all_called=False) as router:
+        index_route = mount(router, index_bytes, files)
+        with pytest.raises(WellKnownFetchError) as info:
+            await client.fetch(BASE)
+    assert info.value.step == "authority"
+    assert "not a public address" in info.value.detail
+    assert index_route.call_count == 0, "nothing may be requested before the check"
+    assert client._cache == {}
+
+
+@pytest.mark.asyncio
+async def test_literal_ip_authority_is_checked_without_dns(monkeypatch):
+    monkeypatch.setattr(
+        wk, "resolve_host", resolver(RuntimeError("DNS must not be used for a literal"))
+    )
+    client = WellKnownAgentClient()
+    with respx.mock(assert_all_called=False):
+        with pytest.raises(WellKnownFetchError) as info:
+            await client.fetch("https://10.0.0.5")
+    assert info.value.step == "authority" and "10.0.0.5" in info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_authority_is_a_readable_error(monkeypatch):
+    monkeypatch.setattr(
+        wk, "resolve_host", resolver(OSError("nodename nor servname provided"))
+    )
+    client = WellKnownAgentClient()
+    with respx.mock(assert_all_called=False):
+        with pytest.raises(WellKnownFetchError) as info:
+            await client.fetch(BASE)
+    assert info.value.step == "authority" and "does not resolve" in info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_private_destinations_are_allowed_when_configured(monkeypatch):
+    monkeypatch.setattr(wk, "resolve_host", resolver(["127.0.0.1"]))
+    client = WellKnownAgentClient(allow_private_destinations=True)
+    index_bytes, files = build_tree()
+    with respx.mock(assert_all_called=True) as router:
+        mount(router, index_bytes, files)
+        definition = await client.fetch(BASE)
+    assert definition.base_url == BASE
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_uses_the_system_resolver():
+    addresses = await REAL_RESOLVE_HOST("localhost")
+    assert set(addresses) & {"127.0.0.1", "::1"}

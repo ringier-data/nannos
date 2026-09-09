@@ -91,7 +91,11 @@ class EmbedBindingService:
         self._sub_agents = sub_agent_service
         self._users = user_service
         self._session_factory = session_factory
-        self._client = client or WellKnownAgentClient()
+        # Local development binds localhost or a docker network; everywhere else the
+        # authority must resolve to public addresses (SSRF guard in the client).
+        self._client = client or WellKnownAgentClient(
+            allow_private_destinations=config.is_local()
+        )
         # azp -> (monotonic expiry, sub_agent_id or None)
         self._azp_cache: dict[str, tuple[float, int | None]] = {}
         # sub_agent_id -> last error text already logged at WARNING

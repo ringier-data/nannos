@@ -17,17 +17,23 @@ immutable `WellKnownDefinition` whose `revision` changes when any byte — or th
 framing template — changes. It never touches the database; `EmbedBindingService` turns a
 definition into a sub-agent config version.
 
-Trust model: the base URL is admin configuration. Redirects are followed only within the
-same origin, every response is size-capped, and the index is trusted no more than the
-files it names (a digest mismatch is a hard error for that fetch).
+Trust model: the base URL is admin configuration. Outside local development the host must
+resolve to public addresses only: private, loopback and link-local destinations are
+refused before the first request, so an admin cannot point Nannos at the cluster's own
+services. Redirects are followed only within the same origin, every response is
+size-capped, and the index is trusted no more than the files it names (a digest mismatch
+is a hard error for that fetch).
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import re
+import socket
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -243,11 +249,29 @@ def _sha256_digest(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-class WellKnownAgentClient:
-    """Fetches, verifies and caches host definitions, one entry per base URL."""
+async def resolve_host(host: str) -> list[str]:
+    """Every address `host` resolves to right now. Raises OSError when there is none."""
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        host, None, type=socket.SOCK_STREAM
+    )
+    return list(dict.fromkeys(str(info[4][0]) for info in infos))
 
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+
+class WellKnownAgentClient:
+    """Fetches, verifies and caches host definitions, one entry per base URL.
+
+    `allow_private_destinations` lifts the public-address rule. Only local development
+    sets it: there the authority is localhost or a docker network.
+    """
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        *,
+        allow_private_destinations: bool = False,
+    ) -> None:
         self._client = client
+        self._allow_private = allow_private_destinations
         # base_url -> (monotonic expiry, definition)
         self._cache: dict[str, tuple[float, WellKnownDefinition]] = {}
 
@@ -273,6 +297,9 @@ class WellKnownAgentClient:
             return cached[1]
 
         origin = origin_of(base_url)
+        # Every request below stays on this origin (index, files, redirects), so one
+        # destination check up front covers them all.
+        await self._refuse_private_destination(base_url, origin)
         index_url = base_url.rstrip("/") + WELL_KNOWN_INDEX_PATH
         raw_index, headers = await self._get(
             base_url, index_url, origin, MAX_INDEX_BYTES, "index"
@@ -340,6 +367,40 @@ class WellKnownAgentClient:
         )
         self._cache[base_url] = (time.monotonic() + ttl, definition)
         return definition
+
+    async def _refuse_private_destination(self, base_url: str, origin: str) -> None:
+        """Refuse an authority that resolves to any non-public address (SSRF guard).
+
+        Blocks private ranges, loopback, link-local (cloud metadata), IPv4-mapped IPv6
+        and the other non-global ranges `ipaddress` knows. The host is resolved here and
+        again by httpx when it connects, so a DNS answer that changes in between is not
+        caught: the base URL is admin input, so this is defence in depth, not the only
+        line.
+        """
+        if self._allow_private:
+            return
+        host = urlsplit(origin).hostname or ""
+        step = "authority"
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                resolved = await resolve_host(host)
+            except OSError as e:
+                raise WellKnownFetchError(
+                    base_url, step, f"{host} does not resolve: {e}"
+                ) from e
+            if not resolved:
+                raise WellKnownFetchError(base_url, step, f"{host} does not resolve")
+            addresses = [ipaddress.ip_address(address) for address in resolved]
+        for address in addresses:
+            if not address.is_global:
+                raise WellKnownFetchError(
+                    base_url,
+                    step,
+                    f"{host} resolves to {address}, which is not a public address; "
+                    "an authority must be reachable on the public internet",
+                )
 
     async def _get(
         self, base_url: str, url: str, origin: str, limit: int, step: str
