@@ -19,6 +19,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Pagination } from '@/components/admin/Pagination';
 import { client } from '@/api/generated/client.gen';
 
 interface RiskFactor {
@@ -49,7 +50,7 @@ interface UpsertPayload {
 async function fetchRiskScores(limit = 100, offset = 0): Promise<{ items: ToolRiskScore[]; total: number }> {
   const res = await client.get({
     url: '/api/mcp/tools/risk-scores',
-    query: { limit, offset, sort: 'updated_at:desc' },
+    query: { limit, offset },
   });
   return res.data as { items: ToolRiskScore[]; total: number };
 }
@@ -74,6 +75,8 @@ function getRiskBadge(score: number) {
 }
 
 const ALL_ACTIONS = ['approve', 'edit', 'reject'] as const;
+
+const PAGE_SIZE = 20;
 
 /** Form state for add/edit dialog. */
 interface FormState {
@@ -115,10 +118,11 @@ export function ToolRiskScoresPage() {
   const [editingExisting, setEditingExisting] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm());
   const [jsonError, setJsonError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
 
   const { data, isLoading, isRefetching } = useQuery({
-    queryKey: ['adminToolRiskScores'],
-    queryFn: () => fetchRiskScores(100, 0),
+    queryKey: ['adminToolRiskScores', page],
+    queryFn: () => fetchRiskScores(PAGE_SIZE, (page - 1) * PAGE_SIZE),
   });
 
   const deleteMutation = useMutation({
@@ -126,6 +130,10 @@ export function ToolRiskScoresPage() {
       deleteRiskScore(toolName, serverSlug),
     onSuccess: () => {
       toast.success('Risk score invalidated — tool will be re-scored on next use');
+      // Removing the last row of a trailing page would leave us past the end.
+      if ((data?.items?.length ?? 0) === 1 && page > 1) {
+        setPage(page - 1);
+      }
       queryClient.invalidateQueries({ queryKey: ['adminToolRiskScores'] });
       setConfirmDelete(null);
     },
@@ -197,6 +205,7 @@ export function ToolRiskScoresPage() {
   };
 
   const scores = data?.items ?? [];
+  const total = data?.total ?? 0;
 
   return (
     <div className="flex flex-col gap-6 p-4 pb-8">
@@ -323,6 +332,8 @@ export function ToolRiskScoresPage() {
           </table>
         </div>
       )}
+
+      {!isLoading && <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />}
 
       {/* Detail Dialog */}
       <Dialog open={!!selectedScore} onOpenChange={() => setSelectedScore(null)}>
