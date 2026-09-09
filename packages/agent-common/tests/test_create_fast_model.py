@@ -9,7 +9,9 @@ thinking off, no streaming, and a short output cap.
 
 from unittest.mock import patch
 
-from agent_common.core.model_factory import REASONING_OFF, _FAST_MODEL_MAX_TOKENS, create_fast_model
+import pytest
+
+from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS, REASONING_OFF, create_fast_model, create_model
 
 
 def _captured_kwargs(**kwargs):
@@ -34,7 +36,7 @@ def test_streaming_is_off():
 
 def test_output_is_capped_short():
     caps = _captured_kwargs()["max_tokens"]
-    assert caps == _FAST_MODEL_MAX_TOKENS
+    assert caps == FAST_MODEL_MAX_TOKENS
     # Bounded well below the reasoning tiers' ceilings: a model ignoring "ONE short
     # sentence" must not be able to stretch the call.
     assert caps <= 2048
@@ -42,3 +44,18 @@ def test_output_is_capped_short():
 
 def test_caller_can_raise_the_cap():
     assert _captured_kwargs(max_tokens=64)["max_tokens"] == 64
+
+
+def test_an_empty_effort_is_rejected():
+    # "" is not a LiteLLM value: it would take the override branch, then fail the `if effort:`
+    # test and send nothing — silently inheriting the provider default this helper exists to
+    # override. Fail at the boundary instead.
+    with pytest.raises(ValueError, match="REASONING_OFF"):
+        create_model("alias", reasoning_effort="")
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_a_non_positive_cap_is_rejected(bad):
+    # Forwarded verbatim it becomes a gateway 400 or an empty completion, far from the call.
+    with pytest.raises(ValueError, match="must be positive"):
+        create_model("alias", max_tokens=bad)

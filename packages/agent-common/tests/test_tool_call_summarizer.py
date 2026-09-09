@@ -186,8 +186,7 @@ class TestSummaryTimeout:
     call is abandoned and the documented ``None`` fallback (render raw args) applies.
     """
 
-    @pytest.mark.asyncio
-    async def test_a_slow_model_gives_up_and_falls_back(self):
+    def _slow_model(self):
         import asyncio
 
         class _SlowStructured:
@@ -199,20 +198,32 @@ class TestSummaryTimeout:
             def with_structured_output(self, _schema, include_raw=False):
                 return _SlowStructured()
 
+        return _SlowModel()
+
+    @pytest.mark.asyncio
+    async def test_a_slow_model_gives_up_and_falls_back(self):
         with (
-            patch("agent_common.core.model_factory.create_fast_model", return_value=_SlowModel()),
+            patch("agent_common.core.model_factory.create_fast_model", return_value=self._slow_model()),
             patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
             patch.object(tcs, "_SUMMARY_TIMEOUT_SECONDS", 0.01),
         ):
             assert await tcs.summarize_action_requests([("ls", {"path": "/x"}, "list files")]) is None
 
     @pytest.mark.asyncio
-    async def test_a_timeout_leaves_the_action_request_untouched(self):
-        # The client renders the raw args; a half-populated card would be worse than none.
+    async def test_a_timed_out_batch_leaves_the_action_request_untouched(self):
+        """End to end: a slow model must leave the card renderable, not half-populated.
+
+        Drives the real ``summarize_action_requests`` — only the model is faked. The earlier
+        version of this test stubbed that function out, so it only re-tested
+        ``attach_summaries``' None branch and would still have passed if the timeout handler
+        started returning ``[]`` or mutating args before giving up.
+        """
         request = {"name": "ls", "args": {"path": "/x", "_call_id": "c1"}}
         with (
             patch.object(tcs, "_resume_pending", return_value=False),
-            patch.object(tcs, "summarize_action_requests", AsyncMock(return_value=None)),
+            patch("agent_common.core.model_factory.create_fast_model", return_value=self._slow_model()),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+            patch.object(tcs, "_SUMMARY_TIMEOUT_SECONDS", 0.01),
         ):
             await tcs.attach_summaries([request])
         assert request["args"] == {"path": "/x", "_call_id": "c1"}
@@ -272,3 +283,48 @@ class TestUnusableReply:
     async def test_a_missing_raw_message_still_falls_back_cleanly(self):
         # Nothing about the envelope is guaranteed; the fallback must not depend on it.
         assert await self._summarize({"raw": None, "parsed": None, "parsing_error": None}) is None
+
+
+class TestBatchTokenBudget:
+    """The cap has to scale with the batch, which `attach_summaries` does not bound.
+
+    A flat cap fails backwards: the largest approval batches — the ones whose raw args are
+    hardest for a non-technical user to read — would be the ones that lose their prose.
+    """
+
+    def test_a_small_batch_keeps_the_fast_model_floor(self):
+        from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS
+
+        assert tcs._summary_token_budget(1) == FAST_MODEL_MAX_TOKENS
+        assert tcs._summary_token_budget(3) == FAST_MODEL_MAX_TOKENS
+
+    def test_a_large_batch_scales_past_the_floor(self):
+        from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS
+
+        budget = tcs._summary_token_budget(20)
+        assert budget > FAST_MODEL_MAX_TOKENS
+        assert budget == 20 * tcs._TOKENS_PER_SUMMARY
+
+    def test_the_budget_never_shrinks_as_the_batch_grows(self):
+        budgets = [tcs._summary_token_budget(n) for n in range(1, 40)]
+        assert budgets == sorted(budgets)
+
+    async def test_the_batch_budget_reaches_the_model(self):
+        # The scaling is worthless if the call site doesn't pass it.
+        seen: dict = {}
+
+        class _Structured:
+            async def ainvoke(self, _msgs):
+                return {"raw": None, "parsed": tcs.ToolCallSummaries(summaries=["a"] * 12), "parsing_error": None}
+
+        def _create(_alias, *, max_tokens=None, **_kw):
+            seen["max_tokens"] = max_tokens
+            return types.SimpleNamespace(with_structured_output=lambda _s, include_raw=False: _Structured())
+
+        calls = [("ls", {"path": f"/{i}"}, "list files") for i in range(12)]
+        with (
+            patch("agent_common.core.model_factory.create_fast_model", _create),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+        ):
+            assert await tcs.summarize_action_requests(calls) == ["a"] * 12
+        assert seen["max_tokens"] == tcs._summary_token_budget(12)

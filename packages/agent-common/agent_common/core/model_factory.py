@@ -257,9 +257,7 @@ _NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
 REASONING_OFF = "none"
 
 
-def get_reasoning_effort(
-    thinking_level: ThinkingLevel | None, model_type: ModelType | None = None
-) -> str | None:
+def get_reasoning_effort(thinking_level: ThinkingLevel | None, model_type: ModelType | None = None) -> str | None:
     """Map the app `thinking_level` to LiteLLM's `reasoning_effort`.
 
     low/medium/high are accepted by every reasoning provider and pass through. The
@@ -336,7 +334,20 @@ def create_model(
 
     `max_tokens` overrides the effort-derived output ceiling for callers that know their
     answer is short.
+
+    Both overrides are validated rather than normalized: an empty `reasoning_effort` would
+    take the override branch and then fail the `if effort:` test below, sending nothing and
+    silently inheriting the provider default — the exact regression `REASONING_OFF` exists to
+    prevent, with no error to notice. A non-positive `max_tokens` would reach the gateway as
+    a 400 or an empty completion. ValueError, not assert: asserts vanish under `-O`.
     """
+    if reasoning_effort is not None and not reasoning_effort:
+        raise ValueError(
+            f"reasoning_effort must be a LiteLLM effort value or None, not {reasoning_effort!r} — "
+            f"pass REASONING_OFF ({REASONING_OFF!r}) to turn thinking off."
+        )
+    if max_tokens is not None and max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive when given, not {max_tokens!r}")
     # Gateway-aware subclass: preserves reasoning_content that base ChatOpenAI (>=1.2) drops.
     ChatOpenAI = _gateway_chat_openai_cls()
 
@@ -764,26 +775,40 @@ def get_default_fast_model() -> ModelType | None:
     return _default_alias_for("chat:low") or get_default_model()
 
 
-# One sentence per tool call, one risk score, one condition verdict — generous for a batch
-# of a few summaries, low enough that a model ignoring "ONE short sentence" cannot stretch
-# the call. Utility work must never inherit the reasoning tiers' 8k-32k ceiling. Same value
-# as `llm_gateway.gateway_chat`'s default for the same reason (see REASONING_OFF on why that
-# module keeps its own copy). A caller whose answer outgrows it should raise it explicitly
-# rather than discover the truncation: with thinking off, the cap only binds real output.
-_FAST_MODEL_MAX_TOKENS = 1024
+# Floor for a single short answer: one risk score, one condition verdict, a sentence or two.
+# Low enough that a model ignoring "ONE short sentence" cannot stretch the call, and utility
+# work never inherits the reasoning tiers' 8k-32k ceiling. Same value as
+# `llm_gateway.gateway_chat`'s default for the same reason (see REASONING_OFF on why that
+# module keeps its own copy).
+#
+# PUBLIC because it is a floor, not a ceiling: a caller whose answer scales with its input
+# (the tool-call summarizer batches one sentence per pending call) must raise it in
+# proportion, and needs this value to scale *from*. With thinking off the cap binds only
+# real output, so the risk of it being too low is silent truncation — see
+# `tool_call_summarizer._summary_token_budget`.
+FAST_MODEL_MAX_TOKENS = 1024
 
 
 def create_fast_model(
     model_type: ModelType,
     *,
-    max_tokens: int = _FAST_MODEL_MAX_TOKENS,
+    max_tokens: int = FAST_MODEL_MAX_TOKENS,
     callbacks: list | None = None,
 ) -> BaseChatModel:
     """A cheap-tier model configured for LOW LATENCY: thinking off, no streaming, short cap.
 
-    For the utility calls that ride `get_default_fast_model()` — tool-call summaries, risk
-    scoring, watch-condition checks, chunk descriptions. They want the cheap tier's speed,
-    not its reasoning, and several of them sit on a user-visible critical path.
+    For the utility calls that ride `get_default_fast_model()`: they want the cheap tier's
+    speed, not its reasoning, and several sit on a user-visible critical path.
+
+    Currently used by ONE of them — `tool_call_summarizer`, the worst-placed, sitting between
+    the model's tool call and the HITL approval card. The other agent-common fast-model
+    callers still build their own client and still inherit provider-default thinking:
+    `tool_risk_scorer` (which gates that same card), `hitl_resume` (between the user\'s reply
+    and the resume) and `indexing_store` (per chunk, so it multiplies by corpus size).
+    Converting them is a quality judgement — reasoning may be buying something in a score or
+    a classification — not a mechanical swap, so they are deliberately left alone here.
+    (Watch conditions are NOT in this set: they run through console-backend\'s `gateway_chat`,
+    which has defaulted to thinking off since #209.)
 
     Thinking off is the whole point. `create_model` sends `reasoning_effort` only when a
     caller passes a `thinking_level`, so these calls sent nothing and inherited the PROVIDER
