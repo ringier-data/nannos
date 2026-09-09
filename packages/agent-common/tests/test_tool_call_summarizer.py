@@ -173,3 +173,42 @@ class TestSummarizerCostAttribution:
             assert current_sub_agent_id.get() is None
         finally:
             current_sub_agent_id.reset(prev)
+
+
+class TestSummaryTimeout:
+    """The card is what the user is waiting for; the prose is a nicety.
+
+    A slow gateway must not hold the approval card open indefinitely — past the budget the
+    call is abandoned and the documented ``None`` fallback (render raw args) applies.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_slow_model_gives_up_and_falls_back(self):
+        import asyncio
+
+        class _SlowStructured:
+            async def ainvoke(self, _msgs):
+                await asyncio.sleep(5)
+                raise AssertionError("the timeout should have abandoned this call")
+
+        class _SlowModel:
+            def with_structured_output(self, _schema):
+                return _SlowStructured()
+
+        with (
+            patch("agent_common.core.model_factory.create_fast_model", return_value=_SlowModel()),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+            patch.object(tcs, "_SUMMARY_TIMEOUT_SECONDS", 0.01),
+        ):
+            assert await tcs.summarize_action_requests([("ls", {"path": "/x"}, "list files")]) is None
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_leaves_the_action_request_untouched(self):
+        # The client renders the raw args; a half-populated card would be worse than none.
+        request = {"name": "ls", "args": {"path": "/x", "_call_id": "c1"}}
+        with (
+            patch.object(tcs, "_resume_pending", return_value=False),
+            patch.object(tcs, "summarize_action_requests", AsyncMock(return_value=None)),
+        ):
+            await tcs.attach_summaries([request])
+        assert request["args"] == {"path": "/x", "_call_id": "c1"}

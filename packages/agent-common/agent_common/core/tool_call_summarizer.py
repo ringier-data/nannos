@@ -17,10 +17,16 @@ to draw the card, and once on the resume, for a sentence that can no longer be
 shown to anyone. ``attach_summaries`` therefore skips itself while a resume is
 pending (see ``_resume_pending``). Measured on an embedded ``client_action``
 apply: the wasted call sat in front of the form write for 15.6 s.
+
+The call it cannot avoid making is configured for latency, not quality: the cheap tier
+with thinking OFF (``create_fast_model``) and a hard timeout past which the card renders
+raw args. Both exist because this call is the last thing between the model deciding and
+the user being asked.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -46,6 +52,15 @@ _SELF_EVIDENT_TOOLS = frozenset({CLIENT_ACTION_TOOL_NAME})
 
 # Keep the prompt bounded even if a tool call carries a huge payload.
 _MAX_VALUE_CHARS = 300
+
+# Hard ceiling on how long a card may wait for its prose. The summary is a nicety; the
+# approval card is the thing the user is waiting for, and this call sits between the two.
+# Past the budget we abandon it and render raw args — the documented ``None`` fallback.
+# Sized well above what a one-sentence answer needs with thinking off, leaving headroom for
+# a cold gateway connection. It only became a sane guard once `create_fast_model` landed:
+# the observed spread before that was 2.7-25.5 s, so any useful budget would have been
+# trimming the norm rather than the tail.
+_SUMMARY_TIMEOUT_SECONDS = 5.0
 
 _SYSTEM_PROMPT = (
     "You explain pending tool calls to a non-technical user (e.g. a journalist) "
@@ -101,10 +116,10 @@ async def summarize_action_requests(
     if not calls:
         return []
 
-    from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
+    from agent_common.core.model_factory import create_fast_model, get_default_fast_model, require_default_model
 
     try:
-        model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
+        model = create_fast_model(get_default_fast_model() or require_default_model())
         structured_model = model.with_structured_output(ToolCallSummaries)
 
         lines: list[str] = [f"User language: {language}", ""]
@@ -123,12 +138,25 @@ async def summarize_action_requests(
         from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
 
         with run_config_attribution_scope():
-            result: ToolCallSummaries = await structured_model.ainvoke(
-                [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": "\n".join(lines)},
-                ]
+            result: ToolCallSummaries = await asyncio.wait_for(
+                structured_model.ainvoke(
+                    [
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": "\n".join(lines)},
+                    ]
+                ),
+                timeout=_SUMMARY_TIMEOUT_SECONDS,
             )
+    except TimeoutError:
+        # Not exception-worthy: a slow gateway is expected weather, and the caller has a
+        # correct answer for it (raw args). Logged at warning so a systematic regression —
+        # thinking back on, a mis-set default — is still visible.
+        logger.warning(
+            "Tool call summarization exceeded %.1fs for %d call(s); falling back to raw args",
+            _SUMMARY_TIMEOUT_SECONDS,
+            len(calls),
+        )
+        return None
     except Exception:
         logger.exception("Tool call summarization failed; falling back to raw args")
         return None
