@@ -17,12 +17,19 @@ to draw the card, and once on the resume, for a sentence that can no longer be
 shown to anyone. ``attach_summaries`` therefore skips itself while a resume is
 pending (see ``_resume_pending``). Measured on an embedded ``client_action``
 apply: the wasted call sat in front of the form write for 15.6 s.
+
+The call it cannot avoid making is configured for latency, not quality: the cheap tier
+with thinking OFF (``create_fast_model``) and a hard timeout past which the card renders
+raw args. Both exist because this call is the last thing between the model deciding and
+the user being asked.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -46,6 +53,34 @@ _SELF_EVIDENT_TOOLS = frozenset({CLIENT_ACTION_TOOL_NAME})
 
 # Keep the prompt bounded even if a tool call carries a huge payload.
 _MAX_VALUE_CHARS = 300
+
+# Hard ceiling on how long a card may wait for its prose. The summary is a nicety; the
+# approval card is the thing the user is waiting for, and this call sits between the two.
+# Past the budget we abandon it and render raw args — the documented ``None`` fallback.
+# Sized well above what a one-sentence answer needs with thinking off, leaving headroom for
+# a cold gateway connection. It only became a sane guard once `create_fast_model` landed:
+# the observed spread before that was 2.7-25.5 s, so any useful budget would have been
+# trimming the norm rather than the tail.
+_SUMMARY_TIMEOUT_SECONDS = 5.0
+
+# Output budget per pending call. One sentence is ~30-40 tokens, more in a token-heavy
+# language, plus its share of the JSON envelope — so this is roughly 3x headroom.
+_TOKENS_PER_SUMMARY = 160
+
+
+def _summary_token_budget(call_count: int) -> int:
+    """Output cap for a batch of ``call_count`` summaries.
+
+    The batch is UNBOUNDED: ``attach_summaries`` passes every non-self-evident tool call in
+    the turn, so a turn interrupting on ~15-20 parallel calls needs several times the
+    single-answer floor. A flat cap fails exactly backwards — the biggest approval batches,
+    where opaque raw args are hardest to read, would be the ones that lose their prose.
+    Scaled from the shared floor so a small batch keeps the fast-model default.
+    """
+    from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS
+
+    return max(FAST_MODEL_MAX_TOKENS, _TOKENS_PER_SUMMARY * call_count)
+
 
 _SYSTEM_PROMPT = (
     "You explain pending tool calls to a non-technical user (e.g. a journalist) "
@@ -82,6 +117,50 @@ def _compact_args(args: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _log_unusable_reply(envelope: dict, call_count: int) -> None:
+    """Say WHY a reply yielded no summaries: cut off at the cap, or simply unreadable.
+
+    console-backend's ``gateway_chat`` / ``gateway_chat_json`` learned this the hard way —
+    a reply stopped at ``max_tokens`` reads exactly like one that said little, and only
+    ``finish_reason`` tells them apart (see ``GatewayText``: the distinction "went unlogged
+    for a month"). ``create_fast_model`` asks for a deliberately short output cap, so this
+    is the path that has to name it when a batch outgrows it: without this, truncation
+    arrives as a generic parse failure and the fix (raise the cap, or split the batch)
+    isn't visible from the log.
+
+    Warning, not exception: the caller's fallback (render raw args) is correct either way.
+    """
+    raw = envelope.get("raw")
+    finish_reason = (getattr(raw, "response_metadata", None) or {}).get("finish_reason")
+    if finish_reason == "length":
+        logger.warning(
+            "Tool call summaries for %d call(s) hit the output cap (finish_reason=length); falling back to raw args",
+            call_count,
+        )
+        return
+    logger.warning(
+        "Tool call summaries for %d call(s) were unreadable (finish_reason=%s): %s; falling back to raw args",
+        call_count,
+        finish_reason,
+        envelope.get("parsing_error"),
+    )
+
+
+async def _invoke(build, lines: list[str]) -> dict:
+    """Build the client off the loop, then run the request — both inside the caller's budget.
+
+    Split out so ``asyncio.wait_for`` wraps ONE awaitable covering both halves; see
+    ``_build`` for why the construction cannot simply be called inline.
+    """
+    structured_model = await asyncio.to_thread(build)
+    return await structured_model.ainvoke(
+        [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": "\n".join(lines)},
+        ]
+    )
+
+
 @traceable(name="tool-call-summarize", run_type="tool")
 async def summarize_action_requests(
     calls: list[tuple[str, dict[str, Any], str]],
@@ -101,12 +180,32 @@ async def summarize_action_requests(
     if not calls:
         return []
 
-    from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
+    from agent_common.core.model_factory import create_fast_model, get_default_fast_model, require_default_model
 
+    def _build():
+        """Resolve the alias and build the client — SYNCHRONOUS, and sometimes slow.
+
+        Both resolvers go through ``_refresh_if_stale``, which on a cold cache runs the fetch
+        in the calling thread (2 s urllib timeout) or blocks a cold waiter up to ``_COLD_WAIT``
+        (3 s). On the event loop that stalls every other coroutine in the process, and it sits
+        outside anything ``asyncio.wait_for`` can interrupt — a timeout cannot cancel code that
+        never awaits. Hence ``to_thread``: it makes the block cancellable from the loop's point
+        of view and brings it under the summary budget. The thread itself runs to completion
+        after a timeout (nothing can stop it), but it finishes into a discarded result instead
+        of holding the card.
+        """
+        model = create_fast_model(
+            get_default_fast_model() or require_default_model(),
+            max_tokens=_summary_token_budget(len(calls)),
+        )
+        # ``include_raw`` keeps the provider's finish reason reachable: a parse failure is
+        # then returned in the envelope rather than raised, so ``_log_unusable_reply`` can
+        # tell "cut off at max_tokens" from "wrote something unreadable". See
+        # ``_log_unusable_reply`` for why that distinction is worth the extra unwrapping.
+        return model.with_structured_output(ToolCallSummaries, include_raw=True)
+
+    started = time.monotonic()
     try:
-        model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
-        structured_model = model.with_structured_output(ToolCallSummaries)
-
         lines: list[str] = [f"User language: {language}", ""]
         for idx, (tool_name, args, description) in enumerate(calls, start=1):
             lines.append(f"Tool call {idx}:")
@@ -123,12 +222,38 @@ async def summarize_action_requests(
         from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
 
         with run_config_attribution_scope():
-            result: ToolCallSummaries = await structured_model.ainvoke(
-                [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": "\n".join(lines)},
-                ]
+            envelope: dict = await asyncio.wait_for(
+                _invoke(_build, lines),
+                timeout=_SUMMARY_TIMEOUT_SECONDS,
             )
+
+        # Inside the try on purpose: the envelope's shape is the provider's business, and
+        # this is a best-effort path whose caller is mid-``interrupt()``. Anything
+        # unexpected here degrades to raw args like every other failure, rather than
+        # raising into the HITL request.
+        result: ToolCallSummaries | None = envelope.get("parsed")
+        if result is None:
+            _log_unusable_reply(envelope, len(calls))
+            return None
+    except TimeoutError:
+        # Not exception-worthy: a slow gateway is expected weather, and the caller has a
+        # correct answer for it (raw args). Logged at warning so a systematic regression —
+        # thinking back on, a mis-set default — is still visible.
+        #
+        # Reports measured elapsed time rather than asserting the budget expired: since 3.10
+        # ``socket.timeout`` IS ``TimeoutError``, so a transport timeout raised inside the
+        # request lands here too, having taken a fraction of the budget. Reading "exceeded
+        # 5.0s" for a 0.3 s socket failure sends the next reader after gateway latency
+        # instead of the client.
+        elapsed = time.monotonic() - started
+        logger.warning(
+            "Tool call summarization for %d call(s) timed out after %.2fs (budget %.1fs, %s); falling back to raw args",
+            len(calls),
+            elapsed,
+            _SUMMARY_TIMEOUT_SECONDS,
+            "budget expired" if elapsed >= _SUMMARY_TIMEOUT_SECONDS else "transport timeout, not the budget",
+        )
+        return None
     except Exception:
         logger.exception("Tool call summarization failed; falling back to raw args")
         return None
