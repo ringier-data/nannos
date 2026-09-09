@@ -636,3 +636,92 @@ async def test_second_eval_call_about_the_same_call_gets_a_distinct_ask_id():
     )
     assert ask_one.startswith("safe_read:"), ask_one
     assert ask_two.startswith("safe_read:"), ask_two
+
+
+async def test_rate_limited_inner_call_surfaces_as_a_value_inside_eval():
+    """Through a real ``eval``: a quota error becomes a ``rate_limited`` payload the program
+    can return, and the tolerant middleware's ``after_agent`` clears the run's call counts."""
+    from langchain_core.tools import ToolException
+
+    calls: list[str] = []
+
+    async def _inner(path: str) -> str:
+        calls.append(path)
+        raise ToolException("GET https://api.example.com/search: 403 API rate limit exceeded for user ID 1.")
+
+    inner = StructuredTool.from_function(coroutine=_inner, name="rate_read", description="r", args_schema=_Args)
+    from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+
+    policy = RepeatedToolCallMiddleware(max_repeats=5, max_tool_repeats=None, dispatch_tools={"eval"})
+    wrapped = wrap_tool_for_ptc(inner, risk_scorer=None, loop_detection=policy)
+    ci = _PTCToleranceCodeInterpreterMiddleware(static_ptc_tools=[wrapped], loop_detection=policy)
+    model = _ScriptedModel()
+    model.responses = deque(
+        [
+            AIMessage(
+                content="",
+                id="ai-1",
+                tool_calls=[
+                    {
+                        "id": "c1",
+                        "name": "eval",
+                        "args": {"code": "const r = await tools.rateRead({path: '/q'}); r"},
+                    }
+                ],
+            ),
+            AIMessage(content="done", id="ai-2"),
+        ]
+    )
+    agent = create_agent(model=model, tools=[], middleware=[ci, policy], checkpointer=InMemorySaver())
+    cfg = {"configurable": {"thread_id": "t-rate"}}
+    result = await agent.ainvoke({"messages": [HumanMessage("go")]}, config=cfg)
+
+    assert calls == ["/q"]
+    eval_result = next(m for m in result["messages"] if getattr(m, "name", None) == "eval")
+    assert "rate_limited" in eval_result.content
+    assert "<error" not in eval_result.content  # returned as a value, not thrown
+    # The inner call was judged by the stack's loop policy and recorded in *its* state —
+    # next to the ``eval`` call the middleware recorded itself at the model boundary.
+    history = (await agent.aget_state(cfg)).values["tool_call_history"]
+    assert history["eval:rate_read"] == [policy._hash_args({"path": "/q"})]
+    assert len(history["eval"]) == 1
+
+
+def test_history_write_back_merges_every_command_shape_and_never_drops():
+    """The guard's record must land whatever the handler returned: a ToolMessage, or a Command whose
+    update is a dict, a pair sequence, or None. The shapes that cannot be merged raise instead of
+    silently failing the loop guard open."""
+    from types import SimpleNamespace
+
+    import pytest
+    from langchain_core.messages import ToolMessage
+
+    from agent_common.core.graph_utils import TOOL_CALL_HISTORY_STATE_KEY
+
+    attach = _PTCToleranceCodeInterpreterMiddleware._with_tool_call_history
+    turn = SimpleNamespace(tool_call_history={"eval:get": ["h1"]})
+    seed: dict[str, list[str]] = {}
+    tm = ToolMessage(content="ok", tool_call_id="c1", name="eval")
+
+    out = attach(tm, turn, seed)
+    assert isinstance(out, Command) and out.update == {
+        "messages": [tm],
+        TOOL_CALL_HISTORY_STATE_KEY: {"eval:get": ["h1"]},
+    }
+
+    out = attach(Command(update={"messages": [tm], "x": 1}, goto="n"), turn, seed)
+    assert out.update == {"messages": [tm], "x": 1, TOOL_CALL_HISTORY_STATE_KEY: {"eval:get": ["h1"]}}
+    assert out.goto == "n"
+
+    out = attach(Command(update=[("messages", [tm])]), turn, seed)
+    assert out.update == [("messages", [tm]), (TOOL_CALL_HISTORY_STATE_KEY, {"eval:get": ["h1"]})]
+
+    out = attach(Command(update=None, resume="r"), turn, seed)
+    assert out.update == {TOOL_CALL_HISTORY_STATE_KEY: {"eval:get": ["h1"]}} and out.resume == "r"
+
+    with pytest.raises(TypeError, match="refusing to drop a loop-guard record"):
+        attach(Command(update="bare root value"), turn, seed)
+
+    # Unchanged history: pass-through, whatever the shape.
+    same = Command(update="bare root value")
+    assert attach(same, turn, {"eval:get": ["h1"]}) is same
