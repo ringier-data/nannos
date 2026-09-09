@@ -270,13 +270,60 @@ def take_ptc_pending(thread_id: str) -> list[_PendingApproval]:
 
 
 def _call_key(tool_name: str, args: dict[str, Any]) -> str:
-    """Stable identity for a (tool, args) pair across ``eval`` re-runs."""
+    """Stable identity for a (tool, args) pair across ``eval`` re-runs.
+
+    Deliberately content-derived: after an approval the guard re-runs the whole
+    ``eval`` program, and it must recognise the calls it already asked about so it
+    can replay the decision (``turn.decisions``) and reuse the cached result
+    (``turn.results``) instead of prompting again. Two *different* questions about
+    the same tool+args are therefore indistinguishable by this key — which is why
+    it is NOT what goes on the wire; see ``ask_id``.
+
+    This is a per-turn decision/result memo key, not a bypass rule. The bypass
+    policy is a separate, durable, per-user thing (``context.tool_bypass_rules``,
+    keyed ``tool_name::server_slug`` with glob patterns) that outlives the turn.
+    """
     try:
         payload = json.dumps(args, sort_keys=True, default=str)
     except Exception:  # noqa: BLE001 - best-effort hashing of arbitrary args
         payload = repr(args)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"{tool_name}:{digest}"
+
+
+#: Separates the ``call_key`` from the ask ordinal in a wire ``_call_id``. Not
+#: ``#``, which the embed SDK already uses to suffix a client-action part id.
+_ASK_SEPARATOR = "@"
+
+
+def ask_id(call_key: str, ask_scope: str, ask_round: int) -> str:
+    """The wire ``_call_id`` for ONE approval question about ``call_key``.
+
+    Clients need the opposite property from ``_call_key``: every question must
+    carry its own id, so that answering one is never mistaken for answering
+    another. A client that suppresses prompts it has already answered (the embed
+    SDK does, to swallow a snapshot replay racing a resume) otherwise drops the
+    second, genuine ask for an identical call and parks the turn forever.
+
+    Uniqueness comes from two nested scopes, because an identical call can be asked
+    about twice at two different levels:
+
+    * ``ask_scope`` — the ``eval`` tool call this ask belongs to. A PTC turn lives
+      for ONE ``eval`` invocation, and within it an identical call is served from
+      ``turn.results``, so it never asks twice. Two asks therefore mean two ``eval``
+      calls — which is the case seen in the wild, and which a per-turn counter alone
+      cannot tell apart (both would be round 0). The model's ``tool_call["id"]``
+      separates them and is checkpointed on the AI message, so it survives replay.
+    * ``ask_round`` — the interrupt round within one ``eval`` invocation, for a
+      program whose later calls only become reachable once earlier ones are decided.
+
+    Both are replay-stable: the node re-runs deterministically from the top on every
+    resume, so round N's ``interrupt()`` is always round N's, under the same tool
+    call id. Embedding ``call_key`` keeps decision matching order-independent, which
+    is what it was chosen for (parallel ``eval`` calls register concurrently, so the
+    re-run's pending order can differ from the order the human saw).
+    """
+    return f"{call_key}{_ASK_SEPARATOR}{ask_scope}:{ask_round}"
 
 
 def _resolve_server_slug(

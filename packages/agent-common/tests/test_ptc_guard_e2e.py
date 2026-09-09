@@ -590,3 +590,49 @@ async def test_inner_interrupted_nested_resume_through_resuming_parent():
         f"executed={executed2!r}, eval said: {eval_msg!r}"
     )
     assert "contents-of:/etc/passwd" in eval_msg, f"eval result lost on resume: {eval_msg!r}"
+
+
+async def test_second_eval_call_about_the_same_call_gets_a_distinct_ask_id():
+    """REGRESSION (parked turn): the NEXT ask about an already-approved call must
+    not be indistinguishable from the one just answered.
+
+    A PTC turn lives for one ``eval`` invocation and serves an identical call from
+    ``turn.results``, so two asks about the same (tool, args) always mean two
+    ``eval`` calls. Both used to carry the same ``_call_id`` — a hash of tool+args —
+    and a client that suppresses prompts it has already answered (embed-sdk's
+    ``TurnSession.answered``) dropped the second card and parked the turn on
+    "Working…" forever, with no way to submit a decision.
+
+    The call key still has to match across the two (decisions are aligned by id), so
+    this pins the shape too: same call key, different ask.
+    """
+    code = "const r = await tools.safeRead({path: '/etc/passwd'}); JSON.stringify(r)"
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "t-two-asks"}}
+
+    first_model = _ScriptedModel()
+    first_model.responses = deque(
+        [AIMessage(content="", id="ai-1", tool_calls=[{"id": "c1", "name": "eval", "args": {"code": code}}])]
+    )
+    agent1, _ = _build_hitl_agent_with_saver(0.95, code, saver, first_model)
+    result = await agent1.ainvoke({"messages": [HumanMessage("go")]}, config=config)
+    ask_one = result["__interrupt__"][0].value["action_requests"][0]["args"]["_call_id"]
+
+    # Approve it; the model then wants the very same call again, in a NEW eval call.
+    second_model = _ScriptedModel()
+    second_model.responses = deque(
+        [AIMessage(content="", id="ai-2", tool_calls=[{"id": "c2", "name": "eval", "args": {"code": code}}])]
+    )
+    agent2, executed = _build_hitl_agent_with_saver(0.95, code, saver, second_model)
+    resumed = await agent2.ainvoke(Command(resume={"decisions": [{"type": "approve"}]}), config=config)
+
+    assert executed == ["/etc/passwd"], "the approved call should have run before the second ask"
+    assert "__interrupt__" in resumed, "the second eval call must ask again, not run unapproved"
+    ask_two = resumed["__interrupt__"][0].value["action_requests"][0]["args"]["_call_id"]
+
+    assert ask_one != ask_two, (
+        "two distinct approval questions carried the same _call_id; a client that "
+        f"already answered {ask_one!r} will silently drop the second card"
+    )
+    assert ask_one.startswith("safe_read:"), ask_one
+    assert ask_two.startswith("safe_read:"), ask_two

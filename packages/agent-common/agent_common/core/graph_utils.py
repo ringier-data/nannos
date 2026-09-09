@@ -91,6 +91,7 @@ from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMi
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import (
     PTC_CODE_INTERPRETER_TOOL_NAME,
+    ask_id,
     begin_ptc_turn,
     clear_ptc_pending,
     end_ptc_turn,
@@ -1097,6 +1098,14 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         if self._ptc_enabled and not self._ptc_tools_by_thread.get(thread_id):
             self._ptc_tools_by_thread[thread_id] = tuple(self._collect_ptc_tools(request))
         turn = begin_ptc_turn(thread_id)
+        # Identity of the questions this ``eval`` asks, as the client sees them (see
+        # ptc_guard.ask_id): the model's tool call id scopes them to this ``eval``
+        # invocation, the counter separates successive rounds within it. Replay-safe
+        # without any checkpointed map — the tool call id is checkpointed on the AI
+        # message, and the node re-runs from the top so the counter is rebuilt in
+        # lockstep with the interrupts it names.
+        ask_scope = str((getattr(request, "tool_call", None) or {}).get("id") or "")
+        ask_round = 0
         try:
             while True:
                 clear_ptc_pending(thread_id)
@@ -1111,7 +1120,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 # resume by interrupt id, so each interrupt() returns exactly its own
                 # decisions — no cross-eval bleed from LangGraph's multi-interrupt resume.
                 # Any count mismatch here is therefore a genuine bug, not a resume artefact.
-                hitl_request = self._build_ptc_hitl_request(pending)
+                hitl_request = self._build_ptc_hitl_request(pending, ask_scope, ask_round)
                 # Same plain-language summaries the normal HITL path stamps
                 # (see ConditionalHumanInTheLoopMiddleware._attach_summaries).
                 # Best-effort: on failure the client shows raw args.
@@ -1132,12 +1141,13 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 if (n := len(decisions)) != (m := len(pending)):
                     msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
                     raise ValueError(msg)
-                self._apply_ptc_decisions(turn, pending, decisions, context)
+                self._apply_ptc_decisions(turn, pending, decisions, context, ask_scope, ask_round)
+                ask_round += 1
         finally:
             end_ptc_turn(thread_id)
 
     @staticmethod
-    def _build_ptc_hitl_request(pending: list[Any]) -> Any:
+    def _build_ptc_hitl_request(pending: list[Any], ask_scope: str = "", ask_round: int = 0) -> Any:
         """Build the HITL interrupt payload for a batch of pending PTC calls.
 
         Mirrors ``ConditionalHumanInTheLoopMiddleware.aafter_model`` so the
@@ -1145,6 +1155,9 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         (``_risk_metadata`` enrichment + per-action ``allowed_decisions``).
         ``edit`` is never offered — the approved call is re-executed verbatim
         from the re-run ``eval`` code, so there is no per-call arg to edit.
+
+        ``ask_round`` distinguishes successive questions about the same tool+args;
+        the native HITL path gets that for free from the model's ``tool_call["id"]``.
         """
         from langchain.agents.middleware.human_in_the_loop import (
             ActionRequest,
@@ -1157,12 +1170,15 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         for p in pending:
             enriched_args = {
                 **p.args,
-                # Top-level, risk-independent per-call id the client echoes so the
+                # Top-level, risk-independent per-ASK id the client echoes so the
                 # resume path aligns decisions by id (see
                 # executor._build_interrupt_resume_map) instead of positionally —
-                # the latter is fragile to model replay reordering. ``call_key`` is
-                # deterministic on tool+args.
-                "_call_id": p.call_key,
+                # the latter is fragile to model replay reordering. Unique per
+                # question asked, NOT per (tool, args): a program that calls the
+                # same tool with the same arguments in a later ``eval`` round asks
+                # a genuinely new question, and a client that cannot tell it from
+                # the one it just answered drops the card and parks the turn.
+                "_call_id": ask_id(p.call_key, ask_scope, ask_round),
                 "_risk_metadata": {
                     "source": "risk_score",
                     "score": p.score,
@@ -1196,6 +1212,8 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         pending: list[Any],
         decisions: list[dict[str, Any]],
         context: Any,
+        ask_scope: str = "",
+        ask_round: int = 0,
     ) -> None:
         """Record human decisions for the re-run and apply any bypass rules.
 
@@ -1211,14 +1229,31 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         # per-call decisions. ``Promise.all``-style eval calls register concurrently,
         # so the re-run's ``pending`` order can differ from the order the decisions
         # were collected/displayed in — a positional zip would then apply a decision
-        # to the WRONG call (e.g. approve `/memories` lands on `/`). ``call_id`` equals
-        # ``call_key`` (deterministic on tool+args), so by-id matching is order-
-        # independent. Fall back to positional zip for legacy decisions without ids.
+        # to the WRONG call (e.g. approve `/memories` lands on `/`). The client echoes
+        # the ask id we stamped (``ask_id(call_key, ask_scope, ask_round)``); a client build that
+        # predates ask ids echoes the bare ``call_key``, which is still unambiguous
+        # because a call key appears at most once in ``pending``. Accept either, so a
+        # mid-deploy client is matched by id rather than dropped to positional.
         by_id = {d["id"]: d for d in decisions if isinstance(d, dict) and "id" in d}
-        use_by_id = bool(by_id) and all(p.call_key in by_id for p in pending)
+        matched: dict[str, dict[str, Any]] = {}
+        for p in pending:
+            found = by_id.get(ask_id(p.call_key, ask_scope, ask_round)) or by_id.get(p.call_key)
+            if found is not None:
+                matched[p.call_key] = found
+        # Positional zip ONLY when the client sent no usable ids at all. Falling back
+        # on a PARTIAL match would silently pair a decision with a different call than
+        # the human answered for — an approval landing on a call they never saw.
+        use_by_id = len(matched) == len(pending)
+        if by_id and not use_by_id:
+            logger.warning(
+                "[PTC] %d of %d human decisions could not be matched by id; "
+                "falling back to positional alignment",
+                len(pending) - len(matched),
+                len(pending),
+            )
 
         for i, p in enumerate(pending):
-            decision = by_id[p.call_key] if use_by_id else decisions[i]
+            decision = matched[p.call_key] if use_by_id else decisions[i]
             dtype = decision.get("type")
             if dtype == "approve":
                 turn.decisions[p.call_key] = "approve"
