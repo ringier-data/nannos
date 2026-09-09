@@ -362,9 +362,14 @@ export interface ApprovalPrompt {
  * any request carries no stable `_call_id`: with nothing to match on it must
  * always render.
  *
- * Used by the TurnSession to recognise a prompt it has ALREADY answered. The
- * id is `ptc_guard._call_key` — a hash of tool + args, deterministic within a
- * turn, and the same key the middleware itself dedupes on server-side.
+ * Used by the TurnSession to recognise a prompt it has ALREADY answered. The id
+ * identifies one ASK (`ptc_guard.ask_id` for calls gated inside the code
+ * interpreter, the model's `tool_call_id` on the normal path), so equal ids mean
+ * the same question redelivered and different ids mean a new question. It is
+ * deliberately NOT a hash of tool + args: it used to be, and then a program that
+ * repeated an approved call asked a genuine second question under the id just
+ * answered — the card was dropped and the turn parked forever. The server's own
+ * content-derived memo key stays server-side (`ptc_guard._call_key`).
  *
  * The KIND is part of that identity because the two prompt shapes SHARE one
  * id: a risk-gated `client_action` call is approved under its `_call_id`, and

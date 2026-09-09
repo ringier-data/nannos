@@ -97,12 +97,18 @@ export class TurnSession {
   handle(data: AgentResponseData, wireId?: string): void {
     if (this.closed) return;
     // Stale prompt replay: a `pendingHitl` snapshot (a subscribe racing this
-    // resume, or a socket rejoin) re-asks a call this turn already answered.
+    // resume, or a socket rejoin) redelivers an ask this turn already answered.
     // Rendering it would duplicate the approval card AND close this stream on
     // `input-required`, dropping the resumed answer on the floor. A prompt
     // with any unanswered call in it still renders — and so does a prompt of a
     // DIFFERENT kind for the same call: an approved `client_action` tool emits
     // its round-trip request under the very `_call_id` just approved.
+    //
+    // This is sound ONLY because an id identifies one ASK rather than one
+    // (tool, args) — see `approvalPrompt`. Asking the same call again produces a
+    // new id, so a genuine repeat still renders; that was the bug this rule had
+    // when the server shipped a content hash (approve, repeat the call, and the
+    // second card vanished with the turn stuck on "Working…").
     if (this.answered.size > 0) {
       const asked = approvalPrompt(data);
       if (asked && asked.ids.every((id) => this.answered.get(id) === asked.kind)) return;

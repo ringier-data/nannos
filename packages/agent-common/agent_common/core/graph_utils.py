@@ -72,7 +72,7 @@ from agent_common.backends.attachments_store import ContextScopedAttachmentsBack
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
-from agent_common.core.hitl_resume import decisions_from_resume
+from agent_common.core.hitl_resume import HITL_DECISION_TYPES, decisions_from_resume
 from agent_common.core.model_factory import is_gemini_model
 from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.ptc_discovery import (
@@ -1255,6 +1255,16 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         for i, p in enumerate(pending):
             decision = matched[p.call_key] if use_by_id else decisions[i]
             dtype = decision.get("type")
+            if dtype not in HITL_DECISION_TYPES:
+                # Falls through to the reject branch below — an answer this build
+                # cannot read must never be taken for consent. Logged because it
+                # means a client is sending a type this side does not know, which
+                # the registry pin exists to catch before it ships.
+                logger.warning(
+                    "[PTC] unknown human decision type %r for %s; treating as a rejection",
+                    dtype,
+                    p.tool_name,
+                )
             if dtype == "approve":
                 turn.decisions[p.call_key] = "approve"
                 if decision.get("bypass"):

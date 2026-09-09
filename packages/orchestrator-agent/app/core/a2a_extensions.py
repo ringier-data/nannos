@@ -60,20 +60,62 @@ When emitted on a status-update with state=input_required, the message carries:
 - A DataPart with the structured review request:
   {
     "action_requests": [
-      {"name": "tool_name", "args": {...}, "description": "..."}
+      {"name": "tool_name", "args": {..., "_call_id": "..."}, "description": "..."}
     ],
     "review_configs": [
       {"action_name": "tool_name", "allowed_decisions": ["approve", "edit", "reject"]}
     ]
   }
 
+Reserved ``args`` members the server stamps (underscore-prefixed, never real tool
+arguments — a client that forwards args elsewhere should strip them):
+  - ``_call_id``   the ask id. See the invariant below; echo it back on the decision.
+  - ``_risk_metadata``  why this was gated: {source, score, threshold,
+    matched_pattern, server_slug, tool_name}. Advisory display data.
+
+Further underscore-prefixed members may be present; a client must ignore the ones
+it does not know rather than treating them as tool arguments or as required. Only
+the two above are part of this contract — anything else is unversioned and may
+appear, change shape, or (for values the server computes lazily) arrive later than
+the request that carries them.
+
+``_call_id`` is UNIQUE PER ASK, not per (tool, args). Two questions about the same
+tool with the same arguments — a program that repeats a call in a later step — carry
+DIFFERENT ids. Treat it as an opaque string: match decisions to asks with it, and if
+you suppress prompts you have already answered (to absorb a redelivered snapshot),
+key that on this id, because equal ids mean "the same question again" and different
+ids mean "a new question". Deriving your own identity from the tool name and args
+instead makes a genuine second ask look like a replay: the prompt is dropped, no
+decision can be submitted, and the turn waits forever. The server-side per-turn memo
+key IS content-derived (agent_common.middleware.ptc_guard._call_key) and is
+deliberately not what ships here (see ``ask_id`` in the same module).
+
 To respond, send a message with a DataPart containing:
   {"decisions": [{"type": "approve"|"edit"|"reject", ...}]}
 
+Send one decision per action_request, each carrying the ``id`` it answers; a list
+without ids is aligned positionally, which is unreliable when several calls are
+pending (they may be re-collected in a different order than they were displayed).
+
 Decision formats:
-  - approve: {"type": "approve"}
-  - edit:    {"type": "edit", "edited_action": {"name": "tool_name", "args": {...}}}
-  - reject:  {"type": "reject", "message": "reason text"}
+  - approve: {"type": "approve", "id": "<_call_id>"}
+  - edit:    {"type": "edit", "id": "...", "edited_action": {"name": "tool_name", "args": {...}}}
+  - reject:  {"type": "reject", "id": "...", "message": "reason text"}
+
+``edit`` is offered only where ``review_configs.allowed_decisions`` lists it — calls
+gated inside the code interpreter cannot honor it (the approved call is re-executed
+verbatim from the re-run program, so there is no per-call argument to rewrite), and
+an ``edit`` sent for one is treated as a rejection.
+
+Optional members on an ``approve``, all independent of the decision itself:
+  - ``bypass``          also install a standing rule so this is not asked again
+  - ``bypass_all``      that rule covers every call of the tool (else pattern-scoped)
+  - ``bypass_pattern``  glob the rule is scoped to
+  These write the per-user bypass policy (keyed ``tool_name::server_slug``), which is
+  durable and outlives the turn — unrelated to ``_call_id``.
+  - ``client_action_result``  the browser's outcome for a ``client_action`` round trip
+    (see CLIENT_ACTION_EXTENSION), which lets one approval settle the call outright
+    instead of costing a second pause.
 """
 
 CONVERSATION_ORIGIN_EXTENSION = "urn:nannos:a2a:conversation-origin:1.0"

@@ -86,8 +86,24 @@ def authorization_verdict(payload: Any) -> tuple[str | None, str]:
     return None, message
 
 
+#: Decision types a client may send back on the human-in-the-loop extension.
+#: Pinned to the repo-root ``a2a-extensions.json`` registry (see
+#: ``tests/test_hitl_decision_type_conformance.py``), whose copy in
+#: ``embed-sdk approval-codec.ts`` must agree. Anything outside this set is
+#: treated as a rejection rather than trusted — an unreadable answer must never
+#: read as consent — so a type added on one side only fails closed, loudly.
+HITL_DECISION_TYPES = frozenset({"approve", "edit", "reject"})
+
+
 def _call_id(action_request: Any) -> Any:
-    """The per-call id the HITL builders stamp into ``args._call_id``, if any."""
+    """The ask id the HITL builders stamp into ``args._call_id``, if any.
+
+    Opaque here on purpose: this module only echoes it back onto the decision it
+    builds, so that the producer can match answers to questions. Its uniqueness
+    rule (one id per ASK, not per tool+args) is the producers' contract — see
+    ``ptc_guard.ask_id`` and the extension docs in
+    ``orchestrator-agent app/core/a2a_extensions.py``.
+    """
     if not isinstance(action_request, dict):
         return None
     return (action_request.get("args") or {}).get("_call_id")
