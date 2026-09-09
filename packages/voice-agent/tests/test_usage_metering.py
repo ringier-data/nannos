@@ -306,3 +306,83 @@ def test_complete_details_do_not_warn(caplog):
         usage_metadata_to_billing_units(um)
 
     assert caplog.text == ""
+
+
+# ── generate_content shape (the tool risk scorer) ─────────────────────────────
+#
+# One mapper serves two models with two usage classes. Every test above builds
+# types.UsageMetadata (the Live shape), which is exactly why the risk scorer's output
+# tokens went unbilled unnoticed — GenerateContentResponseUsageMetadata names them
+# candidates_*, not response_*.
+
+
+def _gc_usage(**kwargs) -> types.GenerateContentResponseUsageMetadata:
+    """The shape `client.aio.models.generate_content` actually returns."""
+    return types.GenerateContentResponseUsageMetadata(**kwargs)
+
+
+def test_risk_scorer_output_tokens_are_billed_from_candidates_fields():
+    """generate_content reports output as candidates_*, not response_*. Reading only the
+    Live names billed every risk-scorer call with input and ZERO output."""
+    um = _gc_usage(
+        prompt_token_count=900,
+        candidates_token_count=40,
+        candidates_tokens_details=[_modality("TEXT", 40)],
+    )
+    assert usage_metadata_to_billing_units(um) == {
+        "base_input_tokens": 900,
+        "base_output_tokens": 40,
+    }
+
+
+def test_risk_scorer_output_falls_back_to_flat_candidates_count():
+    """Same fix on the no-details path."""
+    um = _gc_usage(prompt_token_count=900, candidates_token_count=40)
+    assert usage_metadata_to_billing_units(um) == {
+        "base_input_tokens": 900,
+        "base_output_tokens": 40,
+    }
+
+
+def test_thinking_tokens_are_billed_as_output():
+    """thoughts_token_count is billed by Vertex at the output rate and never appears in
+    the modality details. gemini-2.5-flash thinks by default, so leaving it unread
+    under-billed the risk scorer on every single call."""
+    um = _gc_usage(prompt_token_count=900, candidates_token_count=40, thoughts_token_count=250)
+    assert usage_metadata_to_billing_units(um) == {
+        "base_input_tokens": 900,
+        "base_output_tokens": 290,  # 40 candidates + 250 thoughts
+    }
+
+
+def test_thinking_tokens_are_billed_on_the_live_path_too():
+    """The native-audio model supports thinking as well. Thoughts are text-rate output,
+    so they land in base_output_tokens even when the audio split is present."""
+    um = types.UsageMetadata(
+        prompt_tokens_details=[_modality("AUDIO", 1490)],
+        response_tokens_details=[_modality("AUDIO", 293)],
+        prompt_token_count=1490,
+        response_token_count=293,
+        thoughts_token_count=120,
+    )
+    assert usage_metadata_to_billing_units(um) == {
+        "audio_input_tokens": 1490,
+        "audio_output_tokens": 293,
+        "base_output_tokens": 120,
+    }
+
+
+def test_thoughts_do_not_trigger_a_false_shortfall_warning(caplog):
+    """response_token_count can exclude thoughts, so the shortfall check must count them
+    as accounted-for or it cries wolf on every thinking turn."""
+    um = types.UsageMetadata(
+        prompt_tokens_details=[_modality("AUDIO", 500)],
+        response_tokens_details=[_modality("AUDIO", 100)],
+        prompt_token_count=500,
+        response_token_count=350,
+        thoughts_token_count=250,
+    )
+    with caplog.at_level("WARNING"):
+        usage_metadata_to_billing_units(um)
+
+    assert "unbilled" not in caplog.text
