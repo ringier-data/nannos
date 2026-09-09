@@ -204,6 +204,14 @@ class _PTCTurnState:
     #: rejection so it can say what actually happened instead of guessing.
     reject_reasons: dict[str, str] = field(default_factory=dict)
     results: dict[str, Any] = field(default_factory=dict)
+    #: Scope component of every ask id minted for this turn (see ``ask_id``). Owned
+    #: by the TURN, not by the wrapper that happens to drain ``pending``: the list is
+    #: thread-keyed, so with two parallel ``eval`` calls either wrapper may drain a
+    #: mixed list. Reading the scope from here keeps stamping and matching consistent
+    #: whichever one does it — taking it from the draining wrapper's own tool call id
+    #: made ask-id matching depend on a nondeterministic race. (Parallel ``eval`` calls
+    #: on one thread are separately broken — they clobber this shared state; see #217.)
+    ask_scope: str = ""
 
     def record_pending(self, item: _PendingApproval) -> None:
         if any(p.call_key == item.call_key for p in self.pending):
@@ -235,9 +243,14 @@ def resolve_ptc_thread_id(runtime: Any) -> str:
     return _PTC_DEFAULT_THREAD_ID
 
 
-def begin_ptc_turn(thread_id: str) -> _PTCTurnState:
-    """Start (or reset) a PTC approval turn for ``thread_id``."""
-    state = _PTCTurnState()
+def begin_ptc_turn(thread_id: str, ask_scope: str = "") -> _PTCTurnState:
+    """Start (or reset) a PTC approval turn for ``thread_id``.
+
+    ``ask_scope`` is the ``eval`` tool call id this turn belongs to; it scopes the
+    turn's ask ids (see ``ask_id``) and is read back off the state rather than from
+    whichever wrapper drains ``pending``.
+    """
+    state = _PTCTurnState(ask_scope=ask_scope)
     _PTC_TURNS[thread_id] = state
     return state
 
@@ -270,13 +283,68 @@ def take_ptc_pending(thread_id: str) -> list[_PendingApproval]:
 
 
 def _call_key(tool_name: str, args: dict[str, Any]) -> str:
-    """Stable identity for a (tool, args) pair across ``eval`` re-runs."""
+    """Stable identity for a (tool, args) pair across ``eval`` re-runs.
+
+    Deliberately content-derived: after an approval the guard re-runs the whole
+    ``eval`` program, and it must recognise the calls it already asked about so it
+    can replay the decision (``turn.decisions``) and reuse the cached result
+    (``turn.results``) instead of prompting again. Two *different* questions about
+    the same tool+args are therefore indistinguishable by this key — which is why
+    it is NOT what goes on the wire; see ``ask_id``.
+
+    This is a per-turn decision/result memo key, not a bypass rule. The bypass
+    policy is a separate, durable, per-user thing (``context.tool_bypass_rules``,
+    keyed ``tool_name::server_slug`` with glob patterns) that outlives the turn.
+    """
     try:
         payload = json.dumps(args, sort_keys=True, default=str)
     except Exception:  # noqa: BLE001 - best-effort hashing of arbitrary args
         payload = repr(args)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"{tool_name}:{digest}"
+
+
+#: Separates the ``call_key`` from the ask ordinal in a wire ``_call_id``. Not
+#: ``#``, which the embed SDK already uses to suffix a client-action part id.
+_ASK_SEPARATOR = "@"
+
+
+def ask_id(call_key: str, ask_scope: str, ask_round: int) -> str:
+    """The wire ``_call_id`` for ONE approval question about ``call_key``.
+
+    Clients need the opposite property from ``_call_key``: every question must
+    carry its own id, so that answering one is never mistaken for answering
+    another. A client that suppresses prompts it has already answered (the embed
+    SDK does, to swallow a snapshot replay racing a resume) otherwise drops the
+    second, genuine ask for an identical call and parks the turn forever.
+
+    Uniqueness comes from two nested scopes, because an identical call can be asked
+    about twice at two different levels:
+
+    * ``ask_scope`` — the ``eval`` tool call this ask belongs to. A PTC turn lives
+      for ONE ``eval`` invocation, and within it an identical call is served from
+      ``turn.results``, so it never asks twice. Two asks therefore mean two ``eval``
+      calls — which is the case seen in the wild, and which a per-turn counter alone
+      cannot tell apart (both would be round 0). The model's ``tool_call["id"]``
+      separates them and is checkpointed on the AI message, so it survives replay.
+    * ``ask_round`` — the interrupt round within one ``eval`` invocation, for a
+      program whose later calls only become reachable once earlier ones are decided.
+
+    Both are replay-stable: the node re-runs deterministically from the top on every
+    resume, so round N's ``interrupt()`` is always round N's, under the same tool
+    call id. Embedding ``call_key`` keeps decision matching order-independent, which
+    is what it was chosen for (parallel ``eval`` calls register concurrently, so the
+    re-run's pending order can differ from the order the human saw).
+
+    The scope is folded to a short digest rather than carried verbatim: these ids ride
+    in places with hard size budgets (Slack packs a batch of them, base64-encoded, into
+    a 2000-char button ``value``), and raw tool call ids are provider-sized — Gemini's
+    are markedly longer than OpenAI's. A digest keeps the id's growth constant instead
+    of letting the model's provider decide it. The scope stays greppable in traces and
+    logs, where the raw id is what appears.
+    """
+    scope = hashlib.sha256(ask_scope.encode("utf-8")).hexdigest()[:8] if ask_scope else "-"
+    return f"{call_key}{_ASK_SEPARATOR}{scope}:{ask_round}"
 
 
 def _resolve_server_slug(

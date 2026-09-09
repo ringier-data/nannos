@@ -7,6 +7,11 @@ whose URN the client requested) — a URN missing here is silently never streame
 Keep in sync with the repo-root ``a2a-extensions.json`` registry (pinned by
 ``tests/test_a2a_extensions_conformance.py``); the orchestrator and the embed SDK
 carry their own copies of the same list.
+
+This copy is negotiation only — it decides WHETHER an extension is streamed, never
+what its payload looks like. Each extension's payload contract is documented where
+it is emitted, in the orchestrator's ``app/core/a2a_extensions.py``; the registry
+additionally pins the vocabularies that several runtimes must agree on.
 """
 
 SUPPORTED_A2A_EXTENSIONS = [

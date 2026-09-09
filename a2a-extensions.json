@@ -20,5 +20,12 @@
   "_activityLogKindsComment": "Message-metadata `kind` discriminators of the activity-log extension. Absent kind = an ordinary mechanical line (a tool ran, work was delegated). `note` = a mid-turn note the agent itself wrote for the user (agent-common notify_user tool). Copies: agent-common a2a/stream_events.py ActivityLogMeta.kind Literal, embed-sdk src/core/extensions.ts ACTIVITY_LOG_KINDS. A client drops unknown kinds rather than mis-styling them, so a kind added in Python but not here/in the SDK is silently rendered as nothing.",
   "activityLogKinds": [
     "note"
+  ],
+  "_hitlCallIdComment": "Identity rule of the human-in-the-loop extension, stated here because every client depends on it and none can derive it. Each action_request carries args._call_id identifying ONE ASK: unique per question, NOT per (tool, args). Asking about the same tool with the same arguments twice \u2014 a program repeating a call in a later step \u2014 yields two DIFFERENT ids. Clients echo it back as the decision's id, and a client that suppresses prompts it has already answered (embed-sdk TurnSession, absorbing a snapshot redelivered by a subscribe racing a resume) must key that on this id (the embed SDK pairs it with the prompt KIND, because a risk-gated client_action call and the round-trip request that follows it share one id). Deriving an identity from the tool name and args instead makes a genuine second ask look like a replay: the card is dropped, no decision can be submitted, and the turn hangs forever \u2014 the failure this rule prevents. Producers: agent_common ptc_guard.ask_id for calls gated inside the code interpreter, the model's tool_call id on the normal path (conditional_hitl). The server's own per-turn memo key IS content-derived (ptc_guard._call_key) and deliberately never ships.",
+  "_hitlDecisionTypesComment": "Decision types a client may send back on the human-in-the-loop extension. Copies: agent-common core/hitl_resume.py HITL_DECISION_TYPES (the server accepts these; anything else refuses to execute \u2014 the PTC gate blocks and logs, the native gate raises) and embed-sdk approval-codec.ts HITL_DECISION_TYPES (the Decision union). 'edit' is only offered where an action's review_configs.allowed_decisions lists it \u2014 PTC-gated calls cannot honor it, since the approved call is re-executed verbatim from the re-run program. Full payload contract: orchestrator app/core/a2a_extensions.py.",
+  "hitlDecisionTypes": [
+    "approve",
+    "edit",
+    "reject"
   ]
 }
