@@ -84,7 +84,10 @@ tool with the same arguments — a program that repeats a call in a later step �
 DIFFERENT ids. Treat it as an opaque string: match decisions to asks with it, and if
 you suppress prompts you have already answered (to absorb a redelivered snapshot),
 key that on this id, because equal ids mean "the same question again" and different
-ids mean "a new question". Deriving your own identity from the tool name and args
+ids mean "a new question". (The id alone need not be the whole key: a risk-gated
+``client_action`` call and the round-trip request the tool then emits share one id,
+so the embed SDK pairs it with the prompt kind. Pair it with anything you like — just
+not with the call's own content.) Deriving your own identity from the tool name and args
 instead makes a genuine second ask look like a replay: the prompt is dropped, no
 decision can be submitted, and the turn waits forever. The server-side per-turn memo
 key IS content-derived (agent_common.middleware.ptc_guard._call_key) and is

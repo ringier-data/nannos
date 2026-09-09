@@ -504,6 +504,69 @@ def test_apply_ptc_decisions_positional_fallback_without_ids():
     assert turn.decisions[b] == "reject"
 
 
+def test_apply_ptc_decisions_matches_scoped_ask_ids():
+    """The PRIMARY arm: decisions echoing the ask id we actually stamped.
+
+    The two tests above answer with a bare ``call_key`` — the compatibility arm for a
+    client build predating ask ids. A current client echoes
+    ``ask_id(call_key, ask_scope, ask_round)``, so that path needs its own coverage,
+    again with the decisions ordered opposite to ``pending``.
+    """
+    from agent_common.core.graph_utils import _PTCToleranceCodeInterpreterMiddleware
+
+    root = ptc_guard._call_key("ls", {"path": "/"})
+    mem = ptc_guard._call_key("ls", {"path": "/memories/"})
+    pending = [
+        types.SimpleNamespace(call_key=root, tool_name="ls", server_slug="_self"),
+        types.SimpleNamespace(call_key=mem, tool_name="ls", server_slug="_self"),
+    ]
+    decisions = [
+        {"id": ptc_guard.ask_id(mem, "c1", 2), "type": "approve"},
+        {"id": ptc_guard.ask_id(root, "c1", 2), "type": "reject"},
+    ]
+    turn = types.SimpleNamespace(decisions={}, reject_reasons={})
+
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(
+        turn, pending, decisions, context=None, ask_scope="c1", ask_round=2
+    )
+
+    assert turn.decisions[mem] == "approve"
+    assert turn.decisions[root] == "reject"
+
+
+def test_apply_ptc_decisions_rejects_unmatched_instead_of_going_positional():
+    """A PARTIAL id match must not flip the batch to positional alignment.
+
+    ``executor._decisions_for_interrupt`` pads calls it has no answer for with id-less
+    ``{"type": "reject"}`` placeholders, so a real approval can arrive alongside them.
+    Falling back to position for the whole batch could then apply that approval to a
+    call the human never saw — here, ordering the list opposite to ``pending`` would
+    approve ``/`` when the human approved ``/memories/``. The unanswered call must
+    simply be rejected.
+    """
+    from agent_common.core.graph_utils import _PTCToleranceCodeInterpreterMiddleware
+
+    root = ptc_guard._call_key("ls", {"path": "/"})
+    mem = ptc_guard._call_key("ls", {"path": "/memories/"})
+    pending = [
+        types.SimpleNamespace(call_key=root, tool_name="ls", server_slug="_self"),
+        types.SimpleNamespace(call_key=mem, tool_name="ls", server_slug="_self"),
+    ]
+    decisions = [
+        {"id": ptc_guard.ask_id(mem, "c1", 0), "type": "approve"},
+        {"type": "reject"},  # id-less placeholder for the call with no answer
+    ]
+    turn = types.SimpleNamespace(decisions={}, reject_reasons={})
+
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(
+        turn, pending, decisions, context=None, ask_scope="c1", ask_round=0
+    )
+
+    assert turn.decisions[mem] == "approve", "the id-bearing approval must land on its own call"
+    assert turn.decisions[root] == "reject", "the unanswered call must fail closed, not borrow by position"
+    assert "No approval decision was received" in turn.reject_reasons[root]
+
+
 # ── Naming the tool behind a sandbox authorization error ────────────────────────
 #
 # A `need-credentials` raised by an MCP call made inside `eval` escapes as an

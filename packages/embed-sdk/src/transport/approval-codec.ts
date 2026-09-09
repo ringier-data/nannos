@@ -71,7 +71,9 @@ export interface ApprovalResponse {
 
 const envelopeSchema = z.object({
   v: z.literal(1),
-  type: z.enum(['approve', 'reject', 'edit']).optional(),
+  // Derived, not restated: a type added to the pinned constant must reach the wire
+  // codec too, or the registry conformance test passes while this schema drops it.
+  type: z.enum(HITL_DECISION_TYPES).optional(),
   message: z.string().optional(),
   bypass: z.boolean().optional(),
   bypass_all: z.boolean().optional(),

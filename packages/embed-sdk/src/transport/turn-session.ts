@@ -104,11 +104,9 @@ export class TurnSession {
     // DIFFERENT kind for the same call: an approved `client_action` tool emits
     // its round-trip request under the very `_call_id` just approved.
     //
-    // This is sound ONLY because an id identifies one ASK rather than one
-    // (tool, args) — see `approvalPrompt`. Asking the same call again produces a
-    // new id, so a genuine repeat still renders; that was the bug this rule had
-    // when the server shipped a content hash (approve, repeat the call, and the
-    // second card vanished with the turn stuck on "Working…").
+    // Sound ONLY because an id identifies one ASK, not one (tool, args) — so
+    // asking the same call again renders rather than being swallowed here. See
+    // `approvalPrompt` for why that distinction is load-bearing.
     if (this.answered.size > 0) {
       const asked = approvalPrompt(data);
       if (asked && asked.ids.every((id) => this.answered.get(id) === asked.kind)) return;

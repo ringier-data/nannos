@@ -204,6 +204,14 @@ class _PTCTurnState:
     #: rejection so it can say what actually happened instead of guessing.
     reject_reasons: dict[str, str] = field(default_factory=dict)
     results: dict[str, Any] = field(default_factory=dict)
+    #: Scope component of every ask id minted for this turn (see ``ask_id``). Owned
+    #: by the TURN, not by the wrapper that happens to drain ``pending``: the list is
+    #: thread-keyed, so with two parallel ``eval`` calls either wrapper may drain a
+    #: mixed list. Reading the scope from here keeps stamping and matching consistent
+    #: whichever one does it — taking it from the draining wrapper's own tool call id
+    #: made ask-id matching depend on a nondeterministic race. (Parallel ``eval`` calls
+    #: on one thread are separately broken — they clobber this shared state; see #217.)
+    ask_scope: str = ""
 
     def record_pending(self, item: _PendingApproval) -> None:
         if any(p.call_key == item.call_key for p in self.pending):
@@ -235,9 +243,14 @@ def resolve_ptc_thread_id(runtime: Any) -> str:
     return _PTC_DEFAULT_THREAD_ID
 
 
-def begin_ptc_turn(thread_id: str) -> _PTCTurnState:
-    """Start (or reset) a PTC approval turn for ``thread_id``."""
-    state = _PTCTurnState()
+def begin_ptc_turn(thread_id: str, ask_scope: str = "") -> _PTCTurnState:
+    """Start (or reset) a PTC approval turn for ``thread_id``.
+
+    ``ask_scope`` is the ``eval`` tool call id this turn belongs to; it scopes the
+    turn's ask ids (see ``ask_id``) and is read back off the state rather than from
+    whichever wrapper drains ``pending``.
+    """
+    state = _PTCTurnState(ask_scope=ask_scope)
     _PTC_TURNS[thread_id] = state
     return state
 
@@ -322,8 +335,16 @@ def ask_id(call_key: str, ask_scope: str, ask_round: int) -> str:
     call id. Embedding ``call_key`` keeps decision matching order-independent, which
     is what it was chosen for (parallel ``eval`` calls register concurrently, so the
     re-run's pending order can differ from the order the human saw).
+
+    The scope is folded to a short digest rather than carried verbatim: these ids ride
+    in places with hard size budgets (Slack packs a batch of them, base64-encoded, into
+    a 2000-char button ``value``), and raw tool call ids are provider-sized — Gemini's
+    are markedly longer than OpenAI's. A digest keeps the id's growth constant instead
+    of letting the model's provider decide it. The scope stays greppable in traces and
+    logs, where the raw id is what appears.
     """
-    return f"{call_key}{_ASK_SEPARATOR}{ask_scope}:{ask_round}"
+    scope = hashlib.sha256(ask_scope.encode("utf-8")).hexdigest()[:8] if ask_scope else "-"
+    return f"{call_key}{_ASK_SEPARATOR}{scope}:{ask_round}"
 
 
 def _resolve_server_slug(
