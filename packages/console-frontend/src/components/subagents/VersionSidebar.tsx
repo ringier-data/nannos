@@ -61,6 +61,8 @@ interface VersionSidebarProps {
   isOwner: boolean;
   isAdmin: boolean;
   hasWriteAccess?: boolean;
+  /** Host-published sub-agent (ADR-0006): versions are written by the sync, so revert, delete and set-default are off. */
+  isEmbedBound?: boolean;
   isCollapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
   onRefresh?: () => void;
@@ -74,6 +76,7 @@ export function VersionSidebar({
   isOwner,
   isAdmin,
   hasWriteAccess = false,
+  isEmbedBound = false,
   isCollapsed = false,
   onCollapsedChange,
   onRefresh,
@@ -276,16 +279,16 @@ export function VersionSidebar({
                 // Group members with write access can also create/submit drafts.
                 const canManage = isOwner || isAdmin;
                 const canWrite = canManage || hasWriteAccess;
-                const canSetDefault = canWrite && isApproved && !isDefault;
+                const canSetDefault = canWrite && !isEmbedBound && isApproved && !isDefault;
                 const canSubmit = canWrite && (isDraft || isRejected);
-                const canRevert = canWrite && !isCurrent;
+                const canRevert = canWrite && !isEmbedBound && !isCurrent;
                 const canCompare = version.version > 1 || (defaultVersion !== undefined && defaultVersion !== version.version);
                 // Check if there's actually a previous version available in the list
                 const sortedVersions = [...allVersions].sort((a, b) => a.version - b.version);
                 const currentVersionIndex = sortedVersions.findIndex((v) => v.version === version.version);
                 const hasPreviousVersion = currentVersionIndex > 0;
                 // Can delete non-approved versions (except if it's the only version)
-                const canDelete = canManage && !isApproved && versions.length > 1;
+                const canDelete = canManage && !isEmbedBound && !isApproved && versions.length > 1;
 
                 return (
                   <div

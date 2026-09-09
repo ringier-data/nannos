@@ -27,11 +27,12 @@ async def test_bearer_token_authenticates_socket_in_every_environment(
 
     monkeypatch.setattr(app_module.config, "environment", environment)
     app_module._socket_owned_sessions.pop("sid-1", None)
-    resolve_token = AsyncMock(return_value="stored-session-1")
+    resolve_token = AsyncMock(return_value=app_module._SocketTokenAuth("stored-session-1"))
     notifications = MagicMock()
+    sio = _mock_sio()
 
     with (
-        patch("app.sio", _mock_sio()),
+        patch("app.sio", sio),
         patch("app._resolve_socket_user_via_cookie", AsyncMock(return_value=None)),
         patch("app._resolve_socket_user_via_token", resolve_token),
         patch("app.socket_notification_manager", notifications),
@@ -45,6 +46,37 @@ async def test_bearer_token_authenticates_socket_in_every_environment(
     # The token path mints a socket-owned StoredSession that handle_disconnect must destroy.
     assert app_module._socket_owned_sessions.get("sid-1") == "stored-session-1"
     notifications.register_connection.assert_called_once_with("user-1", "sid-1")
+    # An unbound token leaves the socket session unstamped.
+    create_session = sio.app_instance.state.socket_session_service.create_session
+    assert create_session.await_args.kwargs["embedded_sub_agent_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_bound_token_stamps_the_socket_session(monkeypatch):
+    """Embed bindings (ADR-0006): the sub-agent bound to the token's azp is stamped on the
+    socket session at connect, so send_message can scope turns without trusting the client."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.config, "environment", "prod")
+    app_module._socket_owned_sessions.pop("sid-9", None)
+    resolve_token = AsyncMock(
+        return_value=app_module._SocketTokenAuth("stored-session-9", embedded_sub_agent_id=20)
+    )
+    sio = _mock_sio()
+
+    with (
+        patch("app.sio", sio),
+        patch("app._resolve_socket_user_via_cookie", AsyncMock(return_value=None)),
+        patch("app._resolve_socket_user_via_token", resolve_token),
+        patch("app.socket_notification_manager", MagicMock()),
+    ):
+        assert await app_module.handle_connect("sid-9", environ={}, auth={"token": "bound.jwt"}) is True
+
+    create_session = sio.app_instance.state.socket_session_service.create_session
+    create_session.assert_awaited_once()
+    assert create_session.await_args.kwargs["embedded_sub_agent_id"] == 20
+    assert create_session.await_args.kwargs["http_session_id"] == "stored-session-9"
+    assert app_module._socket_owned_sessions.get("sid-9") == "stored-session-9"
 
 
 @pytest.mark.asyncio

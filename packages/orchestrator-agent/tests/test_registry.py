@@ -834,3 +834,78 @@ class TestGetEntitlementVersion:
     @pytest.mark.asyncio
     async def test_none_without_token(self, registry_service):
         assert await registry_service.get_entitlement_version(None) is None
+
+
+def _local_agent(agent_id: int, name: str) -> dict:
+    return {
+        "id": agent_id,
+        "name": name,
+        "description": "A local agent",
+        "owner_user_id": "test-user",
+        "type": "local",
+        "current_version": 1,
+        "default_version": 1,
+        "config_version": {
+            "id": agent_id,
+            "sub_agent_id": agent_id,
+            "version": 1,
+            "description": "A local agent",
+            "model": "claude-sonnet-4-6",
+            "agent_url": None,
+            "system_prompt": "Be useful.",
+            "mcp_tools": [],
+            "status": "approved",
+            "created_at": "2026-01-01T00:00:00",
+        },
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+    }
+
+
+_SETTINGS = {
+    "data": {
+        "user_id": "test-user-id",
+        "sub": "test-user-sub",
+        "language": "en",
+        "custom_prompt": None,
+        "timezone": "Europe/Zurich",
+        "mcp_tools": [],
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+    }
+}
+
+
+class TestMalformedSubAgentIsSkipped:
+    """A sub-agent whose stored config no longer validates must cost only itself.
+
+    A name with a space ("Alloy AI Assistant") predates the console-side check, so rows
+    like it still exist. Building LocalLangGraphSubAgentConfig from one raises, and that
+    used to escape to get_user's blanket `except Exception` → None → the executor's
+    "user not found" → InvalidParamsError on every turn, including turns that never
+    touched the offending agent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_user_survives_a_sub_agent_with_an_invalid_name(self, mock_registry_service):
+        response = {
+            "items": [_local_agent(22, "Alloy AI Assistant"), _local_agent(23, "data-analyst")],
+            "total": 2,
+        }
+
+        with mock_registry_service(response, _SETTINGS) as registry_service:
+            user = await registry_service.get_user(user_sub="test-user-sub", access_token="test-token")
+
+        assert user is not None, "one bad row must not make the whole user disappear"
+        assert [sa.name for sa in user.local_subagents] == ["data-analyst"]
+
+    @pytest.mark.asyncio
+    async def test_only_bad_agent_means_a_user_with_no_local_agents(self, mock_registry_service):
+        response = {"items": [_local_agent(22, "Alloy AI Assistant")], "total": 1}
+
+        with mock_registry_service(response, _SETTINGS) as registry_service:
+            user = await registry_service.get_user(user_sub="test-user-sub", access_token="test-token")
+
+        # Still a real user — the orchestrator answers, it just cannot delegate to that one.
+        assert user is not None
+        assert user.local_subagents == []

@@ -2987,6 +2987,105 @@ class SubAgentService:
                         skill.sandbox_required = entry["sandbox_required"]
                         skill.scope = entry["scope"]
 
+    async def create_managed_sub_agent(
+        self, db: AsyncSession, actor: User, *, name: str, is_public: bool = False
+    ) -> int:
+        """Create the row of a MANAGED local sub-agent (ADR-0006) with no config version yet.
+
+        ``current_version = 0`` so that the first :meth:`publish_managed_version` writes
+        version 1 as the approved default. Does not commit: the caller writes the embed
+        binding and publishes in the same transaction, so a failed sync leaves nothing
+        behind. Returns the new sub-agent id.
+        """
+        now = datetime.now(timezone.utc)
+        return await self.repo.create(
+            db=db,
+            actor=actor,
+            fields={
+                "name": name,
+                "owner_user_id": actor.id,
+                "type": SubAgentType.LOCAL.value,
+                "is_public": is_public,
+                "current_version": 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+            returning="id",
+        )
+
+    async def publish_managed_version(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        *,
+        version_hash: str,
+        change_summary: str,
+        description: str,
+        system_prompt: str,
+        mcp_tools: list[str] | None,
+        model_tier: str | None,
+        enable_thinking: bool | None,
+        thinking_level: ThinkingLevel | None,
+        skills: list[SkillDefinition],
+    ) -> int:
+        """Write one new version of a MANAGED sub-agent and make it the approved default.
+
+        Used by embed bindings (ADR-0006): the content was authored and reviewed on the
+        host, so there is no draft/review cycle here — the version is approved on the
+        spot, signed by ``actor`` (the admin who created the binding). Returns the new
+        version number.
+
+        What the host does not publish stays a Nannos-side setting: ``mcp_tools=None``
+        keeps the tool list, ``model_tier=None`` keeps model/tier, and thinking is kept
+        when both thinking arguments are None. Those are carried forward from the
+        APPROVED default version — never from a pending draft, which the sync would
+        otherwise promote unreviewed.
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if existing is None:
+            raise LookupError(f"Sub-agent {sub_agent_id} not found")
+        baseline = existing.config_version
+        if existing.default_version is not None and (baseline is None or baseline.version != existing.default_version):
+            approved = await self.get_sub_agent_by_id(db, sub_agent_id, version=existing.default_version)
+            baseline = approved.config_version if approved and approved.config_version else baseline
+
+        if mcp_tools is None:
+            mcp_tools = list(baseline.mcp_tools) if baseline and baseline.mcp_tools else []
+        model: str | None = None
+        if model_tier is None and baseline is not None:
+            model = baseline.model
+            model_tier = baseline.model_tier.value if baseline.model_tier else None
+        if enable_thinking is None and thinking_level is None and baseline is not None:
+            enable_thinking = baseline.enable_thinking
+            thinking_level = baseline.thinking_level
+
+        new_version = (existing.current_version or 0) + 1
+        await self._create_config_version(
+            db,
+            actor,
+            sub_agent_id,
+            new_version,
+            change_summary,
+            status=SubAgentStatus.DRAFT,
+            description=description,
+            model=model,
+            model_tier=model_tier,
+            system_prompt=system_prompt,
+            mcp_tools=mcp_tools,
+            pricing_config=baseline.pricing_config if baseline else None,
+            enable_thinking=enable_thinking,
+            thinking_level=thinking_level,
+            skills=skills,
+            sandbox_enabled=bool(baseline.sandbox_enabled) if baseline else False,
+            version_hash=version_hash,
+        )
+        await self.repo.update_current_version(db, actor, sub_agent_id, new_version)
+        await self.repo.approve_version(
+            db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
+        )
+        return new_version
+
     async def _create_config_version(
         self,
         db: AsyncSession,
@@ -3013,8 +3112,14 @@ class SubAgentService:
         thinking_level: ThinkingLevel | None = None,
         skills: list[SkillDefinition] | None = None,
         sandbox_enabled: bool = False,
+        version_hash: str | None = None,
     ) -> int:
-        """Create a new configuration version entry. Returns the new version ID."""
+        """Create a new configuration version entry. Returns the new version ID.
+
+        ``version_hash`` is normally derived from content + timestamp. A caller that
+        already has a content-addressed identity for the version (embed bindings,
+        ADR-0006: ``wk<revision>``) passes it so the orchestrator's caches key on it.
+        """
         now = datetime.now(timezone.utc)
         mcp_tools_list = mcp_tools if mcp_tools is not None else []
         skills_list: list[SkillDefinition] = skills if skills is not None else []
@@ -3023,9 +3128,10 @@ class SubAgentService:
         # Full content lives in the skill_registry table and is resolved on read.
         skill_refs = await self._persist_and_strip_skills(db, actor, sub_agent_id, skills_list)
 
-        version_hash = self._generate_version_hash(
-            system_prompt, agent_url, mcp_tools_list, skill_refs, sandbox_enabled, now
-        )
+        if version_hash is None:
+            version_hash = self._generate_version_hash(
+                system_prompt, agent_url, mcp_tools_list, skill_refs, sandbox_enabled, now
+            )
 
         return await self.repo.create_config_version(
             db=db,

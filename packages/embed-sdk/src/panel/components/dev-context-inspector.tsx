@@ -12,6 +12,8 @@
  *     traffic, this browser's stored record of earlier turns (localStorage,
  *     dev mode only), and — on demand — the backend's own persisted record,
  *     which is the only way to inspect a conversation this browser never ran.
+ *   - the access token every send and the socket handshake carry: its claims,
+ *     its remaining life, and the raw JWT itself behind an explicit reveal;
  *   - the client-action log: every directive the agent sent, which path
  *     delivered it, and what the SDK answered — plus a runner that fires a
  *     hand-written directive through the same executor, so the host side can
@@ -44,7 +46,10 @@ import {
   CopyIcon,
   DownloadIcon,
   ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
   PlayIcon,
+  RefreshCwIcon,
   Trash2Icon,
 } from 'lucide-react';
 import { Switch } from '../../components/ui/switch';
@@ -52,6 +57,7 @@ import { cn } from '../../lib/utils';
 import { writeClipboard } from '../../lib/clipboard';
 import { YamlView } from './yaml-view';
 import { useAssistant } from '../../react';
+import { decodeJwt, jwtExpMs } from '../../core';
 import type { ClientActionLogEntry } from '../../core';
 import { fetchWireHistory, type WireLogEntry } from '../../transport';
 import { useChatEngineOptional } from '../engine';
@@ -73,6 +79,7 @@ const TABS = [
   { id: 'context', label: 'context' },
   { id: 'actions', label: 'actions' },
   { id: 'wire', label: 'wire' },
+  { id: 'auth', label: 'auth' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -175,8 +182,21 @@ function serializeEntries(entries: WireLogEntry[]): string {
 }
 
 
-/** Copies every event of the section, not only the expanded ones. */
-function CopyWireButton({ entries }: { entries: WireLogEntry[] }) {
+/** Bar button that copies and then says whether it worked — a panel inside a
+ *  shadow root can be denied the clipboard, and a button that silently did
+ *  nothing is worse than no button. `text` is a getter: the payload is only
+ *  serialized on the click, never on a render. */
+function CopyButton({
+  text,
+  label,
+  title,
+  disabled,
+}: {
+  text: () => string;
+  label: string;
+  title: string;
+  disabled?: boolean;
+}) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   useEffect(() => {
@@ -189,18 +209,28 @@ function CopyWireButton({ entries }: { entries: WireLogEntry[] }) {
   return (
     <button
       type="button"
-      disabled={entries.length === 0}
-      title="Copy every event of this conversation as JSON"
+      disabled={disabled}
+      title={title}
       className={barButtonClass}
       onClick={() => {
-        void writeClipboard(serializeEntries(entries)).then((ok) =>
-          setState(ok ? 'copied' : 'failed'),
-        );
+        void writeClipboard(text()).then((ok) => setState(ok ? 'copied' : 'failed'));
       }}
     >
       <Icon className="size-3" />
-      {state === 'copied' ? 'copied' : state === 'failed' ? 'copy failed' : `copy all (${entries.length})`}
+      {state === 'copied' ? 'copied' : state === 'failed' ? 'copy failed' : label}
     </button>
+  );
+}
+
+/** Copies every event of the section, not only the expanded ones. */
+function CopyWireButton({ entries }: { entries: WireLogEntry[] }) {
+  return (
+    <CopyButton
+      text={() => serializeEntries(entries)}
+      label={`copy all (${entries.length})`}
+      title="Copy every event of this conversation as JSON"
+      disabled={entries.length === 0}
+    />
   );
 }
 
@@ -499,6 +529,349 @@ function ClientActionsSection() {
   );
 }
 
+/** A clock only the leaf that reads it re-renders on. A countdown ticking at
+ *  the top of the inspector would re-emit every YAML block on the panel once a
+ *  second for nothing. */
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+/** Compact and human: `48s`, `4m 12s`, `1h 3m`. */
+function durationOf(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m ${total % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/** Epoch-second claims read as noise as bare integers, and `exp` is the one
+ *  claim a developer always wants. Annotated for the eye only — the `·` form is
+ *  obviously a rendering, and the raw token stays the copyable truth. */
+const TIME_CLAIMS = new Set(['exp', 'iat', 'nbf', 'auth_time']);
+
+function annotateClaims(payload: Record<string, unknown>, now: number): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (TIME_CLAIMS.has(key) && typeof value === 'number') {
+      const at = value * 1000;
+      const delta = at - now;
+      out[key] = `${value} · ${timeOf(at)} · ${delta >= 0 ? `in ${durationOf(delta)}` : `${durationOf(-delta)} ago`}`;
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/** Where the bearer comes from. `none` is the console's own panel: same-origin,
+ *  the session cookie carries it and there is no token to show. */
+type TokenSource = 'none' | 'host' | 'self-login';
+
+interface TokenRead {
+  source: TokenSource;
+  /** The bearer the NEXT send will carry: `''` when the source has none to
+   *  give yet (login pending), `null` before the first read, when there is no
+   *  bearer at all, or when the read threw. */
+  token: string | null;
+  error: string | null;
+  loading: boolean;
+  /** When the value above was read, or null if it never was. */
+  at: number | null;
+  reload: () => void;
+}
+
+/**
+ * The token the SDK itself would present, read through the very same
+ * `config.getToken` the socket's auth callback and every REST call go through
+ * (core/index.ts bridges the `auth` self-login strategy onto it) — so what this
+ * shows is the bearer on the wire, not a second guess at it.
+ *
+ * Read once per mount plus on demand, and re-read when the transport would
+ * re-auth. Deliberately NOT polled: a host `getToken` can be a backend round
+ * trip (the cockpit's BFF mints from a stored refresh token), and this is a
+ * panel, not a poller.
+ */
+function useAccessToken(): TokenRead {
+  const engine = useChatEngineOptional();
+  const core = engine?.core;
+  const getToken = core?.config.getToken;
+  const source: TokenSource = !getToken ? 'none' : core?.auth ? 'self-login' : 'host';
+
+  const [read, setRead] = useState<{ token: string | null; error: string | null; at: number | null }>({
+    token: null,
+    error: null,
+    at: null,
+  });
+  const [nonce, reload] = useReducer((v: number) => v + 1, 0);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!getToken) return;
+    let alive = true;
+    setLoading(true);
+    // Host code: it may be sync or async, and may throw either way.
+    void (async () => {
+      try {
+        const token = await getToken();
+        if (alive) setRead({ token: token ?? '', error: null, at: Date.now() });
+      } catch (e) {
+        if (alive) setRead({ token: null, error: e instanceof Error ? e.message : String(e), at: Date.now() });
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [getToken, nonce]);
+
+  // Follow the token that is actually presented: re-read when the transport
+  // re-auths (60 s before expiry, core/client.ts), then once more at expiry
+  // itself if that read handed back the same soon-dead token. Bounded on
+  // purpose — both candidates are in the past once the token is dead, so a
+  // source that cannot refresh is asked twice, not forever. `at` is in the
+  // deps so an unchanged token still re-arms the second timer.
+  const { token, at } = read;
+  useEffect(() => {
+    const exp = token && at !== null ? jwtExpMs(token) : null;
+    if (!exp) return;
+    const delay = [exp - 60_000 - Date.now(), exp - Date.now()].find((d) => d > 0);
+    if (delay === undefined) return;
+    const id = window.setTimeout(reload, delay);
+    return () => window.clearTimeout(id);
+  }, [token, at]);
+
+  return { source, token, error: read.error, loading, at, reload };
+}
+
+/** Enough of both ends to tell WHICH token this is, never enough to use it.
+ *  A short one is hidden outright — head plus tail would be the whole token,
+ *  and an opaque token can be short. */
+function maskToken(token: string): string {
+  return token.length > 32 ? `${token.slice(0, 16)}…${token.slice(-8)}` : '•'.repeat(12);
+}
+
+/** Milliseconds until the token dies, or null when it carries no `exp`. */
+function expiresInOf(read: TokenRead, now: number): number | null {
+  const exp = read.token ? jwtExpMs(read.token) : null;
+  return exp === null ? null : exp - now;
+}
+
+function Fact({ label, value, className }: { label: string; value: string; className?: string }) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="w-14 shrink-0 text-muted-foreground">{label}</span>
+      <span className={cn('min-w-0 flex-1 break-all font-mono text-foreground', className)}>{value}</span>
+    </div>
+  );
+}
+
+/** The auth tab's own badge. What is worth announcing about a bearer while the
+ *  tab is closed is not a count — it is whether the thing is still alive. */
+function AuthBadge({ read }: { read: TokenRead }) {
+  const now = useNow(1000);
+  const badge = 'font-mono text-[10px] tabular-nums';
+  if (read.source === 'none') return <span className={cn(badge, 'text-muted-foreground')}>cookie</span>;
+  if (read.at === null) return <span className={cn(badge, 'text-muted-foreground')}>…</span>;
+  if (read.error) return <span className={cn(badge, 'text-red-700 dark:text-red-400')}>error</span>;
+  if (!read.token) return <span className={cn(badge, 'text-red-700 dark:text-red-400')}>none</span>;
+  const left = expiresInOf(read, now);
+  if (left === null) return <span className={cn(badge, 'text-muted-foreground')}>no exp</span>;
+  if (left <= 0) return <span className={cn(badge, 'text-red-700 dark:text-red-400')}>expired</span>;
+  return (
+    <span className={cn(badge, left < 60_000 ? 'text-amber-700 dark:text-amber-500' : 'text-muted-foreground')}>
+      {durationOf(left)}
+    </span>
+  );
+}
+
+/** Speaks up on the COLLAPSED bar, and only when the bearer is itself the
+ *  problem — absent, dead, or unreadable. A missing token turns every other
+ *  symptom into a mystery, and the tab badge that carries the countdown is out
+ *  of sight while the inspector is folded away. */
+function AuthAlert({ read }: { read: TokenRead }) {
+  const now = useNow(5000);
+  if (read.source === 'none' || read.at === null) return null;
+  const left = expiresInOf(read, now);
+  const label = read.error
+    ? 'token error'
+    : !read.token
+      ? 'no token'
+      : left !== null && left <= 0
+        ? 'token expired'
+        : null;
+  if (!label) return null;
+  return <span className="shrink-0 font-mono font-medium text-red-700 dark:text-red-400">{label}</span>;
+}
+
+/**
+ * The bearer, its claims, and its remaining life.
+ *
+ * Masked until asked: a JWT is a live credential until it expires, and this
+ * panel is exactly what ends up in screenshots and pasted bug reports. The
+ * claims are what a developer needs nine times out of ten — who the backend
+ * thinks you are, which client and audience the token is bound to, when it
+ * dies — so those are shown outright and the raw string waits behind a reveal.
+ */
+function AuthSection({ read }: { read: TokenRead }) {
+  const engine = useChatEngineOptional();
+  const [revealed, setRevealed] = useState(false);
+  const now = useNow(1000);
+
+  const token = read.token;
+  const decoded = token ? decodeJwt(token) : null;
+  const left = expiresInOf(read, now);
+  const backend = engine?.core.config.backendUrl ?? (typeof window !== 'undefined' ? window.location.origin : '—');
+  const sourceText =
+    read.source === 'none'
+      ? 'same-origin session cookie — no bearer'
+      : read.source === 'self-login'
+        ? 'auth strategy (self-login), via config.getToken'
+        : 'host config.getToken()';
+
+  const reload = (
+    <button
+      type="button"
+      disabled={read.source === 'none' || read.loading}
+      title="Ask the token source again — the same call the socket makes when it re-auths"
+      className={barButtonClass}
+      onClick={read.reload}
+    >
+      <RefreshCwIcon className={cn('size-3', read.loading && 'animate-spin')} />
+      {read.loading ? 'reading…' : 're-read'}
+    </button>
+  );
+
+  // The console's own panel: nothing to show, and saying so beats an empty box.
+  if (read.source === 'none') {
+    return (
+      <Section title="access token" hint="no bearer on this surface">
+        <div className="flex flex-col gap-1 rounded-md border border-border bg-background/40 p-2">
+          <span className="text-muted-foreground">
+            This surface rides a same-origin session cookie: getToken is unset, so no JWT is presented on the
+            socket or on any REST call. An embedded host is the case that carries one.
+          </span>
+          <Fact label="backend" value={backend} />
+        </div>
+      </Section>
+    );
+  }
+
+  return (
+    <>
+      <Section
+        title="access token"
+        hint={
+          read.error
+            ? 'the token source threw'
+            : !token
+              ? 'the token source has none to give'
+              : left === null
+                ? 'presented on the socket handshake and every REST call'
+                : left > 0
+                  ? `expires in ${durationOf(left)}`
+                  : `expired ${durationOf(-left)} ago`
+        }
+      >
+        <div className="flex flex-col gap-1 rounded-md border border-border bg-background/40 p-2">
+          <Fact label="source" value={sourceText} />
+          <Fact label="backend" value={backend} />
+          {decoded && (
+            <Fact
+              label="user"
+              value={String(
+                decoded.payload.preferred_username ?? decoded.payload.email ?? decoded.payload.sub ?? '—',
+              )}
+            />
+          )}
+          {left !== null && (
+            <Fact
+              label="expires"
+              value={left > 0 ? `in ${durationOf(left)}` : `${durationOf(-left)} ago`}
+              className={left <= 0 ? 'text-red-700 dark:text-red-400' : undefined}
+            />
+          )}
+          {read.at !== null && <Fact label="read" value={timeOf(read.at)} />}
+          {read.error && (
+            <Fact label="error" value={read.error} className="text-red-700 dark:text-red-400" />
+          )}
+          {token !== null && token !== '' && (
+            <div className="pt-1">
+              {revealed ? (
+                <div className="max-h-24 overflow-auto rounded-md border border-border bg-muted p-2 font-mono text-[11px] leading-snug break-all text-foreground">
+                  {token}
+                </div>
+              ) : (
+                <span className="font-mono text-muted-foreground">
+                  {maskToken(token)} · {token.length} chars
+                </span>
+              )}
+            </div>
+          )}
+          {token === '' && (
+            <span className="text-muted-foreground">
+              The source returned nothing — not logged in yet, or the refresh failed. The panel&rsquo;s own
+              sign-in prompt is what mints one; this bar never opens a popup.
+            </span>
+          )}
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          {token ? (
+            <>
+              <button
+                type="button"
+                title={revealed ? 'Hide the raw token again' : 'Show the raw token — it is a live credential'}
+                className={barButtonClass}
+                onClick={() => setRevealed((v) => !v)}
+              >
+                {revealed ? <EyeOffIcon className="size-3" /> : <EyeIcon className="size-3" />}
+                {revealed ? 'hide' : 'reveal'}
+              </button>
+              <CopyButton
+                text={() => token}
+                label="copy token"
+                title="Copy the raw JWT — a live credential until it expires"
+              />
+            </>
+          ) : null}
+          {reload}
+        </div>
+      </Section>
+      {token ? (
+        <Section
+          title="claims"
+          hint={
+            decoded
+              ? `${String(decoded.header.alg ?? 'unknown alg')} · decoded here, verified by the backend`
+              : 'not a JWT'
+          }
+        >
+          {decoded ? (
+            <Yaml
+              value={{
+                header: decoded.header,
+                payload: annotateClaims(decoded.payload, now),
+              }}
+              className="max-h-64"
+            />
+          ) : (
+            <span className="p-2 text-muted-foreground">
+              An opaque token — three dot-separated base64url segments is what can be decoded, and this is not
+              that. Only the backend can say what it means.
+            </span>
+          )}
+        </Section>
+      ) : null}
+    </>
+  );
+}
+
 /** Deep-links the active conversation's LangSmith trace. The host's
  *  `links.trace` wins when supplied (the console routes it through its own
  *  config); otherwise the URL is derived from the nannos backend's
@@ -638,6 +1011,11 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
 
   const [tab, setTab] = useState<TabId>('context');
 
+  // Read HERE, not inside the auth tab: the collapsed bar warns about a dead
+  // or missing bearer, and the tab badge counts down, both while that tab is
+  // out of sight.
+  const tokenRead = useAccessToken();
+
   const pageContext = assistant.pageContext;
   const conversationKey = engine?.conversations.contextKeyOf(chat.conversationId);
   const layerCount = pageContext ? Object.keys(pageContext).length : 0;
@@ -667,7 +1045,9 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
     (e) => !e.conversationId || e.conversationId === chat.conversationId,
   ).length;
 
-  const counts: Record<TabId, number> = {
+  // Partial: every tab but `auth` announces itself with a count. What matters
+  // about a bearer is its remaining life, which `AuthBadge` renders instead.
+  const counts: Partial<Record<TabId, number>> = {
     context: clientObjects.length,
     actions: actions.length,
     wire: wireCount,
@@ -718,6 +1098,7 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
               {failedActions} failed
             </span>
           )}
+          <AuthAlert read={tokenRead} />
           <TraceLink conversationId={chat.conversationId} hasMessages={chat.messages.length > 0} />
           <DevModeSwitch />
           <ChevronDownIcon
@@ -745,14 +1126,18 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
             )}
             {tab === 'actions' && <ClientActionsSection />}
             {tab === 'wire' && <WireSection conversationId={chat.conversationId} />}
+            {tab === 'auth' && <AuthSection read={tokenRead} />}
           </div>
           {/* The switcher sits UNDER the panel, hard against the composer: the
               body above it changes height with the tab, the row itself never
-              moves. DOM order is reading order, so it follows what it labels. */}
+              moves. DOM order is reading order, so it follows what it labels.
+              It wraps because the panel is drag-resizable and the auth tab's
+              badge is a countdown — a second row is survivable, a tab pushed
+              out of reach is not. */}
           <div
             role="tablist"
             aria-label="inspector sections"
-            className="-mx-2 mt-1 flex items-center gap-1 border-t border-amber-500/30 px-2 pt-2"
+            className="-mx-2 mt-1 flex flex-wrap items-center gap-1 border-t border-amber-500/30 px-2 pt-2"
           >
             {TABS.map((t) => (
               <button
@@ -769,7 +1154,10 @@ export function DevContextInspector({ chat, className }: DevContextInspectorProp
                 onClick={() => setTab(t.id)}
               >
                 {t.label}
-                <span className="font-mono text-[10px] tabular-nums">{counts[t.id]}</span>
+                {counts[t.id] !== undefined && (
+                  <span className="font-mono text-[10px] tabular-nums">{counts[t.id]}</span>
+                )}
+                {t.id === 'auth' && <AuthBadge read={tokenRead} />}
                 {t.id === 'actions' && failedActions > 0 && (
                   <span className="font-mono text-[10px] text-red-700 dark:text-red-400">
                     !{failedActions}

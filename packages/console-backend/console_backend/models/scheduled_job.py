@@ -11,7 +11,13 @@ from ..services.cel_condition import CEL_SYNTAX_HINT, CelSyntaxError, validate_c
 from pydantic.fields import FieldInfo
 
 from ..utils.timezones import validate_timezone_name as _validate_timezone_name
-from .sub_agent import ModelName, ModelTier, ThinkingLevel
+from .sub_agent import (
+    SUB_AGENT_NAME_RULE,
+    ModelName,
+    ModelTier,
+    ThinkingLevel,
+    validate_sub_agent_name,
+)
 
 
 class JobType(str, Enum):
@@ -141,7 +147,7 @@ class AutomatedSubAgentConfig(BaseModel):
 
     # TODO: we should rather suggest to create a system_prompt which is not too long, and to not use too many tools,
     #       so that we could activate the sub-agent without the need of any approval.
-    name: str
+    name: str = Field(description=SUB_AGENT_NAME_RULE)
     description: str = Field(max_length=200, description="Short description of the sub-agent's skill, max 200 chars.")
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
     # Bind to either a concrete model alias or a capability tier (mutually exclusive). A tier
@@ -182,6 +188,14 @@ class AutomatedSubAgentConfig(BaseModel):
     # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)
     enable_thinking: bool | None = None
     thinking_level: ThinkingLevel | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        # Checked here as well as on SubAgentCreate: this config is what the request
+        # carries, so the caller gets a 422 naming the field instead of a 500 from the
+        # SubAgentCreate the scheduler service builds out of it.
+        return validate_sub_agent_name(v)
 
     @model_validator(mode="after")
     def _validate_model_or_tier(self) -> "AutomatedSubAgentConfig":

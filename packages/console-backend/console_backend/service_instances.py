@@ -39,6 +39,7 @@ from .services.bug_report_service import BugReportService
 from .services.catalog_service import CatalogService
 from .services.conversation_service import ConversationService
 from .services.debug_agent_service import DebugAgentService
+from .services.embed_binding_service import EmbedBindingService
 from .services.feedback_service import FeedbackService
 from .services.file_storage_service import FileStorageService
 from .services.keycloak_admin_service import KeycloakAdminService
@@ -131,6 +132,12 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.sub_agent_service.set_repository(app.state.sub_agent_repository)
     app.state.sub_agent_service.set_notification_service(app.state.notification_service)
     app.state.sub_agent_service.set_skill_registry_service(app.state.skill_registry_service)
+    # Embed bindings (ADR-0006): host-published sub-agent definitions, azp-bound activation.
+    app.state.embed_binding_service = EmbedBindingService(
+        sub_agent_service=app.state.sub_agent_service,
+        user_service=app.state.user_service,
+        session_factory=get_async_session_factory(),
+    )
 
     app.state.catalog_repository = CatalogRepository()
     app.state.catalog_repository.set_audit_service(app.state.audit_service)

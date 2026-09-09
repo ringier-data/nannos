@@ -114,9 +114,10 @@ export interface NannosChatScopeProps {
   /** Console sub-agent playground: scopes conversations + tags every send. */
   playground?: PlaygroundMode;
   /** With nothing to resume: console adopts the most recent conversation,
-   *  embedded surfaces start fresh. Default: true without a `subAgentId`
-   *  (console), false with one (embedded). Every surface first tries the
-   *  conversation this browser tab was on, so a reload changes nothing. */
+   *  embedded surfaces start fresh. Default: true for the console's own
+   *  cookie session, false for an embedded host (`core.isEmbedded()`). Every
+   *  surface first tries the conversation this browser tab was on, so a reload
+   *  changes nothing. */
   autoSelectConversation?: boolean;
   /** Host adapter override (defaults to the provider's). */
   adapter?: NannosHostAdapter;
@@ -204,13 +205,13 @@ function ChatScopeInner({
       sessionId,
     );
 
+    const embedded = !playground && core.isEmbedded();
     const conversations = new ConversationsStore({
       fetch: fetcher,
-      subAgentId: playground ? undefined : core.config.subAgentId,
+      embedded,
       subAgentConfigHash: playground?.subAgentConfigHash,
       getAgentUrl: () => resolved.defaults.agentUrl,
-      autoSelectConversation:
-        autoSelectConversation ?? (playground ? true : core.config.subAgentId === undefined),
+      autoSelectConversation: autoSelectConversation ?? !embedded,
     });
 
     const getSendContext = (): SendContext => ({
@@ -220,8 +221,6 @@ function ChatScopeInner({
         enableThinking: settingsRef.current.enableThinking,
       }),
       ...(settingsRef.current.thinkingLevel && { thinkingLevel: settingsRef.current.thinkingLevel }),
-      ...(core.config.subAgentId !== undefined &&
-        !playground && { executeOnlySubAgentId: core.config.subAgentId }),
       ...(core.manifest().length > 0 && { clientObjects: core.manifest() }),
       ...(pageContextRef.current && { pageContext: pageContextRef.current }),
       ...(playground && {

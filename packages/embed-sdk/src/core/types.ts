@@ -152,14 +152,9 @@ export interface NannosConfig {
   customHeaders?: Record<string, string>;
   /** Handshake timeout; defaults to 15s (console parity). */
   initTimeoutMs?: number;
-  /** Embedded Nannos (ADR-0004): the scoped domain sub-agent this integration runs.
-   *  When set, every turn is sent with `executeOnlySubAgentId` so the orchestrator
-   *  runs THAT sub-agent as the top-level graph (execute-only: client_action +
-   *  <client_objects>, no routing turn). The orchestrator validates the id against
-   *  the authenticated user's accessible sub-agents — a wrong/inaccessible id fails
-   *  closed, so the client declaring it is safe (identity is the hard boundary). */
-  // string | number: hosts read this from env vars (always strings) — the
-  // orchestrator validates the id against the signed-in user's accessible
-  // sub-agents either way (identity is the boundary, not the client's claim).
-  subAgentId?: string | number;
+  // Embedded Nannos (ADR-0004/0006): WHICH scoped domain sub-agent runs is not
+  // declared here. console-backend binds it to the token's OAuth client (`azp`)
+  // at connect and stamps every turn server-side, so a page cannot pick a
+  // sub-agent it was not bound to. A host is "embedded" simply by authenticating
+  // with a bearer token (`getToken` or `auth`); see `NannosCore.isEmbedded()`.
 }

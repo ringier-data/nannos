@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, field_validator
 
 from ..config import config
-from ..dependencies import require_auth_or_bearer_token
+from ..dependencies import get_client_id_from_request, require_auth_or_bearer_token
 from ..models.user import User
 from ..services.conversation_summary import MAX_TITLE_CHARS
 
@@ -58,9 +58,11 @@ async def get_conversations_by_user(
         sub_agent_config_hash: Optional filter by sub-agent config version hash
         exclude_playground: If True, exclude conversations with sub_agent_config_hash set
         embedded_sub_agent_id: Only conversations created by the embedded widget scoped
-            to this sub-agent (metadata stamp). The embed SDK passes this so a host
-            application only ever receives its OWN conversations — console and
-            other-app conversation titles must not reach a third-party page.
+            to this sub-agent (metadata stamp). For a bearer token whose ``azp`` is bound
+            to a sub-agent (embed bindings, ADR-0006) the scope is derived from the token
+            and overrides this parameter, so a host application only ever receives its
+            OWN conversations — console and other-app conversation titles must not reach
+            a third-party page.
         search: Optional case-insensitive substring to filter conversations by title
 
     Returns:
@@ -94,6 +96,13 @@ async def get_conversations_by_user(
             # Exclude playground conversations (those with sub_agent_config_hash set)
             conversations = [c for c in conversations if c.sub_agent_config_hash is None]
 
+        # Embedded hosts (ADR-0006): the scope comes from the bearer token's azp when that
+        # azp is bound to a sub-agent, never from the query string alone.
+        embed_service = getattr(request.app.state, "embed_binding_service", None)
+        if embed_service is not None:
+            bound = await embed_service.sub_agent_id_for_azp(await get_client_id_from_request(request))
+            if bound is not None:
+                embedded_sub_agent_id = str(bound)
         # Scope to one embedded application's conversations (see docstring).
         if embedded_sub_agent_id is not None:
             conversations = [

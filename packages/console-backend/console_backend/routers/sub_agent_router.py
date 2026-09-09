@@ -3,6 +3,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import DbSession
 from ..dependencies import (
@@ -29,8 +30,15 @@ from ..models.sub_agent import (
     SubAgentUpdate,
     SubAgentVersionApproval,
 )
+from ..models.embed_binding import (
+    EmbedBinding,
+    EmbedBindingProbe,
+    EmbedBindingProbeRequest,
+    EmbedBindingUpsert,
+)
 from ..models.user import User
 from ..services.model_status import annotate_models
+from ..services.embed_binding_service import EmbedBindingError, EmbedBindingService
 from ..services.sub_agent_service import SubAgentService
 
 logger = logging.getLogger(__name__)
@@ -41,6 +49,62 @@ router: APIRouter = APIRouter(prefix="/api/v1/sub-agents", tags=["sub-agents"])
 def get_sub_agent_service(request: Request) -> SubAgentService:
     """Get sub-agent service from app state."""
     return request.app.state.sub_agent_service
+
+
+def get_embed_binding_service(request: Request) -> EmbedBindingService:
+    """Get the embed binding service (ADR-0006) from app state."""
+    return request.app.state.embed_binding_service
+
+
+#: Fields the host ALWAYS publishes for a bound sub-agent (ADR-0006).
+_HOST_MANAGED_FIELDS = ("description", "system_prompt", "skills")
+
+
+async def _reject_if_embed_bound(
+    request: Request,
+    db: AsyncSession,
+    sub_agent_id: int,
+    data: SubAgentUpdate | None = None,
+) -> None:
+    """Refuse edits the embed sync would overwrite (ADR-0006).
+
+    A host-bound sub-agent's prompt, description and skills are written by the sync;
+    so are the tool list, model tier and thinking level WHEN the host publishes them.
+    Whatever the host leaves out stays a Nannos-side setting and remains editable
+    here. Whole-version operations (revert, delete, default) pass ``data=None`` and are
+    refused outright, since they swap the content under the binding.
+    """
+    service = getattr(request.app.state, "embed_binding_service", None)
+    if service is None:
+        return
+    binding = await service.get_binding(db, sub_agent_id)
+    if binding is None:
+        return
+    if data is None:
+        touched = ["the version"]
+    else:
+        touched = [f for f in _HOST_MANAGED_FIELDS if getattr(data, f) is not None]
+        published = binding.agent
+        if published is not None:
+            if published.tools is not None and data.mcp_tools is not None:
+                touched.append("mcp_tools")
+            if published.model_tier is not None and (
+                data.model_tier is not None or data.model is not None
+            ):
+                touched.append("model_tier/model")
+            if published.thinking_level is not None and (
+                data.thinking_level is not None or data.enable_thinking is not None
+            ):
+                touched.append("thinking")
+    if touched:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Sub-agent {sub_agent_id} is managed by {binding.base_url}: {', '.join(touched)} "
+                "is published there and would be overwritten by the next sync. Change it in the host's "
+                "repository, or remove the embed binding first."
+            ),
+        )
 
 
 @router.get("", response_model=SubAgentListResponse, tags=["MCP"], operation_id="console_list_sub_agents")
@@ -235,6 +299,111 @@ async def create_sub_agent(
         raise HTTPException(status_code=500, detail="Failed to create sub-agent")
 
 
+# --- Embed bindings (ADR-0006): a sub-agent whose definition is published by a host ------
+
+
+@router.get("/embed-bindings", response_model=list[EmbedBinding])
+async def list_embed_bindings(
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_admin),
+) -> list[EmbedBinding]:
+    """Every sub-agent bound to a host, with the state of its last sync. Admin only."""
+    return await get_embed_binding_service(request).list_bindings(db)
+
+
+@router.post("/embed-bindings/probe", response_model=EmbedBindingProbe)
+async def probe_embed_authority(
+    request: Request,
+    data: EmbedBindingProbeRequest,
+    user: User = Depends(require_admin),
+) -> EmbedBindingProbe:
+    """Read an authority's published definition without creating anything. Admin only.
+
+    A dry run of what ``POST /embed-bindings`` would read: the same fetch, digest checks
+    and validation. Always answers 200 — ``ok`` says whether the authority could be read,
+    and ``error`` carries the reason when it could not.
+    """
+    return await get_embed_binding_service(request).probe(data.base_url)
+
+
+@router.post("/embed-bindings", response_model=EmbedBinding, status_code=201)
+async def create_embed_bound_sub_agent(
+    request: Request,
+    data: EmbedBindingUpsert,
+    db: DbSession,
+    user: User = Depends(require_admin),
+) -> EmbedBinding:
+    """Create a local sub-agent from a host's published definition and bind it. Admin only.
+
+    The host is read first; if it cannot be read, nothing is created. The new sub-agent
+    is named after the published agent, owned by the calling admin, private, and gets
+    version 1 as its approved default. Use ``PUT /{id}/embed-binding`` to bind a
+    sub-agent that already exists.
+    """
+    try:
+        return await get_embed_binding_service(request).create_bound_sub_agent(
+            db, user, data
+        )
+    except EmbedBindingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/{sub_agent_id}/embed-binding", response_model=EmbedBinding)
+async def set_embed_binding(
+    request: Request,
+    sub_agent_id: int,
+    data: EmbedBindingUpsert,
+    db: DbSession,
+    user: User = Depends(require_admin),
+) -> EmbedBinding:
+    """Bind a local sub-agent to the host that publishes its definition.
+
+    ``base_url`` serves ``/.well-known/agent-skills/``; ``azps`` are the OAuth client ids
+    whose tokens select this sub-agent for embed mode and activate their users on arrival.
+    Syncs immediately: the response carries the synced revision, or ``last_error`` when
+    the host could not be read. From now on the sub-agent's content is read-only here.
+    """
+    try:
+        return await get_embed_binding_service(request).upsert_binding(
+            db, user, sub_agent_id, data
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except EmbedBindingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{sub_agent_id}/embed-binding", status_code=204)
+async def remove_embed_binding(
+    request: Request,
+    sub_agent_id: int,
+    db: DbSession,
+    user: User = Depends(require_admin),
+) -> None:
+    """Unbind. The sub-agent keeps its last synced version and becomes editable again."""
+    if not await get_embed_binding_service(request).delete_binding(db, sub_agent_id):
+        raise HTTPException(
+            status_code=404, detail=f"Sub-agent {sub_agent_id} has no embed binding"
+        )
+
+
+@router.post("/{sub_agent_id}/embed-binding/refresh", response_model=EmbedBinding)
+async def refresh_embed_binding(
+    request: Request,
+    sub_agent_id: int,
+    db: DbSession,
+    user: User = Depends(require_admin),
+) -> EmbedBinding:
+    """Fetch the host definition now, bypassing the cache, and sync if it changed."""
+    try:
+        return await get_embed_binding_service(request).sync_binding(
+            db, sub_agent_id, force=True
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/{sub_agent_id}", response_model=SubAgent)
 async def get_sub_agent(
     request: Request,
@@ -265,6 +434,9 @@ async def get_sub_agent(
 
         await sub_agent_service.resolve_imported_skills(db, sub_agent)
         await annotate_models(request, db, [sub_agent.config_version])
+        embed_service = getattr(request.app.state, "embed_binding_service", None)
+        if embed_service is not None:
+            sub_agent.embed_binding = await embed_service.get_binding(db, sub_agent_id)
         return sub_agent
     except HTTPException:
         raise
@@ -298,6 +470,7 @@ async def update_sub_agent(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
+        await _reject_if_embed_bound(request, db, sub_agent_id, data)
         sub_agent = await sub_agent_service.update_sub_agent(db, sub_agent_id, data, actor=user)
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
@@ -597,6 +770,7 @@ async def revert_to_version(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
+        await _reject_if_embed_bound(request, db, sub_agent_id)
         effective_admin = is_admin_mode(request, user)
         sub_agent = await sub_agent_service.revert_to_version(
             db, sub_agent_id, version, actor=user, is_admin=effective_admin
@@ -665,6 +839,7 @@ async def delete_version(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
+        await _reject_if_embed_bound(request, db, sub_agent_id)
         effective_admin = is_admin_mode(request, user)
         deleted = await sub_agent_service.delete_version(
             db, sub_agent_id, version, actor=user, is_admin=effective_admin
@@ -751,6 +926,7 @@ async def set_default_version(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
+        await _reject_if_embed_bound(request, db, sub_agent_id)
         effective_admin = is_admin_mode(request, user)
         sub_agent = await sub_agent_service.set_default_version(
             db, sub_agent_id, data.version, actor=user, is_admin=effective_admin

@@ -266,6 +266,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_sweep_task = asyncio.create_task(_session_sweep_loop())
     logger.info("Expired-session sweep task started")
 
+    # Embed bindings (ADR-0006): keep bound sub-agents in sync with their hosts. The first
+    # pass runs immediately so a fresh pod serves the current definition before the first
+    # embedded turn; one bad host cannot kill the loop.
+    async def _embed_sync_loop() -> None:
+        while True:
+            try:
+                await app.state.embed_binding_service.sync_all()
+            except Exception:  # noqa: BLE001 — the loop must never die
+                logger.exception("Embed binding sync pass failed")
+            await asyncio.sleep(config.embed_sync_interval_seconds)
+
+    app.state.embed_sync_task = asyncio.create_task(_embed_sync_loop())
+    logger.info("Embed binding sync task started")
+
     # Start the MCP StreamableHTTP session manager (streaming SSE transport mounted
     # at /mcp). Its run() context owns the background task that services /mcp requests.
     # A fresh instance is created here each startup because run() can only be entered
@@ -292,6 +306,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Application shutting down...")
     if hasattr(app.state, "session_sweep_task"):
         app.state.session_sweep_task.cancel()
+    if hasattr(app.state, "embed_sync_task"):
+        app.state.embed_sync_task.cancel()
     if hasattr(app.state, "mcp_sm_stack"):
         await app.state.mcp_sm_stack.aclose()
         logger.info("MCP StreamableHTTP session manager stopped")
@@ -1583,7 +1599,32 @@ async def _resolve_socket_user_via_cookie(environ: dict[str, Any]) -> str | None
     return session_id
 
 
-async def _resolve_socket_user_via_token(token: str) -> str | None:
+@dataclass(frozen=True)
+class _SocketTokenAuth:
+    """Result of the socket bearer-token path: the socket-owned StoredSession, plus the
+    sub-agent the token's ``azp`` is bound to (embed bindings, ADR-0006), if any."""
+
+    http_session_id: str
+    embedded_sub_agent_id: int | None = None
+
+
+def _apply_embed_scope(metadata: dict[str, Any], socket_session: SocketSession) -> int | None:
+    """Replace any client-sent execute-only target with the connection's bound sub-agent.
+
+    The orchestrator runs ``executeOnlySubAgentId`` from the message metadata as the
+    top-level graph (ADR-0004). Only console-backend may set it, from the azp binding
+    made at connect (ADR-0006) — a page cannot pick a sub-agent it was not bound to.
+    Returns the bound id, or None for console sessions and unbound tokens.
+    """
+    metadata.pop("executeOnlySubAgentId", None)
+    metadata.pop("subAgentId", None)
+    bound = getattr(socket_session, "embedded_sub_agent_id", None)
+    if bound is not None:
+        metadata["executeOnlySubAgentId"] = bound
+    return bound
+
+
+async def _resolve_socket_user_via_token(token: str) -> _SocketTokenAuth | None:
     """Embedded/cross-origin hosts (ADR-0002 Amendment 2 — browser leg): authenticate
     a socket from a nannos bearer token in the socket.io ``auth`` payload instead of
     the session cookie (which a different-origin host like the cockpit cannot carry).
@@ -1592,7 +1633,9 @@ async def _resolve_socket_user_via_token(token: str) -> str | None:
     bearer path uses), provisions/looks up the user by ``sub``, and creates a
     StoredSession holding the token — so the downstream OrchestratorAuth on-behalf-of
     exchange (StoredSession.access_token → orchestrator audience → Gatana) works
-    unchanged. Returns the new StoredSession id, or None on any failure.
+    unchanged. When the token's ``azp`` is bound to a sub-agent (embed bindings,
+    ADR-0006) the user is activated for it here and the id travels back so the socket
+    session can be stamped. Returns None on any failure.
     """
     from ringier_a2a_sdk.auth.jwt_validator import JWTValidationError
 
@@ -1631,6 +1674,20 @@ async def _resolve_socket_user_via_token(token: str) -> str | None:
             # from get_db_session).
             await db.commit()
 
+        # Embed binding (ADR-0006): azp → sub-agent. Activates the user on the spot so the
+        # orchestrator's /activated list contains the agent on their very first turn.
+        embedded_sub_agent_id: int | None = None
+        embed_service = getattr(sio.app_instance.state, "embed_binding_service", None)  # type: ignore[attr-defined]
+        azp = claims.get("azp")
+        if embed_service is not None and isinstance(azp, str) and azp:
+            try:
+                embedded_sub_agent_id = await embed_service.bind_connection(db, user=user, azp=azp)
+                if embedded_sub_agent_id is not None:
+                    await db.commit()
+            except Exception:  # noqa: BLE001 — a binding hiccup must not reject the login
+                logger.exception(f"Embed binding lookup failed for azp={azp!r}; connecting unbound")
+                embedded_sub_agent_id = None
+
     # Cache expiry from the token's own exp so OrchestratorAuth's refresh window is
     # accurate. No refresh_token: an embedded token is short-lived and re-minted by
     # the host's getToken()/federated-exchange endpoint, not refreshed server-side.
@@ -1641,7 +1698,7 @@ async def _resolve_socket_user_via_token(token: str) -> str | None:
     # session (handle_disconnect); this bound covers ungraceful drops.
     exp = claims.get("exp")
     expires_in = max(1, int(exp - time.time())) if isinstance(exp, (int, float)) else 3600
-    return await sio.app_instance.state.session_service.create_session(  # type: ignore[attr-defined]
+    http_session_id = await sio.app_instance.state.session_service.create_session(  # type: ignore[attr-defined]
         user_id=user.id,
         refresh_token="",
         id_token="",
@@ -1649,6 +1706,7 @@ async def _resolve_socket_user_via_token(token: str) -> str | None:
         access_token_expires_in=expires_in,
         session_ttl_seconds=expires_in + 300,
     )
+    return _SocketTokenAuth(http_session_id=http_session_id, embedded_sub_agent_id=embedded_sub_agent_id)
 
 
 # StoredSession ids minted per-connection by the token path, keyed by socket id, so
@@ -1672,12 +1730,15 @@ async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any]
     Returns False to reject unauthenticated connections.
     """
     http_session_id = await _resolve_socket_user_via_cookie(environ)
+    embedded_sub_agent_id: int | None = None
 
     if not http_session_id:
         token = auth.get("token") if isinstance(auth, dict) else None
         if token:
-            http_session_id = await _resolve_socket_user_via_token(token)
-            if http_session_id:
+            token_auth = await _resolve_socket_user_via_token(token)
+            if token_auth:
+                http_session_id = token_auth.http_session_id
+                embedded_sub_agent_id = token_auth.embedded_sub_agent_id
                 # This StoredSession exists only for this socket connection (the
                 # cookie path's session is the user's browser login — never ours to
                 # delete). Remember it so handle_disconnect can destroy it; the SDK
@@ -1698,6 +1759,7 @@ async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any]
         socket_id=sid,
         user_id=stored_session.user_id,
         http_session_id=http_session_id,
+        embedded_sub_agent_id=embedded_sub_agent_id,
     )
 
     # Register connection for scheduler notifications
@@ -2275,10 +2337,12 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         # outage, timeouts) are NOT ownership violations and propagate to the generic error
         # handler below so they surface as retryable server errors, not "Conversation not found".
         sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
-        # The embedded widget marks its turns with executeOnlySubAgentId; stamp the
-        # conversation on creation so the console can label it and render it
-        # read-only (its turns assume a live host page with registered objects).
-        embedded_sub_agent_id = metadata.get("executeOnlySubAgentId") or metadata.get("subAgentId")
+        # Embedded turns run execute-only against the sub-agent the CONNECTION is bound to
+        # (token azp → embed binding, stamped on the socket session at connect; ADR-0006).
+        # The client's own claim is dropped. The id is also stamped on the conversation so
+        # the console can label it and render it read-only (its turns assume a live host
+        # page with registered objects).
+        embedded_sub_agent_id = _apply_embed_scope(metadata, socket_session)
         # Where the conversation STARTED (embed SDK metadata.pageContext) — stamped on
         # creation only, so the list can say "this one began on campaign 123".
         page_context = metadata.get("pageContext") if isinstance(metadata, dict) else None

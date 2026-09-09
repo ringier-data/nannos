@@ -10,6 +10,7 @@ import type { AgentAction } from '@/components/AgentActionFields';
 import type { AutomatedSubAgentConfig } from '@/api/scheduler';
 import { isModelTier, modelTierOf } from '@/config/models';
 import { config } from '@/config';
+import { subAgentNameError } from '@/lib/subAgentName';
 
 /** The API body an inline ('automated') definition becomes. */
 export function automatedSubAgentParameters(value: AgentAction): AutomatedSubAgentConfig {
@@ -36,7 +37,8 @@ export function agentActionError(value: AgentAction): string | null {
   if (value.sub_agent_mode === 'existing') {
     return value.sub_agent_id ? null : 'Sub-agent is required';
   }
-  if (!value.automated_name.trim()) return 'Sub-agent name is required';
+  const nameError = subAgentNameError(value.automated_name, 'Sub-agent name');
+  if (nameError) return nameError;
   if (!value.automated_description.trim()) return 'Sub-agent description is required';
   if (!value.automated_model) return 'Model is required';
   if (!value.automated_system_prompt.trim()) return 'System prompt is required';

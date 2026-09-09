@@ -161,15 +161,15 @@ describe('ConversationsStore', () => {
     expect(ticks).toBe(0); // no pointless re-render of every subscriber
   });
 
-  it('embedded scoping: subAgentId rides the query; resume only from session storage', async () => {
+  it('embedded scoping is server-side: nothing rides the query; resume only from session storage', async () => {
     sessionStorage.setItem(
-      'nannos-active-conversation:42',
+      'nannos-active-conversation:embedded',
       JSON.stringify({ id: 'c2', contextKey: 'campaign:7' }),
     );
     const { fetch, calls } = fetchReturning([serverConv('c1'), serverConv('c2')]);
-    const store = new ConversationsStore({ fetch, subAgentId: 42, autoSelectConversation: false });
+    const store = new ConversationsStore({ fetch, embedded: true, autoSelectConversation: false });
     await store.loadList();
-    expect(calls[0]).toContain('embedded_sub_agent_id=42');
+    expect(calls[0]).not.toContain('embedded_sub_agent_id'); // the token's azp binding scopes it (ADR-0006)
     expect(store.activeId).toBe('c2'); // session resume, NOT most-recent
     expect(store.contextKeyOf('c2')).toBe('campaign:7');
   });
@@ -259,7 +259,7 @@ describe('ConversationsStore', () => {
 
   it('no session record → embedded surface selects nothing (fresh start)', async () => {
     const { fetch } = fetchReturning([serverConv('c1')]);
-    const store = new ConversationsStore({ fetch, subAgentId: 42, autoSelectConversation: false });
+    const store = new ConversationsStore({ fetch, embedded: true, autoSelectConversation: false });
     await store.loadList();
     expect(store.activeId).toBeNull();
   });
@@ -297,17 +297,20 @@ describe('ConversationsStore', () => {
     expect(store.activeId).toBe(b);
   });
 
-  it('read-only for conversations owned by ANOTHER embedded surface', async () => {
-    const { fetch } = fetchReturning([
-      serverConv('mine', { metadata: { embedded_sub_agent_id: 42 } }),
-      serverConv('theirs', { metadata: { embedded_sub_agent_id: 7 } }),
-      serverConv('console-one'),
-    ]);
-    const store = new ConversationsStore({ fetch, subAgentId: 42, autoSelectConversation: false });
-    await store.loadList();
-    expect(store.isReadOnly('mine')).toBe(false);
-    expect(store.isReadOnly('theirs')).toBe(true);
-    expect(store.isReadOnly('console-one')).toBe(false);
+  it('embedded-stamped conversations are read-only in the console, editable on the embedded surface', async () => {
+    const rows = [serverConv('embedded-one', { metadata: { embedded_sub_agent_id: 42 } }), serverConv('console-one')];
+
+    const console_ = new ConversationsStore({ fetch: fetchReturning(rows).fetch, autoSelectConversation: false });
+    await console_.loadList();
+    expect(console_.isReadOnly('embedded-one')).toBe(true); // its turns assume a live host page
+    expect(console_.isReadOnly('console-one')).toBe(false);
+
+    // The server scopes an embedded surface's list to its own sub-agent (ADR-0006),
+    // so every stamped row it receives is its own.
+    const embedded = new ConversationsStore({ fetch: fetchReturning(rows).fetch, embedded: true, autoSelectConversation: false });
+    await embedded.loadList();
+    expect(embedded.isReadOnly('embedded-one')).toBe(false);
+    expect(embedded.isReadOnly('console-one')).toBe(false);
   });
 
   it('unread counts: activity on a background conversation increments; selecting clears', async () => {
@@ -327,14 +330,14 @@ describe('ConversationsStore', () => {
 
   it('adopt registers a render-minted id once and persists the session record', async () => {
     const { fetch } = fetchReturning([]);
-    const store = new ConversationsStore({ fetch, subAgentId: 42, autoSelectConversation: false });
+    const store = new ConversationsStore({ fetch, embedded: true, autoSelectConversation: false });
     const listener = vi.fn();
     store.subscribe(listener);
     store.adopt('minted-1');
     store.adopt('minted-1'); // idempotent
     expect(store.activeId).toBe('minted-1');
     expect(store.getSnapshot().items).toHaveLength(1);
-    expect(JSON.parse(sessionStorage.getItem('nannos-active-conversation:42')!)).toMatchObject({
+    expect(JSON.parse(sessionStorage.getItem('nannos-active-conversation:embedded')!)).toMatchObject({
       id: 'minted-1',
     });
   });

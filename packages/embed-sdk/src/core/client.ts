@@ -10,6 +10,7 @@ import type {
   Settings,
   SubscribeAck,
 } from './wire';
+import { jwtExpMs } from './jwt';
 import type { NannosConfig, NannosErrorEvent } from './types';
 
 /**
@@ -56,19 +57,6 @@ export class TransportClient {
     private readonly ioFactory: IoFactory = io as unknown as IoFactory,
   ) {}
 
-  /** Decode a JWT's `exp` (epoch ms) without verifying — for scheduling re-auth. */
-  private static jwtExpMs(token: string): number | null {
-    try {
-      const [, payload] = token.split('.');
-      let b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-      b64 += '='.repeat((4 - (b64.length % 4)) % 4); // JWT payloads are unpadded base64url
-      const json = JSON.parse(atob(b64));
-      return typeof json.exp === 'number' ? json.exp * 1000 : null;
-    } catch {
-      return null;
-    }
-  }
-
   /** Reconnect shortly before the access token expires so the connection always
    *  carries a fresh token (socket.io re-runs the auth callback on reconnect →
    *  getToken refreshes/re-mints). Short-lived embed tokens would otherwise go
@@ -76,7 +64,7 @@ export class TransportClient {
   private scheduleReauth(token: string) {
     if (this.reauthTimer) clearTimeout(this.reauthTimer);
     this.reauthTimer = null;
-    const exp = TransportClient.jwtExpMs(token);
+    const exp = jwtExpMs(token);
     if (!exp) return;
     const delay = exp - Date.now() - 60_000; // 60s lead
     if (delay <= 0) return; // already near expiry; the next (re)connect refreshes
