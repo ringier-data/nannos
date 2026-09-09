@@ -97,6 +97,35 @@ def _compact_args(args: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _log_unusable_reply(envelope: dict, call_count: int) -> None:
+    """Say WHY a reply yielded no summaries: cut off at the cap, or simply unreadable.
+
+    console-backend's ``gateway_chat`` / ``gateway_chat_json`` learned this the hard way —
+    a reply stopped at ``max_tokens`` reads exactly like one that said little, and only
+    ``finish_reason`` tells them apart (see ``GatewayText``: the distinction "went unlogged
+    for a month"). ``create_fast_model`` asks for a deliberately short output cap, so this
+    is the path that has to name it when a batch outgrows it: without this, truncation
+    arrives as a generic parse failure and the fix (raise the cap, or split the batch)
+    isn't visible from the log.
+
+    Warning, not exception: the caller's fallback (render raw args) is correct either way.
+    """
+    raw = envelope.get("raw")
+    finish_reason = (getattr(raw, "response_metadata", None) or {}).get("finish_reason")
+    if finish_reason == "length":
+        logger.warning(
+            "Tool call summaries for %d call(s) hit the output cap (finish_reason=length); falling back to raw args",
+            call_count,
+        )
+        return
+    logger.warning(
+        "Tool call summaries for %d call(s) were unreadable (finish_reason=%s): %s; falling back to raw args",
+        call_count,
+        finish_reason,
+        envelope.get("parsing_error"),
+    )
+
+
 @traceable(name="tool-call-summarize", run_type="tool")
 async def summarize_action_requests(
     calls: list[tuple[str, dict[str, Any], str]],
@@ -120,7 +149,11 @@ async def summarize_action_requests(
 
     try:
         model = create_fast_model(get_default_fast_model() or require_default_model())
-        structured_model = model.with_structured_output(ToolCallSummaries)
+        # ``include_raw`` keeps the provider's finish reason reachable: a parse failure is
+        # then returned in the envelope rather than raised, so ``_log_unusable_reply`` can
+        # tell "cut off at max_tokens" from "wrote something unreadable". See
+        # ``_log_unusable_reply`` for why that distinction is worth the extra unwrapping.
+        structured_model = model.with_structured_output(ToolCallSummaries, include_raw=True)
 
         lines: list[str] = [f"User language: {language}", ""]
         for idx, (tool_name, args, description) in enumerate(calls, start=1):
@@ -138,7 +171,7 @@ async def summarize_action_requests(
         from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
 
         with run_config_attribution_scope():
-            result: ToolCallSummaries = await asyncio.wait_for(
+            envelope: dict = await asyncio.wait_for(
                 structured_model.ainvoke(
                     [
                         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -147,6 +180,15 @@ async def summarize_action_requests(
                 ),
                 timeout=_SUMMARY_TIMEOUT_SECONDS,
             )
+
+        # Inside the try on purpose: the envelope's shape is the provider's business, and
+        # this is a best-effort path whose caller is mid-``interrupt()``. Anything
+        # unexpected here degrades to raw args like every other failure, rather than
+        # raising into the HITL request.
+        result: ToolCallSummaries | None = envelope.get("parsed")
+        if result is None:
+            _log_unusable_reply(envelope, len(calls))
+            return None
     except TimeoutError:
         # Not exception-worthy: a slow gateway is expected weather, and the caller has a
         # correct answer for it (raw args). Logged at warning so a systematic regression —

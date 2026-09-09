@@ -152,10 +152,14 @@ class TestSummarizerCostAttribution:
         class _FakeStructured:
             async def ainvoke(self, _msgs):
                 seen["sub_agent_id"] = current_sub_agent_id.get()
-                return tcs.ToolCallSummaries(summaries=["lists the folder"])
+                return {
+                    "raw": None,
+                    "parsed": tcs.ToolCallSummaries(summaries=["lists the folder"]),
+                    "parsing_error": None,
+                }
 
         class _FakeModel:
-            def with_structured_output(self, _schema):
+            def with_structured_output(self, _schema, include_raw=False):
                 return _FakeStructured()
 
         async def run(_: object):
@@ -192,7 +196,7 @@ class TestSummaryTimeout:
                 raise AssertionError("the timeout should have abandoned this call")
 
         class _SlowModel:
-            def with_structured_output(self, _schema):
+            def with_structured_output(self, _schema, include_raw=False):
                 return _SlowStructured()
 
         with (
@@ -212,3 +216,59 @@ class TestSummaryTimeout:
         ):
             await tcs.attach_summaries([request])
         assert request["args"] == {"path": "/x", "_call_id": "c1"}
+
+
+class TestUnusableReply:
+    """A reply with no summaries in it must say WHY in the log, then fall back to raw args.
+
+    `create_fast_model` asks for a short output cap, so this path owns the truncation risk:
+    console-backend's `gateway_chat`/`GatewayText` exist because a reply stopped at
+    `max_tokens` reads exactly like one that said little. Only `finish_reason` separates
+    them, and the remedy (raise the cap, split the batch) differs from a content miss.
+    """
+
+    def _model(self, envelope):
+        class _Structured:
+            async def ainvoke(self, _msgs):
+                return envelope
+
+        class _Model:
+            def with_structured_output(self, _schema, include_raw=False):
+                assert include_raw, "the finish reason has to survive to the failure path"
+                return _Structured()
+
+        return _Model()
+
+    async def _summarize(self, envelope):
+        with (
+            patch("agent_common.core.model_factory.create_fast_model", return_value=self._model(envelope)),
+            patch("agent_common.core.model_factory.get_default_fast_model", return_value="fast"),
+        ):
+            return await tcs.summarize_action_requests([("ls", {"path": "/x"}, "list files")])
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_reply_names_the_cap(self, caplog):
+        raw = types.SimpleNamespace(response_metadata={"finish_reason": "length"})
+        with caplog.at_level("WARNING"):
+            out = await self._summarize({"raw": raw, "parsed": None, "parsing_error": ValueError("boom")})
+        assert out is None
+        # "hit the output cap" is the actionable half — a generic parse failure would send
+        # the reader looking at the prompt instead of the budget.
+        assert "output cap" in caplog.text
+        assert "finish_reason=length" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_reply_is_reported_as_such(self, caplog):
+        raw = types.SimpleNamespace(response_metadata={"finish_reason": "stop"})
+        with caplog.at_level("WARNING"):
+            out = await self._summarize({"raw": raw, "parsed": None, "parsing_error": ValueError("not json")})
+        assert out is None
+        assert "unreadable" in caplog.text
+        assert "not json" in caplog.text
+        # Not the truncation message: the budget was fine, the content wasn't.
+        assert "output cap" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_missing_raw_message_still_falls_back_cleanly(self):
+        # Nothing about the envelope is guaranteed; the fallback must not depend on it.
+        assert await self._summarize({"raw": None, "parsed": None, "parsing_error": None}) is None

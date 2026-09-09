@@ -248,6 +248,12 @@ _NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
 # drops it for models with no reasoning to disable). NOT a `ThinkingLevel` member: the app
 # models thinking-off as a toggle rather than a tier, so it can only be requested through
 # `create_model(reasoning_effort=...)` — which is what `create_fast_model` does.
+#
+# console-backend's `llm_gateway.gateway_chat` defaults to this same value, and states the
+# same policy (thinking is opt-in for mechanical utility calls). That copy is deliberate —
+# console-backend stays dependency-light and imports neither agent-common nor langchain, the
+# way it also duplicates the gateway Bearer-key default — but the two are one decision:
+# change the policy here and change it there.
 REASONING_OFF = "none"
 
 
@@ -760,7 +766,10 @@ def get_default_fast_model() -> ModelType | None:
 
 # One sentence per tool call, one risk score, one condition verdict — generous for a batch
 # of a few summaries, low enough that a model ignoring "ONE short sentence" cannot stretch
-# the call. Utility work must never inherit the reasoning tiers' 8k-32k ceiling.
+# the call. Utility work must never inherit the reasoning tiers' 8k-32k ceiling. Same value
+# as `llm_gateway.gateway_chat`'s default for the same reason (see REASONING_OFF on why that
+# module keeps its own copy). A caller whose answer outgrows it should raise it explicitly
+# rather than discover the truncation: with thinking off, the cap only binds real output.
 _FAST_MODEL_MAX_TOKENS = 1024
 
 
