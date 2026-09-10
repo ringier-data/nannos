@@ -317,6 +317,27 @@ def test_setting_the_legacy_name_warns(monkeypatch, caplog):
     assert MAX_MODEL_CALLS_PER_TURN_ENV in caplog.text
 
 
+def test_the_legacy_warning_does_not_read_as_obsolete(monkeypatch, caplog):
+    """The wording is the whole point of this warning, so it is pinned.
+
+    `MAX_RECURSION_LIMIT` is not dead: agent-common's `dynamic_agent` reads it as
+    the fallback bound for every local sub-agent in this same process, and
+    agent-runner and ringier-a2a-sdk read it too. An operator who takes "no longer
+    configures the orchestrator" as "safe to remove" silently changes every
+    sub-agent's recursion bound — so the warning has to say both things and name
+    the variable that decouples them.
+    """
+    monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
+
+    with caplog.at_level("WARNING"):
+        _resolve_max_model_calls_per_turn()
+
+    text = caplog.text
+    assert "do not unset" in text.lower(), "the warning must not read as 'this is obsolete'"
+    assert "SUB_AGENT_RECURSION_LIMIT" in text, "must name the variable that decouples the two"
+    assert "sub-agent" in text.lower()
+
+
 def test_the_orchestrator_budget_is_configurable(monkeypatch):
     monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "40")
 

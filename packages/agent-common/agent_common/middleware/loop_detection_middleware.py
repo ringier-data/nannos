@@ -34,6 +34,7 @@ Integration:
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr, hook_config
@@ -59,6 +60,22 @@ RESPONSE_TOOLS: frozenset[str] = frozenset({"FinalResponseSchema", "SubAgentResp
 _STOPPED_BEFORE_EXECUTION = (
     "BLOCKED: the run was stopped because another tool call on this turn was looping. This call was not executed."
 )
+
+
+@dataclass(frozen=True)
+class LoopVerdict:
+    """Outcome of ``RepeatedToolCallMiddleware.evaluate`` for one prospective call.
+
+    ``history`` is the tool's updated history *including* this call (blocked calls are
+    recorded too, so repeated offenders escalate), already trimmed to the window
+    when the call was allowed.
+    """
+
+    blocked: bool
+    loop_type: str
+    repeat_count: int
+    description: str
+    history: list[str]
 
 
 class LoopDetectionState(AgentState):
@@ -174,19 +191,74 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             logger.warning(f"Failed to hash args: {e}, using str representation")
             return hashlib.sha256(str(args).encode()).hexdigest()[:16]
 
-    def _matches_tool_filter(self, tool_call: ToolCall) -> bool:
-        """Check if a tool call matches this middleware's tool filter.
-
-        Args:
-            tool_call: The tool call to check.
-
-        Returns:
-            True if this middleware should track this tool call.
-        """
+    def applies_to(self, tool_name: str) -> bool:
+        """Whether this middleware tracks calls to ``tool_name`` at all."""
         # Terminal response tools are never loop candidates — see ``RESPONSE_TOOLS``.
-        if tool_call["name"] in self.response_tools:
+        if tool_name in self.response_tools:
             return False
-        return self.tool_name is None or tool_call["name"] == self.tool_name
+        return self.tool_name is None or tool_name == self.tool_name
+
+    def _matches_tool_filter(self, tool_call: ToolCall) -> bool:
+        """Check if a tool call matches this middleware's tool filter."""
+        return self.applies_to(tool_call["name"])
+
+    def evaluate(
+        self, tool_name: str, args: dict[str, Any], tool_history: list[str], *, program_call: bool = False
+    ) -> LoopVerdict:
+        """Judge one prospective call against ``tool_history`` and return the updated history.
+
+        This is *the* loop rule — thresholds, dispatch exemptions, window — shared by
+        the two places a tool call can be observed: ``aafter_model`` (calls the model
+        makes directly) and the PTC guard (calls a program makes inside ``eval``, which
+        the model boundary only ever sees as one ``eval``). Both must run this exact
+        code so configuring the middleware configures both paths.
+
+        ``program_call`` marks the second kind. The identical-arguments rule applies to
+        it unchanged (re-issuing the same call across ``eval`` turns is the loop #211
+        was about). The same-tool cap does not: that rule reads "N calls to one tool
+        with different arguments" as a model flailing across *model turns*, whereas
+        inside a program N distinct calls is one turn iterating over N items — the
+        very reason ``dispatch_tools`` exempts ``task`` and ``eval`` at the boundary.
+        Callers keep program calls under their own history key (see the PTC guard) so
+        a legitimate bulk loop cannot inflate the same-tool count of direct calls.
+        """
+        args_hash = self._hash_args(args)
+        is_loop, repeat_count, loop_type = self._check_for_loop(
+            tool_name, args_hash, tool_history, program_call=program_call
+        )
+        if is_loop:
+            if loop_type == "same_args":
+                description = (
+                    f"Tool '{tool_name}' called {tool_history.count(args_hash)} times with identical arguments"
+                )
+            else:  # same_tool
+                description = (
+                    f"Tool '{tool_name}' called {repeat_count} times "
+                    f"(with {len(set(tool_history))} different argument sets)"
+                )
+            logger.warning(f"Loop detected: {description}")
+        else:
+            description = ""
+        # Blocked calls are recorded too, so their repeat_count keeps growing (escalating
+        # feedback, and ``force_stop_after`` can fire). The sliding window is NOT applied
+        # to blocked tools: with window_size == max_tool_repeats the count would plateau
+        # at window_size + 1 and force_stop would never trigger.
+        history = [*tool_history, args_hash]
+        if not is_loop and len(history) > self.window_size:
+            history = history[-self.window_size :]
+        return LoopVerdict(
+            blocked=is_loop,
+            loop_type=loop_type,
+            repeat_count=repeat_count,
+            description=description,
+            history=history,
+        )
+
+    def blocked_message(self, tool_name: str, verdict: LoopVerdict) -> str:
+        """The instruction given to the model for a call ``evaluate`` blocked."""
+        return self._build_error_message(
+            {"tool_name": tool_name, "loop_type": verdict.loop_type, "description": verdict.description}
+        )
 
     def _build_error_message(self, info: dict[str, Any]) -> str:
         """Build an actionable error message for a blocked tool call.
@@ -209,13 +281,17 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 f"or try a completely different tool/approach."
             )
 
-    def _check_for_loop(self, tool_name: str, args_hash: str, tool_history: list[str]) -> tuple[bool, int, str]:
+    def _check_for_loop(
+        self, tool_name: str, args_hash: str, tool_history: list[str], *, program_call: bool = False
+    ) -> tuple[bool, int, str]:
         """Check if adding this call would create a loop pattern.
 
         Args:
             tool_name: Name of the tool being called
             args_hash: Hash of the tool arguments
             tool_history: List of arg hashes for this specific tool
+            program_call: The call is made by a program inside ``eval`` (PTC). Exempt
+                from the same-tool cap like a dispatch tool — see ``evaluate``.
 
         Returns:
             Tuple of (is_loop_detected, repeat_count, loop_type)
@@ -236,9 +312,10 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             return True, same_args_count, "same_args"
         # Skip max_tool_repeats check for dispatch tools (e.g. 'task') —
         # they delegate to sub-agents and are expected to be called many times
-        # with different arguments.
+        # with different arguments — and for program calls, which are iteration.
         if (
             self.max_tool_repeats is not None
+            and not program_call
             and tool_name not in self.dispatch_tools
             and same_tool_count > self.max_tool_repeats
         ):
@@ -317,54 +394,18 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             if not self._matches_tool_filter(tool_call):
                 continue
 
-            args = tool_call.get("args", {})
-            args_hash = self._hash_args(args)
-
-            # Get this tool's history
-            tool_history = history.get(tool_name, [])
-
-            # Check for loop
-            is_loop, repeat_count, loop_type = self._check_for_loop(tool_name, args_hash, tool_history)
-
-            if is_loop:
-                # Build description
-                if loop_type == "same_args":
-                    same_count = tool_history.count(args_hash)
-                    desc = f"Tool '{tool_name}' called {same_count} times with identical arguments"
-                else:  # same_tool
-                    unique_count = len(set(tool_history))
-                    desc = (
-                        f"Tool '{tool_name}' called {repeat_count} times (with {unique_count} different argument sets)"
-                    )
-
+            verdict = self.evaluate(tool_name, tool_call.get("args", {}), history.get(tool_name, []))
+            if verdict.blocked:
                 blocked_calls.append(
                     {
                         "tool_call": tool_call,
                         "tool_name": tool_name,
-                        "loop_type": loop_type,
-                        "description": desc,
-                        "repeat_count": repeat_count,
+                        "loop_type": verdict.loop_type,
+                        "description": verdict.description,
+                        "repeat_count": verdict.repeat_count,
                     }
                 )
-
-                logger.warning(f"Loop detected: {desc}")
-
-                # CRITICAL: Add blocked calls to history so count increases
-                # This provides escalating feedback to the model
-                tool_history.append(args_hash)
-            else:
-                # Not looping - add to history
-                tool_history.append(args_hash)
-
-            # Always update history (for both looping and non-looping)
-            # Maintain sliding window — but NOT for blocked tools, so their
-            # repeat_count can grow past the threshold and trigger force_stop.
-            # Without this, window_size == max_tool_repeats causes repeat_count
-            # to plateau at window_size+1 and force_stop never fires.
-            if not is_loop and len(tool_history) > self.window_size:
-                tool_history = tool_history[-self.window_size :]
-
-            history[tool_name] = tool_history
+            history[tool_name] = verdict.history
 
         # If no blocked calls, just update history
         if not blocked_calls:

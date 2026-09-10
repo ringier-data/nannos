@@ -86,8 +86,34 @@ def authorization_verdict(payload: Any) -> tuple[str | None, str]:
     return None, message
 
 
+#: Decision types a client may send back on the human-in-the-loop extension.
+#: Pinned to the repo-root ``a2a-extensions.json`` registry (see
+#: ``tests/test_hitl_decision_type_conformance.py``), whose copy in
+#: ``embed-sdk approval-codec.ts`` must agree.
+#:
+#: What happens to a type outside this set is NOT uniform across the two gate
+#: implementations, so do not read this as a promise:
+#:
+#: * the PTC path (``graph_utils._apply_ptc_decisions``) fails it closed — it
+#:   blocks the call and logs, so an unreadable answer is never taken for consent;
+#: * the native path hands it to langchain's ``HumanInTheLoopMiddleware
+#:   ._process_decision``, which raises ``ValueError`` and ends the turn.
+#:
+#: Both refuse to execute, which is the safety property that matters, but only one
+#: leaves the agent able to say what happened. Normalising them belongs in this
+#: shared funnel rather than in either caller — deliberately out of scope here.
+HITL_DECISION_TYPES = frozenset({"approve", "edit", "reject"})
+
+
 def _call_id(action_request: Any) -> Any:
-    """The per-call id the HITL builders stamp into ``args._call_id``, if any."""
+    """The ask id the HITL builders stamp into ``args._call_id``, if any.
+
+    Opaque here on purpose: this module only echoes it back onto the decision it
+    builds, so that the producer can match answers to questions. Its uniqueness
+    rule (one id per ASK, not per tool+args) is the producers' contract — see
+    ``ptc_guard.ask_id`` and the extension docs in
+    ``orchestrator-agent app/core/a2a_extensions.py``.
+    """
     if not isinstance(action_request, dict):
         return None
     return (action_request.get("args") or {}).get("_call_id")

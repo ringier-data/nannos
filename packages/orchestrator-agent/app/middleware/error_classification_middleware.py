@@ -21,6 +21,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 
+from agent_common.middleware.ptc_guard import RATE_LIMIT_PATTERN, is_rate_limit_error
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
@@ -29,16 +30,34 @@ from langgraph.typing import ContextT
 
 logger = logging.getLogger(__name__)
 
-# Conservative patterns — start narrow, expand based on actual bug reports
+# Conservative patterns — start narrow, expand based on actual bug reports.
+# Quota wording is deliberately absent here: ``_RATE_LIMIT_PATTERNS`` owns it.
 _TRANSIENT_PATTERNS = re.compile(
-    r"timeout|timed?\s*out|rate.limit|429|503|502|504|5\d{2}\s+(?:internal|bad gateway|service unavailable)",
+    r"timeout|timed?\s*out|503|502|504|5\d{2}\s+(?:internal|bad gateway|service unavailable)",
     re.IGNORECASE,
 )
 
+# Quota exhaustion. Checked *between* the two auth tiers below: a provider that
+# spells its quota error ``403 ... rate limit exceeded`` must not classify as
+# ``auth`` on the strength of the bare status code (re-authenticating cannot fix
+# a quota), while a real ``401`` on a rate-limited auth endpoint stays ``auth``.
+# ``too many requests`` is how the MCP gateway words its own throttling — no
+# ``429``, no ``rate limit`` — and without it that error fell through to
+# ``system_error``, i.e. was reported to the model as an unexpected crash. The
+# pattern is shared with the PTC guard (which returns a terminal ``rate_limited``
+# payload on it) so both paths agree on what a rate limit looks like.
+_RATE_LIMIT_PATTERNS = RATE_LIMIT_PATTERN
+
+# Unambiguous authentication failures: outrank everything. Status codes are
+# word-bounded: a request id containing ``401`` is not an auth failure.
 _AUTH_PATTERNS = re.compile(
-    r"401|403|unauthorized|forbidden|authentication.required|need.credentials|auth_required",
+    r"\b401\b|unauthorized|authentication.required|need.credentials|auth_required",
     re.IGNORECASE,
 )
+
+# A bare 403 / "forbidden" is authorization *unless* the same message says it is a
+# quota problem — see ``_RATE_LIMIT_PATTERNS``.
+_FORBIDDEN_PATTERNS = re.compile(r"\b403\b|forbidden", re.IGNORECASE)
 
 _CAPABILITY_GAP_PATTERNS = re.compile(
     r"(?:tool|function|capability|action)\s+(?:not\s+found|not\s+available|unknown|unsupported)"
@@ -75,8 +94,13 @@ def classify_error(content: str) -> str | None:
     if classification:
         return classification
 
-    # Pattern-based classification
+    # Pattern-based classification, most specific first. A bare ``403`` only
+    # counts as auth when nothing in the message says "quota".
     if _AUTH_PATTERNS.search(content):
+        return "auth"
+    if _RATE_LIMIT_PATTERNS.search(content):
+        return "transient"
+    if _FORBIDDEN_PATTERNS.search(content):
         return "auth"
     if _TRANSIENT_PATTERNS.search(content):
         return "transient"
@@ -125,8 +149,12 @@ def _classify_json(content: str) -> str | None:
         status_code = data.get("statusCode", data.get("status_code", data.get("status", 0)))
 
         if isinstance(status_code, int):
-            if status_code == 401 or status_code == 403:
+            if status_code == 401:
                 return "auth"
+            if status_code == 403:
+                # Same rule as the text tier: a 403 whose wording says "quota" is
+                # rate limiting, not authorization.
+                return "transient" if is_rate_limit_error(content) else "auth"
             if status_code == 429 or 500 <= status_code <= 599:
                 return "transient"
             if status_code == 400:

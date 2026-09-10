@@ -34,11 +34,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
+from langgraph.config import get_config
 from langgraph.prebuilt import ToolRuntime
 
 if TYPE_CHECKING:
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
 
     from agent_common.core.tool_risk_cache import ToolRiskCache
     from agent_common.middleware.conditional_hitl import RiskScorerFn
+    from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +119,78 @@ def rejection_payload(tool_name: str, reason: str = "") -> dict[str, str]:
         "tool": tool_name,
         "message": message,
     }
+
+
+_PTC_RATE_LIMITED_ERROR = "rate_limited"
+
+_PTC_RATE_LIMITED_MESSAGE = (
+    "Tool '{tool_name}' is being rate-limited by its provider; the call was not served. "
+    "Retrying now — or with a reworded query — will fail the same way, and there is no "
+    "way to wait inside `eval`. Stop calling '{tool_name}' for this task and report what "
+    "you have so far, saying the provider was rate-limited."
+)
+
+_PTC_REPEATED_CALL_ERROR = "repeated_call"
+
+#: Program-made calls are recorded in ``RepeatedToolCallMiddleware``'s ``tool_call_history``
+#: under this prefix + the inner tool's name, not under the bare name the model
+#: boundary uses for direct calls. The identical-arguments rule is judged within the
+#: program namespace (the #211 loop: the same call re-issued across ``eval`` turns);
+#: the boundary's same-tool cap counts model turns, and a program iterating over 20
+#: items in one turn must neither trip it nor prime it for the next direct call.
+PTC_HISTORY_KEY_PREFIX = "eval:"
+
+
+def ptc_history_key(tool_name: str) -> str:
+    """The ``tool_call_history`` key under which program calls to ``tool_name`` are kept."""
+    return f"{PTC_HISTORY_KEY_PREFIX}{tool_name}"
+
+
+#: Provider / gateway wording for quota exhaustion: ``403 ... rate limit exceeded`` is
+#: a quota problem, not an authorization one, and ``too many requests`` is how the
+#: MCP gateway words its own throttling. The status code is word-bounded so a request
+#: id or an issue number containing ``429`` is not a rate limit, and the wording must
+#: start a word so an echoed ``x-ratelimit-remaining`` header inside an unrelated error
+#: is not one either. This is the single definition — the orchestrator's error
+#: classification imports it — so the PTC path and the model-boundary path can never
+#: disagree on what a rate limit looks like.
+RATE_LIMIT_PATTERN = re.compile(r"(?<![\w-])rate.?limit|\b429\b|too.many.requests", re.IGNORECASE)
+
+_RATE_LIMIT_DETAIL_CHARS = 300
+
+
+def is_rate_limit_error(text: str) -> bool:
+    """Whether an error message describes quota exhaustion (provider or gateway)."""
+    return bool(RATE_LIMIT_PATTERN.search(text or ""))
+
+
+def rate_limited_payload(tool_name: str, detail: str = "") -> dict[str, str]:
+    """Build the error payload returned when the inner tool was rate-limited.
+
+    Returned (not raised) from the guarded wrapper for the same reason as the
+    approval/rejection payloads: a raised exception surfaces in the program as a
+    bare throw it will catch and retry, while a value tells it what happened and
+    that retrying is pointless. The model cannot sleep inside ``eval``, so a quota
+    error is terminal for the run — see :data:`_PTC_RATE_LIMITED_MESSAGE`.
+    """
+    payload = {
+        "error": _PTC_RATE_LIMITED_ERROR,
+        "tool": tool_name,
+        "message": _PTC_RATE_LIMITED_MESSAGE.format(tool_name=tool_name),
+    }
+    if detail.strip():
+        payload["detail"] = detail.strip()[:_RATE_LIMIT_DETAIL_CHARS]
+    return payload
+
+
+def repeated_call_payload(tool_name: str, message: str) -> dict[str, str]:
+    """Build the error payload returned when the loop rule blocks an inner call.
+
+    ``message`` is ``RepeatedToolCallMiddleware.blocked_message`` — the very text the
+    model would have received had it made the call directly — so the instruction is
+    identical whether the loop was caught at the model boundary or inside ``eval``.
+    """
+    return {"error": _PTC_REPEATED_CALL_ERROR, "tool": tool_name, "message": message}
 
 
 # The gateway's secondary-authorization error. Raised by the INNER tool, but it
@@ -204,6 +279,21 @@ class _PTCTurnState:
     #: rejection so it can say what actually happened instead of guessing.
     reject_reasons: dict[str, str] = field(default_factory=dict)
     results: dict[str, Any] = field(default_factory=dict)
+    #: Scope component of every ask id minted for this turn (see ``ask_id``). Owned
+    #: by the TURN, not by the wrapper that happens to drain ``pending``: the list is
+    #: thread-keyed, so with two parallel ``eval`` calls either wrapper may drain a
+    #: mixed list. Reading the scope from here keeps stamping and matching consistent
+    #: whichever one does it — taking it from the draining wrapper's own tool call id
+    #: made ask-id matching depend on a nondeterministic race. (Parallel ``eval`` calls
+    #: on one thread are separately broken — they clobber this shared state; see #217.)
+    ask_scope: str = ""
+    #: ``RepeatedToolCallMiddleware``'s ``tool_call_history`` (per tool name, the arg
+    #: hashes of past calls), seeded from checkpointed graph state by the PTC middleware
+    #: when the turn begins and written back when the ``eval`` call returns. It lives on
+    #: the turn only so the guard — which runs on the sandbox bridge thread, without
+    #: access to graph state — can read and extend it; the durable copy is the state
+    #: field the loop middleware itself owns, never this process.
+    tool_call_history: dict[str, list[str]] = field(default_factory=dict)
 
     def record_pending(self, item: _PendingApproval) -> None:
         if any(p.call_key == item.call_key for p in self.pending):
@@ -226,6 +316,14 @@ def resolve_ptc_thread_id(runtime: Any) -> str:
     anyway.
     """
     config = getattr(runtime, "config", None)
+    if not isinstance(config, dict):
+        # Agent-level hooks (``after_agent``) get a ``Runtime`` without ``config``;
+        # read the same thread id from LangGraph's config contextvar instead so the
+        # per-run records keyed here can be cleared under the key they were made with.
+        try:
+            config = get_config()
+        except RuntimeError:
+            config = None
     if isinstance(config, dict):
         configurable = config.get("configurable")
         if isinstance(configurable, dict):
@@ -235,9 +333,20 @@ def resolve_ptc_thread_id(runtime: Any) -> str:
     return _PTC_DEFAULT_THREAD_ID
 
 
-def begin_ptc_turn(thread_id: str) -> _PTCTurnState:
-    """Start (or reset) a PTC approval turn for ``thread_id``."""
-    state = _PTCTurnState()
+# One turn per thread, not per ``eval`` call: two concurrent ``eval`` calls on one
+# thread would swap the turn out from under each other. That is an inherited
+# constraint — ``langchain_quickjs`` keys the REPL slot itself per ``thread_id``
+# and resets it after every call in ``mode="call"``, so concurrent evals already
+# collide one layer down. Re-keying here alone would not make them safe; the
+# single-eval-per-step guarantee is tracked separately (#217).
+def begin_ptc_turn(thread_id: str, ask_scope: str = "") -> _PTCTurnState:
+    """Start (or reset) a PTC approval turn for ``thread_id``.
+
+    ``ask_scope`` is the ``eval`` tool call id this turn belongs to; it scopes the
+    turn's ask ids (see ``ask_id``) and is read back off the state rather than from
+    whichever wrapper drains ``pending``.
+    """
+    state = _PTCTurnState(ask_scope=ask_scope)
     _PTC_TURNS[thread_id] = state
     return state
 
@@ -270,13 +379,68 @@ def take_ptc_pending(thread_id: str) -> list[_PendingApproval]:
 
 
 def _call_key(tool_name: str, args: dict[str, Any]) -> str:
-    """Stable identity for a (tool, args) pair across ``eval`` re-runs."""
+    """Stable identity for a (tool, args) pair across ``eval`` re-runs.
+
+    Deliberately content-derived: after an approval the guard re-runs the whole
+    ``eval`` program, and it must recognise the calls it already asked about so it
+    can replay the decision (``turn.decisions``) and reuse the cached result
+    (``turn.results``) instead of prompting again. Two *different* questions about
+    the same tool+args are therefore indistinguishable by this key — which is why
+    it is NOT what goes on the wire; see ``ask_id``.
+
+    This is a per-turn decision/result memo key, not a bypass rule. The bypass
+    policy is a separate, durable, per-user thing (``context.tool_bypass_rules``,
+    keyed ``tool_name::server_slug`` with glob patterns) that outlives the turn.
+    """
     try:
         payload = json.dumps(args, sort_keys=True, default=str)
     except Exception:  # noqa: BLE001 - best-effort hashing of arbitrary args
         payload = repr(args)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"{tool_name}:{digest}"
+
+
+#: Separates the ``call_key`` from the ask ordinal in a wire ``_call_id``. Not
+#: ``#``, which the embed SDK already uses to suffix a client-action part id.
+_ASK_SEPARATOR = "@"
+
+
+def ask_id(call_key: str, ask_scope: str, ask_round: int) -> str:
+    """The wire ``_call_id`` for ONE approval question about ``call_key``.
+
+    Clients need the opposite property from ``_call_key``: every question must
+    carry its own id, so that answering one is never mistaken for answering
+    another. A client that suppresses prompts it has already answered (the embed
+    SDK does, to swallow a snapshot replay racing a resume) otherwise drops the
+    second, genuine ask for an identical call and parks the turn forever.
+
+    Uniqueness comes from two nested scopes, because an identical call can be asked
+    about twice at two different levels:
+
+    * ``ask_scope`` — the ``eval`` tool call this ask belongs to. A PTC turn lives
+      for ONE ``eval`` invocation, and within it an identical call is served from
+      ``turn.results``, so it never asks twice. Two asks therefore mean two ``eval``
+      calls — which is the case seen in the wild, and which a per-turn counter alone
+      cannot tell apart (both would be round 0). The model's ``tool_call["id"]``
+      separates them and is checkpointed on the AI message, so it survives replay.
+    * ``ask_round`` — the interrupt round within one ``eval`` invocation, for a
+      program whose later calls only become reachable once earlier ones are decided.
+
+    Both are replay-stable: the node re-runs deterministically from the top on every
+    resume, so round N's ``interrupt()`` is always round N's, under the same tool
+    call id. Embedding ``call_key`` keeps decision matching order-independent, which
+    is what it was chosen for (parallel ``eval`` calls register concurrently, so the
+    re-run's pending order can differ from the order the human saw).
+
+    The scope is folded to a short digest rather than carried verbatim: these ids ride
+    in places with hard size budgets (Slack packs a batch of them, base64-encoded, into
+    a 2000-char button ``value``), and raw tool call ids are provider-sized — Gemini's
+    are markedly longer than OpenAI's. A digest keeps the id's growth constant instead
+    of letting the model's provider decide it. The scope stays greppable in traces and
+    logs, where the raw id is what appears.
+    """
+    scope = hashlib.sha256(ask_scope.encode("utf-8")).hexdigest()[:8] if ask_scope else "-"
+    return f"{call_key}{_ASK_SEPARATOR}{scope}:{ask_round}"
 
 
 def _resolve_server_slug(
@@ -360,6 +524,7 @@ def wrap_tool_for_ptc(
     tool_risk_cache: ToolRiskCache | None = None,
     default_risk_threshold: float = 0.8,
     tool_server_map: dict[str, str] | None = None,
+    loop_detection: RepeatedToolCallMiddleware | None = None,
 ) -> BaseTool:
     """Wrap ``inner`` with a runtime HITL risk guard for safe PTC exposure.
 
@@ -386,27 +551,41 @@ def wrap_tool_for_ptc(
     tool_name = inner.name
 
     async def _execute(
-        runtime: ToolRuntime | None, kwargs: dict[str, Any], server_slug: str | None = None
+        runtime: ToolRuntime | None,
+        kwargs: dict[str, Any],
+        server_slug: str | None = None,
+        *,
+        turn: _PTCTurnState | None,
+        call_key: str,
     ) -> Any:
+        # The loop rule, applied to the call the model boundary cannot see (it only
+        # sees ``eval``): the same ``RepeatedToolCallMiddleware`` instance that judges
+        # direct calls judges this one, against the same ``tool_call_history``, so one
+        # configuration governs both paths — as the HITL guard above reuses the HITL
+        # middleware's policy. Applied at the point of execution, so HITL round-trips
+        # (pending → interrupt replay → approved) and cache hits never count. Outside
+        # an ``eval`` turn there is no history to judge against and the check is inert.
+        if turn is not None and loop_detection is not None and loop_detection.applies_to(tool_name):
+            key = ptc_history_key(tool_name)
+            verdict = loop_detection.evaluate(tool_name, kwargs, turn.tool_call_history.get(key, []), program_call=True)
+            turn.tool_call_history[key] = verdict.history
+            if verdict.blocked:
+                return repeated_call_payload(tool_name, loop_detection.blocked_message(tool_name, verdict))
         try:
             return await inner.arun(_inject_for_inner(inner, kwargs, runtime))
         except ToolException as exc:
+            # A quota error is terminal for this run: the model cannot wait inside
+            # ``eval`` and every immediate retry fails the same way. Return it, like
+            # the approval/rejection payloads, so the program sees a value naming
+            # the cause instead of a bare throw it will catch and retry (#211).
+            if is_rate_limit_error(str(exc)):
+                logger.warning("PTC call to '%s' was rate-limited; returning terminal payload", tool_name)
+                return rate_limited_payload(tool_name, str(exc))
             # Stamp the inner tool onto a secondary-authorization error before it
             # escapes into ``eval`` and loses that fact (see annotate_need_credentials).
             raise annotate_need_credentials(exc, tool_name, server_slug) from None
 
     async def _guarded(runtime: ToolRuntime = None, **kwargs: Any) -> Any:  # type: ignore[assignment]
-        if risk_scorer is None:
-            return await _execute(
-                runtime,
-                kwargs,
-                _resolve_server_slug(tool_name, getattr(runtime, "context", None), tool_server_map, inner),
-            )
-
-        from agent_common.middleware.conditional_hitl import (
-            ConditionalHumanInTheLoopMiddleware,
-        )
-
         context: Any = getattr(runtime, "context", None)
         server_slug = _resolve_server_slug(tool_name, context, tool_server_map, inner)
         thread_id = resolve_ptc_thread_id(runtime)
@@ -418,6 +597,13 @@ def wrap_tool_for_ptc(
         if turn is not None and call_key in turn.results:
             return turn.results[call_key]
 
+        if risk_scorer is None:
+            return await _execute(runtime, kwargs, server_slug, turn=turn, call_key=call_key)
+
+        from agent_common.middleware.conditional_hitl import (
+            ConditionalHumanInTheLoopMiddleware,
+        )
+
         # 2. Honor a human decision recorded for this call earlier in the turn
         #    (re-applied on every interrupt replay via the resume value).
         if turn is not None:
@@ -425,7 +611,7 @@ def wrap_tool_for_ptc(
             if decision == "reject":
                 return rejection_payload(tool_name, turn.reject_reasons.get(call_key, ""))
             if decision == "approve":
-                result = await _execute(runtime, kwargs, server_slug)
+                result = await _execute(runtime, kwargs, server_slug, turn=turn, call_key=call_key)
                 turn.results[call_key] = result
                 return result
 
@@ -434,7 +620,7 @@ def wrap_tool_for_ptc(
         if bypass_rules and ConditionalHumanInTheLoopMiddleware._is_bypassed(
             tool_name, server_slug, kwargs, bypass_rules
         ):
-            result = await _execute(runtime, kwargs, server_slug)
+            result = await _execute(runtime, kwargs, server_slug, turn=turn, call_key=call_key)
             if turn is not None:
                 turn.results[call_key] = result
             return result
@@ -466,7 +652,7 @@ def wrap_tool_for_ptc(
             score, entry = 0.0, None
 
         if score < threshold:
-            result = await _execute(runtime, kwargs, server_slug)
+            result = await _execute(runtime, kwargs, server_slug, turn=turn, call_key=call_key)
             if turn is not None:
                 turn.results[call_key] = result
             return result

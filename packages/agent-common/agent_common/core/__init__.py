@@ -11,6 +11,7 @@ from .message_formatting import (
 from .model_factory import (
     _has_aws_credentials as has_aws_credentials,
     NoDefaultModelError,
+    create_fast_model,
     create_model,
     get_available_models,
     get_default_model,
@@ -31,6 +32,7 @@ from object_storage import (
 
 __all__ = [
     # Model factory
+    "create_fast_model",
     "create_model",
     "get_available_models",
     "has_aws_credentials",

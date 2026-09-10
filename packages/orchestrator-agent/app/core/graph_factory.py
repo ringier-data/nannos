@@ -717,6 +717,9 @@ class GraphFactory:
             expose_context_registry=True,
             risk_scorer=score_tool_risk,
             default_risk_threshold=0.8,
+            # The stack's loop policy also judges the calls a program makes inside
+            # ``eval`` — same instance, same thresholds, same ``tool_call_history``.
+            loop_detection=self._loop_detection_middleware,
         )
 
         middleware_stack: list[Any] = [
@@ -910,8 +913,9 @@ class GraphFactory:
             context_schema=GraphRuntimeContext,
             response_format=response_format,
         )
-        # Override deepagents' recursion_limit default of 1000, which is too high to
-        # catch a runaway loop. The budget is configured in model calls and converted
+        # Override deepagents' recursion_limit default of 9_999 (deepagents/graph.py),
+        # which is far too high to catch a runaway loop — roughly 1,200 model calls at
+        # this stack's cost. The budget is configured in model calls and converted
         # here, against *this* graph: the multiplier is the middleware stack's per-call
         # node cost, so it goes stale the moment a middleware with model hooks is added
         # or removed — which is why it is counted rather than written down.

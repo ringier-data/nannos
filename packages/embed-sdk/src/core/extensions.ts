@@ -9,6 +9,10 @@ export const ACTIVITY_LOG_EXT = 'urn:nannos:a2a:activity-log:1.0';
 export const WORK_PLAN_EXT = 'urn:nannos:a2a:work-plan:1.0';
 export const INTERMEDIATE_OUTPUT_EXT = 'urn:nannos:a2a:intermediate-output:1.0';
 export const FEEDBACK_REQUEST_EXT = 'urn:nannos:a2a:feedback-request:1.0';
+/** Tool approvals. `action_requests[].args._call_id` identifies ONE ASK — unique per
+ *  question, NOT per (tool, args). Echo it back as the decision's `id`, and key any
+ *  "already answered" suppression on it (see `transport/approvalPrompt`).
+ *  Full payload contract: orchestrator `app/core/a2a_extensions.py`. */
 export const HITL_EXT = 'urn:nannos:a2a:human-in-the-loop:1.0';
 export const CONVERSATION_ORIGIN_EXT = 'urn:nannos:a2a:conversation-origin:1.0';
 export const CLIENT_ACTION_EXT = 'urn:nannos:a2a:client-action:1.0';
