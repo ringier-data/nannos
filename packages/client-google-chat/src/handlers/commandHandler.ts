@@ -1,9 +1,15 @@
 import { Logger } from '../utils/logger.js';
 
-import type { IContextStore, IInFlightTaskStore } from '../storage/types.js';
+import type { IContextStore, IInFlightTaskStore, InFlightTask } from '../storage/types.js';
 import { UserAuthService } from '../services/userAuthService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
+import { A2AClientService } from '../services/a2aClientService.js';
 import { HandlerDependencies } from './types.js';
+
+// A2A JSON-RPC error codes signalling the task is already terminal (or gone),
+// i.e. the stored in-flight record is stale and can be dropped.
+const A2A_TASK_NOT_FOUND = -32001;
+const A2A_TASK_NOT_CANCELABLE = -32002;
 
 
 export interface AppCommand {
@@ -176,6 +182,84 @@ async function handleLoginCommand(
 }
 
 /**
+ * Handle "cancel" command – aborts running tasks via the same A2A cancel
+ * protocol the web client's stop button uses.
+ *
+ * Task IDs are internal to the system, so the tasks to cancel are resolved
+ * from where the command is issued: the user's running tasks in the current
+ * thread (there is almost always exactly one).
+ */
+export async function handleCancelCommand(
+  appCommand: AppCommand,
+  chatService: GoogleChatService,
+  inFlightTaskStore: IInFlightTaskStore,
+  userAuthService: UserAuthService,
+  a2aClientService: A2AClientService
+): Promise<void> {
+  const logger = Logger.getLogger('handleCancelCommand');
+  const { projectId, spaceId, userId, threadId } = appCommand;
+
+  logger.info(`cancel command from user ${userId} in thread ${threadId}`);
+
+  const reply = (text: string) => chatService.sendPrivateTextMessage(projectId, spaceId, userId, text, threadId);
+
+  const tasks = await inFlightTaskStore.getByUser(projectId, userId);
+  const targets: InFlightTask[] = tasks.filter((t) => t.threadId === threadId);
+
+  if (targets.length === 0) {
+    const elsewhere =
+      tasks.length > 0
+        ? ` You have ${tasks.length} running task(s) in other threads — use the *cancel* command there to cancel them.`
+        : '';
+    await reply(`ℹ️ You have no running tasks in this thread.${elsewhere}`);
+    return;
+  }
+
+  const accessToken = await userAuthService.getOrchestratorToken(userId, projectId);
+  if (!accessToken) {
+    await reply('🔐 You need to log in first. Use the *login* command.');
+    return;
+  }
+
+  let cancelled = 0;
+  let alreadyFinished = 0;
+  const failures: string[] = [];
+
+  for (const task of targets) {
+    const response = await a2aClientService.cancelTask(task.taskId, accessToken);
+
+    if ('error' in response && response.error) {
+      if (response.error.code === A2A_TASK_NOT_FOUND || response.error.code === A2A_TASK_NOT_CANCELABLE) {
+        // Stale record — the task already reached a terminal state.
+        await inFlightTaskStore.delete(task.taskId).catch(() => {});
+        alreadyFinished++;
+      } else {
+        failures.push(response.error.message);
+      }
+    } else {
+      cancelled++;
+    }
+  }
+
+  const lines: string[] = [];
+  if (cancelled > 0) {
+    lines.push(
+      cancelled === 1
+        ? '🛑 Cancellation requested — the task will stop shortly.'
+        : `🛑 Cancellation requested for ${cancelled} running tasks — they will stop shortly.`
+    );
+  }
+  if (alreadyFinished > 0) {
+    lines.push(`ℹ️ ${alreadyFinished} task(s) had already finished — nothing to cancel.`);
+  }
+  for (const failure of failures) {
+    lines.push(`❌ Failed to cancel a task: ${failure}`);
+  }
+
+  await reply(lines.join('\n'));
+}
+
+/**
  * Handle "help" command – shows available commands.
  */
 async function handleHelpCommand(
@@ -185,6 +269,7 @@ async function handleHelpCommand(
   const helpText = [
     '🤖 *Nannos Commands*\n',
     '• *login* - Log in to use Nannos services',
+    '• *cancel* - Cancel your running task in this thread (alias: *stop*)',
     '• *debug* - Show debug info about your session and threads',
     '• *logout* - Log out from Nannos',
     '• *help* - Show this help message',
@@ -208,17 +293,24 @@ export async function handleAppCommand(
   appCommand: AppCommand,
   deps: HandlerDependencies
 ): Promise<void> {
-  const { chatService, contextStore, inFlightTaskStore, userAuthService } = deps;
+  const { chatService, contextStore, inFlightTaskStore, userAuthService, a2aClientService } = deps;
 
   const logger = Logger.getLogger('handleAppCommand');
   logger.info(`App command argument=${appCommand.commandArgument} from user ${appCommand.userId} in space ${appCommand.spaceId}`);
 
-  switch (appCommand.commandArgument) {
+  // Dispatch on the first token so trailing text doesn't break command matching
+  const [commandName] = appCommand.commandArgument.split(/\s+/);
+
+  switch (commandName) {
     case 'help':
       return handleHelpCommand(appCommand, chatService);
 
     case 'login':
       return handleLoginCommand(appCommand, chatService, userAuthService);
+
+    case 'cancel':
+    case 'stop':
+      return handleCancelCommand(appCommand, chatService, inFlightTaskStore, userAuthService, a2aClientService);
 
     case 'debug':
       return handleDebugCommand(

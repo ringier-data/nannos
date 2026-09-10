@@ -8,6 +8,7 @@ import {
   DataPart,
   FilePart,
   GetTaskResponse,
+  CancelTaskResponse,
   TaskStatusUpdateEvent,
   TaskArtifactUpdateEvent,
 } from '@a2a-js/sdk';
@@ -199,6 +200,31 @@ export class A2AClientService {
     const task = (response as { result: Task }).result;
     const state = task.status?.state || 'working';
     this.logger.debug(`Task status: id=${task.id}, state=${state}, artifacts=${task.artifacts?.length}`);
+    return response;
+  }
+
+  /**
+   * Request cancellation of a running task. This is the same A2A cancel
+   * protocol the web client's stop button uses; the orchestrator propagates
+   * the cancel to sub-agents and emits a terminal `canceled` status event.
+   */
+  async cancelTask(taskId: string, accessToken: string): Promise<CancelTaskResponse> {
+    this.logger.info(`Requesting cancellation of taskId: ${taskId}`);
+
+    // Create client with authenticated fetch
+    const client = await A2AClient.fromCardUrl(this.agentCardUrl, {
+      fetchImpl: createAuthenticatedFetch(accessToken),
+    });
+
+    const response: CancelTaskResponse = await client.cancelTask({ id: taskId });
+
+    if ('error' in response && response.error) {
+      this.logger.warn(`cancelTask error response for ${taskId}: ${response.error.message}`);
+      return response;
+    }
+
+    const task = (response as { result: Task }).result;
+    this.logger.info(`Cancellation accepted: id=${task.id}, state=${task.status?.state}`);
     return response;
   }
 }
