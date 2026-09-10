@@ -65,8 +65,8 @@ function AgentChip({ agent }: { agent: EmbeddedAgentInfo }) {
       </TooltipTrigger>
       {/* Above the composer: the row sits at the bottom of the panel, and a
           bottom-side tooltip would open off-surface. */}
-      <TooltipContent side="top" align="start" sideOffset={6} className="max-w-xs">
-        This is the sub-agent. It is locked.
+      <TooltipContent side="top" align="start" sideOffset={6} className="max-w-xs text-pretty">
+        {strings['composer.agentTooltip']}
       </TooltipContent>
     </Tooltip>
   );
@@ -304,14 +304,32 @@ export function Composer({ chat, className }: ComposerProps) {
             className="flex min-w-0 flex-1 items-center justify-start"
           >
             {contextLabel && (
-              <span
-                className="flex min-w-0 items-center gap-1.5 border-l pl-1.5 text-muted-foreground text-xs"
-                title={contextTitle}
-                aria-label={format(strings['context.label'], { label: contextLabel })}
-              >
-                <FileTextIcon aria-hidden="true" className="size-3.5 shrink-0" />
-                <span className="truncate">{contextLabel}</span>
-              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  {/* A label, not a control: `cursor-default` and no tab stop,
+                      like the agent chip. Screen readers read `aria-label`. */}
+                  <span
+                    className="flex min-w-0 cursor-default items-center gap-1.5 border-l pl-1.5 text-muted-foreground text-xs"
+                    aria-label={format(strings['context.label'], { label: contextLabel })}
+                  >
+                    <FileTextIcon aria-hidden="true" className="size-3.5 shrink-0" />
+                    <span className="truncate">{contextLabel}</span>
+                  </span>
+                </TooltipTrigger>
+                {/* Above the composer, for the same reason as the agent chip.
+                    `text-pretty` overrides the primitive's `text-balance`: a
+                    balanced box is still sized on the UNBALANCED max-content
+                    width, so a full sentence rendered as a wide box with two
+                    short, ragged lines inside it. */}
+                <TooltipContent
+                  side="top"
+                  align="start"
+                  sideOffset={6}
+                  className="max-w-xs text-pretty"
+                >
+                  <p>{strings['context.tooltip']}</p>
+                </TooltipContent>
+              </Tooltip>
             )}
           </div>
 

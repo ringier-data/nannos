@@ -22,6 +22,7 @@ export const de: NannosStrings = {
   'composer.recordError': 'Audio konnte nicht aufgenommen werden',
   'composer.readOnly': 'Diese Unterhaltung gehört zu einer anderen Oberfläche und ist hier nur lesbar.',
   'composer.agent': 'Beantwortet von {name}',
+  'composer.agentTooltip': 'Der Assistent für diese Anwendung. Er kann nicht gewechselt werden.',
 
   'status.connected': 'Verbunden',
   'status.connecting': 'Verbindung wird aufgebaut…',
@@ -60,6 +61,8 @@ export const de: NannosStrings = {
   'conversations.deleteError': 'Die Unterhaltung konnte nicht gelöscht werden',
 
   'context.label': 'Kontext: {label}',
+  'context.tooltip':
+    'Der Assistent weiss, wo Sie sich befinden, und kann den Inhalt dieser Seite lesen.',
 
   'hitl.title': 'Bestätigung erforderlich für {toolName}',
   'hitl.titleCount': '{count} Bestätigungen erforderlich',

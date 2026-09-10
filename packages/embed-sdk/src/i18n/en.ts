@@ -21,6 +21,7 @@ export const en: NannosStrings = {
   'composer.recordError': 'Could not record audio',
   'composer.readOnly': 'This conversation belongs to another surface and is read-only here.',
   'composer.agent': 'Answered by {name}',
+  'composer.agentTooltip': 'The assistant for this application. It cannot be changed.',
 
   'status.connected': 'Connected',
   'status.connecting': 'Connecting…',
@@ -59,6 +60,7 @@ export const en: NannosStrings = {
   'conversations.deleteError': 'Could not delete the conversation',
 
   'context.label': 'Context: {label}',
+  'context.tooltip': 'The assistant is aware where you are and can read this page content.',
 
   'hitl.title': 'Approval needed for {toolName}',
   'hitl.titleCount': '{count} approvals needed',
