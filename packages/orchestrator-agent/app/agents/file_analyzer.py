@@ -32,14 +32,10 @@ Model: the fleet's cheap/fast chat tier, resolved at runtime from the gateway
 registered at runtime.
 """
 
-import asyncio
 import base64
-import ipaddress
 import logging
 import re
-import socket
 from typing import Any, Dict, List, Optional, cast
-from urllib.parse import urlparse
 
 import httpx
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
@@ -62,6 +58,15 @@ from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
+
+# The SSRF guard and the capped fetch are shared with the multi-modal URL converter in
+# the SDK, so the canonical copies live down there (SDK layering rule). Kept bound to the
+# original private names: call sites read the module global, which is what the tests
+# monkeypatch.
+from ringier_a2a_sdk.utils.url_fetch import SSRFError  # noqa: F401 — re-exported for callers/tests
+from ringier_a2a_sdk.utils.url_fetch import assert_public_url as _assert_public_url
+from ringier_a2a_sdk.utils.url_fetch import fetch_bytes_capped as _fetch_bytes_capped
+from ringier_a2a_sdk.utils.url_fetch import is_blocked_address as _is_blocked_address  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -214,60 +219,6 @@ When analyzing a file:
 Always provide actionable, useful information based on what is actually in the file — not what you imagine might be there."""
 
 
-class SSRFError(ValueError):
-    """Raised when a URL targets a non-public address (SSRF guard)."""
-
-
-def _is_blocked_address(ip: str) -> bool:
-    """True if an IP is loopback/private/link-local/reserved (i.e. not publicly routable)."""
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return True
-    return (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local  # blocks 169.254.0.0/16, incl. the cloud metadata endpoint
-        or addr.is_reserved
-        or addr.is_multicast
-        or addr.is_unspecified
-    )
-
-
-async def _assert_public_url(url: str) -> None:
-    """Reject URLs whose host resolves to a non-public address.
-
-    The file-analyzer fetches attacker-supplied URLs server-side (from inside the
-    orchestrator pod) and returns their body, so an unrestricted fetch is an SSRF that
-    can reach cluster-internal services and cloud-metadata endpoints. Resolve the host
-    and refuse any URL that maps to a loopback/private/link-local/reserved address.
-
-    Note: this validates at resolution time and does not pin the connection to the
-    resolved IP, so it does not defend against active DNS rebinding; combine with an
-    egress NetworkPolicy for defense-in-depth.
-    """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise SSRFError(f"Unsupported URL scheme: {parsed.scheme!r}")
-    host = parsed.hostname
-    if not host:
-        raise SSRFError("URL has no host")
-
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    try:
-        loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        raise SSRFError(f"Could not resolve host {host!r}: {e}")
-
-    resolved = {info[4][0] for info in infos}
-    if not resolved:
-        raise SSRFError(f"Host {host!r} did not resolve")
-    for ip in resolved:
-        if _is_blocked_address(ip):
-            raise SSRFError(f"Refusing to fetch a URL that resolves to a non-public address ({ip})")
-
-
 def _get_file_extension(url: str) -> str:
     """Extract file extension from URL, ignoring query parameters."""
     path = url.split("?")[0]
@@ -325,29 +276,6 @@ async def _detect_file_type(url: str, client: httpx.AsyncClient) -> str:
         return "video"
 
     return "unknown"
-
-
-async def _fetch_bytes_capped(
-    client: httpx.AsyncClient, url: str, max_bytes: int, too_large_msg: str
-) -> bytes:
-    """GET ``url`` and return its body, aborting as soon as it exceeds ``max_bytes``.
-
-    Streams the response so an oversized (or malicious) URL is never fully buffered before the
-    limit is enforced: a declared ``Content-Length`` over the cap is rejected before reading the
-    body, and the incremental read still caps memory at ~``max_bytes`` when the header is absent
-    or lies. Raises ``ValueError(too_large_msg)`` when the cap is exceeded.
-    """
-    async with client.stream("GET", url) as response:
-        response.raise_for_status()
-        cl = response.headers.get("content-length")
-        if cl and cl.strip().isdigit() and int(cl) > max_bytes:
-            raise ValueError(too_large_msg)
-        buf = bytearray()
-        async for chunk in response.aiter_bytes():
-            buf.extend(chunk)
-            if len(buf) > max_bytes:
-                raise ValueError(too_large_msg)
-        return bytes(buf)
 
 
 def _create_file_analyzer_model(callbacks: Optional[List] = None):
