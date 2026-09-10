@@ -21,7 +21,7 @@ export const en: NannosStrings = {
   'composer.recordError': 'Could not record audio',
   'composer.readOnly': 'This conversation belongs to another surface and is read-only here.',
   'composer.agent': 'Answered by {name}',
-  'composer.agentTooltip': 'The assistant for this application. It cannot be changed.',
+  'composer.agentTooltip': 'The current sub-agent. It cannot be changed.',
 
   'status.connected': 'Connected',
   'status.connecting': 'Connecting…',

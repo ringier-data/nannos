@@ -22,7 +22,7 @@ export const de: NannosStrings = {
   'composer.recordError': 'Audio konnte nicht aufgenommen werden',
   'composer.readOnly': 'Diese Unterhaltung gehört zu einer anderen Oberfläche und ist hier nur lesbar.',
   'composer.agent': 'Beantwortet von {name}',
-  'composer.agentTooltip': 'Der Assistent für diese Anwendung. Er kann nicht gewechselt werden.',
+  'composer.agentTooltip': 'Der Sub-Agent für diese Anwendung. Er kann nicht gewechselt werden.',
 
   'status.connected': 'Verbunden',
   'status.connecting': 'Verbindung wird aufgebaut…',
