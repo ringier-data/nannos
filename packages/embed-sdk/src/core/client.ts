@@ -6,10 +6,12 @@ import type {
   ClientInitializedData,
   ConversationSnapshotData,
   ConversationUpdatedData,
+  EmbeddedAgentInfo,
   SendMessagePayload,
   Settings,
   SubscribeAck,
 } from './wire';
+import { jwtExpMs } from './jwt';
 import type { NannosConfig, NannosErrorEvent } from './types';
 
 /**
@@ -21,6 +23,8 @@ export interface TransportState {
   socketConnected: boolean;
   initialized: boolean;
   agentInfo: AgentInfo | null;
+  /** The bound sub-agent on an embedded surface; null everywhere else (ADR-0006). */
+  embeddedAgent: EmbeddedAgentInfo | null;
 }
 
 const INIT_TIMEOUT_MS = 15_000;
@@ -44,7 +48,12 @@ export type IoFactory = (uri: string | undefined, opts: Record<string, unknown>)
  */
 export class TransportClient {
   private socket: Socket | null = null;
-  private state: TransportState = { socketConnected: false, initialized: false, agentInfo: null };
+  private state: TransportState = {
+    socketConnected: false,
+    initialized: false,
+    agentInfo: null,
+    embeddedAgent: null,
+  };
   private readonly stateListeners = new Set<(s: TransportState) => void>();
   private readonly responseListeners = new Set<(data: AgentResponseData) => void>();
   private readonly errorListeners = new Set<(e: NannosErrorEvent) => void>();
@@ -56,19 +65,6 @@ export class TransportClient {
     private readonly ioFactory: IoFactory = io as unknown as IoFactory,
   ) {}
 
-  /** Decode a JWT's `exp` (epoch ms) without verifying — for scheduling re-auth. */
-  private static jwtExpMs(token: string): number | null {
-    try {
-      const [, payload] = token.split('.');
-      let b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-      b64 += '='.repeat((4 - (b64.length % 4)) % 4); // JWT payloads are unpadded base64url
-      const json = JSON.parse(atob(b64));
-      return typeof json.exp === 'number' ? json.exp * 1000 : null;
-    } catch {
-      return null;
-    }
-  }
-
   /** Reconnect shortly before the access token expires so the connection always
    *  carries a fresh token (socket.io re-runs the auth callback on reconnect →
    *  getToken refreshes/re-mints). Short-lived embed tokens would otherwise go
@@ -76,7 +72,7 @@ export class TransportClient {
   private scheduleReauth(token: string) {
     if (this.reauthTimer) clearTimeout(this.reauthTimer);
     this.reauthTimer = null;
-    const exp = TransportClient.jwtExpMs(token);
+    const exp = jwtExpMs(token);
     if (!exp) return;
     const delay = exp - Date.now() - 60_000; // 60s lead
     if (delay <= 0) return; // already near expiry; the next (re)connect refreshes
@@ -160,11 +156,15 @@ export class TransportClient {
       }),
     );
     socket.on('disconnect', () =>
-      this.setState({ socketConnected: false, initialized: false, agentInfo: null }),
+      this.setState({ socketConnected: false, initialized: false, agentInfo: null, embeddedAgent: null }),
     );
     socket.on('client_initialized', (data: ClientInitializedData) => {
       const ok = data.status === 'success';
-      this.setState({ initialized: ok, agentInfo: ok ? (data.agent ?? null) : null });
+      this.setState({
+        initialized: ok,
+        agentInfo: ok ? (data.agent ?? null) : null,
+        embeddedAgent: ok ? (data.embeddedAgent ?? null) : null,
+      });
       if (!ok) {
         this.emitError({
           type: 'init',
@@ -341,6 +341,6 @@ export class TransportClient {
     this.socket?.disconnect();
     this.socket = null;
     this.pendingInit = null;
-    this.setState({ socketConnected: false, initialized: false, agentInfo: null });
+    this.setState({ socketConnected: false, initialized: false, agentInfo: null, embeddedAgent: null });
   }
 }

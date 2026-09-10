@@ -46,7 +46,16 @@ import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -64,10 +73,17 @@ import { VersionSidebar } from '@/components/subagents/VersionSidebar';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
 import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
 import { ConfigSection } from '@/components/subagents/ConfigSection';
+import { EmbedBindingPanel } from '@/components/subagents/EmbedBindingPanel';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
-import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, MODEL_TIER_OPTIONS } from '@/config/models';
+import {
+  useAvailableModels,
+  modelSupportsThinking,
+  getAvailableThinkingLevels,
+  modelSelectOptions,
+  MODEL_TIER_OPTIONS,
+} from '@/config/models';
 import { ModelStatusText } from '@/components/models/ModelStatusText';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
@@ -85,7 +101,15 @@ import {
   updateActivationApiV1SkillsActivationsActivationIdUpdatePostMutation,
   listMyGroupsApiV1GroupsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinition, McpSkillFile, SkillSearchResult, SkillActivationWithStatus, ModelTier } from '@/api/generated/types.gen';
+import type {
+  SubAgentConfigVersion,
+  OrchestratorThinkingLevel,
+  SkillDefinition,
+  McpSkillFile,
+  SkillSearchResult,
+  SkillActivationWithStatus,
+  ModelTier,
+} from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
@@ -109,7 +133,10 @@ type SkillDiffInfo = {
   registryId: string;
   contentHash: string;
   name: string;
-  updateTarget?: { type: 'imported-skill'; skillName: string } | { type: 'imported-skill-direct'; skillName: string } | { type: 'activation'; activationId: number };
+  updateTarget?:
+    | { type: 'imported-skill'; skillName: string }
+    | { type: 'imported-skill-direct'; skillName: string }
+    | { type: 'activation'; activationId: number };
 };
 
 export function SubAgentDetailPage() {
@@ -209,7 +236,10 @@ export function SubAgentDetailPage() {
   const [versionSidebarCollapsed, setVersionSidebarCollapsed] = useState(false);
 
   // Auto-enable sandbox when any skill has executable files
-  const SANDBOX_EXTENSIONS = useMemo(() => new Set(['.py', '.sh', '.bash', '.zsh', '.js', '.ts', '.rb', '.pl', '.ps1', '.bat', '.cmd', '.mjs', '.cjs']), []);
+  const SANDBOX_EXTENSIONS = useMemo(
+    () => new Set(['.py', '.sh', '.bash', '.zsh', '.js', '.ts', '.rb', '.pl', '.ps1', '.bat', '.cmd', '.mjs', '.cjs']),
+    []
+  );
   useEffect(() => {
     const hasExecutableFiles = editSkills.some((skill) =>
       skill.files?.some((f) => {
@@ -227,7 +257,14 @@ export function SubAgentDetailPage() {
   }, [editSkills]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch sub-agent
-  const { data: subAgent } = useQuery({
+  const {
+    data: subAgent,
+    isPending: isSubAgentPending,
+    isError: isSubAgentError,
+    error: subAgentError,
+    isFetching: isSubAgentFetching,
+    refetch: refetchSubAgent,
+  } = useQuery({
     ...getSubAgentApiV1SubAgentsSubAgentIdGetOptions({
       path: { sub_agent_id: parseInt(id || '0', 10) },
     }),
@@ -476,6 +513,15 @@ export function SubAgentDetailPage() {
   // Administrators with admin mode enabled can also edit
   // Users with write access through groups can also edit
   const canEdit = (isOwner || (isAdministrator && adminMode) || hasGroupWriteAccess) && !isViewingHistoricalVersion;
+
+  // Host-published sub-agent (ADR-0006): the host always owns description, system prompt and
+  // skills, and owns tools / model tier / thinking level only when it publishes them.
+  // The backend refuses edits to those fields with 409, so the UI does not offer them.
+  const embedBinding = subAgent?.embed_binding ?? null;
+  const isEmbedBound = embedBinding !== null;
+  const hostOwnsTools = isEmbedBound && embedBinding?.agent?.tools != null;
+  const hostOwnsModel = isEmbedBound && embedBinding?.agent?.model_tier != null;
+  const hostOwnsThinking = isEmbedBound && embedBinding?.agent?.thinking_level != null;
   const canDelete = isOwner || canApprove;
   // Can submit if owner or has write access through groups, and current version is draft
   const canSubmitForApproval = (isOwner || hasGroupWriteAccess) && currentVersionStatus === 'draft';
@@ -579,7 +625,9 @@ export function SubAgentDetailPage() {
       return;
     }
     // Fallback: check registry for imported skills without update_available flag
-    const importedSkills = editSkills.filter((s) => s.registry_id && s.content_hash && !s.update_available && s.scope !== 'sub-agent');
+    const importedSkills = editSkills.filter(
+      (s) => s.registry_id && s.content_hash && !s.update_available && s.scope !== 'sub-agent'
+    );
     if (importedSkills.length === 0) return;
 
     let cancelled = false;
@@ -601,7 +649,9 @@ export function SubAgentDetailPage() {
       }
       if (!cancelled) setSkillsWithUpdates(updatable);
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [isEditing, editSkills.length]);
 
   // Screen width detection for responsive behavior
@@ -663,7 +713,9 @@ export function SubAgentDetailPage() {
     setEditName(sa.name);
     setEditIsPublic(sa.is_public ?? false);
     setEditDescription(sa.config_version?.description || '');
-    setEditModel(sa.config_version?.model_tier ? `tier:${sa.config_version.model_tier}` : (sa.config_version?.model || ''));
+    setEditModel(
+      sa.config_version?.model_tier ? `tier:${sa.config_version.model_tier}` : sa.config_version?.model || ''
+    );
     if (sa.type === 'remote') {
       setEditAgentUrl(String(sa.config_version?.agent_url ?? ''));
     } else if (sa.type === 'foundry') {
@@ -760,12 +812,13 @@ export function SubAgentDetailPage() {
         };
       }
     } else {
+      // Host-managed fields are omitted: the backend rejects them for a bound sub-agent.
       typeSpecificConfig = {
-        system_prompt: editSystemPrompt,
-        mcp_tools: editMcpTools.length > 0 ? editMcpTools : undefined,
-        enable_thinking: editEnableThinking,
-        thinking_level: editThinkingLevel ?? undefined, // Convert null to undefined for API
-        skills: editSkills,
+        system_prompt: isEmbedBound ? undefined : editSystemPrompt,
+        mcp_tools: hostOwnsTools ? undefined : editMcpTools.length > 0 ? editMcpTools : undefined,
+        enable_thinking: hostOwnsThinking ? undefined : editEnableThinking,
+        thinking_level: hostOwnsThinking ? undefined : (editThinkingLevel ?? undefined), // Convert null to undefined for API
+        skills: isEmbedBound ? undefined : editSkills,
         sandbox_enabled: editSandboxEnabled,
       };
     }
@@ -775,9 +828,9 @@ export function SubAgentDetailPage() {
       body: {
         name: editName,
         is_public: editIsPublic,
-        description: editDescription,
-        model: editIsTier ? undefined : (editModelAlias || undefined),
-        model_tier: editIsTier ? (editModelTier as ModelTier) : undefined,
+        description: isEmbedBound ? undefined : editDescription,
+        model: editIsTier || hostOwnsModel ? undefined : editModelAlias || undefined,
+        model_tier: editIsTier && !hostOwnsModel ? (editModelTier as ModelTier) : undefined,
         ...typeSpecificConfig,
         change_summary: summary || 'Updated configuration from playground',
       },
@@ -811,7 +864,13 @@ export function SubAgentDetailPage() {
         toast.error('Failed to fetch skill details');
         return;
       }
-      const detail = data as { name?: string; slug?: string; description?: string; content_hash?: string; scope?: string };
+      const detail = data as {
+        name?: string;
+        slug?: string;
+        description?: string;
+        content_hash?: string;
+        scope?: string;
+      };
       const newSkill = {
         name: detail.slug ?? skill.slug ?? skill.name,
         description: detail.description ?? '',
@@ -850,7 +909,11 @@ export function SubAgentDetailPage() {
       setEditSkills((prev) =>
         prev.map((s) =>
           s.name === skillName
-            ? { ...s, description: detail.description ?? s.description, content_hash: detail.content_hash ?? s.content_hash }
+            ? {
+                ...s,
+                description: detail.description ?? s.description,
+                content_hash: detail.content_hash ?? s.content_hash,
+              }
             : s
         )
       );
@@ -908,7 +971,11 @@ export function SubAgentDetailPage() {
           : [];
         const updatedSkills = currentSkills.map((s) =>
           s.name === skillName
-            ? { ...s, description: detail.description ?? s.description, content_hash: detail.content_hash ?? s.content_hash }
+            ? {
+                ...s,
+                description: detail.description ?? s.description,
+                content_hash: detail.content_hash ?? s.content_hash,
+              }
             : s
         );
         updateMutation.mutate({
@@ -919,7 +986,9 @@ export function SubAgentDetailPage() {
             description: subAgent!.config_version?.description || '',
             model: (subAgent!.config_version?.model as any) || undefined,
             system_prompt: subAgent!.config_version?.system_prompt ?? '',
-            mcp_tools: (subAgent!.config_version?.mcp_tools as string[] | undefined)?.length ? subAgent!.config_version!.mcp_tools as string[] : undefined,
+            mcp_tools: (subAgent!.config_version?.mcp_tools as string[] | undefined)?.length
+              ? (subAgent!.config_version!.mcp_tools as string[])
+              : undefined,
             enable_thinking: subAgent!.config_version?.enable_thinking ?? false,
             thinking_level: (subAgent!.config_version?.thinking_level as any) ?? undefined,
             skills: updatedSkills,
@@ -990,6 +1059,43 @@ export function SubAgentDetailPage() {
   };
 
   const isSubmitting = updateMutation.isPending || submitMutation.isPending || reviewVersionMutation.isPending;
+
+  // Three distinct states. Collapsing them into one "not found" screen turned any
+  // dropped request into a permanently missing agent, because React Query stops after
+  // its retries and does not fetch again until the page is remounted.
+  if (id && isSubAgentPending) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-4 p-4">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        <p className="text-muted-foreground">Loading sub-agent...</p>
+      </div>
+    );
+  }
+
+  if (isSubAgentError) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-4 p-4">
+        <AlertCircle className="h-12 w-12 text-destructive" />
+        <div className="text-center space-y-1">
+          <p className="font-medium">Could not load this sub-agent</p>
+          <p className="text-sm text-muted-foreground max-w-md break-words">{getErrorMessage(subAgentError)}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => navigate('/app/subagents')}>
+            Back to Sub-Agents
+          </Button>
+          <Button onClick={() => refetchSubAgent()} disabled={isSubAgentFetching}>
+            {isSubAgentFetching ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4 mr-2" />
+            )}
+            Try again
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (!subAgent) {
     return (
@@ -1106,6 +1212,20 @@ export function SubAgentDetailPage() {
                   </Select>
                 </>
               )}
+              {isEmbedBound && (
+                <>
+                  <span>•</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge variant="outline" className="text-xs font-normal">
+                        <Plug className="mr-1 h-3 w-3" />
+                        Embedded
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent>Definition published by {embedBinding?.base_url}</TooltipContent>
+                  </Tooltip>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -1129,7 +1249,13 @@ export function SubAgentDetailPage() {
             </>
           )}
           {canDelete && (
-            <Button variant="outline" size="icon" onClick={() => setShowDeleteDialog(true)}>
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => setShowDeleteDialog(true)}
+              disabled={isEmbedBound}
+              title={isEmbedBound ? 'Remove the embed binding first, then delete the sub-agent.' : undefined}
+            >
               <Trash2 className="h-4 w-4" />
             </Button>
           )}
@@ -1176,1097 +1302,1231 @@ export function SubAgentDetailPage() {
           }`}
         >
           {/* Main Panel with Tabs */}
-          <Tabs value={leftPanelTab} onValueChange={(v) => setLeftPanelTab(v as 'config' | 'personalize')} className="flex flex-col flex-1 min-h-0">
-          <div
-            className={`flex flex-col rounded-lg border overflow-hidden flex-1 min-h-0 motion-safe:transition-all motion-safe:duration-300 motion-safe:ease-in-out ${
-              isEditing && leftPanelTab === 'config' ? 'border-amber-500/50 bg-amber-50/30 dark:bg-amber-950/20' : 'border-border bg-muted/30'
-            }`}
+          <Tabs
+            value={leftPanelTab}
+            onValueChange={(v) => setLeftPanelTab(v as 'config' | 'personalize')}
+            className="flex flex-col flex-1 min-h-0"
           >
-            <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
-              <div className="flex items-center gap-2">
-                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => navigate('/app/subagents')}>
-                  <ArrowLeft className="h-4 w-4" />
-                </Button>
-                <TabsList className="h-8">
-                  {!isGpAgent && (
-                    <TabsTrigger value="config" className="text-xs px-3 h-6">
-                      Configuration
+            <div
+              className={`flex flex-col rounded-lg border overflow-hidden flex-1 min-h-0 motion-safe:transition-all motion-safe:duration-300 motion-safe:ease-in-out ${
+                isEditing && leftPanelTab === 'config'
+                  ? 'border-amber-500/50 bg-amber-50/30 dark:bg-amber-950/20'
+                  : 'border-border bg-muted/30'
+              }`}
+            >
+              <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
+                <div className="flex items-center gap-2">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => navigate('/app/subagents')}>
+                    <ArrowLeft className="h-4 w-4" />
+                  </Button>
+                  <TabsList className="h-8">
+                    {!isGpAgent && (
+                      <TabsTrigger value="config" className="text-xs px-3 h-6">
+                        Configuration
+                      </TabsTrigger>
+                    )}
+                    <TabsTrigger value="personalize" className="text-xs px-3 h-6">
+                      My Skills
                     </TabsTrigger>
+                  </TabsList>
+                  {leftPanelTab === 'config' && isEditing && (
+                    <Badge
+                      variant="outline"
+                      className="text-xs border-amber-500 text-amber-600 bg-amber-50 dark:bg-amber-950"
+                    >
+                      <Edit className="mr-1 h-3 w-3" />
+                      Editing
+                    </Badge>
                   )}
-                  <TabsTrigger value="personalize" className="text-xs px-3 h-6">
-                    My Skills
-                  </TabsTrigger>
-                </TabsList>
-                {leftPanelTab === 'config' && isEditing && (
-                  <Badge
-                    variant="outline"
-                    className="text-xs border-amber-500 text-amber-600 bg-amber-50 dark:bg-amber-950"
-                  >
-                    <Edit className="mr-1 h-3 w-3" />
-                    Editing
-                  </Badge>
-                )}
-                {leftPanelTab === 'config' && isViewingHistoricalVersion && (
-                  <Badge variant="outline" className="text-xs border-amber-500 text-amber-600">
-                    {formatVersionLabel(viewedVersion, viewingVersionNumber)}
-                  </Badge>
-                )}
-              </div>
-              {leftPanelTab === 'config' && (
-              <div className="flex items-center gap-1">
-                {/* Layout lock toggle */}
-                {!isViewingHistoricalVersion && (
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => {
-                            const newLocked = !layoutLocked;
-                            setLayoutLocked(newLocked);
-                            localStorage.setItem('subagent-layout-locked', String(newLocked));
-                          }}
-                        >
-                          {layoutLocked ? <Lock className="h-4 w-4 text-amber-600" /> : <Unlock className="h-4 w-4" />}
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>
-                          {layoutLocked
-                            ? 'Layout locked - click to enable auto-resize'
-                            : 'Auto-resize enabled - click to lock'}
-                        </p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                )}
-                {/* Panel width controls */}
-                {!isViewingHistoricalVersion && (
-                  <Select
-                    value={configPanelWidth}
-                    onValueChange={(value: 'compact' | 'medium' | 'wide') => {
-                      setConfigPanelWidth(value);
-                      localStorage.setItem('subagent-config-panel-width', value);
-                    }}
-                  >
-                    <SelectTrigger className="h-7 w-7 p-0 border-0" title="Adjust panel width">
-                      <Maximize2 className="h-4 w-4" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="compact">Compact (400px)</SelectItem>
-                      <SelectItem value="medium">Medium (560px)</SelectItem>
-                      <SelectItem value="wide">Wide (800px)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                )}
-                {canEdit && !isViewingHistoricalVersion && (
-                  <>
-                    {isEditing ? (
-                      <>
+                  {leftPanelTab === 'config' && isViewingHistoricalVersion && (
+                    <Badge variant="outline" className="text-xs border-amber-500 text-amber-600">
+                      {formatVersionLabel(viewedVersion, viewingVersionNumber)}
+                    </Badge>
+                  )}
+                </div>
+                {leftPanelTab === 'config' && (
+                  <div className="flex items-center gap-1">
+                    {/* Layout lock toggle */}
+                    {!isViewingHistoricalVersion && (
+                      <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={handleCancelEdit}
-                              disabled={updateMutation.isPending}
                               className="h-7 w-7"
+                              onClick={() => {
+                                const newLocked = !layoutLocked;
+                                setLayoutLocked(newLocked);
+                                localStorage.setItem('subagent-layout-locked', String(newLocked));
+                              }}
                             >
-                              <X className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Cancel editing</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="icon"
-                              onClick={handleSave}
-                              disabled={updateMutation.isPending}
-                              className="h-7 w-7"
-                            >
-                              {updateMutation.isPending ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
+                              {layoutLocked ? (
+                                <Lock className="h-4 w-4 text-amber-600" />
                               ) : (
-                                <Save className="h-4 w-4" />
+                                <Unlock className="h-4 w-4" />
                               )}
                             </Button>
                           </TooltipTrigger>
-                          <TooltipContent>Save changes</TooltipContent>
-                        </Tooltip>
-                      </>
-                    ) : (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => {
-                              setIsEditing(true);
-                              setActiveFocusArea('config');
-                              setShowConversationList(false);
-                            }}
-                            className="h-7 w-7"
-                          >
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Edit configuration</TooltipContent>
-                      </Tooltip>
-                    )}
-                  </>
-                )}
-              </div>
-              )}
-              {leftPanelTab === 'personalize' && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => setShowActivateSkillDialog(true)}
-              >
-                <Plus className="h-3 w-3 mr-1" />
-                Add Skill
-              </Button>
-              )}
-            </div>
-
-            <TabsContent value="config" className="flex-1 min-h-0 flex flex-col mt-0 data-[state=inactive]:hidden">
-            {/* Read-only mode indicator */}
-            {isViewingHistoricalVersion && (
-              <div className="px-3 py-2 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between shrink-0">
-                <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
-                  <Info className="h-3.5 w-3.5" />
-                  <span>Viewing {formatVersionLabel(viewedVersion, viewingVersionNumber)} (read-only)</span>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700"
-                  onClick={() => setViewingVersionNumber(null)}
-                >
-                  Back to current
-                </Button>
-              </div>
-            )}
-
-            <ScrollArea className="flex-1 min-h-0">
-              <div className="p-3 flex flex-col gap-3 h-full w-full max-w-full">
-                {/* Section: Identity */}
-                <ConfigSection title="Identity" icon={FileText}>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="name" className="text-xs">Name</Label>
-                    {isEditing ? (
-                      <Input
-                        id="name"
-                        value={editName}
-                        onChange={(e) => {
-                          setEditName(e.target.value);
-                          handleFieldChange();
-                        }}
-                        onFocus={() => setActiveFocusArea('config')}
-                        onBlur={() => setActiveFocusArea(null)}
-                        className="h-8 text-sm"
-                      />
-                    ) : (
-                      <p className="text-sm">{subAgent.name}</p>
-                    )}
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <Label htmlFor="description" className="text-xs">Description</Label>
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-xs">
+                          <TooltipContent>
                             <p>
-                              The orchestrator uses this description to route conversations to the appropriate sub-agent.
+                              {layoutLocked
+                                ? 'Layout locked - click to enable auto-resize'
+                                : 'Auto-resize enabled - click to lock'}
                             </p>
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
-                    </div>
-                    {isEditing ? (
-                      <Textarea
-                        id="description"
-                        value={editDescription}
-                        onChange={(e) => {
-                          setEditDescription(e.target.value);
-                          handleFieldChange();
-                        }}
-                        onFocus={() => setActiveFocusArea('config')}
-                        onBlur={() => setActiveFocusArea(null)}
-                        rows={3}
-                        className="text-sm resize-none"
-                        placeholder="Describe what this sub-agent does..."
-                      />
-                    ) : (
-                      <p className="text-sm text-muted-foreground">{displayedDescription || 'No description'}</p>
                     )}
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-0.5">
-                      <Label htmlFor="is_public" className="text-xs flex items-center gap-1.5">
-                        <Users className="h-3 w-3" />
-                        Public Access
-                      </Label>
-                      <p className="text-[11px] text-muted-foreground">
-                        All users can access without group permissions
-                      </p>
-                    </div>
-                    {isEditing ? (
-                      <Switch
-                        id="is_public"
-                        checked={editIsPublic}
-                        onCheckedChange={(checked) => {
-                          setEditIsPublic(checked);
-                          handleFieldChange();
+                    {/* Panel width controls */}
+                    {!isViewingHistoricalVersion && (
+                      <Select
+                        value={configPanelWidth}
+                        onValueChange={(value: 'compact' | 'medium' | 'wide') => {
+                          setConfigPanelWidth(value);
+                          localStorage.setItem('subagent-config-panel-width', value);
                         }}
-                      />
-                    ) : (
-                      <Badge variant={subAgent.is_public ? 'default' : 'secondary'} className="text-[10px]">
-                        {subAgent.is_public ? 'Public' : 'Private'}
-                      </Badge>
+                      >
+                        <SelectTrigger className="h-7 w-7 p-0 border-0" title="Adjust panel width">
+                          <Maximize2 className="h-4 w-4" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="compact">Compact (400px)</SelectItem>
+                          <SelectItem value="medium">Medium (560px)</SelectItem>
+                          <SelectItem value="wide">Wide (800px)</SelectItem>
+                        </SelectContent>
+                      </Select>
                     )}
-                  </div>
-                </ConfigSection>
-
-                {/* Type-specific configuration */}
-                {subAgent.type === 'remote' ? (
-                  <>
-                    {/* Section: Connection */}
-                    <ConfigSection title="Connection" icon={Plug}>
-                      <div className="space-y-1.5">
-                        <Label htmlFor="agentUrl" className="text-xs">Agent URL</Label>
-                        {isEditing ? (
-                          <Input
-                            id="agentUrl"
-                            value={editAgentUrl}
-                            onChange={(e) => {
-                              setEditAgentUrl(e.target.value);
-                              handleFieldChange();
-                            }}
-                            onFocus={() => setActiveFocusArea('config')}
-                            onBlur={() => setActiveFocusArea(null)}
-                            placeholder="https://..."
-                            className="h-8 text-sm font-mono"
-                          />
-                        ) : (
-                          <p className="text-sm font-mono break-all bg-muted p-2 rounded">{displayedAgentUrl}</p>
-                        )}
-                      </div>
-                    </ConfigSection>
-
-                    {/* Pricing */}
-                    <PricingConfigurationSection
-                      isEditing={isEditing}
-                      expanded={pricingExpanded}
-                      onExpandedChange={setPricingExpanded}
-                      rateCardEntries={editRateCardEntries}
-                      onRateCardEntriesChange={setEditRateCardEntries}
-                      onFieldChange={handleFieldChange}
-                      onFocusAreaChange={setActiveFocusArea}
-                      pricingConfig={subAgent?.config_version?.pricing_config}
-                    />
-                  </>
-                ) : subAgent.type === 'foundry' ? (
-                  <>
-                    {/* Section: Foundry Connection */}
-                    <ConfigSection title="Foundry Connection" icon={Database}>
-                      <div className="space-y-1.5">
-                        <Label htmlFor="foundryHostname" className="text-xs">Hostname</Label>
-                        {isEditing ? (
-                          <Input
-                            id="foundryHostname"
-                            value={editFoundryHostname}
-                            onChange={(e) => {
-                              setEditFoundryHostname(e.target.value);
-                              handleFieldChange();
-                            }}
-                            onFocus={() => setActiveFocusArea('config')}
-                            onBlur={() => setActiveFocusArea(null)}
-                            placeholder="example.palantirfoundry.com"
-                            className="h-8 text-sm font-mono"
-                          />
-                        ) : (
-                          <p className="text-sm font-mono break-all bg-muted p-2 rounded">
-                            {displayedFoundryHostname || 'Not configured'}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <Label htmlFor="foundryClientId" className="text-xs">Client ID</Label>
-                        {isEditing ? (
-                          <Input
-                            id="foundryClientId"
-                            value={editFoundryClientId}
-                            onChange={(e) => {
-                              setEditFoundryClientId(e.target.value);
-                              handleFieldChange();
-                            }}
-                            onFocus={() => setActiveFocusArea('config')}
-                            onBlur={() => setActiveFocusArea(null)}
-                            placeholder="client-id"
-                            className="h-8 text-sm font-mono"
-                          />
-                        ) : (
-                          <p className="text-sm font-mono break-all bg-muted p-2 rounded">
-                            {displayedFoundryClientId || 'Not configured'}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <Label htmlFor="foundryClientSecretRef" className="text-xs flex items-center gap-1.5">
-                          <Key className="h-3 w-3" />
-                          Client Secret
-                        </Label>
+                    {canEdit && !isViewingHistoricalVersion && (
+                      <>
                         {isEditing ? (
                           <>
-                            <Select
-                              value={editFoundryClientSecretRef?.toString() ?? ''}
-                              onValueChange={(value) => {
-                                setEditFoundryClientSecretRef(value ? parseInt(value) : null);
-                                handleFieldChange();
-                              }}
-                            >
-                              <SelectTrigger
-                                id="foundryClientSecretRef"
-                                onFocus={() => setActiveFocusArea('config')}
-                                onBlur={() => setActiveFocusArea(null)}
-                                className="h-8 text-sm"
-                              >
-                                <SelectValue placeholder="Select a secret" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {availableSecrets.length === 0 ? (
-                                  <div className="p-3 text-center text-xs text-muted-foreground">
-                                    No secrets available. Create one in Settings → Secrets Vault.
-                                  </div>
-                                ) : (
-                                  availableSecrets.map((secret) => (
-                                    <SelectItem key={secret.id} value={secret.id.toString()}>
-                                      {secret.name}
-                                    </SelectItem>
-                                  ))
-                                )}
-                              </SelectContent>
-                            </Select>
-                            <p className="text-[11px] text-muted-foreground flex items-center gap-1">
-                              <Lock className="h-2.5 w-2.5" />
-                              Stored securely in AWS SSM Parameter Store
-                            </p>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={handleCancelEdit}
+                                  disabled={updateMutation.isPending}
+                                  className="h-7 w-7"
+                                >
+                                  <X className="h-4 w-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Cancel editing</TooltipContent>
+                            </Tooltip>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="icon"
+                                  onClick={handleSave}
+                                  disabled={updateMutation.isPending}
+                                  className="h-7 w-7"
+                                >
+                                  {updateMutation.isPending ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Save className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Save changes</TooltipContent>
+                            </Tooltip>
                           </>
                         ) : (
-                          <p className="text-sm text-muted-foreground flex items-center gap-1.5">
-                            <Lock className="h-3.5 w-3.5" />
-                            {displayedFoundryClientSecretRef
-                              ? availableSecrets.find((s) => s.id === displayedFoundryClientSecretRef)?.name ||
-                                `Secret ID: ${displayedFoundryClientSecretRef}`
-                              : 'Not configured'}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <Label htmlFor="foundryOntologyRid" className="text-xs">Ontology RID</Label>
-                        {isEditing ? (
-                          <Input
-                            id="foundryOntologyRid"
-                            value={editFoundryOntologyRid}
-                            onChange={(e) => {
-                              setEditFoundryOntologyRid(e.target.value);
-                              handleFieldChange();
-                            }}
-                            onFocus={() => setActiveFocusArea('config')}
-                            onBlur={() => setActiveFocusArea(null)}
-                            placeholder="ri.ontology.main.ontology.xxx"
-                            className="h-8 text-sm font-mono"
-                          />
-                        ) : (
-                          <p className="text-sm font-mono break-all bg-muted p-2 rounded">
-                            {displayedFoundryOntologyRid || 'Not configured'}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <Label htmlFor="foundryQueryApiName" className="text-xs">Query API Name</Label>
-                        {isEditing ? (
-                          <Input
-                            id="foundryQueryApiName"
-                            value={editFoundryQueryApiName}
-                            onChange={(e) => {
-                              setEditFoundryQueryApiName(e.target.value);
-                              handleFieldChange();
-                            }}
-                            onFocus={() => setActiveFocusArea('config')}
-                            onBlur={() => setActiveFocusArea(null)}
-                            placeholder="myQueryApi"
-                            className="h-8 text-sm font-mono"
-                          />
-                        ) : (
-                          <p className="text-sm font-mono break-all bg-muted p-2 rounded">
-                            {displayedFoundryQueryApiName || 'Not configured'}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <Label className="text-xs">API Scopes</Label>
-                        {isEditing ? (
-                          <div className="grid grid-cols-1 gap-1.5 p-2 border rounded text-xs">
-                            {[
-                              { value: 'api:use-ontologies-read', label: 'Ontologies Read' },
-                              { value: 'api:use-ontologies-write', label: 'Ontologies Write' },
-                              { value: 'api:use-aip-agents-read', label: 'AIP Agents Read' },
-                              { value: 'api:use-aip-agents-write', label: 'AIP Agents Write' },
-                              { value: 'api:use-mediasets-read', label: 'Mediasets Read' },
-                              { value: 'api:use-mediasets-write', label: 'Mediasets Write' },
-                            ].map((scope) => (
-                              <label key={scope.value} className="flex items-center gap-2">
-                                <input
-                                  type="checkbox"
-                                  checked={editFoundryScopes.includes(scope.value)}
-                                  onChange={(e) => {
-                                    if (e.target.checked) {
-                                      setEditFoundryScopes([...editFoundryScopes, scope.value]);
-                                    } else {
-                                      setEditFoundryScopes(editFoundryScopes.filter((s) => s !== scope.value));
-                                    }
-                                    handleFieldChange();
-                                  }}
-                                  className="rounded border-gray-300"
-                                />
-                                <span>{scope.label}</span>
-                              </label>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="space-y-1 text-sm bg-muted p-2 rounded">
-                            {Array.isArray(displayedFoundryScopes) && displayedFoundryScopes.length > 0 ? (
-                              displayedFoundryScopes.map((scope) => (
-                                <div key={scope} className="flex items-center gap-2">
-                                  <CheckCircle className="h-3 w-3 text-muted-foreground" />
-                                  <code className="text-xs">{scope}</code>
-                                </div>
-                              ))
-                            ) : (
-                              <p className="text-xs text-muted-foreground">No scopes configured</p>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      {(isEditing || displayedFoundryVersion) && (
-                        <div className="space-y-1.5">
-                          <Label htmlFor="foundryVersion" className="text-xs">Version (Optional)</Label>
-                          {isEditing ? (
-                            <Input
-                              id="foundryVersion"
-                              value={editFoundryVersion}
-                              onChange={(e) => {
-                                setEditFoundryVersion(e.target.value);
-                                handleFieldChange();
-                              }}
-                              onFocus={() => setActiveFocusArea('config')}
-                              onBlur={() => setActiveFocusArea(null)}
-                              placeholder="v1"
-                              className="h-8 text-sm"
-                            />
-                          ) : (
-                            <p className="text-sm font-mono bg-muted p-2 rounded">{displayedFoundryVersion}</p>
-                          )}
-                        </div>
-                      )}
-                    </ConfigSection>
-
-                    {/* Pricing */}
-                    <PricingConfigurationSection
-                      isEditing={isEditing}
-                      expanded={pricingExpanded}
-                      onExpandedChange={setPricingExpanded}
-                      rateCardEntries={editRateCardEntries}
-                      onRateCardEntriesChange={setEditRateCardEntries}
-                      onFieldChange={handleFieldChange}
-                      onFocusAreaChange={setActiveFocusArea}
-                      pricingConfig={subAgent?.config_version?.pricing_config}
-                    />
-                  </>
-                ) : (
-                  <>
-                    {/* Section: Model & Intelligence (local agents) */}
-                    <ConfigSection title="Model" icon={Cpu}>
-                      <div className="space-y-1.5">
-                        {isEditing ? (
-                          <Select
-                            value={editModel}
-                            onValueChange={(value) => {
-                              setEditModel(value);
-                              // Tier selections have no concrete alias to check capabilities against.
-                              if (!value.startsWith('tier:') && !modelSupportsThinking(value, availableModels)) {
-                                setEditEnableThinking(false);
-                                setEditThinkingLevel(null);
-                              }
-                              handleFieldChange();
-                            }}
-                          >
-                            <SelectTrigger id="model" className="h-8 text-sm">
-                              <SelectValue placeholder="Select a model or tier" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectGroup>
-                                <SelectLabel>Tier (follows the fleet default for that tier)</SelectLabel>
-                                {MODEL_TIER_OPTIONS.map((opt) => (
-                                  <SelectItem key={opt.value} value={opt.value}>
-                                    {opt.label}
-                                  </SelectItem>
-                                ))}
-                              </SelectGroup>
-                              <SelectSeparator />
-                              <SelectGroup>
-                                <SelectLabel>Specific model</SelectLabel>
-                                {modelSelectOptions(editModelAlias, availableModels, displayedModelRetired).options.map((option) => (
-                                  <SelectItem key={option.value} value={option.value}>
-                                    {option.label}
-                                  </SelectItem>
-                                ))}
-                              </SelectGroup>
-                            </SelectContent>
-                          </Select>
-                        ) : displayedModelTier ? (
-                          <span className="text-sm text-foreground">
-                            {displayedModelTier} tier
-                            {displayedEffectiveModel ? (
-                              <span className="text-muted-foreground"> → {displayedEffectiveModel}</span>
-                            ) : null}
-                          </span>
-                        ) : (
-                          <ModelStatusText
-                            value={displayedModel}
-                            modelRetired={displayedModelRetired}
-                            effectiveModel={displayedEffectiveModel}
-                          />
-                        )}
-                        {isEditing && !editIsTier && modelSelectOptions(editModelAlias, availableModels, displayedModelRetired).retiredValue && (
-                          <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                            This model was retired. Select a replacement to update the agent.
-                          </p>
-                        )}
-                        {isEditing && editIsTier && (
-                          <p className="text-[11px] text-muted-foreground">
-                            Runs on the current default for this tier — survives model upgrades.
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Extended Thinking — only offered for models the gateway reports as
-                          thinking-capable, so we never let the user enable a config the
-                          backend would silently drop on save. */}
-                      {isEditing ? (
-                        modelSupportsThinking(editModelAlias, availableModels) && (
-                          <div className="flex items-center justify-between">
-                            <div className="space-y-0.5">
-                              <span className="text-xs font-medium text-foreground">Extended Thinking</span>
-                              <p className="text-[11px] text-muted-foreground">Enable extended thinking for complex reasoning tasks</p>
-                            </div>
-                            <Switch
-                              checked={editEnableThinking}
-                              onCheckedChange={(checked) => {
-                                setEditEnableThinking(checked);
-                                if (!checked) {
-                                  setEditThinkingLevel(null);
-                                } else if (editThinkingLevel === null) {
-                                  setEditThinkingLevel('low');
-                                }
-                                handleFieldChange();
-                              }}
-                            />
-                          </div>
-                        )
-                      ) : (
-                        displayedEnableThinking && (
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium text-foreground">Extended Thinking</span>
-                            <Badge variant="secondary" className="text-[10px]">
-                              {displayedThinkingLevel ? displayedThinkingLevel.charAt(0).toUpperCase() + displayedThinkingLevel.slice(1) : 'On'}
-                            </Badge>
-                          </div>
-                        )
-                      )}
-
-                      {isEditing && editEnableThinking && modelSupportsThinking(editModelAlias, availableModels) && (
-                        <div className="space-y-1.5 pl-1">
-                          <span className="text-[11px] text-muted-foreground">Thinking Level</span>
-                          <Select
-                            value={editThinkingLevel || undefined}
-                            onValueChange={(value) => {
-                              setEditThinkingLevel(value as OrchestratorThinkingLevel);
-                              handleFieldChange();
-                            }}
-                          >
-                            <SelectTrigger className="h-7 text-xs w-full max-w-[180px]">
-                              <SelectValue placeholder="Select level" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {getAvailableThinkingLevels(editModelAlias, availableModels).map((option) => (
-                                <SelectItem key={option.value} value={option.value}>
-                                  {option.label}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      )}
-                    </ConfigSection>
-
-                    {/* Section: Tools & Skills */}
-                    <ConfigSection title="Tools & Skills" icon={Wrench}>
-                      {/* MCP Tools */}
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-foreground">MCP Tools</span>
-                          {isEditing && (
-                            <Button variant="outline" size="sm" className="h-6 text-[11px] px-2" onClick={() => setShowMcpToolsSheet(true)}>
-                              <Wrench className="h-2.5 w-2.5 mr-1" />
-                              {editMcpTools.length > 0 ? `${editMcpTools.length} selected` : 'Select'}
-                            </Button>
-                          )}
-                        </div>
-                        {!isEditing && (
-                          Array.isArray(displayedMcpTools) && displayedMcpTools.length > 0 ? (
-                            <Collapsible open={mcpToolsExpanded} onOpenChange={setMcpToolsExpanded}>
-                              <CollapsibleTrigger asChild>
-                                <button type="button" className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors">
-                                  <ChevronDown className={`h-3 w-3 transition-transform ${mcpToolsExpanded ? '' : '-rotate-90'}`} />
-                                  {displayedMcpTools.length} tools configured
-                                </button>
-                              </CollapsibleTrigger>
-                              <CollapsibleContent className="pt-1.5">
-                                <div className="space-y-0.5 bg-muted/50 p-2 rounded">
-                                  {displayedMcpTools.map((tool) => (
-                                    <div key={tool} className="flex items-center gap-1.5">
-                                      <Wrench className="h-2.5 w-2.5 text-muted-foreground" />
-                                      <code className="text-[11px]">{tool}</code>
-                                    </div>
-                                  ))}
-                                </div>
-                              </CollapsibleContent>
-                            </Collapsible>
-                          ) : (
-                            <p className="text-[11px] text-muted-foreground">No MCP tools configured.</p>
-                          )
-                        )}
-                      </div>
-
-                      <hr className="border-border/40" />
-
-                      {/* Skills */}
-                      <div className="space-y-2 min-w-0 w-full">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-foreground">Skills</span>
-                          {isEditing && (
-                            <div className="flex gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
                               <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-6 text-[11px] px-2"
-                                onClick={() => setIsSkillImportOpen(true)}
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => {
+                                  setIsEditing(true);
+                                  setActiveFocusArea('config');
+                                  setShowConversationList(false);
+                                }}
+                                className="h-7 w-7"
                               >
-                                <Plus className="h-2.5 w-2.5 mr-1" />
-                                Import
+                                <Edit className="h-4 w-4" />
                               </Button>
-                              {editSkills.some((s) => s.scope === 'sub-agent' || !s.registry_id) ? (
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-6 text-[11px] px-2"
-                                  onClick={() => setIsSkillModalOpen(true)}
-                                >
-                                  <Pencil className="h-2.5 w-2.5 mr-1" />
-                                  Edit Custom
-                                </Button>
-                              ) : (
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-6 text-[11px] px-2"
-                                  onClick={() => setIsSkillModalOpen(true)}
-                                >
-                                  <Plus className="h-2.5 w-2.5 mr-1" />
-                                  Create
-                                </Button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        {(() => {
-                          const skillsList = isEditing ? editSkills : displayedSkills;
-                          return Array.isArray(skillsList) && skillsList.length > 0 ? (
-                            <div className="space-y-1">
-                              {skillsList.map((skill: SkillDefinition, idx: number) => (
-                                <div
-                                  key={skill.name}
-                                  className="flex items-center gap-2 py-1 px-2 rounded bg-muted/40 text-[11px] group/skill"
-                                >
-                                  {skill.scope && skill.scope !== 'sub-agent' ? (
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <a
-                                          href={`/app/skill-registry?skill=${skill.registry_id}`}
-                                          className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline inline-flex items-center gap-0.5"
-                                        >
-                                          {skill.name || '(unnamed)'}
-                                          <ExternalLink className="h-2.5 w-2.5 opacity-60" />
-                                        </a>
-                                      </TooltipTrigger>
-                                      <TooltipContent>View in skill registry</TooltipContent>
-                                    </Tooltip>
-                                  ) : (
-                                    <code className="font-mono font-medium shrink-0 whitespace-nowrap">{skill.name || '(unnamed)'}</code>
-                                  )}
-                                  {skill.scope && skill.scope !== 'sub-agent' && (
-                                    <span className="text-[10px] text-muted-foreground bg-muted px-1 rounded shrink-0">imported</span>
-                                  )}
-                                  {!isEditing && skill.scope && skill.scope !== 'sub-agent' && skill.update_available && skill.registry_id && skill.content_hash && (
-                                    <button
-                                      type="button"
-                                      className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer"
-                                      onClick={() => setSkillDiffInfo({
-                                        registryId: skill.registry_id!,
-                                        contentHash: skill.content_hash!,
-                                        name: skill.name || 'Skill',
-                                        ...(canEdit && { updateTarget: { type: 'imported-skill-direct' as const, skillName: skill.name! } }),
-                                      })}
-                                    >
-                                      update available
-                                    </button>
-                                  )}
-                                  {isEditing && skill.scope && skill.scope !== 'sub-agent' && skill.name && skillsWithUpdates.has(skill.name) && skill.registry_id && skill.content_hash && (
-                                    <button
-                                      type="button"
-                                      className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer"
-                                      disabled={updatingSkillName === skill.name}
-                                      onClick={() => setSkillDiffInfo({
-                                        registryId: skill.registry_id!,
-                                        contentHash: skill.content_hash!,
-                                        name: skill.name || 'Skill',
-                                        updateTarget: { type: 'imported-skill', skillName: skill.name! },
-                                      })}
-                                    >
-                                      {updatingSkillName === skill.name ? (
-                                        <Loader2 className="h-3 w-3 animate-spin inline" />
-                                      ) : (
-                                        'update available'
-                                      )}
-                                    </button>
-                                  )}
-                                  {(skill.files?.length ?? 0) > 0 && (
-                                    <span className="text-[10px] text-muted-foreground shrink-0">
-                                      {skill.files!.length} files
-                                    </span>
-                                  )}
-                                  {skill.description && (
-                                    <span className="text-muted-foreground truncate flex-1">
-                                      — {skill.description.length > 50 ? skill.description.slice(0, 50) + '…' : skill.description}
-                                    </span>
-                                  )}
-                                  {isEditing && skill.scope && skill.scope !== 'sub-agent' && (
-                                    <div className="flex items-center gap-1 opacity-0 group-hover/skill:opacity-100 transition-opacity ml-auto shrink-0">
-                                      <button
-                                        type="button"
-                                        className="text-destructive hover:text-destructive/80"
-                                        onClick={() => {
-                                          setEditSkills((prev) => prev.filter((_, i) => i !== idx));
-                                          handleFieldChange();
-                                        }}
-                                      >
-                                        <Trash2 className="h-3 w-3" />
-                                      </button>
-                                    </div>
-                                  )}
-                                  {isEditing && (!skill.scope || skill.scope === 'sub-agent') && (
-                                    <button
-                                      type="button"
-                                      className="opacity-0 group-hover/skill:opacity-100 text-destructive hover:text-destructive/80 transition-opacity ml-auto shrink-0"
-                                      onClick={() => {
-                                        setEditSkills((prev) => prev.filter((_, i) => i !== idx));
-                                        handleFieldChange();
-                                      }}
-                                    >
-                                      <Trash2 className="h-3 w-3" />
-                                    </button>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-[11px] text-muted-foreground">No skills defined.</p>
-                          );
-                        })()}
+                            </TooltipTrigger>
+                            <TooltipContent>Edit configuration</TooltipContent>
+                          </Tooltip>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                {leftPanelTab === 'personalize' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setShowActivateSkillDialog(true)}
+                  >
+                    <Plus className="h-3 w-3 mr-1" />
+                    Add Skill
+                  </Button>
+                )}
+              </div>
+
+              <TabsContent value="config" className="flex-1 min-h-0 flex flex-col mt-0 data-[state=inactive]:hidden">
+                {/* Read-only mode indicator */}
+                {isViewingHistoricalVersion && (
+                  <div className="px-3 py-2 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+                      <Info className="h-3.5 w-3.5" />
+                      <span>Viewing {formatVersionLabel(viewedVersion, viewingVersionNumber)} (read-only)</span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700"
+                      onClick={() => setViewingVersionNumber(null)}
+                    >
+                      Back to current
+                    </Button>
+                  </div>
+                )}
+
+                <ScrollArea className="flex-1 min-h-0">
+                  <div className="p-3 flex flex-col gap-3 h-full w-full max-w-full">
+                    {isEditing && isEmbedBound && (
+                      <Alert className="py-2">
+                        <Plug className="h-4 w-4" />
+                        <AlertDescription className="text-xs">
+                          Embedded agent. {embedBinding?.base_url} publishes the description, system prompt, skills
+                          {hostOwnsTools ? ', tools' : ''}
+                          {hostOwnsModel ? ', model' : ''}
+                          {hostOwnsThinking ? ', thinking' : ''}. They are read-only here.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+
+                    {/* Section: Identity */}
+                    <ConfigSection title="Identity" icon={FileText}>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="name" className="text-xs">
+                          Name
+                        </Label>
+                        {isEditing ? (
+                          <Input
+                            id="name"
+                            value={editName}
+                            onChange={(e) => {
+                              setEditName(e.target.value);
+                              handleFieldChange();
+                            }}
+                            onFocus={() => setActiveFocusArea('config')}
+                            onBlur={() => setActiveFocusArea(null)}
+                            className="h-8 text-sm"
+                          />
+                        ) : (
+                          <p className="text-sm">{subAgent.name}</p>
+                        )}
                       </div>
 
-                      {/* Skill import from registry dialog */}
-                      {isEditing && (
-                        <SkillRegistryBrowseDialog
-                          open={isSkillImportOpen}
-                          onOpenChange={setIsSkillImportOpen}
-                          title="Add skill from registry"
-                          description="Search for a skill to import into this agent's configuration."
-                          actionLabel="Import"
-                          onAction={(skill) => handleImportSkillFromRegistry(skill)}
-                          actionPending={!!importingSkillId}
-                        />
-                      )}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <Label htmlFor="description" className="text-xs">
+                            Description
+                          </Label>
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-xs">
+                                <p>
+                                  The orchestrator uses this description to route conversations to the appropriate
+                                  sub-agent.
+                                </p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        </div>
+                        {isEditing && !isEmbedBound ? (
+                          <Textarea
+                            id="description"
+                            value={editDescription}
+                            onChange={(e) => {
+                              setEditDescription(e.target.value);
+                              handleFieldChange();
+                            }}
+                            onFocus={() => setActiveFocusArea('config')}
+                            onBlur={() => setActiveFocusArea(null)}
+                            rows={3}
+                            className="text-sm resize-none"
+                            placeholder="Describe what this sub-agent does..."
+                          />
+                        ) : (
+                          <p className="text-sm text-muted-foreground">{displayedDescription || 'No description'}</p>
+                        )}
+                      </div>
 
-                      {/* Skill inline editor modal (for editing body/files - custom skills only) */}
-                      {isEditing && (
-                        <SkillEditorModal
-                          open={isSkillModalOpen}
-                          onOpenChange={setIsSkillModalOpen}
-                          skills={editSkills.filter((s) => s.scope === 'sub-agent' || !s.registry_id) as SkillDefinition[]}
-                          onChange={(updated) => {
-                            const importedSkills = editSkills.filter((s) => s.scope && s.scope !== 'sub-agent');
-                            // Build a lookup of existing sub-agent skills to preserve registry_id/scope
-                            const existingByName = new Map(
-                              editSkills
-                                .filter((s) => s.scope === 'sub-agent' || !s.registry_id)
-                                .map((s) => [s.name, s])
-                            );
-                            const customSkills = updated.map(s => {
-                              const existing = existingByName.get(s.name);
-                              return {
-                                name: s.name,
-                                description: s.description,
-                                body: s.body ?? '',
-                                files: s.files?.map((f: { path: string; content: string }) => ({ path: f.path, content: f.content })),
-                                registry_id: existing?.registry_id ?? null,
-                                scope: existing?.scope ?? null,
-                              };
-                            });
-                            setEditSkills([...importedSkills, ...customSkills]);
-                            handleFieldChange();
-                          }}
-                        />
-                      )}
-
-                      <hr className="border-border/40" />
-
-                      {/* Sandbox Toggle */}
                       <div className="flex items-center justify-between">
                         <div className="space-y-0.5">
-                          <span className="text-xs font-medium text-foreground">Sandbox Execution</span>
+                          <Label htmlFor="is_public" className="text-xs flex items-center gap-1.5">
+                            <Users className="h-3 w-3" />
+                            Public Access
+                          </Label>
                           <p className="text-[11px] text-muted-foreground">
-                            Run skill scripts in isolation
+                            All users can access without group permissions
                           </p>
                         </div>
                         {isEditing ? (
                           <Switch
-                            checked={editSandboxEnabled}
+                            id="is_public"
+                            checked={editIsPublic}
                             onCheckedChange={(checked) => {
-                              setEditSandboxEnabled(checked);
-                              if (!checked) setEditSandboxAutoEnabled(false);
+                              setEditIsPublic(checked);
                               handleFieldChange();
                             }}
                           />
                         ) : (
-                          <Badge variant={displayedSandboxEnabled ? 'default' : 'secondary'} className="text-[10px]">
-                            {displayedSandboxEnabled ? 'Enabled' : 'Disabled'}
+                          <Badge variant={subAgent.is_public ? 'default' : 'secondary'} className="text-[10px]">
+                            {subAgent.is_public ? 'Public' : 'Private'}
                           </Badge>
                         )}
                       </div>
-                      {isEditing && editSandboxAutoEnabled && (
-                        <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                          Auto-enabled because one or more skills contain executable files (.py, .sh, etc.)
-                        </p>
-                      )}
                     </ConfigSection>
 
-                    {/* Section: System Prompt */}
-                    <ConfigSection title="System Prompt" icon={Code} defaultOpen={true}>
-                      <div className="flex flex-col gap-2 min-h-0">
-                        {isEditing ? (
-                          <div className="flex flex-col gap-2 min-h-0">
-                            {/* Edit/Preview Tabs */}
-                            <div className="flex gap-1 p-0.5 bg-muted rounded-md">
-                              <button
-                                className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
-                                  systemPromptTab === 'edit'
-                                    ? 'bg-background text-foreground shadow-sm'
-                                    : 'text-muted-foreground hover:text-foreground'
-                                }`}
-                                onClick={() => setSystemPromptTab('edit')}
-                              >
-                                <Code className="inline h-3 w-3 mr-1" />
-                                Edit
-                              </button>
-                              <button
-                                className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
-                                  systemPromptTab === 'preview'
-                                    ? 'bg-background text-foreground shadow-sm'
-                                    : 'text-muted-foreground hover:text-foreground'
-                                }`}
-                                onClick={() => setSystemPromptTab('preview')}
-                              >
-                                <Eye className="inline h-3 w-3 mr-1" />
-                                Preview
-                              </button>
-                            </div>
-
-                            {systemPromptTab === 'edit' ? (
-                              <Textarea
-                                id="systemPrompt"
-                                value={editSystemPrompt}
+                    {/* Type-specific configuration */}
+                    {subAgent.type === 'remote' ? (
+                      <>
+                        {/* Section: Connection */}
+                        <ConfigSection title="Connection" icon={Plug}>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="agentUrl" className="text-xs">
+                              Agent URL
+                            </Label>
+                            {isEditing ? (
+                              <Input
+                                id="agentUrl"
+                                value={editAgentUrl}
                                 onChange={(e) => {
-                                  setEditSystemPrompt(e.target.value);
+                                  setEditAgentUrl(e.target.value);
                                   handleFieldChange();
                                 }}
                                 onFocus={() => setActiveFocusArea('config')}
                                 onBlur={() => setActiveFocusArea(null)}
-                                className="font-mono text-xs min-h-[200px] resize-none"
-                                placeholder="Enter the system prompt..."
+                                placeholder="https://..."
+                                className="h-8 text-sm font-mono"
                               />
                             ) : (
-                              <div className="bg-muted p-3 rounded min-h-[200px] overflow-auto border">
-                                <Markdown className="text-sm">{editSystemPrompt || '*No content to preview*'}</Markdown>
+                              <p className="text-sm font-mono break-all bg-muted p-2 rounded">{displayedAgentUrl}</p>
+                            )}
+                          </div>
+                        </ConfigSection>
+
+                        {/* Pricing */}
+                        <PricingConfigurationSection
+                          isEditing={isEditing}
+                          expanded={pricingExpanded}
+                          onExpandedChange={setPricingExpanded}
+                          rateCardEntries={editRateCardEntries}
+                          onRateCardEntriesChange={setEditRateCardEntries}
+                          onFieldChange={handleFieldChange}
+                          onFocusAreaChange={setActiveFocusArea}
+                          pricingConfig={subAgent?.config_version?.pricing_config}
+                        />
+                      </>
+                    ) : subAgent.type === 'foundry' ? (
+                      <>
+                        {/* Section: Foundry Connection */}
+                        <ConfigSection title="Foundry Connection" icon={Database}>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="foundryHostname" className="text-xs">
+                              Hostname
+                            </Label>
+                            {isEditing ? (
+                              <Input
+                                id="foundryHostname"
+                                value={editFoundryHostname}
+                                onChange={(e) => {
+                                  setEditFoundryHostname(e.target.value);
+                                  handleFieldChange();
+                                }}
+                                onFocus={() => setActiveFocusArea('config')}
+                                onBlur={() => setActiveFocusArea(null)}
+                                placeholder="example.palantirfoundry.com"
+                                className="h-8 text-sm font-mono"
+                              />
+                            ) : (
+                              <p className="text-sm font-mono break-all bg-muted p-2 rounded">
+                                {displayedFoundryHostname || 'Not configured'}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label htmlFor="foundryClientId" className="text-xs">
+                              Client ID
+                            </Label>
+                            {isEditing ? (
+                              <Input
+                                id="foundryClientId"
+                                value={editFoundryClientId}
+                                onChange={(e) => {
+                                  setEditFoundryClientId(e.target.value);
+                                  handleFieldChange();
+                                }}
+                                onFocus={() => setActiveFocusArea('config')}
+                                onBlur={() => setActiveFocusArea(null)}
+                                placeholder="client-id"
+                                className="h-8 text-sm font-mono"
+                              />
+                            ) : (
+                              <p className="text-sm font-mono break-all bg-muted p-2 rounded">
+                                {displayedFoundryClientId || 'Not configured'}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label htmlFor="foundryClientSecretRef" className="text-xs flex items-center gap-1.5">
+                              <Key className="h-3 w-3" />
+                              Client Secret
+                            </Label>
+                            {isEditing ? (
+                              <>
+                                <Select
+                                  value={editFoundryClientSecretRef?.toString() ?? ''}
+                                  onValueChange={(value) => {
+                                    setEditFoundryClientSecretRef(value ? parseInt(value) : null);
+                                    handleFieldChange();
+                                  }}
+                                >
+                                  <SelectTrigger
+                                    id="foundryClientSecretRef"
+                                    onFocus={() => setActiveFocusArea('config')}
+                                    onBlur={() => setActiveFocusArea(null)}
+                                    className="h-8 text-sm"
+                                  >
+                                    <SelectValue placeholder="Select a secret" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {availableSecrets.length === 0 ? (
+                                      <div className="p-3 text-center text-xs text-muted-foreground">
+                                        No secrets available. Create one in Settings → Secrets Vault.
+                                      </div>
+                                    ) : (
+                                      availableSecrets.map((secret) => (
+                                        <SelectItem key={secret.id} value={secret.id.toString()}>
+                                          {secret.name}
+                                        </SelectItem>
+                                      ))
+                                    )}
+                                  </SelectContent>
+                                </Select>
+                                <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                                  <Lock className="h-2.5 w-2.5" />
+                                  Stored securely in AWS SSM Parameter Store
+                                </p>
+                              </>
+                            ) : (
+                              <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+                                <Lock className="h-3.5 w-3.5" />
+                                {displayedFoundryClientSecretRef
+                                  ? availableSecrets.find((s) => s.id === displayedFoundryClientSecretRef)?.name ||
+                                    `Secret ID: ${displayedFoundryClientSecretRef}`
+                                  : 'Not configured'}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label htmlFor="foundryOntologyRid" className="text-xs">
+                              Ontology RID
+                            </Label>
+                            {isEditing ? (
+                              <Input
+                                id="foundryOntologyRid"
+                                value={editFoundryOntologyRid}
+                                onChange={(e) => {
+                                  setEditFoundryOntologyRid(e.target.value);
+                                  handleFieldChange();
+                                }}
+                                onFocus={() => setActiveFocusArea('config')}
+                                onBlur={() => setActiveFocusArea(null)}
+                                placeholder="ri.ontology.main.ontology.xxx"
+                                className="h-8 text-sm font-mono"
+                              />
+                            ) : (
+                              <p className="text-sm font-mono break-all bg-muted p-2 rounded">
+                                {displayedFoundryOntologyRid || 'Not configured'}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label htmlFor="foundryQueryApiName" className="text-xs">
+                              Query API Name
+                            </Label>
+                            {isEditing ? (
+                              <Input
+                                id="foundryQueryApiName"
+                                value={editFoundryQueryApiName}
+                                onChange={(e) => {
+                                  setEditFoundryQueryApiName(e.target.value);
+                                  handleFieldChange();
+                                }}
+                                onFocus={() => setActiveFocusArea('config')}
+                                onBlur={() => setActiveFocusArea(null)}
+                                placeholder="myQueryApi"
+                                className="h-8 text-sm font-mono"
+                              />
+                            ) : (
+                              <p className="text-sm font-mono break-all bg-muted p-2 rounded">
+                                {displayedFoundryQueryApiName || 'Not configured'}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">API Scopes</Label>
+                            {isEditing ? (
+                              <div className="grid grid-cols-1 gap-1.5 p-2 border rounded text-xs">
+                                {[
+                                  { value: 'api:use-ontologies-read', label: 'Ontologies Read' },
+                                  { value: 'api:use-ontologies-write', label: 'Ontologies Write' },
+                                  { value: 'api:use-aip-agents-read', label: 'AIP Agents Read' },
+                                  { value: 'api:use-aip-agents-write', label: 'AIP Agents Write' },
+                                  { value: 'api:use-mediasets-read', label: 'Mediasets Read' },
+                                  { value: 'api:use-mediasets-write', label: 'Mediasets Write' },
+                                ].map((scope) => (
+                                  <label key={scope.value} className="flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={editFoundryScopes.includes(scope.value)}
+                                      onChange={(e) => {
+                                        if (e.target.checked) {
+                                          setEditFoundryScopes([...editFoundryScopes, scope.value]);
+                                        } else {
+                                          setEditFoundryScopes(editFoundryScopes.filter((s) => s !== scope.value));
+                                        }
+                                        handleFieldChange();
+                                      }}
+                                      className="rounded border-gray-300"
+                                    />
+                                    <span>{scope.label}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="space-y-1 text-sm bg-muted p-2 rounded">
+                                {Array.isArray(displayedFoundryScopes) && displayedFoundryScopes.length > 0 ? (
+                                  displayedFoundryScopes.map((scope) => (
+                                    <div key={scope} className="flex items-center gap-2">
+                                      <CheckCircle className="h-3 w-3 text-muted-foreground" />
+                                      <code className="text-xs">{scope}</code>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <p className="text-xs text-muted-foreground">No scopes configured</p>
+                                )}
                               </div>
                             )}
                           </div>
-                        ) : (
-                          <div className="bg-muted p-3 rounded min-h-[100px] max-h-[300px] overflow-auto border">
-                            <Markdown className="text-sm">{displayedSystemPrompt}</Markdown>
+
+                          {(isEditing || displayedFoundryVersion) && (
+                            <div className="space-y-1.5">
+                              <Label htmlFor="foundryVersion" className="text-xs">
+                                Version (Optional)
+                              </Label>
+                              {isEditing ? (
+                                <Input
+                                  id="foundryVersion"
+                                  value={editFoundryVersion}
+                                  onChange={(e) => {
+                                    setEditFoundryVersion(e.target.value);
+                                    handleFieldChange();
+                                  }}
+                                  onFocus={() => setActiveFocusArea('config')}
+                                  onBlur={() => setActiveFocusArea(null)}
+                                  placeholder="v1"
+                                  className="h-8 text-sm"
+                                />
+                              ) : (
+                                <p className="text-sm font-mono bg-muted p-2 rounded">{displayedFoundryVersion}</p>
+                              )}
+                            </div>
+                          )}
+                        </ConfigSection>
+
+                        {/* Pricing */}
+                        <PricingConfigurationSection
+                          isEditing={isEditing}
+                          expanded={pricingExpanded}
+                          onExpandedChange={setPricingExpanded}
+                          rateCardEntries={editRateCardEntries}
+                          onRateCardEntriesChange={setEditRateCardEntries}
+                          onFieldChange={handleFieldChange}
+                          onFocusAreaChange={setActiveFocusArea}
+                          pricingConfig={subAgent?.config_version?.pricing_config}
+                        />
+                      </>
+                    ) : (
+                      <>
+                        {/* Section: Model & Intelligence (local agents) */}
+                        <ConfigSection title="Model" icon={Cpu}>
+                          <div className="space-y-1.5">
+                            {isEditing ? (
+                              <Select
+                                value={editModel}
+                                disabled={hostOwnsModel}
+                                onValueChange={(value) => {
+                                  setEditModel(value);
+                                  // Tier selections have no concrete alias to check capabilities against.
+                                  if (!value.startsWith('tier:') && !modelSupportsThinking(value, availableModels)) {
+                                    setEditEnableThinking(false);
+                                    setEditThinkingLevel(null);
+                                  }
+                                  handleFieldChange();
+                                }}
+                              >
+                                <SelectTrigger id="model" className="h-8 text-sm">
+                                  <SelectValue placeholder="Select a model or tier" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectGroup>
+                                    <SelectLabel>Tier (follows the fleet default for that tier)</SelectLabel>
+                                    {MODEL_TIER_OPTIONS.map((opt) => (
+                                      <SelectItem key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectGroup>
+                                  <SelectSeparator />
+                                  <SelectGroup>
+                                    <SelectLabel>Specific model</SelectLabel>
+                                    {modelSelectOptions(
+                                      editModelAlias,
+                                      availableModels,
+                                      displayedModelRetired
+                                    ).options.map((option) => (
+                                      <SelectItem key={option.value} value={option.value}>
+                                        {option.label}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectGroup>
+                                </SelectContent>
+                              </Select>
+                            ) : displayedModelTier ? (
+                              <span className="text-sm text-foreground">
+                                {displayedModelTier} tier
+                                {displayedEffectiveModel ? (
+                                  <span className="text-muted-foreground"> → {displayedEffectiveModel}</span>
+                                ) : null}
+                              </span>
+                            ) : (
+                              <ModelStatusText
+                                value={displayedModel}
+                                modelRetired={displayedModelRetired}
+                                effectiveModel={displayedEffectiveModel}
+                              />
+                            )}
+                            {isEditing &&
+                              !editIsTier &&
+                              modelSelectOptions(editModelAlias, availableModels, displayedModelRetired)
+                                .retiredValue && (
+                                <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                                  This model was retired. Select a replacement to update the agent.
+                                </p>
+                              )}
+                            {isEditing && editIsTier && (
+                              <p className="text-[11px] text-muted-foreground">
+                                Runs on the current default for this tier — survives model upgrades.
+                              </p>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    </ConfigSection>
-                  </>
-                )}
 
-                {hasUnsavedChanges && (
-                  <Alert className="flex-shrink-0">
-                    <AlertDescription>
-                      You have unsaved changes. Save to test with the updated configuration.
-                    </AlertDescription>
-                  </Alert>
-                )}
-              </div>
-            </ScrollArea>
-            </TabsContent>
+                          {/* Extended Thinking — only offered for models the gateway reports as
+                          thinking-capable, so we never let the user enable a config the
+                          backend would silently drop on save. */}
+                          {isEditing
+                            ? modelSupportsThinking(editModelAlias, availableModels) && (
+                                <div className="flex items-center justify-between">
+                                  <div className="space-y-0.5">
+                                    <span className="text-xs font-medium text-foreground">Extended Thinking</span>
+                                    <p className="text-[11px] text-muted-foreground">
+                                      Enable extended thinking for complex reasoning tasks
+                                    </p>
+                                  </div>
+                                  <Switch
+                                    checked={editEnableThinking}
+                                    disabled={hostOwnsThinking}
+                                    onCheckedChange={(checked) => {
+                                      setEditEnableThinking(checked);
+                                      if (!checked) {
+                                        setEditThinkingLevel(null);
+                                      } else if (editThinkingLevel === null) {
+                                        setEditThinkingLevel('low');
+                                      }
+                                      handleFieldChange();
+                                    }}
+                                  />
+                                </div>
+                              )
+                            : displayedEnableThinking && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-medium text-foreground">Extended Thinking</span>
+                                  <Badge variant="secondary" className="text-[10px]">
+                                    {displayedThinkingLevel
+                                      ? displayedThinkingLevel.charAt(0).toUpperCase() + displayedThinkingLevel.slice(1)
+                                      : 'On'}
+                                  </Badge>
+                                </div>
+                              )}
 
-            <TabsContent value="personalize" className="flex-1 min-h-0 flex flex-col mt-0 data-[state=inactive]:hidden">
-            <ScrollArea className="flex-1 min-h-0">
-              <div className="p-4 space-y-4">
-                <div className="space-y-2">
-                  <p className="text-sm text-muted-foreground">
-                    Skills you activate here extend this agent for your conversations (personal) or for everyone in a group.
-                  </p>
-                  <p className="text-xs text-muted-foreground/70">
-                    Resolution: personal skills override group skills, which override the agent&apos;s built-in skills (by name).
-                  </p>
-                  <a
-                    href="/app/skill-registry"
-                    className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
-                  >
-                    <ExternalLink className="h-3 w-3" />
-                    Browse skill registry
-                  </a>
-                </div>
-                <div className="space-y-1.5">
-              {myActivations.length > 0 ? (
-                myActivations.map((activation) => (
-                  <div
-                    key={activation.id}
-                    className="flex items-center gap-2 py-1.5 px-2 rounded bg-background/60 text-[11px] group/activation"
-                  >
-                    <Blocks className="h-3 w-3 text-muted-foreground shrink-0" />
-                    <a
-                      href={`/app/skill-registry?skill=${(activation as any).skill_slug || activation.skill_name}`}
-                      className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline"
-                    >
-                      {activation.skill_name}
-                    </a>
-                    <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5 shrink-0">
-                      {activation.scope === 'group' ? <Users className="h-2 w-2" /> : <Lock className="h-2 w-2" />}
-                      {activation.scope === 'group' ? (activation.group_name ?? 'Group') : 'Personal'}
-                    </Badge>
-                    {activation.update_available && (
-                      <button
-                        type="button"
-                        onClick={() => setSkillDiffInfo({
-                          registryId: activation.registry_id,
-                          contentHash: activation.content_hash,
-                          name: activation.skill_name,
-                          updateTarget: { type: 'activation', activationId: activation.id },
-                        })}
+                          {isEditing &&
+                            editEnableThinking &&
+                            modelSupportsThinking(editModelAlias, availableModels) && (
+                              <div className="space-y-1.5 pl-1">
+                                <span className="text-[11px] text-muted-foreground">Thinking Level</span>
+                                <Select
+                                  value={editThinkingLevel || undefined}
+                                  disabled={hostOwnsThinking}
+                                  onValueChange={(value) => {
+                                    setEditThinkingLevel(value as OrchestratorThinkingLevel);
+                                    handleFieldChange();
+                                  }}
+                                >
+                                  <SelectTrigger className="h-7 text-xs w-full max-w-[180px]">
+                                    <SelectValue placeholder="Select level" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {getAvailableThinkingLevels(editModelAlias, availableModels).map((option) => (
+                                      <SelectItem key={option.value} value={option.value}>
+                                        {option.label}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            )}
+                        </ConfigSection>
+
+                        {/* Section: Tools & Skills */}
+                        <ConfigSection title="Tools & Skills" icon={Wrench}>
+                          {/* MCP Tools */}
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-medium text-foreground">MCP Tools</span>
+                              {isEditing && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-6 text-[11px] px-2"
+                                  disabled={hostOwnsTools}
+                                  title={hostOwnsTools ? 'The tool list is published by the authority' : undefined}
+                                  onClick={() => setShowMcpToolsSheet(true)}
+                                >
+                                  <Wrench className="h-2.5 w-2.5 mr-1" />
+                                  {editMcpTools.length > 0 ? `${editMcpTools.length} selected` : 'Select'}
+                                </Button>
+                              )}
+                            </div>
+                            {!isEditing &&
+                              (Array.isArray(displayedMcpTools) && displayedMcpTools.length > 0 ? (
+                                <Collapsible open={mcpToolsExpanded} onOpenChange={setMcpToolsExpanded}>
+                                  <CollapsibleTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                                    >
+                                      <ChevronDown
+                                        className={`h-3 w-3 transition-transform ${mcpToolsExpanded ? '' : '-rotate-90'}`}
+                                      />
+                                      {displayedMcpTools.length} tools configured
+                                    </button>
+                                  </CollapsibleTrigger>
+                                  <CollapsibleContent className="pt-1.5">
+                                    <div className="space-y-0.5 bg-muted/50 p-2 rounded">
+                                      {displayedMcpTools.map((tool) => (
+                                        <div key={tool} className="flex items-center gap-1.5">
+                                          <Wrench className="h-2.5 w-2.5 text-muted-foreground" />
+                                          <code className="text-[11px]">{tool}</code>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </CollapsibleContent>
+                                </Collapsible>
+                              ) : isEmbedBound ? (
+                                <p className="text-[11px] text-muted-foreground">
+                                  No tool list. This embedded agent can use every tool the user has.
+                                </p>
+                              ) : (
+                                <p className="text-[11px] text-muted-foreground">No MCP tools configured.</p>
+                              ))}
+                          </div>
+
+                          <hr className="border-border/40" />
+
+                          {/* Skills */}
+                          <div className="space-y-2 min-w-0 w-full">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-medium text-foreground">Skills</span>
+                              {isEditing && !isEmbedBound && (
+                                <div className="flex gap-1">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-6 text-[11px] px-2"
+                                    onClick={() => setIsSkillImportOpen(true)}
+                                  >
+                                    <Plus className="h-2.5 w-2.5 mr-1" />
+                                    Import
+                                  </Button>
+                                  {editSkills.some((s) => s.scope === 'sub-agent' || !s.registry_id) ? (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 text-[11px] px-2"
+                                      onClick={() => setIsSkillModalOpen(true)}
+                                    >
+                                      <Pencil className="h-2.5 w-2.5 mr-1" />
+                                      Edit Custom
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 text-[11px] px-2"
+                                      onClick={() => setIsSkillModalOpen(true)}
+                                    >
+                                      <Plus className="h-2.5 w-2.5 mr-1" />
+                                      Create
+                                    </Button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            {(() => {
+                              const skillsList = isEditing ? editSkills : displayedSkills;
+                              return Array.isArray(skillsList) && skillsList.length > 0 ? (
+                                <div className="space-y-1">
+                                  {skillsList.map((skill: SkillDefinition, idx: number) => (
+                                    <div
+                                      key={skill.name}
+                                      className="flex items-center gap-2 py-1 px-2 rounded bg-muted/40 text-[11px] group/skill"
+                                    >
+                                      {skill.scope && skill.scope !== 'sub-agent' ? (
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <a
+                                              href={`/app/skill-registry?skill=${skill.registry_id}`}
+                                              className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline inline-flex items-center gap-0.5"
+                                            >
+                                              {skill.name || '(unnamed)'}
+                                              <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                                            </a>
+                                          </TooltipTrigger>
+                                          <TooltipContent>View in skill registry</TooltipContent>
+                                        </Tooltip>
+                                      ) : (
+                                        <code className="font-mono font-medium shrink-0 whitespace-nowrap">
+                                          {skill.name || '(unnamed)'}
+                                        </code>
+                                      )}
+                                      {skill.scope && skill.scope !== 'sub-agent' && (
+                                        <span className="text-[10px] text-muted-foreground bg-muted px-1 rounded shrink-0">
+                                          imported
+                                        </span>
+                                      )}
+                                      {!isEditing &&
+                                        skill.scope &&
+                                        skill.scope !== 'sub-agent' &&
+                                        skill.update_available &&
+                                        skill.registry_id &&
+                                        skill.content_hash && (
+                                          <button
+                                            type="button"
+                                            className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer"
+                                            onClick={() =>
+                                              setSkillDiffInfo({
+                                                registryId: skill.registry_id!,
+                                                contentHash: skill.content_hash!,
+                                                name: skill.name || 'Skill',
+                                                ...(canEdit &&
+                                                  !isEmbedBound && {
+                                                    updateTarget: {
+                                                      type: 'imported-skill-direct' as const,
+                                                      skillName: skill.name!,
+                                                    },
+                                                  }),
+                                              })
+                                            }
+                                          >
+                                            update available
+                                          </button>
+                                        )}
+                                      {isEditing &&
+                                        !isEmbedBound &&
+                                        skill.scope &&
+                                        skill.scope !== 'sub-agent' &&
+                                        skill.name &&
+                                        skillsWithUpdates.has(skill.name) &&
+                                        skill.registry_id &&
+                                        skill.content_hash && (
+                                          <button
+                                            type="button"
+                                            className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer"
+                                            disabled={updatingSkillName === skill.name}
+                                            onClick={() =>
+                                              setSkillDiffInfo({
+                                                registryId: skill.registry_id!,
+                                                contentHash: skill.content_hash!,
+                                                name: skill.name || 'Skill',
+                                                updateTarget: { type: 'imported-skill', skillName: skill.name! },
+                                              })
+                                            }
+                                          >
+                                            {updatingSkillName === skill.name ? (
+                                              <Loader2 className="h-3 w-3 animate-spin inline" />
+                                            ) : (
+                                              'update available'
+                                            )}
+                                          </button>
+                                        )}
+                                      {(skill.files?.length ?? 0) > 0 && (
+                                        <span className="text-[10px] text-muted-foreground shrink-0">
+                                          {skill.files!.length} files
+                                        </span>
+                                      )}
+                                      {skill.description && (
+                                        <span className="text-muted-foreground truncate flex-1">
+                                          —{' '}
+                                          {skill.description.length > 50
+                                            ? skill.description.slice(0, 50) + '…'
+                                            : skill.description}
+                                        </span>
+                                      )}
+                                      {isEditing && !isEmbedBound && skill.scope && skill.scope !== 'sub-agent' && (
+                                        <div className="flex items-center gap-1 opacity-0 group-hover/skill:opacity-100 transition-opacity ml-auto shrink-0">
+                                          <button
+                                            type="button"
+                                            className="text-destructive hover:text-destructive/80"
+                                            onClick={() => {
+                                              setEditSkills((prev) => prev.filter((_, i) => i !== idx));
+                                              handleFieldChange();
+                                            }}
+                                          >
+                                            <Trash2 className="h-3 w-3" />
+                                          </button>
+                                        </div>
+                                      )}
+                                      {isEditing && !isEmbedBound && (!skill.scope || skill.scope === 'sub-agent') && (
+                                        <button
+                                          type="button"
+                                          className="opacity-0 group-hover/skill:opacity-100 text-destructive hover:text-destructive/80 transition-opacity ml-auto shrink-0"
+                                          onClick={() => {
+                                            setEditSkills((prev) => prev.filter((_, i) => i !== idx));
+                                            handleFieldChange();
+                                          }}
+                                        >
+                                          <Trash2 className="h-3 w-3" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-[11px] text-muted-foreground">No skills defined.</p>
+                              );
+                            })()}
+                          </div>
+
+                          {/* Skill import from registry dialog */}
+                          {isEditing && (
+                            <SkillRegistryBrowseDialog
+                              open={isSkillImportOpen}
+                              onOpenChange={setIsSkillImportOpen}
+                              title="Add skill from registry"
+                              description="Search for a skill to import into this agent's configuration."
+                              actionLabel="Import"
+                              onAction={(skill) => handleImportSkillFromRegistry(skill)}
+                              actionPending={!!importingSkillId}
+                            />
+                          )}
+
+                          {/* Skill inline editor modal (for editing body/files - custom skills only) */}
+                          {isEditing && (
+                            <SkillEditorModal
+                              open={isSkillModalOpen}
+                              onOpenChange={setIsSkillModalOpen}
+                              skills={
+                                editSkills.filter((s) => s.scope === 'sub-agent' || !s.registry_id) as SkillDefinition[]
+                              }
+                              onChange={(updated) => {
+                                const importedSkills = editSkills.filter((s) => s.scope && s.scope !== 'sub-agent');
+                                // Build a lookup of existing sub-agent skills to preserve registry_id/scope
+                                const existingByName = new Map(
+                                  editSkills
+                                    .filter((s) => s.scope === 'sub-agent' || !s.registry_id)
+                                    .map((s) => [s.name, s])
+                                );
+                                const customSkills = updated.map((s) => {
+                                  const existing = existingByName.get(s.name);
+                                  return {
+                                    name: s.name,
+                                    description: s.description,
+                                    body: s.body ?? '',
+                                    files: s.files?.map((f: { path: string; content: string }) => ({
+                                      path: f.path,
+                                      content: f.content,
+                                    })),
+                                    registry_id: existing?.registry_id ?? null,
+                                    scope: existing?.scope ?? null,
+                                  };
+                                });
+                                setEditSkills([...importedSkills, ...customSkills]);
+                                handleFieldChange();
+                              }}
+                            />
+                          )}
+
+                          <hr className="border-border/40" />
+
+                          {/* Sandbox Toggle */}
+                          <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                              <span className="text-xs font-medium text-foreground">Sandbox Execution</span>
+                              <p className="text-[11px] text-muted-foreground">Run skill scripts in isolation</p>
+                            </div>
+                            {isEditing ? (
+                              <Switch
+                                checked={editSandboxEnabled}
+                                onCheckedChange={(checked) => {
+                                  setEditSandboxEnabled(checked);
+                                  if (!checked) setEditSandboxAutoEnabled(false);
+                                  handleFieldChange();
+                                }}
+                              />
+                            ) : (
+                              <Badge
+                                variant={displayedSandboxEnabled ? 'default' : 'secondary'}
+                                className="text-[10px]"
+                              >
+                                {displayedSandboxEnabled ? 'Enabled' : 'Disabled'}
+                              </Badge>
+                            )}
+                          </div>
+                          {isEditing && editSandboxAutoEnabled && (
+                            <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                              Auto-enabled because one or more skills contain executable files (.py, .sh, etc.)
+                            </p>
+                          )}
+                        </ConfigSection>
+
+                        {/* Section: System Prompt */}
+                        <ConfigSection title="System Prompt" icon={Code} defaultOpen={true}>
+                          <div className="flex flex-col gap-2 min-h-0">
+                            {isEditing && !isEmbedBound ? (
+                              <div className="flex flex-col gap-2 min-h-0">
+                                {/* Edit/Preview Tabs */}
+                                <div className="flex gap-1 p-0.5 bg-muted rounded-md">
+                                  <button
+                                    className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
+                                      systemPromptTab === 'edit'
+                                        ? 'bg-background text-foreground shadow-sm'
+                                        : 'text-muted-foreground hover:text-foreground'
+                                    }`}
+                                    onClick={() => setSystemPromptTab('edit')}
+                                  >
+                                    <Code className="inline h-3 w-3 mr-1" />
+                                    Edit
+                                  </button>
+                                  <button
+                                    className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
+                                      systemPromptTab === 'preview'
+                                        ? 'bg-background text-foreground shadow-sm'
+                                        : 'text-muted-foreground hover:text-foreground'
+                                    }`}
+                                    onClick={() => setSystemPromptTab('preview')}
+                                  >
+                                    <Eye className="inline h-3 w-3 mr-1" />
+                                    Preview
+                                  </button>
+                                </div>
+
+                                {systemPromptTab === 'edit' ? (
+                                  <Textarea
+                                    id="systemPrompt"
+                                    value={editSystemPrompt}
+                                    onChange={(e) => {
+                                      setEditSystemPrompt(e.target.value);
+                                      handleFieldChange();
+                                    }}
+                                    onFocus={() => setActiveFocusArea('config')}
+                                    onBlur={() => setActiveFocusArea(null)}
+                                    className="font-mono text-xs min-h-[200px] resize-none"
+                                    placeholder="Enter the system prompt..."
+                                  />
+                                ) : (
+                                  <div className="bg-muted p-3 rounded min-h-[200px] overflow-auto border">
+                                    <Markdown className="text-sm">
+                                      {editSystemPrompt || '*No content to preview*'}
+                                    </Markdown>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="bg-muted p-3 rounded min-h-[100px] max-h-[300px] overflow-auto border">
+                                <Markdown className="text-sm">{displayedSystemPrompt}</Markdown>
+                              </div>
+                            )}
+                          </div>
+                        </ConfigSection>
+                      </>
+                    )}
+
+                    {hasUnsavedChanges && (
+                      <Alert className="flex-shrink-0">
+                        <AlertDescription>
+                          You have unsaved changes. Save to test with the updated configuration.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                  </div>
+                </ScrollArea>
+              </TabsContent>
+
+              <TabsContent
+                value="personalize"
+                className="flex-1 min-h-0 flex flex-col mt-0 data-[state=inactive]:hidden"
+              >
+                <ScrollArea className="flex-1 min-h-0">
+                  <div className="p-4 space-y-4">
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground">
+                        Skills you activate here extend this agent for your conversations (personal) or for everyone in
+                        a group.
+                      </p>
+                      <p className="text-xs text-muted-foreground/70">
+                        Resolution: personal skills override group skills, which override the agent&apos;s built-in
+                        skills (by name).
+                      </p>
+                      <a
+                        href="/app/skill-registry"
+                        className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
                       >
-                        <Badge variant="default" className="text-[9px] px-1 py-0 bg-amber-500 hover:bg-amber-600 shrink-0 cursor-pointer">
-                          <ArrowUpCircle className="h-2 w-2 mr-0.5" />
-                          update
-                        </Badge>
-                      </button>
-                    )}
-                    {activation.skill_description && (
-                      <span className="text-muted-foreground truncate flex-1">
-                        — {activation.skill_description.length > 40 ? activation.skill_description.slice(0, 40) + '…' : activation.skill_description}
-                      </span>
-                    )}
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover/activation:opacity-100 transition-opacity ml-auto shrink-0">
-                      {activation.update_available && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <button
-                              type="button"
-                              className="text-primary hover:text-primary/80 p-0.5"
-                              onClick={() => setSkillDiffInfo({
-                                registryId: activation.registry_id,
-                                contentHash: activation.content_hash,
-                                name: activation.skill_name,
-                                updateTarget: { type: 'activation', activationId: activation.id },
-                              })}
-                              disabled={updateActivationMutation.isPending}
-                            >
-                              <RefreshCw className="h-3 w-3" />
-                            </button>
-                          </TooltipTrigger>
-                          <TooltipContent>Update to latest</TooltipContent>
-                        </Tooltip>
-                      )}
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            className="text-destructive hover:text-destructive/80 p-0.5"
-                            onClick={() => setDeactivatingActivation(activation)}
+                        <ExternalLink className="h-3 w-3" />
+                        Browse skill registry
+                      </a>
+                    </div>
+                    <div className="space-y-1.5">
+                      {myActivations.length > 0 ? (
+                        myActivations.map((activation) => (
+                          <div
+                            key={activation.id}
+                            className="flex items-center gap-2 py-1.5 px-2 rounded bg-background/60 text-[11px] group/activation"
                           >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>Deactivate</TooltipContent>
-                      </Tooltip>
+                            <Blocks className="h-3 w-3 text-muted-foreground shrink-0" />
+                            <a
+                              href={`/app/skill-registry?skill=${(activation as any).skill_slug || activation.skill_name}`}
+                              className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline"
+                            >
+                              {activation.skill_name}
+                            </a>
+                            <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5 shrink-0">
+                              {activation.scope === 'group' ? (
+                                <Users className="h-2 w-2" />
+                              ) : (
+                                <Lock className="h-2 w-2" />
+                              )}
+                              {activation.scope === 'group' ? (activation.group_name ?? 'Group') : 'Personal'}
+                            </Badge>
+                            {activation.update_available && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSkillDiffInfo({
+                                    registryId: activation.registry_id,
+                                    contentHash: activation.content_hash,
+                                    name: activation.skill_name,
+                                    updateTarget: { type: 'activation', activationId: activation.id },
+                                  })
+                                }
+                              >
+                                <Badge
+                                  variant="default"
+                                  className="text-[9px] px-1 py-0 bg-amber-500 hover:bg-amber-600 shrink-0 cursor-pointer"
+                                >
+                                  <ArrowUpCircle className="h-2 w-2 mr-0.5" />
+                                  update
+                                </Badge>
+                              </button>
+                            )}
+                            {activation.skill_description && (
+                              <span className="text-muted-foreground truncate flex-1">
+                                —{' '}
+                                {activation.skill_description.length > 40
+                                  ? activation.skill_description.slice(0, 40) + '…'
+                                  : activation.skill_description}
+                              </span>
+                            )}
+                            <div className="flex items-center gap-0.5 opacity-0 group-hover/activation:opacity-100 transition-opacity ml-auto shrink-0">
+                              {activation.update_available && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="text-primary hover:text-primary/80 p-0.5"
+                                      onClick={() =>
+                                        setSkillDiffInfo({
+                                          registryId: activation.registry_id,
+                                          contentHash: activation.content_hash,
+                                          name: activation.skill_name,
+                                          updateTarget: { type: 'activation', activationId: activation.id },
+                                        })
+                                      }
+                                      disabled={updateActivationMutation.isPending}
+                                    >
+                                      <RefreshCw className="h-3 w-3" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Update to latest</TooltipContent>
+                                </Tooltip>
+                              )}
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    className="text-destructive hover:text-destructive/80 p-0.5"
+                                    onClick={() => setDeactivatingActivation(activation)}
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent>Deactivate</TooltipContent>
+                              </Tooltip>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground text-center py-6">
+                          No skills activated. Click &quot;Add Skill&quot; to add from registry.
+                        </p>
+                      )}
                     </div>
                   </div>
-                ))
-              ) : (
-                <p className="text-[11px] text-muted-foreground text-center py-6">
-                  No skills activated. Click &quot;Add Skill&quot; to add from registry.
-                </p>
-              )}
-                </div>
-              </div>
-            </ScrollArea>
-            </TabsContent>
-          </div>
+                </ScrollArea>
+              </TabsContent>
+            </div>
           </Tabs>
+
+          {/* Host Binding Panel (ADR-0006) */}
+          {subAgent.type === 'local' && (isOwner || (isAdministrator && adminMode) || hasGroupWriteAccess) && (
+            <EmbedBindingPanel
+              subAgentId={subAgent.id}
+              binding={embedBinding}
+              canManage={isAdministrator}
+              onChanged={invalidateSubAgentQuery}
+            />
+          )}
 
           {/* Group Access Panel */}
           {(isOwner || (isAdministrator && adminMode)) && (
@@ -2320,6 +2580,7 @@ export function SubAgentDetailPage() {
             isOwner={isOwner}
             isAdmin={adminMode}
             hasWriteAccess={hasGroupWriteAccess}
+            isEmbedBound={isEmbedBound}
             isCollapsed={versionSidebarCollapsed}
             onCollapsedChange={(collapsed) => {
               setVersionSidebarCollapsed(collapsed);
@@ -2575,12 +2836,14 @@ export function SubAgentDetailPage() {
             <DialogHeader>
               <DialogTitle>Deactivate skill?</DialogTitle>
               <DialogDescription>
-                This will remove <strong>{deactivatingActivation.skill_name}</strong> from this agent.
-                The skill remains in the registry and can be re-activated later.
+                This will remove <strong>{deactivatingActivation.skill_name}</strong> from this agent. The skill remains
+                in the registry and can be re-activated later.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setDeactivatingActivation(null)}>Cancel</Button>
+              <Button variant="outline" onClick={() => setDeactivatingActivation(null)}>
+                Cancel
+              </Button>
               <Button
                 variant="destructive"
                 onClick={() => {
@@ -2601,7 +2864,9 @@ export function SubAgentDetailPage() {
       {/* Skill Diff Dialog */}
       <SkillDiffDialog
         open={!!skillDiffInfo}
-        onOpenChange={(open) => { if (!open) setSkillDiffInfo(null); }}
+        onOpenChange={(open) => {
+          if (!open) setSkillDiffInfo(null);
+        }}
         registryId={skillDiffInfo?.registryId ?? ''}
         pinnedContentHash={skillDiffInfo?.contentHash ?? ''}
         skillName={skillDiffInfo?.name ?? ''}

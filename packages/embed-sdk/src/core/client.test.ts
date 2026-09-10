@@ -72,6 +72,29 @@ describe('TransportClient handshake', () => {
     expect(client.getState().agentInfo).toEqual({ name: 'Nannos' });
   });
 
+  it('stores the bound sub-agent the handshake names, and clears it when unbound', async () => {
+    const { client, fake } = makeClient();
+    await client.connect();
+    const init = client.initializeClient({ agentUrl: 'http://orch', model: 'm' }, 'sess-1');
+    fake.fire('client_initialized', {
+      status: 'success',
+      agent: { name: 'Orchestrator Agent' },
+      embeddedAgent: { subAgentId: '21', name: 'Alloy AI Assistant', revision: 'abc123def4567890' },
+    });
+    await expect(init).resolves.toBe(true);
+    expect(client.getState().embeddedAgent).toEqual({
+      subAgentId: '21',
+      name: 'Alloy AI Assistant',
+      revision: 'abc123def4567890',
+    });
+
+    // A console session (and an unbound token) simply omit the field.
+    const again = client.initializeClient({ agentUrl: 'http://orch', model: 'm' }, 'sess-1');
+    fake.fire('client_initialized', { status: 'success', agent: { name: 'Orchestrator Agent' } });
+    await expect(again).resolves.toBe(true);
+    expect(client.getState().embeddedAgent).toBeNull();
+  });
+
   it('resolves false on error status', async () => {
     const { client, fake } = makeClient();
     await client.connect();
@@ -170,7 +193,12 @@ describe('TransportClient messaging and state', () => {
     fake.fire('client_initialized', { status: 'success', agent: {} });
     expect(client.getState().initialized).toBe(true);
     fake.fire('disconnect');
-    expect(client.getState()).toEqual({ socketConnected: false, initialized: false, agentInfo: null });
+    expect(client.getState()).toEqual({
+      socketConnected: false,
+      initialized: false,
+      agentInfo: null,
+      embeddedAgent: null,
+    });
   });
 
   it('is StrictMode-safe: disconnect() nulls the socket so a remount reconnects cleanly', async () => {

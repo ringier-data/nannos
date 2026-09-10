@@ -402,6 +402,11 @@ class Config(BaseModel):
     #   CORS_ALLOWED_CHAT_ORIGINS=https://riad.alloy.ch,https://pr-*-riad.d.alloy.ch
     # Parsed by console_backend.cors_origins; both CORS layers share the result.
     cors_allowed_chat_origins: list[str] = Field(default_factory=lambda: _read_cors_allowed_chat_origins())
+    # How often bound sub-agents re-fetch their host-published definition (ADR-0006).
+    # The host's Cache-Control also bounds each fetch; this is the loop cadence.
+    embed_sync_interval_seconds: int = Field(
+        default_factory=lambda: int(os.getenv("EMBED_SYNC_INTERVAL_SECONDS", "300"))
+    )
     secret_key: str = Field(default_factory=lambda: os.getenv("SECRET_KEY", "change-me-in-production"))
     session_ttl_seconds: int = Field(default=2592000)  # 30 days
     cookie_name: str = Field(default="a2a-chatui")

@@ -25,7 +25,11 @@ semantics; the panel needs a human pass on a real backend per environment
 Client actions now have their own lens for this pass: the dev inspector's
 **client actions** section logs every executed directive (path, outcome,
 registered targets at the time) and its **run a directive** box fires one
-host-side without an agent — see `core/client-action-log.ts`.
+host-side without an agent — see `core/client-action-log.ts`. Auth has one
+too: the inspector's **auth** tab reads `config.getToken` — the same call the
+socket makes — and shows the claims, the remaining life and (on request) the
+raw JWT, which is what separates a wrong-audience token from a broken
+backend.
 
 ### 7. Fire-and-forget directives are dropped in an own-socket scope
 `NannosCore.bindClientActions` listens on `core.transport`, but a scope with

@@ -17,7 +17,7 @@ async def test_update_automated_agent_without_foundry_fields(
     """Test that updating an AUTOMATED agent does not require Foundry fields."""
     # Create an AUTOMATED agent
     create_data = SubAgentCreate(
-        name="Dante Verse Daily Inspiration",
+        name="dante-verse-daily-inspiration",
         type=SubAgentType.AUTOMATED,
         is_public=False,
         description="Retrieves Divina Commedia verses",
@@ -66,7 +66,7 @@ async def test_automated_agent_constraints_on_update(
     """Test that AUTOMATED agent constraints are enforced on update."""
     # Create an AUTOMATED agent
     create_data = SubAgentCreate(
-        name="Test Automated Agent",
+        name="test-automated-agent",
         type=SubAgentType.AUTOMATED,
         is_public=False,
         description="Test agent",

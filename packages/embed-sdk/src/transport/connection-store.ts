@@ -6,16 +6,24 @@
  * subscribe/getSnapshot.
  */
 import type { TransportClient } from '../core/client';
-import type { Settings } from '../core/wire';
+import type { EmbeddedAgentInfo, Settings } from '../core/wire';
 
 export interface ConnectionSnapshot {
   socketConnected: boolean;
   initialized: boolean;
   agentName: string | null;
+  /** The sub-agent this connection is bound to (ADR-0006); null off an embedded
+   *  surface, and until the handshake answers. */
+  embeddedAgent: EmbeddedAgentInfo | null;
 }
 
 export class ConnectionStore {
-  private snapshot: ConnectionSnapshot = { socketConnected: false, initialized: false, agentName: null };
+  private snapshot: ConnectionSnapshot = {
+    socketConnected: false,
+    initialized: false,
+    agentName: null,
+    embeddedAgent: null,
+  };
   private readonly listeners = new Set<() => void>();
   private readonly readyWaiters = new Set<(ok: boolean) => void>();
   private initializing = false;
@@ -44,11 +52,16 @@ export class ConnectionStore {
         socketConnected: state.socketConnected,
         initialized: state.initialized,
         agentName: state.agentInfo?.displayName ?? state.agentInfo?.name ?? this.snapshot.agentName,
+        // Kept across a disconnect like agentName: the binding does not change
+        // under a reconnect, and blanking the label mid-drop would flicker the UI.
+        embeddedAgent: state.embeddedAgent ?? this.snapshot.embeddedAgent,
       };
       const changed =
         next.socketConnected !== this.snapshot.socketConnected ||
         next.initialized !== this.snapshot.initialized ||
-        next.agentName !== this.snapshot.agentName;
+        next.agentName !== this.snapshot.agentName ||
+        next.embeddedAgent?.subAgentId !== this.snapshot.embeddedAgent?.subAgentId ||
+        next.embeddedAgent?.name !== this.snapshot.embeddedAgent?.name;
       this.snapshot = next;
       if (changed) for (const l of this.listeners) l();
       // State-driven (not promise-driven): a reconnect can race the

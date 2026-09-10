@@ -4,7 +4,6 @@ import {
   Terminal,
   ChevronDown,
   Info,
-  CheckCircle2,
   Lightbulb,
   Server,
   Code2,
@@ -25,9 +24,9 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
 import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, MODEL_TIER_OPTIONS } from '@/config/models';
 import type { SubAgent, SubAgentType, SubAgentFormData, SkillDefinition } from './types';
+import { AgentTypeCards, type AgentTypeChoice } from './AgentTypeCards';
 import type { OrchestratorThinkingLevel, SkillSearchResult } from '@/api/generated/types.gen';
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { SkillRegistryBrowseDialog } from '@/components/skills/SkillRegistryBrowseDialog';
@@ -37,15 +36,30 @@ import { PricingConfigurationSection } from '@/components/subagents/PricingConfi
 import { useQuery } from '@tanstack/react-query';
 import { listSecretsApiV1SecretsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
 import { client } from '@/api/generated/client.gen';
+import { SUB_AGENT_NAME_HINT, subAgentNameError } from '@/lib/subAgentName';
 
 interface SubAgentFormProps {
   subAgent?: SubAgent;
   onSubmit: (data: SubAgentFormData) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
+  /** Which type card starts selected when creating. Ignored while editing. */
+  initialType?: SubAgentType;
+  /** Offer the admin-only "Embedded Agent" card in the type chooser. */
+  showEmbeddedType?: boolean;
+  /** The admin picked "Embedded Agent". This form does not handle it; the page swaps itself out. */
+  onSelectEmbeddedType?: () => void;
 }
 
-export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = false }: SubAgentFormProps) {
+export function SubAgentForm({
+  subAgent,
+  onSubmit,
+  onCancel,
+  isSubmitting = false,
+  initialType,
+  showEmbeddedType = false,
+  onSelectEmbeddedType,
+}: SubAgentFormProps) {
   const isEditing = !!subAgent;
   const { models: availableModels } = useAvailableModels();
 
@@ -62,7 +76,7 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
   const isTierSelected = modelSelection.startsWith('tier:');
   const modelAlias = isTierSelected ? '' : modelSelection;  // '' when a tier is chosen
   const modelTier = isTierSelected ? modelSelection.slice('tier:'.length) : null;
-  const [type, setType] = useState<SubAgentType>(subAgent?.type ?? ('local' as SubAgentType));
+  const [type, setType] = useState<SubAgentType>(subAgent?.type ?? initialType ?? ('local' as SubAgentType));
   const [isPublic, setIsPublic] = useState(subAgent?.is_public ?? false);
   const [isMcpToolsOpen, setIsMcpToolsOpen] = useState(false);
 
@@ -203,13 +217,9 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
   }, [modelAlias, enableThinking, thinkingLevel]);
 
   const validate = (): string | null => {
-    if (!name.trim()) {
-      return 'Name is required';
-    }
-    // Validate name format: only lowercase letters, numbers, and hyphens
-    const namePattern = /^[a-z0-9-]+$/;
-    if (!namePattern.test(name.trim())) {
-      return 'Name must contain only lowercase letters, numbers, and hyphens';
+    const nameError = subAgentNameError(name);
+    if (nameError) {
+      return nameError;
     }
     if (!description.trim()) {
       return 'Description is required';
@@ -396,95 +406,14 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       {!isEditing && (
         <div>
           <h3 className="text-lg font-semibold mb-4">Choose Agent Type</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Local Agent Card */}
-            <button
-              type="button"
-              onClick={() => handleTypeChange('local')}
-              disabled={isSubmitting}
-              className={cn(
-                'relative flex flex-col items-start p-6 rounded-lg border-2 transition-all text-left',
-                'hover:shadow-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
-                type === 'local'
-                  ? 'border-primary bg-primary/5 shadow-sm'
-                  : 'border-border bg-background hover:border-primary/50'
-              )}
-            >
-              {type === 'local' && (
-                <div className="absolute top-3 right-3">
-                  <CheckCircle2 className="h-5 w-5 text-primary" />
-                </div>
-              )}
-              <div className="flex items-center gap-3 mb-3">
-                <div className={cn('p-2 rounded-md', type === 'local' ? 'bg-primary/10' : 'bg-muted')}>
-                  <Terminal className="h-6 w-6" />
-                </div>
-                <h4 className="text-base font-semibold">Local Agent</h4>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Run an agent locally with a custom system prompt and optional MCP tools. Full control over behavior and
-                capabilities.
-              </p>
-            </button>
-
-            {/* Remote Agent Card */}
-            <button
-              type="button"
-              onClick={() => handleTypeChange('remote')}
-              disabled={isSubmitting}
-              className={cn(
-                'relative flex flex-col items-start p-6 rounded-lg border-2 transition-all text-left',
-                'hover:shadow-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
-                type === 'remote'
-                  ? 'border-primary bg-primary/5 shadow-sm'
-                  : 'border-border bg-background hover:border-primary/50'
-              )}
-            >
-              {type === 'remote' && (
-                <div className="absolute top-3 right-3">
-                  <CheckCircle2 className="h-5 w-5 text-primary" />
-                </div>
-              )}
-              <div className="flex items-center gap-3 mb-3">
-                <div className={cn('p-2 rounded-md', type === 'remote' ? 'bg-primary/10' : 'bg-muted')}>
-                  <Globe className="h-6 w-6" />
-                </div>
-                <h4 className="text-base font-semibold">Remote Agent (A2A)</h4>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Connect to an external A2A-compatible agent endpoint. Delegate tasks to specialized external services.
-              </p>
-            </button>
-
-            {/* Foundry Agent Card */}
-            <button
-              type="button"
-              onClick={() => handleTypeChange('foundry' as SubAgentType)}
-              disabled={isSubmitting}
-              className={cn(
-                'relative flex flex-col items-start p-6 rounded-lg border-2 transition-all text-left',
-                'hover:shadow-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
-                type === 'foundry'
-                  ? 'border-primary bg-primary/5 shadow-sm'
-                  : 'border-border bg-background hover:border-primary/50'
-              )}
-            >
-              {type === 'foundry' && (
-                <div className="absolute top-3 right-3">
-                  <CheckCircle2 className="h-5 w-5 text-primary" />
-                </div>
-              )}
-              <div className="flex items-center gap-3 mb-3">
-                <div className={cn('p-2 rounded-md', type === 'foundry' ? 'bg-primary/10' : 'bg-muted')}>
-                  <Database className="h-6 w-6" />
-                </div>
-                <h4 className="text-base font-semibold">Foundry Agent</h4>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Connect to Palantir Foundry ontology queries. Execute data operations and workflows on Foundry.
-              </p>
-            </button>
-          </div>
+          <AgentTypeCards
+            value={type as AgentTypeChoice}
+            onChange={(choice) =>
+              choice === 'embedded' ? onSelectEmbeddedType?.() : handleTypeChange(choice as SubAgentType)
+            }
+            disabled={isSubmitting}
+            showEmbedded={showEmbeddedType}
+          />
         </div>
       )}
 
@@ -508,7 +437,7 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                   placeholder="my-sub-agent"
                   disabled={isSubmitting}
                 />
-                <p className="text-xs text-muted-foreground">Only lowercase letters, numbers, and hyphens allowed</p>
+                <p className="text-xs text-muted-foreground">{SUB_AGENT_NAME_HINT}</p>
               </div>
 
               <div className="space-y-2">

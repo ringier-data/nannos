@@ -54,6 +54,32 @@ describe('ConnectionStore', () => {
     expect(store.getSnapshot()).toMatchObject({ initialized: true, agentName: 'Orchestrator' });
   });
 
+  it('carries the bound sub-agent into the snapshot and keeps it across a reconnect', async () => {
+    const { fake, client, store } = setup();
+    await client.connect();
+    fake.connect();
+    void store.initialize();
+    await vi.waitFor(() => expect(fake.emitted.some(([e]) => e === 'initialize_client')).toBe(true));
+
+    const seen: number[] = [];
+    store.subscribe(() => seen.push(1));
+    fake.fire('client_initialized', {
+      status: 'success',
+      agent: { name: 'Orchestrator Agent' },
+      embeddedAgent: { subAgentId: '21', name: 'Alloy AI Assistant' },
+    });
+    // The A2A card names the orchestrator; the bound sub-agent is what the panel labels.
+    expect(store.getSnapshot()).toMatchObject({
+      agentName: 'Orchestrator Agent',
+      embeddedAgent: { subAgentId: '21', name: 'Alloy AI Assistant' },
+    });
+    expect(seen.length).toBeGreaterThan(0);
+
+    // A drop does not unbind anything, so the label must not blink out under it.
+    fake.disconnect();
+    expect(store.getSnapshot().embeddedAgent).toEqual({ subAgentId: '21', name: 'Alloy AI Assistant' });
+  });
+
   it('whenReady times out to FALSE when nothing answers (a send becomes a visible error)', async () => {
     const { store, client, fake } = setup();
     await client.connect();

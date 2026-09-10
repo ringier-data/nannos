@@ -29,7 +29,7 @@ class TestSubAgentServiceGroupPermissions:
         sub_agent_service: SubAgentService,
         db_session,
         actor: User,
-        name: str = "Test Agent",
+        name: str = "test-agent",
     ):
         """Helper to create a test sub-agent."""
 
@@ -57,7 +57,7 @@ class TestSubAgentServiceGroupPermissions:
         """Test that owner_status is synced when user status changes."""
 
         # Create sub-agent
-        agent = await self._create_test_sub_agent(sub_agent_service, db_session, actor=test_user_db, name="Test Agent")
+        agent = await self._create_test_sub_agent(sub_agent_service, db_session, actor=test_user_db, name="test-agent")
 
         # Verify initial owner_status is 'active'
         result = await db_session.execute(

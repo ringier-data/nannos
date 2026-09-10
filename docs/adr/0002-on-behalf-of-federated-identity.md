@@ -101,6 +101,33 @@ status: accepted (mechanism refined 2026-07-06 — see Amendments 1 & 2)
 > identity provider (toggle *JWT Authorization Grant* on it, alongside the new
 > client, in the provisioning tool) and the user links this amendment creates. Both
 > Keycloaks can be upgraded to any version, so no preview feature is on the path.
+>
+> **Amendment 5 (2026-09-09) — hint dropped; cockpit-backend keeps the refresh token (BFF).**
+> A live test of Amendment 4 on prod showed two gaps: the token minted after an
+> Alloy-brokered login lacked the profile claims an Okta-brokered login carries, and
+> the flow as tested handed the widget no refresh token. Decision: the cockpit does
+> **not** send `kc_idp_hint`; the popup runs the realm's standard login (default
+> identity provider: Ringier Okta), once. Token custody moves into cockpit-backend as a
+> backend-for-frontend: it generates the PKCE verifier, receives the code from the
+> cockpit page (same static callback page as before), exchanges it, stores the
+> `offline_access` refresh token per cockpit user (`nannos_user_tokens`) and mints
+> access tokens on demand (`GET /api/v1/nannos/token`). The SDK is unchanged: the
+> cockpit supplies its own `NannosAuth` (`bffAuth`) whose `login()` drives the popup
+> and whose `getAccessToken()` asks cockpit-backend. The browser holds only a
+> short-lived access token in memory; a 404 from the BFF is the "not linked" signal
+> that re-arms the launcher's login. A linked user gets tokens in every tab and on
+> every device with a cockpit session, until the offline session lapses (30 days
+> idle, realm default) or they unlink.
+>
+> Consequences: this is custody of a Nannos-issued token, not an exchange, so the
+> Tier-B `federated-exchange` service (Amendment 2) stays retired. The `alloy`
+> identity provider + first-broker-login flow (`rcplus-nannos-keycloak` 1.7.1) and the
+> `nannos-broker` client (`rcplus-alloy-keycloak` 2.17.1) stay deployed but unused;
+> `alloy` is hidden on the login page, so it is inert, and removing it is a separate
+> decision. The JWT Authorization Grant chain is **parked**, so ADR-0006's "stage 2"
+> has no date. `pkce({ idpHint })` stays in the SDK (0.5.0) as a generic option.
+> Concurrent refreshes from several tabs are safe while the realm keeps *Revoke
+> Refresh Token* off; turning it on would need a per-user lock in the BFF.
 
 When PTC code calls a host application's MCP server, it runs under the **end
 user's own OIDC identity**, carried end-to-end (host → embed widget →

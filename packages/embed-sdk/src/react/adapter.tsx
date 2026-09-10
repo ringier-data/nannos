@@ -39,10 +39,10 @@ export interface UserChatSettings {
  *   (backendUrl, token, socket) live in the core's `NannosConfig`.
  */
 export interface NannosHostAdapter {
-  /** Override the name shown in the chat header. By default the embed auto-resolves
-   *  the scoped sub-agent's name (from `subAgentId`); set this to force a label
-   *  instead (or when there's no sub-agent). Falls back to the A2A handshake's
-   *  agent name if neither is available. */
+  /** Force the agent's display name (read via `useAgentName()` by hosts that
+   *  render their own chrome). Unset, the SDK uses the name the host itself
+   *  publishes at `/.well-known/agent-skills/index.json` (`x-nannos-agent.name`,
+   *  ADR-0006), then the A2A handshake's agent name. */
   agentName?: string;
 
   /** Host-known auth facts. The widget never derives these itself. */

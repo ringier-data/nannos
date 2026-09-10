@@ -32,6 +32,7 @@ export {
   type ClientActionPath,
 } from './client-action-log';
 export { createPkceAuth, handleAuthCallback, type PkceAuth, type PkceAuthConfig } from './auth';
+export { decodeJwt, jwtExpMs, type DecodedJwt } from './jwt';
 export {
   zodFormRegistration,
   zodToFieldSpecs,
@@ -53,6 +54,8 @@ export {
  * `LANGSMITH_ENDPOINT` is the API host, not the UI, so it cannot be reused here.
  */
 const LANGSMITH_APP_URL = 'https://eu.smith.langchain.com';
+/** Where a host publishes its agent definition (Agent Skills Discovery RFC 0.2.0 + `x-nannos-agent`). */
+const HOST_AGENT_INDEX_PATH = '/.well-known/agent-skills/index.json';
 
 /** The subset of `{backendUrl}/api/v1/config` this SDK reads. */
 interface BackendConfig {
@@ -66,7 +69,7 @@ export class NannosCore {
   readonly clientActions = new ClientActionLog();
   readonly transport: TransportClient;
   private backendConfigPromise: Promise<BackendConfig | null> | null = null;
-  private subAgentNamePromise: Promise<string | null> | null = null;
+  private hostAgentNamePromise: Promise<string | null> | null = null;
 
   /** Self-login strategy (PKCE), if the host chose the `auth` path. */
   readonly auth: NannosAuth | null;
@@ -257,22 +260,39 @@ export class NannosCore {
   }
 
   /**
-   * Resolve the display name of the scoped sub-agent this embed runs (`subAgentId`)
-   * from `{backendUrl}/api/v1/sub-agents/{id}` → `name`. In execute-only mode the
-   * A2A handshake returns the ORCHESTRATOR's card ("Orchestrator Agent"), which
-   * mislabels the widget — the header should reflect the sub-agent actually
-   * running. Cached; null when there's no `subAgentId` or the lookup fails (the
-   * caller then falls back to the handshake's agent name).
+   * Whether this surface is an EMBEDDED host (ADR-0004/0006) rather than the
+   * console's own panel. The two authenticate differently and that is the tell:
+   * a host on another origin hands us a bearer token (`getToken`, or `auth`
+   * bridged to one); the console rides its same-origin session cookie. Embedded
+   * surfaces start fresh instead of adopting the latest conversation, and never
+   * render another surface's conversations read-only (the server already scopes
+   * their list to the sub-agent their token is bound to).
    */
-  resolveSubAgentName(fetcher: (path: string) => Promise<Response>): Promise<string | null> {
-    if (this.config.subAgentId === undefined) return Promise.resolve(null);
-    if (!this.subAgentNamePromise) {
-      this.subAgentNamePromise = fetcher(`/api/v1/sub-agents/${this.config.subAgentId}`)
-        .then((r) => (r.ok ? (r.json() as Promise<{ name?: string }>) : null))
-        .then((sa) => sa?.name ?? null)
-        .catch(() => null);
+  isEmbedded(): boolean {
+    return this.config.getToken !== undefined;
+  }
+
+  /**
+   * The display name of the agent this host publishes (ADR-0006): read from the
+   * host's OWN origin, `/.well-known/agent-skills/index.json` →
+   * `x-nannos-agent.name`. Same-origin, unauthenticated, cached for the page's
+   * life. Null outside a browser, when the host publishes no definition, or on
+   * any error — callers fall back to the A2A handshake's agent name.
+   */
+  resolveHostAgentName(fetchImpl: typeof fetch = (...args) => fetch(...args)): Promise<string | null> {
+    if (!this.hostAgentNamePromise) {
+      const origin = typeof window !== 'undefined' ? window.location?.origin : undefined;
+      this.hostAgentNamePromise = !origin
+        ? Promise.resolve(null)
+        : fetchImpl(`${origin}${HOST_AGENT_INDEX_PATH}`, { credentials: 'omit' })
+            .then((r) => (r.ok ? (r.json() as Promise<{ 'x-nannos-agent'?: { name?: unknown } }>) : null))
+            .then((index) => {
+              const name = index?.['x-nannos-agent']?.name;
+              return typeof name === 'string' && name.trim() ? name.trim() : null;
+            })
+            .catch(() => null);
     }
-    return this.subAgentNamePromise;
+    return this.hostAgentNamePromise;
   }
 
   register<TState>(input: RegisterInput<TState>): ObjectHandle {

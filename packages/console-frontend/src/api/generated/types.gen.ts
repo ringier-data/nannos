@@ -36,7 +36,7 @@ export type ActivateRequest = {
  *
  * Activation source enum matching database enum.
  */
-export type ActivationSource = 'user' | 'group' | 'admin';
+export type ActivationSource = 'user' | 'group' | 'admin' | 'embed';
 
 /**
  * ActivationUpdateResponse
@@ -215,6 +215,8 @@ export type AuditLogListResponse = {
 export type AutomatedSubAgentConfig = {
     /**
      * Name
+     *
+     * Agent name must be 1-64 characters, start with a letter, and contain only letters, digits, hyphens and underscores (no spaces)
      */
     name: string;
     /**
@@ -1676,6 +1678,151 @@ export type DetailedUsageReport = {
      * Billing Unit Breakdown
      */
     billing_unit_breakdown?: Array<BillingUnitBreakdown>;
+};
+
+/**
+ * EmbedBinding
+ *
+ * Read model: the binding plus the state of its last sync.
+ */
+export type EmbedBinding = {
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id: number;
+    /**
+     * Base Url
+     */
+    base_url: string;
+    /**
+     * Index Url
+     */
+    index_url: string;
+    /**
+     * Azps
+     */
+    azps: Array<string>;
+    /**
+     * Revision
+     */
+    revision?: string | null;
+    /**
+     * Version Hash
+     */
+    version_hash?: string | null;
+    /**
+     * Fetched At
+     */
+    fetched_at?: string | null;
+    /**
+     * Last Error
+     */
+    last_error?: string | null;
+    /**
+     * Last Error At
+     */
+    last_error_at?: string | null;
+    /**
+     * Last Seen At
+     */
+    last_seen_at?: string | null;
+    /**
+     * Azps Seen
+     */
+    azps_seen?: {
+        [key: string]: string;
+    };
+    agent?: WellKnownAgentInfo | null;
+    /**
+     * Skills
+     */
+    skills?: Array<WellKnownSkillInfo>;
+    /**
+     * Created By
+     */
+    created_by: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * EmbedBindingProbe
+ *
+ * Result of a dry run against an authority. Nothing is created or changed.
+ *
+ * `ok` is False when the authority could not be read; `error` then says why, in the
+ * same words the create call would have failed with.
+ */
+export type EmbedBindingProbe = {
+    /**
+     * Ok
+     */
+    ok: boolean;
+    /**
+     * Base Url
+     */
+    base_url: string;
+    /**
+     * Index Url
+     */
+    index_url: string;
+    agent?: WellKnownAgentInfo | null;
+    /**
+     * Skills
+     */
+    skills?: Array<WellKnownSkillInfo>;
+    /**
+     * Revision
+     */
+    revision?: string | null;
+    /**
+     * Error
+     */
+    error?: string | null;
+};
+
+/**
+ * EmbedBindingProbeRequest
+ *
+ * Admin request body for POST /api/v1/sub-agents/embed-bindings/probe.
+ *
+ * `base_url` is deliberately NOT validated here: the probe is a test, so a malformed
+ * origin must come back as a readable probe failure, not as a 422 the caller has to
+ * unwrap. The service normalizes it and reports the same message inline.
+ */
+export type EmbedBindingProbeRequest = {
+    /**
+     * Base Url
+     *
+     * Origin to read /.well-known/agent-skills/ from, e.g. https://riad.alloy.ch
+     */
+    base_url: string;
+};
+
+/**
+ * EmbedBindingUpsert
+ *
+ * Admin request body for PUT /api/v1/sub-agents/{id}/embed-binding.
+ */
+export type EmbedBindingUpsert = {
+    /**
+     * Base Url
+     *
+     * Origin that serves /.well-known/agent-skills/, e.g. https://riad.alloy.ch
+     */
+    base_url: string;
+    /**
+     * Azps
+     *
+     * OAuth client ids (token `azp`) whose users are bound to this sub-agent
+     */
+    azps: Array<string>;
 };
 
 /**
@@ -5727,6 +5874,7 @@ export type SubAgent = {
      */
     updated_at?: string;
     config_version?: SubAgentConfigVersion | null;
+    embed_binding?: EmbedBinding | null;
 };
 
 /**
@@ -6039,6 +6187,8 @@ export type SubAgentConfigVersionSummary = {
 export type SubAgentCreate = {
     /**
      * Name
+     *
+     * Agent name must be 1-64 characters, start with a letter, and contain only letters, digits, hyphens and underscores (no spaces)
      */
     name: string;
     /**
@@ -6365,6 +6515,8 @@ export type SubAgentType = 'remote' | 'local' | 'foundry' | 'automated';
 export type SubAgentUpdate = {
     /**
      * Name
+     *
+     * Agent name must be 1-64 characters, start with a letter, and contain only letters, digits, hyphens and underscores (no spaces)
      */
     name?: string | null;
     /**
@@ -7828,6 +7980,66 @@ export type WebSearchModelOption = {
 };
 
 /**
+ * WellKnownAgentInfo
+ *
+ * The `x-nannos-agent` block as last synced, for the admin view.
+ */
+export type WellKnownAgentInfo = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Organization
+     */
+    organization?: string | null;
+    /**
+     * Prompt Url
+     */
+    prompt_url: string;
+    /**
+     * Prompt Digest
+     */
+    prompt_digest: string;
+    /**
+     * Tools
+     */
+    tools?: Array<string> | null;
+    /**
+     * Model Tier
+     */
+    model_tier?: string | null;
+    /**
+     * Thinking Level
+     */
+    thinking_level?: string | null;
+};
+
+/**
+ * WellKnownSkillInfo
+ *
+ * One published skill as listed in the host's index (no body — that lives in the version).
+ */
+export type WellKnownSkillInfo = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Url
+     */
+    url: string;
+    /**
+     * Digest
+     */
+    digest: string;
+};
+
+/**
  * SkillSummary
  *
  * Summary of a skill file (for listing).
@@ -9037,6 +9249,164 @@ export type GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetRes
 };
 
 export type GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponse = GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponses[keyof GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponses];
+
+export type ListEmbedBindingsApiV1SubAgentsEmbedBindingsGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/sub-agents/embed-bindings';
+};
+
+export type ListEmbedBindingsApiV1SubAgentsEmbedBindingsGetResponses = {
+    /**
+     * Response List Embed Bindings Api V1 Sub Agents Embed Bindings Get
+     *
+     * Successful Response
+     */
+    200: Array<EmbedBinding>;
+};
+
+export type ListEmbedBindingsApiV1SubAgentsEmbedBindingsGetResponse = ListEmbedBindingsApiV1SubAgentsEmbedBindingsGetResponses[keyof ListEmbedBindingsApiV1SubAgentsEmbedBindingsGetResponses];
+
+export type CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostData = {
+    body: EmbedBindingUpsert;
+    path?: never;
+    query?: never;
+    url: '/api/v1/sub-agents/embed-bindings';
+};
+
+export type CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostError = CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostErrors[keyof CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostErrors];
+
+export type CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: EmbedBinding;
+};
+
+export type CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostResponse = CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostResponses[keyof CreateEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostResponses];
+
+export type ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostData = {
+    body: EmbedBindingProbeRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/sub-agents/embed-bindings/probe';
+};
+
+export type ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostError = ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostErrors[keyof ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostErrors];
+
+export type ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: EmbedBindingProbe;
+};
+
+export type ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostResponse = ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostResponses[keyof ProbeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostResponses];
+
+export type RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/sub-agents/{sub_agent_id}/embed-binding';
+};
+
+export type RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteError = RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteErrors[keyof RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteErrors];
+
+export type RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteResponse = RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteResponses[keyof RemoveEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteResponses];
+
+export type SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutData = {
+    body: EmbedBindingUpsert;
+    path: {
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/sub-agents/{sub_agent_id}/embed-binding';
+};
+
+export type SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutError = SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutErrors[keyof SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutErrors];
+
+export type SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: EmbedBinding;
+};
+
+export type SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutResponse = SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutResponses[keyof SetEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutResponses];
+
+export type RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostData = {
+    body?: never;
+    path: {
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/sub-agents/{sub_agent_id}/embed-binding/refresh';
+};
+
+export type RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostError = RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostErrors[keyof RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostErrors];
+
+export type RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: EmbedBinding;
+};
+
+export type RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostResponse = RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostResponses[keyof RefreshEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingRefreshPostResponses];
 
 export type DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteData = {
     body?: never;

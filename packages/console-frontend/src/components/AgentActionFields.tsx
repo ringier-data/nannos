@@ -37,6 +37,7 @@ import {
 } from '@/config/models';
 import { config } from '@/config';
 import type { McpTool } from '@/api/generated/types.gen';
+import { SUB_AGENT_NAME_HINT } from '@/lib/subAgentName';
 
 /** The subset of a job form that describes what to run. */
 export interface AgentAction {
@@ -133,9 +134,10 @@ export function AgentActionFields({
                 id="automated_name"
                 value={value.automated_name}
                 onChange={(e) => onChange({ automated_name: e.target.value })}
-                placeholder="My Automated Agent"
+                placeholder="my-automated-agent"
                 aria-invalid={Boolean(fieldErrors?.automated_name) || undefined}
               />
+              <p className="text-xs text-muted-foreground">{SUB_AGENT_NAME_HINT}</p>
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="automated_model">Model</Label>

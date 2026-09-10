@@ -65,7 +65,6 @@ import { NannosProvider } from '@nannos/embed-sdk/react';
   config={{
     backendUrl: 'https://console.your-nannos.example', // omit for same-origin console usage
     getToken: () => auth.getAccessToken(),             // or `auth={pkce({...})}` — see Auth
-    subAgentId: process.env.MY_SUB_AGENT_ID,           // string|number; execute-only scoped agent
   }}
   navigate={(to) => router.push(to)}   // client-action `navigate`
   highlight={myHighlight}              // client-action `highlight` (host DOM knowledge)
@@ -141,7 +140,16 @@ The header names the **conversation**, not the agent — that is what changes as
 the user moves between chats. An unnamed one reads as `thread.newConversation`
 from the strings table, so it translates; `panel.title` now names the panel
 region instead. A host that wants its agent's name on screen owns that chrome:
-pass your own `header`, and read `useChatEngine().adapter.agentName`.
+pass your own `header`, and read `useAgentName()` — the adapter's `agentName`
+if set, else the bound sub-agent console-backend named in the handshake, else the
+name the host publishes at `/.well-known/agent-skills/index.json`
+(`x-nannos-agent.name`), else the A2A handshake's agent name.
+
+On a bound embedded surface the composer already shows which agent answers, next
+to the page-context label — no host chrome needed. `useEmbeddedAgent()` returns
+that binding (`{ subAgentId, name, description, organization, revision }`) or
+`null` off an embedded surface. It is the server's answer, so it holds even when
+the host serves no well-known index on the page's own origin.
 
 A host that replaces `header` keeps the overlay by driving it itself:
 `useConversationHistory()` returns `{ available, isOpen, open, close, toggle }`.
@@ -259,6 +267,16 @@ Open dialogs and toasts (sonner, `role="alert"`) are reported even though they
 portal outside the root. Set `screenOutline={false}` on the provider to send
 only page context + readers.
 
+## Which agent runs
+
+An embedded host never names a sub-agent. console-backend binds the OAuth client
+(`azp`) of the bearer token to a sub-agent an admin configured in the Nannos
+console (the *embed binding*, ADR-0006), activates the user for it on their first
+connect, and stamps every turn server-side. Anything a page sends under
+`executeOnlySubAgentId` is dropped. The agent's prompt, tools, skills, model tier
+and thinking level are published by the host itself under
+`/.well-known/agent-skills/` and synced into that sub-agent.
+
 ## Auth
 
 Unchanged from v1 (ADR-0002): supply exactly one of
@@ -275,8 +293,14 @@ Unchanged from v1 (ADR-0002): supply exactly one of
     skips the nannos login page. With a live host SSO session it flashes and
     closes (no credentials typed), and the first visit creates + links the
     nannos user. Realm setup is code in `rcplus-nannos-keycloak`
-    (`app/keycloak-client-provisioning`, `--idp alloy`); see ADR-0002 Amendment 4.
+    (`app/keycloak-client-provisioning`, `--idp alloy`); see ADR-0002 Amendments 4
+    and 5 (the cockpit does not set it).
     `extraAuthParams` appends any other authorize params.
+- **Your own `NannosAuth`** — the interface is four methods (`getAccessToken`,
+  `login`, `isAuthenticated`, `logout`), so a host can put token custody wherever
+  it wants. The cockpit does: its `bffAuth` keeps the Nannos refresh token in
+  cockpit-backend and `getAccessToken()` asks the backend for a fresh access
+  token, so the browser never holds a refresh token (ADR-0002 Amendment 5).
 
 `useNannosStatus()` separates `unauthenticated` (fix = login) from
 `disconnected` (network) — plus `connecting | connected | authError`.
@@ -291,8 +315,7 @@ Unchanged from v1 (ADR-0002): supply exactly one of
   `approval-requested` dynamic-tool parts (risk badges from `_risk_metadata`,
   buttons gated by `review_configs`); `addToolApprovalResponse` + the AI SDK's
   `sendAutomaticallyWhen` produce exactly ONE resume send with the batched
-  decisions, re-attaching the execute-only directive and the client-object
-  manifest.
+  decisions, re-attaching the client-object manifest.
 - **Streaming offsets are code points** (Python `len`), never `.length` —
   reconnect/replay dedupe survives emoji.
 - **Steering**: sending while a turn streams routes into the RUNNING turn

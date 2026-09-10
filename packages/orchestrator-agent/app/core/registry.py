@@ -10,7 +10,7 @@ import httpx
 from agent_common.a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
 from agent_common.core.tool_catalogue import sanitize_tool_name
 from agent_common.models.base import ThinkingLevel
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .prompt_placeholders import resolve_prompt_placeholders
 
@@ -121,6 +121,9 @@ class SubAgent(BaseModel):
     default_version: int | None = None
     config_version: SubAgentConfigVersion | None = None  # Embedded version data
     effective_permission: str | None = None  # User's effective permission (owner/write/read)
+    # ADR-0006: present when a host application publishes this sub-agent's definition.
+    # Read only for its presence here; the published block lives in console-backend.
+    embed_binding: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -424,82 +427,101 @@ class RegistryService:
             if not sa.config_version:
                 continue
 
-            cv = sa.config_version
-            if sa.type == "remote":
-                # Remote A2A agents have agent_url at root level
-                agent_url = cv.agent_url
-                if agent_url:
-                    # Store metadata for remote agents (sub_agent_id for cost tracking)
-                    agent_metadata[agent_url] = {
-                        "sub_agent_id": sa.id,
-                        "name": sa.name,
-                        "description": cv.description,
-                    }
-            elif sa.type in ("local", "automated"):
-                # Local agents have system_prompt and mcp_tools at root level.
-                # Automated agents share the exact config shape (agent-runner
-                # executes both through the same path) but are for system
-                # scheduling: they carry interactive=False and are registered
-                # into a conversation only when it adopted one of their
-                # scheduled runs (conversation-origin extension).
-                system_prompt = resolve_prompt_placeholders(cv.system_prompt or "")
-                mcp_tools = cv.mcp_tools or []
+            # One malformed sub-agent must not cost the user every other one. A bad
+            # `name` (a space, a leading digit) fails LocalLangGraphSubAgentConfig here,
+            # and before this guard the ValidationError escaped to get_user's blanket
+            # `except Exception`, which returns None — the executor reads that as
+            # "user not found" and every turn dies with InvalidParamsError. Skip the
+            # offending agent, keep the user.
+            try:
+                cv = sa.config_version
+                if sa.type == "remote":
+                    # Remote A2A agents have agent_url at root level
+                    agent_url = cv.agent_url
+                    if agent_url:
+                        # Store metadata for remote agents (sub_agent_id for cost tracking)
+                        agent_metadata[agent_url] = {
+                            "sub_agent_id": sa.id,
+                            "name": sa.name,
+                            "description": cv.description,
+                        }
+                elif sa.type in ("local", "automated"):
+                    # Local agents have system_prompt and mcp_tools at root level.
+                    # Automated agents share the exact config shape (agent-runner
+                    # executes both through the same path) but are for system
+                    # scheduling: they carry interactive=False and are registered
+                    # into a conversation only when it adopted one of their
+                    # scheduled runs (conversation-origin extension).
+                    system_prompt = resolve_prompt_placeholders(cv.system_prompt or "")
+                    mcp_tools = cv.mcp_tools or []
+                    # ADR-0006: an embed-bound sub-agent whose authority published no tool
+                    # list, and that has none set on the Nannos side, gets every tool the
+                    # user has — the same lazy catalog as the general-purpose agent. Only
+                    # "embedded AND empty": a plain sub-agent with an empty list still runs
+                    # with the essential tools only.
+                    all_tools = sa.embed_binding is not None and not mcp_tools
 
-                if sa.name and system_prompt:
-                    # Run the backend-resolved effective model. When it differs from the
-                    # configured model the alias was retired and console-backend degraded it
-                    # to the chat default; log it so the substitution is visible.
-                    effective_model = cv.effective_model or cv.model
-                    if cv.model_retired and effective_model != cv.model:
-                        logger.info(
-                            f"Sub-agent '{sa.name}' model '{cv.model}' is retired; "
-                            f"running on chat default '{effective_model}' (resolved by console-backend)"
+                    if sa.name and system_prompt:
+                        # Run the backend-resolved effective model. When it differs from the
+                        # configured model the alias was retired and console-backend degraded it
+                        # to the chat default; log it so the substitution is visible.
+                        effective_model = cv.effective_model or cv.model
+                        if cv.model_retired and effective_model != cv.model:
+                            logger.info(
+                                f"Sub-agent '{sa.name}' model '{cv.model}' is retired; "
+                                f"running on chat default '{effective_model}' (resolved by console-backend)"
+                            )
+                        local_subagents.append(
+                            LocalLangGraphSubAgentConfig(
+                                name=sa.name,
+                                description=cv.description or f"Local agent: {sa.name}",
+                                interactive=sa.type == "local",
+                                system_prompt=system_prompt,
+                                mcp_tools=mcp_tools if mcp_tools else None,
+                                all_tools=all_tools,
+                                model_name=effective_model,
+                                enable_thinking=cv.enable_thinking,
+                                thinking_level=cv.thinking_level,
+                                sub_agent_id=sa.id,  # Include console backend ID for tracking
+                                # The exact running config version, for precise cost attribution
+                                # (falls back to backend default-version derivation when absent).
+                                sub_agent_config_version_id=cv.id,
+                                skills=cv.skills if cv.skills else [],
+                                sandbox_enabled=cv.sandbox_enabled if cv.sandbox_enabled else False,
+                                effective_permission=sa.effective_permission,
+                            )
                         )
-                    local_subagents.append(
-                        LocalLangGraphSubAgentConfig(
-                            name=sa.name,
-                            description=cv.description or f"Local agent: {sa.name}",
-                            interactive=sa.type == "local",
-                            system_prompt=system_prompt,
-                            mcp_tools=mcp_tools if mcp_tools else None,
-                            model_name=effective_model,
-                            enable_thinking=cv.enable_thinking,
-                            thinking_level=cv.thinking_level,
-                            sub_agent_id=sa.id,  # Include console backend ID for tracking
-                            # The exact running config version, for precise cost attribution
-                            # (falls back to backend default-version derivation when absent).
-                            sub_agent_config_version_id=cv.id,
-                            skills=cv.skills if cv.skills else [],
-                            sandbox_enabled=cv.sandbox_enabled if cv.sandbox_enabled else False,
-                            effective_permission=sa.effective_permission,
+                        logger.debug(
+                            f"Added local sub-agent '{local_subagents[-1].model_dump_json()}' for user sub {user_sub}"
                         )
-                    )
-                    logger.debug(
-                        f"Added local sub-agent '{local_subagents[-1].model_dump_json()}' for user sub {user_sub}"
-                    )
-            elif sa.type == "foundry":
-                # Foundry agents have foundry-specific configuration fields
-                if sa.name and cv.foundry_hostname and cv.foundry_query_api_name:
-                    local_subagents.append(
-                        LocalFoundrySubAgentConfig(
-                            name=sa.name,
-                            description=cv.description or f"Foundry agent: {sa.name}",
-                            sub_agent_id=cv.sub_agent_id,  # Include console backend ID for tracking
-                            # The exact running config version, for precise cost attribution
-                            # (falls back to backend default-version derivation when absent).
-                            sub_agent_config_version_id=cv.id,
-                            hostname=cv.foundry_hostname,
-                            client_id=cv.foundry_client_id or "",
-                            client_secret_ref=cv.foundry_client_secret_ssmkey or "",
-                            ontology_rid=cv.foundry_ontology_rid or "",
-                            query_api_name=cv.foundry_query_api_name,
-                            scopes=cv.foundry_scopes or [],
-                            version=cv.foundry_version,
+                elif sa.type == "foundry":
+                    # Foundry agents have foundry-specific configuration fields
+                    if sa.name and cv.foundry_hostname and cv.foundry_query_api_name:
+                        local_subagents.append(
+                            LocalFoundrySubAgentConfig(
+                                name=sa.name,
+                                description=cv.description or f"Foundry agent: {sa.name}",
+                                sub_agent_id=cv.sub_agent_id,  # Include console backend ID for tracking
+                                # The exact running config version, for precise cost attribution
+                                # (falls back to backend default-version derivation when absent).
+                                sub_agent_config_version_id=cv.id,
+                                hostname=cv.foundry_hostname,
+                                client_id=cv.foundry_client_id or "",
+                                client_secret_ref=cv.foundry_client_secret_ssmkey or "",
+                                ontology_rid=cv.foundry_ontology_rid or "",
+                                query_api_name=cv.foundry_query_api_name,
+                                scopes=cv.foundry_scopes or [],
+                                version=cv.foundry_version,
+                            )
                         )
-                    )
-                    logger.debug(
-                        f"Added Foundry local sub-agent '{local_subagents[-1].model_dump_json()}' for user sub {user_sub}"
-                    )
+                        logger.debug(
+                            f"Added Foundry local sub-agent '{local_subagents[-1].model_dump_json()}' for user sub {user_sub}"
+                        )
+            except ValidationError as e:
+                logger.error(
+                    f"Skipping sub-agent {sa.id} '{sa.name}' (type {sa.type}) for user sub "
+                    f"{user_sub}: its stored config is not valid: {e}"
+                )
         logger.debug(
             f"Converted sub-agents for user (sub={user_sub}): {len(agent_metadata)} remote, {len(local_subagents)} local"
         )

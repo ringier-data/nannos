@@ -175,6 +175,8 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
     # Billing — is billing configured to work (deterministic, and every finding fixable).
     features.append(await _billing_config_feature(request, db))
 
+    # Embed bindings — sub-agents whose definition is published by a host (ADR-0006).
+    features.append(await _embed_bindings_feature(request, db))
     # Optional integrations gated purely on config presence.
     features.append(
         _config_feature(
@@ -623,3 +625,42 @@ async def _text_only_embedding_caveat(request: "Request", alias: str | None) -> 
         "embedded, so visual-only content won't be searchable. Set a fusion-capable model "
         "(Gemini Embedding 2) as the multimodal_embedding default to embed images."
     )
+
+
+async def _embed_bindings_feature(request: "Request", db: "AsyncSession") -> FeatureStatus:
+    """Host-published embedded agents (ADR-0006): one entry per bound sub-agent with its
+    synced revision, or the reason it has none yet."""
+    key, name = "embed_bindings", "Embedded agents"
+    service = getattr(request.app.state, "embed_binding_service", None)
+    bindings = await service.list_bindings(db) if service is not None else []
+    if not bindings:
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="disabled",
+            detail="No sub-agent is bound to a host.",
+            remediation="In admin mode, use “Create Embedded Agent” on the sub-agents list, or embed an existing local sub-agent from its Embedded Agent panel.",
+        )
+    lines: list[str] = []
+    never_synced = 0
+    for b in bindings:
+        azps = ",".join(b.azps) or "no azp"
+        if b.revision:
+            line = f"sub-agent {b.sub_agent_id} ← {b.base_url} [{azps}] revision {b.revision}"
+            if b.last_error:
+                line += f" (last fetch failed: {b.last_error})"
+        else:
+            never_synced += 1
+            line = f"sub-agent {b.sub_agent_id} ← {b.base_url} [{azps}] never synced"
+            if b.last_error:
+                line += f" ({b.last_error})"
+        lines.append(line)
+    if never_synced:
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="degraded",
+            detail="; ".join(lines),
+            remediation="Check the base URL and the host's /.well-known/agent-skills/index.json, then refresh the binding.",
+        )
+    return FeatureStatus(key=key, name=name, status="ready", detail="; ".join(lines))

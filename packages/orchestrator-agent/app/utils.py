@@ -121,6 +121,8 @@ def build_runtime_context(
     - Essential orchestrator tools always included (get_current_time, docstore, etc.)
     - MCP tool discovery (lazy) if mcp_tools is a non-empty list
     - NO additional MCP tools if mcp_tools is None or empty list
+    - The whole registry as a lazy catalog (like the GP agent) if config.all_tools is set:
+      an embed-bound sub-agent with no tool list on either side (ADR-0006)
     - Shared checkpointer for multi-turn conversation state
     - Shared document store for persistent memory (FilesystemMiddleware)
     - Shared backend factory for semantic indexing (IndexingStoreBackend)
@@ -435,7 +437,11 @@ def build_runtime_context(
                     subagent_extra_middlewares: list[Any] = [AuthErrorDetectionMiddleware()]
                     gp_inject_all_tools = None
                     gp_tool_catalog = None
-                    if config.name == "general-purpose":
+                    # The GP agent gets the whole registry. So does an embed-bound sub-agent
+                    # whose authority left the tool list open (config.all_tools, ADR-0006,
+                    # set by the registry) — same catalog, same code path.
+                    full_catalog = config.name == "general-purpose" or getattr(config, "all_tools", False)
+                    if full_catalog:
                         if _gp_tool_catalog_enabled():
                             # Catalog mode (default): hand the registry to GP as a lazy
                             # catalog — NEVER materialized into create_agent. Binding the
@@ -451,7 +457,7 @@ def build_runtime_context(
                                 name: t for name, t in tool_registry.items() if isinstance(t, BaseTool)
                             }
                             logger.info(
-                                f"GP agent: catalog mode with {len(gp_tool_catalog)} tools "
+                                f"Sub-agent '{config.name}': catalog mode with {len(gp_tool_catalog)} tools "
                                 f"(PTC={'on' if code_interpreter_ptc_enabled() else 'off'})"
                             )
                         else:
@@ -486,13 +492,13 @@ def build_runtime_context(
                                 )
                             _selector_state = "off (PTC runtime discovery)" if code_interpreter_ptc_enabled() else "on"
                             logger.info(
-                                f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
+                                f"Sub-agent '{config.name}': injecting {len(gp_inject_all_tools)} tools from tool_registry "
                                 f"(ToolsetSelectorMiddleware={_selector_state})"
                             )
 
                     # Auto-expand non-GP sub-agent MCP whitelist with compression
                     # server tools when any whitelisted tool is from a compression-enabled server
-                    if config.name != "general-purpose" and config.mcp_tools:
+                    if not full_catalog and config.mcp_tools:
                         compression_slug = AgentSettings.GATANA_COMPRESSION_SERVER_SLUG
                         mcp_tool_set = set(config.mcp_tools)
                         has_compression_tool = any(
