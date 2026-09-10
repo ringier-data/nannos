@@ -50,7 +50,13 @@ _MAX_RECURSION_LIMIT = 50
 
 
 def _get_default_recursion_limit() -> int:
-    """Get recursion limit from environment or default."""
+    """Get recursion limit from environment or default.
+
+    ``MAX_RECURSION_LIMIT`` is shared: agent-runner and this SDK default it to 50,
+    agent-common's dynamic_agent to 75. Setting it moves all of them in a process
+    that runs more than one. It counts LangGraph super-steps, not model calls --
+    see #216 for expressing this budget in the unit that has meaning.
+    """
     return int(os.getenv("MAX_RECURSION_LIMIT", str(_MAX_RECURSION_LIMIT)))
 
 
@@ -104,7 +110,7 @@ class LangGraphAgent(BaseAgent):
 
     Args:
         tool_query_regex: Optional regex pattern to filter MCP tools by name
-        recursion_limit: Maximum number of LangGraph steps (default: 50, configurable via LANGGRAPH_RECURSION_LIMIT env var)
+        recursion_limit: Maximum number of LangGraph steps (default: 50, configurable via MAX_RECURSION_LIMIT env var)
     """
 
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
@@ -117,7 +123,7 @@ class LangGraphAgent(BaseAgent):
 
         Args:
             tool_query_regex: Optional regex pattern to filter MCP tools by name
-            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
+            recursion_limit: Maximum number of LangGraph steps (default: from MAX_RECURSION_LIMIT env var or 50)
         """
         super().__init__()
 

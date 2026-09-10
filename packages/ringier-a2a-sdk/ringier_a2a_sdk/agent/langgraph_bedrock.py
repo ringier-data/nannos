@@ -85,7 +85,7 @@ class LangGraphBedrockAgent(PostgreSQLCheckpointerMixin, LangGraphAgent):
 
         Args:
             tool_query_regex: Optional regex pattern to filter MCP tools by name
-            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
+            recursion_limit: Maximum number of LangGraph steps (default: from MAX_RECURSION_LIMIT env var or 50)
         """
         # Bedrock configuration (needed by _create_model before __init__ calls it)
         self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "eu-central-1")
