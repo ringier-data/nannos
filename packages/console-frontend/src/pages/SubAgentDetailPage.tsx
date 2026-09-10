@@ -1249,7 +1249,13 @@ export function SubAgentDetailPage() {
             </>
           )}
           {canDelete && (
-            <Button variant="outline" size="icon" onClick={() => setShowDeleteDialog(true)}>
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => setShowDeleteDialog(true)}
+              disabled={isEmbedBound}
+              title={isEmbedBound ? 'Remove the embed binding first, then delete the sub-agent.' : undefined}
+            >
               <Trash2 className="h-4 w-4" />
             </Button>
           )}

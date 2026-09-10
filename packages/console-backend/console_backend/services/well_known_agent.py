@@ -47,7 +47,7 @@ from console_backend.models.skills_registry import (
     MAX_SKILL_FILE_SIZE_BYTES,
     MAX_SKILL_FILES,
 )
-from console_backend.models.sub_agent import ModelTier, ThinkingLevel
+from console_backend.models.sub_agent import SUB_AGENT_NAME_RE, ModelTier, ThinkingLevel
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,11 @@ def to_sub_agent_name(published_name: str) -> str:
     slug = _NAME_SEPARATORS.sub("-", published_name.strip())
     slug = _LEADING_NON_LETTER.sub("", slug)
     slug = slug[:MAX_NAME_LENGTH].rstrip("-_")
-    return slug or FALLBACK_AGENT_NAME
+    # The console's own rule is the authority: never hand a row a name it would refuse,
+    # or the orchestrator's registry guard silently drops the agent for every user.
+    if not slug or not SUB_AGENT_NAME_RE.fullmatch(slug):
+        return FALLBACK_AGENT_NAME
+    return slug
 
 
 class WellKnownAgent(BaseModel):
@@ -154,7 +158,10 @@ class WellKnownDefinition(BaseModel):
     agent: WellKnownAgent
     skills: list[WellKnownSkill]
     revision: str = Field(
-        description="16 hex chars; changes when any served byte or the framing template changes"
+        description=(
+            "16 hex chars; changes when any served byte, any index.json field "
+            "or the framing template changes"
+        )
     )
     fetched_at: datetime
     ttl_seconds: int
@@ -166,12 +173,42 @@ def origin_of(url: str) -> str:
 
 
 def compute_revision(
-    prompt_digest: str,
-    skill_digests: list[str],
+    agent: WellKnownAgent,
+    skills: list[WellKnownSkill],
     framing_version: str = FRAMING_TEMPLATE_VERSION,
 ) -> str:
-    material = "|".join([framing_version, prompt_digest, *sorted(skill_digests)])
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    """The 16-hex revision of a fetched definition.
+
+    Covers every served byte through the file digests AND the index.json metadata that
+    is published nowhere else: agent name, description, organization, tools, model tier
+    and thinking level, plus each skill's name and description. Without the metadata a
+    host could change its tool list or description and the sync would read "same
+    revision" and skip. Skill order does not matter. The framing template version is
+    part of it so a wording change in the Nannos-owned prefix re-syncs every bound agent.
+    """
+    material = {
+        "framing": framing_version,
+        "agent": {
+            "name": agent.name,
+            "description": agent.description,
+            "organization": agent.organization,
+            "tools": agent.tools,
+            "model_tier": agent.model_tier,
+            "thinking_level": agent.thinking_level,
+            "digest": agent.digest,
+        },
+        "skills": sorted(
+            (
+                {"name": s.name, "description": s.description, "digest": s.digest}
+                for s in skills
+            ),
+            key=lambda s: (s["name"], s["digest"]),
+        ),
+    }
+    encoded = json.dumps(
+        material, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def version_hash_for(revision: str) -> str:
@@ -361,7 +398,7 @@ class WellKnownAgentClient:
             index_url=index_url,
             agent=agent,
             skills=skills,
-            revision=compute_revision(agent.digest, [s.digest for s in skills]),
+            revision=compute_revision(agent, skills),
             fetched_at=datetime.now(timezone.utc),
             ttl_seconds=ttl,
         )

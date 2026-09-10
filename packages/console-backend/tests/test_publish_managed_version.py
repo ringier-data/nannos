@@ -15,6 +15,7 @@ from console_backend.models.sub_agent import (
     SubAgentCreate,
     SubAgentStatus,
     SubAgentType,
+    SubAgentUpdate,
     ThinkingLevel,
 )
 from console_backend.models.user import User
@@ -166,3 +167,62 @@ async def test_create_managed_sub_agent_then_publish_writes_version_one(
     assert cv.description == "Helps campaign managers."
     assert cv.mcp_tools == [] and cv.model is None  # nothing to carry forward
     assert cv.model_tier == ModelTier.STANDARD
+
+
+@pytest.mark.asyncio
+async def test_publish_managed_version_skips_numbers_held_by_deleted_drafts(
+    managed_sub_agent_service: SubAgentService,
+    pg_session: AsyncSession,
+    test_user_db: User,
+):
+    """A deleted draft keeps its number under UNIQUE(sub_agent_id, version) while
+    current_version drops back to the previous one. The publish must allocate
+    MAX(version)+1 — with current_version+1 every sync pass would hit the same
+    IntegrityError and the binding would never advance."""
+    sub_agent_service = managed_sub_agent_service
+    agent = await sub_agent_service.create_sub_agent(
+        pg_session,
+        SubAgentCreate(
+            name="Alloy-AI-Assistant",
+            type=SubAgentType.LOCAL,
+            description="pasted description",
+            model="gpt-4o",
+            system_prompt="pasted prompt",
+        ),
+        test_user_db,
+    )
+    assert agent.current_version == 1
+
+    # A draft v2, then deleted: current_version is 1 again, the v2 row stays soft-deleted.
+    # (A long prompt keeps the update below the auto-approve threshold, so it stays a draft.)
+    await sub_agent_service.update_sub_agent(
+        pg_session,
+        agent.id,
+        SubAgentUpdate(description="a draft", system_prompt="New system prompt " * 100),
+        test_user_db,
+    )
+    drafted = await sub_agent_service.get_sub_agent_by_id(pg_session, agent.id)
+    assert drafted.current_version == 2
+    assert drafted.config_version.status == SubAgentStatus.DRAFT
+    await sub_agent_service.delete_version(pg_session, agent.id, 2, test_user_db)
+    reset = await sub_agent_service.get_sub_agent_by_id(pg_session, agent.id)
+    assert reset.current_version == 1
+
+    version = await sub_agent_service.publish_managed_version(
+        pg_session,
+        test_user_db,
+        agent.id,
+        version_hash="wkabc123def4",
+        change_summary="well-known revision abc123def4567890 from https://riad.example",
+        description="Helps campaign managers.",
+        system_prompt="You are Nannos ...",
+        mcp_tools=None,
+        model_tier=None,
+        enable_thinking=None,
+        thinking_level=None,
+        skills=[],
+    )
+    assert version == 3
+    synced = await sub_agent_service.get_sub_agent_by_id(pg_session, agent.id)
+    assert synced.current_version == 3 and synced.default_version == 3
+    assert synced.config_version.status == SubAgentStatus.APPROVED

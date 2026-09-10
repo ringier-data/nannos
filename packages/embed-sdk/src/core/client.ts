@@ -6,6 +6,7 @@ import type {
   ClientInitializedData,
   ConversationSnapshotData,
   ConversationUpdatedData,
+  EmbeddedAgentInfo,
   SendMessagePayload,
   Settings,
   SubscribeAck,
@@ -22,6 +23,8 @@ export interface TransportState {
   socketConnected: boolean;
   initialized: boolean;
   agentInfo: AgentInfo | null;
+  /** The bound sub-agent on an embedded surface; null everywhere else (ADR-0006). */
+  embeddedAgent: EmbeddedAgentInfo | null;
 }
 
 const INIT_TIMEOUT_MS = 15_000;
@@ -45,7 +48,12 @@ export type IoFactory = (uri: string | undefined, opts: Record<string, unknown>)
  */
 export class TransportClient {
   private socket: Socket | null = null;
-  private state: TransportState = { socketConnected: false, initialized: false, agentInfo: null };
+  private state: TransportState = {
+    socketConnected: false,
+    initialized: false,
+    agentInfo: null,
+    embeddedAgent: null,
+  };
   private readonly stateListeners = new Set<(s: TransportState) => void>();
   private readonly responseListeners = new Set<(data: AgentResponseData) => void>();
   private readonly errorListeners = new Set<(e: NannosErrorEvent) => void>();
@@ -148,11 +156,15 @@ export class TransportClient {
       }),
     );
     socket.on('disconnect', () =>
-      this.setState({ socketConnected: false, initialized: false, agentInfo: null }),
+      this.setState({ socketConnected: false, initialized: false, agentInfo: null, embeddedAgent: null }),
     );
     socket.on('client_initialized', (data: ClientInitializedData) => {
       const ok = data.status === 'success';
-      this.setState({ initialized: ok, agentInfo: ok ? (data.agent ?? null) : null });
+      this.setState({
+        initialized: ok,
+        agentInfo: ok ? (data.agent ?? null) : null,
+        embeddedAgent: ok ? (data.embeddedAgent ?? null) : null,
+      });
       if (!ok) {
         this.emitError({
           type: 'init',
@@ -329,6 +341,6 @@ export class TransportClient {
     this.socket?.disconnect();
     this.socket = null;
     this.pendingInit = null;
-    this.setState({ socketConnected: false, initialized: false, agentInfo: null });
+    this.setState({ socketConnected: false, initialized: false, agentInfo: null, embeddedAgent: null });
   }
 }

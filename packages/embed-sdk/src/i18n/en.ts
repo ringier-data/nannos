@@ -20,6 +20,7 @@ export const en: NannosStrings = {
   'composer.recordPermission': 'Microphone access was denied. Allow microphone access to record audio.',
   'composer.recordError': 'Could not record audio',
   'composer.readOnly': 'This conversation belongs to another surface and is read-only here.',
+  'composer.agent': 'Answered by {name}',
 
   'status.connected': 'Connected',
   'status.connecting': 'Connecting…',

@@ -4,6 +4,7 @@ and bind arriving users to it by their token's `azp`.
 Three jobs:
 
 * **Admin**: upsert / read / delete the binding (base URL + azp list) of a sub-agent.
+  Writes go through `EmbedBindingRepository` and are audited on the sub-agent.
 * **Sync**: fetch the host's `/.well-known/agent-skills/` tree, and when its revision
   changed write ONE new approved config version (`version_hash = wk<rev>`) so the
   orchestrator's caches roll over by themselves. Runs at startup, on a timer, on every
@@ -43,6 +44,7 @@ from console_backend.models.sub_agent import (
     SubAgentType,
 )
 from console_backend.models.user import User
+from console_backend.repositories.embed_binding_repository import EmbedBindingRepository
 from console_backend.services.well_known_agent import (
     WELL_KNOWN_INDEX_PATH,
     WellKnownAgentClient,
@@ -87,10 +89,15 @@ class EmbedBindingService:
         user_service: "UserService",
         session_factory: async_sessionmaker[AsyncSession],
         client: WellKnownAgentClient | None = None,
+        repository: EmbedBindingRepository | None = None,
     ) -> None:
         self._sub_agents = sub_agent_service
         self._users = user_service
         self._session_factory = session_factory
+        # Binding writes go through the audited repository (AGENTS.md: every write with
+        # business meaning is audited). It needs its AuditService injected — done in
+        # service_instances.py; a bare default fails loudly on the first write.
+        self._repo = repository or EmbedBindingRepository()
         # Local development binds localhost or a docker network; everywhere else the
         # authority must resolve to public addresses (SSRF guard in the client).
         self._client = client or WellKnownAgentClient(
@@ -272,58 +279,23 @@ class EmbedBindingService:
     async def _write_binding_rows(
         self, db: AsyncSession, actor: User, sub_agent_id: int, data: EmbedBindingUpsert
     ) -> None:
-        """Insert or replace the binding row and its azp rows. No fetch, no commit."""
-        now = datetime.now(timezone.utc)
-        await db.execute(
-            text(
-                """
-                INSERT INTO sub_agent_embed_bindings (sub_agent_id, base_url, created_by, created_at, updated_at)
-                VALUES (:id, :base_url, :created_by, :now, :now)
-                ON CONFLICT (sub_agent_id) DO UPDATE
-                   SET base_url = EXCLUDED.base_url,
-                       -- a new host means a new definition; forget the old revision so the
-                       -- sync below writes a version even if the new host's revision collides
-                       revision = CASE WHEN sub_agent_embed_bindings.base_url = EXCLUDED.base_url
-                                       THEN sub_agent_embed_bindings.revision ELSE NULL END,
-                       updated_at = EXCLUDED.updated_at
-                """
-            ),
-            {
-                "id": sub_agent_id,
-                "base_url": data.base_url,
-                "created_by": actor.id,
-                "now": now,
-            },
+        """Insert or replace the binding row and its azp rows (audited). No fetch, no commit."""
+        await self._repo.write_binding(
+            db, actor, sub_agent_id, base_url=data.base_url, azps=data.azps
         )
-        await db.execute(
-            text("DELETE FROM sub_agent_embed_binding_azps WHERE sub_agent_id = :id"),
-            {"id": sub_agent_id},
-        )
-        for azp in data.azps:
-            await db.execute(
-                text(
-                    "INSERT INTO sub_agent_embed_binding_azps (azp, sub_agent_id) VALUES (:azp, :id)"
-                ),
-                {"azp": azp, "id": sub_agent_id},
-            )
         self._azp_cache.clear()
         logger.info(
             f"Embed binding for sub-agent {sub_agent_id} set to {data.base_url} azps={data.azps} by {actor.id}"
         )
 
-    async def delete_binding(self, db: AsyncSession, sub_agent_id: int) -> bool:
-        result = await db.execute(
-            text(
-                "DELETE FROM sub_agent_embed_bindings WHERE sub_agent_id = :id RETURNING sub_agent_id"
-            ),
-            {"id": sub_agent_id},
-        )
-        deleted = result.first() is not None
+    async def delete_binding(self, db: AsyncSession, actor: User, sub_agent_id: int) -> bool:
+        deleted = await self._repo.delete_binding(db, actor, sub_agent_id)
         self._azp_cache.clear()
         self._logged_errors.pop(sub_agent_id, None)
         if deleted:
             logger.info(
-                f"Embed binding for sub-agent {sub_agent_id} removed; the sub-agent is editable again"
+                f"Embed binding for sub-agent {sub_agent_id} removed by {actor.id}; "
+                "the sub-agent is editable again"
             )
         return deleted
 

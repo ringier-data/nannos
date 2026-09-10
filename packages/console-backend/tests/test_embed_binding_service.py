@@ -11,7 +11,9 @@ import pytest
 
 from console_backend.models.embed_binding import EmbedBinding, EmbedBindingUpsert
 from console_backend.models.sub_agent import ActivationSource, SubAgentType
+from console_backend.models.audit import AuditAction, AuditEntityType
 from console_backend.models.user import User, UserRole, UserStatus
+from console_backend.repositories.embed_binding_repository import EmbedBindingRepository
 from console_backend.services import embed_binding_service as ebs
 from console_backend.services.embed_binding_service import (
     EmbedBindingError,
@@ -107,8 +109,12 @@ def make_service(fetch=None):
     users.get_user = AsyncMock(return_value=make_user())
     client = MagicMock()
     client.fetch = fetch or AsyncMock(return_value=make_definition())
+    repo = EmbedBindingRepository()
+    audit = MagicMock()
+    audit.log_action = AsyncMock()
+    repo.set_audit_service(audit)
     service = EmbedBindingService(
-        sas, users, session_factory=MagicMock(), client=client
+        sas, users, session_factory=MagicMock(), client=client, repository=repo
     )
     return service, sas, users, client
 
@@ -387,6 +393,9 @@ async def test_upsert_writes_rows_and_syncs_immediately(monkeypatch):
 
     sql = executed_sql(db)
     assert any("INSERT INTO sub_agent_embed_bindings" in s for s in sql)
+    # A new host clears the old revision AND the old definition, so the admin view never
+    # attributes the previous host's agent and skills to the new URL.
+    assert any("revision = CASE" in s and "definition = CASE" in s for s in sql)
     assert any("DELETE FROM sub_agent_embed_binding_azps" in s for s in sql)
     assert sum("INSERT INTO sub_agent_embed_binding_azps" in s for s in sql) == 2
     insert_params = [
@@ -553,3 +562,56 @@ async def test_probe_reports_a_malformed_origin_inline():
     assert probe.ok is False
     assert "https://" in (probe.error or "")
     client.fetch.assert_not_awaited()
+
+
+
+# ------------------------------------------------------------------------------ audit
+
+
+@pytest.mark.asyncio
+async def test_binding_writes_are_audited_as_an_update_of_the_sub_agent(monkeypatch):
+    """Binding changes decide which token azp maps to which agent: an admin action with
+    authorization impact, so it lands in audit_logs — on the sub-agent, before and after."""
+    service, _, _, _ = make_service()
+    monkeypatch.setattr(ebs.config, "environment", "local")
+    service.sync_binding = AsyncMock(return_value=make_binding(revision=REV))
+    audit = service._repo.audit_service
+    # The snapshot SELECT sees a previous binding to another host.
+    db = make_db(first=("https://old.example", ["old-azp"]), all_rows=[])
+
+    await service.upsert_binding(
+        db, make_user(), 20, EmbedBindingUpsert(base_url=BASE, azps=["nannos-embedded"])
+    )
+
+    audit.log_action.assert_awaited_once()
+    kwargs = audit.log_action.await_args.kwargs
+    assert kwargs["entity_type"] == AuditEntityType.SUB_AGENT
+    assert kwargs["entity_id"] == "20" and kwargs["action"] == AuditAction.UPDATE
+    assert kwargs["changes"] == {
+        "before": {"embed_binding": {"base_url": "https://old.example", "azps": ["old-azp"]}},
+        "after": {"embed_binding": {"base_url": BASE, "azps": ["nannos-embedded"]}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_delete_binding_is_audited_and_reports_whether_anything_was_bound():
+    service, _, _, _ = make_service()
+    audit = service._repo.audit_service
+    service._azp_cache["nannos-embedded"] = (float("inf"), 20)
+
+    db = make_db(first=(BASE, ["nannos-embedded"]))
+    assert await service.delete_binding(db, make_user(), 20) is True
+    assert any("DELETE FROM sub_agent_embed_bindings" in s for s in executed_sql(db))
+    assert service._azp_cache == {}
+    kwargs = audit.log_action.await_args.kwargs
+    assert kwargs["action"] == AuditAction.UPDATE and kwargs["entity_id"] == "20"
+    assert kwargs["changes"]["after"] == {"embed_binding": None}
+    assert kwargs["changes"]["before"] == {
+        "embed_binding": {"base_url": BASE, "azps": ["nannos-embedded"]}
+    }
+
+    audit.log_action.reset_mock()
+    unbound_db = make_db(first=None)
+    assert await service.delete_binding(unbound_db, make_user(), 20) is False
+    assert not any("DELETE FROM sub_agent_embed_bindings" in s for s in executed_sql(unbound_db))
+    audit.log_action.assert_not_awaited()

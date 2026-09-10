@@ -22,6 +22,7 @@ export const fr: NannosStrings = {
   'composer.recordError': 'Impossible d’enregistrer l’audio',
   'composer.readOnly':
     'Cette conversation appartient à une autre surface et est en lecture seule ici.',
+  'composer.agent': 'Réponse de {name}',
 
   'status.connected': 'Connecté',
   'status.connecting': 'Connexion…',

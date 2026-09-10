@@ -19,6 +19,7 @@ from .db.connection import get_async_session_factory, get_sync_session_factory
 from .repositories.bug_report_repository import BugReportRepository
 from .repositories.catalog_repository import CatalogRepository
 from .repositories.delivery_channel_repository import DeliveryChannelRepository
+from .repositories.embed_binding_repository import EmbedBindingRepository
 from .repositories.feedback_repository import FeedbackRepository
 from .repositories.budget_settings_repository import BudgetSettingsRepository
 from .repositories.model_defaults_repository import ModelDefaultsRepository
@@ -133,10 +134,13 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.sub_agent_service.set_notification_service(app.state.notification_service)
     app.state.sub_agent_service.set_skill_registry_service(app.state.skill_registry_service)
     # Embed bindings (ADR-0006): host-published sub-agent definitions, azp-bound activation.
+    app.state.embed_binding_repository = EmbedBindingRepository()
+    app.state.embed_binding_repository.set_audit_service(app.state.audit_service)
     app.state.embed_binding_service = EmbedBindingService(
         sub_agent_service=app.state.sub_agent_service,
         user_service=app.state.user_service,
         session_factory=get_async_session_factory(),
+        repository=app.state.embed_binding_repository,
     )
 
     app.state.catalog_repository = CatalogRepository()

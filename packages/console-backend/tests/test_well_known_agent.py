@@ -208,15 +208,75 @@ async def test_tools_are_optional_and_stay_nannos_side_when_absent():
     assert "when published" in err.detail
 
 
+def _agent(**over) -> wk.WellKnownAgent:
+    fields = dict(
+        name="Alloy AI Assistant",
+        description="Helps with campaigns.",
+        prompt_body="Domain guidance.",
+        tools=["list_campaigns", "get_campaign"],
+        url=f"{BASE}{WK}/AGENT.md",
+        digest="sha256:" + "a" * 64,
+    )
+    fields.update(over)
+    return wk.WellKnownAgent(**fields)
+
+
+def _skill(name: str = "book-line-items", digest_char: str = "b", **over) -> wk.WellKnownSkill:
+    fields = dict(
+        name=name,
+        description=f"Use {name}.",
+        body="Do the thing.",
+        url=f"{BASE}{WK}/{name}/SKILL.md",
+        digest="sha256:" + digest_char * 64,
+    )
+    fields.update(over)
+    return wk.WellKnownSkill(**fields)
+
+
 def test_framing_template_version_is_part_of_the_revision():
-    prompt, skills = "sha256:" + "a" * 64, ["sha256:" + "b" * 64]
-    assert compute_revision(prompt, skills, framing_version="1") != compute_revision(
-        prompt, skills, framing_version="2"
+    agent, skills = _agent(), [_skill()]
+    assert compute_revision(agent, skills, framing_version="1") != compute_revision(
+        agent, skills, framing_version="2"
     )
     # order of skills does not matter
-    assert compute_revision(
-        prompt, ["sha256:" + "c" * 64, "sha256:" + "b" * 64]
-    ) == compute_revision(prompt, ["sha256:" + "b" * 64, "sha256:" + "c" * 64])
+    b, c = _skill("a-skill", "b"), _skill("z-skill", "c")
+    assert compute_revision(agent, [c, b]) == compute_revision(agent, [b, c])
+
+
+def test_index_metadata_is_part_of_the_revision():
+    """Fields that live only in index.json — tools, description, tier, skill descriptions —
+    must move the revision, or the host could change them and the sync would skip."""
+    base = compute_revision(_agent(), [_skill()])
+    assert compute_revision(_agent(), [_skill()]) == base  # deterministic
+    for changed in [
+        _agent(name="Alloy Assistant"),
+        _agent(description="Helps with line items."),
+        _agent(organization="Ringier Advertising"),
+        _agent(tools=["list_campaigns"]),
+        _agent(tools=None),
+        _agent(model_tier="premium"),
+        _agent(thinking_level="high"),
+        _agent(digest="sha256:" + "f" * 64),
+    ]:
+        assert compute_revision(changed, [_skill()]) != base
+    assert compute_revision(_agent(), [_skill(description="Use when booking.")]) != base
+    assert compute_revision(_agent(), [_skill(digest_char="d")]) != base
+    assert compute_revision(_agent(), []) != base
+
+
+@pytest.mark.asyncio
+async def test_revision_tracks_index_only_changes_end_to_end():
+    """Same AGENT.md and SKILL.md bytes, a different tool list in index.json: new revision."""
+    client = WellKnownAgentClient()
+    index_bytes, files = build_tree()
+    with respx.mock(assert_all_called=False) as router:
+        mount(router, index_bytes, files)
+        first = await client.fetch(BASE, force=True)
+    changed_index, changed_files = build_tree(extension={"tools": ["list_campaigns"]})
+    with respx.mock(assert_all_called=False) as router:
+        mount(router, changed_index, changed_files)
+        second = await client.fetch(BASE, force=True)
+    assert second.revision != first.revision
 
 
 @pytest.mark.asyncio

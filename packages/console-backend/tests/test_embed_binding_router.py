@@ -112,3 +112,19 @@ async def test_whole_version_operations_are_refused_on_bound_sub_agents():
         and "the version" in detail
         and "https://riad.example" in detail
     )
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_bound_sub_agent_is_refused_until_unbound():
+    """The delete is soft: the binding and its azps would outlive the agent, the sync
+    would keep writing versions into it, and the azps would stay claimed."""
+    try:
+        await _reject_if_embed_bound(request_with(binding()), MagicMock(), 20, deleting=True)
+    except HTTPException as e:
+        assert e.status_code == 409
+        assert "Remove the embed binding first" in str(e.detail)
+        assert "https://riad.example" in str(e.detail)
+    else:
+        raise AssertionError("deleting a bound sub-agent was not refused")
+    # Nothing bound: nothing to protect.
+    await _reject_if_embed_bound(request_with(None), MagicMock(), 20, deleting=True)

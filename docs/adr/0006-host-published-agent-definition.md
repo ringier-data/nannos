@@ -33,7 +33,11 @@ Amendments 4 and 5.
   format" below.
 - The orchestrator only runs a sub-agent that is in the user's activated list
   (`GET /api/v1/sub-agents/activated`, `sub_agent_service.get_accessible_sub_agents`
-  with `activated_only=True`: an activation row, or a `system`-owned public agent).
+  with `activated_only=True`). That list is the user's ACCESSIBLE sub-agents — owned,
+  public, group-assigned, or (since this ADR) carrying an `embed` activation row for
+  the user — narrowed to the activated ones. An activation row alone granted nothing
+  before: a private agent activated for a user outside its owner and groups stayed
+  invisible, so the embed activation had to become a grant in its own right.
   A cockpit user who arrives through the Alloy brokering of ADR-0002 Amendment 4
   is created on the fly by `_resolve_socket_user_via_token` (app.py) with no groups
   and no activations. Their first embed turn failed in
@@ -192,9 +196,16 @@ Base URLs for the cockpit: `https://riad.d.alloy.ch` (dev), `https://riad.s.allo
   definition JSONB, fetched_at, last_error, last_error_at, last_seen_at,
   azps_seen JSONB, created_by → users, created_at, updated_at)`. `definition` holds
   the parsed agent block and the skill index of the last good revision, for the
-  admin view; bodies live in the config version.
+  admin view; bodies live in the config version. Changing `base_url` clears both
+  `revision` and `definition`, so the admin view never shows the previous host's
+  agent and skills under the new URL while its first sync fails.
 - `sub_agent_embed_binding_azps(azp PK, sub_agent_id → bindings)`: the primary key
   is the "one azp → one sub-agent per cluster" rule.
+- Binding writes (create, replace, remove) go through
+  `repositories/embed_binding_repository.py` and are audited as an UPDATE of the
+  sub-agent with the binding before and after. Sync bookkeeping (`revision`,
+  `definition`, `fetched_at`, `last_error`, `last_seen_at`, `azps_seen`) is written
+  directly: it records what the host published or when a token was seen.
 - `socket_sessions.embedded_sub_agent_id INTEGER`: the stamp made at connect.
 - `ALTER TYPE activation_source ADD VALUE 'embed'` and `ActivationSource.EMBED`.
 - `skill_registry.source_type` is untouched: well-known skills become ordinary
@@ -207,9 +218,12 @@ an authority that resolves to a non-public address (outside local development), 
 every file with a size cap (index 64 KiB, files 256 KiB, ≤ 20 skills), follows at
 most 3 redirects and only within the origin, verifies digests, parses frontmatter
 with `yaml.safe_load`, validates names, tools, tiers and levels, and caches per base
-URL for `max-age` clamped to [60 s, 3600 s]. `revision = sha256(FRAMING_TEMPLATE_VERSION
-| prompt digest | sorted skill digests)[:16]`; `version_hash_for(revision) = "wk" +
-revision[:10]`. Any problem raises `WellKnownFetchError(base_url, step, detail)` and
+URL for `max-age` clamped to [60 s, 3600 s]. `revision` is the first 16 hex chars of
+the sha256 of a canonical JSON of: `FRAMING_TEMPLATE_VERSION`, the agent block (name,
+description, organization, tools, model tier, thinking level, prompt digest) and the
+skills sorted by name (name, description, digest) — every served byte through the
+digests, plus the index.json-only fields, so a host changing its tool list or a
+description re-syncs too. `version_hash_for(revision) = "wk" + revision[:10]`. Any problem raises `WellKnownFetchError(base_url, step, detail)` and
 caches nothing. `render_embed_framing` is the Nannos-owned prefix; changing its
 wording bumps `FRAMING_TEMPLATE_VERSION` so bound agents re-sync.
 
@@ -240,9 +254,22 @@ own transaction.
   `embed_binding_service.bind_connection(db, user, claims["azp"])`, which looks the
   `azp` up (cached 60 s), upserts the activation row (`activated_by = embed`),
   records `last_seen_at` / `azps_seen`, and returns the id. A binding failure logs
-  and connects unbound; it never rejects the login.
+  and connects unbound; it never rejects the login. An `azp` with no binding also
+  connects unbound, at WARNING: the user is authenticated and Keycloak client
+  registration is the gate, but the page then runs the full orchestrator with an
+  unscoped conversation list and nothing in the UI says so — the log line is how a
+  misconfigured or not-yet-created binding is found.
 - `handle_connect` stores the id on the socket session
   (`socket_session_service.create_session(..., embedded_sub_agent_id=)`).
+- `handle_initialize_client` answers `client_initialized` with `embeddedAgent`
+  alongside the A2A `agent` card: `{subAgentId, name, description, organization,
+  revision}`, read from the binding (`_embedded_agent_info`), where `name` is the
+  host's PUBLISHED display name, not the hyphenated row name. Absent for console
+  sessions and unbound tokens. It exists because the sibling card names the
+  orchestrator and the SDK's own fallback reads the well-known index from the PAGE
+  origin, which need not be the binding's `base_url`. Resolving it never raises: a
+  label is not worth failing the handshake for, and a bound-but-never-synced agent
+  falls back to the row name.
 - `handle_send_message` calls `_apply_embed_scope(metadata, socket_session)`: it
   drops `executeOnlySubAgentId` / `subAgentId` from the client metadata and sets
   `executeOnlySubAgentId` from the session when bound. The conversation stamp
@@ -276,8 +303,10 @@ own transaction.
   `system_prompt` or `skills`, and `mcp_tools` / model / thinking only when the
   host publishes them; other fields (name, `is_public`, Nannos-side tools or model)
   stay editable and go through the normal version + approval flow. Revert, delete
-  version and set default version are refused outright. Submit and review are
-  not guarded — approving changes no content.
+  version, set default version and deleting the sub-agent itself are refused
+  outright — the delete is soft, so the binding and its azps would outlive the
+  agent: remove the binding first. Submit and review are not guarded — approving
+  changes no content.
 - `services/feature_status.py`: `embed_bindings` entry — disabled with no
   bindings, ready with one line per binding (base URL, azps, revision), degraded
   when a binding has never synced.
@@ -317,10 +346,13 @@ exclusivity). Migration 091 is applied by the database fixtures.
   scopes — and marks stamped conversations read-only only in the console.
   `executeOnlySubAgentId` left the send payload. `NannosCore.resolveHostAgentName()`
   reads `x-nannos-agent.name` from the page origin's index, same-origin and without
-  credentials; `useAgentName()` (panel) returns the adapter's `agentName`, else that,
-  else the handshake name, for hosts that render their own header. The default
-  header still names the conversation. Breaking for hosts that set `subAgentId`:
-  release as a new minor (0.x).
+  credentials; `useEmbeddedAgent()` returns the bound sub-agent the handshake named
+  (below); `useAgentName()` (panel) returns the adapter's `agentName`, else the bound
+  name, else the page-origin index name, else the handshake name, for hosts that
+  render their own header. The default header still names the conversation; the
+  composer shows the bound agent next to the page-context label, so an embedded
+  surface says which assistant answers without the host writing any chrome. Breaking
+  for hosts that set `subAgentId`: release as a new minor (0.x).
 - **cockpit**: `AGENT.md` frontmatter accepts optional `organization`, `model-tier`,
   `thinking-level`, validated against the Nannos enums at build time and emitted as
   `organization`, `model_tier`, `thinking_level`. `REACT_APP_NANNOS_SUB_AGENT_ID` and

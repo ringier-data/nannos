@@ -65,6 +65,8 @@ async def _reject_if_embed_bound(
     db: AsyncSession,
     sub_agent_id: int,
     data: SubAgentUpdate | None = None,
+    *,
+    deleting: bool = False,
 ) -> None:
     """Refuse edits the embed sync would overwrite (ADR-0006).
 
@@ -73,6 +75,11 @@ async def _reject_if_embed_bound(
     Whatever the host leaves out stays a Nannos-side setting and remains editable
     here. Whole-version operations (revert, delete, default) pass ``data=None`` and are
     refused outright, since they swap the content under the binding.
+
+    Deleting the sub-agent (``deleting=True``) is refused too: the delete is soft, so
+    the binding and its azps would stay behind — the sync would keep writing versions
+    into a deleted agent, connects would keep activating users for it, and the azps
+    would stay claimed against any replacement binding.
     """
     service = getattr(request.app.state, "embed_binding_service", None)
     if service is None:
@@ -80,6 +87,14 @@ async def _reject_if_embed_bound(
     binding = await service.get_binding(db, sub_agent_id)
     if binding is None:
         return
+    if deleting:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Sub-agent {sub_agent_id} is managed by {binding.base_url}. "
+                "Remove the embed binding first, then delete the sub-agent."
+            ),
+        )
     if data is None:
         touched = ["the version"]
     else:
@@ -382,7 +397,7 @@ async def remove_embed_binding(
     user: User = Depends(require_admin),
 ) -> None:
     """Unbind. The sub-agent keeps its last synced version and becomes editable again."""
-    if not await get_embed_binding_service(request).delete_binding(db, sub_agent_id):
+    if not await get_embed_binding_service(request).delete_binding(db, user, sub_agent_id):
         raise HTTPException(
             status_code=404, detail=f"Sub-agent {sub_agent_id} has no embed binding"
         )
@@ -500,9 +515,10 @@ async def delete_sub_agent(
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> None:
-    """Delete a sub-agent."""
+    """Delete a sub-agent. Refused (409) while an embed binding exists (ADR-0006)."""
     sub_agent_service = get_sub_agent_service(request)
     try:
+        await _reject_if_embed_bound(request, db, sub_agent_id, deleting=True)
         deleted = await sub_agent_service.delete_sub_agent(db, sub_agent_id, actor=user)
         if not deleted:
             raise HTTPException(status_code=404, detail="Sub-agent not found")

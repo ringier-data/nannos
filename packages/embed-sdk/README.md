@@ -141,9 +141,15 @@ the user moves between chats. An unnamed one reads as `thread.newConversation`
 from the strings table, so it translates; `panel.title` now names the panel
 region instead. A host that wants its agent's name on screen owns that chrome:
 pass your own `header`, and read `useAgentName()` — the adapter's `agentName`
-if set, else the name the host publishes at
-`/.well-known/agent-skills/index.json` (`x-nannos-agent.name`), else the A2A
-handshake's agent name.
+if set, else the bound sub-agent console-backend named in the handshake, else the
+name the host publishes at `/.well-known/agent-skills/index.json`
+(`x-nannos-agent.name`), else the A2A handshake's agent name.
+
+On a bound embedded surface the composer already shows which agent answers, next
+to the page-context label — no host chrome needed. `useEmbeddedAgent()` returns
+that binding (`{ subAgentId, name, description, organization, revision }`) or
+`null` off an embedded surface. It is the server's answer, so it holds even when
+the host serves no well-known index on the page's own origin.
 
 A host that replaces `header` keeps the overlay by driving it itself:
 `useConversationHistory()` returns `{ available, isOpen, open, close, toggle }`.

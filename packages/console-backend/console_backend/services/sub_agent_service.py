@@ -226,6 +226,8 @@ class SubAgentService:
         - Owned by the user (if include_owned=True)
         - Public sub-agents (is_public=true)
         - Assigned to user's groups
+        - Activated for the user by an embed binding (activated_by='embed', ADR-0006):
+          the binding's azp authorised the user, there is no owner/public/group relation
         - All sub-agents if user is admin
 
         Always joins with current_version to show the latest state.
@@ -345,6 +347,9 @@ class SubAgentService:
                     (:include_owned AND sa.owner_user_id = :user_id)
                     OR sa.is_public = TRUE
                     OR ugm.user_id = :user_id
+                    -- An embed activation (ADR-0006) is itself the grant: the binding's azp
+                    -- authorised the user; there is no owner/public/group relation to lean on.
+                    OR usa.activated_by = :embed_source
                 ) {activation_filter}
             """
             if status_filter:
@@ -353,12 +358,24 @@ class SubAgentService:
                 query = text(query_str)
                 result = await db.execute(
                     query,
-                    {"user_id": user_id, "include_owned": include_owned, "status": status_filter.value},
+                    {
+                        "user_id": user_id,
+                        "include_owned": include_owned,
+                        "status": status_filter.value,
+                        "embed_source": ActivationSource.EMBED.value,
+                    },
                 )
             else:
                 query_str += "ORDER BY sa.updated_at DESC"
                 query = text(query_str)
-                result = await db.execute(query, {"user_id": user_id, "include_owned": include_owned})
+                result = await db.execute(
+                    query,
+                    {
+                        "user_id": user_id,
+                        "include_owned": include_owned,
+                        "embed_source": ActivationSource.EMBED.value,
+                    },
+                )
 
         rows = result.mappings().all()
         sub_agents = [self._row_to_sub_agent_with_version(row) for row in rows]
@@ -3060,7 +3077,17 @@ class SubAgentService:
             enable_thinking = baseline.enable_thinking
             thinking_level = baseline.thinking_level
 
-        new_version = (existing.current_version or 0) + 1
+        # MAX(version)+1, not current_version+1: a soft-deleted draft keeps its number under
+        # UNIQUE(sub_agent_id, version) while delete_version lowers current_version again,
+        # so the next sync would collide on every pass and the binding would never advance.
+        max_version_result = await db.execute(
+            text("""
+                SELECT COALESCE(MAX(version), 0) FROM sub_agent_config_versions
+                WHERE sub_agent_id = :sub_agent_id
+            """),
+            {"sub_agent_id": sub_agent_id},
+        )
+        new_version = max_version_result.scalar_one() + 1
         await self._create_config_version(
             db,
             actor,
@@ -3167,7 +3194,7 @@ class SubAgentService:
         Uses a single batch query for group permissions, then resolves per agent:
         - Owner → "owner"
         - Group write/manager role with write resource permission → "write"
-        - Public or group read → "read"
+        - Public, group read, or embed-activated (ADR-0006) → "read"
 
         Mutates sub_agents in place.
         """
@@ -3211,7 +3238,7 @@ class SubAgentService:
                 continue  # Already set (owner)
             if sa.id in write_agents:
                 sa.effective_permission = "write"
-            elif sa.id in read_agents or sa.is_public:
+            elif sa.id in read_agents or sa.is_public or sa.activated_by == ActivationSource.EMBED:
                 sa.effective_permission = "read"
 
     def _row_to_sub_agent_with_version(self, row: Any) -> SubAgent:

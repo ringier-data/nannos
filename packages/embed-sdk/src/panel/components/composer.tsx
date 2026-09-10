@@ -10,21 +10,24 @@
  * The box stacks three rows inside ONE border:
  *   row 0 — attachments (absent while nothing is attached);
  *   row 1 — the textarea, with the mic as its only trailing button;
- *   row 2 — attach (left) · current context (stretches, text left-aligned) ·
+ *   row 2 — attach (left) · bound agent + current context (stretch, left-aligned) ·
  *           apply mode · stop/send (right).
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ChangeEvent, DragEvent, ClipboardEvent, KeyboardEvent } from 'react';
-import { ArrowUpIcon, FileTextIcon, PaperclipIcon, XIcon } from 'lucide-react';
+import { ArrowUpIcon, BotIcon, FileTextIcon, PaperclipIcon, XIcon } from 'lucide-react';
 import { StopIcon } from '../../components/icons/stop-icon';
 import { Button } from '../../components/ui/button';
 import { Spinner } from '../../components/ui/spinner';
 import { Textarea } from '../../components/ui/textarea';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { cn } from '../../lib/utils';
 import { format, useAssistant, useStrings } from '../../react';
 import { useChatEngineOptional } from '../engine';
 import { useAttachments } from '../hooks/use-attachments';
+import { useEmbeddedAgent } from '../hooks/use-embedded-agent';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
+import type { EmbeddedAgentInfo } from '../../core/wire';
 import { ApplyModeSwitch } from './apply-mode-switch';
 import { SendModeSwitch } from './send-mode-switch';
 import { useSendMode } from '../send-mode';
@@ -35,12 +38,50 @@ export interface ComposerProps {
   className?: string;
 }
 
+/**
+ * Who answers on a bound embedded surface. Sits at the right of the action row,
+ * divided from the controls that follow it, and capped at half the row so a long
+ * product name cannot squeeze the page context out of the stretch space beside it.
+ * It therefore truncates, which is why the tooltip carries the full name — with the
+ * description and organization the host published, which a native `title` could
+ * only flatten into one line. Not focusable on purpose: it is a label, and the
+ * composer should not grow a tab stop between attach and send. Screen readers get
+ * the whole thing from `aria-label` instead of the tooltip.
+ */
+function AgentChip({ agent }: { agent: EmbeddedAgentInfo }) {
+  const strings = useStrings();
+  const details = [agent.description, agent.organization].filter(Boolean) as string[];
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          data-slot="nannos-composer-agent"
+          className="flex min-w-0 max-w-[50%] cursor-default items-center gap-1.5 border-r pr-3 text-muted-foreground text-xs"
+          aria-label={[format(strings['composer.agent'], { name: agent.name }), ...details].join('. ')}
+        >
+          <BotIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          <span className="truncate">{agent.name}</span>
+        </span>
+      </TooltipTrigger>
+      {/* Above the composer: the row sits at the bottom of the panel, and a
+          bottom-side tooltip would open off-surface. */}
+      <TooltipContent side="top" align="start" sideOffset={6} className="max-w-xs">
+        This is the sub-agent. It is locked.
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function Composer({ chat, className }: ComposerProps) {
   const strings = useStrings();
   const assistant = useAssistant();
   const attachments = useAttachments();
   const engine = useChatEngineOptional();
   const { mode: sendMode } = useSendMode();
+  // Which agent answers here. Present only on a bound embedded surface, where the
+  // panel is one application's assistant rather than the whole console — see
+  // `use-embedded-agent.ts`.
+  const embeddedAgent = useEmbeddedAgent();
   const [text, setText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -254,7 +295,10 @@ export function Composer({ chat, className }: ComposerProps) {
             <PaperclipIcon />
           </Button>
 
-          {/* Stretches so send stays hard right; its own text is left-aligned. */}
+          {/* Stretches so everything after it stays hard right; its own text is
+              left-aligned. Holds WHAT page context the next send carries, which
+              changes as the user navigates. WHO answers is fixed for the surface,
+              so it sits with the controls on the right instead. */}
           <div
             data-slot="nannos-composer-context"
             className="flex min-w-0 flex-1 items-center justify-start"
@@ -270,6 +314,8 @@ export function Composer({ chat, className }: ComposerProps) {
               </span>
             )}
           </div>
+
+          {embeddedAgent && <AgentChip agent={embeddedAgent} />}
 
           {/* Directly left of send: whether a form fill asks first is answered
               where the user is when they ask for one. Absent when the host

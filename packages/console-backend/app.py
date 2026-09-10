@@ -1681,6 +1681,15 @@ async def _resolve_socket_user_via_token(token: str) -> _SocketTokenAuth | None:
                 embedded_sub_agent_id = await embed_service.bind_connection(db, user=user, azp=azp)
                 if embedded_sub_agent_id is not None:
                     await db.commit()
+                else:
+                    # Fails open by design: the user is authenticated whic is the gate.
+                    # But an unbound host page runs the full
+                    # orchestrator — make the misconfiguration (an azp
+                    # typo, a binding not yet created) visible here.
+                    logger.warning(
+                        f"Embedded socket connect: azp={azp!r} has no embed binding; "
+                        "connecting unbound (full orchestrator, unscoped conversation list)"
+                    )
             except Exception:  # noqa: BLE001 — a binding hiccup must not reject the login
                 logger.exception(f"Embed binding lookup failed for azp={azp!r}; connecting unbound")
                 embedded_sub_agent_id = None
@@ -1810,6 +1819,53 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
         await connection_pool.remove(sid)
 
 
+async def _embedded_agent_info(socket_session: Any) -> dict[str, Any] | None:
+    """What the panel should call the agent on a bound embedded surface (ADR-0006).
+
+    The A2A card in the same handshake names the ORCHESTRATOR ("Orchestrator Agent"),
+    which is the wrong label on a host page, and the SDK's own fallback reads the
+    host's well-known index from the PAGE origin — which need not be the binding's
+    base_url (an API host, a static server that 404s). console-backend already knows
+    the answer from the binding, so it says it here.
+
+    Returns None for console sessions and unbound tokens, and never raises: a missing
+    label must not fail the handshake that carries it.
+    """
+    sub_agent_id = getattr(socket_session, "embedded_sub_agent_id", None)
+    if sub_agent_id is None:
+        return None
+    embed_service = getattr(sio.app_instance.state, "embed_binding_service", None)  # type: ignore[attr-defined]
+    if embed_service is None:
+        return None
+    try:
+        session_factory = get_async_session_factory()
+        async with session_factory() as db:
+            binding = await embed_service.get_binding(db, int(sub_agent_id))
+            if binding is None:
+                return None
+            published = binding.agent
+            if published is None:
+                # Bound but never synced (the host was unreachable on every attempt):
+                # the row name is derived and hyphenated, but it beats "Orchestrator Agent".
+                sub_agent = await sio.app_instance.state.sub_agent_service.get_sub_agent_by_id(  # type: ignore[attr-defined]
+                    db, int(sub_agent_id)
+                )
+                name = getattr(sub_agent, "name", None)
+                return {"subAgentId": str(sub_agent_id), "name": name} if name else None
+            return {
+                "subAgentId": str(sub_agent_id),
+                "name": published.name,
+                "description": published.description,
+                "organization": published.organization,
+                "revision": binding.revision,
+            }
+    except Exception:  # noqa: BLE001 — a label is not worth failing the handshake for
+        logger.exception(
+            f"Could not resolve the embedded agent label for sub-agent {sub_agent_id}"
+        )
+        return None
+
+
 @sio.on(SocketEvents.INITIALIZE_CLIENT)  # type: ignore
 @require_socket_auth(sio)
 async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -1929,7 +1985,11 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
             instance_info = f"hostname={hostname}, pid={os.getpid()}"
             logger.info(f"Successfully cached connection for sid {sid} on instance {instance_info}")
 
-            success_response = create_success_response({"agent": agent_info})
+            # `embeddedAgent`: which sub-agent THIS connection runs, named as its host
+            # published it (ADR-0006). Absent on console sessions and unbound tokens.
+            success_response = create_success_response(
+                {"agent": agent_info, "embeddedAgent": await _embedded_agent_info(socket_session)}
+            )
             await sio.emit(SocketEvents.CLIENT_INITIALIZED, success_response, to=sid)
             return success_response
 

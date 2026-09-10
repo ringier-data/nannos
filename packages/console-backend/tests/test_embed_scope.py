@@ -204,3 +204,86 @@ async def test_conversation_list_unbound_token_keeps_the_query_parameter():
         "console",
         "other-app",
     ]
+
+
+# --------------------------------------------------- the handshake's agent label
+
+
+def _label_mocks(binding, sub_agent=None):
+    db = MagicMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=db)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+    sio = MagicMock()
+    sio.app_instance.state.embed_binding_service.get_binding = AsyncMock(
+        return_value=binding
+    )
+    sio.app_instance.state.sub_agent_service.get_sub_agent_by_id = AsyncMock(
+        return_value=sub_agent
+    )
+    return factory, sio
+
+
+async def _label_for(session, binding, sub_agent=None):
+    import app as app_module
+
+    factory, sio = _label_mocks(binding, sub_agent)
+    with (
+        patch("app.get_async_session_factory", return_value=factory),
+        patch("app.sio", sio),
+    ):
+        return await app_module._embedded_agent_info(session)
+
+
+@pytest.mark.asyncio
+async def test_handshake_names_the_bound_agent_as_its_host_published_it():
+    """The A2A card in the same handshake names the ORCHESTRATOR; a host page must not
+    label its assistant with that, and must not have to guess from its own origin."""
+    binding = SimpleNamespace(
+        revision="abc123def4567890",
+        agent=SimpleNamespace(
+            name="Alloy AI Assistant",
+            description="Helps with campaigns.",
+            organization="Ringier Advertising",
+        ),
+    )
+    assert await _label_for(_session(20), binding) == {
+        "subAgentId": "20",
+        "name": "Alloy AI Assistant",
+        "description": "Helps with campaigns.",
+        "organization": "Ringier Advertising",
+        "revision": "abc123def4567890",
+    }
+
+
+@pytest.mark.asyncio
+async def test_handshake_omits_the_label_for_console_and_unbound_connections():
+    assert await _label_for(_session(None), None) is None
+
+
+@pytest.mark.asyncio
+async def test_handshake_falls_back_to_the_row_name_before_the_first_sync():
+    """Bound but never synced (an unreachable host): the derived row name is
+    hyphenated, but it still beats labelling the page 'Orchestrator Agent'."""
+    binding = SimpleNamespace(revision=None, agent=None)
+    row = SimpleNamespace(name="Alloy-AI-Assistant")
+    assert await _label_for(_session(20), binding, row) == {
+        "subAgentId": "20",
+        "name": "Alloy-AI-Assistant",
+    }
+
+
+@pytest.mark.asyncio
+async def test_handshake_label_failure_never_breaks_the_handshake():
+    import app as app_module
+
+    factory, sio = _label_mocks(None)
+    sio.app_instance.state.embed_binding_service.get_binding = AsyncMock(
+        side_effect=RuntimeError("database is down")
+    )
+    with (
+        patch("app.get_async_session_factory", return_value=factory),
+        patch("app.sio", sio),
+    ):
+        assert await app_module._embedded_agent_info(_session(20)) is None

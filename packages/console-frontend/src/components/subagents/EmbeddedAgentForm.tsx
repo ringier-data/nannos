@@ -130,8 +130,8 @@ export function EmbeddedAgentForm({ onCancel, onCreated }: EmbeddedAgentFormProp
                   disabled={busy}
                 />
                 <p className="text-xs text-muted-foreground">
-                  When a token is recieved, we check that its `azp` claim is in this list. One per line, no commas. If
-                  matching, this sug-agent will be activated.
+                  When a token is received, we check that its `azp` claim is in this list. One per line, no commas. If
+                  matching, this sub-agent will be activated.
                 </p>
               </div>
             </CardContent>

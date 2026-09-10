@@ -110,9 +110,29 @@ export interface SendMessagePayload {
   dataParts?: Record<string, unknown>[];
 }
 
+/**
+ * The sub-agent an embedded connection is bound to (ADR-0006), as console-backend
+ * resolved it from the token's `azp`. Present only on a bound embedded surface —
+ * a console session and an unbound token both leave it out.
+ *
+ * `name` is what the HOST published for people to read ("Alloy AI Assistant"),
+ * not the hyphenated row name the orchestrator routes on. It is the authoritative
+ * label for the surface: the sibling `agent` card names the orchestrator, and the
+ * host's own well-known index is served from an origin the page may not share.
+ */
+export interface EmbeddedAgentInfo {
+  subAgentId: string;
+  name: string;
+  description?: string;
+  organization?: string;
+  /** Well-known revision the bound definition was last synced from. */
+  revision?: string | null;
+}
+
 export interface ClientInitializedData {
   status: 'success' | 'error';
   agent?: AgentInfo;
+  embeddedAgent?: EmbeddedAgentInfo | null;
   error?: string;
   message?: string;
 }

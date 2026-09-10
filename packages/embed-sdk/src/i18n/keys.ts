@@ -29,6 +29,7 @@ export interface NannosStrings {
   'composer.recordPermission': string;
   'composer.recordError': string;
   'composer.readOnly': string;
+  'composer.agent': string;
 
   // Connection status
   'status.connected': string;
@@ -204,6 +205,7 @@ export const nannosStringKeys = [
   'composer.recordPermission',
   'composer.recordError',
   'composer.readOnly',
+  'composer.agent',
   'status.connected',
   'status.connecting',
   'status.disconnected',

@@ -21,6 +21,7 @@ export const de: NannosStrings = {
     'Der Zugriff auf das Mikrofon wurde verweigert. Erlauben Sie den Zugriff, um Audio aufzunehmen.',
   'composer.recordError': 'Audio konnte nicht aufgenommen werden',
   'composer.readOnly': 'Diese Unterhaltung gehört zu einer anderen Oberfläche und ist hier nur lesbar.',
+  'composer.agent': 'Beantwortet von {name}',
 
   'status.connected': 'Verbunden',
   'status.connecting': 'Verbindung wird aufgebaut…',
