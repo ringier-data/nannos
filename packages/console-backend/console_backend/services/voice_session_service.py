@@ -96,6 +96,13 @@ class VoiceSessionService:
             await db.rollback()
             return False
 
+    async def get_session(self, db, session_id: str) -> VoiceSession | None:
+        try:
+            return await self.repo.get_session(db, session_id)
+        except Exception as e:
+            logger.error("Failed to get voice session %s: %s", session_id, e)
+            return None
+
     async def complete_session(self, db, actor: User, session_id: str) -> bool:
         try:
             await self.repo.complete_session(db, actor, session_id)

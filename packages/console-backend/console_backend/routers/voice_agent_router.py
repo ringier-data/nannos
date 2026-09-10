@@ -11,6 +11,12 @@ Endpoints:
   PATCH /api/v1/voice/sessions/{session_id}/handle       — store Gemini resumption handle
   PATCH /api/v1/voice/sessions/{session_id}/complete     — mark session completed
   PATCH /api/v1/voice/sessions/{session_id}/fail         — mark session failed
+  POST /api/v1/voice/sessions/{session_id}/usage         — record token usage for the call
+
+Cost tracking: the voice agent bypasses the Model Gateway (it speaks Gemini Live
+directly), so the gateway's CustomLogger never sees its spend. Instead the agent POSTs
+observed token counts to .../usage, attributed to the sub-agent the call impersonated,
+resolved here from the voice session record.
 """
 
 from __future__ import annotations
@@ -30,9 +36,11 @@ from ..models.voice_session import (
     VoiceSessionCreate,
     VoiceSessionHandleUpdate,
     VoiceSessionResponse,
+    VoiceUsageReport,
 )
 from ..services.scheduler_token_service import SchedulerTokenService
 from ..services.sub_agent_service import SubAgentService
+from ..services.usage_service import UsageService
 from ..services.user_service import UserService
 from ..services.voice_session_service import VoiceSessionService  # for type hint in _get_voice_session_service
 
@@ -55,6 +63,10 @@ def _get_scheduler_token_service(request: Request) -> SchedulerTokenService:
 
 def _get_voice_session_service(request: Request) -> VoiceSessionService:
     return request.app.state.voice_session_service
+
+
+def _get_usage_service(request: Request) -> UsageService:
+    return request.app.state.usage_service
 
 
 async def require_voice_agent_service(request: Request) -> User:
@@ -300,3 +312,57 @@ async def fail_voice_session(
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to fail session")
     return {"ok": True}
+
+
+# ── Usage reporting ───────────────────────────────────────────────────────────
+
+
+@router.post("/sessions/{session_id}/usage", status_code=201)
+async def report_voice_session_usage(
+    session_id: str,
+    body: VoiceUsageReport,
+    request: Request,
+    db: DbSession,
+    _: User = Depends(require_voice_agent_service),
+) -> dict:
+    """Record token usage measured during a voice call.
+
+    The voice agent talks to Gemini Live directly (not through the Model Gateway), so
+    its spend never reaches the gateway's CustomLogger. It reports the token counts it
+    observed here instead, keyed only on the session id.
+
+    Attribution is resolved server-side from the voice session record — the caller
+    supplies no user or sub-agent — so token costs land on the sub-agent the call
+    impersonated and the agent cannot mis-attribute spend.
+    """
+    session = await _get_voice_session_service(request).get_session(db, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Voice session not found")
+
+    usage_service = _get_usage_service(request)
+    logged_ids: list[int] = []
+    try:
+        for entry in body.entries:
+            logged_ids.append(
+                await usage_service.log_usage(
+                    db=db,
+                    user_id=session.user_id,
+                    provider=entry.provider,
+                    model_name=entry.model_name,
+                    billing_unit_breakdown=entry.billing_unit_breakdown,
+                    invoked_at=session.started_at,
+                    sub_agent_id=session.sub_agent_id,
+                    voice_session_id=session.id,
+                )
+            )
+        await db.commit()
+    except Exception as exc:
+        logger.exception("Failed to log voice usage for session %s", session_id)
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to log voice usage") from exc
+
+    logger.info(
+        "Logged voice usage: session=%s user=%s sub_agent=%s entries=%d",
+        session.id, session.user_id, session.sub_agent_id, len(logged_ids),
+    )
+    return {"count": len(logged_ids), "ids": logged_ids, "status": "logged"}

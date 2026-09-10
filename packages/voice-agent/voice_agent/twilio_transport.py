@@ -272,9 +272,18 @@ async def twilio_stream(websocket: WebSocket) -> None:
         except Exception:
             logger.exception("twilio→agent error")
         finally:
-            # Signal end of session to agent
+            # Grab the agent handle first, end the session, THEN read usage. _end_session
+            # sends audio_stream_end and only afterwards cancels the receive loop, so
+            # Gemini's final response and its usage report land during teardown — reading
+            # before it silently dropped that last turn. The handle survives the
+            # _active_sessions pop; the outer finally reports it (voice_session_id lives
+            # there).
             if state["session_key"]:
+                agent = _voice_agent.get_session_agent(state["session_key"])
                 await _voice_agent._end_session(state["session_key"])
+                state["usage_entries"] = _voice_agent.collect_usage_entries(
+                    state["session_key"], agent=agent
+                )
 
     async def _agent_to_twilio(session_key: str, init_query: str) -> None:
         """Consume A2A agent output and send to Twilio."""
@@ -384,11 +393,32 @@ async def twilio_stream(websocket: WebSocket) -> None:
             _fut.set_result({"transcript": transcript, "call_sid": call_sid})
             logger.info("Resolved A2A future for call_sid=%s", call_sid)
 
-        # Mark inbound voice session complete (fire-and-forget)
+        # Report usage and mark the session complete — concurrently. They are
+        # independent: the usage endpoint resolves the session by id regardless of its
+        # status, so neither ordering matters. (They used to be sequential because
+        # /complete also wrote the call-duration row, which has since been removed.)
+        # Both are best-effort and swallow their own errors.
         voice_session_id = state.get("voice_session_id")
         if voice_session_id:
-            from voice_agent.console_client import (
-                complete_voice_session,  # noqa: PLC0415
+            from voice_agent.console_client import (  # noqa: PLC0415
+                complete_voice_session,
+                report_voice_usage,
             )
 
-            _fire_and_forget(complete_voice_session(voice_session_id))
+            async def _finish_session(
+                session_id: str = voice_session_id,
+                entries: list = state.get("usage_entries") or [],
+            ) -> None:
+                await asyncio.gather(
+                    report_voice_usage(session_id, entries),
+                    complete_voice_session(session_id),
+                )
+
+            _fire_and_forget(_finish_session())
+        elif state.get("usage_entries"):
+            # No session record (default-config fallback path), so there is nothing to
+            # attribute this spend to. Surface it rather than dropping it silently.
+            logger.warning(
+                "Discarding usage for call_sid=%s — no voice session record to attribute it to",
+                call_sid,
+            )
