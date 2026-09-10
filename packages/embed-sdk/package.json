@@ -1,6 +1,6 @@
 {
   "name": "@nannos/embed-sdk",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "Embeddable Nannos: headless core (protocol + object registration + client-action) and a styleable React UI kit, distributed as a Shadow-DOM web component.",
   "license": "SEE LICENSE IN LICENSE",
