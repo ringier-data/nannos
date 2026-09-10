@@ -1,6 +1,7 @@
 """Tests for the registry service."""
 
 from contextlib import contextmanager
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -181,6 +182,87 @@ class TestRegistryService:
             assert local_agent.system_prompt == "You are a data analysis expert."
             assert local_agent.mcp_tools is None  # No tools specified
             assert local_agent.model_name == "gpt-4o"
+
+    @staticmethod
+    def _local_agent_response(mcp_tools: list[str], embed_binding: dict | None) -> dict:
+        return {
+            "items": [
+                {
+                    "id": 20,
+                    "name": "alloy-ai-assistant",
+                    "owner_user_id": "admin-1",
+                    "type": "local",
+                    "current_version": 1,
+                    "default_version": 1,
+                    "config_version": {
+                        "id": 7,
+                        "sub_agent_id": 20,
+                        "version": 1,
+                        "description": "Helps with campaigns.",
+                        "model": "gpt-4o",
+                        "system_prompt": "Domain guidance.",
+                        "mcp_tools": mcp_tools,
+                        "status": "approved",
+                        "created_at": "2026-09-08T00:00:00",
+                    },
+                    "embed_binding": embed_binding,
+                    "created_at": "2026-09-08T00:00:00",
+                    "updated_at": "2026-09-08T00:00:00",
+                }
+            ],
+            "total": 1,
+        }
+
+    _SETTINGS: ClassVar[dict] = {
+        "data": {
+            "user_id": "test-user-id",
+            "sub": "test-user-sub",
+            "language": "en",
+            "custom_prompt": None,
+            "timezone": "Europe/Zurich",
+            "mcp_tools": [],
+            "created_at": "2026-01-01T00:00:00",
+            "updated_at": "2026-01-01T00:00:00",
+        }
+    }
+    _BINDING: ClassVar[dict] = {
+        "sub_agent_id": 20,
+        "base_url": "https://riad.example",
+        "index_url": "https://riad.example/.well-known/agent-skills/index.json",
+        "azps": ["nannos-embedded"],
+        "agent": {"name": "Alloy AI Assistant", "tools": None},
+        "created_by": "admin-1",
+        "created_at": "2026-09-08T00:00:00",
+        "updated_at": "2026-09-08T00:00:00",
+    }
+
+    @pytest.mark.asyncio
+    async def test_embed_bound_agent_without_tool_list_gets_all_tools(self, mock_registry_service):
+        """ADR-0006: bound + no tool list on either side = every tool (the GP agent's catalog)."""
+        with mock_registry_service(self._local_agent_response([], self._BINDING), self._SETTINGS) as svc:
+            user = await svc.get_user(user_sub="test-user-sub", access_token="t")
+        (agent,) = user.local_subagents
+        assert agent.all_tools is True
+        assert agent.mcp_tools is None
+
+    @pytest.mark.asyncio
+    async def test_embed_bound_agent_with_tool_list_keeps_the_whitelist(self, mock_registry_service):
+        with mock_registry_service(
+            self._local_agent_response(["list_campaigns"], self._BINDING), self._SETTINGS
+        ) as svc:
+            user = await svc.get_user(user_sub="test-user-sub", access_token="t")
+        (agent,) = user.local_subagents
+        assert agent.all_tools is False
+        assert agent.mcp_tools == ["list_campaigns"]
+
+    @pytest.mark.asyncio
+    async def test_unbound_agent_with_empty_tool_list_stays_tool_less(self, mock_registry_service):
+        """The rule is embedded AND empty; a plain sub-agent with no list is unchanged."""
+        with mock_registry_service(self._local_agent_response([], None), self._SETTINGS) as svc:
+            user = await svc.get_user(user_sub="test-user-sub", access_token="t")
+        (agent,) = user.local_subagents
+        assert agent.all_tools is False
+        assert agent.mcp_tools is None
 
     @pytest.mark.asyncio
     async def test_stored_whitelists_are_sanitised_to_exposed_tool_names(self, mock_registry_service):

@@ -3058,6 +3058,10 @@ class SubAgentService:
         when both thinking arguments are None. Those are carried forward from the
         APPROVED default version — never from a pending draft, which the sync would
         otherwise promote unreviewed.
+
+        A bound sub-agent whose tool list ends up empty (nothing published, nothing set
+        here) is NOT tool-less: the orchestrator gives it every tool the user has, the
+        same lazy catalog the general-purpose agent gets (registry ``all_tools``).
         """
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if existing is None:

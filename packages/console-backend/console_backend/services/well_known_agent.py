@@ -10,7 +10,9 @@ A first-party host publishes, on its own origin:
 Every file the index points at carries a `sha256:` digest over the exact bytes served.
 The `x-nannos-agent` block carries name, description and the prompt; `tools`, `model_tier`,
 `thinking_level` and `organization` are optional — whatever the host leaves out stays a
-Nannos-side setting on the bound sub-agent.
+Nannos-side setting on the bound sub-agent. When neither side sets a tool list, the bound
+sub-agent runs with every tool the user has (the orchestrator gives it the general-purpose
+agent's lazy catalog); a published list narrows that.
 
 This module fetches the tree, verifies each digest, validates the shapes, and returns one
 immutable `WellKnownDefinition` whose `revision` changes when any byte — or the Nannos
@@ -622,6 +624,7 @@ def _validate_index(
             "digest must be 'sha256:' followed by 64 lowercase hex characters",
         )
     # Optional: a host may leave the MCP tool list to the Nannos side (the cockpit does).
+    # With nothing set there either, the bound sub-agent gets every tool the user has.
     tools = agent.get("tools")
     if tools is not None:
         if not isinstance(tools, list) or not tools:

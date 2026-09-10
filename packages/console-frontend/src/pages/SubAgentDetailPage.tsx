@@ -2051,6 +2051,10 @@ export function SubAgentDetailPage() {
                                     </div>
                                   </CollapsibleContent>
                                 </Collapsible>
+                              ) : isEmbedBound ? (
+                                <p className="text-[11px] text-muted-foreground">
+                                  No tool list. This embedded agent can use every tool the user has.
+                                </p>
                               ) : (
                                 <p className="text-[11px] text-muted-foreground">No MCP tools configured.</p>
                               ))}

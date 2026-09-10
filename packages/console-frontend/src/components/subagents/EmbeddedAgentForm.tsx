@@ -251,7 +251,7 @@ function ProbeResult({ probe }: { probe: EmbedBindingProbe }) {
 
         <dt className="text-muted-foreground">Settings</dt>
         <dd className="text-muted-foreground">
-          {tools ? `${tools.length} tool${tools.length === 1 ? '' : 's'}` : 'tools set here'}
+          {tools ? `${tools.length} tool${tools.length === 1 ? '' : 's'}` : 'all tools unless set here'}
           {' · '}
           {agent.model_tier ? `${agent.model_tier} tier` : 'model set here'}
           {' · '}

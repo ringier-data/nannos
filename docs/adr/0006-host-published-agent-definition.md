@@ -175,6 +175,14 @@ Rules the consumer relies on:
   own setting applies. The cockpit publishes no `tools`; a host that does publishes
   scope, not authorization: the MCP gateway still enforces the user's own
   permissions and the HITL floor stays. A host can narrow, never widen.
+- **No tool list on either side means every tool** (2026-09-10). A bound sub-agent
+  whose authority publishes no `tools` and that has none set in the console runs with
+  every tool the user has — the same lazy catalog as the general-purpose agent, never
+  the bind-all path. The orchestrator registry sets `all_tools` on the sub-agent
+  config when `embed_binding` is present and `mcp_tools` is empty; the runtime then
+  treats it like the GP agent. A plain (unbound) sub-agent with an empty list still
+  gets the essential tools only. Setting a list in the console, or publishing one,
+  narrows it again.
 - Unknown fields must be ignored. `x-nannos-agent` is defined by Nannos, here.
 - Content type of `.md` may be `text/markdown` or `application/octet-stream` (S3
   guesses by extension). Do not reject on content type.
@@ -298,7 +306,10 @@ own transaction.
 - `GET /api/v1/sub-agents/{id}` carries `embed_binding`: base URL, index URL, azps,
   revision, `wk…` hash, fetched at, last error, last seen, azps seen, the published
   agent block (name, description, organization, prompt URL and digest, tools,
-  model tier, thinking level) and the skill URLs and digests.
+  model tier, thinking level) and the skill URLs and digests. The orchestrator-facing
+  `GET /api/v1/sub-agents/activated` and `/configs/by-hash/{hash}` carry it too
+  (`EmbedBindingService.get_bindings_for`, one query per list), so the registry can
+  apply the "no tool list means every tool" rule above.
 - `_reject_if_embed_bound` (409): `PATCH` is refused when it touches `description`,
   `system_prompt` or `skills`, and `mcp_tools` / model / thinking only when the
   host publishes them; other fields (name, `is_public`, Nannos-side tools or model)

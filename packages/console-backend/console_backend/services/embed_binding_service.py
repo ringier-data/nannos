@@ -122,6 +122,28 @@ class EmbedBindingService:
         row = result.mappings().first()
         return _row_to_binding(row) if row else None
 
+    async def get_bindings_for(
+        self, db: AsyncSession, sub_agent_ids: list[int]
+    ) -> dict[int, EmbedBinding]:
+        """The bindings among ``sub_agent_ids``, keyed by sub-agent id. One query for a list.
+
+        Used by the sub-agent list the orchestrator loads: it needs to know which agents
+        are embed-bound (an unbound tool list means "every tool" there, ADR-0006).
+        """
+        if not sub_agent_ids:
+            return {}
+        result = await db.execute(
+            text(
+                _SELECT_BINDING
+                + " WHERE b.sub_agent_id = ANY(:ids) GROUP BY b.sub_agent_id"
+            ),
+            {"ids": list(sub_agent_ids)},
+        )
+        return {
+            int(row["sub_agent_id"]): _row_to_binding(row)
+            for row in result.mappings().all()
+        }
+
     async def list_bindings(self, db: AsyncSession) -> list[EmbedBinding]:
         result = await db.execute(
             text(_SELECT_BINDING + " GROUP BY b.sub_agent_id ORDER BY b.sub_agent_id")

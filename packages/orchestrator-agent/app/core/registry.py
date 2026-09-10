@@ -121,6 +121,9 @@ class SubAgent(BaseModel):
     default_version: int | None = None
     config_version: SubAgentConfigVersion | None = None  # Embedded version data
     effective_permission: str | None = None  # User's effective permission (owner/write/read)
+    # ADR-0006: present when a host application publishes this sub-agent's definition.
+    # Read only for its presence here; the published block lives in console-backend.
+    embed_binding: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -451,6 +454,12 @@ class RegistryService:
                     # scheduled runs (conversation-origin extension).
                     system_prompt = resolve_prompt_placeholders(cv.system_prompt or "")
                     mcp_tools = cv.mcp_tools or []
+                    # ADR-0006: an embed-bound sub-agent whose authority published no tool
+                    # list, and that has none set on the Nannos side, gets every tool the
+                    # user has — the same lazy catalog as the general-purpose agent. Only
+                    # "embedded AND empty": a plain sub-agent with an empty list still runs
+                    # with the essential tools only.
+                    all_tools = sa.embed_binding is not None and not mcp_tools
 
                     if sa.name and system_prompt:
                         # Run the backend-resolved effective model. When it differs from the
@@ -469,6 +478,7 @@ class RegistryService:
                                 interactive=sa.type == "local",
                                 system_prompt=system_prompt,
                                 mcp_tools=mcp_tools if mcp_tools else None,
+                                all_tools=all_tools,
                                 model_name=effective_model,
                                 enable_thinking=cv.enable_thinking,
                                 thinking_level=cv.thinking_level,

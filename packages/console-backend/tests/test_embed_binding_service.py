@@ -171,6 +171,46 @@ async def test_sync_new_revision_publishes_one_approved_version():
     assert out.revision == REV
 
 
+def _binding_row(sub_agent_id: int) -> dict:
+    return {
+        "sub_agent_id": sub_agent_id,
+        "base_url": BASE,
+        "revision": REV,
+        "definition": None,
+        "fetched_at": NOW,
+        "last_error": None,
+        "last_error_at": None,
+        "last_seen_at": None,
+        "azps_seen": {},
+        "created_by": "admin-1",
+        "created_at": NOW,
+        "updated_at": NOW,
+        "azps": ["nannos-embedded"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_bindings_for_reads_a_whole_list_in_one_query():
+    service, *_ = make_service()
+    db = make_db()
+    db.execute.return_value.mappings.return_value.all.return_value = [_binding_row(20), _binding_row(22)]
+
+    found = await service.get_bindings_for(db, [20, 21, 22])
+
+    assert set(found) == {20, 22} and found[20].base_url == BASE
+    (sql,) = executed_sql(db)
+    assert "b.sub_agent_id = ANY(:ids)" in sql
+    assert db.execute.await_args.args[1] == {"ids": [20, 21, 22]}
+
+
+@pytest.mark.asyncio
+async def test_get_bindings_for_empty_list_skips_the_database():
+    service, *_ = make_service()
+    db = make_db()
+    assert await service.get_bindings_for(db, []) == {}
+    db.execute.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_sync_same_revision_only_touches_fetched_at():
     service, sas, _, _ = make_service()

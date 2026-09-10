@@ -194,6 +194,13 @@ async def list_activated_sub_agents(
         await sub_agent_service.resolve_imported_skills_bulk(db, sub_agents)
         # Resolve model lifecycle so the orchestrator runs effective_model directly.
         await annotate_models(request, db, [sa.config_version for sa in sub_agents])
+        # Mark embed-bound sub-agents (ADR-0006): the orchestrator gives a bound agent
+        # with no tool list every tool the user has, so it must know which ones are bound.
+        embed_service = getattr(request.app.state, "embed_binding_service", None)
+        if embed_service is not None:
+            bindings = await embed_service.get_bindings_for(db, [sa.id for sa in sub_agents])
+            for sa in sub_agents:
+                sa.embed_binding = bindings.get(sa.id)
 
         return SubAgentListFullResponse(items=sub_agents, total=len(sub_agents))
     except Exception as e:
@@ -245,6 +252,10 @@ async def get_sub_agent_by_config_hash(
 
         await sub_agent_service.resolve_imported_skills(db, sub_agent)
         await annotate_models(request, db, [sub_agent.config_version])
+        # Same marker as the activated list, so the playground runs a bound agent the same way.
+        embed_service = getattr(request.app.state, "embed_binding_service", None)
+        if embed_service is not None:
+            sub_agent.embed_binding = await embed_service.get_binding(db, sub_agent.id)
         return sub_agent
     except HTTPException:
         raise
