@@ -41,10 +41,19 @@ export function wireCallId(partId: string): string {
     : partId;
 }
 
-/** A single HITL decision as the backend consumes it (aligned by `id` = `_call_id`). */
+/**
+ * Decision types the backend accepts on the human-in-the-loop extension. Pinned
+ * to the repo-root `a2a-extensions.json` registry (see `extensions.test.ts`),
+ * whose copy in agent-common `core/hitl_resume.py` HITL_DECISION_TYPES must
+ * agree — the server treats an unknown type as a rejection, so a type added on
+ * one side only silently blocks the call it was meant to allow.
+ */
+export const HITL_DECISION_TYPES = ['approve', 'reject', 'edit'] as const;
+
+/** A single HITL decision as the backend consumes it (`id` = the ask's `_call_id`). */
 export interface Decision {
   id?: string;
-  type: 'approve' | 'reject' | 'edit';
+  type: (typeof HITL_DECISION_TYPES)[number];
   message?: string;
   bypass?: boolean;
   bypass_all?: boolean;
@@ -62,7 +71,9 @@ export interface ApprovalResponse {
 
 const envelopeSchema = z.object({
   v: z.literal(1),
-  type: z.enum(['approve', 'reject', 'edit']).optional(),
+  // Derived, not restated: a type added to the pinned constant must reach the wire
+  // codec too, or the registry conformance test passes while this schema drops it.
+  type: z.enum(HITL_DECISION_TYPES).optional(),
   message: z.string().optional(),
   bypass: z.boolean().optional(),
   bypass_all: z.boolean().optional(),

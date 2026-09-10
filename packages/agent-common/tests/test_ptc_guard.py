@@ -504,6 +504,69 @@ def test_apply_ptc_decisions_positional_fallback_without_ids():
     assert turn.decisions[b] == "reject"
 
 
+def test_apply_ptc_decisions_matches_scoped_ask_ids():
+    """The PRIMARY arm: decisions echoing the ask id we actually stamped.
+
+    The two tests above answer with a bare ``call_key`` — the compatibility arm for a
+    client build predating ask ids. A current client echoes
+    ``ask_id(call_key, ask_scope, ask_round)``, so that path needs its own coverage,
+    again with the decisions ordered opposite to ``pending``.
+    """
+    from agent_common.core.graph_utils import _PTCToleranceCodeInterpreterMiddleware
+
+    root = ptc_guard._call_key("ls", {"path": "/"})
+    mem = ptc_guard._call_key("ls", {"path": "/memories/"})
+    pending = [
+        types.SimpleNamespace(call_key=root, tool_name="ls", server_slug="_self"),
+        types.SimpleNamespace(call_key=mem, tool_name="ls", server_slug="_self"),
+    ]
+    decisions = [
+        {"id": ptc_guard.ask_id(mem, "c1", 2), "type": "approve"},
+        {"id": ptc_guard.ask_id(root, "c1", 2), "type": "reject"},
+    ]
+    turn = types.SimpleNamespace(decisions={}, reject_reasons={})
+
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(
+        turn, pending, decisions, context=None, ask_scope="c1", ask_round=2
+    )
+
+    assert turn.decisions[mem] == "approve"
+    assert turn.decisions[root] == "reject"
+
+
+def test_apply_ptc_decisions_rejects_unmatched_instead_of_going_positional():
+    """A PARTIAL id match must not flip the batch to positional alignment.
+
+    ``executor._decisions_for_interrupt`` pads calls it has no answer for with id-less
+    ``{"type": "reject"}`` placeholders, so a real approval can arrive alongside them.
+    Falling back to position for the whole batch could then apply that approval to a
+    call the human never saw — here, ordering the list opposite to ``pending`` would
+    approve ``/`` when the human approved ``/memories/``. The unanswered call must
+    simply be rejected.
+    """
+    from agent_common.core.graph_utils import _PTCToleranceCodeInterpreterMiddleware
+
+    root = ptc_guard._call_key("ls", {"path": "/"})
+    mem = ptc_guard._call_key("ls", {"path": "/memories/"})
+    pending = [
+        types.SimpleNamespace(call_key=root, tool_name="ls", server_slug="_self"),
+        types.SimpleNamespace(call_key=mem, tool_name="ls", server_slug="_self"),
+    ]
+    decisions = [
+        {"id": ptc_guard.ask_id(mem, "c1", 0), "type": "approve"},
+        {"type": "reject"},  # id-less placeholder for the call with no answer
+    ]
+    turn = types.SimpleNamespace(decisions={}, reject_reasons={})
+
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(
+        turn, pending, decisions, context=None, ask_scope="c1", ask_round=0
+    )
+
+    assert turn.decisions[mem] == "approve", "the id-bearing approval must land on its own call"
+    assert turn.decisions[root] == "reject", "the unanswered call must fail closed, not borrow by position"
+    assert "No approval decision was received" in turn.reject_reasons[root]
+
+
 # ── Naming the tool behind a sandbox authorization error ────────────────────────
 #
 # A `need-credentials` raised by an MCP call made inside `eval` escapes as an
@@ -565,3 +628,274 @@ def test_rejection_payload_carries_the_reason():
 
 def test_rejection_payload_without_a_reason_is_unchanged():
     assert rejection_payload("github_get_me")["message"].startswith("Tool 'github_get_me' was not approved")
+
+
+# ---------------------------------------------------------------------------
+# Rate limits and identical-call loops inside ``eval`` (#211)
+# ---------------------------------------------------------------------------
+
+_GITHUB_RATE_LIMIT = (
+    "Error calling tool search_issues on server github: failed to search issues: GET "
+    "https://api.example.com/search/issues?q=x: 403 API rate limit exceeded for user ID 1."
+)
+_GATEWAY_THROTTLE = "Error: Streamable HTTP error: Error POSTing to endpoint: too many requests"
+
+
+def _make_raising_inner(exc: Exception, record: list[dict[str, Any]]) -> BaseTool:
+    async def _inner(path: str) -> str:
+        record.append({"path": path})
+        raise exc
+
+    return StructuredTool.from_function(coroutine=_inner, name="search_issues", description="search", args_schema=_Args)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [_GITHUB_RATE_LIMIT, _GATEWAY_THROTTLE, "HTTP 429 Too Many Requests", "secondary rate-limit hit", "ratelimit"],
+)
+def test_is_rate_limit_error_recognises_provider_and_gateway_wording(text):
+    assert ptc_guard.is_rate_limit_error(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "403 Forbidden: insufficient scope",
+        "404 Not Found",
+        "",
+        "timeout",
+        # ``429`` inside a longer number is not a status code.
+        "GET https://api.example.com/repos/o/r/issues/4291: 404 Not Found []",
+        "request-id 8F4297AA: permission denied",
+        # Echoed standard headers are not a quota error.
+        "403 Forbidden: insufficient scope (x-ratelimit-remaining: 4999)",
+        "404 Not Found; headers: X-RateLimit-Reset=1700000000",
+    ],
+)
+def test_is_rate_limit_error_ignores_other_failures(text):
+    assert not ptc_guard.is_rate_limit_error(text)
+
+
+async def test_rate_limited_inner_call_returns_terminal_payload_instead_of_raising():
+    """A quota error comes back as a value the program can read, not a throw it will retry."""
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(_make_raising_inner(ToolException(_GITHUB_RATE_LIMIT), record), risk_scorer=None)
+    out = await wrapped.coroutine(runtime=_make_runtime(), path="q")
+    assert out["error"] == "rate_limited"
+    assert out["tool"] == "search_issues"
+    assert "do not" in out["message"].lower() or "stop calling" in out["message"].lower()
+    assert "403 API rate limit exceeded" in out["detail"]
+    assert record == [{"path": "q"}]
+
+
+async def test_gateway_throttle_is_a_rate_limit_too():
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(_make_raising_inner(ToolException(_GATEWAY_THROTTLE), record), risk_scorer=None)
+    out = await wrapped.coroutine(runtime=_make_runtime(), path="q")
+    assert out["error"] == "rate_limited"
+
+
+async def test_rate_limited_payload_is_cached_for_the_turn():
+    """Within one eval turn the same call is not sent to the provider again."""
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(
+        _make_raising_inner(ToolException(_GITHUB_RATE_LIMIT), record), risk_scorer=_scorer(0.1)
+    )
+    rt = _runtime_with_thread("t-rl")
+    ptc_guard.begin_ptc_turn("t-rl")
+    try:
+        first = await wrapped.coroutine(runtime=rt, path="q")
+        second = await wrapped.coroutine(runtime=rt, path="q")
+    finally:
+        ptc_guard.end_ptc_turn("t-rl")
+    assert first["error"] == second["error"] == "rate_limited"
+    assert record == [{"path": "q"}]
+
+
+async def test_other_tool_exceptions_still_raise():
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(_make_raising_inner(ToolException("404 Not Found"), record), risk_scorer=None)
+    with pytest.raises(ToolException, match="404"):
+        await wrapped.coroutine(runtime=_make_runtime(), path="q")
+
+
+def _loop_policy(**kwargs):
+    from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+
+    kwargs.setdefault("max_tool_repeats", None)
+    return RepeatedToolCallMiddleware(**kwargs)
+
+
+async def test_identical_inner_call_is_refused_by_the_stacks_loop_policy():
+    """The PTC guard applies the *same* ``RepeatedToolCallMiddleware`` — same thresholds, same
+    history, same wording — to a call a program makes inside ``eval``."""
+    policy = _loop_policy(max_repeats=3)
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(_make_inner(record), risk_scorer=None, loop_detection=policy)
+    rt = _runtime_with_thread("t-loop")
+    same = policy._hash_args({"path": "/same"})
+
+    turn = ptc_guard.begin_ptc_turn("t-loop")
+    try:
+        for _ in range(3):
+            assert await wrapped.coroutine(runtime=rt, path="/same") == "read:/same"
+        refused = await wrapped.coroutine(runtime=rt, path="/same")
+        assert refused["error"] == "repeated_call"
+        assert refused["tool"] == "read_file"
+        # Byte-identical to what the model gets when it makes the call directly.
+        assert refused["message"].startswith("BLOCKED: 'read_file' — Tool 'read_file' called 3 times with identical")
+        assert "Do NOT retry with the same arguments" in refused["message"]
+        assert len(record) == 3  # the refused call never ran
+        # Different arguments are a different call — and a blocked call is recorded too.
+        assert await wrapped.coroutine(runtime=rt, path="/other") == "read:/other"
+        assert turn.tool_call_history == {
+            "eval:read_file": [same, same, same, same, policy._hash_args({"path": "/other"})]
+        }
+    finally:
+        ptc_guard.end_ptc_turn("t-loop")
+
+    # The durable copy is the loop middleware's own state: a turn seeded with the thread's
+    # history continues it, an empty seed starts over.
+    turn = ptc_guard.begin_ptc_turn("t-loop")
+    turn.tool_call_history = {"eval:read_file": [same, same, same]}
+    try:
+        assert (await wrapped.coroutine(runtime=rt, path="/same"))["error"] == "repeated_call"
+    finally:
+        ptc_guard.end_ptc_turn("t-loop")
+    turn = ptc_guard.begin_ptc_turn("t-loop")
+    try:
+        assert await wrapped.coroutine(runtime=rt, path="/same") == "read:/same"
+    finally:
+        ptc_guard.end_ptc_turn("t-loop")
+
+    # Outside an eval turn there is no history to judge against: the check is inert.
+    for _ in range(5):
+        assert await wrapped.coroutine(runtime=rt, path="/same") == "read:/same"
+
+
+async def test_no_loop_policy_means_no_loop_check():
+    """Without a ``RepeatedToolCallMiddleware`` in the stack the guard adds none of its own."""
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(_make_inner(record), risk_scorer=None)
+    rt = _runtime_with_thread("t-none")
+    turn = ptc_guard.begin_ptc_turn("t-none")
+    try:
+        for _ in range(8):
+            assert await wrapped.coroutine(runtime=rt, path="/same") == "read:/same"
+        assert turn.tool_call_history == {}
+    finally:
+        ptc_guard.end_ptc_turn("t-none")
+
+
+async def test_loop_policy_configuration_governs_the_ptc_path():
+    """Configure the middleware and the PTC path follows for the rules that describe a program's
+    calls: ``max_repeats``, ``window_size``, the tool filter. The same-tool cap is the one rule that
+    does not — it counts model turns, and a program iterating over distinct items is one turn."""
+    record: list[dict] = []
+    policy = _loop_policy(max_repeats=2, max_tool_repeats=3, window_size=10)
+    wrapped = wrap_tool_for_ptc(_make_inner(record), risk_scorer=None, loop_detection=policy)
+    rt = _runtime_with_thread("t-cfg")
+    turn = ptc_guard.begin_ptc_turn("t-cfg")
+    try:
+        # A bulk loop over 12 distinct items — the pattern PTC exists for — is not a loop.
+        for i in range(12):
+            assert await wrapped.coroutine(runtime=rt, path=f"/p{i}") == f"read:/p{i}"
+        # ...while the identical-arguments rule still binds, with the configured threshold
+        # (``/p0`` has left the window by now, so it starts over: two allowed, the third blocked).
+        assert await wrapped.coroutine(runtime=rt, path="/p0") == "read:/p0"
+        assert await wrapped.coroutine(runtime=rt, path="/p0") == "read:/p0"
+        assert (await wrapped.coroutine(runtime=rt, path="/p0"))["error"] == "repeated_call"
+        # Program calls live under their own key: the model boundary's same-tool count for
+        # *direct* calls to read_file is untouched, so the loop above cannot prime a block.
+        assert set(turn.tool_call_history) == {"eval:read_file"}
+        direct = policy.evaluate("read_file", {"path": "/direct"}, turn.tool_call_history.get("read_file", []))
+        assert not direct.blocked
+    finally:
+        ptc_guard.end_ptc_turn("t-cfg")
+
+    # The tool filter is shared too: a policy scoped to another tool ignores this one.
+    policy = _loop_policy(tool_name="write_file", max_repeats=1)
+    wrapped = wrap_tool_for_ptc(_make_inner(record), risk_scorer=None, loop_detection=policy)
+    rt = _runtime_with_thread("t-cfg2")
+    turn = ptc_guard.begin_ptc_turn("t-cfg2")
+    try:
+        for _ in range(3):
+            assert await wrapped.coroutine(runtime=rt, path="/same") == "read:/same"
+        assert turn.tool_call_history == {}
+    finally:
+        ptc_guard.end_ptc_turn("t-cfg2")
+
+
+async def test_identical_call_threshold_applies_on_the_guarded_path_too():
+    """Within one eval turn the per-turn result cache already dedups an identical low-risk call, so
+    the rule is about the same call re-issued on *successive* eval turns — each seeded from the
+    history the previous one wrote to state."""
+    policy = _loop_policy(max_repeats=2)
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(_make_inner(record), risk_scorer=_scorer(0.1), loop_detection=policy)
+    rt = _runtime_with_thread("t-loop2")
+    history: dict[str, list[str]] = {}
+
+    async def eval_turn():
+        turn = ptc_guard.begin_ptc_turn("t-loop2")
+        turn.tool_call_history = {k: list(v) for k, v in history.items()}
+        try:
+            return await wrapped.coroutine(runtime=rt, path="/same")
+        finally:
+            history.clear()
+            history.update(turn.tool_call_history)
+            ptc_guard.end_ptc_turn("t-loop2")
+
+    assert await eval_turn() == "read:/same"
+    assert await eval_turn() == "read:/same"
+    assert (await eval_turn())["error"] == "repeated_call"
+    assert len(record) == 2
+
+
+def test_resolve_thread_id_falls_back_to_langgraph_config(monkeypatch):
+    """``after_agent`` gets a Runtime without ``config``; it must still key like the guard."""
+    monkeypatch.setattr(ptc_guard, "get_config", lambda: {"configurable": {"thread_id": "from-ctx"}})
+    assert ptc_guard.resolve_ptc_thread_id(types.SimpleNamespace()) == "from-ctx"
+    # An explicit runtime config still wins.
+    assert ptc_guard.resolve_ptc_thread_id(_runtime_with_thread("explicit")) == "explicit"
+
+
+async def test_hitl_round_trips_do_not_consume_the_repeat_budget():
+    """Only calls that reach the inner tool are judged and recorded: a pending approval, its interrupt
+    replay and a recorded rejection all leave the history alone (the reviewer's approval-round
+    accounting). Each phase is its own eval turn seeded from the previous one, as the middleware
+    does from state."""
+    policy = _loop_policy(max_repeats=1)
+    record: list[dict] = []
+    wrapped = wrap_tool_for_ptc(
+        _make_inner(record), risk_scorer=_scorer(0.9), default_risk_threshold=0.8, loop_detection=policy
+    )
+    rt = _runtime_with_thread("t-hitl")
+    call_key = ptc_guard._call_key("read_file", {"path": "/etc/passwd"})
+    history: dict[str, list[str]] = {}
+
+    async def phase(decision: str | None):
+        turn = ptc_guard.begin_ptc_turn("t-hitl")
+        turn.tool_call_history = {k: list(v) for k, v in history.items()}
+        if decision:
+            turn.decisions[call_key] = decision
+        try:
+            return await wrapped.coroutine(runtime=rt, path="/etc/passwd")
+        finally:
+            history.clear()
+            history.update(turn.tool_call_history)
+            ptc_guard.end_ptc_turn("t-hitl")
+
+    # Probe run: recorded as pending, not executed, not judged. Interrupt replay: same again.
+    assert (await phase(None))["error"] == "human_approval_required"
+    assert (await phase(None))["error"] == "human_approval_required"
+    assert history == {}
+
+    # The human approves: the call executes exactly once and is the first recorded occurrence.
+    assert await phase("approve") == "read:/etc/passwd"
+    assert record == [{"path": "/etc/passwd"}]
+    assert history == {"eval:read_file": [policy._hash_args({"path": "/etc/passwd"})]}
+
+    # A rejection is not recorded either.
+    assert (await phase("reject"))["error"] == "human_rejected"
+    assert history == {"eval:read_file": [policy._hash_args({"path": "/etc/passwd"})]}

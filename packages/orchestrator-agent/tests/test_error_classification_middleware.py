@@ -271,6 +271,64 @@ async def test_auth_takes_priority_over_transient(middleware):
     assert result.additional_kwargs["error_classification"] == "auth"
 
 
+@pytest.mark.asyncio
+async def test_403_rate_limit_is_transient_not_auth(middleware):
+    """A provider that spells quota exhaustion ``403 ... rate limit`` is not an auth failure (#211)."""
+    request = _make_request()
+    msg = ToolMessage(
+        content=(
+            "ToolException('failed to search issues: GET https://api.example.com/search/issues?q=x: "
+            "403 API rate limit exceeded for user ID 1. If you reach out to support, include the request ID.')"
+        ),
+        tool_call_id="tc-1",
+        status="error",
+    )
+    handler = AsyncMock(return_value=msg)
+
+    result = await middleware.awrap_tool_call(request, handler)
+    assert result.additional_kwargs["error_classification"] == "transient"
+
+
+@pytest.mark.asyncio
+async def test_gateway_too_many_requests_is_transient(middleware):
+    """The MCP gateway's throttle wording carries neither ``429`` nor ``rate limit`` (#211)."""
+    request = _make_request()
+    msg = ToolMessage(
+        content="ToolException('Error: Streamable HTTP error: Error POSTing to endpoint: too many requests')",
+        tool_call_id="tc-1",
+        status="error",
+    )
+    handler = AsyncMock(return_value=msg)
+
+    result = await middleware.awrap_tool_call(request, handler)
+    assert result.additional_kwargs["error_classification"] == "transient"
+
+
+def test_bare_403_without_quota_wording_stays_auth():
+    from app.middleware.error_classification_middleware import classify_error
+
+    assert classify_error("403 Forbidden: insufficient scope for this resource") == "auth"
+    assert classify_error("HTTP 401 Unauthorized — rate limit on auth endpoint") == "auth"
+
+
+def test_status_codes_are_word_bounded():
+    """``429``/``401``/``403`` inside a request id or an issue number are not status codes."""
+    from app.middleware.error_classification_middleware import classify_error
+
+    assert classify_error("403 Forbidden: you do not have permission. request-id 8F4297AA") == "auth"
+    assert classify_error("failed: 403 API rate limit exceeded. request-id 8B4A:1401:2F9C") == "transient"
+    assert classify_error("Error: GET /repos/o/r/issues/4291: 404 Not Found") == "system_error"
+
+
+def test_json_403_with_quota_wording_is_transient():
+    """The JSON tier applies the same 403 rule as the text tier."""
+    from app.middleware.error_classification_middleware import classify_error
+
+    assert classify_error(json.dumps({"statusCode": 403, "message": "API rate limit exceeded"})) == "transient"
+    assert classify_error(json.dumps({"statusCode": 403, "message": "Resource not accessible"})) == "auth"
+    assert classify_error(json.dumps({"statusCode": 401, "message": "rate limit"})) == "auth"
+
+
 class TestStructuredEvalResults:
     """A successful PTC ``eval`` ``<result>`` must never be classified, whatever words it contains."""
 

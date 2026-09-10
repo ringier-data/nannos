@@ -63,7 +63,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from typing_extensions import NotRequired
@@ -72,7 +72,7 @@ from agent_common.backends.attachments_store import ContextScopedAttachmentsBack
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
-from agent_common.core.hitl_resume import decisions_from_resume
+from agent_common.core.hitl_resume import HITL_DECISION_TYPES, decisions_from_resume
 from agent_common.core.model_factory import is_gemini_model
 from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.ptc_discovery import (
@@ -91,6 +91,7 @@ from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMi
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import (
     PTC_CODE_INTERPRETER_TOOL_NAME,
+    ask_id,
     begin_ptc_turn,
     clear_ptc_pending,
     end_ptc_turn,
@@ -335,8 +336,30 @@ _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
 # *resume* — where the model-call hook does not run and ``request.tools`` is empty
 # — the eval REPL re-exposes exactly the (ToolsetSelector-filtered) set the
 # original call used, instead of falling back to the full build-time baseline.
-# Must equal the field name on ``_PTCExposureState``.
+# Must equal the field names on ``_PTCExposureState``.
 PTC_EXPOSED_TOOL_NAMES_STATE_KEY = "ptc_exposed_tool_names"
+# ``RepeatedToolCallMiddleware``'s state field (``LoopDetectionState.tool_call_history``).
+TOOL_CALL_HISTORY_STATE_KEY = "tool_call_history"
+
+#: Stands in for a pending call that an id-speaking client sent no decision for.
+#: Fails closed, and says so in words the model can act on — a bare "not approved"
+#: is what makes it invent a cause and tell the user the tool does not exist.
+_UNMATCHED_DECISION = {
+    "type": "reject",
+    "message": (
+        "No approval decision was received for this specific call, so it was not run. "
+        "Ask the user to approve it explicitly if it is still needed."
+    ),
+}
+
+#: Stands in for a decision that did not arrive as an object at all.
+_UNREADABLE_DECISION = {
+    "type": "reject",
+    "message": (
+        "The approval response for this call could not be read, so it was not run. "
+        "Ask the user to confirm what they intended."
+    ),
+}
 
 # When the number of MCP catalog tools (those carrying ``server_name`` metadata)
 # exposed via PTC exceeds this threshold, the middleware switches to *core-only*
@@ -389,6 +412,14 @@ class _PTCExposureState(REPLState):
     """
 
     ptc_exposed_tool_names: NotRequired[Annotated[list[str], PrivateStateAttr]]
+
+    #: The same channel ``LoopDetectionState`` declares (identical type, so the two
+    #: schemas merge). Declared here because this middleware writes it: the PTC guard
+    #: judges inner calls with the stack's ``RepeatedToolCallMiddleware`` against this
+    #: history — the guard runs on the sandbox bridge thread with no access to graph
+    #: state, so ``awrap_tool_call`` seeds the ``eval`` turn from it and writes the
+    #: turn's history back with the tool result. One history, one rule, both paths.
+    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr]]
 
 
 def _code_interpreter_ptc_enabled() -> bool:
@@ -605,6 +636,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         tool_risk_cache: ToolRiskCache | None = None,
         default_risk_threshold: float = 0.8,
         tool_server_map: dict[str, str] | None = None,
+        loop_detection: RepeatedToolCallMiddleware | None = None,
         excluded_ptc_names: frozenset[str] = _PTC_EXCLUDED_TOOL_NAMES,
         backend_supports_execution: bool = False,
         expose_context_registry: bool = False,
@@ -644,6 +676,8 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         self._ptc_tool_risk_cache = tool_risk_cache
         self._ptc_default_risk_threshold = default_risk_threshold
         self._ptc_tool_server_map = tool_server_map
+        # The stack's loop-detection policy, applied to inner calls by the guard.
+        self._ptc_loop_detection = loop_detection
         self._excluded_ptc_names = excluded_ptc_names
         # Whether the graph's backend can run shell commands. Gates the sandbox
         # ``execute`` tool: FilesystemMiddleware binds a dead ``execute`` even on
@@ -712,6 +746,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                         tool_risk_cache=self._ptc_tool_risk_cache,
                         default_risk_threshold=self._ptc_default_risk_threshold,
                         tool_server_map=self._ptc_tool_server_map,
+                        loop_detection=self._ptc_loop_detection,
                     )
                 )
 
@@ -749,6 +784,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                     tool_risk_cache=self._ptc_tool_risk_cache,
                     default_risk_threshold=self._ptc_default_risk_threshold,
                     tool_server_map=self._ptc_tool_server_map,
+                    loop_detection=self._ptc_loop_detection,
                 )
             )
 
@@ -1007,6 +1043,46 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         return self._exposure_state_update()
 
+    @staticmethod
+    def _with_tool_call_history(result: Any, turn: Any, seed: dict[str, list[str]]) -> Any:
+        """Attach the turn's ``tool_call_history`` to the ``eval`` result as a state update.
+
+        The guard extended ``turn.tool_call_history`` for every inner call it judged;
+        this is the only place those entries become durable. When the program made no
+        judged call the history equals ``seed`` (what the state already holds) and the
+        result passes through untouched — no state write. Otherwise a ``ToolMessage``
+        is wrapped in a ``Command`` carrying both the message and the history, and a
+        ``Command`` from the handler gets the history merged into its update.
+
+        A guard record must never be dropped silently — that would fail the loop
+        guard open for exactly the call it just judged. ``Command.update`` may be a
+        dict, a sequence of ``(channel, value)`` pairs, or ``None``; all three merge.
+        The remaining shapes LangGraph accepts (an annotated state object, a bare root
+        value) cannot be merged without knowing the schema, and the ``eval`` handler
+        never produces them, so they raise instead of being papered over.
+        """
+        history = {k: list(v) for k, v in turn.tool_call_history.items()}
+        if history == seed:
+            return result
+        if not isinstance(result, Command):
+            return Command(update={"messages": [result], TOOL_CALL_HISTORY_STATE_KEY: history})
+        update = result.update
+        if update is None:
+            merged: Any = {TOOL_CALL_HISTORY_STATE_KEY: history}
+        elif isinstance(update, dict):
+            merged = {**update, TOOL_CALL_HISTORY_STATE_KEY: history}
+        elif isinstance(update, (list, tuple)) and all(
+            isinstance(t, tuple) and len(t) == 2 and isinstance(t[0], str) for t in update
+        ):
+            merged = [*update, (TOOL_CALL_HISTORY_STATE_KEY, history)]
+        else:
+            msg = (
+                f"[PTC] eval returned a Command whose update is a {type(update).__name__}; "
+                "cannot merge tool_call_history into it and refusing to drop a loop-guard record"
+            )
+            raise TypeError(msg)
+        return Command(update=merged, goto=result.goto, graph=result.graph, resume=result.resume)
+
     async def _run_eval_with_guidance(self, request: Any, handler: Any, thread_id: Any) -> Any:
         """Run ``eval`` with the top-level-``return`` retry, then annotate a ``not a function``.
 
@@ -1080,9 +1156,40 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             return await handler(request)
         runtime = getattr(request, "runtime", None)
         thread_id = resolve_ptc_thread_id(runtime)
-        if not self._ptc_enabled or self._ptc_risk_scorer is None:
-            return await self._run_eval_with_guidance(request, handler, thread_id)
+        # One turn per ``eval`` execution, guarded or not: it is how the guard (on
+        # the bridge thread) reaches the loop middleware's ``tool_call_history``,
+        # seeded here from the checkpointed state and written back with the result.
+        # Deep-copied: the guard appends, and the state's lists must not be mutated
+        # before the reducer applies the returned update.
+        #
+        # The turn also carries the scope of every ask id it mints (see
+        # ptc_guard.ask_id): the model's tool call id, which scopes this ``eval``
+        # invocation's questions and is checkpointed on the AI message, so it is
+        # stable across the replay. It is owned by the turn rather than read from
+        # whichever wrapper drains ``pending``, so two parallel ``eval`` calls
+        # sharing a thread still stamp and match with one scope.
+        turn = begin_ptc_turn(thread_id, str(tool_call.get("id") or ""))
+        if not turn.ask_scope:
+            # Not fatal — ask ids stay unique per round, and per turn is enough for
+            # a single eval call. Logged because it silently weakens the guarantee
+            # for a thread that later runs a second eval call.
+            logger.debug("[PTC] eval tool call carries no id; ask ids for this turn are scope-less")
+        state = getattr(request, "state", None) or {}
+        seed: dict[str, list[str]] = {k: list(v) for k, v in (state.get(TOOL_CALL_HISTORY_STATE_KEY) or {}).items()}
+        turn.tool_call_history = {k: list(v) for k, v in seed.items()}
+        try:
+            if not self._ptc_enabled or self._ptc_risk_scorer is None:
+                result = await self._run_eval_with_guidance(request, handler, thread_id)
+                return self._with_tool_call_history(result, turn, seed)
+            return await self._run_guarded_eval(request, handler, thread_id, turn, seed)
+        finally:
+            end_ptc_turn(thread_id)
 
+    async def _run_guarded_eval(
+        self, request: Any, handler: Any, thread_id: Any, turn: Any, seed: dict[str, list[str]]
+    ) -> Any:
+        """The HITL loop for a guarded ``eval`` — see ``awrap_tool_call``."""
+        runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
         # On an interrupt *resume* the graph may have been rebuilt (a fresh
         # middleware instance on a different request/pod), so the upstream
@@ -1096,48 +1203,46 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         # per-call REPL reinstalls the same PTC bindings the original ``eval`` used.
         if self._ptc_enabled and not self._ptc_tools_by_thread.get(thread_id):
             self._ptc_tools_by_thread[thread_id] = tuple(self._collect_ptc_tools(request))
-        turn = begin_ptc_turn(thread_id)
-        try:
-            while True:
-                clear_ptc_pending(thread_id)
-                result = await self._run_eval_with_guidance(request, handler, thread_id)
-                pending = take_ptc_pending(thread_id)
-                if not pending:
-                    return result
+        ask_round = 0
+        while True:
+            clear_ptc_pending(thread_id)
+            result = await self._run_eval_with_guidance(request, handler, thread_id)
+            pending = take_ptc_pending(thread_id)
+            if not pending:
+                return self._with_tool_call_history(result, turn, seed)
 
-                # Decisions arrive already aligned 1:1 with `pending`. The orchestrator's
-                # resume path (executor._build_interrupt_resume_map) replicates the single
-                # blanket UI decision to this interrupt's action_request count and keys the
-                # resume by interrupt id, so each interrupt() returns exactly its own
-                # decisions — no cross-eval bleed from LangGraph's multi-interrupt resume.
-                # Any count mismatch here is therefore a genuine bug, not a resume artefact.
-                hitl_request = self._build_ptc_hitl_request(pending)
-                # Same plain-language summaries the normal HITL path stamps
-                # (see ConditionalHumanInTheLoopMiddleware._attach_summaries).
-                # Best-effort: on failure the client shows raw args.
-                from agent_common.core.tool_call_summarizer import attach_summaries
+            # Decisions arrive already aligned 1:1 with `pending`. The orchestrator's
+            # resume path (executor._build_interrupt_resume_map) replicates the single
+            # blanket UI decision to this interrupt's action_request count and keys the
+            # resume by interrupt id, so each interrupt() returns exactly its own
+            # decisions — no cross-eval bleed from LangGraph's multi-interrupt resume.
+            # Any count mismatch here is therefore a genuine bug, not a resume artefact.
+            hitl_request = self._build_ptc_hitl_request(pending, turn.ask_scope, ask_round)
+            # Same plain-language summaries the normal HITL path stamps
+            # (see ConditionalHumanInTheLoopMiddleware._attach_summaries).
+            # Best-effort: on failure the client shows raw args.
+            from agent_common.core.tool_call_summarizer import attach_summaries
 
-                ptc_tools = self._ptc_tools_by_thread.get(thread_id) or ()
-                descriptions = {t.name: t.description or "" for t in ptc_tools}
-                await attach_summaries(
-                    hitl_request["action_requests"],
-                    language=getattr(context, "language", None) or "en",
-                    describe=lambda name: descriptions.get(name, ""),
-                )
-                # Shape-tolerant read: the resume value may have been written for a
-                # DIFFERENT question (an authorization prompt the sub-agent has since
-                # moved past), or be the words the user typed instead of clicking.
-                # ``["decisions"]`` killed the whole sub-agent with KeyError there.
-                decisions = await decisions_from_resume(interrupt(hitl_request), hitl_request["action_requests"])
-                if (n := len(decisions)) != (m := len(pending)):
-                    msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
-                    raise ValueError(msg)
-                self._apply_ptc_decisions(turn, pending, decisions, context)
-        finally:
-            end_ptc_turn(thread_id)
+            ptc_tools = self._ptc_tools_by_thread.get(thread_id) or ()
+            descriptions = {t.name: t.description or "" for t in ptc_tools}
+            await attach_summaries(
+                hitl_request["action_requests"],
+                language=getattr(context, "language", None) or "en",
+                describe=lambda name: descriptions.get(name, ""),
+            )
+            # Shape-tolerant read: the resume value may have been written for a
+            # DIFFERENT question (an authorization prompt the sub-agent has since
+            # moved past), or be the words the user typed instead of clicking.
+            # ``["decisions"]`` killed the whole sub-agent with KeyError there.
+            decisions = await decisions_from_resume(interrupt(hitl_request), hitl_request["action_requests"])
+            if (n := len(decisions)) != (m := len(pending)):
+                msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
+                raise ValueError(msg)
+            self._apply_ptc_decisions(turn, pending, decisions, context, turn.ask_scope, ask_round)
+            ask_round += 1
 
     @staticmethod
-    def _build_ptc_hitl_request(pending: list[Any]) -> Any:
+    def _build_ptc_hitl_request(pending: list[Any], ask_scope: str = "", ask_round: int = 0) -> Any:
         """Build the HITL interrupt payload for a batch of pending PTC calls.
 
         Mirrors ``ConditionalHumanInTheLoopMiddleware.aafter_model`` so the
@@ -1145,6 +1250,9 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         (``_risk_metadata`` enrichment + per-action ``allowed_decisions``).
         ``edit`` is never offered — the approved call is re-executed verbatim
         from the re-run ``eval`` code, so there is no per-call arg to edit.
+
+        ``ask_round`` distinguishes successive questions about the same tool+args;
+        the native HITL path gets that for free from the model's ``tool_call["id"]``.
         """
         from langchain.agents.middleware.human_in_the_loop import (
             ActionRequest,
@@ -1157,12 +1265,12 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         for p in pending:
             enriched_args = {
                 **p.args,
-                # Top-level, risk-independent per-call id the client echoes so the
+                # Top-level, risk-independent per-ASK id the client echoes so the
                 # resume path aligns decisions by id (see
                 # executor._build_interrupt_resume_map) instead of positionally —
-                # the latter is fragile to model replay reordering. ``call_key`` is
-                # deterministic on tool+args.
-                "_call_id": p.call_key,
+                # the latter is fragile to model replay reordering. Unique per
+                # question asked, NOT per (tool, args); ``ptc_guard.ask_id`` says why.
+                "_call_id": ask_id(p.call_key, ask_scope, ask_round),
                 "_risk_metadata": {
                     "source": "risk_score",
                     "score": p.score,
@@ -1196,6 +1304,8 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         pending: list[Any],
         decisions: list[dict[str, Any]],
         context: Any,
+        ask_scope: str = "",
+        ask_round: int = 0,
     ) -> None:
         """Record human decisions for the re-run and apply any bypass rules.
 
@@ -1211,14 +1321,48 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         # per-call decisions. ``Promise.all``-style eval calls register concurrently,
         # so the re-run's ``pending`` order can differ from the order the decisions
         # were collected/displayed in — a positional zip would then apply a decision
-        # to the WRONG call (e.g. approve `/memories` lands on `/`). ``call_id`` equals
-        # ``call_key`` (deterministic on tool+args), so by-id matching is order-
-        # independent. Fall back to positional zip for legacy decisions without ids.
+        # to the WRONG call (e.g. approve `/memories` lands on `/`). The client echoes
+        # the ask id we stamped (``ask_id(call_key, ask_scope, ask_round)``); a client build that
+        # predates ask ids echoes the bare ``call_key``, which is still unambiguous
+        # because a call key appears at most once in ``pending``. Accept either, so a
+        # mid-deploy client is matched by id rather than dropped to positional.
         by_id = {d["id"]: d for d in decisions if isinstance(d, dict) and "id" in d}
-        use_by_id = bool(by_id) and all(p.call_key in by_id for p in pending)
+        matched: dict[str, dict[str, Any]] = {}
+        for p in pending:
+            found = by_id.get(ask_id(p.call_key, ask_scope, ask_round)) or by_id.get(p.call_key)
+            if found is not None:
+                matched[p.call_key] = found
+        # A positional zip is only sound when the client speaks no ids AT ALL: the list
+        # is then, by construction, in the order the questions were asked. The moment
+        # ANY id arrives the client is id-speaking, and a *partial* match must NOT fall
+        # back to position for the whole batch — the executor pads unanswered calls with
+        # id-less ``{"type": "reject"}`` placeholders
+        # (``executor._decisions_for_interrupt``), so one id-bearing approval among
+        # N-1 placeholders would flip everything to positional and could land that
+        # approval on a call the human never saw. Reject the unmatched instead, which is
+        # exactly what those placeholders already mean.
+        use_by_id = bool(by_id)
+        if use_by_id and len(matched) < len(pending):
+            logger.warning(
+                "[PTC] %d of %d human decisions could not be matched by id; rejecting the unmatched calls",
+                len(pending) - len(matched),
+                len(pending),
+            )
 
         for i, p in enumerate(pending):
-            decision = by_id[p.call_key] if use_by_id else decisions[i]
+            if use_by_id:
+                decision = matched.get(p.call_key) or _UNMATCHED_DECISION
+            else:
+                decision = decisions[i]
+            if not isinstance(decision, dict):
+                # `decisions_from_resume` is shape-tolerant but not exhaustive; a
+                # non-object here would crash on `.get` and take the turn with it.
+                logger.warning(
+                    "[PTC] human decision for %s is a %s, not an object; treating as a rejection",
+                    p.tool_name,
+                    type(decision).__name__,
+                )
+                decision = _UNREADABLE_DECISION
             dtype = decision.get("type")
             if dtype == "approve":
                 turn.decisions[p.call_key] = "approve"
@@ -1231,13 +1375,29 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                         context=context,
                     )
             else:
-                # reject / edit / unknown — PTC cannot honor edit, so block.
+                # reject / edit / unknown all block here, for different reasons worth
+                # telling apart in the log: ``edit`` is a KNOWN type this path
+                # deliberately cannot honor (the approved call is re-executed verbatim
+                # from the re-run program, so there is no per-call arg to rewrite —
+                # which is why it is never offered in ``allowed_decisions``), whereas an
+                # unrecognised type means a client is speaking a vocabulary this build
+                # does not have, and the registry pin exists to catch that before it
+                # ships. Either way it fails closed: an answer that cannot be read must
+                # never be taken for consent.
+                if dtype == "edit":
+                    logger.info("[PTC] 'edit' cannot be honored for %s; treating as a rejection", p.tool_name)
+                elif dtype not in HITL_DECISION_TYPES:
+                    logger.warning(
+                        "[PTC] unknown human decision type %r for %s; treating as a rejection",
+                        dtype,
+                        p.tool_name,
+                    )
                 turn.decisions[p.call_key] = "reject"
                 # Keep the human-written reason with the block. Dropping it left
                 # the model with a bare "not approved", and it filled the gap by
                 # telling the user the tool did not exist — when in fact they had
                 # skipped its authorization.
-                reason = decision.get("message") if isinstance(decision, dict) else None
+                reason = decision.get("message")
                 if isinstance(reason, str) and reason.strip():
                     turn.reject_reasons[p.call_key] = reason
 
@@ -1253,8 +1413,14 @@ def build_code_interpreter_middlewares(
     tool_risk_cache: ToolRiskCache | None = None,
     default_risk_threshold: float = 0.8,
     tool_server_map: dict[str, str] | None = None,
+    loop_detection: RepeatedToolCallMiddleware | None = None,
 ) -> list[Any]:
     """Build the code-interpreter middleware(s) for a graph.
+
+    ``loop_detection`` is the stack's ``RepeatedToolCallMiddleware`` instance; the
+    PTC guard applies its rule to the calls a program makes inside ``eval``, against
+    the same ``tool_call_history``. Pass the very instance that sits in the stack —
+    a second instance would be a second policy.
 
     Returns a single ``_PTCToleranceCodeInterpreterMiddleware`` (exposing a
     wasm-sandboxed ``eval`` JS REPL).
@@ -1339,6 +1505,7 @@ def build_code_interpreter_middlewares(
                         tool_risk_cache=tool_risk_cache,
                         default_risk_threshold=default_risk_threshold,
                         tool_server_map=tool_server_map,
+                        loop_detection=loop_detection,
                     )
                 )
 
@@ -1358,6 +1525,7 @@ def build_code_interpreter_middlewares(
                     tool_risk_cache=tool_risk_cache,
                     default_risk_threshold=default_risk_threshold,
                     tool_server_map=tool_server_map,
+                    loop_detection=loop_detection,
                 )
             )
 
@@ -1371,6 +1539,7 @@ def build_code_interpreter_middlewares(
             tool_risk_cache=tool_risk_cache,
             default_risk_threshold=default_risk_threshold,
             tool_server_map=tool_server_map,
+            loop_detection=loop_detection,
             backend_supports_execution=exec_supported,
             expose_context_registry=expose_context_registry,
             # ``skills_backend`` was removed in langchain-quickjs 0.2.0 (wasm
@@ -1564,6 +1733,23 @@ def build_common_middleware_stack(
     # own tags, so in-process sub-agent LLM calls are billed to the sub-agent
     # (not the orchestrator) regardless of which dispatch path invoked them.
     middleware: list = [GatewayAttributionMiddleware(), ContinueOnTruncationMiddleware()]
+    # One loop-detection policy for the stack. It sits near the end of the stack
+    # (below) and is also handed to the code interpreter so the PTC guard applies
+    # the same rule, with the same history, to the calls a program makes inside
+    # ``eval`` — which the model boundary only ever sees as one ``eval`` call.
+    loop_detection = RepeatedToolCallMiddleware(
+        max_repeats=5,
+        max_tool_repeats=10,
+        window_size=10,
+        # ``task`` (sub-agent dispatch) and ``eval`` (the PTC code interpreter)
+        # are meta/gateway tools legitimately called many times with *different*
+        # arguments — distinct delegations / distinct code. They must be exempt
+        # from the per-tool-name ``max_tool_repeats`` cap (otherwise a normal
+        # multi-step PTC agent gets blocked mid-task and force-stopped, ending
+        # with no structured response). They remain subject to ``max_repeats``
+        # (identical-args) detection, which still catches true loops.
+        dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
+    )
     if not exclude_deep_agents_middlewares:
         summarization_defaults = compute_summarization_defaults(model)
         fs_cls = _FilesystemMiddlewareWithDocstoreHint if add_docstore_hint else FilesystemMiddleware
@@ -1581,6 +1767,7 @@ def build_common_middleware_stack(
             tool_risk_cache=tool_risk_cache,
             default_risk_threshold=default_risk_threshold,
             tool_server_map=tool_server_map,
+            loop_detection=loop_detection,
         )
         middleware += [
             StoragePathsInstructionMiddleware(
@@ -1662,19 +1849,7 @@ def build_common_middleware_stack(
         middleware.append(ConversationContextToolsMiddleware(context_gated_tools))
 
     middleware += [
-        RepeatedToolCallMiddleware(
-            max_repeats=5,
-            max_tool_repeats=10,
-            window_size=10,
-            # ``task`` (sub-agent dispatch) and ``eval`` (the PTC code interpreter)
-            # are meta/gateway tools legitimately called many times with *different*
-            # arguments — distinct delegations / distinct code. They must be exempt
-            # from the per-tool-name ``max_tool_repeats`` cap (otherwise a normal
-            # multi-step PTC agent gets blocked mid-task and force-stopped, ending
-            # with no structured response). They remain subject to ``max_repeats``
-            # (identical-args) detection, which still catches true loops.
-            dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
-        ),
+        loop_detection,
         ToolSchemaCleaningMiddleware(),
     ]
     return middleware
