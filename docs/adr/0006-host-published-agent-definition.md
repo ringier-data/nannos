@@ -198,7 +198,7 @@ Base URLs for the cockpit: `https://riad.d.alloy.ch` (dev), `https://riad.s.allo
 
 ## Console-backend, as implemented
 
-### Schema — `sqlmigrations/ddl/091_sub_agent_embed_bindings.sql`
+### Schema — `sqlmigrations/ddl/094_sub_agent_embed_bindings.sql`
 
 - `sub_agent_embed_bindings(sub_agent_id PK → sub_agents, base_url, revision,
   definition JSONB, fetched_at, last_error, last_error_at, last_seen_at,
