@@ -16,6 +16,7 @@ from ..config import config
 from ..db.session import DbSession
 from ..dependencies import require_admin
 from ..models.model_gateway import (
+    CHAT_TIER_ROLES,
     BedrockModelRegions,
     CatalogModel,
     CostPrefill,
@@ -24,6 +25,8 @@ from ..models.model_gateway import (
     ModelRegistrationRequest,
     ModelRegistrationResponse,
     SetDefaultRequest,
+    SetFailoverChainRequest,
+    TierGroup,
     WebSearchConfig,
 )
 from ..models.usage import RateCardPricingEntry
@@ -526,6 +529,9 @@ async def set_default(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model id {model_id} not registered")
     alias = model.get("model_name") or ""
     defaults_service = get_model_defaults_service(request)
+    # Captured before the write: a tier's failover chain is keyed proxy-side on the tier's
+    # head alias, so re-pointing the default has to move the chain off the old head.
+    previous_head = (await defaults_service.get_all(db)).get(body.role)
     # The audited repository records this fleet-wide config change and commits
     # (AGENTS.md: admin writes go through the repository pattern → automatic audit).
     try:
@@ -533,7 +539,29 @@ async def set_default(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     logger.info("Set '%s' (id=%s) as default for role=%s by %s", alias, model_id, body.role, user.id)
-    return {"status": "ok", "model_name": alias, "default_for": body.role}
+
+    # The default is stored; the chain that hangs off it is best-effort. A projection failure
+    # must not undo an accepted default (nor report the write as failed), but it does leave
+    # the proxy chained to the previous head, so it is surfaced to the caller rather than
+    # swallowed — the console shows it as a warning on an otherwise successful save.
+    warning: str | None = None
+    try:
+        await defaults_service.reproject_tier_group(
+            db,
+            body.role,
+            gateway=get_model_gateway_service(request),
+            previous_head=previous_head,
+        )
+    except ModelGatewayError as e:
+        # The gateway's own message is logged, never returned: it can carry transport detail
+        # about an internal-only service, and the caller needs the *state* ("your chain is not
+        # live") rather than the cause, which an admin reads from the logs.
+        warning = (
+            "Default saved, but its failover chain was not re-declared on the gateway. "
+            "Re-save the chain to retry; see the console-backend logs for the gateway's response."
+        )
+        logger.error("Failed to reproject failover chain for role=%s after default change: %s", body.role, e)
+    return {"status": "ok", "model_name": alias, "default_for": body.role, "warning": warning}
 
 
 @router.delete("/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -544,3 +572,87 @@ async def delete_model(model_id: str, request: Request, user: User = Depends(req
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     logger.info("Deleted gateway model id=%s by %s", model_id, user.id)
+
+
+# --- Tier groups (nannos#204, ADR-0008) ------------------------------------------------
+# A tier group is one chat tier's ordered models: the tier default, then the aliases the
+# gateway falls back to when the default's provider is unavailable. Nannos stores the chain
+# and projects it onto the proxy (POST /fallback); LiteLLM executes the routing. Chat tiers
+# only — see ModelDefaultsService._require_chat_tier for why embeddings must never fail over.
+
+
+@router.get("/tiers", response_model=list[TierGroup])
+async def list_tier_groups(request: Request, db: DbSession, user: User = Depends(require_admin)):
+    """Every chat tier with its failover chain, plus any drift against the live proxy.
+
+    The proxy is read per tier rather than trusted: a chain that exists only in our table is
+    a failover that will not happen, and that is exactly the failure this feature exists to
+    prevent, so it is surfaced instead of assumed away. A proxy that cannot be reached leaves
+    ``gateway_mismatch`` unset (unknown), which is not the same as "in sync".
+    """
+    defaults_service = get_model_defaults_service(request)
+    gateway = get_model_gateway_service(request)
+    groups = await defaults_service.get_all_tier_groups(db)
+    chains = await defaults_service.repository.get_all_fallbacks(db)
+
+    out: list[TierGroup] = []
+    for role in CHAT_TIER_ROLES:
+        models = groups.get(role, [])
+        head = models[0] if models else None
+        stored = chains.get(role, [])
+        mismatch: list[str] | None = None
+        if head:
+            try:
+                live = await gateway.get_fallbacks(head)
+                mismatch = live if live != stored else None
+            except ModelGatewayError as e:
+                logger.warning("Could not read live fallbacks for '%s': %s", head, e)
+        out.append(
+            TierGroup(
+                role=role,
+                default=head,
+                fallbacks=stored,
+                models=models,
+                gateway_mismatch=mismatch,
+            )
+        )
+    return out
+
+
+@router.put("/tiers/{role:path}/fallbacks", response_model=TierGroup)
+async def set_tier_failover_chain(
+    role: str,
+    body: SetFailoverChainRequest,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_admin),
+):
+    """Replace a chat tier's failover chain, then declare it on the gateway.
+
+    ``role:path`` because the tier roles carry a colon (``chat:low``, ``chat:premium``).
+    A rejected chain (non-chat role, unregistered alias, a model appearing twice) is a 400:
+    the request is wrong, not the gateway.
+    """
+    defaults_service = get_model_defaults_service(request)
+    try:
+        models = await defaults_service.set_failover_chain(
+            db,
+            actor=user,
+            role=role,
+            aliases=body.fallbacks,
+            gateway=get_model_gateway_service(request),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except ModelGatewayError as e:
+        # The chain is stored but unprojected: the console will show it, the gateway will not
+        # honour it. A 502 says exactly that — retrying the same request is the fix. The
+        # gateway's own message is logged rather than returned (it can carry transport detail
+        # about an internal-only service); the caller needs the state, not the cause.
+        logger.error("Gateway rejected the failover chain for tier=%s: %s", role, e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Chain saved, but the gateway rejected it — see the console-backend logs.",
+        )
+    logger.info("Set failover chain for tier=%s to %s by %s", role, body.fallbacks, user.id)
+    return TierGroup(role=role, default=models[0], fallbacks=body.fallbacks, models=models)

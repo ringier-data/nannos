@@ -277,6 +277,49 @@ class ModelGatewayService:
         await self._request("POST", "/model/delete", json={"id": model_id})
         self._invalidate_list_cache()
 
+    # --- Failover chains (nannos#204, ADR-0008) ------------------------------------------
+    # LiteLLM stores fallbacks in its own DB when store_model_in_db is on, alongside the
+    # model registry, so a chain cannot drift against the aliases it names. That is why the
+    # chain is projected here rather than written into the proxy's config.yaml, which in
+    # Nannos deliberately carries no model knowledge at all.
+
+    async def set_fallbacks(self, model_name: str, fallback_models: list[str]) -> None:
+        """Declare ``model_name``'s failover chain on the proxy (replaces any existing one).
+
+        An empty chain deletes the entry rather than writing a zero-length one: LiteLLM
+        treats a declared-but-empty fallback list as a configured route, and a stale empty
+        route is harder to notice than no route.
+        """
+        if not fallback_models:
+            await self.delete_fallbacks(model_name)
+            return
+        await self._request(
+            "POST",
+            "/fallback",
+            json={
+                "model": model_name,
+                "fallback_models": list(fallback_models),
+                "fallback_type": "general",
+            },
+        )
+
+    async def delete_fallbacks(self, model_name: str) -> None:
+        """Remove ``model_name``'s failover chain. Absent is the desired end state, so a
+        proxy that has no such entry is not an error (``optional``)."""
+        await self._request(
+            "DELETE", f"/fallback/{model_name}", optional=True
+        )
+
+    async def get_fallbacks(self, model_name: str) -> list[str]:
+        """The failover chain the proxy currently holds for ``model_name`` (live, uncached).
+
+        Read back from the proxy rather than from our own table so drift between the two is
+        observable instead of assumed away.
+        """
+        data = await self._request("GET", f"/fallback/{model_name}", optional=True)
+        models = data.get("fallback_models") or data.get("fallbacks") or []
+        return [m for m in models if isinstance(m, str)]
+
     async def get_model_by_id(self, model_id: str) -> dict | None:
         """The registered deployment with this gateway id, or None."""
         for m in await self.list_models():
