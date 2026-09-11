@@ -23,9 +23,11 @@ import {
   gatewayUiConfigApiV1AdminModelGatewayConfigGet,
   getSystemStatusApiV1AdminSystemStatusGet,
   listModelsApiV1AdminModelGatewayModelsGet,
+  listTierGroupsApiV1AdminModelGatewayTiersGet,
   modelCatalogApiV1AdminModelGatewayCatalogGet,
   registerModelApiV1AdminModelGatewayModelsPost,
   setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost,
+  setTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPut,
   testModelApiV1AdminModelGatewayModelsModelNameTestPost,
   webSearchConfigApiV1AdminModelGatewayWebSearchGet,
 } from './generated/sdk.gen';
@@ -39,6 +41,7 @@ import type {
   ModelRegistrationRequest,
   ModelRegistrationResponse,
   RateCardPricingEntryInput,
+  TierGroup,
   WebSearchConfig,
   WebSearchModelOption,
 } from './generated/types.gen';
@@ -52,6 +55,7 @@ export type {
   GatewayUiConfig,
   ModelRegistrationRequest,
   ModelRegistrationResponse,
+  TierGroup,
   WebSearchConfig,
   WebSearchModelOption,
 };
@@ -199,4 +203,29 @@ export async function deleteGatewayModel(modelId: string): Promise<void> {
     path: { model_id: modelId },
   });
   if (error) throw error;
+}
+
+/**
+ * Tier groups — a chat tier's ordered models: its default, then the failover chain the
+ * gateway walks when the default's provider is unavailable (nannos#204).
+ *
+ * Chat tiers only. Embedding roles are refused by the backend on purpose: a failed-over
+ * embedding call writes vectors from a different embedding space into the same pgvector
+ * index, which inserts cleanly and silently degrades search for everything embedded during
+ * the outage.
+ */
+export async function listTierGroups(): Promise<TierGroup[]> {
+  const { data, error } = await listTierGroupsApiV1AdminModelGatewayTiersGet();
+  if (error) throw error;
+  return (data ?? []) as TierGroup[];
+}
+
+/** Replace one chat tier's failover chain (the tier's default stays its head). */
+export async function setTierFailoverChain(role: string, fallbacks: string[]): Promise<TierGroup> {
+  const { data, error } = await setTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPut({
+    path: { role },
+    body: { fallbacks },
+  });
+  if (error) throw error;
+  return data as TierGroup;
 }

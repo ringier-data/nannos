@@ -77,6 +77,17 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
   - **model_info** — per-model metadata on the proxy (Capability + base cost); source of truth for routing + capability. Written/edited *exclusively* through console-backend, never hand-edited on the proxy.
   - **Rate Card** — console-backend's billing record keyed on `(provider, model_name, billing_unit)`. Richer than the Gateway's cost map: supports per-sub-agent pricing and time-versioned rates. A Rate Card must exist before a model goes `active`. (`model_name` stores the Model Alias.)
   - **Usage Event** — one LLM call's measured consumption (token breakdown + model + Cost Attribution), captured proxy-side via a LiteLLM `CustomLogger`; costed against the Rate Card.
+  - **Tier group** — a chat tier's *ordered* models: the tier's default (`model_defaults`)
+followed by its failover chain (`model_tier_fallbacks`). Declared by console-backend onto the proxy
+via `POST /fallback` (DB-backed, so it cannot drift against the DB-backed model registry) and
+executed entirely by LiteLLM — retries, cooldown, then the next alias. Within-tier only: a tier
+never chains into another tier, because availability and cost/quality are separate axes. Chat tiers
+only — an embedding call must never fail over, since a second model's vectors insert cleanly into
+the same pgvector index and silently degrade search. See ADR-0008.
+  - **Failover** vs **alias degradation** — *failover* is runtime (a live alias's provider is
+unavailable, the gateway tries the next in the tier group); *alias degradation* is registry-time (a
+**retired** alias resolves to its tier's successor, `resolve_chat_model`). Both were once called
+"graceful degradation"; they share no mechanism.
   - **Cost Attribution** — who to bill (user / sub-agent / sub-agent config version / conversation / scheduled job); travels to the proxy per-request as `spend_logs_metadata`. Set at request boundaries and refined per model call by `GatewayAttributionMiddleware` (derives it from the call's own LangGraph tags), so in-process sub-agent calls bill to the sub-agent, not the orchestrator.
 - **Reasoning effort**: extended thinking uses LiteLLM's unified `reasoning_effort`; the app keeps only a small `thinking_level → reasoning_effort` map (budgets are provider-determined).
 - **Streaming watchdog**: a mandatory client-side inter-chunk watchdog bounds streaming, because the proxy silently ignores `stream_timeout` on Bedrock streaming (LiteLLM #23375); proxy timeouts are a best-effort outer bound only.

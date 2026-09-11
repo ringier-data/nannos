@@ -6,6 +6,15 @@ model registration, and proxy-side cost capture. Apps talk to it via
 `LLM_GATEWAY_URL` and never construct provider clients directly.
 
 ## Contents (deployment-agnostic)
+- `litellm-settings.yaml` — the proxy settings themselves (`litellm_settings` + `router_settings`),
+  committed and consumed: `scripts/start-local.sh` cats it into the local config, and a
+  deployment's own `config.yaml` is expected to carry these blocks verbatim. It exists because
+  these settings otherwise live once in the start-local heredoc and again in each deployment's
+  mounted ConfigMap, kept in step only by comments claiming they match — which nothing verifies,
+  so a deployment can sit on `num_retries: 0` indefinitely and turn every transient provider blip
+  into a hard user-visible failure. It carries no
+  secrets, no `general_settings` (whose env var names legitimately differ per environment) and no
+  `model_list`.
 - `custom_logger.py` — `NannosCostLogger`, the in-process callback that owns two
   provider-boundary jobs:
   - **Cost capture** (`async_log_success_event`): maps native usage (incl. cache/reasoning
@@ -19,8 +28,8 @@ model registration, and proxy-side cost capture. Apps talk to it via
     Fixing it here covers every structured-output path uniformly and is safe across providers.
   - **Gemini cache_control stripping** (`async_pre_call_deployment_hook`): removes
     Anthropic-style `cache_control` markers from requests routed to gemini-format models
-    (`_CACHE_CONTROL_STRIP_RULES`, keyed provider + model prefix — Claude-on-Vertex keeps its
-    markers). The app attaches the markers to every provider's messages (ADR-0001, one client);
+    (`_CACHE_CONTROL_KEEP_RULES`, an allowlist keyed provider + model markers — Anthropic-format
+    deployments keep their markers, everything else is stripped; see ADR-0008). The app attaches the markers to every provider's messages (ADR-0001, one client);
     on Gemini, LiteLLM silently reinterprets them as *explicit* Vertex context caching: a
     `cachedContents` object is created before the first generate call, so the first call of a
     conversation reports its whole prefix as cache-read. The create call bills full-price input
@@ -53,6 +62,24 @@ The `config.yaml` (model_list, regions, `model_info` cost seeds, `store_model_in
 is **deployment-specific and not committed here** — it's mounted at runtime:
 - **k8s:** a ConfigMap in your deployment/GitOps repo, mounted at `/etc/litellm/config.yaml`.
 - **local:** generated on the fly by `scripts/start-local.sh` (never committed).
+
+## Failover
+
+Provider failover is LiteLLM's, not ours: retries → cooldown → the next model in the chain.
+Nannos only *declares* the chain, and does so in the proxy's own DB (`POST /fallback`, which
+needs `store_model_in_db`) rather than in `config.yaml` — the model registry is DB-backed too, so
+a chain written to Git would drift against the aliases it names. Console-backend is the sole
+writer, projecting each chat tier's **tier group** (the tier's default followed by its fallback
+aliases) onto the proxy whenever an admin edits it.
+
+Two halves are needed and they live in different places: the *chain* is DB-backed as above, while
+the *behaviour that makes it fire* — `num_retries`, `allowed_fails`, `cooldown_time` — is
+config-only and ships in `litellm-settings.yaml`. A chain declared while `num_retries: 0` never
+fires, so `custom_logger.py` warns at startup when it reads a config with retries disabled.
+
+Chat tiers only. Embedding models must never fail over: a different model's vectors insert
+cleanly into the same pgvector index (both sides are pinned to `EMBEDDING_DIMENSION`) and
+silently degrade similarity search for everything embedded during the outage.
 
 ## Runtime configuration (env)
 - `LITELLM_MASTER_KEY` — proxy admin/master key.

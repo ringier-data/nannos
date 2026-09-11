@@ -769,31 +769,28 @@ export LITELLM_DATABASE_URL="${LITELLM_DATABASE_URL:-postgresql://postgres:passw
 # `pwd -P` is POSIX and a no-op on Linux, where /tmp is a real directory.
 _physical_path() { cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")"; }
 
-# Generate the local gateway config on the fly (ephemeral, never committed —
-# config is deployment-specific). The settings block (callbacks, store_model_in_db,
-# db, master key) is always managed here; the model_list is stack-specific so it's
-# sourced from $LITELLM_LOCAL_MODELS_FILE when set, else a built-in dev default.
+# Generate the local gateway config on the fly (ephemeral, never committed — the assembled
+# config is deployment-specific). Three sources, each owning what only it can own:
+#   settings     -> packages/litellm-proxy/litellm-settings.yaml (shared with deployments)
+#   general_*    -> inline below (names env vars that differ per environment)
+#   model_list   -> $LITELLM_LOCAL_MODELS_FILE when set, else the committed example.
 _GW_CONFIG=$(_physical_path "$(mktemp /tmp/nannos-litellm-XXXXXX).yaml")
-cat > "$_GW_CONFIG" <<'EOF'
-litellm_settings:
-  callbacks: custom_logger.proxy_handler_instance
-  # Total per-request bound for non-streaming calls; streaming hangs are caught by the
-  # client-side inter-chunk watchdog (Bedrock ignores stream_timeout).
-  request_timeout: 600
-  drop_params: true
-  # Let LiteLLM normalize provider-specific message sequencing. Bedrock's Converse API
-  # requires alternating user/assistant turns; agent loops with parallel tool calls produce
-  # consecutive user/tool blocks, which LiteLLM otherwise merges-and-warns about on every
-  # turn ("Potential consecutive user/tool blocks"). With this set it normalizes them
-  # cleanly (inserting a dummy assistant turn where needed) and stays quiet. Mirror in the
-  # k8s ConfigMap.
-  modify_params: true
-  # Gateway-native retries on transient failures/timeouts, replacing the
-  # per-call boto3 retries dropped in the migration. Matches the k8s ConfigMap.
-  num_retries: 2
-  # Emit structured (JSON) logs instead of colorized text, so the proxy's output
-  # is parseable by log aggregators (matches the k8s ConfigMap).
-  json_logs: true
+
+# Settings come from the committed, SHARED settings file — the same blocks a deployment's
+# own config.yaml is expected to carry. Do not inline them here: they used to live in this
+# heredoc AND in each deployment's mounted config, kept in step only by comments claiming they
+# matched. Nothing verifies such a claim, and a deployment left on num_retries: 0 has no
+# retries and no failover at all (nannos#204).
+_GW_SETTINGS="$ROOT_DIR/packages/litellm-proxy/litellm-settings.yaml"
+if [[ ! -f "$_GW_SETTINGS" ]]; then
+  err "Missing gateway settings file: $_GW_SETTINGS"
+fi
+cat "$_GW_SETTINGS" > "$_GW_CONFIG"
+
+# general_settings stays here: it names env vars that legitimately differ per environment
+# (locally LITELLM_DATABASE_URL, in k8s DATABASE_URL), so it cannot be shared verbatim.
+cat >> "$_GW_CONFIG" <<'EOF'
+
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   store_model_in_db: true

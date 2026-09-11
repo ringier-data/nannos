@@ -91,6 +91,32 @@ class WebSearchConfig(BaseModel):
     models: list[WebSearchModelOption] = Field(default_factory=list)
 
 
+class TierGroup(BaseModel):
+    """One chat tier's ordered models: the default, then its failover chain.
+
+    ``models`` is the whole group in routing order (``models[0] == default``); ``fallbacks``
+    is the tail on its own, which is what a client edits. Both are returned so a client never
+    has to re-derive one from the other and get the head wrong.
+    """
+
+    role: str
+    default: str | None = None
+    fallbacks: list[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
+    # Set when our stored chain and the proxy's differ — drift is reported, never hidden,
+    # because a chain that exists only in the console is a failover that will not happen.
+    gateway_mismatch: list[str] | None = None
+
+
+class SetFailoverChainRequest(BaseModel):
+    """Replace a chat tier's failover chain. The tier's default stays its head."""
+
+    fallbacks: list[str] = Field(
+        default_factory=list,
+        description="Aliases to try, in order, when the tier's default is unavailable. Empty removes the chain.",
+    )
+
+
 class SetDefaultRequest(BaseModel):
     """Mark a model as the fleet default for a role (graceful degradation when an alias retires)."""
 

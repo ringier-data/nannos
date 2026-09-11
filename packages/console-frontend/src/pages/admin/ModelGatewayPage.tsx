@@ -49,6 +49,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
 import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
+import { FailoverChains } from '@/components/admin/FailoverChains';
 import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
@@ -696,6 +697,8 @@ export function ModelGatewayPage() {
       </div>
 
       <WebSearchSettings />
+
+      <FailoverChains />
 
       {/* Billing-provider consistency check (async — never blocks the model list) */}
       <ProviderMismatchBanner />
