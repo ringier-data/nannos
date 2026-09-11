@@ -124,11 +124,20 @@ killing the turn rather than silently dropping a record. That is why the fix nee
 
 Two parts, both required — each was disabled alone and the harness re-run to confirm:
 
-- **`ptc_guard.serialized_eval`** — a per-`(event loop, thread_id)` mutex held across
-  the whole `begin_ptc_turn` → `end_ptc_turn` span in
+- **`ptc_guard.serialized_eval`** — a per-`thread_id` mutex held across the whole
+  `begin_ptc_turn` → `end_ptc_turn` span in
   `_PTCToleranceCodeInterpreterMiddleware.awrap_tool_call`. Only the `eval` path
   enters it, so every other tool keeps its concurrency. Disable this alone and both
   parallel scenarios go back to `already closed`.
+
+  It holds a `threading.Lock`, not an `asyncio.Lock`, and is keyed by `thread_id`
+  alone — the same key the resources it protects use. Per-`(event loop, thread_id)`
+  keying is **not** enough: two parallel `task` dispatches of the same sub-agent share
+  one `thread_id` (`{context_id}::{checkpoint_ns}`) but reach `eval` through
+  `LocalA2ARunnable.invoke` → `asyncio.run`, a fresh loop each, so a per-loop gate
+  serializes neither. The lock is acquired non-blockingly and polled between awaits
+  rather than blocking the loop or going through `asyncio.to_thread`, which would park
+  an executor worker per waiter and can deadlock against the summarizer.
 - **An incremental write-back** — with the sandbox collision gone, both eval tasks
   write the `tool_call_history` channel in one superstep. The eval path now emits a
   tagged *delta* (`history_delta`: what this eval appended, plus the window to apply

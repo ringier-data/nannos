@@ -117,14 +117,28 @@ class TestInterruptValueSelection:
         assert call_ids == ["c1", "c2"]
         assert [rc["action_name"] for rc in merged["review_configs"]] == ["delete_file", "send_email"]
 
-    def test_mixed_auth_and_approval_is_not_merged(self):
-        """An auth pause needs its own round trip and cannot join an approval card."""
+    def test_single_approval_beside_auth_renders_the_auth(self):
+        """With nothing to fold, the last pending value renders as before."""
         auth = {"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "auth_url": "https://example/authorize"}
-        approval = _approval("c1", "delete_file")
 
-        picked = AgentStreamResponse.interrupt_value([_Intr(approval), _Intr(auth)])
+        picked = AgentStreamResponse.interrupt_value([_Intr(_approval("c1", "delete_file")), _Intr(auth)])
 
         assert picked == auth
+
+    def test_approvals_are_folded_even_when_an_auth_is_pending_too(self):
+        """Never hide one approval behind another, whatever else is pending.
+
+        With ``[approval, auth, approval]`` the last value is an approval, so bailing
+        out of the fold rendered one and left the other invisible — and a blanket
+        approve then replicated onto the one the user never saw.
+        """
+        auth = {"task_state": TaskState.TASK_STATE_AUTH_REQUIRED, "auth_url": "https://example/authorize"}
+
+        merged = AgentStreamResponse.interrupt_value(
+            [_Intr(_approval("c1", "delete_prod_db")), _Intr(auth), _Intr(_approval("c2", "send_email"))]
+        )
+
+        assert [ar["name"] for ar in merged["action_requests"]] == ["delete_prod_db", "send_email"]
 
     def test_merged_payload_renders_as_one_approval_card(self):
         merged = AgentStreamResponse.interrupt_value([_Intr(_approval("c1", "delete_file")), _Intr(_approval("c2", "send_email"))])

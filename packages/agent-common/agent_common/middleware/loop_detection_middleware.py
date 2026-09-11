@@ -105,9 +105,13 @@ def merge_tool_call_history(
       silent last-writer-wins: ``LastValue`` *raises* ``InvalidUpdateError: can
       receive only one value per step`` and fails the whole agent turn (#217).
 
-    Deltas commute, so two evals in one step produce ``current + A + B`` whatever
-    order the reducer sees them in, and the window is applied once at the end rather
-    than by each writer against its own partial view.
+    Deltas with equal caps commute, so two evals in one step produce
+    ``current + A + B`` whatever order the reducer sees them in. Mixed caps on one key
+    do not: each delta's cap is applied as it lands, so an allowed call (cap
+    ``window_size``) and a blocked one (cap ``None``) on the same key can differ by a
+    single entry depending on order. That is reachable when two evals call the same
+    tool in one step and only one is blocked; the cost is one entry of escalation
+    timing, not a lost record.
 
     An earlier version of this reducer tried to tell a window trim from a concurrent
     extension by comparing the two lists. That is not decidable: ``evaluate``

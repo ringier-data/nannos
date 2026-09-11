@@ -96,22 +96,29 @@ class AgentStreamResponse(BaseAgentStreamResponse):
         pending interrupt, so approving the card you were shown also authorises the
         high-risk call you were never shown.
 
-        When every pending interrupt is an approval ask, their action requests are
+        Whenever two or more approval asks are pending their action requests are
         concatenated into one payload — the clients already render N requests in a
         single card, and each request carries its own ``_call_id``, so decisions route
         back to the right interrupt (``executor._build_interrupt_resume_map``). The
         user then sees everything a blanket approve would authorise.
 
-        Mixed or non-approval pauses (auth, client-action) are left alone: they need
-        their own round trip and cannot be folded into an approval card. The last one
-        renders, as before, and the rest stay pending for the next turn.
+        That fold applies even when a non-approval pause (auth, client-action) is
+        pending alongside them. Skipping it for "mixed" sets was itself the bypass in
+        a narrower form: with ``[approval, auth, approval]`` the last value is an
+        approval, so one approval rendered, the other stayed invisible, and a blanket
+        approve replicated onto it. Approvals are therefore never hidden behind each
+        other. A non-approval left pending this way is not resumable by an approve —
+        the resume map hands it the user's reply — and it renders on the next turn.
+
+        With fewer than two approvals there is nothing to fold and the last pending
+        value renders, as before.
         """
         pending = list(interrupts or ())
         if not pending:
             return {}
         values = [getattr(i, "value", None) for i in pending]
         approvals = [v for v in values if isinstance(v, dict) and v.get("action_requests")]
-        if len(approvals) < 2 or len(approvals) != len(values):
+        if len(approvals) < 2:
             return values[-1] if values[-1] is not None else {}
         merged = dict(approvals[-1])
         merged["action_requests"] = [ar for v in approvals for ar in (v.get("action_requests") or [])]

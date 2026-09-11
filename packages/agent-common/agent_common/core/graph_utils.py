@@ -1064,10 +1064,11 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
 
         The update is an incremental *delta*, not the whole history: a model step may
         emit two ``eval`` calls, which ``ToolNode`` runs as two tasks of one
-        superstep, so both write this channel. Deltas commute, so the reducer applies
-        both whatever order it sees them in and caps the window once at the end,
-        instead of each eval trimming against its own partial view — see
-        ``merge_tool_call_history`` and #217.
+        superstep, so both write this channel. Deltas with equal caps commute, so the
+        reducer applies both whatever order it sees them in instead of each eval
+        trimming against its own partial view — see ``merge_tool_call_history`` and
+        #217 (mixed caps on one key can differ by a single entry; that docstring says
+        when and why it is acceptable).
 
         A guard record must never be dropped silently — that would fail the loop
         guard open for exactly the call it just judged. ``Command.update`` may be a
