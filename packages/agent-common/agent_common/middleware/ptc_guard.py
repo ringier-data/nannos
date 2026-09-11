@@ -31,10 +31,12 @@ operating on the correct backend.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -284,8 +286,9 @@ class _PTCTurnState:
     #: thread-keyed, so with two parallel ``eval`` calls either wrapper may drain a
     #: mixed list. Reading the scope from here keeps stamping and matching consistent
     #: whichever one does it — taking it from the draining wrapper's own tool call id
-    #: made ask-id matching depend on a nondeterministic race. (Parallel ``eval`` calls
-    #: on one thread are separately broken — they clobber this shared state; see #217.)
+    #: made ask-id matching depend on a nondeterministic race. Two ``eval`` calls in one
+    #: step no longer overlap (:func:`serialized_eval`, #217), so each drains its own
+    #: list; keeping the scope on the turn is what makes that per-call scoping exact.
     ask_scope: str = ""
     #: ``RepeatedToolCallMiddleware``'s ``tool_call_history`` (per tool name, the arg
     #: hashes of past calls), seeded from checkpointed graph state by the PTC middleware
@@ -333,12 +336,80 @@ def resolve_ptc_thread_id(runtime: Any) -> str:
     return _PTC_DEFAULT_THREAD_ID
 
 
+@dataclass
+class _EvalGate:
+    """One thread's ``eval`` mutex, plus the count of callers still using it."""
+
+    lock: asyncio.Lock
+    #: Callers inside :func:`serialized_eval` for this key — holder and waiters
+    #: alike. The gate is dropped when it reaches zero, so the registry does not
+    #: grow one permanent entry per conversation for the life of the process.
+    users: int = 0
+
+
+#: Live ``eval`` gates, keyed by ``(event loop, thread_id)``. The loop is part of
+#: the key because an ``asyncio.Lock`` binds to the loop that first awaits it, so a
+#: lock reused across loops (a sync ``invoke`` that spins up its own) would raise
+#: rather than serialize. Same-thread evals on *different* loops are not the race
+#: this closes — that needs a cross-process lock, and is not what #217 is about.
+_PTC_EVAL_GATES: dict[tuple[int, str], _EvalGate] = {}
+
+
+@asynccontextmanager
+async def serialized_eval(thread_id: str):
+    """Hold the thread's ``eval`` mutex for the duration of one ``eval`` execution.
+
+    Nothing guarantees a model step emits at most one ``eval`` tool call, and
+    ``ToolNode`` runs the calls of one assistant message concurrently — but every
+    piece of per-``eval`` bookkeeping on the PTC path is keyed by ``thread_id``
+    alone and assumes one ``eval`` in flight per thread (#217):
+
+    * upstream, ``langchain_quickjs`` hands both calls the *same* QuickJS context
+      and, in ``mode="call"``, closes it in whichever ``finally`` runs first —
+      killing the other eval mid-execution with ``already closed``, out of the
+      tool node, taking the whole agent turn down with it;
+    * :func:`begin_ptc_turn` *replaces* the thread's turn, so the second call
+      swaps the first's turn out from under it — shared ``results``/``decisions``,
+      an inert repeat guard, and a ``tool_call_history`` write-back computed
+      against a stale seed (last writer wins);
+    * :func:`take_ptc_pending` drains one collector per thread, so approvals
+      raised by two evals land in whichever ``interrupt()`` fires first.
+
+    Serializing here fixes all three at once and is the only one of the three
+    candidate fixes that is wholly ours: re-keying the two collectors by
+    ``(thread_id, tool_call_id)`` still leaves the REPL colliding underneath, and
+    constraining the model (``parallel_tool_calls=False``) would disable parallel
+    calls for *every* tool, not just ``eval``. Concurrency for other tools is
+    untouched — this gate is only ever entered on the ``eval`` path.
+
+    The two evals therefore run back-to-back, each with its own turn and its own
+    REPL reset in between, which is what the bookkeeping already assumes.
+    """
+    key = (id(asyncio.get_running_loop()), thread_id)
+    gate = _PTC_EVAL_GATES.get(key)
+    if gate is None:
+        gate = _EvalGate(asyncio.Lock())
+        _PTC_EVAL_GATES[key] = gate
+    # Bump before awaiting the lock so a waiter keeps the gate alive while the
+    # holder's ``finally`` runs; there is no await between the lookup and here, so
+    # concurrent callers on one loop cannot interleave and build two gates.
+    gate.users += 1
+    try:
+        async with gate.lock:
+            yield
+    finally:
+        gate.users -= 1
+        if gate.users == 0:
+            _PTC_EVAL_GATES.pop(key, None)
+
+
 # One turn per thread, not per ``eval`` call: two concurrent ``eval`` calls on one
-# thread would swap the turn out from under each other. That is an inherited
-# constraint — ``langchain_quickjs`` keys the REPL slot itself per ``thread_id``
-# and resets it after every call in ``mode="call"``, so concurrent evals already
-# collide one layer down. Re-keying here alone would not make them safe; the
-# single-eval-per-step guarantee is tracked separately (#217).
+# thread would swap the turn out from under each other. Callers must therefore
+# hold :func:`serialized_eval` for the thread across the whole begin/end span —
+# ``_PTCToleranceCodeInterpreterMiddleware.awrap_tool_call`` is the one caller and
+# does. The constraint is inherited rather than chosen: ``langchain_quickjs`` keys
+# the REPL slot per thread and resets it after every call in ``mode="call"``, so
+# concurrent evals collide one layer down however this dict is keyed (#217).
 def begin_ptc_turn(thread_id: str, ask_scope: str = "") -> _PTCTurnState:
     """Start (or reset) a PTC approval turn for ``thread_id``.
 

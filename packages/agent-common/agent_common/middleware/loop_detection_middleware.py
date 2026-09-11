@@ -62,6 +62,55 @@ _STOPPED_BEFORE_EXECUTION = (
 )
 
 
+def merge_tool_call_history(
+    current: dict[str, list[str]] | None,
+    update: dict[str, list[str]] | None,
+) -> dict[str, list[str]]:
+    """Reducer for the ``tool_call_history`` channel.
+
+    Normally one writer updates this per step and the update simply wins. The
+    exception is a model step that emits two ``eval`` tool calls: ``ToolNode`` makes
+    each a task of the *same* superstep, both read the same checkpointed history as
+    their seed, and both write back their own extension of it. Without a reducer
+    that is not a silent last-writer-wins — LangGraph's default ``LastValue``
+    channel *raises* ``InvalidUpdateError: can receive only one value per step``,
+    which fails the whole agent turn (#217).
+
+    Per key, three cases, in the order tested:
+
+    * **Unchanged / first write** — take the update.
+    * **A window trim** (``RepeatedToolCallMiddleware.evaluate`` drops the oldest
+      entries past ``window_size``): the update is a *suffix* of what we hold, so it
+      is shorter by construction. Take it, or the trim would be undone forever.
+    * **Concurrent extension** — two eval tasks grew the same seed. Keep the common
+      prefix once and append each task's own tail, so neither eval's calls vanish
+      from the loop guard's memo.
+
+    Two eval programs whose divergent tails *begin* with the identical arg hash
+    (the same tool called with the same args from both) collapse to one entry: the
+    common prefix absorbs it. That under-counts the repeat by one, which is the
+    safe direction — the guard blocks late rather than early — and it cannot happen
+    at the model boundary, where there is only ever one writer per step.
+    """
+    if not current:
+        return dict(update or {})
+    if not update:
+        return dict(current)
+    merged = {k: list(v) for k, v in current.items()}
+    for key, new in update.items():
+        old = merged.get(key)
+        if old is None or old == list(new):
+            merged[key] = list(new)
+        elif len(new) < len(old) and list(new) == old[-len(new) :]:
+            merged[key] = list(new)
+        else:
+            shared = 0
+            while shared < min(len(old), len(new)) and old[shared] == new[shared]:
+                shared += 1
+            merged[key] = [*old, *new[shared:]]
+    return merged
+
+
 @dataclass(frozen=True)
 class LoopVerdict:
     """Outcome of ``RepeatedToolCallMiddleware.evaluate`` for one prospective call.
@@ -85,7 +134,7 @@ class LoopDetectionState(AgentState):
     Similar to ToolCallLimitMiddleware but tracks both same-args and same-tool patterns.
     """
 
-    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr]]
+    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr, merge_tool_call_history]]
     """Per-tool history of argument hashes. Format:
     {
         "tool_name": ["args_hash1", "args_hash2", ...],
