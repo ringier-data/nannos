@@ -21,7 +21,7 @@ from app.models.responses import AgentStreamResponse
 
 from .conftest import (
     ALL_MODELS,
-    has_credentials,
+    models_sharing_a_provider,
     one_model_per_provider,
 )
 
@@ -55,8 +55,7 @@ async def collect_stream(agent, prompt: str, user_config: UserConfig, config: di
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "vertexai"],
+    one_model_per_provider(),
 )
 async def test_static_tools_bound_to_graph(
     model_type: ModelType,
@@ -69,9 +68,6 @@ async def test_static_tools_bound_to_graph(
     Inspects the graph's tool list to confirm get_current_time and other
     static tools are properly bound.
     """
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     t.log_inputs({"model": model_type, "check": "graph tool binding"})
 
     graph = await patched_agent.get_or_create_graph(model_type=model_type, thinking_level=None)
@@ -96,8 +92,7 @@ async def test_static_tools_bound_to_graph(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5"],  # Use one model to keep it fast
-    ids=["bedrock"],
+    one_model_per_provider()[:1],  # one model to keep it fast
 )
 async def test_concurrent_streams_isolated(
     model_type: ModelType,
@@ -106,9 +101,6 @@ async def test_concurrent_streams_isolated(
     memory_checkpointer,
 ):
     """Verify two concurrent streams produce independent, non-interleaved results."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     test_user_config.model = model_type
 
     config_a = {
@@ -171,8 +163,7 @@ async def test_concurrent_streams_isolated(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "vertexai"],
+    one_model_per_provider(),
 )
 async def test_long_response_streams_incrementally(
     model_type: ModelType,
@@ -181,9 +172,6 @@ async def test_long_response_streams_incrementally(
     make_config,
 ):
     """Verify a longer response produces multiple streaming chunks (not buffered)."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "List the first 15 prime numbers, one per line."
     t.log_inputs({"prompt": prompt, "model": model_type})
 
@@ -224,9 +212,6 @@ async def test_short_prompt_completes(
     make_config,
 ):
     """Verify 'Hi' completes without error and produces at least one response."""
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Hi"
     t.log_inputs({"prompt": prompt, "model": model_type})
 
@@ -261,8 +246,7 @@ async def test_short_prompt_completes(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    ["claude-sonnet-4.5", "gpt-4o", "gemini-3-flash-preview"],
-    ids=["bedrock", "azure", "vertexai"],
+    one_model_per_provider(),
 )
 async def test_streaming_chunks_are_word_aligned(
     model_type: ModelType,
@@ -275,9 +259,6 @@ async def test_streaming_chunks_are_word_aligned(
     The agent uses a 40-char buffer with word-boundary flushing.
     Most chunks should end with a space or be full words.
     """
-    if not has_credentials(model_type):
-        pytest.skip(f"No credentials for {model_type}")
-
     prompt = "Write a short paragraph about the weather."
     t.log_inputs({"prompt": prompt, "model": model_type})
 
@@ -325,16 +306,15 @@ async def test_model_switching_within_conversation(
     memory_checkpointer,
 ):
     """Verify conversation context survives a model switch (same thread_id, different model)."""
-    # Pick two models from the same provider (both must have credentials)
-    model_pairs = [
-        ("claude-sonnet-4.5", "claude-haiku-4-5"),
-        ("gpt-4o", "gpt-4o-mini"),
-    ]
+    # Two models on the same provider, taken from the gateway registry. This used
+    # to be a hardcoded pair list with a `continue` when a model was unavailable,
+    # which meant the test passed without asserting anything once those aliases
+    # were retired. Skip loudly instead.
+    model_pairs = models_sharing_a_provider()
+    if not model_pairs:
+        pytest.skip("Gateway serves no provider with two or more chat models")
 
     for model_a, model_b in model_pairs:
-        if not has_credentials(model_a) or not has_credentials(model_b):
-            continue
-
         t.log_inputs({"model_a": model_a, "model_b": model_b, "scenario": "model switch context preservation"})
 
         shared_ctx = f"model-switch-{uuid.uuid4().hex[:8]}"

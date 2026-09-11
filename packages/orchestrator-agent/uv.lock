@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.13"
 
 [[package]]
@@ -1795,6 +1795,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-env" },
     { name = "pytest-mock" },
+    { name = "pyyaml" },
     { name = "testcontainers" },
 ]
 
@@ -1851,6 +1852,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=4.1.0" },
     { name = "pytest-env", specifier = ">=1.2.0" },
     { name = "pytest-mock", specifier = ">=3.12.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "testcontainers", extras = ["postgres"], specifier = ">=4.0.0" },
 ]
 

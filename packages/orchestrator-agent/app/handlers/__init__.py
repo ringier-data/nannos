@@ -6,6 +6,7 @@ and various handler functions that support the core agent functionality.
 
 Key Components:
 - StreamHandler: Handles stream response generation and state parsing
+- current_turn_messages: The shared definition of "the current turn"
 - OrchestratorRequestContextBuilder: Custom request context builder for A2A
 - Utility functions: Helper functions for error handling and parsing
 
@@ -19,7 +20,7 @@ Usage:
     )
 """
 
-from .stream_handler import StreamHandler
+from .stream_handler import StreamHandler, current_turn_messages
 from .utils import handle_tool_failure, parse_tool_exception, should_retry
 
 # Backwards compatibility alias
@@ -27,6 +28,7 @@ handle_auth_error = handle_tool_failure
 
 __all__ = [
     "StreamHandler",
+    "current_turn_messages",
     "should_retry",
     "handle_tool_failure",
     "handle_auth_error",

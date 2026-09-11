@@ -195,13 +195,282 @@ Two cross-cutting invariants: the seed key is **`runnable.tracking_key`** (`agen
 
 **Prefer the runTests MCP tool over terminal commands when running tests.**
 
-Fallback to direct pytest commands when needed:
 ```bash
-uv run pytest tests/ -v
-uv run pytest tests/test_specific.py -v
+uv run pytest                      # everything except integration (~8s)
+uv run pytest tests/test_x.py -v   # one file
+uv run pytest -m integration       # real LLM calls, needs a gateway (~4min, ~$1.40)
 ```
+
+Integration tests are **collected on every run but deselected** by `-m "not integration"`
+in `addopts`. They used to be hidden with `--ignore`, which let an a2a-sdk migration
+break three imports in `tests/integration/` unnoticed for months. Never go back to
+`--ignore`: breakage must be visible even when the tests don't run.
+
+That default is a convenience, **not** the spend guard. `-m` is last-wins, so any
+user-supplied expression replaces it, and every integration module also carries
+`slow` — so `-m slow` would select the integration directory and nothing else.
+`tests/integration/conftest.py` therefore also requires the tier to be *requested*:
+`-m integration`, or `RUN_INTEGRATION_TESTS=1` when selecting by path or keyword.
+The predicate lives in `tests/support/marker_gate.py` and is pinned by
+`tests/test_marker_gate.py`; it fails closed, since a skipped test is cheaper than
+a surprise bill.
+
+The same predicate keeps the unit loop network-free. Because the directory is
+collected, `tests/integration/conftest.py` is *imported* on every run — and it
+probes the gateway at import, since parametrize needs the model list while
+collecting. That probe is now skipped unless the tier was requested (+4.8s
+otherwise, when the gateway hostname does not resolve — DNS is not bounded by the
+2s socket timeout). It has to be decided before collection, so the root
+`tests/conftest.py` stashes the `-m` expression in `pytest_configure`: that is the
+only hook that runs before a subdirectory conftest is imported. Keep it there.
 
 - Mock A2A transport for sub-agent communication tests
 - Use real graph execution for middleware integration tests
 - Test HITL interrupt flow end-to-end
 - Verify `GraphRuntimeContext` construction for different user configs
+
+### Two tiers, one assertion vocabulary
+
+| | mock tier | real tier |
+|---|---|---|
+| lives in | `tests/` | `tests/integration/` |
+| model | `ScriptedChatModel` | live, via the gateway |
+| sub-agents | `MockSubAgent` | `MockSubAgent` (still — a real Slack-posting sub-agent would post real messages) |
+| runs | every PR, no credentials | opt-in, needs `LLM_GATEWAY_URL` |
+| answers | "is it wired correctly?" | "does the model decide correctly?" |
+
+Both assert through the **same helpers** in `tests/support/`. Keep it that way: an
+expectation must not mean one thing cheaply and another thing expensively.
+
+New coverage starts in the mock tier and only graduates to the real tier when it
+genuinely needs model judgment. A scripted model cannot tell you whether routing is
+*right*, but it catches everything that breaks without a model involved — and it does
+so in milliseconds.
+
+### Test rigor
+
+Four rules, in descending order of how much damage breaking them does. The first
+one is the whole section; the rest are its common shapes.
+
+**1. A test must not replace the system whose behaviour it asserts.**
+
+Ask it directly: *does the setup stub out the thing the assertion is about?* If
+yes, the test proves nothing however green it is, and — worse than useless — it
+reports confidence it does not have.
+
+`tests/test_hitl_reject_turn.py` is the worked example. It used to build its own
+`StateGraph` including its own router, then assert that rejected tool calls do not
+execute. But a rejected call *stays* in the AIMessage (langchain's
+`_process_decision` returns the tool call, not `None`) and is answered with a
+synthetic error `ToolMessage`, so non-execution depends entirely on a router
+skipping already-answered calls. Supplying that router is testing your own copy.
+
+Measured: disabling the orchestrator's HITL guard entirely — every guarded tool
+executing with no approval — left the whole 796-test suite green. Only the
+rewrite against the real graph caught it, 7 tests failing.
+
+Corollary: **never rebuild production topology in a test.** `scripted_graph()`
+compiles the real `GraphFactory` graph in ~21ms. A hand-copied graph, router or
+middleware stack is a copy that drifts, and it drifts silently.
+
+**2. Test a provider-dependent claim with a pin plus recorded evidence.**
+
+Some claims are only true of a real provider — that a structured-output method
+works, that a schema is accepted. A stub cannot answer those, and hitting five
+providers on every commit is not affordable. So split it:
+
+- the **pin** is cheap and permanent: assert the request was *shaped* correctly
+  (e.g. `method="function_calling"` was passed). Mutation-check it, then it runs
+  free forever and catches the regression.
+- the **proof** is expensive and recorded once: the live results, per model and
+  provider, in the PR body.
+
+PR #202 is the reference: a five-model table showing a 400 from Azure and
+silently-empty output from Bedrock, next to a one-line pin in CI.
+
+**3. Label a pin as a pin.**
+
+A test that asserts "we pass X to third-party Y" is legitimate and worth having —
+it is *not* evidence that Y then behaves. Say which one it is in the docstring.
+`TestLangchainHITLContract` in `test_hitl_reject_turn.py` is labelled this way,
+and kept precisely because the real-graph tests cannot tell you whether a
+regression is upstream or ours.
+
+**4. Know the mock tier's blind spot.**
+
+Its final response is scripted *from* the expectations, so anything derived from
+`expect` is true by construction there. `task_state: failed` in a dataset
+scenario cannot fail in the mock tier — which is why
+`_assert_outcomes_propagated` asserts on the sub-agent's returned message
+instead, since that comes from the real dispatch path in both tiers.
+
+If you cannot state what a test would catch that nothing else would, it is not
+ready. Mutating the code it covers is the cheapest way to find out.
+
+### `tests/support/`
+
+Not a test package; nothing here is collected.
+
+| module | purpose |
+|---|---|
+| `extraction.py` | Read a finished turn: `delegated_agents`, `tool_names`, `final_text`, `a2a_tracking`, `task_state`, `interrupted_tools` |
+| `mock_subagents.py` | `MockSubAgent` — subclasses `LocalA2ARunnable`, so it travels the real dispatch path |
+| `scripted_model.py` | `ScriptedChatModel` — replays canned responses, records what tools were bound |
+| `graph_harness.py` | `scripted_graph()` builds a **real** `GraphFactory` graph with a scripted model |
+| `scenarios.py` | Loads `tests/datasets/*.yaml`; `assert_scenario()` is the shared vocabulary |
+| `eval_report.py` | Pass-ratio gate and cost reporting |
+| `usage.py` | `UsageRecorder` — token accounting via `callbacks` in the graph config |
+
+### Facts that are easy to get wrong
+
+Learned the hard way; each cost real debugging time.
+
+- **Delegation is one tool.** There is no `delegate_to_x`. It is `task` with
+  `args["subagent_type"]`, and the instruction in `args["description"]`.
+- **Sub-agent tools are invisible.** The orchestrator only ever sees `task`,
+  `write_todos`, `FinalResponseSchema`, `get_current_time`, docstore and MCP tools.
+  Expecting `send_slack_message` in orchestrator state can only ever fail.
+- **Assertions must be turn-scoped.** The checkpointer accumulates history, so an
+  unscoped read happily passes on a delegation from two turns ago. The helpers default
+  to the current turn.
+- **`structured_response` is a pydantic instance, not a dict** (the graph sets
+  `response_format`). Read it with the pydantic API.
+- **`include_subagent_output=true` means `message` is EMPTY** by design — the
+  sub-agent's output is appended downstream. `final_text()` reproduces that; reading
+  `message` alone reports an empty answer for a turn that answered at length.
+- **`a2a_tracking[...]["state"]` is the protobuf enum name** (`TASK_STATE_COMPLETED`),
+  not the lowercase `task_state` vocabulary.
+- **Sub-agents require a parent config.** `LocalA2ARunnable` refuses to run without
+  one rather than inventing user ids.
+- **`UserConfig.sub_agents` must be assigned post-construction.** It is annotated
+  `list[CompiledSubAgent]` whose `runnable` is a `Runnable`, which no A2A runnable
+  actually is; production only works because `executor.py` assigns after construction,
+  bypassing validation. Passing them to the constructor raises.
+- **A turn's budget is counted in LangGraph super-steps, not model calls.** Every
+  middleware hook is its own graph node, so one model call costs a whole lap of the
+  graph. Multi-step scenarios can exhaust the budget even when the orchestrator
+  behaves correctly.
+
+  The limit is **derived from the compiled graph** by `app/core/step_budget.py`,
+  which classifies nodes by hook suffix (`.before_model` / `.after_model` per model
+  call, `.before_agent` / `.after_agent` per turn, plus `model` and `tools`). There
+  is no constant to maintain: adding a middleware raises the per-call cost and the
+  limit follows it. Read that module rather than trusting a number restated here —
+  the previous version of this bullet hardcoded three and was wrong within one commit
+  of the config changing.
+
+  Configure the budget with `ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN`, in model calls.
+  The shared `MAX_RECURSION_LIMIT` env var is **not** read here — `agent-runner`,
+  `agent-common` and `ringier-a2a-sdk` all read that name with different defaults
+  (50, 75, 50), so one value cannot serve all four; setting it logs a warning and
+  otherwise does nothing here. It stays live for sub-agents in this same process, so
+  it must not be unset on that basis.
+
+  `tests/test_step_budget.py` measures the super-steps of a real graph run and
+  asserts the derived budget covers them with under one model call of slack. A
+  failure there means the *derivation* is wrong — most likely a new node the
+  classifier does not recognise — not a number to bump.
+
+### Adding a scenario
+
+Add an entry to `tests/datasets/core_routing.yaml`; both tiers pick it up automatically.
+
+```yaml
+- id: routes_to_slack_notifier
+  description: A request to send something on Slack should reach the Slack agent.
+  input:
+    query: "Send a message to @john.doe on Slack saying the deployment is done."
+  subagents:
+    - name: slack-notifier
+      description: "Sends messages to Slack channels and users."   # what the model routes on
+      reply: "Message delivered."
+  expect:
+    delegations:
+      required: [slack-notifier]
+      forbidden: [revenue-analyst]
+      ordered: false        # true only when sequence genuinely matters
+    instructions:
+      slack-notifier: ["john"]     # substrings the sub-agent must have received
+    tools:
+      required: [get_current_time]
+    task_state: completed
+    response_contains: ["8.2"]
+```
+
+Rules that keep scenarios from becoming flaky:
+
+- **Never assert on wording the model chooses.** An early scenario required `"4"` and
+  gemini answered *"Two plus two is four."* — a correct answer failing on
+  representation. Assert stable specifics (a name, an identifier, a number that must
+  appear), or assert nothing about the prose.
+- **`instructions` are substrings, not equality.** The model phrases hand-offs freely.
+- **`subagents[].description` is the routing signal** in the real tier. Keep it close
+  to the real agent card, or you are testing a fiction.
+- **Name sub-agents after things that are actually delegable** — registry sub-agents,
+  system-seeded or user-created. Clients (`client-slack`, `client-email`) call the
+  orchestrator and render its reply; they serve no agent card. `agent-runner` is called
+  by console-backend's scheduler. Nothing delegates to either, so naming one documents
+  a path that does not exist. Nothing in the harness validates this, which is exactly
+  why it needs saying: the tests pass either way.
+- **Include negative expectations.** `forbidden` is what makes a routing assertion
+  falsifiable — but only for agents that are actually registered, or it proves nothing.
+
+The mock tier also lints the dataset: it rejects unobservable tools, instructions keyed
+to unregistered sub-agents, and contradictory required/forbidden pairs. A scenario that
+fails there is malformed, not a real finding.
+
+### The pass-ratio gate
+
+Real-LLM tests fail occasionally for reasons that are not defects. Rather than a rerun
+plugin — which retries until green and so *hides* flakiness — every test runs once and
+the session is judged on the aggregate ratio.
+
+```bash
+EVAL_MIN_PASS_RATIO=0.75                                   # default
+EVAL_REPORT_PATH=../../logs/eval-report.json               # optional JSON artifact
+```
+
+- Skips are excluded: a skip is not evidence either way.
+- `@pytest.mark.strict` exempts a test from the ratio — it must pass. Use it for
+  behaviour that is not supposed to be probabilistic, and to stop a permanently-broken
+  test from hiding behind healthy siblings.
+- A run that passes the gate with failures present says so explicitly. **Read those
+  failures** — the gate tolerates sampling noise, it does not certify correctness.
+
+Cost is reported per test. Note that ~97% of spend is *input* tokens (system prompt and
+tool schemas re-sent on every model call), so scenario cost is roughly fixed regardless
+of complexity — budget ~20k tokens per scenario per model.
+
+### Setting up the real tier
+
+```bash
+./scripts/start-local.sh          # local LiteLLM gateway on :4000
+```
+
+Then two lines in `packages/orchestrator-agent/.env` (gitignored — verify with
+`git check-ignore` before adding anything, this is a public repo):
+
+```
+LLM_GATEWAY_URL=http://localhost:4000
+LLM_GATEWAY_API_KEY=sk-nannos-local
+```
+
+Provider credentials (Bedrock/Azure/Vertex) belong to the **gateway process**, not the
+test process. Never put them in a test env file. Which models exist comes from the
+gateway registry, so pin `litellm-local-models.yaml` to what the deployed gateway
+serves — otherwise a scenario tuned locally proves less than it appears to.
+
+With no gateway, the whole directory skips with a reason saying so.
+
+### Framework choice
+
+Plain **pytest** plus the dataset and shared assertions above. LangSmith stays for
+tracing and experiment history (`@pytest.mark.langsmith`), not as the test framework.
+
+Rationale, from actually using it: LangSmith's value here is the trace UI, and its
+pytest plugin reaches out during *setup* to create a test suite, so without a valid
+`LANGSMITH_API_KEY` every marked test fails for a reason unrelated to the code (hence
+`LANGSMITH_TEST_TRACKING=false` when no real key is present). Gating, cost reporting and
+dataset assertions are all things we need to own regardless, and they work whether or
+not tracing is on. A dedicated eval framework would add a second vocabulary next to
+pytest for no coverage we cannot already express.

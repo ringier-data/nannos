@@ -55,7 +55,7 @@ class LangGraphGoogleGenAIAgent(PostgreSQLCheckpointerMixin, LangGraphAgent):
 
         Args:
             tool_query_regex: Optional regex pattern to filter MCP tools by name
-            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
+            recursion_limit: Maximum number of LangGraph steps (default: from MAX_RECURSION_LIMIT env var or 50)
         """
         self.gcp_project = os.getenv("GCP_PROJECT_ID")
         self.gcp_location = os.getenv("GCP_LOCATION", "europe-west4")
