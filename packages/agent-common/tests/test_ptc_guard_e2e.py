@@ -690,38 +690,42 @@ async def test_rate_limited_inner_call_surfaces_as_a_value_inside_eval():
 def test_history_write_back_merges_every_command_shape_and_never_drops():
     """The guard's record must land whatever the handler returned: a ToolMessage, or a Command whose
     update is a dict, a pair sequence, or None. The shapes that cannot be merged raise instead of
-    silently failing the loop guard open."""
+    silently failing the loop guard open.
+
+    The value written is an incremental delta, not the whole history — a step with two ``eval``
+    calls has two tasks writing that one channel (#217)."""
     from types import SimpleNamespace
 
     import pytest
     from langchain_core.messages import ToolMessage
 
     from agent_common.core.graph_utils import TOOL_CALL_HISTORY_STATE_KEY
+    from agent_common.middleware.loop_detection_middleware import history_delta
 
     attach = _PTCToleranceCodeInterpreterMiddleware._with_tool_call_history
-    turn = SimpleNamespace(tool_call_history={"eval:get": ["h1"]})
-    seed: dict[str, list[str]] = {}
+    turn = SimpleNamespace(history_appends={"eval:get": ["h1"]}, history_caps={"eval:get": 10})
+    expected = history_delta({"eval:get": ["h1"]}, {"eval:get": 10})
     tm = ToolMessage(content="ok", tool_call_id="c1", name="eval")
 
-    out = attach(tm, turn, seed)
+    out = attach(tm, turn)
     assert isinstance(out, Command) and out.update == {
         "messages": [tm],
-        TOOL_CALL_HISTORY_STATE_KEY: {"eval:get": ["h1"]},
+        TOOL_CALL_HISTORY_STATE_KEY: expected,
     }
 
-    out = attach(Command(update={"messages": [tm], "x": 1}, goto="n"), turn, seed)
-    assert out.update == {"messages": [tm], "x": 1, TOOL_CALL_HISTORY_STATE_KEY: {"eval:get": ["h1"]}}
+    out = attach(Command(update={"messages": [tm], "x": 1}, goto="n"), turn)
+    assert out.update == {"messages": [tm], "x": 1, TOOL_CALL_HISTORY_STATE_KEY: expected}
     assert out.goto == "n"
 
-    out = attach(Command(update=[("messages", [tm])]), turn, seed)
-    assert out.update == [("messages", [tm]), (TOOL_CALL_HISTORY_STATE_KEY, {"eval:get": ["h1"]})]
+    out = attach(Command(update=[("messages", [tm])]), turn)
+    assert out.update == [("messages", [tm]), (TOOL_CALL_HISTORY_STATE_KEY, expected)]
 
-    out = attach(Command(update=None, resume="r"), turn, seed)
-    assert out.update == {TOOL_CALL_HISTORY_STATE_KEY: {"eval:get": ["h1"]}} and out.resume == "r"
+    out = attach(Command(update=None, resume="r"), turn)
+    assert out.update == {TOOL_CALL_HISTORY_STATE_KEY: expected} and out.resume == "r"
 
     with pytest.raises(TypeError, match="refusing to drop a loop-guard record"):
-        attach(Command(update="bare root value"), turn, seed)
+        attach(Command(update="bare root value"), turn)
 
-    # Unchanged history: pass-through, whatever the shape.
+    # Nothing appended (the program made no judged call): pass-through, whatever the shape.
     same = Command(update="bare root value")
-    assert attach(same, turn, {"eval:get": ["h1"]}) is same
+    assert attach(same, SimpleNamespace(history_appends={}, history_caps={})) is same

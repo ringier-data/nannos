@@ -62,52 +62,73 @@ _STOPPED_BEFORE_EXECUTION = (
 )
 
 
+#: Marks a ``tool_call_history`` update as an incremental delta rather than a whole
+#: value. A writer that may share its superstep with another writer tags its update
+#: with this key; everyone else keeps emitting whole dicts and keeps replace
+#: semantics. See :func:`merge_tool_call_history`.
+HISTORY_DELTA_KEY = "__ptc_delta__"
+
+
+def history_delta(append: dict[str, list[str]], cap: dict[str, int | None]) -> dict[str, Any]:
+    """Build an incremental ``tool_call_history`` update.
+
+    ``append`` is the arg hashes this writer added, per key. ``cap`` is the sliding
+    window to apply to that key *after* appending, or ``None`` to leave it unbounded
+    — which is how ``RepeatedToolCallMiddleware`` keeps a blocked tool's history
+    growing so ``force_stop_after`` can fire (see ``evaluate``).
+
+    Plain JSON-serializable dicts on purpose: LangGraph checkpoints *pending writes*
+    across an interrupt, so an update has to survive a round-trip through the
+    checkpointer. Only the reduced value — always a plain history dict — is durable
+    state.
+    """
+    return {HISTORY_DELTA_KEY: {"append": append, "cap": cap}}
+
+
 def merge_tool_call_history(
     current: dict[str, list[str]] | None,
-    update: dict[str, list[str]] | None,
+    update: dict[str, Any] | None,
 ) -> dict[str, list[str]]:
     """Reducer for the ``tool_call_history`` channel.
 
-    Normally one writer updates this per step and the update simply wins. The
-    exception is a model step that emits two ``eval`` tool calls: ``ToolNode`` makes
-    each a task of the *same* superstep, both read the same checkpointed history as
-    their seed, and both write back their own extension of it. Without a reducer
-    that is not a silent last-writer-wins — LangGraph's default ``LastValue``
-    channel *raises* ``InvalidUpdateError: can receive only one value per step``,
-    which fails the whole agent turn (#217).
+    Two kinds of update, distinguished by what the *writer declares* rather than by
+    inspecting list shapes:
 
-    Per key, three cases, in the order tested:
+    * **A whole value** (no :data:`HISTORY_DELTA_KEY`) — replace, which is exactly
+      LangGraph's default ``LastValue`` behaviour and therefore exactly what the
+      model-boundary writer in ``RepeatedToolCallMiddleware`` has always got. That
+      writer runs once per step and is left completely alone by this reducer.
+    * **A delta** (:func:`history_delta`) — append the writer's own hashes, then
+      apply its cap. This is what the ``eval`` path emits, because a model step may
+      emit two ``eval`` calls and ``ToolNode`` makes them two tasks of the *same*
+      superstep. Both then write this channel, and without a reducer that is not a
+      silent last-writer-wins: ``LastValue`` *raises* ``InvalidUpdateError: can
+      receive only one value per step`` and fails the whole agent turn (#217).
 
-    * **Unchanged / first write** — take the update.
-    * **A window trim** (``RepeatedToolCallMiddleware.evaluate`` drops the oldest
-      entries past ``window_size``): the update is a *suffix* of what we hold, so it
-      is shorter by construction. Take it, or the trim would be undone forever.
-    * **Concurrent extension** — two eval tasks grew the same seed. Keep the common
-      prefix once and append each task's own tail, so neither eval's calls vanish
-      from the loop guard's memo.
+    Deltas commute, so two evals in one step produce ``current + A + B`` whatever
+    order the reducer sees them in, and the window is applied once at the end rather
+    than by each writer against its own partial view.
 
-    Two eval programs whose divergent tails *begin* with the identical arg hash
-    (the same tool called with the same args from both) collapse to one entry: the
-    common prefix absorbs it. That under-counts the repeat by one, which is the
-    safe direction — the guard blocks late rather than early — and it cannot happen
-    at the model boundary, where there is only ever one writer per step.
+    An earlier version of this reducer tried to tell a window trim from a concurrent
+    extension by comparing the two lists. That is not decidable: ``evaluate``
+    appends *before* trimming, so a saturated-window update is an equal-length
+    rotation (``old[1:] + [new]``), indistinguishable from two writers that diverged
+    at the head — and it silently concatenated on every ordinary step, growing the
+    history without bound. Hence the tag.
     """
-    if not current:
-        return dict(update or {})
-    if not update:
-        return dict(current)
-    merged = {k: list(v) for k, v in current.items()}
-    for key, new in update.items():
-        old = merged.get(key)
-        if old is None or old == list(new):
-            merged[key] = list(new)
-        elif len(new) < len(old) and list(new) == old[-len(new) :]:
-            merged[key] = list(new)
-        else:
-            shared = 0
-            while shared < min(len(old), len(new)) and old[shared] == new[shared]:
-                shared += 1
-            merged[key] = [*old, *new[shared:]]
+    if not isinstance(update, dict):
+        return {k: list(v) for k, v in (current or {}).items()}
+    delta = update.get(HISTORY_DELTA_KEY)
+    if delta is None:
+        return {k: list(v) for k, v in update.items()}
+    merged: dict[str, list[str]] = {k: list(v) for k, v in (current or {}).items()}
+    caps: dict[str, Any] = delta.get("cap") or {}
+    for key, hashes in (delta.get("append") or {}).items():
+        entries = [*merged.get(key, []), *hashes]
+        limit = caps.get(key)
+        if isinstance(limit, int) and len(entries) > limit:
+            entries = entries[-limit:]
+        merged[key] = entries
     return merged
 
 

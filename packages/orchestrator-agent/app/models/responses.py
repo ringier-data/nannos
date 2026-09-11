@@ -83,6 +83,41 @@ class AgentStreamResponse(BaseAgentStreamResponse):
             metadata={"auth_url": auth_url, "error_code": error_code, "requires_auth": True, **metadata},
         )
 
+    @staticmethod
+    def interrupt_value(interrupts: Any) -> Any:
+        """Pick — or build — the one interrupt payload to render for this pause.
+
+        A turn can end with SEVERAL interrupts pending at once. One assistant message
+        may carry two ``eval`` tool calls, ``ToolNode`` runs them as separate tasks of
+        the same superstep, and each raises its own HITL approval (they no longer
+        share a collector — see ``ptc_guard.serialized_eval`` and #217). Rendering
+        only ``interrupts[-1]``, as this used to, is unsafe rather than merely
+        incomplete: the resume path replicates a blanket ``approve`` across *every*
+        pending interrupt, so approving the card you were shown also authorises the
+        high-risk call you were never shown.
+
+        When every pending interrupt is an approval ask, their action requests are
+        concatenated into one payload — the clients already render N requests in a
+        single card, and each request carries its own ``_call_id``, so decisions route
+        back to the right interrupt (``executor._build_interrupt_resume_map``). The
+        user then sees everything a blanket approve would authorise.
+
+        Mixed or non-approval pauses (auth, client-action) are left alone: they need
+        their own round trip and cannot be folded into an approval card. The last one
+        renders, as before, and the rest stay pending for the next turn.
+        """
+        pending = list(interrupts or ())
+        if not pending:
+            return {}
+        values = [getattr(i, "value", None) for i in pending]
+        approvals = [v for v in values if isinstance(v, dict) and v.get("action_requests")]
+        if len(approvals) < 2 or len(approvals) != len(values):
+            return values[-1] if values[-1] is not None else {}
+        merged = dict(approvals[-1])
+        merged["action_requests"] = [ar for v in approvals for ar in (v.get("action_requests") or [])]
+        merged["review_configs"] = [rc for v in approvals for rc in (v.get("review_configs") or [])]
+        return merged
+
     @classmethod
     def from_interrupt(cls, value: Any, pending_nodes: Optional[List[str]] = None) -> "AgentStreamResponse":
         """Map a LangGraph interrupt value to the A2A response the executor emits.

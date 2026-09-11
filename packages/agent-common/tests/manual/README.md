@@ -122,22 +122,45 @@ killing the turn rather than silently dropping a record. That is why the fix nee
 
 ### What the fix is
 
-Two parts, both required — verified by disabling each alone and re-running:
+Two parts, both required — each was disabled alone and the harness re-run to confirm:
 
-- **`ptc_guard.serialized_eval`** — a per-`(event loop, thread_id)` mutex held
-  across the whole `begin_ptc_turn` → `end_ptc_turn` span in
+- **`ptc_guard.serialized_eval`** — a per-`(event loop, thread_id)` mutex held across
+  the whole `begin_ptc_turn` → `end_ptc_turn` span in
   `_PTCToleranceCodeInterpreterMiddleware.awrap_tool_call`. Only the `eval` path
   enters it, so every other tool keeps its concurrency. Disable this alone and both
   parallel scenarios go back to `already closed`.
-- **`loop_detection_middleware.merge_tool_call_history`** — the reducer on the
-  `tool_call_history` channel, declared identically on `LoopDetectionState` and
-  `_PTCExposureState`. Disable this alone and both parallel scenarios raise
-  `InvalidUpdateError`.
+- **An incremental write-back** — with the sandbox collision gone, both eval tasks
+  write the `tool_call_history` channel in one superstep. The eval path now emits a
+  tagged *delta* (`history_delta`: what this eval appended, plus the window to apply
+  after) instead of a whole history, and `merge_tool_call_history` appends it.
+  Disable this alone and both parallel scenarios raise `InvalidUpdateError`.
 
-A gotcha worth knowing if you ever touch that annotation: LangGraph detects a
-reducer as `callable(metadata[-1])`, so it must be the **last** entry —
+The delta exists because the merge has to know *what kind* of update it is getting,
+and that is not decidable from the lists alone. A first attempt tried to recognise a
+window trim by comparing shapes — "the trimmed update is shorter, so take it". That
+is false: `RepeatedToolCallMiddleware.evaluate` appends **then** trims, so a
+saturated update is an equal-length *rotation* (`old[1:] + [new]`), which looks
+exactly like two writers that diverged at the head. Every ordinary step fell into the
+concatenate branch and the history grew by a full window per step — unbounded, with
+duplicated hashes inflating repeat counts until legitimate calls got blocked. Tagging
+the update fixes this by construction: the model-boundary writer keeps plain
+whole-value replace semantics and is untouched, and only the eval path opts in.
+
+A gotcha worth knowing if you ever touch that annotation: LangGraph detects a reducer
+as `callable(metadata[-1])`, so it must be the **last** entry —
 `Annotated[T, PrivateStateAttr, merge_tool_call_history]`. Put it first and it is
 silently ignored, with no error and no reduction.
+
+### The HITL side
+
+Once the two evals stop sharing a collector they each raise their **own** interrupt,
+so a turn can end with two approvals pending. The orchestrator used to render only
+`interrupts[-1]` while the resume path replicates a blanket `approve` across every
+pending interrupt — meaning approving the card you saw also authorised the call you
+did not. `AgentStreamResponse.interrupt_value` now folds co-pending approval asks
+into one card (each request keeps its own `_call_id`, so decisions still route back
+correctly). Auth and client-action pauses are never folded in; they need their own
+round trip.
 
 ### Verifying a future change
 

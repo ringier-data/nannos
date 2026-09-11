@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from agent_common.core.graph_utils import _PTCToleranceCodeInterpreterMiddleware
 from agent_common.middleware.loop_detection_middleware import (
     RepeatedToolCallMiddleware,
+    history_delta,
     merge_tool_call_history,
 )
 from agent_common.middleware.ptc_guard import wrap_tool_for_ptc
@@ -188,34 +189,84 @@ async def test_two_evals_in_one_step_each_get_their_own_approval():
 @pytest.mark.parametrize(
     ("current", "update", "expected"),
     [
-        # First write / nothing held yet.
+        # A WHOLE-VALUE update replaces, exactly as LangGraph's LastValue always did.
+        # This is the model-boundary writer's path and it must not change.
         ({}, {"t": ["a"]}, {"t": ["a"]}),
         (None, {"t": ["a"]}, {"t": ["a"]}),
-        # A single writer appending: the update simply wins.
         ({"t": ["a"]}, {"t": ["a", "b"]}, {"t": ["a", "b"]}),
-        # Unchanged key passes through.
-        ({"t": ["a"]}, {"t": ["a"]}, {"t": ["a"]}),
-        # The loop guard's sliding-window trim must NOT be undone: the update is a
-        # suffix of what we hold, so it replaces rather than merges.
+        # Including when it shrinks a key — a trim must never be undone.
         ({"t": ["a", "b", "c"]}, {"t": ["b", "c"]}, {"t": ["b", "c"]}),
-        # Two eval tasks extending the same seed in one superstep: keep both tails.
-        ({"t": ["seed", "a"]}, {"t": ["seed", "b"]}, {"t": ["seed", "a", "b"]}),
-        # Keys only one writer touched are preserved.
-        ({"t": ["a"], "u": ["x"]}, {"t": ["a", "b"]}, {"t": ["a", "b"], "u": ["x"]}),
+        # Whole-value replace drops keys the update omits, like LastValue.
+        ({"t": ["a"], "u": ["x"]}, {"t": ["a", "b"]}, {"t": ["a", "b"]}),
     ],
 )
-def test_merge_tool_call_history(current, update, expected):
+def test_merge_tool_call_history_whole_value_replaces(current, update, expected):
     assert merge_tool_call_history(current, update) == expected
 
 
-def test_merge_tool_call_history_is_associative_over_two_eval_tasks():
-    """Applying two concurrent extensions in either order yields the same history."""
+def test_merge_tool_call_history_delta_appends_and_caps():
+    """A delta appends the writer's own hashes, then applies its window."""
+    current = {"eval:probe": ["h0", "h1"], "other": ["z"]}
+
+    merged = merge_tool_call_history(current, history_delta({"eval:probe": ["h2"]}, {"eval:probe": 10}))
+
+    assert merged["eval:probe"] == ["h0", "h1", "h2"]
+    # Keys the delta does not mention are untouched — unlike a whole-value write.
+    assert merged["other"] == ["z"]
+
+
+def test_merge_tool_call_history_delta_cap_is_applied_once():
+    full = {"k": [f"h{i}" for i in range(10)]}
+
+    capped = merge_tool_call_history(full, history_delta({"k": ["x"]}, {"k": 10}))
+    uncapped = merge_tool_call_history(full, history_delta({"k": ["x"]}, {"k": None}))
+
+    assert capped["k"] == [*[f"h{i}" for i in range(1, 10)], "x"]
+    # A blocked call is left uncapped so repeat counts keep escalating and
+    # ``force_stop_after`` can fire — see RepeatedToolCallMiddleware.evaluate.
+    assert len(uncapped["k"]) == 11
+
+
+def test_merge_tool_call_history_deltas_commute():
+    """Two eval tasks in one superstep merge the same way in either order."""
     seed = {"eval:probe": ["s1"]}
-    a = {"eval:probe": ["s1", "a1"]}
-    b = {"eval:probe": ["s1", "b1"]}
+    a = history_delta({"eval:probe": ["a1"]}, {"eval:probe": 10})
+    b = history_delta({"eval:probe": ["b1"]}, {"eval:probe": 10})
 
     a_then_b = merge_tool_call_history(merge_tool_call_history(seed, a), b)
     b_then_a = merge_tool_call_history(merge_tool_call_history(seed, b), a)
 
     assert sorted(a_then_b["eval:probe"]) == sorted(b_then_a["eval:probe"])
     assert set(a_then_b["eval:probe"]) == {"s1", "a1", "b1"}
+
+
+def test_merge_tool_call_history_keeps_the_same_hash_from_both_evals():
+    """Two evals making the identical call each get counted, not collapsed.
+
+    An earlier shape-inference reducer absorbed the duplicate into the common
+    prefix and under-counted the repeat.
+    """
+    merged = merge_tool_call_history({"eval:probe": ["s1"]}, history_delta({"eval:probe": ["x"]}, {"eval:probe": 10}))
+    merged = merge_tool_call_history(merged, history_delta({"eval:probe": ["x"]}, {"eval:probe": 10}))
+
+    assert merged["eval:probe"] == ["s1", "x", "x"]
+
+
+def test_single_writer_history_stays_bounded_past_the_window():
+    """The regression guard: drive real updates out of ``evaluate`` past the window.
+
+    ``evaluate`` appends *then* trims, so a saturated update is an equal-length
+    rotation (``old[1:] + [new]``). A reducer that tried to recognise a trim by
+    comparing list shapes mistook that for two writers diverging and concatenated,
+    growing the history by a full window every step and inflating repeat counts
+    until legitimate calls were blocked.
+    """
+    middleware = RepeatedToolCallMiddleware(window_size=10, max_repeats=5)
+    state: dict[str, list[str]] = {}
+
+    for i in range(25):
+        verdict = middleware.evaluate("task", {"i": i}, state.get("task", []))
+        assert not verdict.blocked, f"distinct args must never be a loop (step {i})"
+        state = merge_tool_call_history(state, {"task": verdict.history})
+
+    assert len(state["task"]) == 10

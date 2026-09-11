@@ -297,11 +297,32 @@ class _PTCTurnState:
     #: access to graph state — can read and extend it; the durable copy is the state
     #: field the loop middleware itself owns, never this process.
     tool_call_history: dict[str, list[str]] = field(default_factory=dict)
+    #: What this ``eval`` actually ADDED to ``tool_call_history``, per key, and the
+    #: window to apply afterwards. The write-back is emitted as an incremental delta
+    #: rather than as ``tool_call_history`` itself, because a step with two ``eval``
+    #: calls has two tasks writing that one channel — see
+    #: ``loop_detection_middleware.merge_tool_call_history`` and #217. Tracked here
+    #: rather than diffed against the seed at the end: a diff cannot distinguish a
+    #: hash this eval appended from one the window dropped.
+    history_appends: dict[str, list[str]] = field(default_factory=dict)
+    #: Per key, the sliding window to apply after appending, or ``None`` to leave it
+    #: unbounded. ``None`` is sticky: once any call on this key was blocked, the loop
+    #: middleware deliberately stops trimming so repeat counts keep escalating and
+    #: ``force_stop_after`` can fire, and a later allowed call must not re-impose the
+    #: window and undo that.
+    history_caps: dict[str, int | None] = field(default_factory=dict)
 
     def record_pending(self, item: _PendingApproval) -> None:
         if any(p.call_key == item.call_key for p in self.pending):
             return
         self.pending.append(item)
+
+    def record_history_append(self, key: str, args_hash: str, cap: int | None) -> None:
+        """Note one arg hash this ``eval`` added under ``key``, and the window for it."""
+        self.history_appends.setdefault(key, []).append(args_hash)
+        if key in self.history_caps and self.history_caps[key] is None:
+            return  # already unbounded because an earlier call on this key was blocked
+        self.history_caps[key] = cap
 
 
 _PTC_TURNS: dict[str, _PTCTurnState] = {}
@@ -640,6 +661,14 @@ def wrap_tool_for_ptc(
             key = ptc_history_key(tool_name)
             verdict = loop_detection.evaluate(tool_name, kwargs, turn.tool_call_history.get(key, []), program_call=True)
             turn.tool_call_history[key] = verdict.history
+            # ``evaluate`` appends the new hash last and trims from the front, so the
+            # tail is always this call's own hash. A blocked call is left uncapped,
+            # mirroring the window rule ``evaluate`` itself applies.
+            turn.record_history_append(
+                key,
+                verdict.history[-1],
+                None if verdict.blocked else loop_detection.window_size,
+            )
             if verdict.blocked:
                 return repeated_call_payload(tool_name, loop_detection.blocked_message(tool_name, verdict))
         try:
