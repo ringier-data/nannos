@@ -58,6 +58,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-env>=1.2.0",
     "pytest-mock>=3.12.0",
+    "pytest-xdist>=3.6.0",
     "langsmith[pytest]>=0.4.37",
     "docker>=7.0.0",
     "testcontainers[postgres]>=4.0.0",
@@ -78,6 +79,17 @@ python_functions = "test_*"
 addopts = [
     "-v",
     "--tb=short",
+    # Group-aware distribution, so that `-n <workers>` alone does the right
+    # thing. The integration tier tags model-parametrized items with an
+    # `xdist_group` per alias, keeping each model on one worker (see
+    # tests/integration/conftest.py). A bare `-n` would select `--dist load`,
+    # which ignores those groups and scores every alias twice instead of once.
+    #
+    # It has to be here rather than applied from a conftest: xdist hands workers
+    # the original command line, so a `config.option.dist` mutated at configure
+    # time never reaches the worker that reads it. `addopts` is read from this
+    # file by controller and workers alike. Inert without `-n`.
+    "--dist=loadgroup",
     "--strict-markers",
     "--disable-warnings",
     # Integration tests are collected (so breakage in them is visible) but
