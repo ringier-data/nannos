@@ -81,8 +81,12 @@ JSON.stringify({{result: r, ownerAfterAwait: globalThis.__owner}})
 """
 
 
-def _build_parallel_eval_agent(risk: float) -> tuple[Any, list[str]]:
-    """An agent whose single model step emits two ``eval`` calls."""
+def build_eval_agent(risk: float, *, parallel: bool = True) -> tuple[Any, list[str]]:
+    """An agent that emits two ``eval`` calls, in one model step or in two.
+
+    Shared with the manual QA harness (``tests/manual/qa_217_parallel_eval.py``) so
+    the two cannot drift apart; ``parallel=False`` is that harness's control case.
+    """
     executed: list[str] = []
 
     async def _probe(tag: str, delay_ms: int = 0) -> str:
@@ -107,25 +111,23 @@ def _build_parallel_eval_agent(risk: float) -> tuple[Any, list[str]]:
         default_risk_threshold=0.8,
         loop_detection=loop_detection,
     )
-    model = _ScriptedModel()
-    model.responses = deque(
-        [
-            AIMessage(
-                content="",
-                id="ai-1",
-                tool_calls=[
-                    {"id": "call-a", "name": "eval", "args": {"code": _PROGRAM.format(tag="A", delay=_SLOW_MS)}},
-                    {"id": "call-b", "name": "eval", "args": {"code": _PROGRAM.format(tag="B", delay=0)}},
-                ],
-            ),
-            AIMessage(content="done", id="ai-final"),
+    call_a = {"id": "call-a", "name": "eval", "args": {"code": _PROGRAM.format(tag="A", delay=_SLOW_MS)}}
+    call_b = {"id": "call-b", "name": "eval", "args": {"code": _PROGRAM.format(tag="B", delay=0)}}
+    steps = (
+        [AIMessage(content="", id="ai-1", tool_calls=[call_a, call_b])]
+        if parallel
+        else [
+            AIMessage(content="", id="ai-1", tool_calls=[call_a]),
+            AIMessage(content="", id="ai-2", tool_calls=[call_b]),
         ]
     )
+    model = _ScriptedModel()
+    model.responses = deque([*steps, AIMessage(content="done", id="ai-final")])
     agent = create_agent(model=model, tools=[], middleware=[loop_detection, middleware], checkpointer=InMemorySaver())
     return agent, executed
 
 
-def _eval_results(result: dict) -> dict[str, str]:
+def eval_results(result: dict) -> dict[str, str]:
     return {
         getattr(m, "tool_call_id", "?"): str(m.content)
         for m in result["messages"]
@@ -147,13 +149,13 @@ def _assert_both_evals_intact(evals: dict[str, str], executed: list[str], histor
 
 async def test_two_evals_in_one_step_do_not_collide():
     """Low-risk inner calls: both programs run to completion with their own sandbox."""
-    agent, executed = _build_parallel_eval_agent(risk=0.1)
+    agent, executed = build_eval_agent(risk=0.1)
     config = {"configurable": {"thread_id": "ptc-parallel-low"}}
 
     result = await asyncio.wait_for(agent.ainvoke({"messages": [HumanMessage("go")]}, config), 60)
 
     state = await agent.aget_state(config)
-    _assert_both_evals_intact(_eval_results(result), executed, state.values.get("tool_call_history") or {})
+    _assert_both_evals_intact(eval_results(result), executed, state.values.get("tool_call_history") or {})
 
 
 async def test_two_evals_in_one_step_each_get_their_own_approval():
@@ -163,7 +165,7 @@ async def test_two_evals_in_one_step_each_get_their_own_approval():
     approvals were batched into whichever ``interrupt()`` fired first and the other
     eval's call was never asked about.
     """
-    agent, executed = _build_parallel_eval_agent(risk=0.95)
+    agent, executed = build_eval_agent(risk=0.95)
     config = {"configurable": {"thread_id": "ptc-parallel-high"}}
 
     first = await asyncio.wait_for(agent.ainvoke({"messages": [HumanMessage("go")]}, config), 60)
@@ -183,7 +185,7 @@ async def test_two_evals_in_one_step_each_get_their_own_approval():
     resumed = await asyncio.wait_for(agent.ainvoke(Command(resume=resume_map), config), 60)
 
     state = await agent.aget_state(config)
-    _assert_both_evals_intact(_eval_results(resumed), executed, state.values.get("tool_call_history") or {})
+    _assert_both_evals_intact(eval_results(resumed), executed, state.values.get("tool_call_history") or {})
 
 
 @pytest.mark.parametrize(
