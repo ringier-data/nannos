@@ -20,6 +20,8 @@ export const en: NannosStrings = {
   'composer.recordPermission': 'Microphone access was denied. Allow microphone access to record audio.',
   'composer.recordError': 'Could not record audio',
   'composer.readOnly': 'This conversation belongs to another surface and is read-only here.',
+  'composer.agent': 'Answered by {name}',
+  'composer.agentTooltip': 'The current sub-agent. It cannot be changed.',
 
   'status.connected': 'Connected',
   'status.connecting': 'Connecting…',
@@ -58,6 +60,7 @@ export const en: NannosStrings = {
   'conversations.deleteError': 'Could not delete the conversation',
 
   'context.label': 'Context: {label}',
+  'context.tooltip': 'The assistant is aware where you are and can read this page content.',
 
   'hitl.title': 'Approval needed for {toolName}',
   'hitl.titleCount': '{count} approvals needed',

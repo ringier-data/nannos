@@ -29,6 +29,10 @@ export interface NannosStrings {
   'composer.recordPermission': string;
   'composer.recordError': string;
   'composer.readOnly': string;
+  'composer.agent': string;
+  /** Tooltip body on the agent chip: which agent answers here, and that the
+      surface fixes that choice. */
+  'composer.agentTooltip': string;
 
   // Connection status
   'status.connected': string;
@@ -73,6 +77,8 @@ export interface NannosStrings {
 
   // Injected-prompt context chip
   'context.label': string;
+  /** Tooltip body: what the chip beside the composer actually means. */
+  'context.tooltip': string;
 
   // HITL approval card
   /** Card heading; `{toolName}` is the tool title(s) awaiting approval. */
@@ -204,6 +210,8 @@ export const nannosStringKeys = [
   'composer.recordPermission',
   'composer.recordError',
   'composer.readOnly',
+  'composer.agent',
+  'composer.agentTooltip',
   'status.connected',
   'status.connecting',
   'status.disconnected',
@@ -239,6 +247,7 @@ export const nannosStringKeys = [
   'conversations.deleteCancel',
   'conversations.deleteError',
   'context.label',
+  'context.tooltip',
   'hitl.title',
   'hitl.titleCount',
   'hitl.approve',

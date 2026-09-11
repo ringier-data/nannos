@@ -22,6 +22,8 @@ export const fr: NannosStrings = {
   'composer.recordError': 'Impossible d’enregistrer l’audio',
   'composer.readOnly':
     'Cette conversation appartient à une autre surface et est en lecture seule ici.',
+  'composer.agent': 'Réponse de {name}',
+  'composer.agentTooltip': 'L’assistant de cette application. Il ne peut pas être changé.',
 
   'status.connected': 'Connecté',
   'status.connecting': 'Connexion…',
@@ -60,6 +62,8 @@ export const fr: NannosStrings = {
   'conversations.deleteError': 'Impossible de supprimer la conversation',
 
   'context.label': 'Contexte : {label}',
+  'context.tooltip':
+    'L’assistant sait où vous êtes et peut lire le contenu de cette page.',
 
   'hitl.title': 'Confirmation requise pour {toolName}',
   'hitl.titleCount': '{count} confirmations requises',

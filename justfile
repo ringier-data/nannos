@@ -18,7 +18,7 @@ default:
 #   just release-pkg orchestrator-agent patch → force bump level for a single package
 #   just publish-npm embed-sdk               → publish a package's current version to npm
 #   just hosts                              → how external apps (cockpit, …) consume @nannos/embed-sdk
-#   just host-link cockpit                  → develop a host against this SDK checkout
+#   just host-link [cockpit]                → develop a host (default: all) against this SDK checkout
 #   just host-bump cockpit                  → move a host onto the published SDK (also done by `just release`)
 #   just build                              → build Docker images for all buildable packages
 #   just push=true build                    → build & push Docker images
@@ -474,8 +474,8 @@ hosts:
       esac
     done
 
-# Point a host at this SDK checkout for local development (symlink swap; package.json/lockfile untouched)
-host-link name:
+# Point a host at this SDK checkout for local development (symlink swap; package.json/lockfile untouched); no name = every registered host
+host-link name="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/release-helpers.sh
@@ -483,6 +483,26 @@ host-link name:
     CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
 
     NAME="{{ name }}"
+
+    # No name given: link every registered host, one recipe run each.
+    if [[ -z "$NAME" ]]; then
+      NAMES="$(host_names)"
+      if [[ -z "$NAMES" ]]; then
+        printf "${RED}❌ No hosts registered.${RESET}\n"
+        printf "${DIM}   mkdir -p %s && ln -s /path/to/rcplus-alloy-cockpit-frontend/app %s/cockpit${RESET}\n" "$HOSTS_DIR" "$HOSTS_DIR"
+        exit 1
+      fi
+      FAILED=""
+      for host_name in $NAMES; do
+        just host-link "$host_name" || FAILED="${FAILED} ${host_name}"
+      done
+      if [[ -n "$FAILED" ]]; then
+        printf "${YELLOW}⚠️  host-link failed for:%s — retry with: just host-link <name>${RESET}\n" "$FAILED"
+        exit 1
+      fi
+      exit 0
+    fi
+
     DIR="$(host_dir "$NAME")"
     SDK_DIR="$(pwd -P)/$(pkg_dir "$SDK_PKG")"
     MOD="${DIR}/node_modules/${SDK_NAME}"

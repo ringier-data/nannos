@@ -88,7 +88,7 @@ function setup(opts?: { sendAutomatically?: boolean }) {
   const transport = new A2AChatTransport({
     client: wire,
     whenReady: async () => true,
-    getSendContext: () => ({ sessionId: 'sess-1', executeOnlySubAgentId: 42, clientObjects: [{ type: 'Invoice', id: '7', scope: 'update', fields: ['amount'] }] }),
+    getSendContext: () => ({ sessionId: 'sess-1', clientObjects: [{ type: 'Invoice', id: '7', scope: 'update', fields: ['amount'] }] }),
     snapshotTimeoutMs: 200,
     onTurnEvent: (e) => turnEvents.push(e.type),
   });
@@ -193,7 +193,9 @@ describe('S1 — basic turn', () => {
     await vi.waitFor(() => expect(wire.sent).toHaveLength(1));
 
     expect(wire.sent[0].message).toBe('hello');
-    expect(wire.sent[0].metadata?.executeOnlySubAgentId).toBe(42);
+    // Which sub-agent runs is stamped by console-backend from the token's azp binding
+    // (ADR-0006) — the client never names one.
+    expect(wire.sent[0].metadata?.executeOnlySubAgentId).toBeUndefined();
     expect(wire.sent[0].metadata?.clientObjects).toHaveLength(1);
 
     wire.emit({
@@ -365,8 +367,7 @@ describe('S3 — HITL round-trip (native tool approval)', () => {
     const resume = wire.sent[1];
     expect(resume.message).toBe('');
     expect(resume.dataParts).toEqual([{ decisions: [{ id: 'call-1', type: 'approve' }] }]);
-    expect(resume.metadata?.executeOnlySubAgentId).toBe(42); // re-attached (ADR-0004)
-    expect(resume.metadata?.clientObjects).toHaveLength(1);
+    expect(resume.metadata?.clientObjects).toHaveLength(1); // re-attached (ADR-0004)
 
     wire.emit(streamChunk('Booked!', 7));
     wire.emit(terminal());

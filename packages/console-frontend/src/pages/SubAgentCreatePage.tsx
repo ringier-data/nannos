@@ -1,16 +1,26 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { ArrowLeft } from 'lucide-react';
 import { useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { SubAgentForm } from '@/components/subagents/SubAgentForm';
+import { AgentTypeCards, type AgentTypeChoice } from '@/components/subagents/AgentTypeCards';
+import { EmbeddedAgentForm } from '@/components/subagents/EmbeddedAgentForm';
 import type { SubAgentFormData } from '@/components/subagents/types';
 import { consoleCreateSubAgentMutation } from '@/api/generated/@tanstack/react-query.gen';
 import type { SubAgent } from '@/api/generated/types.gen';
+import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
 
 export function SubAgentCreatePage() {
   const navigate = useNavigate();
+  const { user, adminMode } = useAuth();
+
+  // An embedded agent is created from an application's published definition instead of
+  // from these fields, so picking it swaps the whole form out (ADR-0006). Admins only.
+  const canCreateEmbedded = adminMode && (user?.is_administrator ?? false);
+  const [choice, setChoice] = useState<AgentTypeChoice>('local');
 
   const createMutation = useMutation({
     ...consoleCreateSubAgentMutation(),
@@ -71,7 +81,27 @@ export function SubAgentCreatePage() {
           </p>
         </div>
       </div>
-      <SubAgentForm onSubmit={handleSubmit} onCancel={handleCancel} isSubmitting={createMutation.isPending} />
+      {canCreateEmbedded && choice === 'embedded' ? (
+        <div className="space-y-6">
+          <div>
+            <h3 className="text-lg font-semibold mb-4">Choose Agent Type</h3>
+            <AgentTypeCards value={choice} onChange={setChoice} showEmbedded />
+          </div>
+          <EmbeddedAgentForm
+            onCancel={handleCancel}
+            onCreated={(subAgentId) => navigate(`/app/subagents/${subAgentId}`)}
+          />
+        </div>
+      ) : (
+        <SubAgentForm
+          onSubmit={handleSubmit}
+          onCancel={handleCancel}
+          isSubmitting={createMutation.isPending}
+          initialType={choice === 'embedded' ? undefined : choice}
+          showEmbeddedType={canCreateEmbedded}
+          onSelectEmbeddedType={() => setChoice('embedded')}
+        />
+      )}
     </div>
   );
 }

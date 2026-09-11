@@ -3,9 +3,12 @@
  * assembled. Two shapes ride the same socket event:
  *  - a NEW TURN (typed text / injected prompt, optional attachments), and
  *  - a HITL RESUME (empty message + `dataParts: [{decisions}]`), which must
- *    re-attach `executeOnlySubAgentId` AND the client-object manifest because
- *    the orchestrator re-runs from the top on resume (ADR-0004; old
- *    ChatContext.tsx:1800-1812).
+ *    re-attach the client-object manifest because the orchestrator re-runs from
+ *    the top on resume (ADR-0004; old ChatContext.tsx:1800-1812).
+ *
+ * WHICH sub-agent an embedded turn runs is NOT in this payload: console-backend
+ * stamps `executeOnlySubAgentId` itself from the connection's azp binding
+ * (ADR-0006) and drops anything a client sends under that key.
  */
 import type { ManifestEntry } from '../core/types';
 import type { NannosPageContext } from '../core/page-context';
@@ -23,7 +26,6 @@ export interface SendContext {
   /** The page the user is on RIGHT NOW (read at send time, so a steer sent
    *  after navigating carries the new location). */
   pageContext?: NannosPageContext;
-  executeOnlySubAgentId?: string | number;
   subAgentConfigHash?: string;
   playgroundSubagentName?: string;
 }
@@ -77,12 +79,7 @@ function baseMetadata(ctx: SendContext): Record<string, unknown> {
   // On new turns AND HITL resumes (the orchestrator re-runs from the top on
   // resume, exactly like clientObjects).
   if (ctx.pageContext) metadata.pageContext = ctx.pageContext;
-  if (ctx.executeOnlySubAgentId != null) {
-    metadata.executeOnlySubAgentId = ctx.executeOnlySubAgentId;
-    if (ctx.clientObjects?.length) metadata.clientObjects = ctx.clientObjects;
-  } else if (ctx.clientObjects?.length) {
-    metadata.clientObjects = ctx.clientObjects;
-  }
+  if (ctx.clientObjects?.length) metadata.clientObjects = ctx.clientObjects;
   return metadata;
 }
 

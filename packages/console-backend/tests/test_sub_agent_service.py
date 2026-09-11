@@ -109,7 +109,7 @@ class TestSubAgentVersionCreation:
         user = test_user_db
 
         data = SubAgentCreate(
-            name="Test Agent",
+            name="test-agent",
             type=SubAgentType.LOCAL,
             description="Test description",
             model="gpt-4o",
@@ -120,7 +120,7 @@ class TestSubAgentVersionCreation:
         agent = await service.create_sub_agent(pg_session, data, user)
 
         assert agent is not None
-        assert agent.name == "Test Agent"
+        assert agent.name == "test-agent"
         assert agent.current_version == 1
         assert agent.default_version == 1  # Auto-approved since < 500 chars and < 4 tools
         assert agent.config_version is not None
@@ -139,7 +139,7 @@ class TestSubAgentVersionCreation:
     ):
         """A tier-bound sub-agent persists model_tier and leaves model null."""
         data = SubAgentCreate(
-            name="Tiered Agent",
+            name="tiered-agent",
             type=SubAgentType.LOCAL,
             description="Test description",
             model_tier=ModelTier.LOW,
@@ -198,16 +198,16 @@ class TestSubAgentVersionCreation:
     ):
         """Test that updating metadata (name, is_public) along with config creates a new version."""
         service = sub_agent_service
-        agent = await _create_sub_agent(pg_session, test_user_db, "Original Name", sub_agent_service)
+        agent = await _create_sub_agent(pg_session, test_user_db, "original-name", sub_agent_service)
 
         # Verify initial state
-        assert agent.name == "Original Name"
+        assert agent.name == "original-name"
         assert agent.is_public is False
         assert agent.current_version == 1
 
         # Update metadata fields along with description (which triggers version)
         data = SubAgentUpdate(
-            name="Updated Name",
+            name="updated-name",
             is_public=True,
             description="Updated description",
         )
@@ -216,7 +216,7 @@ class TestSubAgentVersionCreation:
 
         # Verify metadata was updated
         assert updated is not None
-        assert updated.name == "Updated Name"
+        assert updated.name == "updated-name"
         assert updated.is_public is True
 
         # A new version was created due to description change
@@ -228,7 +228,7 @@ class TestSubAgentVersionCreation:
         # Verify the updates persisted by fetching again
         refetched = await service.get_sub_agent_by_id(pg_session, agent.id)
         assert refetched is not None
-        assert refetched.name == "Updated Name"
+        assert refetched.name == "updated-name"
         assert refetched.is_public is True
         assert refetched.current_version == 2
 
@@ -238,7 +238,7 @@ class TestSubAgentVersionCreation:
     ):
         """Test that is_public field is properly persisted and returned after update."""
         service = sub_agent_service
-        agent = await _create_sub_agent(pg_session, test_user_db, "Test Agent", sub_agent_service)
+        agent = await _create_sub_agent(pg_session, test_user_db, "test-agent", sub_agent_service)
 
         # Initially not public
         assert agent.is_public is False
@@ -301,7 +301,7 @@ class TestSubAgentVersionCreation:
         service = sub_agent_service
 
         data = SubAgentCreate(
-            name="Local Agent",
+            name="local-agent",
             description="Local agent description",
             type=SubAgentType.LOCAL,
             system_prompt="Local prompt",
@@ -322,7 +322,7 @@ class TestSubAgentVersionCreation:
         """Test that remote agents use agent_url, not system_prompt."""
         service = sub_agent_service
         data = SubAgentCreate(
-            name="Remote Agent",
+            name="remote-agent",
             description="Remote agent description",
             type=SubAgentType.REMOTE,
             agent_url="https://example.com/agent",
@@ -362,7 +362,7 @@ class TestSubAgentVersionCreation:
         assert secret is not None
 
         data = SubAgentCreate(
-            name="Foundry Agent",
+            name="foundry-agent",
             description="Foundry agent description",
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
@@ -422,7 +422,7 @@ class TestSubAgentVersionCreation:
 
         # Create initial Foundry agent
         data = SubAgentCreate(
-            name="Foundry Agent",
+            name="foundry-agent",
             description="Foundry agent description",
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
@@ -496,7 +496,7 @@ class TestSubAgentVersionCreation:
 
         # Create initial Foundry agent
         data = SubAgentCreate(
-            name="Foundry Agent",
+            name="foundry-agent",
             description="Foundry agent description",
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
@@ -556,7 +556,7 @@ class TestSubAgentVersionCreation:
 
         # Create Foundry agent WITH client_secret (required by DB constraint)
         data = SubAgentCreate(
-            name="Foundry Agent",
+            name="foundry-agent",
             description="Foundry agent description",
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
@@ -1589,7 +1589,7 @@ class TestPermissionValidation:
             await service.update_sub_agent(
                 pg_session,
                 agent.id,
-                SubAgentUpdate(name="New Name", description=""),
+                SubAgentUpdate(name="new-name", description=""),
                 actor=other,
             )
 
@@ -2168,7 +2168,7 @@ class TestConcurrentVersionCreation:
 
         service = sub_agent_service
         user = test_user_db
-        agent = await _create_sub_agent(pg_session, user, "Concurrent Update Agent", service)
+        agent = await _create_sub_agent(pg_session, user, "concurrent-update-agent", service)
 
         engine, factory, schema = self._session_factory(postgres_with_migrations)
 
@@ -2217,7 +2217,7 @@ class TestConcurrentVersionCreation:
 
         service = sub_agent_service
         user = test_user_db
-        agent = await _create_sub_agent(pg_session, user, "Concurrent Skill Agent", service)
+        agent = await _create_sub_agent(pg_session, user, "concurrent-skill-agent", service)
 
         registry_ids = [str(uuid.uuid4()) for _ in range(3)]
         engine, factory, schema = self._session_factory(postgres_with_migrations)

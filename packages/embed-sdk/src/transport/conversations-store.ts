@@ -49,8 +49,11 @@ export interface ConversationsSnapshot {
 
 export interface ConversationsStoreOptions {
   fetch: (path: string, init?: RequestInit) => Promise<Response>;
-  /** Execute-only embed scoping (ADR-0004); also scopes the session-resume record. */
-  subAgentId?: string | number;
+  /** An embedded host surface (ADR-0004/0006). The SERVER scopes its list to the
+   *  sub-agent the bearer token is bound to, so nothing is sent for that here;
+   *  the flag only scopes the session-resume record and turns off the read-only
+   *  rule for stamped conversations (they are all this surface's own). */
+  embedded?: boolean;
   /** Playground scoping (console sub-agent playground). */
   subAgentConfigHash?: string;
   /** Filter by orchestrator URL (console passes its configured agent). */
@@ -71,15 +74,15 @@ export const MAX_CONVERSATION_TITLE = 60;
  * clean, and nothing leaks between tabs looking at different pages.
  *
  * The key is scoped so surfaces never resume each other's conversation:
- * a playground by its config hash, an embedded widget by its sub-agent id,
- * and every other surface (the console's own panel) under 'default'. The
- * sub-agent form is unchanged from when only embedded surfaces resumed.
+ * a playground by its config hash, an embedded widget under 'embedded', and
+ * every other surface (the console's own panel) under 'default'. sessionStorage
+ * is per origin, so two hosts never see each other's record anyway.
  */
 const sessionKey = (scope: string) => `nannos-active-conversation:${scope}`;
 
 function resolveSessionScope(opts: ConversationsStoreOptions): string {
   if (opts.subAgentConfigHash) return `playground:${opts.subAgentConfigHash}`;
-  if (opts.subAgentId !== undefined) return String(opts.subAgentId);
+  if (opts.embedded) return 'embedded';
   return 'default';
 }
 
@@ -165,11 +168,9 @@ export class ConversationsStore {
       } else {
         params.set('exclude_playground', 'true');
       }
-      // Embedded widget: scope server-side — a host page must only ever receive
-      // its own conversations.
-      if (this.opts.subAgentId !== undefined) {
-        params.set('embedded_sub_agent_id', String(this.opts.subAgentId));
-      }
+      // Embedded widget: the server scopes the list to the sub-agent the bearer
+      // token is bound to (ADR-0006) — a host page only ever receives its own
+      // conversations, and nothing the page could send would widen that.
 
       const resp = await this.opts.fetch(`/api/v1/conversations/?${params.toString()}`);
       if (!resp.ok) throw new Error(`Failed to load conversations (status=${resp.status})`);
@@ -468,11 +469,14 @@ export class ConversationsStore {
     return this.contextKeys.get(id);
   }
 
-  /** A conversation owned by ANOTHER embedded surface renders read-only here. */
+  /** A conversation an embedded surface owns renders read-only in the console:
+   *  its turns assume a live host page with registered objects. An embedded
+   *  surface's own list is server-scoped to its sub-agent, so there every
+   *  stamped conversation is its own and stays editable. */
   isReadOnly(id: string): boolean {
     const conversation = this.snapshot.items.find((c) => c.id === id);
     if (!conversation?.embeddedSubAgentId) return false;
-    return String(this.opts.subAgentId ?? '') !== conversation.embeddedSubAgentId;
+    return !this.opts.embedded;
   }
 
   private persistSession(): void {

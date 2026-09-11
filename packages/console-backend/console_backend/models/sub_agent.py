@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from console_backend.models.embed_binding import EmbedBinding
+
 from .skills_registry import RegistryScope, SkillFile
 
 
@@ -17,6 +19,9 @@ class ActivationSource(str, Enum):
     USER = "user"
     GROUP = "group"
     ADMIN = "admin"
+    #: Written at socket connect for a user whose token `azp` is bound to the sub-agent
+    #: (embed bindings, ADR-0006). Nobody clicked anything.
+    EMBED = "embed"
 
 
 class SubAgentType(str, Enum):
@@ -114,6 +119,26 @@ class FoundryAgentConfiguration(BaseModel):
 
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+
+#: A sub-agent name doubles as the identifier the orchestrator puts in the task tool's
+#: enum, so it has to satisfy `BaseLocalSubAgentConfig.name` in agent-common. Nothing used
+#: to enforce that here, and a name with a space (or a leading digit) only failed much
+#: later, when the orchestrator built the owner's registry entry — where the pydantic
+#: error took the whole user down, not just the one agent. Reject it at the point someone
+#: can still fix it.
+SUB_AGENT_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]*$")
+SUB_AGENT_NAME_RULE = (
+    "Agent name must be 1-64 characters, start with a letter, and contain only letters, "
+    "digits, hyphens and underscores (no spaces)"
+)
+
+
+def validate_sub_agent_name(v: str) -> str:
+    """Shared by the create and update models; see :data:`SUB_AGENT_NAME_RE`."""
+    v = v.strip()
+    if len(v) > 64 or not SUB_AGENT_NAME_RE.match(v):
+        raise ValueError(f"{SUB_AGENT_NAME_RULE}. Got: {v!r}")
+    return v
 
 
 class SkillDefinition(BaseModel):
@@ -329,6 +354,9 @@ class SubAgent(SubAgentBase):
     """
 
     config_version: SubAgentConfigVersion | None = None  # Joined version data
+    #: Set when the sub-agent's definition is published by a host and synced by console-backend
+    #: (ADR-0006). Content routes reject edits while this is set.
+    embed_binding: EmbedBinding | None = None
 
 
 # Any alias registered on the Model Gateway (the gateway is the source of truth
@@ -343,7 +371,7 @@ ModelName = str
 class SubAgentCreate(BaseModel):
     """Request model for creating a sub-agent."""
 
-    name: str
+    name: str = Field(description=SUB_AGENT_NAME_RULE)
     description: str
     type: SubAgentType
     is_public: bool = False  # If true, accessible to all users without group permissions
@@ -400,6 +428,11 @@ class SubAgentCreate(BaseModel):
     skills: list[SkillDefinition] = Field(default_factory=list)
     sandbox_enabled: bool = False
 
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        return validate_sub_agent_name(v)
+
     @model_validator(mode="after")
     def _validate_sandbox_local_only(self) -> "SubAgentCreate":
         if self.sandbox_enabled and self.type != SubAgentType.LOCAL:
@@ -416,7 +449,7 @@ class SubAgentCreate(BaseModel):
 class SubAgentUpdate(BaseModel):
     """Request model for updating a sub-agent."""
 
-    name: str | None = None
+    name: str | None = Field(default=None, description=SUB_AGENT_NAME_RULE)
     description: str | None = None
     is_public: bool | None = None  # If true, accessible to all users without group permissions
 
@@ -472,6 +505,12 @@ class SubAgentUpdate(BaseModel):
     sandbox_enabled: bool | None = None
 
     change_summary: str | None = None  # For version history
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str | None) -> str | None:
+        # None means "leave the name alone" — only a supplied name is checked.
+        return None if v is None else validate_sub_agent_name(v)
 
     @model_validator(mode="after")
     def _validate_model_xor_tier(self) -> "SubAgentUpdate":

@@ -26,6 +26,8 @@ export {
 } from './hooks/use-nannos-chat';
 export { useConversations, type UseConversationsValue } from './hooks/use-conversations';
 export { useSocketEvent } from './hooks/use-socket-event';
+export { useAgentName } from './hooks/use-agent-name';
+export { useEmbeddedAgent } from './hooks/use-embedded-agent';
 export {
   useAttachments,
   type UseAttachmentsValue,

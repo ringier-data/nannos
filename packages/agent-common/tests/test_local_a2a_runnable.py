@@ -329,3 +329,85 @@ class TestEnsureSupportedBlockTypes:
         blocks = [{"type": "audio", "url": "https://example.com/clip.mp3"}]
         result = StubLocalAgent._ensure_supported_block_types(blocks, supported_modes=None)
         assert result == blocks
+
+
+class MultiModalStubAgent(StubLocalAgent):
+    """Stub agent that advertises multi-modal input, like a dynamic sub-agent."""
+
+    def get_supported_input_modes(self) -> List[str]:
+        return ["text", "image", "file"]
+
+
+class TestPrepareHumanMessageInput:
+    """URL-sourced file blocks must be inlined before the OpenAI-compatible client
+    serializes them — langchain_core raises "OpenAI Chat Completions does not support
+    file URLs" while building the payload, so the gateway never sees the block."""
+
+    @pytest.mark.asyncio
+    async def test_url_file_block_inlined_image_untouched(self):
+        import base64
+        from unittest.mock import AsyncMock, patch
+
+        from ringier_a2a_sdk.utils import bedrock_image_processor
+
+        agent = MultiModalStubAgent()
+        payload = b"%PDF-1.4 fake"
+
+        # The converter streams the download (so an oversized body is abandoned
+        # rather than buffered), so the stub has to serve client.stream(...).
+        mock_response = MagicMock()
+        mock_response.headers = {"content-length": str(len(payload))}
+        mock_response.raise_for_status = MagicMock()
+
+        async def _aiter_bytes():
+            yield payload
+
+        mock_response.aiter_bytes = _aiter_bytes
+
+        stream_ctx = AsyncMock()
+        stream_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+        stream_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        mock_client = AsyncMock()
+        mock_client.stream = MagicMock(return_value=stream_ctx)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        input_data = SubAgentInput(
+            messages=[
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": "file an issue about this"},
+                        {"type": "image", "url": "https://example.com/shot.png", "mime_type": "image/png"},
+                        {
+                            "type": "file",
+                            "url": "https://example.com/report.pdf",
+                            "mime_type": "application/pdf",
+                            "filename": "report.pdf",
+                        },
+                    ]
+                )
+            ],
+            a2a_tracking={"orchestrator": {"context_id": "ctx-1", "task_id": "t1"}},
+        )
+
+        # The SSRF guard resolves the hostname for real; this test stubs the transport.
+        with patch.object(bedrock_image_processor, "assert_public_url", AsyncMock(return_value=None)):
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                message = await agent._prepare_human_message_input(input_data)
+
+        blocks = message.content
+        assert blocks[0] == {"type": "text", "text": "file an issue about this"}
+        # Image keeps its URL: the translator maps it to image_url.
+        assert blocks[1] == {"type": "image", "url": "https://example.com/shot.png", "mime_type": "image/png"}
+        file_blocks = [b for b in blocks if b.get("type") == "file"]
+        assert len(file_blocks) == 1
+        assert file_blocks[0]["base64"] == base64.b64encode(payload).decode("utf-8")
+        assert file_blocks[0]["filename"] == "report.pdf"
+        assert "url" not in file_blocks[0]
+
+    @pytest.mark.asyncio
+    async def test_text_only_input_unaffected(self):
+        agent = MultiModalStubAgent()
+        message = await agent._prepare_human_message_input(_make_input())
+        assert message.content == "hello"

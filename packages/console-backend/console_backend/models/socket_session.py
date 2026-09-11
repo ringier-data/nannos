@@ -20,6 +20,9 @@ class SocketSession(BaseModel):
     agent_url: str | None = None  # Agent URL for cache lookup
     custom_headers: dict[str, str] = Field(default_factory=dict)  # Custom HTTP headers
     is_initialized: bool = False  # Whether client has been initialized
+    # Sub-agent this connection is bound to, derived at connect from the token's azp
+    # (embed bindings, ADR-0006). None for console sessions and unbound tokens.
+    embedded_sub_agent_id: int | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Config:

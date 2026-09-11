@@ -30,6 +30,7 @@ class SocketSessionService:
         socket_id: str,
         user_id: str,
         http_session_id: str,
+        embedded_sub_agent_id: int | None = None,
     ) -> SocketSession:
         """Create a new socket session.
 
@@ -37,6 +38,8 @@ class SocketSessionService:
             socket_id: The Socket.IO session ID (sid)
             user_id: The user's ID (sub from OIDC)
             http_session_id: The HTTP session ID for linking back to user session
+            embedded_sub_agent_id: Sub-agent bound to this connection via the token's azp
+                (embed bindings, ADR-0006); None for console sessions
 
         Returns:
             The created SocketSession
@@ -48,6 +51,7 @@ class SocketSessionService:
             socket_id=session_key,
             user_id=user_id,
             http_session_id=http_session_id,
+            embedded_sub_agent_id=embedded_sub_agent_id,
             created_at=created_at,
         )
 
@@ -56,13 +60,14 @@ class SocketSessionService:
                 await db.execute(
                     text(
                         "INSERT INTO socket_sessions "
-                        "(socket_id, user_id, http_session_id, created_at) "
-                        "VALUES (:socket_id, :user_id, :http_session_id, :created_at)"
+                        "(socket_id, user_id, http_session_id, embedded_sub_agent_id, created_at) "
+                        "VALUES (:socket_id, :user_id, :http_session_id, :embedded_sub_agent_id, :created_at)"
                     ),
                     {
                         "socket_id": session_key,
                         "user_id": user_id,
                         "http_session_id": http_session_id,
+                        "embedded_sub_agent_id": embedded_sub_agent_id,
                         "created_at": created_at,
                     },
                 )
@@ -102,6 +107,7 @@ class SocketSessionService:
                 agent_url=row["agent_url"],
                 custom_headers=row["custom_headers"] or {},
                 is_initialized=row["is_initialized"],
+                embedded_sub_agent_id=row.get("embedded_sub_agent_id"),
                 created_at=row["created_at"],
             )
         except Exception as e:

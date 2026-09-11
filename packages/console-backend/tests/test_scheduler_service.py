@@ -113,7 +113,7 @@ class TestCreateJobAutoSubAgent:
         create_data = ScheduledJobCreate(
             sub_agent_id=None,
             sub_agent_parameters=AutomatedSubAgentConfig(
-                name="Auto Agent",
+                name="auto-agent",
                 description="Does daily reporting",
                 model="claude-sonnet-4.5",
                 system_prompt="You are a daily reporter. Generate a short summary.",
@@ -190,7 +190,7 @@ class TestCreateJobAutoSubAgent:
         create_data = ScheduledJobCreate(
             sub_agent_id=None,
             sub_agent_parameters=AutomatedSubAgentConfig(
-                name="Tiered Auto",
+                name="tiered-auto",
                 description="Bound to the standard tier",
                 model_tier=ModelTier.STANDARD,
                 system_prompt="Do the thing.",

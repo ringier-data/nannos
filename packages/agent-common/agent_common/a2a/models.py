@@ -108,6 +108,8 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
         mcp_tools: Optional list of MCP tool names to enable for this sub-agent.
             - If None or empty: The sub-agent inherits tools from the orchestrator.
             - If set: Only these tools from Gatana MCP gateway are enabled for the sub-agent.
+        all_tools: True hands the sub-agent the whole tool registry as a lazy catalog, like
+            the general-purpose agent. Set for embed-bound sub-agents with no tool list.
 
     Example DynamoDB JSON:
         {
@@ -152,6 +154,15 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
     mcp_tools: Optional[list[str]] = Field(
         default=None,
         description="Optional list of MCP tool names enabled for this sub-agent. If None, inherits orchestrator tools.",
+    )
+    all_tools: bool = Field(
+        default=False,
+        description=(
+            "Give this sub-agent every tool the user has, as the same lazy catalog the "
+            "general-purpose agent gets, instead of an mcp_tools whitelist. The orchestrator "
+            "registry sets it for an embed-bound sub-agent (ADR-0006) whose authority published "
+            "no tool list and that has none set on the Nannos side."
+        ),
     )
     enable_thinking: bool | None = Field(
         default=None,
