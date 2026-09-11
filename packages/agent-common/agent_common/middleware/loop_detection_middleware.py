@@ -132,6 +132,15 @@ def merge_tool_call_history(
     return merged
 
 
+#: The ``tool_call_history`` channel's annotation. Exported as ONE alias because two
+#: schemas declare this channel (``LoopDetectionState`` and graph_utils'
+#: ``_PTCExposureState``) and LangGraph only merges them when the annotations match —
+#: and because the reducer must be the LAST metadata entry: detection is
+#: ``callable(metadata[-1])``, so appending another marker after it silently disables
+#: reduction, with no error, returning prod to the ``InvalidUpdateError`` of #217.
+ToolCallHistory = Annotated[dict[str, list[str]], PrivateStateAttr, merge_tool_call_history]
+
+
 @dataclass(frozen=True)
 class LoopVerdict:
     """Outcome of ``RepeatedToolCallMiddleware.evaluate`` for one prospective call.
@@ -155,7 +164,7 @@ class LoopDetectionState(AgentState):
     Similar to ToolCallLimitMiddleware but tracks both same-args and same-tool patterns.
     """
 
-    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr, merge_tool_call_history]]
+    tool_call_history: NotRequired[ToolCallHistory]
     """Per-tool history of argument hashes. Format:
     {
         "tool_name": ["args_hash1", "args_hash2", ...],

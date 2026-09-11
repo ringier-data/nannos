@@ -89,8 +89,8 @@ from agent_common.middleware.conversation_context_tools_middleware import (
 from agent_common.middleware.gateway_attribution_middleware import GatewayAttributionMiddleware
 from agent_common.middleware.loop_detection_middleware import (
     RepeatedToolCallMiddleware,
+    ToolCallHistory,
     history_delta,
-    merge_tool_call_history,
 )
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import (
@@ -418,16 +418,16 @@ class _PTCExposureState(REPLState):
 
     ptc_exposed_tool_names: NotRequired[Annotated[list[str], PrivateStateAttr]]
 
-    #: The same channel ``LoopDetectionState`` declares — type AND reducer must stay
-    #: identical here or the two schemas will not merge. Declared here because this
-    #: middleware writes it: the PTC guard judges inner calls with the stack's
+    #: The same channel ``LoopDetectionState`` declares, via the one shared alias —
+    #: the annotations must match exactly or the two schemas will not merge, and the
+    #: reducer must stay last inside it. Declared here because this middleware writes it: the PTC guard judges inner calls with the stack's
     #: ``RepeatedToolCallMiddleware`` against this history — the guard runs on the
     #: sandbox bridge thread with no access to graph state, so ``awrap_tool_call``
     #: seeds the ``eval`` turn from it and writes the turn's history back with the
     #: tool result. One history, one rule, both paths. The reducer is what lets a step
     #: with two ``eval`` calls write back both tasks' records instead of raising
     #: ``InvalidUpdateError`` — see ``merge_tool_call_history`` and #217.
-    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr, merge_tool_call_history]]
+    tool_call_history: NotRequired[ToolCallHistory]
 
 
 def _code_interpreter_ptc_enabled() -> bool:
@@ -1174,11 +1174,14 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             return await handler(request)
         runtime = getattr(request, "runtime", None)
         thread_id = resolve_ptc_thread_id(runtime)
-        # Serialize ``eval`` per thread. A model step may emit two ``eval`` calls and
-        # ``ToolNode`` runs them concurrently, but the REPL slot upstream, the turn
-        # below and the HITL collector are all keyed by ``thread_id`` alone and assume
-        # one ``eval`` in flight (#217). The gate spans the whole begin/end turn span,
-        # not just the eval run, because the turn is one of the things being protected.
+        # Serialize ``eval`` per thread. Two paths reach one ``thread_id`` at once: a
+        # model step that emits two ``eval`` calls (``ToolNode`` runs them as separate
+        # tasks of one superstep), and two parallel ``task`` dispatches of the same
+        # sub-agent, which share ``{context_id}::{checkpoint_ns}`` but each get their
+        # own event loop from ``asyncio.run``. The REPL slot upstream, the turn below
+        # and the HITL collector are all keyed by ``thread_id`` alone and assume one
+        # ``eval`` in flight (#217). The gate spans the whole begin/end turn span, not
+        # just the eval run, because the turn is one of the things being protected.
         # Only the ``eval`` path reaches here, so other tools keep their concurrency.
         async with serialized_eval(thread_id):
             # One turn per ``eval`` execution, guarded or not: it is how the guard (on

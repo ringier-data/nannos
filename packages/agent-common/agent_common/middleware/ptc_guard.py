@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -361,19 +362,36 @@ def resolve_ptc_thread_id(runtime: Any) -> str:
 class _EvalGate:
     """One thread's ``eval`` mutex, plus the count of callers still using it."""
 
-    lock: asyncio.Lock
+    #: A ``threading`` lock, NOT an ``asyncio`` one, because the evals it has to
+    #: serialize do not all share an event loop. Two parallel ``task`` dispatches of
+    #: the same sub-agent land on one ``thread_id`` (the default is
+    #: ``{context_id}::{checkpoint_ns}``) but reach it through
+    #: ``LocalA2ARunnable.invoke`` → ``asyncio.run`` (``a2a/base.py``), which builds a
+    #: fresh loop per dispatch on a ToolNode executor thread. An ``asyncio.Lock``
+    #: binds to the loop that first awaits it and would serialize neither.
+    lock: threading.Lock
     #: Callers inside :func:`serialized_eval` for this key — holder and waiters
     #: alike. The gate is dropped when it reaches zero, so the registry does not
     #: grow one permanent entry per conversation for the life of the process.
     users: int = 0
 
 
-#: Live ``eval`` gates, keyed by ``(event loop, thread_id)``. The loop is part of
-#: the key because an ``asyncio.Lock`` binds to the loop that first awaits it, so a
-#: lock reused across loops (a sync ``invoke`` that spins up its own) would raise
-#: rather than serialize. Same-thread evals on *different* loops are not the race
-#: this closes — that needs a cross-process lock, and is not what #217 is about.
-_PTC_EVAL_GATES: dict[tuple[int, str], _EvalGate] = {}
+#: Live ``eval`` gates, keyed by ``thread_id`` — the same key the resources being
+#: protected use (``_PTC_TURNS``, the pending collector, and ``langchain_quickjs``'s
+#: REPL slot registry), so the gate cannot be finer-grained than they are.
+_PTC_EVAL_GATES: dict[str, _EvalGate] = {}
+
+#: Guards ``_PTC_EVAL_GATES`` itself. Needed because the registry is now reached from
+#: several threads, not just several tasks on one loop.
+_PTC_EVAL_GATES_LOCK = threading.Lock()
+
+#: How long to wait between attempts on a held gate. Polling rather than blocking
+#: because the lock has to be acquirable from any loop: a blocking acquire would
+#: stall the caller's whole event loop, and handing it to ``asyncio.to_thread``
+#: would park an executor worker per waiter — which can deadlock, since the holder
+#: itself needs a worker for the summarizer's ``to_thread`` call. Coarse on purpose:
+#: an ``eval`` runs for orders of magnitude longer than this.
+_GATE_POLL_SECONDS = 0.01
 
 
 @asynccontextmanager
@@ -406,22 +424,26 @@ async def serialized_eval(thread_id: str):
     The two evals therefore run back-to-back, each with its own turn and its own
     REPL reset in between, which is what the bookkeeping already assumes.
     """
-    key = (id(asyncio.get_running_loop()), thread_id)
-    gate = _PTC_EVAL_GATES.get(key)
-    if gate is None:
-        gate = _EvalGate(asyncio.Lock())
-        _PTC_EVAL_GATES[key] = gate
-    # Bump before awaiting the lock so a waiter keeps the gate alive while the
-    # holder's ``finally`` runs; there is no await between the lookup and here, so
-    # concurrent callers on one loop cannot interleave and build two gates.
-    gate.users += 1
+    with _PTC_EVAL_GATES_LOCK:
+        gate = _PTC_EVAL_GATES.get(thread_id)
+        if gate is None:
+            gate = _EvalGate(threading.Lock())
+            _PTC_EVAL_GATES[thread_id] = gate
+        # Bump before contending so a waiter keeps the gate alive while the holder's
+        # ``finally`` runs and would otherwise drop it from the registry.
+        gate.users += 1
     try:
-        async with gate.lock:
+        while not gate.lock.acquire(blocking=False):
+            await asyncio.sleep(_GATE_POLL_SECONDS)
+        try:
             yield
+        finally:
+            gate.lock.release()
     finally:
-        gate.users -= 1
-        if gate.users == 0:
-            _PTC_EVAL_GATES.pop(key, None)
+        with _PTC_EVAL_GATES_LOCK:
+            gate.users -= 1
+            if gate.users == 0:
+                _PTC_EVAL_GATES.pop(thread_id, None)
 
 
 # One turn per thread, not per ``eval`` call: two concurrent ``eval`` calls on one

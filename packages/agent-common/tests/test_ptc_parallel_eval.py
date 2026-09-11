@@ -270,3 +270,43 @@ def test_single_writer_history_stays_bounded_past_the_window():
         state = merge_tool_call_history(state, {"task": verdict.history})
 
     assert len(state["task"]) == 10
+
+
+def test_serialized_eval_excludes_across_event_loops():
+    """The gate must serialize evals that never share an event loop.
+
+    Two parallel ``task`` dispatches of the same sub-agent resolve one ``thread_id``
+    (``{context_id}::{checkpoint_ns}``) but reach ``eval`` through
+    ``LocalA2ARunnable.invoke`` → ``asyncio.run`` on ToolNode executor threads — a
+    fresh loop each. An ``asyncio.Lock`` binds to the loop that first awaits it, so a
+    gate keyed per loop serializes neither and leaves the #217 sandbox collision open.
+    """
+    import threading
+
+    from agent_common.middleware.ptc_guard import serialized_eval
+
+    holder_inside = threading.Event()
+    saw_holder_inside: list[bool] = []
+
+    async def _hold():
+        async with serialized_eval("shared-thread"):
+            holder_inside.set()
+            await asyncio.sleep(0.3)
+            holder_inside.clear()
+
+    async def _contend():
+        # Only start contending once the holder is demonstrably in the section.
+        holder_inside.wait(2.0)
+        async with serialized_eval("shared-thread"):
+            # With real mutual exclusion we cannot get here until the holder left.
+            saw_holder_inside.append(holder_inside.is_set())
+
+    holder = threading.Thread(target=lambda: asyncio.run(_hold()))
+    contender = threading.Thread(target=lambda: asyncio.run(_contend()))
+    holder.start()
+    contender.start()
+    holder.join(5)
+    contender.join(5)
+
+    assert not holder.is_alive() and not contender.is_alive(), "gate deadlocked across loops"
+    assert saw_holder_inside == [False], "the second eval entered while the first still held the gate"
