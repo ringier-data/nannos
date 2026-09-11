@@ -62,6 +62,89 @@ _STOPPED_BEFORE_EXECUTION = (
 )
 
 
+#: Marks a ``tool_call_history`` update as an incremental delta rather than a whole
+#: value. A writer that may share its superstep with another writer tags its update
+#: with this key; everyone else keeps emitting whole dicts and keeps replace
+#: semantics. See :func:`merge_tool_call_history`.
+HISTORY_DELTA_KEY = "__ptc_delta__"
+
+
+def history_delta(append: dict[str, list[str]], cap: dict[str, int | None]) -> dict[str, Any]:
+    """Build an incremental ``tool_call_history`` update.
+
+    ``append`` is the arg hashes this writer added, per key. ``cap`` is the sliding
+    window to apply to that key *after* appending, or ``None`` to leave it unbounded
+    — which is how ``RepeatedToolCallMiddleware`` keeps a blocked tool's history
+    growing so ``force_stop_after`` can fire (see ``evaluate``).
+
+    Plain JSON-serializable dicts on purpose: LangGraph checkpoints *pending writes*
+    across an interrupt, so an update has to survive a round-trip through the
+    checkpointer. Only the reduced value — always a plain history dict — is durable
+    state.
+    """
+    return {HISTORY_DELTA_KEY: {"append": append, "cap": cap}}
+
+
+def merge_tool_call_history(
+    current: dict[str, list[str]] | None,
+    update: dict[str, Any] | None,
+) -> dict[str, list[str]]:
+    """Reducer for the ``tool_call_history`` channel.
+
+    Two kinds of update, distinguished by what the *writer declares* rather than by
+    inspecting list shapes:
+
+    * **A whole value** (no :data:`HISTORY_DELTA_KEY`) — replace, which is exactly
+      LangGraph's default ``LastValue`` behaviour and therefore exactly what the
+      model-boundary writer in ``RepeatedToolCallMiddleware`` has always got. That
+      writer runs once per step and is left completely alone by this reducer.
+    * **A delta** (:func:`history_delta`) — append the writer's own hashes, then
+      apply its cap. This is what the ``eval`` path emits, because a model step may
+      emit two ``eval`` calls and ``ToolNode`` makes them two tasks of the *same*
+      superstep. Both then write this channel, and without a reducer that is not a
+      silent last-writer-wins: ``LastValue`` *raises* ``InvalidUpdateError: can
+      receive only one value per step`` and fails the whole agent turn (#217).
+
+    Deltas with equal caps commute, so two evals in one step produce
+    ``current + A + B`` whatever order the reducer sees them in. Mixed caps on one key
+    do not: each delta's cap is applied as it lands, so an allowed call (cap
+    ``window_size``) and a blocked one (cap ``None``) on the same key can differ by a
+    single entry depending on order. That is reachable when two evals call the same
+    tool in one step and only one is blocked; the cost is one entry of escalation
+    timing, not a lost record.
+
+    An earlier version of this reducer tried to tell a window trim from a concurrent
+    extension by comparing the two lists. That is not decidable: ``evaluate``
+    appends *before* trimming, so a saturated-window update is an equal-length
+    rotation (``old[1:] + [new]``), indistinguishable from two writers that diverged
+    at the head — and it silently concatenated on every ordinary step, growing the
+    history without bound. Hence the tag.
+    """
+    if not isinstance(update, dict):
+        return {k: list(v) for k, v in (current or {}).items()}
+    delta = update.get(HISTORY_DELTA_KEY)
+    if delta is None:
+        return {k: list(v) for k, v in update.items()}
+    merged: dict[str, list[str]] = {k: list(v) for k, v in (current or {}).items()}
+    caps: dict[str, Any] = delta.get("cap") or {}
+    for key, hashes in (delta.get("append") or {}).items():
+        entries = [*merged.get(key, []), *hashes]
+        limit = caps.get(key)
+        if isinstance(limit, int) and len(entries) > limit:
+            entries = entries[-limit:]
+        merged[key] = entries
+    return merged
+
+
+#: The ``tool_call_history`` channel's annotation. Exported as ONE alias because two
+#: schemas declare this channel (``LoopDetectionState`` and graph_utils'
+#: ``_PTCExposureState``) and LangGraph only merges them when the annotations match —
+#: and because the reducer must be the LAST metadata entry: detection is
+#: ``callable(metadata[-1])``, so appending another marker after it silently disables
+#: reduction, with no error, returning prod to the ``InvalidUpdateError`` of #217.
+ToolCallHistory = Annotated[dict[str, list[str]], PrivateStateAttr, merge_tool_call_history]
+
+
 @dataclass(frozen=True)
 class LoopVerdict:
     """Outcome of ``RepeatedToolCallMiddleware.evaluate`` for one prospective call.
@@ -85,7 +168,7 @@ class LoopDetectionState(AgentState):
     Similar to ToolCallLimitMiddleware but tracks both same-args and same-tool patterns.
     """
 
-    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr]]
+    tool_call_history: NotRequired[ToolCallHistory]
     """Per-tool history of argument hashes. Format:
     {
         "tool_name": ["args_hash1", "args_hash2", ...],
