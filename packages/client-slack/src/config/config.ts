@@ -149,6 +149,7 @@ export async function getConfigFromEnv(): Promise<Config> {
         database: process.env.POSTGRES_DB || 'postgres',
         useSsl: process.env.POSTGRES_USE_SSL === 'true',
         sslCa: process.env.POSTGRES_SSL_CA,
+        schema: process.env.POSTGRES_SCHEMA,
       }
     : undefined;
 
