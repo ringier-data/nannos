@@ -54,6 +54,16 @@ spec:
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"
         - name: MCP_GATEWAY_CLIENT_ID
           value: "gatana"
+        # Turn budget for a scheduled run, in MODEL CALLS -- not LangGraph super-steps.
+        # The super-step limit is derived from the compiled graph at runtime, because
+        # one model call costs a whole lap of the middleware stack and that multiplier
+        # changes whenever a middleware carrying model hooks is added or removed.
+        # Scheduled runs get the largest budget of the three services: nobody is
+        # watching, the run cannot ask a question and continue, and a truncated result
+        # is silently useless rather than visibly incomplete. Shown at its default so
+        # the knob is discoverable; remove the two lines to track the default.
+        - name: AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN
+          value: "125"
         - name: POSTGRES_HOST
           value: "${POSTGRES_HOST}"
         - name: POSTGRES_PORT

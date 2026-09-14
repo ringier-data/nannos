@@ -53,7 +53,11 @@ from agent_common.core.model_factory import (
     is_valid_model,
     require_default_model,
 )
-from agent_common.core.step_budget import recursion_limit_for, resolve_max_model_calls
+from agent_common.core.step_budget import (
+    DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS,
+    recursion_limit_for,
+    resolve_max_model_calls,
+)
 from agent_common.core.stream_watchdog import watch_stream_with_resume
 from agent_common.core.token_provider import DEFAULT_LEEWAY_S, UserTokenProvider
 from agent_common.core.tool_catalogue import sanitize_tool_name
@@ -98,12 +102,17 @@ _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
 # — a handful of model calls once the middleware stack's per-call node cost is paid
 # — which was enough to kill a scheduled run mid-work on an agent that spends some
 # of them resolving MCP tools, while the *same* sub-agent delegated from a
-# conversation got 75. Same number as the in-process sub-agent bound, because it is
-# the same graph doing the same work; the name is separate so a deployment can give
-# scheduled jobs a longer leash than interactive ones without touching the
-# orchestrator or anything else.
+# conversation got 75.
+#
+# It is now the largest of the three default budgets, not the smallest. A scheduled
+# run is unattended: nothing notices it stopping one model call short, nothing
+# re-delegates it, and a truncated result is silently useless rather than visibly
+# incomplete — so being too tight costs more here than anywhere else. See
+# DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS, where the three sit together.
 _MAX_MODEL_CALLS_ENV = "AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN"
-_MAX_MODEL_CALLS_PER_TURN = resolve_max_model_calls(_MAX_MODEL_CALLS_ENV)
+_MAX_MODEL_CALLS_PER_TURN = resolve_max_model_calls(
+    _MAX_MODEL_CALLS_ENV, DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS
+)
 
 
 def _build_postgres_conn() -> str | None:

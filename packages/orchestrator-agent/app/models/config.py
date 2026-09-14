@@ -12,7 +12,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from agent_common.a2a.models import LocalSubAgentConfig
-from agent_common.core.step_budget import int_env as _int_env, resolve_max_model_calls
+from agent_common.core.step_budget import (
+    DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS,
+    int_env as _int_env,
+    resolve_max_model_calls,
+)
 from agent_common.models.base import ThinkingLevel
 from deepagents import CompiledSubAgent
 from langchain_core.messages import ContentBlock
@@ -36,7 +40,7 @@ MAX_MODEL_CALLS_PER_TURN_ENV = "ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN"
 
 def _resolve_max_model_calls_per_turn() -> int:
     """Model calls allowed per turn; clamping and legacy warnings are shared."""
-    return resolve_max_model_calls(MAX_MODEL_CALLS_PER_TURN_ENV)
+    return resolve_max_model_calls(MAX_MODEL_CALLS_PER_TURN_ENV, DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS)
 
 
 # Message formatting literal for type safety

@@ -40,7 +40,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import Field, PrivateAttr
 
 from agent_common.core.step_budget import (
-    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
+    DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS,
     LEGACY_RECURSION_LIMIT_ENV,
     classify_nodes,
     recursion_limit_for,
@@ -278,7 +278,7 @@ def test_the_shared_env_var_no_longer_configures_the_orchestrator(monkeypatch):
     """
     monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
 
-    assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+    assert _resolve_max_model_calls_per_turn() == DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS
 
 
 def test_setting_the_legacy_name_warns(monkeypatch, caplog):

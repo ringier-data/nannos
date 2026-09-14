@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 from agent_common.core.step_budget import (
-    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
+    DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS,
     LEGACY_RECURSION_LIMIT_ENV,
     LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV,
     resolve_max_model_calls,
@@ -36,7 +36,10 @@ def test_the_budget_is_expressed_in_model_calls_under_its_own_name():
     """50 was a super-step count. The unit changed, and so did the name — sharing
     one env var across four consumers was a defect distinct from the shared unit."""
     assert _MAX_MODEL_CALLS_ENV == "AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN"
-    assert resolve_max_model_calls(_MAX_MODEL_CALLS_ENV) == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+    assert (
+        resolve_max_model_calls(_MAX_MODEL_CALLS_ENV, DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS)
+        == DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS
+    )
 
 
 @pytest.mark.parametrize("legacy", [LEGACY_RECURSION_LIMIT_ENV, LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV])
@@ -50,7 +53,10 @@ def test_a_retired_super_step_name_no_longer_moves_this_service(monkeypatch, leg
     """
     monkeypatch.setenv(legacy, "50")
 
-    assert resolve_max_model_calls(_MAX_MODEL_CALLS_ENV) == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+    assert (
+        resolve_max_model_calls(_MAX_MODEL_CALLS_ENV, DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS)
+        == DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS
+    )
 
 
 def test_the_service_can_still_be_tuned_apart_from_its_siblings(monkeypatch):
@@ -59,4 +65,4 @@ def test_the_service_can_still_be_tuned_apart_from_its_siblings(monkeypatch):
     monkeypatch.setenv(_MAX_MODEL_CALLS_ENV, "60")
     monkeypatch.setenv("SUB_AGENT_MAX_MODEL_CALLS_PER_TURN", "10")
 
-    assert resolve_max_model_calls(_MAX_MODEL_CALLS_ENV) == 60
+    assert resolve_max_model_calls(_MAX_MODEL_CALLS_ENV, DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS) == 60

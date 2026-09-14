@@ -411,8 +411,9 @@ Learned the hard way; each cost real debugging time.
   Configure the budget with `ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN`, in model calls.
   Every consumer now has its own name — `SUB_AGENT_MAX_MODEL_CALLS_PER_TURN` for
   in-process sub-agents, `AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN` for scheduled ones
-  — so raising one cannot silently move another, while the default they share is
-  written down once, in `agent_common/core/step_budget.py`. The old shared `MAX_RECURSION_LIMIT`
+  — so raising one cannot silently move another. The defaults differ by how much
+  work the turn does (planning 25 < in-process sub-agent 40 < scheduled run 125) and
+  are defined together in `agent_common/core/step_budget.py` so they can be compared. The old shared `MAX_RECURSION_LIMIT`
   (and `SUB_AGENT_RECURSION_LIMIT`) are read by nothing in this repo; setting either
   logs a warning and otherwise does nothing. `MAX_RECURSION_LIMIT` is still read by
   the externally published `ringier-a2a-sdk`, so it must not be unset on the strength

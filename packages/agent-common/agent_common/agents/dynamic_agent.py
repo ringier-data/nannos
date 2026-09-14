@@ -92,7 +92,11 @@ from agent_common.core.graph_utils import (
 from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.core.catalogue_ingest import fetch_catalogue_mcp
 from agent_common.core.notify_user_tool import NOTE_KIND, USER_NOTE_EVENT
-from agent_common.core.step_budget import recursion_limit_for, resolve_max_model_calls
+from agent_common.core.step_budget import (
+    DEFAULT_SUB_AGENT_MAX_MODEL_CALLS,
+    recursion_limit_for,
+    resolve_max_model_calls,
+)
 from agent_common.core.token_provider import UserTokenProvider, bearer_interceptor
 from agent_common.core.tool_catalog import TOOL_CATALOG_PROMPT_ADDENDUM, ToolCatalogMiddleware
 from agent_common.core.tool_catalogue import make_lazy_tool
@@ -121,18 +125,21 @@ logger = logging.getLogger(__name__)
 # is the middleware stack's per-call node count and changes whenever that stack
 # does.
 #
-# 25 matches the orchestrator's budget deliberately, and is *not* a conversion of
-# the 75 super-steps it replaces: the exchange rate is per-graph, so porting the
-# old number by multiplication would bake in exactly the implied rate this is
-# meant to remove. A sub-agent is where the tool loop actually runs — discovery,
-# retries, several rounds against an MCP server — so it has no business being more
-# constrained than the planner that delegates to it, which is what 25 says.
+# The default is *not* a conversion of the 75 super-steps it replaces: the exchange
+# rate is per-graph, so porting the old number by multiplication would bake in
+# exactly the implied rate this is meant to remove. It is set above the
+# orchestrator's because a sub-agent is where the tool loop actually runs —
+# discovery, retries, several rounds against an MCP server — so it has no business
+# being more constrained than the planner that delegates to it. See
+# DEFAULT_SUB_AGENT_MAX_MODEL_CALLS, where the three budgets sit together.
 #
 # Binding at all also matters: langgraph propagates `recursion_limit` into a
 # child graph that does not set its own, so without the `with_config` below every
 # sub-agent would inherit the orchestrator's.
 SUB_AGENT_MAX_MODEL_CALLS_ENV = "SUB_AGENT_MAX_MODEL_CALLS_PER_TURN"
-_SUB_AGENT_MAX_MODEL_CALLS = resolve_max_model_calls(SUB_AGENT_MAX_MODEL_CALLS_ENV)
+_SUB_AGENT_MAX_MODEL_CALLS = resolve_max_model_calls(
+    SUB_AGENT_MAX_MODEL_CALLS_ENV, DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
+)
 
 # Tool-name prefixes served by the console-backend MCP (FastAPI routes tagged
 # ``MCP``): the ``console_*`` tools AND the ``scheduler_*`` scheduler tools.

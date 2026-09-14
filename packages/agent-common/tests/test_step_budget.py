@@ -46,7 +46,8 @@ from agent_common.agents.dynamic_agent import (
 from agent_common.core import step_budget
 from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.step_budget import (
-    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
+    DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS,
+    DEFAULT_SUB_AGENT_MAX_MODEL_CALLS,
     LEGACY_RECURSION_LIMIT_ENV,
     LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV,
     MIN_MAX_MODEL_CALLS,
@@ -362,6 +363,24 @@ def test_dynamic_agent_binds_the_derived_limit(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_the_three_defaults_are_ordered_by_how_much_work_the_turn_does():
+    """Not three arbitrary numbers: the ordering is the design.
+
+    A planning turn delegates and decides; an in-process sub-agent does the work a
+    user is waiting on; a scheduled run does it unattended, where nothing notices it
+    stopping one call early and nothing re-delegates it. If a future edit makes a
+    planner more generous than the sub-agents it delegates to, that is the drift this
+    module exists to catch, and it should fail here rather than in production.
+    """
+    from agent_common.core.step_budget import DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS
+
+    assert (
+        DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS
+        <= DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
+        <= DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS
+    )
+
+
 def test_each_consumer_reads_its_own_env_name(monkeypatch):
     """One name for four consumers was a defect in its own right.
 
@@ -372,8 +391,11 @@ def test_each_consumer_reads_its_own_env_name(monkeypatch):
     monkeypatch.setenv("ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN", "7")
     monkeypatch.delenv("AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN", raising=False)
 
-    assert resolve_max_model_calls(SUB_AGENT_MAX_MODEL_CALLS_ENV) == 40
-    assert resolve_max_model_calls("AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN") == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+    assert resolve_max_model_calls(SUB_AGENT_MAX_MODEL_CALLS_ENV, DEFAULT_SUB_AGENT_MAX_MODEL_CALLS) == 40
+    assert (
+        resolve_max_model_calls("AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN", DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS)
+        == DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS
+    )
 
 
 @pytest.mark.parametrize("legacy", [LEGACY_RECURSION_LIMIT_ENV, LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV])

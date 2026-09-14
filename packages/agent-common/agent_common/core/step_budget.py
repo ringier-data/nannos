@@ -212,14 +212,37 @@ def recursion_limit_for(graph: Any, max_model_calls: int) -> int:
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_MAX_MODEL_CALLS_PER_TURN = 25
-"""The budget every consumer defaults to, written down **once**.
+# Default budgets, in model calls -- one per kind of turn, defined together.
+#
+# They are co-located deliberately. The defect this module exists to remove was a
+# number written down separately in each package and left to drift; these are
+# different on purpose, and the only way that stays legible is for the three to sit
+# where they can be compared. A reader who wants to know whether a sub-agent is more
+# or less constrained than the planner that delegates to it gets the answer here.
+#
+# They differ because the turns differ. The orchestrator plans and delegates: its
+# turn is a handful of tool calls around a decision, and a long one usually means a
+# loop rather than hard work. A sub-agent is where the work actually happens --
+# discovery, retries, several rounds against an MCP server -- so it needs room the
+# planner does not. A scheduled run needs the most: nobody is watching it, it cannot
+# ask a question and continue, and a truncated run is silently useless rather than
+# visibly incomplete, so the cost of being too tight is much higher than the cost of
+# being generous.
+#
+# These are starting points backed by operational experience, not arithmetic on the
+# super-step constants they replace. Every one can be overridden per service.
 
-Each service reads its own env name so they can be tuned apart, but the number
-they fall back to lives here: three hand-written 25s across three packages would
-be the same drift mechanism as the 75-vs-50 this module exists to remove, one
-level up. A service that genuinely needs a different default passes one.
-"""
+DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS = 25
+"""Planning turns: delegate, decide, answer."""
+
+DEFAULT_SUB_AGENT_MAX_MODEL_CALLS = 40
+"""Delegated work, in-process. A user is waiting, and the orchestrator can
+re-delegate if a sub-agent stops short."""
+
+DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS = 125
+"""Unattended work. Nothing observes a scheduled run stopping one call early, and
+nothing re-delegates it, so this is the one budget where erring large is clearly
+the cheaper mistake."""
 
 MIN_MAX_MODEL_CALLS = 1
 SANE_MAX_MODEL_CALLS = 200
@@ -302,11 +325,15 @@ def int_env(name: str, default: int) -> int:
         return default
 
 
-def resolve_max_model_calls(env_name: str, default: int = DEFAULT_MAX_MODEL_CALLS_PER_TURN) -> int:
+def resolve_max_model_calls(env_name: str, default: int) -> int:
     """Model calls one turn may spend, read from *env_name* and sanity-checked.
 
     Shared by every consumer so the clamping and the warnings do not have to be
-    re-derived per service -- the numbers differ, the failure modes do not.
+    re-derived per service -- the numbers differ, the failure modes do not. *default*
+    is explicit rather than falling back to one shared constant: the three budgets
+    above are deliberately different, so an implicit one would silently give a
+    service the wrong kind of turn's budget.
+
     Never raises: this is called at import time in some consumers, so a malformed
     value falls back rather than taking the process down.
     """
