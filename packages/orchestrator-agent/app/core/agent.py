@@ -1326,9 +1326,15 @@ class OrchestratorDeepAgent:
             # Check for general interrupt conditions (pending nodes without specific interrupts)
             # Note: Specific interrupt handling is done in agent_executor for proper A2A task state management
             if hasattr(final_state, "interrupts") and final_state.interrupts:
-                logger.debug(f"[ORCHESTRATOR] Found interrupt in final state: {final_state.interrupts[-1].value}")
+                # All pending interrupts, not just the last: a step with two eval
+                # calls raises one approval each, and showing only one would let a
+                # blanket approve authorise the ask the user never saw (#217).
+                interrupt_value = AgentStreamResponse.interrupt_value(final_state.interrupts)
+                logger.debug(
+                    f"[ORCHESTRATOR] Found {len(final_state.interrupts)} interrupt(s) in final state: {interrupt_value}"
+                )
                 yield AgentStreamResponse.from_interrupt(
-                    final_state.interrupts[-1].value,
+                    interrupt_value,
                     pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
                 )
                 return
@@ -1554,9 +1560,7 @@ class OrchestratorDeepAgent:
             # HITL → input_required approval card, auth → auth_required with the
             # authorize URL in content + metadata; the next turn resumes via Command.
             interrupts = gi.args[0] if gi.args else ()
-            last_intr = interrupts[-1] if interrupts else None
-            value = getattr(last_intr, "value", {}) if last_intr is not None else {}
-            yield AgentStreamResponse.from_interrupt(value)
+            yield AgentStreamResponse.from_interrupt(AgentStreamResponse.interrupt_value(interrupts))
 
     def get_agent_response(self, final_state) -> AgentStreamResponse:
         """Parse the agent response to extract structured information and check for auth requirements."""

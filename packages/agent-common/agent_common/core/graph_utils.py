@@ -87,7 +87,11 @@ from agent_common.middleware.conversation_context_tools_middleware import (
     ConversationContextToolsMiddleware,
 )
 from agent_common.middleware.gateway_attribution_middleware import GatewayAttributionMiddleware
-from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+from agent_common.middleware.loop_detection_middleware import (
+    RepeatedToolCallMiddleware,
+    ToolCallHistory,
+    history_delta,
+)
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import (
     PTC_CODE_INTERPRETER_TOOL_NAME,
@@ -96,6 +100,7 @@ from agent_common.middleware.ptc_guard import (
     clear_ptc_pending,
     end_ptc_turn,
     resolve_ptc_thread_id,
+    serialized_eval,
     take_ptc_pending,
     wrap_tool_for_ptc,
 )
@@ -413,13 +418,16 @@ class _PTCExposureState(REPLState):
 
     ptc_exposed_tool_names: NotRequired[Annotated[list[str], PrivateStateAttr]]
 
-    #: The same channel ``LoopDetectionState`` declares (identical type, so the two
-    #: schemas merge). Declared here because this middleware writes it: the PTC guard
-    #: judges inner calls with the stack's ``RepeatedToolCallMiddleware`` against this
-    #: history — the guard runs on the sandbox bridge thread with no access to graph
-    #: state, so ``awrap_tool_call`` seeds the ``eval`` turn from it and writes the
-    #: turn's history back with the tool result. One history, one rule, both paths.
-    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr]]
+    #: The same channel ``LoopDetectionState`` declares, via the one shared alias —
+    #: the annotations must match exactly or the two schemas will not merge, and the
+    #: reducer must stay last inside it. Declared here because this middleware writes it: the PTC guard judges inner calls with the stack's
+    #: ``RepeatedToolCallMiddleware`` against this history — the guard runs on the
+    #: sandbox bridge thread with no access to graph state, so ``awrap_tool_call``
+    #: seeds the ``eval`` turn from it and writes the turn's history back with the
+    #: tool result. One history, one rule, both paths. The reducer is what lets a step
+    #: with two ``eval`` calls write back both tasks' records instead of raising
+    #: ``InvalidUpdateError`` — see ``merge_tool_call_history`` and #217.
+    tool_call_history: NotRequired[ToolCallHistory]
 
 
 def _code_interpreter_ptc_enabled() -> bool:
@@ -1044,15 +1052,23 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         return self._exposure_state_update()
 
     @staticmethod
-    def _with_tool_call_history(result: Any, turn: Any, seed: dict[str, list[str]]) -> Any:
-        """Attach the turn's ``tool_call_history`` to the ``eval`` result as a state update.
+    def _with_tool_call_history(result: Any, turn: Any) -> Any:
+        """Attach this ``eval``'s ``tool_call_history`` additions to the result.
 
-        The guard extended ``turn.tool_call_history`` for every inner call it judged;
+        The guard recorded every inner call it judged on ``turn.history_appends``;
         this is the only place those entries become durable. When the program made no
-        judged call the history equals ``seed`` (what the state already holds) and the
-        result passes through untouched — no state write. Otherwise a ``ToolMessage``
-        is wrapped in a ``Command`` carrying both the message and the history, and a
-        ``Command`` from the handler gets the history merged into its update.
+        judged call there is nothing to append and the result passes through
+        untouched — no state write. Otherwise a ``ToolMessage`` is wrapped in a
+        ``Command`` carrying both the message and the update, and a ``Command`` from
+        the handler gets the update merged into its own.
+
+        The update is an incremental *delta*, not the whole history: a model step may
+        emit two ``eval`` calls, which ``ToolNode`` runs as two tasks of one
+        superstep, so both write this channel. Deltas with equal caps commute, so the
+        reducer applies both whatever order it sees them in instead of each eval
+        trimming against its own partial view — see ``merge_tool_call_history`` and
+        #217 (mixed caps on one key can differ by a single entry; that docstring says
+        when and why it is acceptable).
 
         A guard record must never be dropped silently — that would fail the loop
         guard open for exactly the call it just judged. ``Command.update`` may be a
@@ -1061,9 +1077,12 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         value) cannot be merged without knowing the schema, and the ``eval`` handler
         never produces them, so they raise instead of being papered over.
         """
-        history = {k: list(v) for k, v in turn.tool_call_history.items()}
-        if history == seed:
+        if not turn.history_appends:
             return result
+        history = history_delta(
+            {k: list(v) for k, v in turn.history_appends.items()},
+            dict(turn.history_caps),
+        )
         if not isinstance(result, Command):
             return Command(update={"messages": [result], TOOL_CALL_HISTORY_STATE_KEY: history})
         update = result.update
@@ -1156,37 +1175,50 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             return await handler(request)
         runtime = getattr(request, "runtime", None)
         thread_id = resolve_ptc_thread_id(runtime)
-        # One turn per ``eval`` execution, guarded or not: it is how the guard (on
-        # the bridge thread) reaches the loop middleware's ``tool_call_history``,
-        # seeded here from the checkpointed state and written back with the result.
-        # Deep-copied: the guard appends, and the state's lists must not be mutated
-        # before the reducer applies the returned update.
-        #
-        # The turn also carries the scope of every ask id it mints (see
-        # ptc_guard.ask_id): the model's tool call id, which scopes this ``eval``
-        # invocation's questions and is checkpointed on the AI message, so it is
-        # stable across the replay. It is owned by the turn rather than read from
-        # whichever wrapper drains ``pending``, so two parallel ``eval`` calls
-        # sharing a thread still stamp and match with one scope.
-        turn = begin_ptc_turn(thread_id, str(tool_call.get("id") or ""))
-        if not turn.ask_scope:
-            # Not fatal — ask ids stay unique per round, and per turn is enough for
-            # a single eval call. Logged because it silently weakens the guarantee
-            # for a thread that later runs a second eval call.
-            logger.debug("[PTC] eval tool call carries no id; ask ids for this turn are scope-less")
-        state = getattr(request, "state", None) or {}
-        seed: dict[str, list[str]] = {k: list(v) for k, v in (state.get(TOOL_CALL_HISTORY_STATE_KEY) or {}).items()}
-        turn.tool_call_history = {k: list(v) for k, v in seed.items()}
-        try:
-            if not self._ptc_enabled or self._ptc_risk_scorer is None:
-                result = await self._run_eval_with_guidance(request, handler, thread_id)
-                return self._with_tool_call_history(result, turn, seed)
-            return await self._run_guarded_eval(request, handler, thread_id, turn, seed)
-        finally:
-            end_ptc_turn(thread_id)
+        # Serialize ``eval`` per thread. Two paths reach one ``thread_id`` at once: a
+        # model step that emits two ``eval`` calls (``ToolNode`` runs them as separate
+        # tasks of one superstep), and two parallel ``task`` dispatches of the same
+        # sub-agent, which share ``{context_id}::{checkpoint_ns}`` but each get their
+        # own event loop from ``asyncio.run``. The REPL slot upstream, the turn below
+        # and the HITL collector are all keyed by ``thread_id`` alone and assume one
+        # ``eval`` in flight (#217). The gate spans the whole begin/end turn span, not
+        # just the eval run, because the turn is one of the things being protected.
+        # Only the ``eval`` path reaches here, so other tools keep their concurrency.
+        async with serialized_eval(thread_id):
+            # One turn per ``eval`` execution, guarded or not: it is how the guard (on
+            # the bridge thread) reaches the loop middleware's ``tool_call_history``,
+            # seeded here from the checkpointed state and written back with the result.
+            # Deep-copied: the guard appends, and the state's lists must not be mutated
+            # before the reducer applies the returned update.
+            #
+            # The turn also carries the scope of every ask id it mints (see
+            # ptc_guard.ask_id): the model's tool call id, which scopes this ``eval``
+            # invocation's questions and is checkpointed on the AI message, so it is
+            # stable across the replay.
+            turn = begin_ptc_turn(thread_id, str(tool_call.get("id") or ""))
+            if not turn.ask_scope:
+                # Not fatal — ask ids stay unique per round, and per turn is enough for
+                # a single eval call. Logged because it silently weakens the guarantee
+                # for a thread that later runs a second eval call.
+                logger.debug("[PTC] eval tool call carries no id; ask ids for this turn are scope-less")
+            state = getattr(request, "state", None) or {}
+            # The guard's READ view of the history: what the loop rule judges inner
+            # calls against. Deep-copied so the guard's appends cannot mutate the
+            # state's lists in place. What gets written BACK is the delta the guard
+            # records alongside it, not this dict.
+            turn.tool_call_history = {
+                k: list(v) for k, v in (state.get(TOOL_CALL_HISTORY_STATE_KEY) or {}).items()
+            }
+            try:
+                if not self._ptc_enabled or self._ptc_risk_scorer is None:
+                    result = await self._run_eval_with_guidance(request, handler, thread_id)
+                    return self._with_tool_call_history(result, turn)
+                return await self._run_guarded_eval(request, handler, thread_id, turn)
+            finally:
+                end_ptc_turn(thread_id)
 
     async def _run_guarded_eval(
-        self, request: Any, handler: Any, thread_id: Any, turn: Any, seed: dict[str, list[str]]
+        self, request: Any, handler: Any, thread_id: Any, turn: Any
     ) -> Any:
         """The HITL loop for a guarded ``eval`` — see ``awrap_tool_call``."""
         runtime = getattr(request, "runtime", None)
@@ -1209,7 +1241,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             result = await self._run_eval_with_guidance(request, handler, thread_id)
             pending = take_ptc_pending(thread_id)
             if not pending:
-                return self._with_tool_call_history(result, turn, seed)
+                return self._with_tool_call_history(result, turn)
 
             # Decisions arrive already aligned 1:1 with `pending`. The orchestrator's
             # resume path (executor._build_interrupt_resume_map) replicates the single
