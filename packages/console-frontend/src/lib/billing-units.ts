@@ -47,6 +47,7 @@ export function getBillingUnitLabel(billingUnitName: string): string {
     'reasoning_output_tokens': 'Reasoning',
     'audio_input_tokens': 'Audio Input',
     'audio_output_tokens': 'Audio Output',
+    'tool_use_input_tokens': 'Tool Use Input',
   };
   
   if (specialCases[billingUnitName]) {

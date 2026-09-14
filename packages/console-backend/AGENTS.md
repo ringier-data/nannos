@@ -500,6 +500,77 @@ functions — do not fold them back into one with a mode flag:
   that very prefix. An unroutable prefix is caught by the mandatory post-registration test call,
   which rolls it back.
 
+#### Voice-agent rate cards are seeded — the one exception to "no seeding"
+
+The voice agent calls Vertex AI directly, so its models are keyed on the real family
+`vertex_ai` (no provider exception needed). But **nothing else would ever create their
+cards**: migration 076 stopped seeding on the premise that every model gets its card at
+registration, and these two never touch the gateway, so no registration runs for them.
+Without a card `calculate_cost` fails closed to `Decimal("0.00")`, so every voice call
+would silently bill nothing.
+
+That is why **migration 093 seeds them** — a deliberate, documented exception to 076, not
+an oversight. Anything else billed outside the gateway needs the same treatment.
+
+Prices in USD per **million** tokens (Vertex Standard tier, verified 2026-08-19 at
+cloud.google.com/vertex-ai/generative-ai/pricing — the page lists the Live model as
+"Gemini 2.5 Flash Live API", never "native audio"):
+
+| provider | model_name | billing unit | flow | $/1M |
+|---|---|---|---|---|
+| `vertex_ai` | `gemini-live-2.5-flash-native-audio` | `audio_input_tokens` | input | 3.00 |
+| | | `audio_output_tokens` | output | 12.00 |
+| | | `base_input_tokens` | input | 0.50 |
+| | | `base_output_tokens` | output | 2.00 |
+| | | `tool_use_input_tokens` | input | 0.50 |
+| `vertex_ai` | `gemini-2.5-flash` | `base_input_tokens` | input | 0.30 |
+| (MCP tool risk scorer) | | `base_output_tokens` | output | 2.50 |
+| | | `cache_read_input_tokens` | input | 0.03 |
+| | | `tool_use_input_tokens` | input | 0.30 |
+
+`model_name` must match what the agent reports — `GEMINI_MODEL_ID` and
+`GEMINI_RISK_SCORER_MODEL` in `voice-agent/voice_agent/agent.py`.
+
+**Live sessions re-bill the whole context every turn**, so voice call cost compounds with
+call length. Google's Vertex pricing page states it in a footnote to the Live API tables —
+"You are charged per turn for all tokens present in the Session Context Window… tokens from
+past turns are re-processed and accounted for in each new turn" — and the Live API
+best-practices pages repeat it under a heading called "Re-billing". Consequences:
+
+- `fold_usage_into` **sums every unit**. Each `usageMetadata` report shows the context
+  cumulatively, but the charge recurs per turn, so the sum is the billed total. An earlier
+  version took the max on the input side and under-billed a measured 10-turn call by 2.6x.
+- **`contextWindowCompression` is the only documented lever** against the compounding: after
+  a compression the API "bills subsequent turns only for the retained history plus any new
+  tokens". `build_live_config` currently sets `trigger_tokens=128000`, which never fires at
+  realistic call lengths (a measured call peaked at 1,490) — so it provides no mitigation
+  today. Lowering it trades conversational memory for cost and is a product decision.
+- **Context caching does not apply.** The model page says "Context caching: Not supported",
+  no Live SKU has a caching variant, and pricing shows N/A — so no cache discount softens
+  the re-billed history.
+
+**`tool_use_input_tokens`** is the voice agent's own unit for `tool_use_prompt_token_count`,
+priced as ordinary input. Kept separate from `base_input_tokens` so it stays visible in the
+breakdown and can be repriced on its own line.
+
+**Cached input is discounted, never added on top.** `promptTokenCount` is cache-INCLUSIVE
+per Google's docs, so emitting a cache unit alongside the full prompt count bills the
+cached tokens twice. `_discount_cached_from_input` moves them out of the full-price units
+first, matching the convention the gateway already established (`base_input = total_input -
+cache_read - cache_creation`, `litellm-proxy/custom_logger.py`) after hitting the identical
+bug on normalized Anthropic usage. On the Live path this is **defensive only** (caching is
+unsupported there, per above) but it must stay: the risk scorer `gemini-2.5-flash` does
+support caching and shares the same mapping.
+
+Deliberately unpriced: **`cache_read_input_tokens` on the Live model** — no published rate
+exists to enter. The unit is still reported if Gemini ever returns cached tokens, which
+surfaces as a "missing rate card / partial cost" warning: the signal to go find the rate,
+not a bug to silence.
+
+Both models have retirement dates (Live: 2026-12-13, flash: 2026-10-20). Cards are
+time-versioned, so a successor model needs its own card — usage on an unpriced model bills $0
+silently, and only the Rate Cards banner will say so.
+
 Do NOT key or "correct" a card from the gateway's
 `model_info.litellm_provider`: that is LiteLLM's cost-map *implementation tag*
 (`bedrock_converse`, `vertex_ai-language-models`, `vertex_ai-anthropic_models`) — a different

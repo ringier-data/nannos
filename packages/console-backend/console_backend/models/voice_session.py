@@ -8,6 +8,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from .usage import BillingUnitBreakdownDict
+
 
 class VoiceSessionStatus(str, Enum):
     ACTIVE = "active"
@@ -45,3 +47,27 @@ class VoiceSessionHandleUpdate(BaseModel):
 
 class VoiceSessionResponse(BaseModel):
     data: VoiceSession
+
+
+class VoiceUsageEntry(BaseModel):
+    """One model's measured consumption during a voice call.
+
+    Reuses `BillingUnitBreakdownDict` (snake_case names, no zeros, no reserved names) so
+    this payload validates identically to every other usage write. Carries no
+    attribution: the endpoint derives user + sub-agent from the voice session record,
+    so the voice agent cannot mis-attribute spend.
+    """
+
+    provider: str = Field(..., description="Provider family, e.g. 'vertex_ai'")
+    model_name: str = Field(..., description="Model the tokens were spent on")
+    billing_unit_breakdown: BillingUnitBreakdownDict = Field(
+        ...,
+        description="Mapping of billing_unit to count (only non-zero values)",
+        examples=[{"audio_input_tokens": 1234, "audio_output_tokens": 5678}],
+    )
+
+
+class VoiceUsageReport(BaseModel):
+    """Batch of per-model usage for a single voice session."""
+
+    entries: list[VoiceUsageEntry] = Field(..., max_length=20)
