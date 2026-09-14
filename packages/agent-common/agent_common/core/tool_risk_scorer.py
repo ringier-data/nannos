@@ -35,12 +35,62 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class RiskyValuesOutput(BaseModel):
+# NOTE: Every collection below is a LIST of objects with named fields, never a dict
+# keyed by strings the model has to invent. That is load-bearing: it is the
+# difference between per-argument risk matching working and silently not working.
+#
+# A `dict[str, X]` serializes to a JSON schema carrying `additionalProperties` and
+# *no* `properties` at all -- an object with zero named fields, whose keys the model
+# is expected to invent. Providers do not agree on what to do with that. Measured on
+# `fs_delete_path` (params path / recursive / confirm):
+#
+#   * gpt-4o-2024-08-06 (Azure) under method="json_schema": 400, strict mode cannot
+#     express an open map at all.
+#   * gemini-3.1-pro-preview, gemini-3.5-flash, gemini-3.5-flash-lite (Vertex),
+#     even under method="function_calling": HTTP 200, a well-formed tool call, a
+#     correct `base_score`, a sensible `reasoning` -- and `risk_factors: {}`, on
+#     every observed call. No error raised anywhere in the stack.
+#   * Claude (Bedrock) and gpt-4o-2024-08-06 under function_calling: populated.
+#
+# The silent case is the dangerous one: an empty profile is persisted with a *real*
+# schema hash, so unlike a hard failure it never self-corrects, and per-argument
+# matching stays off for that tool permanently (#199 / #201).
+#
+# With these list shapes the Vertex aliases populate the map reliably (8/8 sampled
+# on gemini-3.5-flash) on the same prompt and method.
+#
+# One alias still fails, and it is worth knowing it is not a schema problem:
+# `deepseek-v4-pro` (azure_ai) populates roughly half the time, while `v3.2`
+# (bedrock/eu-north-1/deepseek.v3.2 -- same model family) is 15/15 on the identical
+# schema, prompt and method. Ruled out on the azure_ai route: truncation
+# (finish_reason is `tool_calls`, 266 output tokens against a ~4096 budget, and an
+# 8192 cap changes nothing), the schema shape, the field descriptions (five wording
+# variants x3 calls showed no signal), and the gateway registration, which matches
+# v3.2's. So it looks like that deployment, not DeepSeek, and the conclusion is to
+# keep it away from the `chat:low` tier rather than to tune the prompt for it. See
+# orchestrator-agent tests/integration/test_tool_risk_scoring.py.
+
+
+class RiskyValueOutput(BaseModel):
+    """One glob pattern and the risk that matching it implies."""
+
+    pattern: str = Field(
+        description="Glob pattern matched against the argument's value, e.g. 'DELETE*', '*DROP*', '/etc/*'.",
+    )
+    score: float = Field(
+        description="Risk score (0.0-1.0) when the argument's value matches this pattern.",
+    )
+
+
+class ParamRiskOutput(BaseModel):
     """A single parameter's risk profile as returned by the LLM."""
 
-    risky_values: dict[str, float] = Field(
-        default_factory=dict,
-        description="Glob pattern -> risk score (0.0-1.0). Patterns like 'DELETE*', '*DROP*', '/etc/*'.",
+    param_name: str = Field(
+        description="The parameter's name, exactly as it appears in the tool's input schema.",
+    )
+    risky_values: list[RiskyValueOutput] = Field(
+        default_factory=list,
+        description="Value patterns for this parameter that indicate elevated risk.",
     )
     default_contribution: float = Field(
         default=0.0,
@@ -64,8 +114,8 @@ class ToolRiskOutput(BaseModel):
         "0.7 = elevated (writes to shared resources), "
         "1.0 = critical (destructive, irreversible, or security-sensitive operations).",
     )
-    risk_factors: dict[str, RiskyValuesOutput] = Field(
-        default_factory=dict,
+    risk_factors: list[ParamRiskOutput] = Field(
+        default_factory=list,
         description="Parameters that control the risk level of this tool. "
         "Only include params whose values meaningfully change the risk "
         "(e.g., 'action', 'method', 'file_path', 'query'). "
@@ -272,10 +322,18 @@ For risk_factors, use glob patterns:
 - `?` matches a single character
 - `[abc]` matches character set
 
-Examples of control params and risky patterns:
-- "method": {"DELETE*": 0.9, "PUT*": 0.6, "POST*": 0.5}
-- "file_path": {"/etc/*": 0.9, "/tmp/*": 0.3, "*.exe": 0.8}
-- "query": {"*DROP*": 0.95, "*DELETE*": 0.9, "*ALTER*": 0.8}
+Return risk_factors as a LIST with one entry per control parameter. Name every
+control parameter you find — an empty list means the tool has no parameter whose
+value changes its risk, which is rare for anything that writes or deletes.
+
+  "risk_factors": [
+    {"param_name": "method", "risky_values": [
+        {"pattern": "DELETE*", "score": 0.9}, {"pattern": "PUT*", "score": 0.6}]},
+    {"param_name": "file_path", "risky_values": [
+        {"pattern": "/etc/*", "score": 0.9}, {"pattern": "*.exe", "score": 0.8}]},
+    {"param_name": "query", "risky_values": [
+        {"pattern": "*DROP*", "score": 0.95}, {"pattern": "*DELETE*", "score": 0.9}]}
+  ]
 
 Do NOT include content/payload parameters (body, data, message) as risk factors —
 only parameters whose VALUES determine HOW risky the operation is.\
@@ -296,19 +354,18 @@ async def _score_tool_via_llm(
     from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 
     model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
-    # method="function_calling", not the langchain-openai>=0.3 default of "json_schema".
-    # OpenAI's strict structured-output validator requires every object to declare
-    # additionalProperties: false and to list every property in `required`, but
-    # ToolRiskOutput is built on open maps (risk_factors, risky_values) whose keys are
-    # the tool's own parameter names, unknowable ahead of the call. Under the default
-    # every scoring request came back 400 ("'additionalProperties' is required to be
-    # supplied and to be false"), so each tool silently fell through to the
-    # deterministic fallback after paying a full round trip.
-    #
-    # Tool calling accepts the same schema and is what the rest of this stack already
-    # speaks: the gateway normalizes every provider (Bedrock included) into
-    # OpenAI-shape tool_calls (see a2a.structured_response.select_response_format,
+    # method="function_calling", not the langchain-openai>=0.3 default of "json_schema",
+    # which routes through OpenAI's *strict* validator: it requires every object to
+    # declare additionalProperties: false and to list every property in `required`,
+    # neither of which pydantic emits here. Tool calling is also what the rest of this
+    # stack already speaks -- the gateway normalizes every provider (Bedrock included)
+    # into OpenAI-shape tool_calls (see a2a.structured_response.select_response_format,
     # which picks ToolStrategy for the same reason).
+    #
+    # This keyword alone is NOT what makes risk scoring work across the fleet; the
+    # list shape of ToolRiskOutput is (see the note above its definition). Under
+    # function calling with the old open-map schema, Vertex and Azure AI still
+    # returned an empty risk_factors, silently.
     structured_model = model.with_structured_output(ToolRiskOutput, method="function_calling")
 
     # Build user prompt with tool details
@@ -332,11 +389,19 @@ async def _score_tool_via_llm(
             ]
         )
 
-    # Convert LLM output to ToolRiskEntry
+    # Convert LLM output to ToolRiskEntry. The wire format is a list of named
+    # parameters (see ToolRiskOutput); the cache is keyed by param name, so fold it
+    # back into a dict here. A factor with no param_name has told us nothing
+    # matchable, and an empty pattern would compile to a glob matching everything --
+    # skip both rather than persist a profile that misfires at execution time.
     risk_factors: dict[str, ParamRiskProfile] = {}
-    for param_name, profile in result.risk_factors.items():
+    for profile in result.risk_factors:
+        param_name = (profile.param_name or "").strip()
+        if not param_name:
+            logger.warning("Tool %s: LLM returned a risk factor with no param_name, skipping", tool_name)
+            continue
         risk_factors[param_name] = ParamRiskProfile(
-            risky_values=profile.risky_values,
+            risky_values={rv.pattern: rv.score for rv in profile.risky_values if rv.pattern},
             default_contribution=profile.default_contribution,
         )
 
