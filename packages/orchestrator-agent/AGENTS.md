@@ -199,6 +199,7 @@ Two cross-cutting invariants: the seed key is **`runnable.tracking_key`** (`agen
 uv run pytest                      # everything except integration (~8s)
 uv run pytest tests/test_x.py -v   # one file
 uv run pytest -m integration       # real LLM calls, needs a gateway (~4min, ~$1.40)
+uv run pytest -m integration -n 8  # the same tests, concurrently (~3x faster)
 ```
 
 Integration tests are **collected on every run but deselected** by `-m "not integration"`
@@ -211,6 +212,49 @@ user-supplied expression replaces it, and every integration module also carries
 `slow` — so `-m slow` would select the integration directory and nothing else.
 `tests/integration/conftest.py` therefore also requires the tier to be *requested*:
 `-m integration`, or `RUN_INTEGRATION_TESTS=1` when selecting by path or keyword.
+`-n <workers>` works on any selection, not just this tier — the unit suite runs
+clean under it (1023 passed, 12.6s to 7.7s). The gain there is small because
+those tests are import- and CPU-bound, so worker startup eats most of it;
+nothing runs in parallel unless you ask for `-n`.
+
+Where it pays is the integration tier. Model-parametrized tests are almost
+entirely network wait on independent aliases, so a serial sweep costs the sum of
+the fleet where it could cost its slowest member. `-n <workers>` (pytest-xdist) makes them concurrent — measured
+141s to 45s on `test_tool_risk_scoring.py`. Spend is unchanged: the same calls
+are made, just not one at a time.
+
+The integration conftest tags every item carrying a `model_type` param with an
+`xdist_group` named after the alias, so all tests for one model stay on one
+worker. That keeps per-model memoization intact (otherwise a score shared
+between two tests is billed twice — measured 9.7k tokens against 5.0k for the
+same three aliases) and holds each alias to one in-flight request, since fanning
+several at a single Bedrock model earns throttling that surfaces as a 500.
+
+Two details there are easy to get wrong, and both fail *silently* — grouping
+simply stops happening, with no error:
+
+- The marker is added from `pytest_itemcollected`, not from
+  `pytest_collection_modifyitems`. xdist turns `xdist_group` into a nodeid
+  suffix from its own `pytest_collection_modifyitems`; its worker plugin
+  registers after conftests load, and pluggy calls implementations
+  last-registered-first, so xdist's runs before ours and finds no markers.
+  `pytest_itemcollected` fires from `Session.genitems`, which finishes before
+  any `pytest_collection_modifyitems` — a phase guarantee, rather than the
+  relative hint `tryfirst` gives (which only orders against implementations that
+  do not also claim it, and `cacheprovider`, `stepwise` and two xdist plugins are
+  all in that hook). It is also called only for items in this directory, so the
+  tier scoping is structural rather than a path check.
+- `--dist=loadgroup` lives in `addopts`, not in a conftest. xdist hands workers
+  the original command line, so a `config.option.dist` mutated at configure time
+  never reaches the worker that actually reads it. It is inert without `-n`.
+
+Confirm grouping is live by looking for `@<alias>` suffixes on the nodeids in the
+report; without them, each alias is being scored once per test.
+
+Token accounting reaches the controller on the report's `user_properties`;
+writing straight to the `EvalSession` from a fixture would be invisible under
+`-n` and every row would read `-`.
+
 The predicate lives in `tests/support/marker_gate.py` and is pinned by
 `tests/test_marker_gate.py`; it fails closed, since a skipped test is cheaper than
 a surprise bill.

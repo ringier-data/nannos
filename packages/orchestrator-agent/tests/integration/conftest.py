@@ -321,6 +321,48 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(no_gateway)
 
 
+def pytest_itemcollected(item):
+    """Group model-parametrized items by alias, so ``-n`` splits them sanely.
+
+    These tests are almost entirely network wait on independent aliases, so a
+    serial sweep costs the sum of the fleet when it could cost its slowest
+    member. ``-n`` makes that concurrent; this marker decides *how* the work is
+    split, and the default split is wrong for us in two ways. Keeping every test
+    for one model on a single worker means:
+
+      * Per-model memoization keeps working. ``test_tool_risk_scoring`` scores
+        each alias once and has two tests read that one result; split across
+        workers, the saving silently becomes a second billed call.
+      * One in-flight request per alias. Fanning several at a single Bedrock
+        model earns throttling that surfaces as a 500, which reads like a
+        provider outage rather than self-inflicted load.
+
+    xdist reads these markers in its own ``pytest_collection_modifyitems`` and
+    rewrites the nodeid to carry an ``@group`` suffix, which is the whole
+    mechanism -- the scheduler groups on that string alone. So the marker has to
+    exist *before* any ``pytest_collection_modifyitems`` runs, and it would not
+    if this lived in ours: xdist's worker plugin registers after conftests are
+    loaded, and pluggy calls hook implementations last-registered-first, so its
+    implementation runs before ours and finds no markers.
+
+    ``pytest_itemcollected`` sidesteps the ordering question instead of fighting
+    it. It fires from ``Session.genitems``, which finishes before
+    ``pytest_collection_modifyitems`` is called at all -- a phase guarantee
+    rather than a relative hint like ``tryfirst``, which only orders against
+    implementations that do not also claim it (``cacheprovider``, ``stepwise``
+    and two xdist plugins are all in that hook). Being a hook on a conftest in
+    this directory, it is also called only for items *in* this directory, so the
+    tier scoping is structural rather than a path check.
+
+    Harmless without ``-n``: pytest ignores the marker in a serial run. Grouping
+    is live when the report's nodeids carry ``@<alias>``; without them, each
+    alias is being scored once per test. Nothing errors either way.
+    """
+    model_type = getattr(item, "callspec", None) and item.callspec.params.get("model_type")
+    if model_type:
+        item.add_marker(pytest.mark.xdist_group(str(model_type)))
+
+
 # ---------------------------------------------------------------------------
 # LangSmith experiment metadata (used by langsmith pytest plugin)
 # ---------------------------------------------------------------------------
@@ -501,14 +543,21 @@ def _is_integration(nodeid: str) -> bool:
 
 @pytest.fixture()
 def usage_recorder(request):
-    """Per-test token accounting, reachable from the terminal summary."""
+    """Per-test token accounting, reachable from the terminal summary.
+
+    The counts travel to the summary on the test's *report* rather than being
+    written straight into ``_EVAL``. Under ``-n`` this fixture runs in a worker
+    process while the cost table and the gate live on the controller, so a direct
+    write would be invisible there and every row would read "-".
+    ``user_properties`` is serialized with the report by xdist and behaves
+    identically in a single-process run, so there is one code path either way.
+    """
     recorder = UsageRecorder()
     request.node.stash_usage_recorder = recorder  # type: ignore[attr-defined]
     yield recorder
-    record = _EVAL.record_for(request.node.nodeid)
-    record.input_tokens += recorder.input_tokens
-    record.output_tokens += recorder.output_tokens
-    record.unattributed_calls += recorder.unattributed_calls
+    request.node.user_properties.append(
+        ("usage", [recorder.input_tokens, recorder.output_tokens, recorder.unattributed_calls])
+    )
 
 
 def pytest_runtest_logreport(report):
@@ -522,7 +571,20 @@ def pytest_runtest_logreport(report):
     if report.failed:
         _EVAL.note_problem(report.nodeid, report.when)
 
-    if report.when != "call" or not _is_integration(report.nodeid):
+    if not _is_integration(report.nodeid):
+        return
+
+    # Token counts are appended during fixture teardown, so they ride the
+    # teardown report rather than the call report. Read them wherever they turn
+    # up; a JSON round-trip through xdist turns the list back into a list.
+    for key, value in getattr(report, "user_properties", ()):
+        if key == "usage" and value:
+            record = _EVAL.record_for(report.nodeid)
+            record.input_tokens += value[0]
+            record.output_tokens += value[1]
+            record.unattributed_calls += value[2]
+
+    if report.when != "call":
         return
     record = _EVAL.record_for(report.nodeid)
     record.outcome = report.outcome
@@ -581,6 +643,13 @@ def pytest_sessionfinish(session, exitstatus):
     absolving them would turn a real regression green in CI. See
     ``EvalSession.unaccounted_problems``.
     """
+    # xdist runs this hook in every worker as well as the controller, and a
+    # worker only ever saw its own slice. Deciding the run's exit status from a
+    # partial sample there would be meaningless; the controller has the whole
+    # picture, because every report is forwarded to it.
+    if hasattr(session.config, "workerinput"):
+        return
+
     if not _EVAL.judged:
         return
 
