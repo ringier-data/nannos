@@ -367,12 +367,10 @@ function EditForm({ job }: { job: ScheduledJob }) {
     staleTime: 60_000,
   });
 
-  // Pre-select first channel once loaded (only if no channel is already set)
-  useEffect(() => {
-    if (channels.length > 0 && !deliveryChannel) {
-      setDeliveryChannel(String(channels[0].id));
-    }
-  }, [channels]); // eslint-disable-line react-hooks/exhaustive-deps
+  // No pre-selection here, unlike the create dialog: on a saved job an empty
+  // delivery channel is a real, chosen value ("in-app only"), not a missing
+  // default. Filling it in locally would show a channel the job does not have
+  // and write it on the next unrelated save.
 
 
   function touch() {
@@ -559,7 +557,10 @@ function EditForm({ job }: { job: ScheduledJob }) {
           ? { prompt: watch.prompt.trim() || null, notification_message: null }
           : { notification_message: watch.notification_message.trim() || null, prompt: null }),
       }),
-      ...(deliveryChannel && { delivery_channel_id: parseInt(deliveryChannel) }),
+      // Sent unconditionally, null included: omitting it on an emptied value would
+      // make "in-app only" unreachable, since the backend only clears a field that
+      // is explicitly present in the request.
+      delivery_channel_id: deliveryChannel ? parseInt(deliveryChannel) : null,
       voice_call: voiceCall,
     };
 
@@ -799,18 +800,23 @@ function EditForm({ job }: { job: ScheduledJob }) {
           {/* Delivery channel */}
           <div className="grid gap-1.5">
             <Label>Delivery channel</Label>
+            {/* "_none" is a sentinel: a SelectItem cannot carry an empty value, so the
+                absence of a channel needs a value of its own to be selectable at all. */}
             <Select
-              value={deliveryChannel}
+              value={deliveryChannel || '_none'}
               disabled={!editing}
               onValueChange={(v) => {
-                setDeliveryChannel(v);
+                setDeliveryChannel(v === '_none' ? '' : v);
                 touch();
               }}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Select a delivery channel…" />
+                <SelectValue placeholder="None (in-app notifications only)" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="_none">
+                  <span className="text-muted-foreground">None (in-app only)</span>
+                </SelectItem>
                 {channels.length === 0 ? (
                   <div className="px-3 py-2 text-sm text-muted-foreground">No delivery channels registered</div>
                 ) : (
