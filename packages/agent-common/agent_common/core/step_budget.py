@@ -113,7 +113,9 @@ def classify_nodes(graph: Any) -> dict[str, list[str]]:
 # into a flood. `recursion_limit_for` now runs per invocation for sandbox-enabled
 # sub-agents and for any turn carrying attachments, where it used to be an
 # import-time constant; the day a LangGraph upgrade introduces a node this module
-# does not know, the point is to say so once, not once per turn.
+# does not know, the point is to say so once, not once per turn. Both warnings
+# below share this set — a degenerate graph is just the shape that classifies to
+# nothing, and it is on the same hot path.
 _warned_shapes: set[tuple[str, ...]] = set()
 
 
@@ -140,7 +142,15 @@ def _warn_degenerate(graph: Any, buckets: dict[str, list[str]]) -> None:
     ``.nodes``. The derived limit would otherwise be 0, which is not a small budget
     but a graph that dies on its first super-step, with nothing in the logs
     connecting that to the budget.
+
+    Deduplicated per graph type, like ``_warn_unclassified`` and for the same
+    reason: this runs on the per-invocation path, so a degenerate graph that did
+    ship would otherwise warn several times per turn.
     """
+    key = ("__degenerate__", type(graph).__name__)
+    if key in _warned_shapes:
+        return
+    _warned_shapes.add(key)
     logger.warning(
         "Graph %s classifies to no per-model-call nodes (%r); its turn budget cannot be "
         "derived and is being floored. Either the graph is a test double or langgraph no "

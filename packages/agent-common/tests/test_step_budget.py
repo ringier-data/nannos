@@ -264,6 +264,9 @@ def test_a_graph_that_classifies_to_nothing_is_floored_and_warned(caplog):
     class _EmptyGraph:
         nodes: list[str] = []
 
+    # Deduplicated per graph type like its sibling, so assert on the first sighting.
+    step_budget._warned_shapes.discard(("__degenerate__", "_EmptyGraph"))
+
     with caplog.at_level("WARNING"):
         limit = recursion_limit_for(_EmptyGraph(), 25)
 
@@ -276,6 +279,24 @@ def test_a_mock_graph_no_longer_binds_a_zero_budget():
     from unittest.mock import MagicMock
 
     assert recursion_limit_for(MagicMock(), 25) > 0
+
+
+def test_the_degenerate_warning_is_not_repeated_per_invocation(caplog):
+    """It shares `recursion_limit_for`'s per-invocation path with the unclassified
+    warning, so it gets the same treatment — otherwise a degenerate graph that did
+    ship would warn several times per turn on sandboxed sub-agents."""
+
+    class _RepeatedlyEmptyGraph:
+        nodes: list[str] = []
+
+    step_budget._warned_shapes.discard(("__degenerate__", "_RepeatedlyEmptyGraph"))
+    graph = _RepeatedlyEmptyGraph()
+
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            recursion_limit_for(graph, 25)
+
+    assert sum("cannot be" in r.getMessage() for r in caplog.records) == 1
 
 
 def test_the_core_cycle_cost_is_counted_not_assumed():
