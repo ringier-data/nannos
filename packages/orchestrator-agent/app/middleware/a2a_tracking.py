@@ -6,13 +6,13 @@ ensuring A2A protocol compliance and conversation continuity.
 
 Architecture:
 - Uses ONLY before_model hook (passive observer pattern)
-- Tool dispatch and JSON unwrapping handled by DynamicToolDispatchMiddleware
+- Tool dispatch and result reading handled by DynamicToolDispatchMiddleware
 - This middleware simply observes ToolMessages and persists IDs to state
 
 LangGraph Execution Flow:
-  1. DynamicToolDispatchMiddleware dispatches task to subagent
-  2. Subagent returns JSON-wrapped response with A2A metadata
-  3. DynamicToolDispatchMiddleware unwraps JSON, puts metadata in additional_kwargs
+  1. DynamicToolDispatchMiddleware dispatches the task to the sub-agent (an A2A task)
+  2. The sub-agent's final event carries a typed TaskResponseData (task/context ids, state)
+  3. DynamicToolDispatchMiddleware puts those fields in ToolMessage.additional_kwargs["a2a_metadata"]
   4. ToolMessage gets added to messages
   5. NEXT ITERATION: before_model sees ToolMessage, extracts and persists IDs
 
@@ -29,8 +29,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
-
-from .task_refusal import is_concurrent_task_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +64,11 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
     This is a PASSIVE middleware that only uses before_model to extract and persist
     A2A tracking IDs from ToolMessage responses. It does NOT intercept tool calls.
 
-    Tool dispatch and JSON unwrapping are handled by DynamicToolDispatchMiddleware,
+    Tool dispatch and result reading are handled by DynamicToolDispatchMiddleware,
     which puts A2A metadata in ToolMessage.additional_kwargs["a2a_metadata"].
 
     How it works:
-    1. DynamicToolDispatchMiddleware dispatches task and unwraps JSON response
+    1. DynamicToolDispatchMiddleware dispatches the task and reads the typed result
     2. ToolMessage with a2a_metadata in additional_kwargs gets added to messages
     3. NEXT ITERATION: before_model sees ToolMessage
     4. before_model extracts IDs from additional_kwargs, returns state update
@@ -118,16 +116,11 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         # earlier sibling — and with it the ``task_id`` a parked
         # ``input-required``/``auth-required`` sub-agent needs to be resumed, so
         # the next delegation to it started blank instead of continuing.
-        #
-        # Concurrency refusals (``DynamicToolDispatchMiddleware``) are ``task``
-        # ToolMessages too and always land last, so they are skipped: they carry
-        # no metadata of their own and would otherwise be the "last result".
         trailing: list[ToolMessage] = []
         for candidate in reversed(messages):
             if not isinstance(candidate, ToolMessage):
                 break
-            if not is_concurrent_task_refusal(candidate):
-                trailing.append(candidate)
+            trailing.append(candidate)
         trailing.reverse()
 
         if not trailing:

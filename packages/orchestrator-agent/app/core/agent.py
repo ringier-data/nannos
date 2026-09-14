@@ -455,25 +455,21 @@ def _build_adoption_seed(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Build the a2a_tracking adoption record for a server-validated run.
 
-    Cross-service conversation adoption, step 2 of 2. One contract, two
-    continuity mechanisms — the record seeded under the runnable's
-    tracking_key tells the next delegation to that sub-agent to continue the
-    run's conversation instead of starting blank:
+    Cross-service conversation adoption, step 2 of 2. One contract, ONE
+    continuity mechanism — the record seeded under the runnable's tracking_key
+    tells the next delegation to that sub-agent to continue the run's
+    conversation instead of starting blank:
 
-    - REMOTE agents: ``{"context_id": <run conversation_id>}``. agent-runner
-      dispatched the run with the run task's contextId on the wire, so the
-      remote server checkpoints the run's conversation under exactly this id;
-      the A2AClientRunnable waterfall puts a seeded context_id back on the
-      wire unchanged.
-    - LOCAL/AUTOMATED agents: ``{"adopt_thread_from": <run conversation_id>}``.
-      The run's checkpoint lives at bare ``thread_id = conversation_id`` in
-      the SHARED checkpoint tables (both services point at the same
-      Postgres schema); DynamicToolDispatchMiddleware forks it into the
-      conversation's own ``{ctx}::dynamic-{name}`` thread on first
-      delegation. The run ctx must NEVER be seeded as ``context_id`` for a
-      local runnable — that changes its execution thread while the HITL
-      checkpoint probe still probes the conversation-derived thread,
-      silently breaking tool-approval resume (PR #161 round 1).
+    - REMOTE and LOCAL/AUTOMATED agents alike: ``{"context_id": <run
+      conversation_id>}``. agent-runner dispatched the run under the run task's
+      contextId — on the wire for a remote agent, as the ``{ctx}::dynamic-{name}``
+      checkpoint thread (``local_sub_agent_thread_id``) for a local one — so the
+      next delegation, sent with that context id, lands on the run's own
+      conversation. The orchestrator's dispatch no longer probes a
+      conversation-derived thread for pending interrupts (the sub-agent's
+      in-process A2A server owns its task lifecycle), so seeding the run ctx
+      as ``context_id`` is safe for local agents too; the checkpoint fork that
+      used to stand in for this is gone.
     - Foundry: not adoptable — continuity is a session rid the provenance
       does not carry.
 
@@ -497,15 +493,9 @@ def _build_adoption_seed(
         # resumes) re-derive adopted_sub_agent_ids from the persisted tracking
         # state, keeping the adopted agent registered for the whole
         # conversation (_adopted_sub_agent_ids_from_tracking).
-        if isinstance(runnable, A2AClientRunnable):
+        if isinstance(runnable, (A2AClientRunnable, DynamicLocalAgentRunnable)):
             return registry_key, runnable.tracking_key, {
                 "context_id": conversation_id,
-                "is_complete": True,
-                "sub_agent_id": sub_agent_id,
-            }
-        if isinstance(runnable, DynamicLocalAgentRunnable):
-            return registry_key, runnable.tracking_key, {
-                "adopt_thread_from": conversation_id,
                 "is_complete": True,
                 "sub_agent_id": sub_agent_id,
             }
@@ -957,7 +947,7 @@ class OrchestratorDeepAgent:
                     input_data["a2a_tracking"] = {tracking_key: record}
                     logger.info(
                         f"Adopted scheduled-run conversation "
-                        f"{record.get('context_id') or record.get('adopt_thread_from')} "
+                        f"{record.get('context_id')} "
                         f"for sub-agent {registry_key!r}"
                     )
         try:
@@ -1488,7 +1478,11 @@ class OrchestratorDeepAgent:
             )
 
         try:
-            async for ev in runnable.astream(stream_input, config):
+            # ``astream_graph``, not ``astream``: this executor IS the A2A server for
+            # the embedded sub-agent, so it drives the graph directly and maps the
+            # events itself — routing through the sub-agent's own in-process server
+            # would nest one A2A server inside another.
+            async for ev in runnable.astream_graph(stream_input, config):
                 # --- Streaming content chunk ---
                 if isinstance(ev, ArtifactUpdate):
                     if not ev.content:

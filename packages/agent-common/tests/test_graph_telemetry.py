@@ -100,7 +100,11 @@ def spans():
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    previous = otel_trace.get_tracer_provider()
+    # Read the private slot, not get_tracer_provider(): with nothing installed that
+    # returns the module's PROXY provider, and restoring the proxy INTO the slot
+    # makes every later get_tracer() call recurse forever (the proxy delegates to
+    # the slot). The first victim was the A2A SDK's traced request handler.
+    previous = otel_trace._TRACER_PROVIDER  # type: ignore[attr-defined]
     # set_tracer_provider() only takes effect once per process, so go through the
     # module-private hook the SDK uses for exactly this case.
     otel_trace._TRACER_PROVIDER = provider  # type: ignore[attr-defined]

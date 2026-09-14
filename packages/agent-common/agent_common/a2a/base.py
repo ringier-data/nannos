@@ -1,11 +1,15 @@
 """Base classes for A2A Runnable implementations.
 
-Provides abstract base class and shared utilities for both remote (A2A protocol)
-and local (in-process) sub-agents, ensuring consistent response formats.
+Provides the abstract base class and shared utilities for both remote (A2A over
+HTTP) and local (in-process) sub-agents.
 
 Design Principles:
-1. All sub-agents return the same response format for middleware compatibility
-2. Shared `_wrap_message_with_metadata` ensures consistent JSON structure
+1. Every sub-agent is reached through the A2A task lifecycle. A remote one over
+   HTTP; a local one through the in-process server in
+   ``agent_common.a2a.local_server`` — same protocol, no network hop. The caller
+   sees one stream of typed ``StreamEvent``s either way.
+2. A result is a typed ``TaskResponseData`` (task id, context id, state,
+   metadata) — never a JSON envelope inside the message text.
 3. Abstract interface allows type-safe usage across the codebase
 """
 
@@ -14,17 +18,23 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable
-from typing import Any, Dict, List, Optional
+from contextlib import aclosing
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from a2a.types import TaskState
+from a2a.types import Task, TaskState
 from langchain_core.messages import AIMessage, ContentBlock, HumanMessage
 from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent.cost_tracking_mixin import CostTrackingMixin
 from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_blocks_for_chat_completions
 
-
+from .event_translation import A2AStreamTranslator
+from .message_conversion import PROPOSED_TASK_ID_KEY, human_messages_to_a2a_message
 from .stream_events import ErrorEvent, StreamEvent, TaskResponseData, TaskUpdate
+
+if TYPE_CHECKING:
+    from .local_server import LocalA2AServer
 
 logger = logging.getLogger(__name__)
 
@@ -60,35 +70,31 @@ class SubAgentInput(BaseModel):
             "never writes to would only spend its prompt."
         ),
     )
+    proposed_task_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "The id the caller wants the task this message OPENS to have. A2A servers mint task ids; "
+            "the orchestrator names a delegation's task after the tool call that made it, so a LangGraph "
+            "replay of that call finds the task it already opened instead of running the work twice. "
+            "Ignored when the message continues an existing task (a2a_tracking carries a live task_id), "
+            "and by servers that do not honour the proposal (remote agents)."
+        ),
+    )
 
 
 class BaseA2ARunnable(ABC):
     """Abstract base class for A2A Runnables.
 
-    Defines the common interface and shared utilities for both remote
-    (A2A protocol) and local (in-process) sub-agents.
+    Defines the common interface and shared utilities for both remote (A2A over
+    HTTP) and local (in-process) sub-agents.
 
-    All sub-agents must return responses in a consistent format:
-    {
-        "messages": [AIMessage(content=json_wrapped_content)],
-        "task_id": "...",
-        "context_id": "...",
-        "state": "completed|failed|input_required|...",
-        "is_complete": bool,
-        "requires_input": bool,
-        "requires_auth": bool,
-        ...additional metadata...
-    }
-
-    The message content is always JSON-wrapped to embed A2A metadata:
-    {
-        "content": "actual response text",
-        "a2a": {
-            "task_id": "...",
-            "context_id": "...",
-            ...
-        }
-    }
+    Every sub-agent streams the same typed events (``TaskUpdate`` /
+    ``ArtifactUpdate`` / ``ErrorEvent``); a ``TaskUpdate`` carries a
+    ``TaskResponseData`` whose ``task_id`` / ``context_id`` / ``state`` are the
+    A2A task's own, and whose ``messages[-1].content`` is the plain text the
+    agent produced. The exchange ends on a terminal state or on an intervention
+    state (``input_required`` / ``auth_required``), which the caller answers by
+    sending the next message to the same ``task_id``.
     """
 
     @property
@@ -149,59 +155,6 @@ class BaseA2ARunnable(ABC):
         import asyncio
 
         return asyncio.run(self.ainvoke(input_data, config))
-
-    def _wrap_message_with_metadata(self, result: TaskResponseData) -> TaskResponseData:
-        """Wrap the result message with A2A metadata embedded in content.
-
-        The deepagents library strips additional_kwargs when creating ToolMessage,
-        so we embed metadata directly in the content as JSON.
-
-        This method should be called on every response before returning to
-        ensure the middleware can extract A2A metadata.
-
-        Args:
-            result: TaskResponseData containing messages and metadata
-
-        Returns:
-            Updated result with wrapped message
-        """
-        if not result.messages:
-            # Create synthetic message if none exists
-            content = "Task processed"
-            meta = result.metadata
-            if "input_prompt" in meta:
-                content = meta["input_prompt"]
-            elif "error_message" in meta:
-                content = f"Error: {meta['error_message']}"
-            elif "responses" in meta and meta["responses"]:
-                content = meta["responses"][-1] if meta["responses"] else "Processing complete"
-
-            result.messages = [AIMessage(content=content)]
-            logger.debug(f"Created synthetic message: {content}")
-
-        # Wrap last message with metadata
-        last_message = result.messages[-1]
-        if isinstance(last_message, AIMessage):
-            a2a_metadata = {
-                k: v
-                for k, v in {
-                    "task_id": result.task_id,
-                    "context_id": result.context_id,
-                    "is_complete": result.is_complete,
-                    "requires_auth": result.requires_auth,
-                    "requires_input": result.requires_input,
-                    "state": TaskState.Name(result.state) if result.state else None,
-                    **{k: v for k, v in result.metadata.items() if v is not None},
-                }.items()
-                if v is not None
-            }
-
-            wrapped_content = {"content": last_message.content, "a2a": a2a_metadata}
-
-            result.messages[-1] = AIMessage(content=json.dumps(wrapped_content))
-            logger.debug(f"Wrapped message with metadata: task_id={a2a_metadata.get('task_id')}")
-
-        return result
 
     def _build_response(
         self,
@@ -369,6 +322,24 @@ class BaseA2ARunnable(ABC):
 
         # Waterfall: Try persisted context_id first, fallback to orchestrator's
         context_id = agent_tracking.get("context_id") if agent_tracking else None
+
+        # Pre-ADR-0008 adoption records name the run's conversation under
+        # ``adopt_thread_from``: the dispatch used to FORK that checkpoint into
+        # the conversation's own thread. There is no fork any more — the run's
+        # context id IS the thread (``local_sub_agent_thread_id``) — so the old
+        # key means exactly what ``context_id`` means now. Reading it keeps
+        # conversations that adopted a run before the deploy pointed at the run's
+        # conversation instead of silently starting blank.
+        if not context_id and agent_tracking:
+            legacy_context_id = agent_tracking.get("adopt_thread_from")
+            if legacy_context_id:
+                context_id = legacy_context_id
+                logger.warning(
+                    f"[CONVERSATION_ID] '{agent_name}' carries a pre-ADR-0008 adoption record "
+                    f"(adopt_thread_from={context_id}); continuing the run's conversation under it. "
+                    f"``a2a_tracking`` records the same id as context_id once this delegation returns, "
+                    f"so the legacy key is read at most once per conversation."
+                )
 
         if not context_id and input_data.orchestrator_conversation_id:
             # First call to this sub-agent: use orchestrator's conversation ID
@@ -902,86 +873,185 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         )
         return extended_config
 
+    # ------------------------------------------------------------------
+    # The A2A side: a local sub-agent is served in-process
+    # ------------------------------------------------------------------
+
+    @property
+    def local_server(self) -> "LocalA2AServer":
+        """The in-process A2A server this runnable is reached through.
+
+        Built lazily, once per runnable, on the process-wide task store
+        (``local_server.get_local_task_store``). Everything the orchestrator
+        does with a remote agent — open a task, read it back, answer a pause,
+        cancel it — it does with a local one through this object.
+        """
+        server = getattr(self, "_local_server", None)
+        if server is None:
+            from .local_server import LocalA2AServer
+
+            server = LocalA2AServer(self)
+            self._local_server = server
+        return server
+
+    async def aget_task(self, task_id: str) -> Optional[Task]:
+        """``tasks/get`` for one of this agent's tasks; ``None`` for an unknown id."""
+        return await self.local_server.get_task(task_id)
+
+    async def cancel_task(self, task_id: str) -> None:
+        """``tasks/cancel`` for one of this agent's tasks. Best-effort, never raises."""
+        try:
+            await self.local_server.cancel(task_id)
+        except Exception:
+            logger.warning(f"Failed to cancel local task {task_id} on {self.name}", exc_info=True)
+
+    async def aget_pending_interrupts(self, config: Dict[str, Any]) -> list:
+        """The LangGraph interrupts the agent's thread is currently parked on.
+
+        Read by the in-process executor before each message: a non-empty list
+        means the message is the ANSWER to those interrupts and is delivered as
+        ``Command(resume)``; an empty list means it is new input. The default is
+        "never parked", right for agents with no checkpointed graph; graph-backed
+        agents override it with ``graph.aget_state(config).interrupts``.
+
+        Args:
+            config: The instrumented run config (``_instrument``) naming the
+                thread to inspect.
+        """
+        return []
+
     async def astream(
         self, input_data: Dict[str, Any] | Any, config: Optional[Dict[str, Any]] = None
     ) -> AsyncIterable[StreamEvent]:
-        """Stream local sub-agent execution with real-time status updates.
+        """Stream one A2A exchange with this local sub-agent.
 
-        Enables streaming of intermediate progress from LangGraph-based sub-agents.
-        For sub-agents that support streaming, this provides:
-        - Real-time working-state status messages
-        - Progress visibility during long-running operations
-        - Terminal state with wrapped A2A metadata
-
-        Automatically handles:
-        1. Input validation
-        2. Checkpoint isolation setup (via abstract methods)
-        3. Cost tracking tag injection
-        4. Config extension and propagation
-        5. Response wrapping with A2A metadata
+        The caller's side of the task lifecycle: ``input_data`` is turned into an
+        A2A message (continuing the task ``a2a_tracking`` names, or opening a new
+        one under ``proposed_task_id``), sent to the in-process server, and the
+        server's events come back as the same typed ``StreamEvent``s a remote
+        agent's ``astream`` yields. HITL is not special here — a paused task ends
+        the exchange on ``input_required`` / ``auth_required`` with the interrupts
+        in ``data.metadata["interrupts"]``, and the answer is the next ``astream``
+        call addressed to that task.
 
         Args:
-            input_data: Input data matching SubAgentInput schema, or a Command for HITL resume
-            config: Parent config from orchestrator (contains metadata, tags, callbacks)
-
-        Yields:
-            Status update dictionaries compatible with A2AClientRunnable.astream format:
-            - {"type": "task_update", "state": "working", "data": {...}, "is_complete": False}
-            - {"type": "task_update", "state": "completed", "data": {...}, "is_complete": True}
-
-        Raises:
-            NotImplementedError: If subclass doesn't implement _astream_impl()
+            input_data: ``SubAgentInput``-shaped input. A LangGraph ``Command`` is
+                not accepted: resumes travel as messages (``answer_to_human_message``).
+            config: Parent ``RunnableConfig`` from the caller. Required — the
+                graph inherits its callbacks, tags, metadata and checkpointer.
         """
         try:
-            # For HITL resume: pass Command directly to _astream_impl, skip validation
-            from langgraph.types import Command as LGCommand
+            if isinstance(input_data, Command):
+                raise ValueError(
+                    f"Local sub-agent '{self.name}' is resumed by sending the answer as a message to the "
+                    "paused task, not with a Command (see agent_common.a2a.message_conversion)."
+                )
+            if not config:
+                raise ValueError(
+                    f"Local sub-agent '{self.name}' requires parent config from orchestrator. "
+                    "Missing config means incorrect user_id/assistant_id values would be used. "
+                    "This is a programming error - orchestrator must always pass config to sub-agents."
+                )
+            validated = SubAgentInput.model_validate(input_data)
+            context_id, task_id = self._extract_tracking_ids(validated)
+            if not context_id:
+                raise ValueError(f"Missing context_id for sub-agent '{self.name}'")
+            extra_metadata = None
+            if not task_id and validated.proposed_task_id:
+                extra_metadata = {PROPOSED_TASK_ID_KEY: validated.proposed_task_id}
+            message = human_messages_to_a2a_message(
+                validated.messages,
+                context_id,
+                task_id,
+                scheduled_job_id=validated.scheduled_job_id,
+                message_formatting=validated.message_formatting,
+                extra_metadata=extra_metadata,
+            )
+            logger.debug(
+                f"[{self.name}] A2A message {message.message_id} -> in-process server "
+                f"(context_id={context_id}, task_id={task_id or '(new)'})"
+            )
+            translator = A2AStreamTranslator()
+            # ``aclosing``: a caller that stops iterating early must close the
+            # server's stream now, not when the abandoned generator chain is
+            # garbage-collected — that is where the SDK unsubscribes and the
+            # task's live object is released (ADR-0008, "The live object is a cache").
+            async with aclosing(self.local_server.send(message, parent_config=config)) as events:
+                async for event in events:
+                    for out in translator.translate(event):
+                        yield out
+            if translator.task_updates == 0:
+                yield ErrorEvent(error=f"No response received from sub-agent '{self.name}'")
+        except GraphInterrupt:
+            # Never expected past the server, but if a graph interrupt ever escapes
+            # it belongs to the caller's Pregel, not to an error message.
+            raise
+        except ValueError as e:
+            logger.error(f"[{self.name}] Stream validation error: {e}")
+            yield ErrorEvent(error=str(e), data=self._build_error_response(str(e)))
+        except Exception as e:
+            logger.exception(f"Error streaming {self.name}: {e}")
+            yield ErrorEvent(error=str(e), data=self._build_error_response(f"Internal error: {str(e)}"))
 
-            if isinstance(input_data, LGCommand):
-                logger.info(f"[{self.name}] Streaming with Command (HITL resume)")
+    # ------------------------------------------------------------------
+    # The graph side: what the in-process server runs
+    # ------------------------------------------------------------------
+
+    async def astream_graph(
+        self, input_data: Dict[str, Any] | Any, config: Optional[Dict[str, Any]] = None
+    ) -> AsyncIterable[StreamEvent]:
+        """Run this agent's graph directly and stream its events.
+
+        This is the server side of ``astream``: the in-process executor calls it
+        with the message's ``SubAgentInput`` (already instrumented config) or with
+        the ``Command(resume)`` it built for a paused thread, and translates what
+        comes out into A2A events. It is also what a host that IS the A2A server
+        for this agent already (the orchestrator's embedded execute-only path)
+        drives directly.
+
+        Handles input validation, checkpoint isolation and cost-tracking setup
+        (``_instrument``) for a fresh ``SubAgentInput`` — a ``Command`` skips both
+        and is fed to the graph as-is — then delegates to ``_astream_impl``, or to
+        ``_process`` for agents that do not stream.
+
+        A ``GraphInterrupt`` (the graph parked on a question) propagates: the
+        executor turns it into the task's ``input_required`` / ``auth_required``
+        state.
+        """
+        try:
+            if isinstance(input_data, Command):
+                logger.info(f"[{self.name}] Streaming with Command (resume)")
                 async for item in self._astream_impl(input_data, config or {}):
                     yield item
                 return
 
-            # Validate input
             validated = SubAgentInput.model_validate(input_data)
-
-            # Instrumentation: set up cost tracking context
             extended_config = self._instrument(validated, config)
             logger.debug(
                 f"[{self.name}] Streaming with config: thread_id={extended_config.get('configurable', {}).get('thread_id', '')}, "
                 f"checkpoint_ns={extended_config.get('configurable', {}).get('checkpoint_ns', '')}, tags={extended_config.get('tags', [])}"
             )
 
-            # Try streaming first
             try:
                 async for item in self._astream_impl(validated, extended_config):
                     yield item
-                return  # Streaming succeeded
+                return
             except NotImplementedError:
-                pass  # Fall through to _process
+                pass
 
-            # Fallback for non-streaming agents: use _process directly
-            # (Not ainvoke, which would create a circular dependency since ainvoke collects astream)
             logger.debug(f"[{self.name}] Streaming not implemented, falling back to _process")
             result = await self._process(validated, extended_config)
-            wrapped = self._wrap_message_with_metadata(result)
-            yield TaskUpdate(data=wrapped)
+            yield TaskUpdate(data=result)
         except GraphInterrupt:
-            # GraphInterrupt is a LangGraph interrupt signal (e.g. from HumanInTheLoopMiddleware).
-            # It must NOT be swallowed — it needs to propagate so the caller can surface it
-            # to the user as an input_required pause. Re-raise without converting to ErrorEvent.
+            # A LangGraph interrupt signal (e.g. from HumanInTheLoopMiddleware). It
+            # must NOT be swallowed — the executor surfaces it as the task's pause.
             raise
         except ValueError as e:
-            # Content extraction errors
             logger.error(f"[{self.name}] Stream validation error: {e}")
-            result = self._build_error_response(str(e))
-            wrapped = self._wrap_message_with_metadata(result)
-            yield ErrorEvent(error=str(e), data=wrapped)
+            yield ErrorEvent(error=str(e), data=self._build_error_response(str(e)))
         except Exception as e:
             logger.exception(f"Error streaming {self.name}: {e}")
-            result = self._build_error_response(f"Internal error: {str(e)}")
-            wrapped = self._wrap_message_with_metadata(result)
-            yield ErrorEvent(error=str(e), data=wrapped)
+            yield ErrorEvent(error=str(e), data=self._build_error_response(f"Internal error: {str(e)}"))
 
     async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
         """Stream implementation to be provided by subclasses.

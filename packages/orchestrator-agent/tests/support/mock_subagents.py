@@ -15,8 +15,9 @@ until something is registered.
 
 Why subclass ``LocalA2ARunnable`` instead of patching
 -----------------------------------------------------
-``LocalA2ARunnable`` already implements ``astream()`` — input validation, cost
-instrumentation, checkpoint isolation, and the A2A metadata wrapping that makes
+``LocalA2ARunnable`` already implements ``astream()`` — the whole in-process A2A
+exchange: message conversion, the request handler and task store, the executor,
+cost instrumentation, checkpoint isolation, and the typed result that makes
 ``a2a_tracking`` populate downstream. A ``MagicMock`` would skip all of it and
 quietly pass while the real plumbing was broken. Subclassing means a mock
 travels the same path a real local sub-agent does; only the "think about it"
@@ -35,11 +36,17 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterable, Callable
 from typing import Any
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+from agent_common.a2a.stream_events import StreamEvent, TaskUpdate
 from deepagents import CompiledSubAgent
+from langgraph.errors import GraphInterrupt
+from langgraph.types import Command, Interrupt
+
+#: A valid xxh3_128 hexdigest — the format LangGraph uses for interrupt ids.
+APPROVAL_INTERRUPT_ID = "45fda8478b2ef754419799e10992af06"
 
 DEFAULT_DESCRIPTION = "Test double sub-agent."
 
@@ -70,6 +77,13 @@ class MockSubAgent(LocalA2ARunnable):
             ``error``: the work is not wrong, it is unfinished, and the
             orchestrator is supposed to relay the question rather than answer
             it. Mutually exclusive with ``error``.
+        approval: When set, the agent's graph parks on a tool-approval interrupt
+            for a tool of this name before replying — the shape a risk-gated
+            tool produces. The task pauses on ``input_required`` with the
+            interrupt on the wire; the orchestrator surfaces the approval card
+            and the replayed delegation delivers the decision, which lands here
+            as ``resumed_with`` (the id-keyed ``Command.resume`` the graph would
+            see). Then the canned ``reply`` is returned.
     """
 
     def __init__(
@@ -81,6 +95,7 @@ class MockSubAgent(LocalA2ARunnable):
         input_modes: list[str] | None = None,
         error: str | None = None,
         input_required: str | None = None,
+        approval: str | None = None,
     ) -> None:
         super().__init__()
         if error is not None and input_required is not None:
@@ -91,9 +106,14 @@ class MockSubAgent(LocalA2ARunnable):
         self._input_modes = input_modes or ["text"]
         self._error = error
         self._input_required = input_required
+        self._approval = approval
+        self._pending: list[Interrupt] = []
+        self._parked_ids: tuple[str | None, str | None] = (None, None)
         self.received: list[str] = []
         """Instructions this agent was handed, in order — the ``description``
         argument of each ``task`` call that reached it."""
+        self.resumed_with: list[Any] = []
+        """The ``Command.resume`` payloads delivered to a parked approval, in order."""
 
     # -- BaseA2ARunnable contract ------------------------------------------
 
@@ -113,6 +133,38 @@ class MockSubAgent(LocalA2ARunnable):
 
     def get_sub_agent_identifier(self, input_data: SubAgentInput) -> str:
         return self._name
+
+    async def aget_pending_interrupts(self, config: dict[str, Any]) -> list:
+        return list(self._pending)
+
+    async def _astream_impl(self, input_data: Any, config: dict[str, Any]) -> AsyncIterable[StreamEvent]:
+        """Park on the approval when asked to; otherwise the plain ``_process`` reply."""
+        if isinstance(input_data, Command):
+            self.resumed_with.append(input_data.resume)
+            self._pending = []
+            context_id, task_id = self._parked_ids
+            reply = self._reply(self.received[-1]) if callable(self._reply) else self._reply
+            yield TaskUpdate(data=self._build_success_response(reply, context_id=context_id, task_id=task_id))
+            return
+        result = await self._process(input_data, config)
+        if self._approval is not None and self._error is None and self._input_required is None:
+            self._parked_ids = self._extract_tracking_ids(input_data)
+            interrupt = Interrupt(
+                value={
+                    "action_requests": [
+                        {
+                            "name": self._approval,
+                            "args": {"_call_id": f"{self._approval}:1"},
+                            "description": f"Tool '{self._approval}' needs your approval",
+                        }
+                    ],
+                    "review_configs": [{"action_name": self._approval, "allowed_decisions": ["approve", "reject"]}],
+                },
+                id=APPROVAL_INTERRUPT_ID,
+            )
+            self._pending = [interrupt]
+            raise GraphInterrupt((interrupt,))
+        yield TaskUpdate(data=result)
 
     async def _process(self, input_data: SubAgentInput, config: dict[str, Any]) -> Any:
         instruction = self._extract_message_content(input_data)

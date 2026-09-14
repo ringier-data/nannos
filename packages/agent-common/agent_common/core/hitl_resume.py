@@ -25,7 +25,7 @@ Readers go through :func:`decisions_from_resume` instead, which never raises:
 - anything unreadable rejects, with the tool left unexecuted and the model told why.
 
 The mirror-image translation (an approval answer arriving at an auth prompt) lives
-in the orchestrator's ``_build_subagent_resume_command``, which knows both the
+in the sub-agent's in-process A2A server (``a2a.local_server.resume``), which knows both the
 answer and the interrupt it is about to be keyed to.
 """
 

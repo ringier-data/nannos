@@ -40,6 +40,8 @@ from typing import Any, AsyncIterable, Optional, TypedDict, cast
 from a2a.types import TaskState
 from agent_common.a2a.base import LocalA2ARunnable
 from agent_common.a2a.client_runnable import A2AClientRunnable
+from agent_common.a2a.event_translation import INTERRUPTS_METADATA_KEY, INTERVENTION_STATES
+from agent_common.a2a.message_conversion import answer_to_human_message, interrupt_value_from_status
 from agent_common.a2a.stream_events import (
     TERMINAL_STATES,
     ActivityLogMeta,
@@ -53,14 +55,7 @@ from agent_common.a2a.stream_events import (
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
 from agent_common.core.graph_utils import code_interpreter_ptc_enabled
-from agent_common.core.hitl_resume import (
-    KIND_AUTH,
-    KIND_HITL,
-    authorization_from_decisions,
-    interrupt_kind,
-    pending_authorization_answer,
-    structural_decisions,
-)
+from agent_common.core.hitl_resume import KIND_AUTH, interrupt_kind, pending_authorization_answer
 from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 from agent_common.core.stream_watchdog import inter_chunk_timeout
 from langchain.agents.middleware.types import (
@@ -91,7 +86,6 @@ from app.agents.file_analyzer import FileAnalyzerRunnable
 from app.middleware.error_classification_middleware import classify_error
 
 from ..core.steering_state import ActiveSubagentDispatch, clear_active_subagent_dispatch, set_active_subagent_dispatch
-from .task_refusal import CONCURRENT_TASK_REFUSAL_KEY
 from ..models.config import GraphRuntimeContext
 
 logger = logging.getLogger(__name__)
@@ -345,375 +339,37 @@ class FileFilteringResponse(BaseModel):
     relevant_indices: list[int]
 
 
-def _replicate_blanket_decision(payload: Any, interrupt_value: Any) -> Any:
-    """Expand a single blanket decision to the interrupt's action_request count.
-
-    The sub-agent's HITL middleware enforces exactly one decision per pending call and
-    raises ``ValueError`` on a mismatch. When the orchestrator/client forwarded a single
-    blanket approve/reject for N parallel calls, replicate it to N so the sub-agent does
-    not raise. This is the backstop the removed inline blocks provided: it covers the
-    ordinary ``ConditionalHumanInTheLoopMiddleware`` path, which (unlike the PTC
-    ``eval`` path's ``awrap_tool_call``) has no replication of its own. Per-call decision
-    lists (``len != 1`` — already aligned, possibly by id) pass through unchanged.
-    """
-    if not isinstance(payload, dict) or not isinstance(interrupt_value, dict):
-        return payload
-    decisions = payload.get("decisions")
-    if not isinstance(decisions, list) or len(decisions) != 1:
-        return payload
-    n = len(interrupt_value.get("action_requests", []))
-    if n > 1:
-        return {**payload, "decisions": decisions * n}
-    return payload
-
-
-# Sentinel: the answer in hand belongs to a question the sub-agent has already
-# moved past, so it must not be delivered at all. Resuming a local sub-agent with
-# an EMPTY id-keyed map runs it forward without answering anything, so its pending
-# interrupt raises again and reaches the ``except GraphInterrupt`` handler below,
-# which asks the orchestrator for the answer that was actually written for it.
-_ANSWER_NOTHING = object()
-
-
-def _align_answer_to_interrupt(answer: Any, interrupt_value: Any) -> Any:
-    """Fit the user's answer to the question the sub-agent is actually paused on.
-
-    The orchestrator hands each ``interrupt()`` answer to whatever the sub-agent is
-    parked on at that moment, and the two can be different questions: declining an
-    authorization makes the sub-agent re-run the blocked tool, whose risk guard
-    raises a fresh *approval* interrupt — and the decline, written for the auth
-    prompt, was delivered to that one. It reached ``interrupt(...)["decisions"]``
-    and killed the sub-agent with ``KeyError('decisions')``.
-
-    So the answer is translated into the shape the pending question reads, and
-    only where the translation is honest:
-
-    - auth answer -> approval prompt: a decline becomes an explicit **rejection**
-      carrying the reason (skipping the authorization is not approving the call);
-    - approval answer -> auth prompt: a rejection becomes an explicit *declined*
-      authorization ("don't run it" and "don't authorize" are the same no);
-    - an *approval* has no honest reading as an authorization — the user was never
-      asked that — so it is not delivered at all (``_ANSWER_NOTHING``);
-    - words are forwarded untouched: both readers classify them (see
-      ``agent_common.core.hitl_resume``).
-    """
-    kind = interrupt_kind(interrupt_value)
-    if kind == KIND_HITL and isinstance(answer, dict) and not isinstance(answer.get("decisions"), list):
-        action_requests = interrupt_value.get("action_requests") or []
-        decisions = structural_decisions(answer, action_requests)
-        if decisions is not None:
-            logger.info("[HITL] Translated an authorization answer into %d explicit decision(s)", len(decisions))
-            return {"decisions": decisions}
-        message = (answer.get("authorization") or {}).get("message")
-        return message if isinstance(message, str) and message.strip() else answer
-    if kind == KIND_AUTH and isinstance(answer, dict) and not isinstance(answer.get("authorization"), dict):
-        authorization = authorization_from_decisions(answer.get("decisions"))
-        if authorization is not None:
-            logger.info("[HITL] Translated a rejection into a declined authorization")
-            return {"authorization": authorization}
-        logger.info("[HITL] Answer in hand was written for another interrupt — resuming without answering")
-        return _ANSWER_NOTHING
-    return answer
-
-
-def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decisions: Any) -> Command:
-    """Build the ``Command(resume=...)`` used to resume a sub-agent after HITL approval.
-
-    For *local* in-process sub-agents (``LocalA2ARunnable`` — including
-    ``DynamicLocalAgentRunnable``) the resume is replayed against the sub-agent's own
-    LangGraph checkpoint, so it must be an interrupt-id-keyed map: LangGraph >=1.2 raises
-    ``RuntimeError`` on a bare ``Command(resume=value)`` whenever the sub-agent has more
-    than one pending interrupt (e.g. nested parallel ``task`` calls). ``interrupt_obj.id``
-    is the xxh3 namespace hash LangGraph matches the map against
-    (``types.Interrupt.from_ns`` <-> ``pregel/_algo._scratchpad``). A single blanket
-    decision is replicated to the interrupt's action_request count here (see
-    ``_replicate_blanket_decision``) so the sub-agent's HITL middleware sees the 1:1
-    count it requires — the orchestrator usually pre-replicates, but this keeps the local
-    path self-sufficient for non-PTC sub-agents that have no ``awrap_tool_call`` backstop.
-
-    For *remote* A2A sub-agents the ``Command`` never reaches the remote as-is — the
-    remote executor rebuilds its own resume from the A2A DataPart using its own namespace,
-    replicating there — so the plain-payload form is kept unchanged.
-
-    Not every interrupt this forwards is a HITL one. An ``auth-required`` interrupt
-    raised inside a sub-agent resumes with the user's own words (a plain string)
-    when the client sent no structured decision, and those words must survive the
-    trip: they are what the sub-agent's auth middleware reads to tell a "done,
-    try again" from a refusal.
-
-    Nor is the answer necessarily an answer to the question the sub-agent is parked
-    on — see ``_align_answer_to_interrupt``, which fits the two together (or holds
-    the answer back) instead of forwarding a payload the far end cannot read.
-    """
-    intr_id = getattr(interrupt_obj, "id", None)
-    intr_value = getattr(interrupt_obj, "value", interrupt_obj)
-    if intr_id is None and isinstance(interrupt_obj, dict):
-        intr_id = interrupt_obj.get("id")
-
-    # An authorization answer the orchestrator is holding beats whatever this
-    # ``interrupt()`` returned. On a replay the returned value is the answer to an
-    # ALREADY SETTLED question (a tool approval), while the user's "no" is queued
-    # for a second ``interrupt()`` that fires only if the sub-agent asks again —
-    # and it asks only when the tool fails again. Once the user has completed the
-    # login the tool SUCCEEDS, so that second question never comes and the refusal
-    # is never delivered: the call goes through despite an explicit no.
-    if interrupt_kind(intr_value) == KIND_AUTH:
-        held = pending_authorization_answer()
-        if held is not None:
-            logger.info("[HITL] Delivering the authorization answer the orchestrator holds")
-            user_decisions = held
-
-    if user_decisions is None:
-        payload: Any = {}
-    else:
-        # Whatever the user said travels as-is, structured or not. The blanket `{}`
-        # this used to fall back to for anything non-dict dropped their reply on the
-        # floor: the sub-agent then resumed with nothing to act on and fell through
-        # with the stale auth error. Words are what BOTH readers need — the auth
-        # middleware to tell "ok, done" from "no, too wide", and the HITL reader to
-        # classify a typed answer instead of a click (agent_common.core.hitl_resume).
-        payload = user_decisions
-    aligned = _align_answer_to_interrupt(payload, intr_value)
-    if aligned is _ANSWER_NOTHING:
-        if isinstance(runnable, LocalA2ARunnable):
-            # Empty id-keyed map: run forward, answer nothing, let the sub-agent's
-            # pending interrupt raise again so the right question gets asked.
-            return Command(resume={})
-        # Remote A2A: the remote executor rebuilds its own resume from the DataPart
-        # and has the same alignment logic on its side of the wire.
-        aligned = payload
-    payload = aligned
-
-    if isinstance(runnable, LocalA2ARunnable):
-        payload = _replicate_blanket_decision(payload, intr_value)
-        if intr_id:
-            return Command(resume={intr_id: payload})
-    return Command(resume=payload)
-
-
-# ── One live task per sub-agent ──────────────────────────────────────────────
+# ── Every delegation is an A2A task ──────────────────────────────────────────
 #
-# A sub-agent's memory IS its LangGraph checkpoint, and that checkpoint is
-# addressed by conversation and agent name alone (``_effective_thread_id``
-# below, mirroring ``dynamic_agent.get_thread_id``). Two ``task`` calls to the
-# SAME agent in one assistant message therefore run on ONE thread: their writes
-# interleave, the last writer wins, and the loser's messages are gone. Seen in
-# the wild as a "who am I on GitHub" delegation resuming with the
-# campaign-listing delegation's state and answering about campaigns — the GitHub
-# tool was never called a second time, and the authorization it was parked on
-# went unanswered.
+# A ``task`` tool call opens exactly one A2A task on the sub-agent, and the task
+# is named after the call. A2A servers normally mint task ids; the orchestrator
+# proposes this one (``SubAgentInput.proposed_task_id``) because a delegation is
+# a LangGraph tool call, and LangGraph replays that call byte-identical when the
+# orchestrator resumes from an interrupt. If the first attempt parked the
+# sub-agent on a question — a tool approval, an in-task authorization — the
+# replay must find THAT task and deliver the user's answer to it, not open a
+# second task and run the work twice. Deterministic id + ``tasks/get`` is what
+# replaced probing the sub-agent's checkpoint for pending interrupts.
 #
-# Giving the two calls separate threads is NOT enough to make the pair safe,
-# because nothing downstream can address one of two parked tasks:
-#
-# - the answer a client sends back for an authorization carries a verdict and no
-#   interrupt id (``client-slack/src/utils/inTaskAuth.ts::authorizationDataPart``),
-#   so a single "Done, continue" answers BOTH pending prompts — including one
-#   whose card the user never saw;
-# - a later turn cannot name which parked task it is continuing: the ``task``
-#   tool's argument schema belongs to deepagents (``TaskToolSchema``:
-#   description, subagent_type) and has no slot for one.
-#
-# Both would take a contract change — in every client, and in a library we do
-# not own. Allowing one live task per agent removes the need for either: there
-# is never a second candidate to address. Different agents still run in
-# parallel, which is where nearly all of the value of parallel delegation is.
-#
-# The model is told this up front too (``_ONE_TASK_PER_AGENT_GUIDANCE``), so it
-# folds same-agent work into one task itself; this refusal is the backstop.
-CONCURRENT_SAME_AGENT_MESSAGE = (
-    "Not executed: '{agent}' is already working on another task from this message, and it "
-    "takes one task at a time.\n"
-    "This work still needs doing — carry it out, do not abandon it: wait for the running "
-    "task's result, then delegate this as a single follow-up task to '{agent}'. Do not "
-    "re-issue it as a parallel call. Choose that yourself and get on with it: do not ask "
-    "the user how to proceed, and do not describe this constraint to them — it is "
-    "plumbing, not something they can act on. '{agent}' is available and working; it is "
-    "not missing, broken or unavailable."
-)
+# Continuity is still ``a2a_tracking``'s call: a live ``task_id`` recorded there
+# means the message CONTINUES that task (the agent asked the user something and
+# this is the reply); the proposal only applies to a message that opens a task.
+_DELEGATION_TASK_NAMESPACE = uuid.UUID("6f1c9d4e-2b7a-4c1e-9a3d-5e8f7b6c4d21")
+
+#: How many times one delegation may pause and be answered within a single tool
+#: call (approve → the tool needs authorization → approve again …) before the
+#: dispatch stops asking and hands the model the parked state instead.
+MAX_SUBAGENT_RESUME_ROUNDS = 5
 
 
-#: Stand-in for the owner's id in the log line when the owning call carries none.
-_UNIDENTIFIED_OWNER = "<no id>"
+def delegation_task_id(conversation_id: str | None, tool_call_id: str) -> str:
+    """The A2A task id of the delegation ``tool_call_id`` makes in ``conversation_id``.
 
-
-def surplus_same_agent_call(state: Any, tool_call: Any, known_agents: Any = ()) -> str | None:
-    """The id of the call that owns the agent, when this ``task`` call must be refused.
-
-    ``None`` means this call may run: it is the only one for its agent in the
-    message that issued it, it is the one that owns the agent, or the agent is
-    not one whose thread we own (see ``known_agents``).
-
-    The verdict reads *only* the assistant message that issued the call, which
-    LangGraph replays byte-identical on a resume, so the sibling that won the
-    first attempt wins the replay too — a refusal cannot flip into a second
-    execution half way through a turn, nor an execution into a refusal.
-
-    Args:
-        state: the graph state; only ``messages`` is read.
-        tool_call: the ``task`` call being judged.
-        known_agents: names whose checkpoint thread this middleware owns — the
-            ``subagent_registry``. A name outside it is left alone: dispatch
-            falls through to ``SubAgentMiddleware``, which runs its sub-agent
-            inline against the parent's config with no
-            ``{conversation}::{agent}`` thread of its own, so there is no shared
-            memory to corrupt; and an unknown/typo'd name must reach deepagents'
-            own "does not exist, the only allowed types are […]" answer rather
-            than be told an agent that does not exist is busy.
-
-    Ownership is decided by *position* among the siblings, not by comparing ids:
-    ``ToolCall["id"]`` is optional, and comparing a possibly-``None`` owner id
-    against this call's would return "allowed" for every sibling — disabling the
-    guard precisely when history is malformed. An id-less owner still owns.
+    Stable across a LangGraph replay of the same tool call (the assistant message
+    that issued it is replayed unchanged), unique across conversations even when
+    a provider reuses tool-call ids.
     """
-    call_id = tool_call.get("id")
-    subagent_type = (tool_call.get("args") or {}).get("subagent_type")
-    if not call_id or not subagent_type:
-        # Nothing to correlate against the issuing message; dispatch reports its
-        # own errors for a call this malformed.
-        return None
-    if subagent_type not in (known_agents or ()):
-        return None
-
-    try:
-        messages = state["messages"] or []
-    except (TypeError, KeyError, IndexError):
-        # The guard is the only thing standing between a same-agent pair and a
-        # corrupted checkpoint, so a state shape it cannot read must be loud.
-        logger.warning(
-            "[DISPATCH] Cannot read messages from state (%s); concurrency guard inactive for this call",
-            type(state).__name__,
-        )
-        return None
-
-    for message in reversed(messages):
-        calls = getattr(message, "tool_calls", None) or []
-        siblings = [
-            c
-            for c in calls
-            if isinstance(c, dict)
-            and c.get("name") == "task"
-            and (c.get("args") or {}).get("subagent_type") == subagent_type
-        ]
-        position = next((i for i, c in enumerate(siblings) if c.get("id") == call_id), None)
-        if position is None:
-            continue
-        if len(siblings) < 2 or position == 0:
-            return None
-        return str(siblings[0].get("id") or _UNIDENTIFIED_OWNER)
-    return None
-
-
-def _seal_dangling_tool_calls(messages: list[Any]) -> list[Any]:
-    """Answer AI tool calls that never got a ToolMessage with a synthetic one.
-
-    A scheduled run that died mid-tool (exception, timeout, pod restart)
-    commits its last checkpoint right after the model emitted tool_calls —
-    the tool results never landed. Forking that state and then appending the
-    user's next message would send ``tool_use`` with no ``tool_result``,
-    which providers reject outright. Sealing the gap with an explicit
-    "never completed" result keeps the history valid AND tells the model the
-    truth about what happened to those calls.
-    """
-    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
-    sealed = list(messages)
-    for msg in messages:
-        if not isinstance(msg, AIMessage):
-            continue
-        for tool_call in msg.tool_calls or []:
-            call_id = tool_call.get("id")
-            if call_id and call_id not in answered:
-                answered.add(call_id)
-                sealed.append(
-                    ToolMessage(
-                        content=(
-                            "(no result: the scheduled run ended before this tool call "
-                            "completed)"
-                        ),
-                        tool_call_id=call_id,
-                        status="error",
-                    )
-                )
-    return sealed
-
-
-async def _maybe_adopt_run_thread(
-    checkpointer: Any,
-    source_thread_id: str,
-    subagent_config: dict[str, Any],
-    subagent_type: str,
-) -> None:
-    """Fork a scheduled run's checkpoint into the sub-agent's conversation thread.
-
-    Copies the LATEST checkpoint of the run's thread (bare
-    ``thread_id = source_thread_id``, the convention agent-runner uses for
-    scheduled local/automated executions) onto the sub-agent's standard
-    conversation thread — only when that target thread has no checkpoint yet,
-    so the fork happens exactly once per conversation and later delegations
-    keep continuing the forked thread.
-
-    Scheduled-run graphs carry no HITL middleware (build_sub_agent_graph
-    attaches it only with hitl_guarded_tools/risk_scorer, which agent-runner
-    does not pass — scheduling is fail-open), so no pending interrupt can
-    exist on the source; pending_writes are deliberately not copied either,
-    which keeps that true even if agent-runner ever gains HITL. What a
-    FAILED run can leave behind is a trailing AIMessage with unanswered
-    tool_calls — those are sealed in the copy (never in the source) so the
-    forked history stays provider-valid.
-    """
-    target = await checkpointer.aget_tuple(subagent_config)
-    if target is not None:
-        return
-
-    source_config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
-    source = await checkpointer.aget_tuple(source_config)
-    if source is None:
-        logger.info(
-            "[ADOPT] No checkpoint found for run thread '%s' (unshared checkpoint store, "
-            "or the run predates contextId-keyed execution); '%s' starts blank",
-            source_thread_id,
-            subagent_type,
-        )
-        return
-
-    # Work on a copy of the containers we touch — aget_tuple may hand back
-    # references into the checkpointer's own store (MemorySaver does).
-    checkpoint = dict(source.checkpoint)
-    channel_values = dict(checkpoint.get("channel_values") or {})
-    messages = channel_values.get("messages")
-    if isinstance(messages, list) and messages:
-        sealed = _seal_dangling_tool_calls(messages)
-        if len(sealed) != len(messages):
-            logger.info(
-                "[ADOPT] Sealed %d unanswered tool call(s) from run thread '%s' "
-                "(the run ended mid-tool)",
-                len(sealed) - len(messages),
-                source_thread_id,
-            )
-            channel_values["messages"] = sealed
-    checkpoint["channel_values"] = channel_values
-
-    target_config = {
-        "configurable": {
-            "thread_id": subagent_config["configurable"]["thread_id"],
-            "checkpoint_ns": "",
-        }
-    }
-    # aget_tuple returns the checkpoint with channel_values deserialized;
-    # aput re-serializes every channel named in new_versions onto the new
-    # thread, giving a complete, independent copy of the run's state.
-    await checkpointer.aput(
-        target_config,
-        checkpoint,
-        source.metadata,
-        checkpoint.get("channel_versions") or {},
-    )
-    logger.info(
-        "[ADOPT] Forked run thread '%s' into '%s' for sub-agent '%s'",
-        source_thread_id,
-        target_config["configurable"]["thread_id"],
-        subagent_type,
-    )
+    return str(uuid.uuid5(_DELEGATION_TASK_NAMESPACE, f"{conversation_id or ''}:{tool_call_id}"))
 
 
 def _unresolved_tool_content(
@@ -845,50 +501,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         self.agent_settings = agent_settings
         self.cost_logger = cost_logger
 
-    def _concurrent_same_agent_refusal(self, request: ToolCallRequest) -> ToolMessage | None:
-        """The refusal for this ``task`` call, or ``None`` when it may run.
-
-        Verdict and refusal live together here so a future ``task`` entry point
-        cannot consult one without emitting the other — the failure mode of the
-        pair being duplicated at each call site.
-        """
-        tool_call = request.tool_call
-        user_context = request.runtime.context
-        registry = getattr(user_context, "subagent_registry", None) or {}
-        owner_call_id = surplus_same_agent_call(request.runtime.state, tool_call, registry)
-        if not owner_call_id:
-            return None
-        return self._refuse_concurrent_same_agent(tool_call, owner_call_id)
-
-    @staticmethod
-    def _refuse_concurrent_same_agent(tool_call: Any, owner_call_id: str) -> ToolMessage:
-        """The refusal for a second concurrent ``task`` call to one sub-agent.
-
-        Deliberately NOT ``status="error"``: this is a policy decision, not a
-        failure, and an error status would earn it an ``[ERROR_TYPE: ...]`` prefix
-        telling the model to consider a bug report (see ``_classify_error_message``
-        and ``_BUG_REPORT_TOOL_GUIDANCE``) for something working exactly as designed.
-
-        Tagged with ``CONCURRENT_TASK_REFUSAL_KEY`` because it is otherwise
-        indistinguishable from a delegation result: it is a ``task`` ToolMessage,
-        and it lands *after* the owner's (siblings are written in ``tool_calls``
-        order), so every consumer that reads "the latest ``task`` result" would
-        read this instead of the real answer.
-        """
-        subagent_type = (tool_call.get("args") or {}).get("subagent_type", "")
-        logger.info(
-            "[DISPATCH] Refusing concurrent task for '%s' (call %s); owned by call %s",
-            subagent_type,
-            str(tool_call.get("id"))[:8],
-            owner_call_id[:8],
-        )
-        return ToolMessage(
-            content=CONCURRENT_SAME_AGENT_MESSAGE.format(agent=subagent_type),
-            name="task",
-            tool_call_id=tool_call["id"],
-            additional_kwargs={CONCURRENT_TASK_REFUSAL_KEY: True},
-        )
-
     @staticmethod
     def _classify_error_message(msg: ToolMessage) -> ToolMessage:
         """Apply error classification to a ToolMessage.
@@ -963,27 +575,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
     # via TASK_TOOL_DESCRIPTION.  Used to locate the agent list inside the tool
     # description and replace it with the full registry.
     _TOOL_DESC_AGENT_MARKER = "Available agent types and the tools they have access to:\n"
-
-    # Appended to the task tool description, countering deepagents' own usage
-    # note 1 ("Launch multiple agents concurrently whenever possible") for the
-    # one case it does not survive. Guidance, not schema: the description is a
-    # string we may rewrite freely, while ``TaskToolSchema`` belongs to
-    # deepagents and ``atask``'s signature would reject an extra argument.
-    # Enforcement is ``surplus_same_agent_call`` — this is what keeps the model
-    # from walking into it.
-    _ONE_TASK_PER_AGENT_GUIDANCE = (
-        "\n\n## One task per sub-agent at a time\n"
-        "Running sub-agents concurrently is encouraged, but they must be DIFFERENT "
-        "agents. Never issue two `task` calls with the same `subagent_type` in one "
-        "message — the second is refused and its work is dropped.\n"
-        "When the work needs one agent twice, handle it yourself, silently: give that "
-        "agent ONE task covering all of it (a sub-agent can use many tools within a "
-        "single task), or do the parts in sequence, delegating the next only after the "
-        "previous returns. Pick whichever fits and proceed — do NOT ask the user which "
-        "they would prefer, do NOT explain this rule or any other platform internals to "
-        "them, and never present the work as impossible. It is not impossible; it is one "
-        "task, or two in a row."
-    )
 
     _BUG_REPORT_TOOL_GUIDANCE = (
         "\n\n## Error Handling & Bug Reporting\n"
@@ -1085,32 +676,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         return SystemMessage(content_blocks=new_blocks)
 
-    def _append_one_task_per_agent_guidance(self, task_tool_dict: dict[str, Any]) -> dict[str, Any]:
-        """Append the one-task-per-agent rule to the task tool description, once.
-
-        Appended even to an empty description: ``surplus_same_agent_call`` refuses
-        at runtime either way, and a model refused for a rule it was never told
-        is the one outcome worth avoiding. A tool dict with no ``function`` at all
-        has nowhere to put it, and says so.
-        """
-        function_dict = task_tool_dict.get("function")
-        if not isinstance(function_dict, dict):
-            logger.warning(
-                "DynamicToolDispatchMiddleware: task tool dict has no 'function' entry; "
-                "the one-task-per-agent rule is enforced but not announced to the model"
-            )
-            return task_tool_dict
-        description = function_dict.get("description") or ""
-        if self._ONE_TASK_PER_AGENT_GUIDANCE in description:
-            return task_tool_dict
-        return {
-            **task_tool_dict,
-            "function": {
-                **function_dict,
-                "description": description + self._ONE_TASK_PER_AGENT_GUIDANCE,
-            },
-        }
-
     def _enhance_task_tool_schema(
         self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
     ) -> dict[str, Any]:
@@ -1128,10 +693,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         Returns:
             Enhanced task tool dict with all subagents in description and enum.
         """
-        # Before the registry check: the one-task-per-agent rule holds for the
-        # built-in agents too, which are all there is when the registry is empty.
-        task_tool_dict = self._append_one_task_per_agent_guidance(task_tool_dict)
-
         if not user_context.subagent_registry:
             return task_tool_dict
 
@@ -1409,67 +970,86 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         return self.static_tools.get(tool_name)
 
     def _extract_subagent_response(self, event: StreamEvent, subagent_type: str) -> tuple[str, dict[str, Any] | None]:
-        """Extract content and A2A metadata from a subagent StreamEvent.
+        """The text and A2A metadata of a sub-agent's final ``StreamEvent``.
 
-        Takes the subagent's final message (last in messages list) and extracts:
-        - The actual response content
-        - A2A metadata if present (context_id, task_id, etc.)
-
-        Args:
-            event: The StreamEvent from subagent invocation
-            subagent_type: Name of the subagent (for logging)
-
-        Returns:
-            Tuple of (content string, a2a_metadata dict or None)
+        The result is typed (``TaskResponseData``): the task's own ids and state,
+        plus whatever the server put in ``metadata``. Only the final message's
+        text reaches the model — a sub-agent may have had many internal turns, and
+        thinking blocks in list content are dropped.
         """
         if isinstance(event, ErrorEvent):
             return f"Error: {event.error}", None
-
         if not isinstance(event, TaskUpdate):
             return str(event), None
 
         data = event.data
         content = ""
-        a2a_metadata = None
-
-        if isinstance(data, TaskResponseData) and data.messages:
-            messages = data.messages
-            # Take only the last message - this is the subagent's final synthesized response.
-            # The subagent may have had multiple internal turns (tool calls, reasoning),
-            # but we only return the final answer to keep the orchestrator's context clean.
-            raw_content = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
-
-            # Handle list content (e.g., models with extended thinking return
-            # [{'type': 'thinking', ...}, {'type': 'text', ...}])
-            # Extract only text parts, filtering out thinking/reasoning blocks.
+        if data.messages:
+            raw_content = data.messages[-1].content
             if isinstance(raw_content, list):
-                text_parts = []
-                for block in raw_content:
-                    if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
-                        text_parts.append(block["text"])
+                text_parts = [b["text"] for b in raw_content if isinstance(b, dict) and b.get("type") == "text" and "text" in b]
                 content = "\n\n".join(text_parts) if text_parts else str(raw_content)
-            # Try to parse JSON-wrapped A2A metadata from content
-            # Format: {"content": "...", "a2a": {...}}
-            elif isinstance(raw_content, str):
-                try:
-                    content_dict = json.loads(raw_content)
-                    if isinstance(content_dict, dict) and "content" in content_dict and "a2a" in content_dict:
-                        content = content_dict["content"]
-                        a2a_metadata = content_dict["a2a"]
-                        logger.debug(
-                            f"DynamicToolDispatchMiddleware: Extracted A2A metadata for {subagent_type}: "
-                            f"context_id={a2a_metadata.get('context_id')}, task_id={a2a_metadata.get('task_id')}"
-                        )
-                    else:
-                        content = raw_content
-                except json.JSONDecodeError:
-                    content = raw_content
             else:
-                content = str(raw_content)
-        else:
-            content = str(data)
+                content = raw_content if isinstance(raw_content, str) else str(raw_content)
 
+        a2a_metadata: dict[str, Any] = {
+            "task_id": data.task_id or None,
+            "context_id": data.context_id or None,
+            "is_complete": data.is_complete,
+            "requires_input": data.requires_input,
+            "requires_auth": data.requires_auth,
+            "state": TaskState.Name(data.state) if data.state else None,
+        }
+        # The server's own metadata rides along (auth details, session handles…);
+        # the raw interrupts are dispatch plumbing and stay out of the model's record.
+        a2a_metadata.update({k: v for k, v in data.metadata.items() if k != INTERRUPTS_METADATA_KEY})
+        a2a_metadata = {k: v for k, v in a2a_metadata.items() if v is not None}
+        logger.debug(
+            f"DynamicToolDispatchMiddleware: {subagent_type} result: "
+            f"context_id={a2a_metadata.get('context_id')}, task_id={a2a_metadata.get('task_id')}, "
+            f"state={a2a_metadata.get('state')}"
+        )
         return content, a2a_metadata
+
+    @staticmethod
+    def _answer_input(
+        runnable: Any,
+        subagent_state: dict[str, Any],
+        answer: Any,
+        interrupt_value: Any,
+        context_id: str | None,
+        task_id: str,
+    ) -> dict[str, Any]:
+        """The input that delivers the user's answer to a sub-agent's paused task.
+
+        The answer travels as a message to the task (a ``decisions`` /
+        ``authorization`` DataPart, or the user's own words as text); the
+        sub-agent's server fits it to the interrupt it is parked on and builds the
+        ``Command(resume)`` itself. ``a2a_tracking`` is stamped with the task so the
+        message continues it rather than opening another.
+
+        An authorization answer the orchestrator is holding beats whatever
+        ``interrupt()`` returned. On a replay the returned value is the answer to an
+        ALREADY SETTLED question (a tool approval), while the user's "no" is queued
+        for a second ``interrupt()`` that fires only if the sub-agent asks again —
+        and it asks only when the tool fails again. Once the user has completed the
+        login the tool SUCCEEDS, so that second question never comes and the
+        refusal is never delivered: the call goes through despite an explicit no.
+        """
+        if interrupt_kind(interrupt_value) == KIND_AUTH:
+            held = pending_authorization_answer()
+            if held is not None:
+                logger.info("[HITL] Delivering the authorization answer the orchestrator holds")
+                answer = held
+        tracking = {k: dict(v) for k, v in (subagent_state.get("a2a_tracking") or {}).items() if isinstance(v, dict)}
+        record = tracking.setdefault(runnable.tracking_key, {})
+        record.update({"context_id": context_id, "task_id": task_id, "is_complete": False})
+        return {
+            **subagent_state,
+            "messages": [answer_to_human_message(answer)],
+            "a2a_tracking": tracking,
+            "proposed_task_id": None,
+        }
 
     def _build_subagent_command(
         self,
@@ -1515,7 +1095,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         data = event.data if isinstance(event, TaskUpdate) else TaskResponseData()
         dump = data.model_dump(mode="json", exclude={"messages", "type", "metadata"})
         # Flatten metadata into state update so auth fields etc. propagate
-        meta = data.metadata if hasattr(data, "metadata") else {}
+        meta = {k: v for k, v in (data.metadata or {}).items() if k != INTERRUPTS_METADATA_KEY}
         state_update = {k: v for k, v in {**dump, **meta}.items() if k not in excluded_keys}
 
         # Note: Sub-agent output content is already stored in the ToolMessage above.
@@ -2029,7 +1609,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         @traceable(name=f"task:{subagent_type}", run_type="tool")
         def invoke_a2a_agent(agent_state: dict) -> StreamEvent:
             """Invoke A2A agent with tracing for LangSmith visibility."""
-            return runnable.invoke(agent_state)
+            return runnable.invoke(agent_state, config if isinstance(config, dict) else None)
 
         try:
             # Invoke the subagent runnable with tracing
@@ -2158,149 +1738,67 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         subagent_state["orchestrator_conversation_id"] = orchestrator_conversation_id
 
-        # Prepare complete config for sub-agent with correct user_id/assistant_id for namespace consistency
-        # Extract values from user context and parent config
+        # Complete config for the sub-agent: user/assistant ids for namespace
+        # consistency, the orchestrator's checkpointer (without __pregel_checkpointer
+        # LangGraph treats checkpoint_ns as a subgraph identifier), and the
+        # conversation as the thread. The runnable derives its own checkpoint thread
+        # from the A2A context (``local_sub_agent_thread_id``) when it instruments
+        # the run — nothing here needs to spell it.
         user_id = user_context.user_id
         user_sub = user_context.user_sub
         assistant_id = config.get("metadata", {}).get("assistant_id") if isinstance(config, dict) else None
-
-        # Extract checkpointer from parent config to prevent LangGraph from misinterpreting checkpoint_ns as subgraph
-        # CRITICAL: Without __pregel_checkpointer, LangGraph treats checkpoint_ns as a subgraph identifier
         checkpointer = config.get("configurable", {}).get("__pregel_checkpointer") if isinstance(config, dict) else None
-
-        # Create complete RunnableConfig for sub-agent using SDK utility
-        # This ensures FilesystemMiddleware uses consistent (user_id, "filesystem") namespace
-        # CRITICAL: checkpoint_ns must be "" for standalone graphs. Sub-agent graphs
-        # are standalone (not subgraphs), so LangGraph writes checkpoints at the root
-        # namespace. A non-empty checkpoint_ns causes get_state() to look in the wrong
-        # namespace. Thread isolation is provided by unique thread_id instead.
-        # Build the canonical thread_id that the sub-agent will actually use for its
-        # checkpoint.  DynamicLocalAgentRunnable.get_thread_id() produces a "dynamic-{name}"
-        # pattern, so we must use that same key everywhere (config AND checkpoint lookup).
-        # This avoids thread_id mismatches on the HITL resume path where _instrument() is
-        # skipped and the config thread_id passes through unchanged.
-        _effective_thread_id = f"{orchestrator_conversation_id or 'unknown'}::{subagent_type}"
-        if isinstance(runnable, DynamicLocalAgentRunnable):
-            _effective_thread_id = f"{orchestrator_conversation_id or 'unknown'}::dynamic-{subagent_type}"
 
         subagent_config = create_runnable_config(
             user_sub=user_sub,
-            conversation_id=orchestrator_conversation_id or "unknown",  # Fallback to "unknown" if not available
+            conversation_id=orchestrator_conversation_id or "unknown",
             user_id=user_id,
-            assistant_id=assistant_id or user_id,  # Fallback to user_id if not in parent config
-            thread_id=_effective_thread_id,  # Use canonical thread_id matching sub-agent's get_thread_id()
-            checkpoint_ns="",  # Empty for standalone graph — thread_id provides isolation
-            checkpointer=checkpointer,  # Required to prevent checkpoint_ns being treated as subgraph
+            assistant_id=assistant_id or user_id,
+            thread_id=orchestrator_conversation_id or "unknown",
+            checkpoint_ns="",  # Standalone graph — the sub-agent's thread_id provides isolation
+            checkpointer=checkpointer,
         )
 
-        # Inject group_ids and effective_permission into metadata for playbook tool scope resolution.
-        # group_ids comes from the orchestrator's runtime context (user's group memberships).
-        # effective_permission comes from the sub-agent config (computed at discovery time).
+        # group_ids and effective_permission feed playbook tool scope resolution.
         subagent_config["metadata"]["group_ids"] = user_context.groups if user_context.groups else []
         if isinstance(runnable, DynamicLocalAgentRunnable) and hasattr(runnable, "config"):
             subagent_config["metadata"]["effective_permission"] = runnable.config.effective_permission
 
-        # NOTE: Do NOT propagate __pregel_task_id to sub-agent config.
-        # Setting it makes the sub-agent's Pregel set is_nested=True, which
-        # propagates GraphInterrupt as an exception.  However, is_nested is
-        # designed for *actual* parent-managed subgraphs — standalone graphs
-        # called externally cannot resume via Command(resume=...) when
-        # is_nested=True because the parent Pregel never replays their task.
-        # Instead, we keep is_nested=False (the default) and rely on a
-        # post-stream check in dynamic_agent._astream_impl to detect
-        # suppressed interrupts and re-raise GraphInterrupt.
+        # NOTE: Do NOT propagate __pregel_task_id to sub-agent config. Setting it
+        # makes the sub-agent's Pregel set is_nested=True, which propagates
+        # GraphInterrupt as an exception instead of parking the graph; the
+        # sub-agent runs as a standalone root and its in-process server reports the
+        # pause as the task's input_required / auth_required state.
 
-        # Cross-service conversation adoption (fork-on-adopt): a server-
-        # validated scheduled_run origin left an adoption record for this
-        # sub-agent (agent.py::_build_adoption_seed). The run's conversation
-        # checkpoint lives at bare thread_id = run contextId in the SHARED
-        # checkpoint tables (agent-runner and the orchestrator point at the
-        # same Postgres schema and both graphs come from build_sub_agent_graph),
-        # so copy its latest checkpoint into this conversation's own thread the
-        # first time the agent is delegated. Fork, not re-point: the run's
-        # thread stays an untouched record, execution stays on the standard
-        # thread the HITL probe below already targets (no probe/execution
-        # desync possible), and parallel conversations adopting the same run
-        # do not share mutable state. Absent source (unshared DB, expired
-        # data) degrades to a blank start.
-        if isinstance(runnable, DynamicLocalAgentRunnable) and checkpointer is not None:
-            _adopt_record = (subagent_state.get("a2a_tracking") or {}).get(
-                getattr(runnable, "tracking_key", ""), {}
-            ) or {}
-            _adopt_source = _adopt_record.get("adopt_thread_from")
-            if _adopt_source and isinstance(_adopt_source, str):
-                try:
-                    await _maybe_adopt_run_thread(checkpointer, _adopt_source, subagent_config, subagent_type)
-                except Exception:
-                    logger.warning(
-                        "[ADOPT] Fork of run thread '%s' for '%s' failed; delegating on a blank thread",
-                        _adopt_source,
-                        subagent_type,
-                        exc_info=True,
-                    )
-
-        # Check if the sub-agent has a pending HITL interrupt in its checkpoint from a previous invocation.
-        # This happens when: sub-agent interrupted → orchestrator surfaced it → user approved → orchestrator
-        # re-delegated. We must resume the sub-agent with the user's decisions, not start fresh.
-        #
-        # We query the checkpointer directly because _agent is lazily initialised (always None
-        # on the first call to a new runnable instance — runnables are recreated per request).
-        subagent_input: dict | Command = subagent_state
-        _checkpointer = subagent_config["configurable"].get("__pregel_checkpointer")
-        logger.info(
-            "[HITL] Pre-call checkpoint check for '%s': checkpointer=%s, thread_id=%s",
-            subagent_type,
-            _checkpointer is not None,
-            subagent_config["configurable"].get("thread_id", "?"),
-        )
-        if _checkpointer is not None:
-            try:
-                checkpoint_tuple = await _checkpointer.aget_tuple(subagent_config)
+        # Every delegation is its own A2A task, named after this tool call (see
+        # ``delegation_task_id``). For a local sub-agent the task store is the
+        # replay detector: if this call already opened a task that is parked on a
+        # question, the orchestrator interrupted on it and is replaying the call
+        # now with the user's answer — deliver the answer to that task.
+        task_id = delegation_task_id(orchestrator_conversation_id, tool_call_id)
+        subagent_state["proposed_task_id"] = task_id
+        subagent_input: dict[str, Any] = subagent_state
+        if isinstance(runnable, LocalA2ARunnable):
+            parked = await runnable.aget_task(task_id)
+            if parked is not None and parked.status.state not in INTERVENTION_STATES:
+                # The id already names a finished task (a provider reusing tool-call
+                # ids): let the server mint one instead of colliding with it.
+                logger.info("[DISPATCH] Task id %s is already taken; opening an unnamed task", task_id[:8])
+                subagent_state["proposed_task_id"] = None
+            elif parked is not None:
+                value = interrupt_value_from_status(parked.status)
                 logger.info(
-                    "[HITL] Pre-call checkpoint result for '%s': found=%s, pending_writes=%d",
+                    "[HITL] Delegation %s to '%s' is parked (%s); replaying with the user's answer",
+                    task_id[:8],
                     subagent_type,
-                    checkpoint_tuple is not None,
-                    len(checkpoint_tuple.pending_writes) if checkpoint_tuple and checkpoint_tuple.pending_writes else 0,
+                    TaskState.Name(parked.status.state),
                 )
-                if checkpoint_tuple and checkpoint_tuple.pending_writes:
-                    for _task_id, _channel, _pw_value in checkpoint_tuple.pending_writes:
-                        if _channel == "__interrupt__":
-                            # Extract interrupt value from pending writes.
-                            # _pw_value is a list of Interrupt objects (or dicts).
-                            if isinstance(_pw_value, (list, tuple)) and _pw_value:
-                                _int_obj = _pw_value[0]
-                                pending_interrupt_value = (
-                                    _int_obj.value
-                                    if hasattr(_int_obj, "value")
-                                    else (
-                                        _int_obj["value"]
-                                        if isinstance(_int_obj, dict) and "value" in _int_obj
-                                        else _int_obj
-                                    )
-                                )
-                            else:
-                                _int_obj = _pw_value
-                                pending_interrupt_value = _pw_value
-                            logger.info(
-                                f"[HITL] Sub-agent '{subagent_type}' has pending HITL interrupt "
-                                f"(via checkpointer) — surfacing to orchestrator via interrupt()"
-                            )
-                            # First invocation: interrupt() raises → orchestrator suspends → user sees HITL dialog.
-                            # Resume invocation: interrupt() RETURNS user decisions.
-                            user_decisions = interrupt(pending_interrupt_value)
-                            # ── Resumed after user approval ──────────────────────────────────────
-                            logger.info(f"[HITL] User responded to '{subagent_type}' HITL: {user_decisions}")
-                            # Resume the sub-agent. For local in-process sub-agents this is an
-                            # interrupt-id-keyed map (LangGraph >=1.2 multi-interrupt safety) with
-                            # a single blanket decision replicated to the action_request count;
-                            # remote A2A sub-agents keep the plain payload (the remote replicates).
-                            subagent_input = _build_subagent_resume_command(runnable, _int_obj, user_decisions)
-                            break
-            except GraphInterrupt:
-                # interrupt() raised — orchestrator will suspend; let it propagate
-                raise
-            except Exception as e:
-                logger.warning(f"[HITL] Could not check sub-agent checkpoint via checkpointer: {e}", exc_info=True)
+                # Replay: interrupt() RETURNS the user's answer here (the first
+                # attempt raised from the loop below and parked the orchestrator).
+                answer = interrupt(value)
+                subagent_input = self._answer_input(
+                    runnable, subagent_state, answer, value, parked.context_id or orchestrator_conversation_id, task_id
+                )
 
         # Use a traced function for proper LangSmith visibility
         @traceable(name=f"task:{subagent_type}", run_type="tool")
@@ -2494,64 +1992,94 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             set_active_subagent_dispatch(orchestrator_conversation_id, dispatch_info)
 
         try:
-            # All runnables (both local and remote) now support astream
-            final_result = None
-            final_content = None
-            final_a2a_metadata = None
+            final_result: TaskUpdate | None = None
             consumer_item_count = 0
+            resume_rounds = 0
+            current_input: dict[str, Any] = subagent_input
 
-            logger.info(f"[STREAMING] Consumer loop starting for {subagent_type}")
-            async for result in astream_a2a_agent(subagent_input, subagent_config):
-                consumer_item_count += 1
-                result_type = type(result).__name__
-                logger.info(f"[STREAMING] Consumer received item #{consumer_item_count}: {result_type}")
-
-                # Track different event types
-                if isinstance(result, TaskUpdate):
-                    logger.info("[STREAMING] Consumer got TaskUpdate, storing as final_result")
-                    final_result = result
-                    # Update dispatch info with sub-agent's context_id/task_id for steering forwarding
-                    if result.data and dispatch_info:
-                        dispatch_info.subagent_context_id = result.data.context_id
-                        dispatch_info.subagent_task_id = result.data.task_id
-                    # CRITICAL: Exit early on terminal state instead of waiting for all items
-                    # This allows artifacts (which are emitted via stream_writer) to flow through
-                    # the executor's stream incrementally instead of being buffered until now
-                    if result.data and result.data.state in TERMINAL_STATES:
-                        logger.info(
-                            f"[STREAMING] TaskUpdate reached terminal state {result.data.state}, breaking consumer loop early"
+            while True:
+                final_result = None
+                logger.info(f"[STREAMING] Consumer loop starting for {subagent_type}")
+                async for result in astream_a2a_agent(current_input, subagent_config):
+                    consumer_item_count += 1
+                    if isinstance(result, TaskUpdate):
+                        final_result = result
+                        # Update dispatch info with the sub-agent's context/task ids for steering forwarding
+                        if result.data and dispatch_info:
+                            dispatch_info.subagent_context_id = result.data.context_id
+                            dispatch_info.subagent_task_id = result.data.task_id
+                        # Exit early once the exchange is over (terminal state, or the
+                        # task is waiting for someone) instead of draining the stream.
+                        if result.data and (
+                            result.data.state in TERMINAL_STATES or result.data.state in INTERVENTION_STATES
+                        ):
+                            break
+                    elif isinstance(result, ErrorEvent):
+                        logger.error(f"[STREAMING] Consumer got ErrorEvent: {result.error}")
+                        return self._classify_error_message(
+                            ToolMessage(
+                                content=f"Error from subagent '{subagent_type}': {result.error}",
+                                name="task",
+                                tool_call_id=tool_call_id,
+                                status="error",
+                            )
                         )
-                        break
-                elif isinstance(result, ErrorEvent):
-                    # Return error immediately
-                    logger.error(f"[STREAMING] Consumer got ErrorEvent: {result.error}")
+
+                if final_result is None:
                     return self._classify_error_message(
                         ToolMessage(
-                            content=f"Error from subagent '{subagent_type}': {result.error}",
+                            content=f"No response received from subagent '{subagent_type}'",
                             name="task",
                             tool_call_id=tool_call_id,
                             status="error",
                         )
                     )
-                else:
-                    logger.debug(f"[STREAMING] Consumer ignoring event type: {result_type}")
+
+                # A local sub-agent parked on a LangGraph interrupt (tool approval,
+                # in-task authorization, client-action round trip) reports it as a
+                # task in input_required / auth_required with the raw interrupts in
+                # its metadata. That question is the USER's to answer, through the
+                # structured card, so the orchestrator interrupts on it — first pass
+                # raises and parks this turn; on the replay ``interrupt()`` returns
+                # the answer, which is delivered to the parked task as a message.
+                # A plain input_required (the agent asked the user in words, through
+                # its structured response) carries no interrupts and goes to the
+                # model like any other result.
+                data = final_result.data
+                interrupts = (data.metadata or {}).get(INTERRUPTS_METADATA_KEY) if data else None
+                if not (isinstance(runnable, LocalA2ARunnable) and data.state in INTERVENTION_STATES and interrupts):
+                    break
+                if resume_rounds >= MAX_SUBAGENT_RESUME_ROUNDS:
+                    logger.warning(
+                        "[HITL] Sub-agent '%s' paused %d times within one delegation; handing the parked state to the model",
+                        subagent_type,
+                        resume_rounds,
+                    )
+                    break
+                resume_rounds += 1
+                first = interrupts[0] if isinstance(interrupts[0], dict) else {}
+                value = first.get("value") if isinstance(first.get("value"), dict) else {}
+                logger.info(
+                    "[HITL] Sub-agent '%s' parked task %s on %d interrupt(s) — surfacing via interrupt()",
+                    subagent_type,
+                    (data.task_id or task_id)[:8],
+                    len(interrupts),
+                )
+                answer = interrupt(value)
+                logger.info(f"[HITL] User answered '{subagent_type}' (round {resume_rounds}): {answer}")
+                current_input = self._answer_input(
+                    runnable,
+                    subagent_state,
+                    answer,
+                    value,
+                    data.context_id or orchestrator_conversation_id,
+                    data.task_id or task_id,
+                )
 
             logger.info(
-                f"[STREAMING] Consumer loop complete after {consumer_item_count} items, final_result={final_result is not None}"
+                f"[STREAMING] Consumer loop complete after {consumer_item_count} items, "
+                f"state={TaskState.Name(final_result.data.state) if final_result.data else '?'}"
             )
-
-            # Build the final command from the last result
-            if final_result is None:
-                return self._classify_error_message(
-                    ToolMessage(
-                        content=f"No response received from subagent '{subagent_type}'",
-                        name="task",
-                        tool_call_id=tool_call_id,
-                        status="error",
-                    )
-                )
-
-            # Extract content and A2A metadata, then build Command
             final_content, final_a2a_metadata = self._extract_subagent_response(final_result, subagent_type)
             return self._build_subagent_command(
                 final_result,
@@ -2563,61 +2091,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 sub_agent_id=subagent.get("sub_agent_id"),
             )
 
-        except GraphInterrupt as gi:
-            # Sub-agent's _astream_impl detected a pending interrupt in its checkpoint
-            # after streaming and re-raised GraphInterrupt.  We must surface this to
-            # the orchestrator's Pregel by calling interrupt() from the orchestrator's
-            # tool node context — a bare re-raise would propagate the sub-agent's
-            # exception without registering the interrupt value in the orchestrator's
-            # checkpoint for proper resume handling.
-            logger.info(f"[HITL] Sub-agent '{subagent_type}' raised GraphInterrupt — surfacing via interrupt()")
-            sub_interrupts = gi.args[0] if gi.args else ()
-            sub_interrupt_value = sub_interrupts[0].value if sub_interrupts else {}
-            # First call: interrupt() raises → orchestrator suspends.
-            # Resume call: interrupt() returns user decisions.
-            user_decisions = interrupt(sub_interrupt_value)
-            # ── Resumed after user approval (via except handler) ─────────────────────
-            logger.info(f"[HITL] User responded to '{subagent_type}' HITL (resume): {user_decisions}")
-            # Resume the sub-agent: id-keyed map for local in-process sub-agents (LangGraph
-            # >=1.2 multi-interrupt safety) with a single blanket decision replicated to the
-            # action_request count; plain payload for remote A2A (the remote replicates).
-            _first_sub_interrupt = sub_interrupts[0] if sub_interrupts else None
-            resume_command = _build_subagent_resume_command(runnable, _first_sub_interrupt, user_decisions)
-            # Re-stream the sub-agent with the resume command
-            final_result = None
-            async for result in astream_a2a_agent(resume_command, subagent_config):
-                if isinstance(result, TaskUpdate):
-                    final_result = result
-                    if result.data and result.data.state in TERMINAL_STATES:
-                        break
-                elif isinstance(result, ErrorEvent):
-                    return self._classify_error_message(
-                        ToolMessage(
-                            content=f"Error resuming subagent '{subagent_type}': {result.error}",
-                            name="task",
-                            tool_call_id=tool_call_id,
-                            status="error",
-                        )
-                    )
-            if final_result is None:
-                return self._classify_error_message(
-                    ToolMessage(
-                        content=f"No response from subagent '{subagent_type}' after HITL resume",
-                        name="task",
-                        tool_call_id=tool_call_id,
-                        status="error",
-                    )
-                )
-            final_content, final_a2a_metadata = self._extract_subagent_response(final_result, subagent_type)
-            return self._build_subagent_command(
-                final_result,
-                final_content,
-                final_a2a_metadata,
-                tool_call_id,
-                excluded_keys,
-                subagent_name=subagent_type,
-                sub_agent_id=subagent.get("sub_agent_id"),
-            )
+        except GraphInterrupt:
+            # ``interrupt()`` raised: the orchestrator parks this turn. LangGraph
+            # replays this tool call with the answer, and the task store lookup
+            # above finds the parked task. Must stay ahead of ``except Exception``.
+            raise
         except Exception as e:
             logger.exception(f"Subagent '{subagent_type}' failed: {e}")
             return self._classify_error_message(
@@ -2677,12 +2155,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Special handling for "task" tool (subagent dispatch)
         # Try dynamic registry first, fall back to handler (SubAgentMiddleware) for general-purpose
         if tool_name == "task":
-            # One live task per registry sub-agent (see surplus_same_agent_call).
-            # Ahead of the lookup so the refusal costs nothing, though it only
-            # fires for agents whose thread this middleware owns.
-            refusal = self._concurrent_same_agent_refusal(request)
-            if refusal is not None:
-                return refusal
             result = self._dispatch_task_tool(
                 tool_call=tool_call,
                 user_context=user_context,
@@ -2780,13 +2252,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             # NOTE: Task delegation status ("Delegating to...") is now emitted by the
             # orchestrator's astream loop via tool call detection, not here.
             # Removed duplicate emission to prevent status history duplicates.
-
-            # One live task per registry sub-agent (see surplus_same_agent_call).
-            # Ahead of the lookup so the refusal costs nothing, though it only
-            # fires for agents whose thread this middleware owns.
-            refusal = self._concurrent_same_agent_refusal(request)
-            if refusal is not None:
-                return refusal
 
             # Capture the orchestrator's stream_writer now — inside the sub-agent
             # streaming loop the contextvars could shift if sub-agents manipulate them.

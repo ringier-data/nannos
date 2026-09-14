@@ -28,7 +28,7 @@ from app.core.agent import OrchestratorDeepAgent
 
 
 class _FakeRunnable:
-    """Minimal stand-in exposing the two attributes stream_subagent touches."""
+    """Minimal stand-in exposing the two attributes stream_subagent touches (``name``, ``astream_graph``)."""
 
     name = "cockpit"
 
@@ -37,7 +37,7 @@ class _FakeRunnable:
         self._raises = raises
         self.stream_input = None
 
-    async def astream(self, stream_input, config):  # noqa: ARG002 - signature match
+    async def astream_graph(self, stream_input, config):  # noqa: ARG002 - signature match
         self.stream_input = stream_input
         for ev in self._events:
             yield ev

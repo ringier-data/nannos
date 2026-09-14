@@ -57,6 +57,9 @@ from .stream_events import (
     parse_event_metadata,
 )
 
+# Thread conventions
+from .threads import local_sub_agent_thread_id
+
 # Structured response
 from .structured_response import (
     A2A_PROTOCOL_ADDENDUM,
@@ -91,6 +94,8 @@ __all__ = [
     "StructuredResponseMixin",
     "get_response_format",
     "select_response_format",
+    # Thread conventions
+    "local_sub_agent_thread_id",
     # Stream events
     "TaskUpdate",
     "ArtifactUpdate",
