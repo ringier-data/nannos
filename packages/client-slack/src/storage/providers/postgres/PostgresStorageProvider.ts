@@ -19,6 +19,13 @@ export interface PostgresStorageConfig {
   database: string;
   useSsl: boolean;
   sslCa?: string;
+  /**
+   * Schema holding this client's tables. Optional: when unset, Postgres' default
+   * `search_path` ("$user", public) applies, which resolves as long as the schema
+   * is named after the connecting role -- the convention sqlmigrations/migrate.sh
+   * follows by defaulting PGSCHEMA to PGUSER. Set it explicitly when the two differ.
+   */
+  schema?: string;
   /** Maximum number of clients in the pool (default: 10) */
   maxPoolSize?: number;
   /** Connection timeout in milliseconds (default: 30000) */
@@ -58,6 +65,18 @@ export class PostgresStorageProvider extends StorageProvider {
       connectionTimeoutMillis: config.connectionTimeoutMs ?? 30000,
       idleTimeoutMillis: config.idleTimeoutMs ?? 10000,
     };
+
+    // Pin the search_path for every connection in the pool. Queries name tables
+    // unqualified, so without this the schema must happen to match the role name.
+    if (config.schema) {
+      if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(config.schema)) {
+        throw new Error(
+          `Invalid POSTGRES_SCHEMA "${config.schema}": expected an unquoted SQL identifier. ` +
+            'It is passed as a connection option, not as a bound parameter.',
+        );
+      }
+      poolConfig.options = `-c search_path=${config.schema},public`;
+    }
 
     // Configure SSL if enabled
     if (config.useSsl) {
