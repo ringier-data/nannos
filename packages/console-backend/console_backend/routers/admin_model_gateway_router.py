@@ -576,9 +576,11 @@ async def delete_model(model_id: str, request: Request, db: DbSession, user: Use
     nothing left to map the id to a name.
     """
     gateway = get_model_gateway_service(request)
-    model = await gateway.get_model_by_id(model_id)
-    alias = (model or {}).get("model_name") or ""
+    # Inside the try: this lookup hits the proxy on a cold cache, so an unreachable gateway must
+    # still surface as a 502 like the delete itself — leaving it outside turned that into a 500.
     try:
+        model = await gateway.get_model_by_id(model_id)
+        alias = (model or {}).get("model_name") or ""
         await gateway.delete_model(model_id)
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))

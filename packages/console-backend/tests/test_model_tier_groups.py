@@ -255,3 +255,13 @@ async def test_promoting_an_alias_already_in_the_chain_removes_it_from_the_chain
     assert gateway.set_calls == [("gpt", ["vertex"])]  # no self-reference projected
     assert repo.chains["chat"] == ["vertex"]  # and the correction is persisted, not just projected
     assert repo.replaced == [("chat", ["vertex"])]
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_null_mode_is_treated_as_chat():
+    """`.get("mode", "chat")` would reject this: the default applies only when the key is
+    ABSENT, and deployments exist whose model_info carries an explicit null."""
+    repo = _FakeRepo({"chat": "claude"})
+    gateway = _ModeGateway({"claude": "chat", "gpt": None})
+    models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["gpt"], gateway=gateway)
+    assert models == ["claude", "gpt"]

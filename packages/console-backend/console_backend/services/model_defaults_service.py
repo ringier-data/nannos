@@ -122,8 +122,12 @@ class ModelDefaultsService:
         # Mode, not just existence: _require_chat_tier guards the tier's ROLE, but said nothing
         # about the chain's members, so an API caller could route chat traffic onto an embedding
         # deployment — which fails hard at the moment the chain is finally needed.
+        # `or "chat"`, not `.get("mode", "chat")`: the default only applies when the key is
+        # ABSENT, and deployments exist whose model_info carries an explicit null (models_router
+        # guards for the same falsy case). Treating null as "not chat" would have the picker
+        # offer a candidate this then rejects.
         chat_aliases = {
-            m.get("model_name") for m in deployments if (m.get("model_info") or {}).get("mode", "chat") == "chat"
+            m.get("model_name") for m in deployments if ((m.get("model_info") or {}).get("mode") or "chat") == "chat"
         }
         not_chat = [a for a in aliases if a not in chat_aliases]
         if not_chat:

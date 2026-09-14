@@ -2,9 +2,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowDown, HelpCircle, Plus, ShieldCheck, X } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { listTierGroups, roleLabel, setTierFailoverChain } from '@/api/model-gateway';
+import {
+  listAvailableModels,
+  listTierGroups,
+  roleLabel,
+  setTierFailoverChain,
+} from '@/api/model-gateway';
 import type { TierGroup } from '@/api/model-gateway';
-import { useAvailableModels } from '@/config/models';
 import { getErrorMessage } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -130,7 +134,11 @@ function TierRow({
       {/* Always rendered: gating it behind an "Add fallback" button made this a two-click
           interaction (the button only swapped in a closed Select) and stranded an empty
           trigger whenever an add was abandoned. */}
+      {/* Remounted on every chain change (`key`): the Select is uncontrolled, so without this
+          the trigger keeps displaying the alias just added instead of returning to its
+          placeholder. */}
       <Select
+        key={chain.length}
         disabled={saving || selectable.length === 0}
         onValueChange={(alias) => onSave(group.role, [...chain, alias])}
       >
@@ -161,9 +169,16 @@ export function FailoverChains() {
     queryKey: ['gateway-tier-groups'],
     queryFn: listTierGroups,
   });
-  // The shared hook: same query key, tuned staleTime, and /api/v1/models already filters to
-  // chat-mode models — exactly the candidates a chat tier may fall back to.
-  const { models: available } = useAvailableModels();
+  // The same query (and cache entry) as useAvailableModels, but deliberately NOT that hook:
+  // it falls back to the static MODEL_OPTIONS list when the gateway is empty or unreachable,
+  // which is right for a picker that must always render something and wrong here — it would
+  // offer unregistered aliases exactly during an outage, next to a "Gateway unreachable"
+  // badge, and the backend would then 400 them. An empty picker is the honest render.
+  const { data: available } = useQuery({
+    queryKey: ['available-models'],
+    queryFn: listAvailableModels,
+    staleTime: 30_000,
+  });
 
   const mutation = useMutation({
     mutationFn: ({ role, fallbacks }: { role: string; fallbacks: string[] }) =>
@@ -181,7 +196,7 @@ export function FailoverChains() {
     },
   });
 
-  const candidates = available.map((m) => m.value);
+  const candidates = (available ?? []).map((m) => m.value);
 
   return (
     <Card>
