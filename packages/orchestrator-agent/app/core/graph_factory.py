@@ -38,6 +38,7 @@ from agent_common.core.model_factory import (
     require_default_model,
 )
 from agent_common.core.notify_user_tool import create_notify_user_tool
+from agent_common.core.step_budget import recursion_limit_for
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
@@ -72,7 +73,6 @@ from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
 from .steering_state import get_all_active_subagent_dispatches, get_orchestrator_pending_messages
-from .step_budget import recursion_limit_for
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)

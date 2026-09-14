@@ -158,6 +158,16 @@ The `/skills/` virtual filesystem is **read-only** for agents. All mutations go 
 
 **CRITICAL**: `checkpoint_ns` must be `""` for standalone graphs (DynamicLocalAgentRunnable graphs are standalone, not subgraphs). Thread isolation is provided by unique `thread_id` patterns like `"{context_id}::dynamic-{name}"`.
 
+### Turn budgets (core/step_budget.py)
+
+LangGraph's `recursion_limit` counts **super-steps**, not model calls: every middleware hook is its own node, so one model call costs a whole lap of the graph. Every caller therefore states its budget in **model calls** and derives the super-step limit from its own compiled graph — `recursion_limit_for(graph, max_model_calls)` — rather than writing a constant down.
+
+This module is shared because the constants drifted exactly as you would expect them to. The *same* `build_sub_agent_graph` output used to carry a hand-written `75` in `dynamic_agent` and a hand-written `50` in `agent-runner`, so a scheduled run of a sub-agent died on `GraphRecursionError` where the identical agent, delegated from a conversation, answered fine. Adding a middleware with model hooks tightens both, invisibly, and nothing forces either number to follow.
+
+Each consumer reads its **own** env name via `resolve_max_model_calls()` — `SUB_AGENT_MAX_MODEL_CALLS_PER_TURN` here, `AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN` in agent-runner, `ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN` in orchestrator-agent — all defaulting to 25. One shared name is what made the old advice ("set it for the sub-agents, leave it to the sibling services") impossible to follow. The retired `MAX_RECURSION_LIMIT` / `SUB_AGENT_RECURSION_LIMIT` are read by nothing here and warn when set; `MAX_RECURSION_LIMIT` is **still live in the externally published `ringier-a2a-sdk`**, so it is not safe to unset on the strength of that warning.
+
+A node the classifier does not recognise is charged at the per-model-call rate (a generous budget, never a squeeze) and logged. `tests/test_step_budget.py` measures a real sub-agent graph run against the derivation on both middleware configurations; a failure there means the derivation is wrong, not that a number needs bumping.
+
 ### PTC Tool Exposure (core/graph_utils.py, ptc_signatures.py, ptc_discovery.py)
 
 When `CODE_INTERPRETER_PTC` is enabled, the model calls tools by writing JavaScript in the sandboxed `eval` REPL (`tools.<name>({...})`) instead of one native tool call per step. `_PTCToleranceCodeInterpreterMiddleware` subclasses `langchain_quickjs`'s `CodeInterpreterMiddleware`. Non-obvious decisions:
