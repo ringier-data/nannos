@@ -132,10 +132,7 @@ logger = logging.getLogger(__name__)
 # child graph that does not set its own, so without the `with_config` below every
 # sub-agent would inherit the orchestrator's.
 SUB_AGENT_MAX_MODEL_CALLS_ENV = "SUB_AGENT_MAX_MODEL_CALLS_PER_TURN"
-DEFAULT_SUB_AGENT_MAX_MODEL_CALLS = 25
-_SUB_AGENT_MAX_MODEL_CALLS = resolve_max_model_calls(
-    SUB_AGENT_MAX_MODEL_CALLS_ENV, DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
-)
+_SUB_AGENT_MAX_MODEL_CALLS = resolve_max_model_calls(SUB_AGENT_MAX_MODEL_CALLS_ENV)
 
 # Tool-name prefixes served by the console-backend MCP (FastAPI routes tagged
 # ``MCP``): the ``console_*`` tools AND the ``scheduler_*`` scheduler tools.

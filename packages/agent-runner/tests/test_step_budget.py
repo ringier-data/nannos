@@ -6,51 +6,57 @@ hand-written super-step constant — 50 here, 75 there. A scheduled job pointed 
 sub-agent therefore died on `GraphRecursionError` where the identical agent,
 delegated from a conversation, answered fine.
 
-The derivation and its unit tests live in `agent_common.core.step_budget`. What is
-tested here is what agent-runner alone is responsible for: that its default is the
-sub-agent default rather than a second number, and that it reads its own env name.
+The derivation and its unit tests live in `agent_common.core.step_budget`, and the
+default they share is now written down there once. What is tested here is what
+agent-runner alone is responsible for: that it reads its own env name, and that
+neither retired super-step name moves it.
 """
 
 from __future__ import annotations
 
-import importlib
+import pytest
+from agent_common.core.step_budget import (
+    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
+    LEGACY_RECURSION_LIMIT_ENV,
+    LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV,
+    resolve_max_model_calls,
+)
 
-from agent_common.agents.dynamic_agent import DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
-from agent_common.core.step_budget import LEGACY_RECURSION_LIMIT_ENV
-
-from agent.core import _DEFAULT_MAX_MODEL_CALLS, _MAX_MODEL_CALLS_ENV, _MAX_MODEL_CALLS_PER_TURN
-
-
-def test_the_two_sub_agent_paths_no_longer_disagree():
-    """The reported defect, stated as an invariant.
-
-    The two callers may still be configured apart — that is what the separate env
-    names are for — but their *defaults* must be one deliberate number for one
-    graph, not two constants free to drift again.
-    """
-    assert _DEFAULT_MAX_MODEL_CALLS == DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
+from agent.core import _MAX_MODEL_CALLS_ENV
 
 
-def test_the_budget_is_expressed_in_model_calls_not_super_steps():
-    """50 was a super-step count that worked out to roughly six model calls on this
-    graph. A default that is still in that range would mean the unit never changed."""
-    assert _MAX_MODEL_CALLS_PER_TURN == _DEFAULT_MAX_MODEL_CALLS
+@pytest.fixture(autouse=True)
+def _unset_ambient_budget(monkeypatch):
+    """These assertions describe the *default*, so the tuning knob this PR
+    introduces must not be allowed to leak in from a developer's shell."""
+    monkeypatch.delenv(_MAX_MODEL_CALLS_ENV, raising=False)
+
+
+def test_the_budget_is_expressed_in_model_calls_under_its_own_name():
+    """50 was a super-step count. The unit changed, and so did the name — sharing
+    one env var across four consumers was a defect distinct from the shared unit."""
     assert _MAX_MODEL_CALLS_ENV == "AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN"
+    assert resolve_max_model_calls(_MAX_MODEL_CALLS_ENV) == DEFAULT_MAX_MODEL_CALLS_PER_TURN
 
 
-def test_the_legacy_shared_name_no_longer_moves_this_service(monkeypatch):
-    """`MAX_RECURSION_LIMIT=50` was the value that produced the observed failure.
+@pytest.mark.parametrize("legacy", [LEGACY_RECURSION_LIMIT_ENV, LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV])
+def test_a_retired_super_step_name_no_longer_moves_this_service(monkeypatch, legacy):
+    """`MAX_RECURSION_LIMIT=50` is the exact value that produced the observed failure.
 
-    It is read at import time, so the module is reloaded under the env var rather
-    than trusting the constant captured at collection.
+    Asserted through `resolve_max_model_calls` rather than by reloading `agent.core`:
+    the module-level constant is read at import time, and `importlib.reload` would
+    swap every class in the module for the rest of the session while sibling test
+    modules still hold the pre-reload objects.
     """
-    monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
+    monkeypatch.setenv(legacy, "50")
 
-    import agent.core as core
+    assert resolve_max_model_calls(_MAX_MODEL_CALLS_ENV) == DEFAULT_MAX_MODEL_CALLS_PER_TURN
 
-    reloaded = importlib.reload(core)
-    try:
-        assert reloaded._MAX_MODEL_CALLS_PER_TURN == DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
-    finally:
-        monkeypatch.delenv(LEGACY_RECURSION_LIMIT_ENV, raising=False)
-        importlib.reload(core)
+
+def test_the_service_can_still_be_tuned_apart_from_its_siblings(monkeypatch):
+    """Separate names exist so scheduled jobs can get a longer leash than
+    interactive ones without touching the orchestrator or the in-process sub-agents."""
+    monkeypatch.setenv(_MAX_MODEL_CALLS_ENV, "60")
+    monkeypatch.setenv("SUB_AGENT_MAX_MODEL_CALLS_PER_TURN", "10")
+
+    assert resolve_max_model_calls(_MAX_MODEL_CALLS_ENV) == 60

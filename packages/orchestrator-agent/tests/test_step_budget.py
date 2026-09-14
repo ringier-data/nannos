@@ -40,6 +40,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import Field, PrivateAttr
 
 from agent_common.core.step_budget import (
+    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
     LEGACY_RECURSION_LIMIT_ENV,
     classify_nodes,
     recursion_limit_for,
@@ -49,7 +50,6 @@ from agent_common.core.step_budget import (
 from app.core.graph_factory import GraphFactory
 from app.core.time_tools import create_time_tool
 from app.models.config import (
-    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
     MAX_MODEL_CALLS_PER_TURN_ENV,
     AgentSettings,
     GraphRuntimeContext,

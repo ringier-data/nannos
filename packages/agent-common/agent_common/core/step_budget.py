@@ -109,14 +109,46 @@ def classify_nodes(graph: Any) -> dict[str, list[str]]:
     return buckets
 
 
+# Shapes already warned about, so a per-turn caller cannot turn one diagnostic
+# into a flood. `recursion_limit_for` now runs per invocation for sandbox-enabled
+# sub-agents and for any turn carrying attachments, where it used to be an
+# import-time constant; the day a LangGraph upgrade introduces a node this module
+# does not know, the point is to say so once, not once per turn.
+_warned_shapes: set[tuple[str, ...]] = set()
+
+
 def _warn_unclassified(buckets: dict[str, list[str]]) -> None:
-    if buckets["unclassified"]:
-        logger.warning(
-            "Unrecognised graph nodes %s are being charged at the per-model-call rate. "
-            "agent_common/core/step_budget.py needs to learn how often they run; until "
-            "then the turn budget is a safe over-estimate rather than a correct one.",
-            sorted(buckets["unclassified"]),
-        )
+    if not buckets["unclassified"]:
+        return
+    shape = tuple(sorted(buckets["unclassified"]))
+    if shape in _warned_shapes:
+        return
+    _warned_shapes.add(shape)
+    logger.warning(
+        "Unrecognised graph nodes %s are being charged at the per-model-call rate. "
+        "agent_common/core/step_budget.py needs to learn how often they run; until "
+        "then the turn budget is a safe over-estimate rather than a correct one.",
+        list(shape),
+    )
+
+
+def _warn_degenerate(graph: Any, buckets: dict[str, list[str]]) -> None:
+    """Say so when a graph classifies to nothing a model call could cost.
+
+    Reached when ``graph.nodes`` is empty or holds only terminals -- a test double,
+    an already-wrapped runnable, or a future graph type whose nodes do not live on
+    ``.nodes``. The derived limit would otherwise be 0, which is not a small budget
+    but a graph that dies on its first super-step, with nothing in the logs
+    connecting that to the budget.
+    """
+    logger.warning(
+        "Graph %s classifies to no per-model-call nodes (%r); its turn budget cannot be "
+        "derived and is being floored. Either the graph is a test double or langgraph no "
+        "longer exposes nodes on `.nodes` — agent_common/core/step_budget.py would need "
+        "to learn the new shape.",
+        type(graph).__name__,
+        buckets,
+    )
 
 
 def _steps_per_model_call(buckets: dict[str, list[str]]) -> int:
@@ -147,15 +179,37 @@ def recursion_limit_for(graph: Any, max_model_calls: int) -> int:
     Classifies once: the two components are derived from a single pass, since
     this runs on every ``_create_graph`` including the cold path that rebuilds
     per turn.
+
+    Never returns below *max_model_calls*. A graph that classifies to nothing --
+    a ``MagicMock`` in a test, an already-wrapped runnable, a future graph type
+    that does not expose ``.nodes`` -- would otherwise derive 0 and bind a limit
+    on which every turn dies at its first super-step, silently and with nothing
+    pointing at the budget. One step per model call is a floor, not an estimate:
+    it cannot be right, but it is diagnosable, and it is warned about.
     """
     buckets = classify_nodes(graph)
     _warn_unclassified(buckets)
-    return _base_steps(buckets) + _steps_per_model_call(buckets) * max_model_calls
+
+    per_call = _steps_per_model_call(buckets)
+    if per_call <= 0:
+        _warn_degenerate(graph, buckets)
+        return max(max_model_calls, 1)
+
+    return _base_steps(buckets) + per_call * max_model_calls
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+DEFAULT_MAX_MODEL_CALLS_PER_TURN = 25
+"""The budget every consumer defaults to, written down **once**.
+
+Each service reads its own env name so they can be tuned apart, but the number
+they fall back to lives here: three hand-written 25s across three packages would
+be the same drift mechanism as the 75-vs-50 this module exists to remove, one
+level up. A service that genuinely needs a different default passes one.
+"""
 
 MIN_MAX_MODEL_CALLS = 1
 SANE_MAX_MODEL_CALLS = 200
@@ -176,32 +230,58 @@ LEGACY_RECURSION_LIMIT_ENV = "MAX_RECURSION_LIMIT"
 LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV = "SUB_AGENT_RECURSION_LIMIT"
 
 
+# What to say about each retired name once it is no longer honoured. They need
+# different advice, not one symmetrical paragraph mentioning both: telling an
+# operator who set `SUB_AGENT_RECURSION_LIMIT` that some *other* variable is still
+# live in the SDK is noise at best, and at worst reads as a reason not to remove
+# the one they did set.
+_LEGACY_ENV_ADVICE = {
+    LEGACY_RECURSION_LIMIT_ENV: (
+        "It is still read by the externally published ringier-a2a-sdk (default 50), so do "
+        "not unset it without checking whether anything in this deployment is built on the SDK."
+    ),
+    LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV: (
+        "Nothing reads it any more -- it was the decoupling knob for the shared "
+        "MAX_RECURSION_LIMIT, and there is no longer a shared name to decouple from. "
+        "It can be removed."
+    ),
+}
+
+
 def warn_if_legacy_recursion_env_set(service_env: str) -> None:
     """Warn when a retired super-step env var is set for *this* service.
 
     Ignoring it silently is the worse failure: an operator who pinned
     ``MAX_RECURSION_LIMIT=50`` to tame one service would find it quietly doing
     nothing here, with no line in the logs pointing at the variable they set.
+
+    One line per *service* that reads a budget, not one per process. A process
+    hosting both the orchestrator and its in-process sub-agents will log twice,
+    naming a different replacement each time, and that is the intended reading:
+    both budgets really did lose their old name, and an operator who fixes only
+    the one they happened to see would leave the other on its default.
     """
-    for name in (LEGACY_RECURSION_LIMIT_ENV, LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV):
+    for name, advice in _LEGACY_ENV_ADVICE.items():
         raw = os.getenv(name)
         if not raw or not raw.strip():
             continue
         logger.warning(
-            "%s=%s no longer configures this service -- use %s instead, which is counted "
+            "%s=%s no longer configures this service -- set %s instead, which is counted "
             "in model calls rather than LangGraph super-steps and converted against the "
-            "compiled graph. %s is still read by ringier-a2a-sdk (default 50), so unsetting "
-            "it may change an externally built agent's bound; %s is read by nothing and can "
-            "be removed.",
+            "compiled graph. %s",
             name,
             raw,
             service_env,
-            LEGACY_RECURSION_LIMIT_ENV,
-            LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV,
+            advice,
         )
 
 
-def _int_env(name: str, default: int) -> int:
+def int_env(name: str, default: int) -> int:
+    """Parse an int env var, falling back to *default* (with a warning) on a bad value.
+
+    A misconfigured value (e.g. ``"300s"`` or an empty string) must not crash the
+    process at import time -- fall back to the default instead.
+    """
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
@@ -212,7 +292,7 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def resolve_max_model_calls(env_name: str, default: int) -> int:
+def resolve_max_model_calls(env_name: str, default: int = DEFAULT_MAX_MODEL_CALLS_PER_TURN) -> int:
     """Model calls one turn may spend, read from *env_name* and sanity-checked.
 
     Shared by every consumer so the clamping and the warnings do not have to be
@@ -222,7 +302,7 @@ def resolve_max_model_calls(env_name: str, default: int) -> int:
     """
     warn_if_legacy_recursion_env_set(env_name)
 
-    value = _int_env(env_name, default)
+    value = int_env(env_name, default)
 
     # A budget of 0 or less is not a small budget, it is a broken deployment: the
     # derived limit collapses to the per-turn overhead, so every request exhausts

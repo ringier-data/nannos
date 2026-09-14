@@ -52,10 +52,13 @@ _MAX_RECURSION_LIMIT = 50
 def _get_default_recursion_limit() -> int:
     """Get recursion limit from environment or default.
 
-    ``MAX_RECURSION_LIMIT`` is shared: agent-runner and this SDK default it to 50,
-    agent-common's dynamic_agent to 75. Setting it moves all of them in a process
-    that runs more than one. It counts LangGraph super-steps, not model calls --
-    see #216 for expressing this budget in the unit that has meaning.
+    ``MAX_RECURSION_LIMIT`` used to be shared with agent-runner and agent-common's
+    dynamic_agent, which is why it counts LangGraph super-steps rather than model
+    calls -- a unit whose exchange rate depends on the middleware stack, and which
+    is therefore meaningless to set across services. Both of those now express
+    their budget in model calls under their own names (nannos#239) and no longer
+    read this one; the SDK is published externally and keeps it for compatibility.
+    Read ``agent_common.core.step_budget`` before reinstating anything shared here.
     """
     return int(os.getenv("MAX_RECURSION_LIMIT", str(_MAX_RECURSION_LIMIT)))
 

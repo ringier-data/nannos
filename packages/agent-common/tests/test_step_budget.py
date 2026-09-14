@@ -40,11 +40,13 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import Field, PrivateAttr
 
 from agent_common.agents.dynamic_agent import (
-    DEFAULT_SUB_AGENT_MAX_MODEL_CALLS,
+    _SUB_AGENT_MAX_MODEL_CALLS,
     SUB_AGENT_MAX_MODEL_CALLS_ENV,
 )
+from agent_common.core import step_budget
 from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.step_budget import (
+    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
     LEGACY_RECURSION_LIMIT_ENV,
     LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV,
     MIN_MAX_MODEL_CALLS,
@@ -138,7 +140,14 @@ async def _measure_super_steps(model_calls: int, *, exclude_deep_agents_middlewa
     steps = 0
     async for _ in graph.astream(
         {"messages": [HumanMessage("go")]},
-        config={"configurable": {"thread_id": f"budget-{exclude_deep_agents_middlewares}-{model_calls}"}},
+        config={
+            "configurable": {"thread_id": f"budget-{exclude_deep_agents_middlewares}-{model_calls}"},
+            # Explicitly unbounded. `_compiled_graph` returns the bare builder output,
+            # so without this LangGraph's own default of 25 caps the measurement — and
+            # one added middleware would fail the derivation tests below with a
+            # `GraphRecursionError` that looks like a broken derivation when it is not.
+            "recursion_limit": 10_000,
+        },
         stream_mode="updates",
     ):
         steps += 1
@@ -230,12 +239,43 @@ def test_an_unknown_node_inflates_the_budget_and_warns(caplog):
     class _GraphWithMysteryNode:
         nodes = ["__start__", "model", "tools", "Some.before_model", "Mystery.before_tools"]
 
+    # The warning is deduplicated per distinct shape per process, so this asserts on
+    # the first sighting regardless of what ran before it.
+    step_budget._warned_shapes.discard(("Mystery.before_tools",))
+
     with caplog.at_level("WARNING"):
         per_call = steps_per_model_call(_GraphWithMysteryNode())
 
     # 1 known hook + 2 core + 1 unknown, charged as if it ran every cycle.
     assert per_call == 4
     assert "Mystery.before_tools" in caplog.text
+
+
+def test_a_graph_that_classifies_to_nothing_is_floored_and_warned(caplog):
+    """0 is not a small budget; it is a graph that dies on its first super-step.
+
+    Reachable from a test double (`build_sub_agent_graph` patched with a
+    `MagicMock`, as several suites do), an already-wrapped runnable, or a future
+    graph type that does not expose `.nodes`. Before the floor these bound
+    `recursion_limit=0` silently. The floored value cannot be *right* — nothing was
+    counted — but it is diagnosable, and it says so.
+    """
+
+    class _EmptyGraph:
+        nodes: list[str] = []
+
+    with caplog.at_level("WARNING"):
+        limit = recursion_limit_for(_EmptyGraph(), 25)
+
+    assert limit >= 25
+    assert "cannot be" in caplog.text and "derived" in caplog.text
+
+
+def test_a_mock_graph_no_longer_binds_a_zero_budget():
+    """The specific shape that was already live in other suites."""
+    from unittest.mock import MagicMock
+
+    assert recursion_limit_for(MagicMock(), 25) > 0
 
 
 def test_the_core_cycle_cost_is_counted_not_assumed():
@@ -289,10 +329,11 @@ def test_dynamic_agent_binds_the_derived_limit(monkeypatch):
     bound = runnable._build_graph()
 
     assert bound.config is not None
-    assert bound.config["recursion_limit"] == recursion_limit_for(graph, DEFAULT_SUB_AGENT_MAX_MODEL_CALLS)
-    # Not the retired constant: the point is that the number is no longer written
-    # down at the bind site, so a middleware change moves it.
-    assert bound.config["recursion_limit"] != 75
+    # Against `_SUB_AGENT_MAX_MODEL_CALLS`, not the module default: the budget is
+    # resolved from the env at import time, so a developer with the tuning knob this
+    # PR introduces set in their shell would otherwise fail this test, and no
+    # `monkeypatch.setenv` inside it could reconcile the two.
+    assert bound.config["recursion_limit"] == recursion_limit_for(graph, _SUB_AGENT_MAX_MODEL_CALLS)
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +349,10 @@ def test_each_consumer_reads_its_own_env_name(monkeypatch):
     """
     monkeypatch.setenv(SUB_AGENT_MAX_MODEL_CALLS_ENV, "40")
     monkeypatch.setenv("ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN", "7")
+    monkeypatch.delenv("AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN", raising=False)
 
-    assert resolve_max_model_calls(SUB_AGENT_MAX_MODEL_CALLS_ENV, DEFAULT_SUB_AGENT_MAX_MODEL_CALLS) == 40
-    assert resolve_max_model_calls("AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN", 25) == 25
+    assert resolve_max_model_calls(SUB_AGENT_MAX_MODEL_CALLS_ENV) == 40
+    assert resolve_max_model_calls("AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN") == DEFAULT_MAX_MODEL_CALLS_PER_TURN
 
 
 @pytest.mark.parametrize("legacy", [LEGACY_RECURSION_LIMIT_ENV, LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV])
@@ -339,12 +381,31 @@ def test_the_legacy_warning_does_not_orphan_the_sdk(monkeypatch, caplog):
     silently change an externally built agent's bound. The wording is pinned
     because it is the only thing standing between them and that.
     """
+    monkeypatch.delenv(LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV, raising=False)
     monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
 
     with caplog.at_level("WARNING"):
         resolve_max_model_calls(_ENV, 25)
 
     assert "ringier-a2a-sdk" in caplog.text
+    assert "do not unset" in caplog.text.lower()
+
+
+def test_the_advice_is_tailored_to_the_variable_actually_set(monkeypatch, caplog):
+    """The two retired names need different advice, not one symmetrical paragraph.
+
+    `SUB_AGENT_RECURSION_LIMIT` is read by nothing anywhere and can simply go.
+    Telling the operator who set it that some *other* variable is still live in the
+    SDK is noise, and reads as a reason not to remove the one they did set.
+    """
+    monkeypatch.delenv(LEGACY_RECURSION_LIMIT_ENV, raising=False)
+    monkeypatch.setenv(LEGACY_SUB_AGENT_RECURSION_LIMIT_ENV, "75")
+
+    with caplog.at_level("WARNING"):
+        resolve_max_model_calls(_ENV, 25)
+
+    assert "can be removed" in caplog.text
+    assert "ringier-a2a-sdk" not in caplog.text, "the SDK caveat belongs only to MAX_RECURSION_LIMIT"
 
 
 def test_the_budget_is_configurable(monkeypatch):

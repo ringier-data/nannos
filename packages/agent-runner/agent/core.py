@@ -103,8 +103,7 @@ _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
 # scheduled jobs a longer leash than interactive ones without touching the
 # orchestrator or anything else.
 _MAX_MODEL_CALLS_ENV = "AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN"
-_DEFAULT_MAX_MODEL_CALLS = 25
-_MAX_MODEL_CALLS_PER_TURN = resolve_max_model_calls(_MAX_MODEL_CALLS_ENV, _DEFAULT_MAX_MODEL_CALLS)
+_MAX_MODEL_CALLS_PER_TURN = resolve_max_model_calls(_MAX_MODEL_CALLS_ENV)
 
 
 def _build_postgres_conn() -> str | None:
@@ -1077,7 +1076,7 @@ class AgentRunner(BaseAgent):
                 extra_middlewares=extra_middlewares,
             )
             recursion_limit = recursion_limit_for(graph, _MAX_MODEL_CALLS_PER_TURN)
-            logger.info(
+            logger.debug(
                 "Sub-agent graph bound to recursion_limit=%d (%d model calls per turn)",
                 recursion_limit,
                 _MAX_MODEL_CALLS_PER_TURN,

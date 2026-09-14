@@ -12,29 +12,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from agent_common.a2a.models import LocalSubAgentConfig
-from agent_common.core.step_budget import resolve_max_model_calls
+from agent_common.core.step_budget import int_env as _int_env, resolve_max_model_calls
 from agent_common.models.base import ThinkingLevel
 from deepagents import CompiledSubAgent
 from langchain_core.messages import ContentBlock
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 
 logger = logging.getLogger(__name__)
-
-
-def _int_env(name: str, default: int) -> int:
-    """Parse an int env var, falling back to ``default`` (with a warning) on a bad value.
-
-    A misconfigured value (e.g. ``"300s"`` or an empty string) must not crash the process
-    at import time — fall back to the default instead.
-    """
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return int(raw.strip())
-    except ValueError:
-        logger.warning("Invalid int for %s=%r; using default %d", name, raw, default)
-        return default
 
 
 # How many model calls one turn may spend. This is the unit the budget is
@@ -48,12 +32,11 @@ def _int_env(name: str, default: int) -> int:
 # resulting coupling is what made the old advice ("set it for the sub-agents and
 # leave it to the sibling services") impossible to follow.
 MAX_MODEL_CALLS_PER_TURN_ENV = "ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN"
-DEFAULT_MAX_MODEL_CALLS_PER_TURN = 25
 
 
 def _resolve_max_model_calls_per_turn() -> int:
     """Model calls allowed per turn; clamping and legacy warnings are shared."""
-    return resolve_max_model_calls(MAX_MODEL_CALLS_PER_TURN_ENV, DEFAULT_MAX_MODEL_CALLS_PER_TURN)
+    return resolve_max_model_calls(MAX_MODEL_CALLS_PER_TURN_ENV)
 
 
 # Message formatting literal for type safety
