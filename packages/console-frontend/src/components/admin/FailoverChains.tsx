@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, ArrowDown, Plus, ShieldCheck, X } from 'lucide-react';
-import { useState } from 'react';
+import { AlertTriangle, ArrowDown, HelpCircle, Plus, ShieldCheck, X } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { listAvailableModels, listTierGroups, setTierFailoverChain } from '@/api/model-gateway';
+import { listTierGroups, roleLabel, setTierFailoverChain } from '@/api/model-gateway';
 import type { TierGroup } from '@/api/model-gateway';
+import { useAvailableModels } from '@/config/models';
+import { getErrorMessage } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -35,12 +36,6 @@ import {
  * writes vectors from another embedding space into the same index and quietly degrades search.
  */
 
-const TIER_LABEL: Record<string, string> = {
-  chat: 'Standard',
-  'chat:low': 'Low',
-  'chat:premium': 'Premium',
-};
-
 function TierRow({
   group,
   candidates,
@@ -52,7 +47,6 @@ function TierRow({
   onSave: (role: string, fallbacks: string[]) => void;
   saving: boolean;
 }) {
-  const [adding, setAdding] = useState(false);
   const chain = group.fallbacks ?? [];
   // A chain may not revisit a model it has already tried — repeating one just retries a
   // provider that is, by then, known to be unavailable. The backend enforces this too.
@@ -63,7 +57,7 @@ function TierRow({
     return (
       <div className="rounded-md border border-dashed p-3">
         <div className="flex items-center gap-2">
-          <span className="font-medium">{TIER_LABEL[group.role] ?? group.role}</span>
+          <span className="font-medium">{roleLabel(group.role)}</span>
           <span className="text-muted-foreground text-sm">
             No default model — set one before giving this tier a failover chain.
           </span>
@@ -75,21 +69,37 @@ function TierRow({
   return (
     <div className="rounded-md border p-3 space-y-2">
       <div className="flex items-center gap-2">
-        <span className="font-medium">{TIER_LABEL[group.role] ?? group.role}</span>
-        {group.gateway_mismatch != null && (
+        <span className="font-medium">{roleLabel(group.role)}</span>
+        {group.gateway_state === 'drifted' && (
           <Badge variant="destructive" className="gap-1">
             <AlertTriangle className="h-3 w-3" />
             Not what the gateway holds
           </Badge>
         )}
+        {group.gateway_state === 'unknown' && (
+          <Badge variant="outline" className="gap-1">
+            <HelpCircle className="h-3 w-3" />
+            Gateway unreachable
+          </Badge>
+        )}
       </div>
 
-      {group.gateway_mismatch != null && (
+      {group.gateway_state === 'drifted' && (
         <p className="text-destructive text-xs">
-          The gateway is routing {group.gateway_mismatch.length === 0
+          The gateway is routing {(group.gateway_mismatch ?? []).length === 0
             ? 'no failover at all'
-            : `to ${group.gateway_mismatch.join(' → ')}`}
+            : `to ${(group.gateway_mismatch ?? []).join(' → ')}`}
           . Re-save this chain to re-declare it.
+        </p>
+      )}
+
+      {/* "Unknown" is rendered as its own state, never as healthy: an unreachable proxy is
+          exactly when someone is checking failover, and showing green there would hide the
+          one failure this card exists to surface. */}
+      {group.gateway_state === 'unknown' && (
+        <p className="text-muted-foreground text-xs">
+          Could not read the live chain from the gateway, so this may not be what is actually
+          routing. It is what the console has stored.
         </p>
       )}
 
@@ -117,35 +127,29 @@ function TierRow({
         ))}
       </ol>
 
-      {adding && selectable.length > 0 ? (
-        <Select
-          onValueChange={(alias) => {
-            setAdding(false);
-            onSave(group.role, [...chain, alias]);
-          }}
-        >
-          <SelectTrigger className="w-72">
-            <SelectValue placeholder="Add a model to the chain…" />
-          </SelectTrigger>
-          <SelectContent>
-            {selectable.map((m) => (
-              <SelectItem key={m} value={m}>
-                {m}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      ) : (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={saving || selectable.length === 0}
-          onClick={() => setAdding(true)}
-        >
+      {/* Always rendered: gating it behind an "Add fallback" button made this a two-click
+          interaction (the button only swapped in a closed Select) and stranded an empty
+          trigger whenever an add was abandoned. */}
+      <Select
+        disabled={saving || selectable.length === 0}
+        onValueChange={(alias) => onSave(group.role, [...chain, alias])}
+      >
+        <SelectTrigger className="w-72">
           <Plus className="mr-1 h-3 w-3" />
-          {selectable.length === 0 ? 'No other models registered' : 'Add fallback'}
-        </Button>
-      )}
+          <SelectValue
+            placeholder={
+              selectable.length === 0 ? 'No other models registered' : 'Add a fallback…'
+            }
+          />
+        </SelectTrigger>
+        <SelectContent>
+          {selectable.map((m) => (
+            <SelectItem key={m} value={m}>
+              {m}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
@@ -157,10 +161,9 @@ export function FailoverChains() {
     queryKey: ['gateway-tier-groups'],
     queryFn: listTierGroups,
   });
-  const { data: available } = useQuery({
-    queryKey: ['available-models'],
-    queryFn: listAvailableModels,
-  });
+  // The shared hook: same query key, tuned staleTime, and /api/v1/models already filters to
+  // chat-mode models — exactly the candidates a chat tier may fall back to.
+  const { models: available } = useAvailableModels();
 
   const mutation = useMutation({
     mutationFn: ({ role, fallbacks }: { role: string; fallbacks: string[] }) =>
@@ -169,10 +172,16 @@ export function FailoverChains() {
       toast.success('Failover chain updated on the gateway');
       queryClient.invalidateQueries({ queryKey: ['gateway-tier-groups'] });
     },
-    onError: (e: unknown) => toast.error(`Failover chain not saved: ${String(e)}`),
+    // The backend commits the chain before projecting it, so a failure here can still mean
+    // "stored, but not live on the gateway" — hence the neutral wording and the refetch, which
+    // repaints the row with its real drift state instead of leaving the old chain on screen.
+    onError: (e: unknown) => {
+      toast.error(getErrorMessage(e));
+      queryClient.invalidateQueries({ queryKey: ['gateway-tier-groups'] });
+    },
   });
 
-  const candidates = (available ?? []).map((m) => m.model_name).filter(Boolean) as string[];
+  const candidates = available.map((m) => m.value);
 
   return (
     <Card>

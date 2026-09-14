@@ -1,5 +1,7 @@
 """Schemas for runtime model registration via the Model Gateway."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 from .usage import RateCardPricingEntry
@@ -103,8 +105,12 @@ class TierGroup(BaseModel):
     default: str | None = None
     fallbacks: list[str] = Field(default_factory=list)
     models: list[str] = Field(default_factory=list)
-    # Set when our stored chain and the proxy's differ — drift is reported, never hidden,
-    # because a chain that exists only in the console is a failover that will not happen.
+    # Tri-state on purpose. "unknown" (the proxy could not be read) must not render as
+    # "in_sync": an unreachable gateway is exactly when an admin is checking failover, and
+    # collapsing the two would show every tier healthy in the one situation this feature
+    # exists to surface.
+    gateway_state: Literal["in_sync", "drifted", "unknown"] = "unknown"
+    # What the proxy actually holds, when it could be read and differs from `fallbacks`.
     gateway_mismatch: list[str] | None = None
 
 

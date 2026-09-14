@@ -3285,6 +3285,11 @@ export const costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetOptio
  * Delete Model
  *
  * Remove a model from the gateway. The Rate Card is left for historical billing.
+ *
+ * The alias is also dropped from any tier's failover chain: leaving it there would have the
+ * gateway fail over to a model it no longer serves, breaking at exactly the moment the primary
+ * is down. Read the alias *before* deleting — afterwards the deployment is gone and there is
+ * nothing left to map the id to a name.
  */
 export const deleteModelApiV1AdminModelGatewayModelsModelIdDeleteMutation = (options?: Partial<Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData>>): UseMutationOptions<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteResponse, DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteError, Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData>> => {
     const mutationOptions: UseMutationOptions<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteResponse, DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteError, Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData>> = {
@@ -3370,12 +3375,15 @@ export const listTierGroupsApiV1AdminModelGatewayTiersGetQueryKey = (options?: O
 /**
  * List Tier Groups
  *
- * Every chat tier with its failover chain, plus any drift against the live proxy.
+ * Every chat tier with its failover chain, plus how it compares to the live proxy.
  *
- * The proxy is read per tier rather than trusted: a chain that exists only in our table is
- * a failover that will not happen, and that is exactly the failure this feature exists to
- * prevent, so it is surfaced instead of assumed away. A proxy that cannot be reached leaves
- * ``gateway_mismatch`` unset (unknown), which is not the same as "in sync".
+ * The proxy is read rather than trusted: a chain that exists only in our table is a failover
+ * that will not happen, which is the precise failure this feature exists to prevent. The
+ * comparison is tri-state — a proxy that cannot be reached reports ``unknown``, never
+ * ``in_sync``, because an unreachable gateway is exactly when this page is being consulted.
+ *
+ * The three per-tier reads are issued concurrently: serialized, a hung proxy would cost three
+ * full client timeouts before the page rendered.
  */
 export const listTierGroupsApiV1AdminModelGatewayTiersGetOptions = (options?: Options<ListTierGroupsApiV1AdminModelGatewayTiersGetData>) => queryOptions<ListTierGroupsApiV1AdminModelGatewayTiersGetResponse, DefaultError, ListTierGroupsApiV1AdminModelGatewayTiersGetResponse, ReturnType<typeof listTierGroupsApiV1AdminModelGatewayTiersGetQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {

@@ -75,6 +75,25 @@ export type DefaultRole =
   | 'multimodal_embedding'
   | 'search';
 
+/**
+ * Human label for a default role / tier slot. Keyed on the `DefaultRole` union, so adding a
+ * role is a compile error here rather than a raw `chat:low` leaking into the UI. Shared:
+ * the model cards and the failover card render the same tiers one screen apart, and used to
+ * disagree ("low tier" vs "Low").
+ */
+const ROLE_LABELS: Record<DefaultRole, string> = {
+  chat: 'chat',
+  'chat:low': 'low tier',
+  'chat:premium': 'premium tier',
+  embedding: 'embedding',
+  multimodal_embedding: 'multimodal embedding',
+  search: 'search',
+};
+
+/** Accepts a plain string because the gateway types `default_roles` loosely; unknown roles
+ * fall through to their raw value rather than rendering blank. */
+export const roleLabel = (role: string): string => ROLE_LABELS[role as DefaultRole] ?? role;
+
 /** The live model picker — models registered on the gateway (read by every model dropdown). */
 export async function listAvailableModels(): Promise<AvailableModel[]> {
   const { data, error } = await consoleListModels();
@@ -190,12 +209,24 @@ export async function getWebSearchConfig(): Promise<WebSearchConfig> {
   return data as WebSearchConfig;
 }
 
-export async function setGatewayModelDefault(modelId: string, role: DefaultRole): Promise<void> {
-  const { error } = await setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost({
+/**
+ * Set a model as a role's fleet default.
+ *
+ * Returns the backend's `warning` when the default was stored but its failover chain could not
+ * be re-declared on the proxy: the write succeeded, so this is not an error, but the tier is
+ * left routing to the previous head's chain and the admin has to be told. Dropping it on the
+ * floor would leave that state visible only on the next tier-page load.
+ */
+export async function setGatewayModelDefault(
+  modelId: string,
+  role: DefaultRole,
+): Promise<{ warning?: string | null }> {
+  const { data, error } = await setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost({
     path: { model_id: modelId },
     body: { role },
   });
   if (error) throw error;
+  return (data ?? {}) as { warning?: string | null };
 }
 
 export async function deleteGatewayModel(modelId: string): Promise<void> {

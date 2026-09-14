@@ -184,7 +184,7 @@ async def test_empty_chain_clears_the_route():
 async def test_changing_the_default_moves_the_chain_to_the_new_head():
     repo = _FakeRepo({"chat": "gpt"}, {"chat": ["claude-vertex"]})  # already re-pointed
     gateway = _FakeGateway(registered=["gpt", "claude", "claude-vertex"])
-    await _service(repo).reproject_tier_group(_DB, "chat", gateway=gateway, previous_head="claude")
+    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway, previous_head="claude")
     assert gateway.set_calls == [("gpt", ["claude-vertex"])]
     assert gateway.deleted == ["claude"]  # the old head must stop failing over
 
@@ -195,7 +195,7 @@ async def test_the_old_head_is_kept_when_it_still_serves_another_tier():
     tier moved on would silently disarm the tier still using it."""
     repo = _FakeRepo({"chat": "gpt", "chat:premium": "claude"}, {"chat": ["claude-vertex"]})
     gateway = _FakeGateway(registered=["gpt", "claude", "claude-vertex"])
-    await _service(repo).reproject_tier_group(_DB, "chat", gateway=gateway, previous_head="claude")
+    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway, previous_head="claude")
     assert gateway.deleted == []
     assert gateway.set_calls == [("gpt", ["claude-vertex"])]
 
@@ -204,5 +204,54 @@ async def test_the_old_head_is_kept_when_it_still_serves_another_tier():
 async def test_reprojecting_a_non_chat_role_is_a_no_op():
     repo = _FakeRepo({"embedding": "titan"})
     gateway = _FakeGateway(registered=["titan"])
-    await _service(repo).reproject_tier_group(_DB, "embedding", gateway=gateway)
+    await _service(repo).reproject_tier_group(_DB, "embedding", actor=None, gateway=gateway)
     assert gateway.set_calls == [] and gateway.deleted == []
+
+
+# --- validation and repair added after review round 1 -------------------------------------
+
+
+class _ModeGateway(_FakeGateway):
+    """Gateway whose deployments carry a mode, as /model/info reports them."""
+
+    def __init__(self, modes: dict[str, str]):
+        super().__init__(registered=list(modes))
+        self.modes = modes
+
+    async def list_models(self):
+        return [{"model_name": n, "model_info": {"mode": m}} for n, m in self.modes.items()]
+
+
+@pytest.mark.asyncio
+async def test_an_embedding_alias_cannot_be_a_chat_tier_fallback():
+    """_require_chat_tier guards the tier's ROLE; this guards the chain's MEMBERS. Without it an
+    API caller could route chat traffic onto an embedding deployment, which fails hard at the one
+    moment the chain is needed."""
+    repo = _FakeRepo({"chat": "claude"})
+    gateway = _ModeGateway({"claude": "chat", "titan-embed": "embedding"})
+    with pytest.raises(ValueError, match="Not chat models"):
+        await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["titan-embed"], gateway=gateway)
+    assert gateway.set_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_with_no_declared_mode_is_treated_as_chat():
+    """/model/info omits `mode` for plain chat deployments, so absent must not mean 'rejected'."""
+    repo = _FakeRepo({"chat": "claude"})
+    gateway = _FakeGateway(registered=["claude", "gpt"])  # no model_info at all
+    models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["gpt"], gateway=gateway)
+    assert models == ["claude", "gpt"]
+
+
+@pytest.mark.asyncio
+async def test_promoting_an_alias_already_in_the_chain_removes_it_from_the_chain():
+    """Otherwise the tier declares a chain that falls back from the head to itself — burning a hop
+    on the provider just found unavailable — and every later edit 400s, because set_failover_chain
+    rejects a chain containing the head."""
+    repo = _FakeRepo({"chat": "gpt"}, {"chat": ["gpt", "vertex"]})  # 'gpt' just promoted
+    gateway = _FakeGateway(registered=["gpt", "claude", "vertex"])
+    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway, previous_head="claude")
+
+    assert gateway.set_calls == [("gpt", ["vertex"])]  # no self-reference projected
+    assert repo.chains["chat"] == ["vertex"]  # and the correction is persisted, not just projected
+    assert repo.replaced == [("chat", ["vertex"])]

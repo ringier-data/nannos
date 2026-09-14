@@ -1781,6 +1781,11 @@ export const costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGet = <T
  * Delete Model
  *
  * Remove a model from the gateway. The Rate Card is left for historical billing.
+ *
+ * The alias is also dropped from any tier's failover chain: leaving it there would have the
+ * gateway fail over to a model it no longer serves, breaking at exactly the moment the primary
+ * is down. Read the alias *before* deleting — afterwards the deployment is gone and there is
+ * nothing left to map the id to a name.
  */
 export const deleteModelApiV1AdminModelGatewayModelsModelIdDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData, ThrowOnError>) => (options.client ?? client).delete<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteResponses, DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteErrors, ThrowOnError>({ url: '/api/v1/admin/model-gateway/models/{model_id}', ...options });
 
@@ -1830,12 +1835,15 @@ export const setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost = <ThrowOn
 /**
  * List Tier Groups
  *
- * Every chat tier with its failover chain, plus any drift against the live proxy.
+ * Every chat tier with its failover chain, plus how it compares to the live proxy.
  *
- * The proxy is read per tier rather than trusted: a chain that exists only in our table is
- * a failover that will not happen, and that is exactly the failure this feature exists to
- * prevent, so it is surfaced instead of assumed away. A proxy that cannot be reached leaves
- * ``gateway_mismatch`` unset (unknown), which is not the same as "in sync".
+ * The proxy is read rather than trusted: a chain that exists only in our table is a failover
+ * that will not happen, which is the precise failure this feature exists to prevent. The
+ * comparison is tri-state — a proxy that cannot be reached reports ``unknown``, never
+ * ``in_sync``, because an unreachable gateway is exactly when this page is being consulted.
+ *
+ * The three per-tier reads are issued concurrently: serialized, a hung proxy would cost three
+ * full client timeouts before the page rendered.
  */
 export const listTierGroupsApiV1AdminModelGatewayTiersGet = <ThrowOnError extends boolean = false>(options?: Options<ListTierGroupsApiV1AdminModelGatewayTiersGetData, ThrowOnError>) => (options?.client ?? client).get<ListTierGroupsApiV1AdminModelGatewayTiersGetResponses, unknown, ThrowOnError>({ url: '/api/v1/admin/model-gateway/tiers', ...options });
 

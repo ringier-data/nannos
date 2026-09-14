@@ -43,7 +43,12 @@ and could reject the request outright.
   silently loses prompt caching, which shows up as a cost regression rather than an error. The
   allowlist has to be maintained as providers are added; the boot-time gateway settings check is
   where that omission is meant to become visible.
-- `thinking_blocks` replay remains app-side and alias-keyed
-  (`_thinking_round_trip_provider`). It is not covered by this ADR's mechanism. Extended thinking
-  is dropped on a fallback turn rather than replayed, which is accepted: an answer without
-  extended thinking beats no answer, and the primary's own turns are unaffected.
+- `thinking_blocks` are *decided* app-side and alias-keyed (`_thinking_round_trip_provider`),
+  which the same argument condemns: under gateway-side failover the request is already in flight
+  and already carries the blocks inline, so nothing app-side can react. They are therefore
+  stripped here too, by the same hook and on the same predicate. Extended thinking is lost on a
+  fallback attempt rather than replayed — an answer without extended thinking beats no answer —
+  and the primary's own attempts are unaffected, because each attempt gets its own copy.
+- The app still decides *whether to attach* blocks from the alias, which stays correct as long
+  as an alias's own provider is stable. Only the serving provider can differ, and only the proxy
+  sees that.

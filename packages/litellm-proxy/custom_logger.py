@@ -187,14 +187,36 @@ _CACHE_CONTROL_KEEP_RULES: dict[str, tuple[str, ...]] = {
 }
 
 
+# Model-name markers that say "this is an Anthropic model" regardless of provider. Used only to
+# notice the ambiguous case below, never to decide policy.
+_ANTHROPIC_MODEL_MARKERS = ("anthropic.", "claude")
+
+
+def _speaks_anthropic_idiom(provider: str | None, model: str) -> bool:
+    """Whether the resolved deployment understands Anthropic's message extensions."""
+    return not _should_strip_cache_control(provider, model)
+
+
 def _should_strip_cache_control(provider: str | None, model: str) -> bool:
     """True unless the resolved deployment speaks Anthropic's ``cache_control`` idiom.
 
-    Unknown or undeterminable providers strip: losing a cache discount is recoverable and
-    shows up in billing, while forwarding markers a provider rejects fails the call.
+    Unknown or undeterminable providers strip: losing a cache discount is recoverable and shows
+    up in billing, while forwarding markers a provider rejects fails the call. That is a real
+    trade though — an Anthropic model whose provider can't be derived (a bare model id with no
+    prefix and no ``custom_llm_provider``, as a hand-written DB registration can produce) loses
+    prompt caching at a 5-10x input-cost multiple with nothing else to signal it — so that exact
+    case is logged rather than left silent.
     """
     keep_markers = _CACHE_CONTROL_KEEP_RULES.get(provider or "")
     if keep_markers is None:
+        if any(marker in model for marker in _ANTHROPIC_MODEL_MARKERS):
+            logger.warning(
+                "[cache-control] stripping markers for '%s': provider could not be resolved "
+                "(provider=%r) but the model looks Anthropic. Prompt caching is lost for this "
+                "deployment — register it with an explicit provider prefix.",
+                model,
+                provider,
+            )
         return True
     return bool(keep_markers) and not any(marker in model for marker in keep_markers)
 
@@ -233,6 +255,27 @@ def _strip_cache_control_entries(items: list) -> list | None:
         if new_item is not item:
             changed = True
         out.append(new_item)
+    return out if changed else None
+
+
+def _strip_thinking_blocks(messages: list) -> list | None:
+    """Return a copy of ``messages`` with top-level ``thinking_blocks`` removed, or None if none.
+
+    The app re-attaches each assistant turn's signed ``thinking_blocks`` as a TOP-LEVEL message
+    field, keyed on the *requested alias*' provider (agent_common model_factory). Under failover
+    the alias no longer names the serving provider, so an Anthropic-shaped request can reach a
+    non-Anthropic deployment carrying a field it does not define — failing the very request the
+    failover chain existed to save. Same copy-on-write discipline as the cache_control strip: the
+    router hands each attempt a shallow copy, so the Anthropic attempt must keep its blocks.
+    """
+    changed = False
+    out = []
+    for message in messages:
+        if isinstance(message, dict) and "thinking_blocks" in message:
+            out.append({k: v for k, v in message.items() if k != "thinking_blocks"})
+            changed = True
+        else:
+            out.append(message)
     return out if changed else None
 
 
@@ -559,7 +602,7 @@ class NannosCostLogger(CustomLogger):
             if not provider and "/" in model:
                 provider = model.split("/", 1)[0]
             bare_model = model.split("/", 1)[1] if "/" in model else model
-            if not _should_strip_cache_control(provider, bare_model):
+            if _speaks_anthropic_idiom(provider, bare_model):
                 return None
             changed = False
             for key in ("messages", "tools"):
@@ -569,6 +612,12 @@ class NannosCostLogger(CustomLogger):
                     if stripped is not None:
                         kwargs[key] = stripped
                         changed = True
+            messages = kwargs.get("messages")
+            if isinstance(messages, list):
+                stripped = _strip_thinking_blocks(messages)
+                if stripped is not None:
+                    kwargs["messages"] = stripped
+                    changed = True
             return kwargs if changed else None
         except Exception as e:  # never break the call on a stripping failure
             logger.warning(
@@ -722,6 +771,19 @@ def resilience_warnings(config: dict) -> list[str]:
             "num_retries is 0 — the gateway will not retry a transient provider failure, "
             "and a fallback chain declared in the console will never fire. See "
             "packages/litellm-proxy/litellm-settings.yaml."
+        )
+    # Cooldowns are what make a chain useful rather than merely present: without them a sick
+    # deployment is retried on every single request and each call pays its full retry budget
+    # before the chain is consulted. LiteLLM has defaults, so this is a nudge, not an error —
+    # but the shipped example carries them, and a config missing both usually means the file
+    # was copied before they existed.
+    # Gated on the config actually configuring a proxy: an empty or unrelated dict is not a
+    # deployment that forgot its cooldowns, it is simply not this file.
+    if settings and "allowed_fails" not in router and "cooldown_time" not in router:
+        warnings.append(
+            "router_settings has neither allowed_fails nor cooldown_time — a failing deployment "
+            "is never benched, so every request pays the full retry budget before its fallback "
+            "chain is tried. See packages/litellm-proxy/litellm-settings.yaml."
         )
     if router.get("fallbacks"):
         warnings.append(

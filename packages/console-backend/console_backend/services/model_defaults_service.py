@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.model_gateway import CHAT_TIER_ROLES, VALID_ROLES  # single source of truth for role keys
 from ..models.user import User
 
+from .model_gateway_service import ModelGatewayError
+
 if TYPE_CHECKING:
     from ..repositories.model_defaults_repository import ModelDefaultsRepository
     from .model_gateway_service import ModelGatewayService
@@ -109,12 +111,24 @@ class ModelDefaultsService:
                 )
             seen.add(alias)
 
-        registered = {m.get("model_name") for m in await gateway.list_models()}
+        deployments = await gateway.list_models()
+        registered = {m.get("model_name") for m in deployments}
         unknown = [a for a in aliases if a not in registered]
         if unknown:
             raise ValueError(
                 f"Not registered on the gateway: {', '.join(sorted(unknown))}. "
                 f"Register a model before routing traffic to it."
+            )
+        # Mode, not just existence: _require_chat_tier guards the tier's ROLE, but said nothing
+        # about the chain's members, so an API caller could route chat traffic onto an embedding
+        # deployment — which fails hard at the moment the chain is finally needed.
+        chat_aliases = {
+            m.get("model_name") for m in deployments if (m.get("model_info") or {}).get("mode", "chat") == "chat"
+        }
+        not_chat = [a for a in aliases if a not in chat_aliases]
+        if not_chat:
+            raise ValueError(
+                f"Not chat models: {', '.join(sorted(not_chat))}. A chat tier may only fail over to chat models."
             )
 
         await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=aliases)
@@ -126,6 +140,7 @@ class ModelDefaultsService:
         db: AsyncSession,
         role: str,
         *,
+        actor: User,
         gateway: "ModelGatewayService",
         previous_head: str | None = None,
     ) -> None:
@@ -151,7 +166,50 @@ class ModelDefaultsService:
         if not head:
             return
         chain = await self.repository.get_fallbacks(db, role)
+        if head in chain:
+            # The alias just promoted to default was already in this tier's chain. Projecting it
+            # unchanged would declare a chain that falls back from the head to itself — burning a
+            # hop on the provider just found unavailable — and would then make every later edit
+            # 400, since set_failover_chain rejects a chain containing the head. Drop it here and
+            # persist the correction so the console and the proxy agree.
+            chain = [a for a in chain if a != head]
+            await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=chain)
+            logger.info("Removed newly-promoted default '%s' from the '%s' failover chain", head, role)
         await gateway.set_fallbacks(head, chain)
+
+    async def drop_alias_from_chains(
+        self, db: AsyncSession, actor: User, alias: str, *, gateway: "ModelGatewayService"
+    ) -> list[str]:
+        """Remove a retired alias from every failover chain and reproject the affected tiers.
+
+        Deleting a deployment otherwise leaves it named in the chains — both in our table and on
+        the proxy — so the gateway would fail over to a model it no longer serves, breaking at
+        precisely the moment the primary is down. The stored registration check only catches it
+        on the next manual edit, which may never come.
+
+        Returns the roles that changed. Best-effort per tier: one unprojectable tier must not
+        stop the others from being cleaned up.
+        """
+        chains = await self.repository.get_all_fallbacks(db)
+        defaults = await self.get_all(db)
+        changed: list[str] = []
+        for role, chain in chains.items():
+            if alias not in chain:
+                continue
+            await self.repository.replace_fallbacks(
+                db, actor=actor, role=role, aliases=[a for a in chain if a != alias]
+            )
+            changed.append(role)
+            head = defaults.get(role)
+            if not head:
+                continue
+            try:
+                await gateway.set_fallbacks(head, [a for a in chain if a != alias])
+            except ModelGatewayError as e:
+                logger.error("Removed '%s' from tier '%s' but could not reproject: %s", alias, role, e)
+        if changed:
+            logger.info("Removed retired alias '%s' from failover chains: %s", alias, changed)
+        return changed
 
     @staticmethod
     def _require_chat_tier(role: str) -> None:

@@ -6667,6 +6667,7 @@ export type TierGroup = {
      * Models
      */
     models?: Array<string>;
+    gateway_state?: GatewayStateEnum;
     /**
      * Gateway Mismatch
      */
@@ -8238,6 +8239,11 @@ export type ItemsEnum = 'read' | 'write';
 export type _0Enum2 = 'standalone' | 'sub-agent';
 
 export type _0Enum3 = 'owner' | 'write' | 'read';
+
+/**
+ * Gateway State
+ */
+export type GatewayStateEnum = 'in_sync' | 'drifted' | 'unknown';
 
 /**
  * Reason

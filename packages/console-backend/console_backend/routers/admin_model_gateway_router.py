@@ -6,6 +6,7 @@ the LiteLLM proxy. The Rate Card is written FIRST so a model is
 never usable before it is billable. Master-key access stays server-side.
 """
 
+import asyncio
 import logging
 from decimal import Decimal
 from typing import Literal
@@ -549,6 +550,7 @@ async def set_default(
         await defaults_service.reproject_tier_group(
             db,
             body.role,
+            actor=user,
             gateway=get_model_gateway_service(request),
             previous_head=previous_head,
         )
@@ -565,13 +567,30 @@ async def set_default(
 
 
 @router.delete("/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_model(model_id: str, request: Request, user: User = Depends(require_admin)):
-    """Remove a model from the gateway. The Rate Card is left for historical billing."""
+async def delete_model(model_id: str, request: Request, db: DbSession, user: User = Depends(require_admin)):
+    """Remove a model from the gateway. The Rate Card is left for historical billing.
+
+    The alias is also dropped from any tier's failover chain: leaving it there would have the
+    gateway fail over to a model it no longer serves, breaking at exactly the moment the primary
+    is down. Read the alias *before* deleting — afterwards the deployment is gone and there is
+    nothing left to map the id to a name.
+    """
+    gateway = get_model_gateway_service(request)
+    model = await gateway.get_model_by_id(model_id)
+    alias = (model or {}).get("model_name") or ""
     try:
-        await get_model_gateway_service(request).delete_model(model_id)
+        await gateway.delete_model(model_id)
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     logger.info("Deleted gateway model id=%s by %s", model_id, user.id)
+
+    # After the delete: the model is gone either way, so a cleanup failure must not report the
+    # deletion as failed. It is logged, and the tier page's drift state shows the consequence.
+    if alias:
+        try:
+            await get_model_defaults_service(request).drop_alias_from_chains(db, user, alias, gateway=gateway)
+        except Exception as e:  # noqa: BLE001 - cleanup is best-effort; the delete already happened
+            logger.error("Deleted '%s' but failed to clean its failover-chain entries: %s", alias, e)
 
 
 # --- Tier groups (nannos#204, ADR-0008) ------------------------------------------------
@@ -583,40 +602,57 @@ async def delete_model(model_id: str, request: Request, user: User = Depends(req
 
 @router.get("/tiers", response_model=list[TierGroup])
 async def list_tier_groups(request: Request, db: DbSession, user: User = Depends(require_admin)):
-    """Every chat tier with its failover chain, plus any drift against the live proxy.
+    """Every chat tier with its failover chain, plus how it compares to the live proxy.
 
-    The proxy is read per tier rather than trusted: a chain that exists only in our table is
-    a failover that will not happen, and that is exactly the failure this feature exists to
-    prevent, so it is surfaced instead of assumed away. A proxy that cannot be reached leaves
-    ``gateway_mismatch`` unset (unknown), which is not the same as "in sync".
+    The proxy is read rather than trusted: a chain that exists only in our table is a failover
+    that will not happen, which is the precise failure this feature exists to prevent. The
+    comparison is tri-state — a proxy that cannot be reached reports ``unknown``, never
+    ``in_sync``, because an unreachable gateway is exactly when this page is being consulted.
+
+    The three per-tier reads are issued concurrently: serialized, a hung proxy would cost three
+    full client timeouts before the page rendered.
     """
     defaults_service = get_model_defaults_service(request)
     gateway = get_model_gateway_service(request)
     groups = await defaults_service.get_all_tier_groups(db)
-    chains = await defaults_service.repository.get_all_fallbacks(db)
+
+    async def _live(head: str) -> list[str]:
+        return await gateway.get_fallbacks(head)
+
+    heads = [(role, (groups.get(role) or [None])[0]) for role in CHAT_TIER_ROLES]
+    live_results = await asyncio.gather(
+        *(_live(head) if head else _noop_chain() for _, head in heads), return_exceptions=True
+    )
 
     out: list[TierGroup] = []
-    for role in CHAT_TIER_ROLES:
+    for (role, head), live in zip(heads, live_results, strict=True):
         models = groups.get(role, [])
-        head = models[0] if models else None
-        stored = chains.get(role, [])
-        mismatch: list[str] | None = None
-        if head:
-            try:
-                live = await gateway.get_fallbacks(head)
-                mismatch = live if live != stored else None
-            except ModelGatewayError as e:
-                logger.warning("Could not read live fallbacks for '%s': %s", head, e)
+        stored = models[1:]  # the head is models[0]; the chain is the rest
+        if head is None:
+            state, mismatch = "unknown", None
+        elif isinstance(live, BaseException):
+            logger.warning("Could not read live fallbacks for '%s': %s", head, live)
+            state, mismatch = "unknown", None
+        elif live == stored:
+            state, mismatch = "in_sync", None
+        else:
+            state, mismatch = "drifted", list(live)
         out.append(
             TierGroup(
                 role=role,
                 default=head,
                 fallbacks=stored,
                 models=models,
+                gateway_state=state,
                 gateway_mismatch=mismatch,
             )
         )
     return out
+
+
+async def _noop_chain() -> list[str]:
+    """Placeholder coroutine for a tier with no default — nothing to ask the proxy about."""
+    return []
 
 
 @router.put("/tiers/{role:path}/fallbacks", response_model=TierGroup)
