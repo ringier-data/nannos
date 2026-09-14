@@ -8,9 +8,12 @@ closed it under the other, killing the agent turn with ``already closed``), shar
 one ``_PTC_TURNS`` entry, and shared one HITL collector.
 
 These tests script the model so the two-``eval`` message is emitted
-deterministically; everything under it is the production stack. The manual QA
-harness in ``tests/manual/qa_217_parallel_eval.py`` covers the same ground with
-more diagnostics.
+deterministically; everything under it is the production stack — the real
+middleware, the ``ptc_guard`` wrapper and a real QuickJS sandbox, with no gateway
+and no network. Scripting the assistant message deliberately bypasses the model
+boundary: a "fix" that only stopped the model from emitting two ``eval`` calls
+(``parallel_tool_calls=False``) would not be exercised here. These test the layer
+below that.
 """
 
 from __future__ import annotations
@@ -84,8 +87,10 @@ JSON.stringify({{result: r, ownerAfterAwait: globalThis.__owner}})
 def build_eval_agent(risk: float, *, parallel: bool = True) -> tuple[Any, list[str]]:
     """An agent that emits two ``eval`` calls, in one model step or in two.
 
-    Shared with the manual QA harness (``tests/manual/qa_217_parallel_eval.py``) so
-    the two cannot drift apart; ``parallel=False`` is that harness's control case.
+    ``parallel=False`` is the control: the same two programs and the same tools, with
+    only the number of ``eval`` calls per model step differing. It passes on every
+    build, which is what rules out a harness or environment fault when the
+    ``parallel=True`` cases fail.
     """
     executed: list[str] = []
 
@@ -147,10 +152,16 @@ def _assert_both_evals_intact(evals: dict[str, str], executed: list[str], histor
     assert len(history.get("eval:probe", [])) == 2, f"write-back dropped an eval's records: {history}"
 
 
-async def test_two_evals_in_one_step_do_not_collide():
-    """Low-risk inner calls: both programs run to completion with their own sandbox."""
-    agent, executed = build_eval_agent(risk=0.1)
-    config = {"configurable": {"thread_id": "ptc-parallel-low"}}
+@pytest.mark.parametrize("parallel", [False, True], ids=["sequential", "one-step"])
+async def test_two_evals_do_not_collide(parallel):
+    """Low-risk inner calls: both programs run to completion with their own sandbox.
+
+    ``sequential`` is the control and must pass on every build; ``one-step`` is the
+    #217 regression — before the fix the two evals shared a QuickJS slot and the
+    first to finish closed the context the other was still executing in.
+    """
+    agent, executed = build_eval_agent(risk=0.1, parallel=parallel)
+    config = {"configurable": {"thread_id": f"ptc-low-{'one-step' if parallel else 'sequential'}"}}
 
     result = await asyncio.wait_for(agent.ainvoke({"messages": [HumanMessage("go")]}, config), 60)
 
