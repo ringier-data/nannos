@@ -92,6 +92,11 @@ from agent_common.core.graph_utils import (
 from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.core.catalogue_ingest import fetch_catalogue_mcp
 from agent_common.core.notify_user_tool import NOTE_KIND, USER_NOTE_EVENT
+from agent_common.core.step_budget import (
+    DEFAULT_SUB_AGENT_MAX_MODEL_CALLS,
+    recursion_limit_for,
+    resolve_max_model_calls,
+)
 from agent_common.core.token_provider import UserTokenProvider, bearer_interceptor
 from agent_common.core.tool_catalog import TOOL_CATALOG_PROMPT_ADDENDUM, ToolCatalogMiddleware
 from agent_common.core.tool_catalogue import make_lazy_tool
@@ -113,18 +118,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Sub-agent recursion limit — prevents runaway loops when the model ignores
-# tool errors and keeps retrying. Counted in LangGraph super-steps, not model
-# calls; the orchestrator no longer shares this budget (it derives its own from
-# its compiled graph, see orchestrator-agent app/core/step_budget.py), so this is
-# now the sub-agent bound only. Binding it also matters: langgraph propagates
-# `recursion_limit` into a child graph that does not set its own, so without the
-# `with_config` below every sub-agent would inherit the orchestrator's.
-_SUB_AGENT_RECURSION_LIMIT = int(
-    os.getenv(
-        "SUB_AGENT_RECURSION_LIMIT",
-        os.getenv("MAX_RECURSION_LIMIT", "75"),
-    )
+# Sub-agent turn budget — prevents runaway loops when the model ignores tool
+# errors and keeps retrying. Counted in **model calls**; the LangGraph
+# `recursion_limit` is derived from the compiled graph at the bind site below
+# (agent_common/core/step_budget.py), because the super-step cost of a model call
+# is the middleware stack's per-call node count and changes whenever that stack
+# does.
+#
+# The default is *not* a conversion of the 75 super-steps it replaces: the exchange
+# rate is per-graph, so porting the old number by multiplication would bake in
+# exactly the implied rate this is meant to remove. It is set above the
+# orchestrator's because a sub-agent is where the tool loop actually runs —
+# discovery, retries, several rounds against an MCP server — so it has no business
+# being more constrained than the planner that delegates to it. See
+# DEFAULT_SUB_AGENT_MAX_MODEL_CALLS, where the three budgets sit together.
+#
+# Binding at all also matters: langgraph propagates `recursion_limit` into a
+# child graph that does not set its own, so without the `with_config` below every
+# sub-agent would inherit the orchestrator's.
+SUB_AGENT_MAX_MODEL_CALLS_ENV = "SUB_AGENT_MAX_MODEL_CALLS_PER_TURN"
+_SUB_AGENT_MAX_MODEL_CALLS = resolve_max_model_calls(
+    SUB_AGENT_MAX_MODEL_CALLS_ENV, DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
 )
 
 # Tool-name prefixes served by the console-backend MCP (FastAPI routes tagged
@@ -1506,7 +1520,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 if server_name:
                     tool_server_map[tool.name] = server_name
 
-        return build_sub_agent_graph(
+        graph = build_sub_agent_graph(
             model=self.model,
             tools=self._cached_tools or [],
             system_prompt=self._cached_system_prompt or self.config.system_prompt,
@@ -1524,7 +1538,18 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             tool_server_map=tool_server_map or None,
             context_gated_tools=self._cached_context_gated_tools or None,
             expose_context_registry=exposed_catalog is not None,
-        ).with_config({"recursion_limit": _SUB_AGENT_RECURSION_LIMIT})
+        )
+        # Derived against *this* graph: the extra_middlewares assembled above vary
+        # per sub-agent (HITL, tool catalog, PTC), so the super-steps a model call
+        # costs is not a constant across sub-agents, let alone across releases.
+        recursion_limit = recursion_limit_for(graph, _SUB_AGENT_MAX_MODEL_CALLS)
+        logger.debug(
+            "Sub-agent '%s' graph bound to recursion_limit=%d (%d model calls per turn)",
+            self.name,
+            recursion_limit,
+            _SUB_AGENT_MAX_MODEL_CALLS,
+        )
+        return graph.with_config({"recursion_limit": recursion_limit})
 
     def _exposed_catalog(self) -> dict[str, BaseTool] | None:
         """The tool_catalog subset reachable via lazy discovery, or ``None``.

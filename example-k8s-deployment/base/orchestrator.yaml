@@ -63,6 +63,18 @@ spec:
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"
         - name: MCP_GATEWAY_CLIENT_ID
           value: "gatana"
+        # Turn budgets, in MODEL CALLS -- not LangGraph super-steps. The super-step
+        # limit is derived from each compiled graph at runtime, because one model call
+        # costs a whole lap of the middleware stack and that multiplier changes
+        # whenever a middleware carrying model hooks is added or removed.
+        # Two separate budgets live in this pod: the orchestrator's own planning turns,
+        # and the sub-agents it runs in-process. A planning turn delegates and decides;
+        # a sub-agent does the work, so it gets more room. Both shown at their defaults
+        # so the knobs are discoverable; remove the lines to track the defaults.
+        - name: ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN
+          value: "25"
+        - name: SUB_AGENT_MAX_MODEL_CALLS_PER_TURN
+          value: "40"
         # Max MCP servers queried for their tool catalogue at once, process-wide.
         # Cold discovery opens one connection per server, so an unbounded fan-out
         # makes the memory peak scale with the gateway catalogue rather than with

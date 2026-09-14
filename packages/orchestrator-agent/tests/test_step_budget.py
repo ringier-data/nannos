@@ -1,9 +1,15 @@
-"""The turn budget: model calls in, LangGraph super-steps out.
+"""The turn budget: model calls in, LangGraph super-steps out — orchestrator side.
 
 The reported bug was that `MAX_RECURSION_LIMIT=50` capped a turn at six model
 calls, because the limit counts super-steps and every middleware hook is its own
 node. The fix expresses the budget in model calls and derives the multiplier from
 the compiled graph.
+
+The derivation itself now lives in `agent_common.core.step_budget`, because the
+sub-agent paths had the same bug, and its unit tests live beside it. What remains
+here is what is specific to *this* graph and this service: the measurements
+against the orchestrator's own middleware stack, the GraphFactory wiring, and the
+orchestrator's own env name.
 
 These tests exist to stop the derivation going quietly wrong, which is the only
 way this bug can come back. Two of them do real work:
@@ -33,18 +39,18 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field, PrivateAttr
 
-from app.core.graph_factory import GraphFactory
-from app.core.step_budget import (
+from agent_common.core.step_budget import (
+    DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS,
+    LEGACY_RECURSION_LIMIT_ENV,
     classify_nodes,
     recursion_limit_for,
     steps_per_model_call,
 )
+
+from app.core.graph_factory import GraphFactory
 from app.core.time_tools import create_time_tool
 from app.models.config import (
-    DEFAULT_MAX_MODEL_CALLS_PER_TURN,
-    LEGACY_RECURSION_LIMIT_ENV,
     MAX_MODEL_CALLS_PER_TURN_ENV,
-    MIN_MAX_MODEL_CALLS_PER_TURN,
     AgentSettings,
     GraphRuntimeContext,
     _resolve_max_model_calls_per_turn,
@@ -224,42 +230,6 @@ async def test_the_budget_is_never_below_what_a_turn_actually_costs(thinking, mo
     )
 
 
-def test_an_unknown_node_inflates_the_budget_and_warns(caplog):
-    """Production must not treat a node it does not understand as free.
-
-    A `.before_tools`, an async-named hook, a renamed core node: anything
-    unrecognised is charged at the per-model-call rate, so the budget errs large,
-    and logged so it gets fixed. Counting it as zero would shrink the budget
-    toward the truncation this module exists to prevent — and unlike
-    `test_every_node_is_classified` below, this holds for stacks that only exist
-    in a deployment, not in CI.
-    """
-
-    class _GraphWithMysteryNode:
-        nodes = ["__start__", "model", "tools", "Some.before_model", "Mystery.before_tools"]
-
-    with caplog.at_level("WARNING"):
-        per_call = steps_per_model_call(_GraphWithMysteryNode())
-
-    # 1 known hook + 2 core + 1 unknown, charged as if it ran every cycle.
-    assert per_call == 4
-    assert "Mystery.before_tools" in caplog.text
-
-
-def test_the_core_cycle_cost_is_counted_not_assumed():
-    """`model` and `tools` are counted from the classification, not hardcoded to 2.
-
-    langchain only adds a `tools` node when the graph has tools, and a rename
-    would land both in `unclassified` — either way an assumed 2 would be a
-    plausible-looking wrong number.
-    """
-
-    class _GraphWithoutTools:
-        nodes = ["__start__", "model", "Some.after_model"]
-
-    assert steps_per_model_call(_GraphWithoutTools()) == 2  # model + 1 hook, no tools
-
-
 def test_every_node_is_classified():
     """An unclassified node means the derivation is silently mis-counting.
 
@@ -272,7 +242,7 @@ def test_every_node_is_classified():
 
     assert buckets["unclassified"] == [], (
         f"unrecognised graph nodes: {buckets['unclassified']}. "
-        "app/core/step_budget.py needs to learn how often they run."
+        "agent_common/core/step_budget.py needs to learn how often they run."
     )
     assert buckets["core"], "neither `model` nor `tools` was found — node naming changed"
     assert buckets["per_model_call"], "no per-model-call hooks found — hook naming changed"
@@ -287,23 +257,28 @@ def test_the_graph_is_compiled_with_the_derived_limit():
     assert graph.config.get("recursion_limit") == expected
 
 
+
+
 # ---------------------------------------------------------------------------
 # Configuration
+#
+# Only what is orchestrator-specific lives here. The clamping, the fallbacks and
+# the retired-env-var warnings are shared by all three consumers and are tested
+# once, in agent-common's `tests/test_step_budget.py`.
 # ---------------------------------------------------------------------------
 
 
 def test_the_shared_env_var_no_longer_configures_the_orchestrator(monkeypatch):
     """The reported design bug.
 
-    `MAX_RECURSION_LIMIT` is read by agent-runner and ringier-a2a-sdk (default
-    50) and agent-common (75). A deployment pinning 50 — the orchestrator's own
-    former default — used to silently reinstate the truncation, and CI could not
-    catch it: the env var is unset there, so the tests stayed green against the
-    intended budget.
+    `MAX_RECURSION_LIMIT` used to be one name for four consumers, counted in
+    super-steps. A deployment pinning 50 — the orchestrator's own former default —
+    silently reinstated the turn truncation, and CI could not catch it: the env
+    var is unset there, so the tests stayed green against the intended budget.
     """
     monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
 
-    assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
+    assert _resolve_max_model_calls_per_turn() == DEFAULT_ORCHESTRATOR_MAX_MODEL_CALLS
 
 
 def test_setting_the_legacy_name_warns(monkeypatch, caplog):
@@ -317,72 +292,11 @@ def test_setting_the_legacy_name_warns(monkeypatch, caplog):
     assert MAX_MODEL_CALLS_PER_TURN_ENV in caplog.text
 
 
-def test_the_legacy_warning_does_not_read_as_obsolete(monkeypatch, caplog):
-    """The wording is the whole point of this warning, so it is pinned.
-
-    `MAX_RECURSION_LIMIT` is not dead: agent-common's `dynamic_agent` reads it as
-    the fallback bound for every local sub-agent in this same process, and
-    agent-runner and ringier-a2a-sdk read it too. An operator who takes "no longer
-    configures the orchestrator" as "safe to remove" silently changes every
-    sub-agent's recursion bound — so the warning has to say both things and name
-    the variable that decouples them.
-    """
-    monkeypatch.setenv(LEGACY_RECURSION_LIMIT_ENV, "50")
-
-    with caplog.at_level("WARNING"):
-        _resolve_max_model_calls_per_turn()
-
-    text = caplog.text
-    assert "do not unset" in text.lower(), "the warning must not read as 'this is obsolete'"
-    assert "SUB_AGENT_RECURSION_LIMIT" in text, "must name the variable that decouples the two"
-    assert "sub-agent" in text.lower()
-
-
 def test_the_orchestrator_budget_is_configurable(monkeypatch):
+    """And reads *its own* name, not a shared one — that is the whole point of the
+    rename. Setting a sibling service's budget must not move this one."""
     monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "40")
+    monkeypatch.setenv("SUB_AGENT_MAX_MODEL_CALLS_PER_TURN", "7")
+    monkeypatch.setenv("AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN", "7")
 
     assert _resolve_max_model_calls_per_turn() == 40
-
-
-def test_a_malformed_budget_falls_back_rather_than_crashing(monkeypatch):
-    """This is read at import time, so raising would take the process down."""
-    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "40s")
-
-    assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
-
-
-@pytest.mark.parametrize("raw", ["", "   "])
-def test_an_empty_budget_falls_back(monkeypatch, raw):
-    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, raw)
-
-    assert _resolve_max_model_calls_per_turn() == DEFAULT_MAX_MODEL_CALLS_PER_TURN
-
-
-@pytest.mark.parametrize("raw", ["0", "-1"])
-def test_a_non_positive_budget_is_clamped_rather_than_bricking_every_turn(monkeypatch, caplog, raw):
-    """0 is not a small budget, it is a broken deployment.
-
-    The derived limit would collapse to the per-turn overhead, so every request
-    would exhaust it in its first super-steps and answer "I've been working on
-    this for a while and need to take a break" having done nothing — with nothing
-    in the logs pointing at the env var.
-    """
-    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, raw)
-
-    with caplog.at_level("WARNING"):
-        resolved = _resolve_max_model_calls_per_turn()
-
-    assert resolved == MIN_MAX_MODEL_CALLS_PER_TURN
-    assert MAX_MODEL_CALLS_PER_TURN_ENV in caplog.text
-
-
-def test_an_implausibly_large_budget_is_honoured_but_flagged(monkeypatch, caplog):
-    """Not clamped — a long budget can be deliberate — but a typo'd 2500 leaves no
-    runaway protection at all, which is worth noticing before it costs money."""
-    monkeypatch.setenv(MAX_MODEL_CALLS_PER_TURN_ENV, "2500")
-
-    with caplog.at_level("WARNING"):
-        resolved = _resolve_max_model_calls_per_turn()
-
-    assert resolved == 2500
-    assert "runaway" in caplog.text.lower()

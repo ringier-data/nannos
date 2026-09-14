@@ -53,6 +53,11 @@ from agent_common.core.model_factory import (
     is_valid_model,
     require_default_model,
 )
+from agent_common.core.step_budget import (
+    DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS,
+    recursion_limit_for,
+    resolve_max_model_calls,
+)
 from agent_common.core.stream_watchdog import watch_stream_with_resume
 from agent_common.core.token_provider import DEFAULT_LEEWAY_S, UserTokenProvider
 from agent_common.core.tool_catalogue import sanitize_tool_name
@@ -91,7 +96,23 @@ _MCP_CATALOGUE_STATELESS_LIST = os.getenv("MCP_CATALOGUE_STATELESS_LIST", "true"
 _MCP_TOKEN_LEEWAY_SECONDS = max(0.0, float(os.getenv("MCP_TOKEN_LEEWAY_SECONDS", str(DEFAULT_LEEWAY_S))))
 _MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "300"))
 _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
-_MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
+# Turn budget for a scheduled sub-agent run, in **model calls**; the LangGraph
+# `recursion_limit` is derived from the compiled graph where it is bound (see
+# agent_common/core/step_budget.py). This used to be a hand-written 50 super-steps
+# — a handful of model calls once the middleware stack's per-call node cost is paid
+# — which was enough to kill a scheduled run mid-work on an agent that spends some
+# of them resolving MCP tools, while the *same* sub-agent delegated from a
+# conversation got 75.
+#
+# It is now the largest of the three default budgets, not the smallest. A scheduled
+# run is unattended: nothing notices it stopping one model call short, nothing
+# re-delegates it, and a truncated result is silently useless rather than visibly
+# incomplete — so being too tight costs more here than anywhere else. See
+# DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS, where the three sit together.
+_MAX_MODEL_CALLS_ENV = "AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN"
+_MAX_MODEL_CALLS_PER_TURN = resolve_max_model_calls(
+    _MAX_MODEL_CALLS_ENV, DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS
+)
 
 
 def _build_postgres_conn() -> str | None:
@@ -1062,7 +1083,14 @@ class AgentRunner(BaseAgent):
                 exclude_deep_agents_middlewares=False,
                 backend_factory=sandbox_backend_factory,
                 extra_middlewares=extra_middlewares,
-            ).with_config({"recursion_limit": _MAX_RECURSION_LIMIT})
+            )
+            recursion_limit = recursion_limit_for(graph, _MAX_MODEL_CALLS_PER_TURN)
+            logger.debug(
+                "Sub-agent graph bound to recursion_limit=%d (%d model calls per turn)",
+                recursion_limit,
+                _MAX_MODEL_CALLS_PER_TURN,
+            )
+            graph = graph.with_config({"recursion_limit": recursion_limit})
 
             config = self.create_runnable_config(
                 user_sub=user_sub,

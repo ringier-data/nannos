@@ -395,25 +395,35 @@ Learned the hard way; each cost real debugging time.
   graph. Multi-step scenarios can exhaust the budget even when the orchestrator
   behaves correctly.
 
-  The limit is **derived from the compiled graph** by `app/core/step_budget.py`,
-  which classifies nodes by hook suffix (`.before_model` / `.after_model` per model
-  call, `.before_agent` / `.after_agent` per turn, plus `model` and `tools`). There
-  is no constant to maintain: adding a middleware raises the per-call cost and the
-  limit follows it. Read that module rather than trusting a number restated here —
-  the previous version of this bullet hardcoded three and was wrong within one commit
-  of the config changing.
+  The limit is **derived from the compiled graph** by
+  `agent_common/core/step_budget.py`, which classifies nodes by hook suffix
+  (`.before_model` / `.after_model` per model call, `.before_agent` / `.after_agent`
+  per turn, plus `model` and `tools`). There is no constant to maintain: adding a
+  middleware raises the per-call cost and the limit follows it. Read that module
+  rather than trusting a number restated here — the previous version of this bullet
+  hardcoded three and was wrong within one commit of the config changing.
+
+  It lives in `agent-common` because the sub-agent paths had the same bug: the
+  *same* `build_sub_agent_graph` output carried a hand-written 75 in `dynamic_agent`
+  and a hand-written 50 in `agent-runner`, so a scheduled run of a sub-agent died on
+  `GraphRecursionError` where a delegated one succeeded.
 
   Configure the budget with `ORCHESTRATOR_MAX_MODEL_CALLS_PER_TURN`, in model calls.
-  The shared `MAX_RECURSION_LIMIT` env var is **not** read here — `agent-runner`,
-  `agent-common` and `ringier-a2a-sdk` all read that name with different defaults
-  (50, 75, 50), so one value cannot serve all four; setting it logs a warning and
-  otherwise does nothing here. It stays live for sub-agents in this same process, so
-  it must not be unset on that basis.
+  Every consumer now has its own name — `SUB_AGENT_MAX_MODEL_CALLS_PER_TURN` for
+  in-process sub-agents, `AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN` for scheduled ones
+  — so raising one cannot silently move another. The defaults differ by how much
+  work the turn does (planning 25 < in-process sub-agent 40 < scheduled run 125) and
+  are defined together in `agent_common/core/step_budget.py` so they can be compared. The old shared `MAX_RECURSION_LIMIT`
+  (and `SUB_AGENT_RECURSION_LIMIT`) are read by nothing in this repo; setting either
+  logs a warning and otherwise does nothing. `MAX_RECURSION_LIMIT` is still read by
+  the externally published `ringier-a2a-sdk`, so it must not be unset on the strength
+  of that warning alone.
 
   `tests/test_step_budget.py` measures the super-steps of a real graph run and
-  asserts the derived budget covers them with under one model call of slack. A
-  failure there means the *derivation* is wrong — most likely a new node the
-  classifier does not recognise — not a number to bump.
+  asserts the derived budget covers them with under one model call of slack (the
+  sub-agent graph gets the same treatment in `agent-common`). A failure there means
+  the *derivation* is wrong — most likely a new node the classifier does not
+  recognise — not a number to bump.
 
 ### Adding a scenario
 
