@@ -222,13 +222,14 @@ export function UsagePage() {
     orchestrator: 'Orchestrator',
     catalog: 'Catalog',
     scheduler: 'Scheduler',
+    console: 'Console',
     voice: 'Voice',
   };
-
   const SERVICE_COLORS: Record<string, string> = {
     orchestrator: '#8b5cf6',
     catalog: '#f59e0b',
     scheduler: '#10b981',
+    console: '#3b82f6',
     voice: '#3b82f6',
   };
 
