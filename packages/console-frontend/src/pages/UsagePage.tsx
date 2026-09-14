@@ -53,6 +53,7 @@ const SERVICE_LABELS: Record<string, string> = {
   catalog: 'Catalog',
   scheduler: 'Scheduler',
   console: 'Console',
+  voice: 'Voice',
 };
 
 const SERVICE_COLORS: Record<string, string> = {
@@ -60,6 +61,7 @@ const SERVICE_COLORS: Record<string, string> = {
   catalog: '#f59e0b',
   scheduler: '#10b981',
   console: '#3b82f6',
+  voice: '#ec4899',
 };
 
 // What a row says under "Agent" when no sub-agent ran it. A call the console made for
@@ -217,21 +219,6 @@ export function UsagePage() {
       tokens: (item.total_input_tokens || 0) + (item.total_output_tokens || 0),
     })) || [];
   }, [detailed]);
-
-  const SERVICE_LABELS: Record<string, string> = {
-    orchestrator: 'Orchestrator',
-    catalog: 'Catalog',
-    scheduler: 'Scheduler',
-    console: 'Console',
-    voice: 'Voice',
-  };
-  const SERVICE_COLORS: Record<string, string> = {
-    orchestrator: '#8b5cf6',
-    catalog: '#f59e0b',
-    scheduler: '#10b981',
-    console: '#3b82f6',
-    voice: '#3b82f6',
-  };
 
   const byServiceChartData = useMemo(() => {
     return detailed?.by_service?.map((item: UsageByService) => ({
