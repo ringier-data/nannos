@@ -105,8 +105,7 @@ class TestBuildScheduledRunHistory:
         # No context_id in the synthetic tool metadata: conversation adoption
         # goes through the server-validated a2a_tracking seed
         # (_validate_scheduled_run_origin + _build_adoption_seed), never
-        # through client-supplied provenance — and a raw context_id seed on a
-        # local runnable would desynchronize the HITL checkpoint probe.
+        # through client-supplied provenance.
         assert "context_id" not in tool.additional_kwargs["a2a_metadata"]
 
     def test_delegation_label_overrides_provenance_name(self):

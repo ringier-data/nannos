@@ -5,13 +5,13 @@ scheduled_run origin is validated server-side under the authenticated user's
 token (_validate_scheduled_run_origin), then mapped onto the registered
 sub-agent's native continuity mechanism (_build_adoption_seed):
 
-- remote agents get ``a2a_tracking[key] = {"context_id": <server run ctx>}``
-  (wire-level resume on the executing server);
-- local/automated agents get ``{"adopt_thread_from": <server run ctx>}``,
-  consumed by DynamicToolDispatchMiddleware, which forks the run's checkpoint
-  from the shared tables into the conversation's own thread
-  (_maybe_adopt_run_thread) — never a raw context_id, which would
-  desynchronize the HITL checkpoint probe from the execution thread.
+- remote and local/automated agents alike get
+  ``a2a_tracking[key] = {"context_id": <server run ctx>}``: the next delegation
+  is sent under the run's context id, which the remote server resumes on the
+  wire and a local agent resumes on the ``{ctx}::dynamic-{name}`` checkpoint
+  thread agent-runner wrote (``local_sub_agent_thread_id``). No checkpoint is
+  copied — the orchestrator no longer probes threads for pending interrupts, so
+  a local agent may run under the run's own context id.
 
 Unowned jobs, mismatched bindings, missing runs, and foundry agents all
 degrade to no adoption, never an error.
@@ -31,7 +31,6 @@ from app.core.agent import (
     _build_adoption_seed,
     _validate_scheduled_run_origin,
 )
-from app.middleware.dynamic_tool_dispatch import _maybe_adopt_run_thread
 
 BACKEND_URL = "http://console-backend.test"
 
@@ -183,16 +182,27 @@ class TestBuildAdoptionSeed:
         assert tracking_key == runnable.tracking_key == "ReportAgent"
         assert record == {"context_id": "server-run-ctx", "is_complete": True, "sub_agent_id": 5}
 
-    def test_local_agent_gets_fork_record_never_context_id(self):
+    def test_local_agent_gets_the_same_context_id_record(self):
         runnable = _local_runnable("report-agent")
         seed = _build_adoption_seed(dict(VALIDATED), _registry(runnable))
         assert seed is not None
         registry_key, tracking_key, record = seed
         assert registry_key == tracking_key == "report-agent"
-        assert record == {"adopt_thread_from": "server-run-ctx", "is_complete": True, "sub_agent_id": 5}
-        # A context_id on a local runnable changes its execution thread while
-        # the HITL probe keeps probing the conversation-derived thread.
-        assert "context_id" not in record
+        assert record == {"context_id": "server-run-ctx", "is_complete": True, "sub_agent_id": 5}
+
+    def test_local_agent_continues_the_thread_agent_runner_wrote(self):
+        """The seeded context id names the thread agent-runner executed the run on."""
+        from agent_common.a2a.threads import local_sub_agent_thread_id
+        from agent_common.a2a.base import SubAgentInput
+
+        runnable = _local_runnable("report-agent")
+        _, tracking_key, record = _build_adoption_seed(dict(VALIDATED), _registry(runnable))
+        sub_input = SubAgentInput(messages=[], a2a_tracking={tracking_key: record})
+        context_id, task_id = DynamicLocalAgentRunnable._extract_tracking_ids(runnable, sub_input)
+        assert task_id is None
+        assert DynamicLocalAgentRunnable.get_thread_id(runnable, context_id, sub_input) == local_sub_agent_thread_id(
+            "server-run-ctx", "report-agent"
+        )
 
     def test_foundry_like_runnable_is_not_adopted(self):
         # Anything without an adoptable continuity mechanism degrades to None.
@@ -212,7 +222,7 @@ class TestAdoptedIdsFromTracking:
 
     def test_recovers_ids_from_adoption_records(self):
         tracking = {
-            "report-agent": {"adopt_thread_from": "run-ctx", "is_complete": True, "sub_agent_id": 5},
+            "report-agent": {"context_id": "run-ctx", "is_complete": True, "sub_agent_id": 5},
             "RemoteAgent": {"context_id": "other-ctx", "is_complete": True, "sub_agent_id": 9},
         }
         assert _adopted_sub_agent_ids_from_tracking(tracking) == {5, 9}
@@ -228,152 +238,3 @@ class TestAdoptedIdsFromTracking:
     def test_empty_and_malformed_state_yield_none(self):
         assert _adopted_sub_agent_ids_from_tracking({}) is None
         assert _adopted_sub_agent_ids_from_tracking({"x": "not-a-dict", "y": {"sub_agent_id": "abc"}}) is None
-
-
-def _configurable(thread_id: str) -> dict:
-    return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-
-
-class TestMaybeAdoptRunThread:
-    @pytest.mark.asyncio
-    async def test_forks_latest_checkpoint_onto_blank_target(self):
-        source_checkpoint = {
-            "id": "cp-1",
-            "channel_values": {"messages": ["m1", "m2"]},
-            "channel_versions": {"messages": 2},
-        }
-        source_tuple = SimpleNamespace(
-            checkpoint=source_checkpoint, metadata={"step": 3}, pending_writes=None
-        )
-        checkpointer = AsyncMock()
-        # First aget_tuple: target (blank). Second: source.
-        checkpointer.aget_tuple = AsyncMock(side_effect=[None, source_tuple])
-
-        await _maybe_adopt_run_thread(
-            checkpointer, "run-ctx", _configurable("orch::dynamic-report-agent"), "report-agent"
-        )
-
-        source_lookup = checkpointer.aget_tuple.await_args_list[1].args[0]
-        assert source_lookup["configurable"] == {"thread_id": "run-ctx", "checkpoint_ns": ""}
-        checkpointer.aput.assert_awaited_once()
-        target_config, checkpoint, metadata, new_versions = checkpointer.aput.await_args.args
-        assert target_config["configurable"]["thread_id"] == "orch::dynamic-report-agent"
-        assert target_config["configurable"]["checkpoint_ns"] == ""
-        # A shallow copy of the checkpoint is written, never the source object
-        # (aget_tuple can hand back references into the checkpointer's store).
-        assert checkpoint is not source_checkpoint
-        assert checkpoint["id"] == "cp-1"
-        assert checkpoint["channel_values"]["messages"] == ["m1", "m2"]
-        assert metadata == {"step": 3}
-        assert new_versions == {"messages": 2}
-
-    @pytest.mark.asyncio
-    async def test_never_overwrites_an_existing_conversation_thread(self):
-        checkpointer = AsyncMock()
-        checkpointer.aget_tuple = AsyncMock(return_value=SimpleNamespace(checkpoint={}, metadata={}))
-
-        await _maybe_adopt_run_thread(
-            checkpointer, "run-ctx", _configurable("orch::dynamic-report-agent"), "report-agent"
-        )
-
-        checkpointer.aput.assert_not_awaited()
-        # Only the target was probed; the source is not even read.
-        assert checkpointer.aget_tuple.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_missing_source_degrades_to_blank_start(self):
-        checkpointer = AsyncMock()
-        checkpointer.aget_tuple = AsyncMock(side_effect=[None, None])
-
-        await _maybe_adopt_run_thread(
-            checkpointer, "run-ctx", _configurable("orch::dynamic-report-agent"), "report-agent"
-        )
-
-        checkpointer.aput.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_dangling_tool_calls_are_sealed_in_the_copy_only(self):
-        # A run that died mid-tool commits its last checkpoint right after
-        # the model emitted tool_calls: forking that verbatim and appending
-        # the user's next message would send tool_use with no tool_result.
-        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-        source_messages = [
-            HumanMessage(content="do the task"),
-            AIMessage(content="", tool_calls=[
-                {"id": "call-1", "name": "fetch", "args": {}, "type": "tool_call"},
-                {"id": "call-2", "name": "write", "args": {}, "type": "tool_call"},
-            ]),
-            ToolMessage(content="fetched", tool_call_id="call-1"),
-            # call-2 never completed
-        ]
-        source_checkpoint = {
-            "id": "cp-1",
-            "channel_values": {"messages": source_messages},
-            "channel_versions": {"messages": 3},
-        }
-        source_tuple = SimpleNamespace(
-            checkpoint=source_checkpoint, metadata={"step": 2}, pending_writes=None
-        )
-        checkpointer = AsyncMock()
-        checkpointer.aget_tuple = AsyncMock(side_effect=[None, source_tuple])
-
-        await _maybe_adopt_run_thread(
-            checkpointer, "run-ctx", _configurable("orch::dynamic-report-agent"), "report-agent"
-        )
-
-        _, checkpoint, _, _ = checkpointer.aput.await_args.args
-        forked = checkpoint["channel_values"]["messages"]
-        sealer = forked[-1]
-        assert isinstance(sealer, ToolMessage)
-        assert sealer.tool_call_id == "call-2"
-        assert sealer.status == "error"
-        assert "ended before this tool call" in sealer.content
-        # The source checkpoint object is untouched (MemorySaver hands back
-        # references into its own store): still 3 messages, same list object.
-        assert len(source_messages) == 3
-        assert source_checkpoint["channel_values"]["messages"] is source_messages
-
-
-class TestForkFidelityWithRealCheckpointer:
-    """End-to-end fork against a real langgraph checkpointer and graph:
-    state written on the run's bare thread must come back identical from the
-    forked conversation thread, and the forked thread must keep accepting
-    new turns."""
-
-    @pytest.mark.asyncio
-    async def test_forked_thread_resumes_source_state(self):
-        from langgraph.checkpoint.memory import MemorySaver
-        from langgraph.graph import START, MessagesState, StateGraph
-
-        def node(state: MessagesState):
-            return {"messages": [("ai", f"reply-{len(state['messages'])}")]}
-
-        saver = MemorySaver()
-        graph = StateGraph(MessagesState).add_node("node", node).add_edge(START, "node").compile(
-            checkpointer=saver
-        )
-
-        # The scheduled run: two turns on the bare run thread (agent-runner's key).
-        run_config = _configurable("run-ctx")
-        await graph.ainvoke({"messages": [("user", "do the task")]}, run_config)
-        await graph.ainvoke({"messages": [("user", "anything else?")]}, run_config)
-        source_state = await graph.aget_state(run_config)
-
-        # First delegation in the adopting conversation: fork, then continue.
-        target_config = _configurable("orch-ctx::dynamic-report-agent")
-        await _maybe_adopt_run_thread(saver, "run-ctx", target_config, "report-agent")
-
-        forked_state = await graph.aget_state(target_config)
-        assert [m.content for m in forked_state.values["messages"]] == [
-            m.content for m in source_state.values["messages"]
-        ]
-
-        # The forked thread accepts a new turn and keeps the run's history.
-        result = await graph.ainvoke({"messages": [("user", "follow-up")]}, target_config)
-        contents = [m.content for m in result["messages"]]
-        assert contents[:4] == [m.content for m in source_state.values["messages"]]
-        assert "follow-up" in contents
-        # The run's own thread is untouched by the follow-up.
-        source_after = await graph.aget_state(run_config)
-        assert len(source_after.values["messages"]) == len(source_state.values["messages"])

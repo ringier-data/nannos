@@ -61,6 +61,7 @@ from ringier_a2a_sdk.utils.streaming import (
 )
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+from agent_common.a2a.threads import local_sub_agent_thread_id, seal_dangling_tool_calls
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.a2a.stream_events import (
     ActivityLogMeta,
@@ -421,6 +422,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self._cached_response_format: Any = None
         self._cached_hitl_guarded: dict[str, dict] | None = None
         self._cached_effective_backend_factory: Callable | None = None
+        #: Cached stand-in graph for checkpoint reads when ``_agent`` is None
+        #: (sandbox agents). See ``_graph_for_state``.
+        self._state_graph: CompiledStateGraph | None = None
 
     @property
     def name(self) -> str:
@@ -463,11 +467,49 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         return f"dynamic-{self.name}"
 
     def get_thread_id(self, context_id: str, input_data: SubAgentInput) -> str:
-        """Build thread_id for checkpoint isolation.
+        """Build thread_id with dynamic prefix.
 
-        Pattern: {context_id}::dynamic-{agent_name}
+        Pattern: {context_id}::dynamic-{agent_name} — the repo-wide convention in
+        ``agent_common.a2a.threads``, shared with agent-runner so a scheduled
+        run's conversation is the same thread a later delegation continues.
         """
-        return f"{context_id}::dynamic-{self.name}" if context_id else f"dynamic-{self.name}"
+        return local_sub_agent_thread_id(context_id, self.name) if context_id else f"dynamic-{self.name}"
+
+    def _graph_for_state(self) -> CompiledStateGraph:
+        """A compiled graph able to read this agent's checkpoint thread.
+
+        ``self._agent`` is None for sandbox agents (``_ensure_agent`` skips
+        building it; the sandbox graph is built per invocation). Any compiled
+        graph for this agent can read the thread's checkpoint, so a non-sandbox
+        graph serves state reads.
+
+        That stand-in is cached: the in-process executor probes for pending
+        interrupts before EVERY message (``aget_pending_interrupts``), fresh
+        delegations included, so building it per call would put a graph
+        compilation on the critical path of every delegation to a sandbox agent.
+        A state read touches no backend, which is what makes one instance
+        reusable across invocations that each get their own sandboxed graph.
+        """
+        if self._agent is not None:
+            return self._agent
+        if self._state_graph is None:
+            self._state_graph = self._build_graph(self._cached_effective_backend_factory or StateBackend())
+        return self._state_graph
+
+    async def aget_pending_interrupts(self, config: Dict[str, Any]) -> list:
+        """The interrupts this agent's thread is parked on (see ``LocalA2ARunnable``).
+
+        The graph runs as a standalone root, so a pause is suppressed into the
+        checkpoint rather than raised; this is where the in-process executor
+        learns that the next message is an answer, not new work.
+        """
+        await self._ensure_agent()
+        standalone_config = {
+            **config,
+            "configurable": {**config.get("configurable", {}), "checkpoint_ns": ""},
+        }
+        state = await self._graph_for_state().aget_state(cast(RunnableConfig, standalone_config))
+        return list(state.interrupts) if state and state.interrupts else []
 
     def get_checkpointer(self, input_data: SubAgentInput) -> Optional[Any]:
         """Return PostgreSQL checkpointer for this dynamic agent."""
@@ -1453,6 +1495,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self._cached_response_format = response_format
         self._cached_hitl_guarded = None  # Static guards moved to DB (tool_risk_scores table)
         self._cached_effective_backend_factory = effective_backend_factory
+        # Resolution can run again after a degraded MCP discovery; the state-read
+        # stand-in is built from the factory above, so drop it when that changes.
+        self._state_graph = None
 
         # Only build the default (non-sandbox) graph if sandbox is NOT active.
         # Sandbox-enabled agents build a fresh graph per invocation in _astream_impl()
@@ -1677,11 +1722,21 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             # the sandbox graph is built later per-invocation).  Any compiled graph for
             # this agent can read the thread's checkpoint, so we fall back to building
             # a temporary non-sandbox graph solely for the aget_state call.
-            _graph_for_state = self._agent or self._build_graph(
-                self._cached_effective_backend_factory or StateBackend()
-            )
-            checkpoint_state = await _graph_for_state.aget_state(cast(RunnableConfig, config))
+            checkpoint_state = await self._graph_for_state().aget_state(cast(RunnableConfig, config))
             checkpoint_msgs = list(checkpoint_state.values.get("messages") or [])
+            # A thread whose last turn died mid-tool (a scheduled run that
+            # crashed, a pod restart) ends on an AIMessage with unanswered
+            # tool_calls; appending the next human message to it sends
+            # ``tool_use`` with no ``tool_result``, which providers reject. Seal
+            # those calls in this turn's INPUT — the checkpoint itself is never
+            # edited — so the history stays valid and the model is told the truth.
+            history_seals = seal_dangling_tool_calls(checkpoint_msgs) if human_message is not None else []
+            if history_seals:
+                logger.info(
+                    "Sealing %d unanswered tool call(s) left on '%s' by an earlier run",
+                    len(history_seals),
+                    self.name,
+                )
             msgs_to_scan = checkpoint_msgs if human_message is None else checkpoint_msgs + [human_message]
             all_blocks = collect_attachment_blocks_from_messages(msgs_to_scan)
             attachments_backend = build_attachments_backend_from_blocks(all_blocks)
@@ -1768,7 +1823,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 else:
                     agent = self._agent
 
-            agent_input = input_data if human_message is None else {"messages": [human_message]}
+            agent_input = input_data if human_message is None else {"messages": [*history_seals, human_message]}
 
             # CRITICAL: Dynamic agent graphs are standalone, not subgraphs.
             # checkpoint_ns must be "" for standalone graphs (same pattern as GPAgentRunnable).

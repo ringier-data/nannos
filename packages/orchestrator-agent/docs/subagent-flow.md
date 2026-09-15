@@ -1,6 +1,6 @@
 # Subagent Flow Architecture
 
-This document describes the complete end-to-end flow of how subagents are discovered, registered, invoked, and how A2A protocol metadata (context_id/task_id) is managed for multi-turn conversations.
+This document describes the complete end-to-end flow of how subagents are discovered, registered, invoked, and how the A2A task lifecycle (context_id/task_id, pauses and resumes) is managed for multi-turn conversations.
 
 ## Table of Contents
 
@@ -9,7 +9,7 @@ This document describes the complete end-to-end flow of how subagents are discov
 3. [Middleware Stack](#middleware-stack)
 4. [Subagent Types](#subagent-types)
 5. [Request Flow](#request-flow)
-6. [One Live Task Per Sub-Agent](#one-live-task-per-sub-agent)
+6. [Every Delegation Is an A2A Task](#every-delegation-is-an-a2a-task)
 7. [A2A Protocol & Context ID Management](#a2a-protocol--context-id-management)
 8. [Sequence Diagrams](#sequence-diagrams)
 
@@ -21,7 +21,7 @@ The orchestrator uses a **middleware-based architecture** to handle subagent inv
 
 - **Single graph instance** serving all users with different subagent configurations
 - **Dynamic tool/subagent injection** at runtime without graph recreation
-- **A2A protocol compliance** for multi-turn conversation continuity
+- **A2A protocol compliance** for multi-turn conversation continuity — for remote sub-agents over HTTP *and* for local sub-agents, which run behind an in-process A2A server (`agent_common.a2a.local_server`, ADR-0008)
 - **Transparent context_id/task_id management** without LLM involvement
 
 ```
@@ -91,7 +91,6 @@ class GraphRuntimeContext(BaseModel):
     user_id: str
     tool_registry: Dict[str, BaseTool]      # MCP tools discovered at runtime
     subagent_registry: Dict[str, CompiledSubAgent]  # All subagents (local + remote)
-    a2a_tracking: Dict[str, Dict[str, Any]]  # Per-subagent tracking state
     # ... plus user preferences, file attachments, etc.
 ```
 
@@ -109,16 +108,21 @@ CompiledSubAgent = TypedDict("CompiledSubAgent", {
 
 ### 4. BaseA2ARunnable
 
-Abstract base class for all subagent implementations:
+Abstract base class for all subagent implementations. Both concrete families stream the
+same typed events — `TaskUpdate` (carrying a `TaskResponseData`: the A2A task's own
+`task_id`/`context_id`/`state`, plain text in `messages[-1].content`, the server's extras in
+`metadata`), `ArtifactUpdate` (streamed content) and `ErrorEvent` — so the dispatch does not
+know, and does not need to know, which transport produced them:
 
-```python
-class BaseA2ARunnable(ABC):
-    @property
-    def name(self) -> str: ...
-    @property
-    def description(self) -> str: ...
-    async def ainvoke(self, input_data: Dict) -> Dict: ...
-```
+| Runnable | Transport | Where the task lifecycle lives |
+|----------|-----------|--------------------------------|
+| `A2AClientRunnable` | HTTP (A2A SDK client) | the remote server |
+| `LocalA2ARunnable` (`DynamicLocalAgentRunnable`, `FileAnalyzerRunnable`, `FoundryLocalAgentRunnable`, test mocks) | in-process (`runnable.local_server`: A2A SDK `DefaultRequestHandler` + `TaskStore` + `LocalSubAgentExecutor`) | the sub-agent's own in-process server |
+
+A local runnable exposes two entry points:
+
+- **`astream(input, config)`** — the *client* side: builds an A2A message from the `SubAgentInput`, sends it to the in-process server, translates the events (`agent_common.a2a.event_translation`). This is what the dispatch calls.
+- **`astream_graph(input | Command, config)`** — the *graph* side: instruments the run and drives `_astream_impl`. This is what the server's executor calls, and what the orchestrator's embedded execute-only path (`OrchestratorDeepAgent.stream_subagent`) drives directly, because that path *is* the A2A server for its sub-agent.
 
 ---
 
@@ -134,9 +138,9 @@ DynamicToolDispatch → UserPreferences → AuthError → ToolRetry → A2ATaskT
 
 | Middleware | Hook | Responsibility |
 |------------|------|----------------|
-| **DynamicToolDispatchMiddleware** | `wrap_model_call`, `wrap_tool_call` | Inject dynamic tools/subagents; dispatch to subagent_registry |
+| **DynamicToolDispatchMiddleware** | `wrap_model_call`, `wrap_tool_call` | Inject dynamic tools/subagents; dispatch `task` calls as A2A tasks; park the turn on a local sub-agent's structured interrupt |
 | **UserPreferencesMiddleware** | `wrap_model_call` | Inject user language preferences into system prompt |
-| **AuthErrorDetectionMiddleware** | `wrap_tool_call` | Detect and handle auth errors from subagents |
+| **AuthErrorDetectionMiddleware** | `wrap_tool_call` | Detect and handle auth errors from orchestrator tools |
 | **ToolRetryMiddleware** | `wrap_tool_call` | Retry failed tool calls |
 | **A2ATaskTrackingMiddleware** | `before_model` | Extract and persist context_id/task_id to state |
 | **TodoStatusMiddleware** | `before_model` | Track todo list state |
@@ -160,10 +164,9 @@ subagent_registry["FileAnalyzer"] = CompiledSubAgent(
 
 ### 2. Local Dynamic Subagents
 
-User-configured agents defined in DynamoDB with custom system prompts:
+User-configured agents with custom system prompts:
 
 ```python
-# From user's local_subagents config in DynamoDB
 subagent_registry["data-analyst"] = CompiledSubAgent(
     name="data-analyst",
     description="Analyzes data...",
@@ -171,26 +174,28 @@ subagent_registry["data-analyst"] = CompiledSubAgent(
 )
 ```
 
+Their graph runs as a standalone LangGraph root on the thread `{context_id}::dynamic-{name}`
+(`agent_common.a2a.threads.local_sub_agent_thread_id`) — the same thread agent-runner executes a
+scheduled run of the same agent on, which is what lets a conversation adopt a run by context id.
+
 ### 3. Remote A2A Subagents
 
 External agents accessed via A2A protocol over HTTP:
 
 ```python
-# Discovered from user's sub_agents list
 subagent_registry["jira-agent"] = CompiledSubAgent(
     name="jira-agent",
     description="Manages Jira tickets",
-    runnable=A2AClientRunnable(url="https://jira-a2a.example.com"),
+    runnable=A2AClientRunnable(agent_card=card),
 )
 ```
 
 ### 4. General-Purpose Subagent (Special Case)
 
-The `general-purpose` subagent is **NOT** in `subagent_registry`. It's handled specially:
-
-- **DynamicToolDispatchMiddleware** returns `None` when subagent_type not found
-- Request falls through to **SubAgentMiddleware** handler (from deepagents library)
-- **general-purpose does NOT use A2A tracking** - it's a stateless ephemeral agent
+The orchestrator registers its own `general-purpose` (a `DynamicLocalAgentRunnable`, see `AGENTS.md`).
+A `subagent_type` that is **not** in `subagent_registry` falls through to deepagents'
+`SubAgentMiddleware`, which runs its built-in inline against the parent's config — no A2A task,
+no tracking.
 
 ---
 
@@ -208,7 +213,7 @@ The `general-purpose` subagent is **NOT** in `subagent_registry`. It's handled s
          ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  Discover:                                                               │
-│  1. User record from DynamoDB (local_subagents, sub_agents configs)     │
+│  1. User record (local_subagents, sub_agents configs)                   │
 │  2. Remote A2A agents via A2A discovery protocol                        │
 │  3. MCP tools from user's MCP gateway                                   │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -232,144 +237,104 @@ The `general-purpose` subagent is **NOT** in `subagent_registry`. It's handled s
                                       │
                                       ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  DynamicToolDispatchMiddleware.wrap_tool_call()                          │
+│  DynamicToolDispatchMiddleware.awrap_tool_call()                         │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  1. Check: Is tool_name == "task"?                                 │  │
-│  │  2. Check: Is subagent_type in user_context.subagent_registry?     │  │
-│  │     - YES → Dispatch directly via _dispatch_task_tool()            │  │
-│  │     - NO  → Return None (fall through to next middleware)          │  │
+│  │  1. Is tool_name == "task"?                                        │  │
+│  │  2. Is subagent_type in user_context.subagent_registry?            │  │
+│  │     - YES → _adispatch_task_tool()                                 │  │
+│  │     - NO  → return None (fall through to SubAgentMiddleware)       │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────┘
                                       │
-                    ┌─────────────────┴─────────────────┐
-                    │                                   │
-            Found in registry                    Not found (general-purpose)
-                    │                                   │
-                    ▼                                   ▼
-┌─────────────────────────────────┐   ┌─────────────────────────────────────┐
-│ _dispatch_task_tool():          │   │ A2ATaskTrackingMiddleware           │
-│ 1. Get runnable from registry   │   │ .awrap_tool_call():                 │
-│ 2. Prepare subagent_state:      │   │ 1. Inject context_id/task_id        │
-│    - Include a2a_tracking       │   │ 2. Call handler() →                 │
-│    - Set messages=[HumanMsg]    │   │    SubAgentMiddleware               │
-│ 3. runnable.invoke(state)       │   │ 3. Unwrap response metadata         │
-│ 4. Unwrap JSON response         │   └─────────────────────────────────────┘
-│ 5. Return ToolMessage           │
-└─────────────────────────────────┘
+                                      ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ _adispatch_task_tool():                                                  │
+│ 1. Build the SubAgentInput: HumanMessage (+ filtered files), the state's │
+│    a2a_tracking, orchestrator_conversation_id, and                        │
+│    proposed_task_id = delegation_task_id(conversation, tool_call_id)     │
+│ 2. LOCAL agent only: tasks/get(proposed id). Parked on a question?       │
+│    → this is a REPLAY: interrupt() returns the user's answer; the input   │
+│      becomes the answer, addressed to that task                          │
+│ 3. runnable.astream(input, config) — one A2A exchange                    │
+│ 4. Final TaskUpdate: terminal, or input_required / auth_required         │
+│    LOCAL agent with raw interrupts in metadata → interrupt(value):        │
+│      first pass raises (turn parks), replay returns the answer → step 3  │
+│ 5. ToolMessage(content=text, additional_kwargs.a2a_metadata={ids,state}) │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## One Live Task Per Sub-Agent
+## Every Delegation Is an A2A Task
 
-A sub-agent's memory is its LangGraph checkpoint, and that checkpoint is addressed by
-conversation and agent name alone:
+A `task` tool call opens exactly one A2A task on the sub-agent, and the task is named after
+the call:
 
 ```python
-# DynamicToolDispatchMiddleware._adispatch_task_tool
-_effective_thread_id = f"{orchestrator_conversation_id}::{subagent_type}"
-# ...mirroring agents/dynamic_agent.py::get_thread_id -> f"{context_id}::dynamic-{name}"
+task_id = delegation_task_id(orchestrator_conversation_id, tool_call_id)   # uuid5, stable across replay
+subagent_state["proposed_task_id"] = task_id
 ```
 
-Two `task` calls to the **same** `subagent_type` in one assistant message therefore run
-on **one thread**. Their writes interleave, the last writer wins, and the loser's
-conversation is gone. Observed: a "who am I on GitHub" delegation resumed on the
-campaign-listing delegation's state and answered about ad campaigns — the GitHub tool
-was never called again, and the authorization it had parked on was never answered.
+A2A servers normally mint task ids. The orchestrator proposes this one
+(`SubAgentInput.proposed_task_id`, honoured by `ProposedTaskIdContextBuilder` when no task by
+that id exists yet) because a delegation is a LangGraph tool call, and LangGraph **replays that
+call byte-identical** when the orchestrator resumes from an interrupt. If the first attempt
+parked the sub-agent on a question, the replay must find *that* task and deliver the user's
+answer to it — not open a second task and run the work twice. `tasks/get` on the proposed id is
+therefore the replay detector; the sub-agent's checkpoint is never probed by the orchestrator.
 
-**The second concurrent call to one agent is refused** (`surplus_same_agent_call` →
-`_concurrent_same_agent_refusal`, in both `wrap_tool_call` and `awrap_tool_call`).
-Different agents still run in parallel. The model is told the rule up front in the
-task tool description (`_ONE_TASK_PER_AGENT_GUIDANCE`), so it folds same-agent work
-into a single task itself; the refusal is the backstop.
+Continuity is still `a2a_tracking`'s call: a live `task_id` recorded there means the message
+**continues** that task (the agent asked the user something and this is the reply); the proposal
+only applies to a message that opens a task.
 
-Only for agents in `subagent_registry` — the ones whose thread this middleware owns.
-A name outside it falls through to `SubAgentMiddleware`, which runs its sub-agent
-inline against the parent's config with no `{conv}::{agent}` thread of its own
-(and the built-in general-purpose does not use A2A tracking at all), so there is
-nothing shared to corrupt; and an unknown or typo'd name must reach deepagents'
-*"does not exist, the only allowed types are […]"*, which teaches the model the real
-names, rather than being told a non-existent agent is busy and must never be
-reported as unavailable. In practice this costs nothing: the orchestrator registers
-its own `general-purpose` (see `AGENTS.md`), and the task tool's `subagent_type`
-enum is built from the registry.
+### Pausing and resuming a local sub-agent
 
-Ownership among siblings is decided by **position**, not by comparing ids:
-`ToolCall["id"]` is optional, and comparing a possibly-`None` owner id would return
-"allowed" for every sibling — disabling the guard exactly when the history is
-malformed. An id-less owner still owns.
+A local sub-agent's graph can park on a LangGraph interrupt — a risk-gated tool approval
+(`ConditionalHumanInTheLoopMiddleware`), an in-task authorization, a client-action round trip.
+The graph runs as a standalone root, so the interrupt is suppressed into its checkpoint; the
+runnable re-raises it after the stream and its in-process executor turns it into the task's
+state:
 
-### The refusal is not a delegation result
+| Interrupt kind | Task state | Status message |
+|----------------|------------|----------------|
+| `action_requests` (tool approval) | `input_required` | human-in-the-loop extension: TextPart + `{action_requests, review_configs}` DataPart |
+| `task_state == AUTH_REQUIRED` | `auth_required` | in-task-auth extension: TextPart + `AuthPayload.client_payload()` DataPart |
+| `client_action_request` | `input_required` | client-action extension: `{request}` DataPart |
+| anything else | `input_required` | TextPart (+ the raw value as DataPart) |
 
-It travels as a `task` ToolMessage and lands **after** the owner's (parallel siblings
-are written in `tool_calls` order), so every consumer that reads "the latest `task`
-result" would read it instead of the real answer. It carries
-`additional_kwargs["concurrent_task_refusal"]` and those consumers skip it
-(`app/middleware/task_refusal.py`):
+The raw interrupts ride the status **event's** metadata (`interrupts: [{id, value}]`). The
+dispatch reads them off the final `TaskUpdate` and calls the orchestrator's own `interrupt()`
+with the first value, so the client gets the structured approval card exactly as before. On the
+replay the answer travels back to the task as a **message** — a `decisions` / `authorization`
+DataPart, or the user's own words as text (`answer_to_human_message`) — and the sub-agent's
+executor fits it to the interrupt it is parked on (`local_server.resume.build_resume_command`:
+id-keyed map, blanket-decision replication, auth-vs-approval alignment) and resumes the graph.
 
-| Consumer | Untagged consequence |
-|----------|----------------------|
-| `StreamHandler.parse_agent_response` (`include_subagent_output`) | the user's whole visible reply becomes *"This call was NOT executed…"* and the real answer is dropped |
-| `StreamHandler._extract_recently_called_subagents` | a turn whose only `task` output is a refusal counts as a delegation, skipping the executor's re-entry nudge |
-| `A2ATaskTrackingMiddleware.before_model` | the owner's `a2a_metadata` is never read, so a parked `input-required`/`auth-required` owner loses the `task_id` needed to resume it |
+A question the sub-agent asks **in words**, through its structured response
+(`task_state: input_required`), carries no interrupts: it reaches the model as an ordinary result
+and the model relays it; the user's reply continues the same task on the next delegation.
 
-`before_model` now folds in **every** real result of the step rather than the trailing
-message alone, keyed by `subagent_type`. That also fixes the same loss for two
-*different* agents delegated in parallel: both return in one step, and reading only
-the last one silently dropped the earlier agent's ids — leaving a parked task there
-unresumable.
+### Same agent, several tasks
 
-The refusal's wording must also never say a task *"does not exist"* — that phrase is
-the stale-task heuristic in `a2a_tracking.py`, which would delete the **owner's** live
-`task_id`. Pinned by a test.
-
-### Why not just isolate the threads?
-
-Because separate threads make two parked tasks *distinguishable* but still not
-*addressable*, and two layers downstream need to address them:
-
-| Layer | With two parked tasks for one agent |
-|-------|-------------------------------------|
-| Sub-agent checkpoint / interrupt id | collide — fixable by isolation |
-| Client → orchestrator auth answer | `authorizationDataPart` sends a verdict with no interrupt id, so one "Done, continue" answers **both** prompts — including one whose card the user never saw |
-| Model → orchestrator continuation | nothing can name which parked task a follow-up continues: `TaskToolSchema` (description, subagent_type) belongs to deepagents |
-
-The last two each need a contract change — in every client, and in a library we do not
-own. One live task per agent removes the need for either: there is never a second
-candidate to address.
-
-### What still works
-
-- **Different agents in parallel** — untouched, including two that both need authorization.
-- **Sequential re-delegation** — a later `task` call with a new `tool_call_id` continues
-  the agent's thread, which is how a sub-agent remembers earlier delegations and how a
-  parked `input-required`/`auth-required` task is resumed (`a2a_tracking` keeps
-  `context_id` and clears `task_id` only once the task completes).
-
-The guard reads only the assistant message that issued the call, which LangGraph replays
-unchanged, so the sibling that won the first attempt wins the resume replay too — a
-refusal cannot become a second execution part way through a turn.
+A sub-agent's memory is one checkpoint thread per (conversation, agent). Two `task` calls to the
+same agent in one assistant message are two A2A tasks on that one thread; the in-process
+executor **serialises** graph runs per conversation (`LocalA2AServer.thread_lock`), so the second
+runs as a follow-up on the agent's conversation and both results reach the model. The only
+refusal left is server-side and A2A-native: a *new* task arriving while the thread is parked on a
+question is `rejected` with an explanation (`PARKED_TASK_MESSAGE`) — its description is work,
+not an answer, and delivering it to the interrupt reader would reject the pending call as "not
+an answer". The parked task still resumes normally.
 
 ### What this does NOT cover
 
-The invariant is enforced *within one assistant message*. Other routes to the same
-thread remain open, and each needs a claim on the thread itself (the
-`StreamCoordinator.try_register/release` pattern in
+The lock lives in the orchestrator process. Other routes to the same thread remain open, and
+each needs a claim on the thread itself (the `StreamCoordinator.try_register/release` pattern in
 `ringier-a2a-sdk/server/executor.py` is the shape that would subsume all of them):
 
-- **Two orchestrator turns on one conversation** — a second user message arriving
-  mid-turn, or a scheduled run landing on the same `context_id`. Each sees a lone
-  sibling.
-- **A stall-timeout abort** — the consumer is cancelled, but a remote A2A sub-agent
-  keeps executing on `{conv}::{agent}` while the model is told the task failed and
-  may retry.
-- **Re-delegation into a parked task** — the refusal advises "wait for the running
-  task's result and delegate the remainder afterwards". If the owner is still parked
-  when that follow-up lands, the pre-call pending-interrupt probe turns the dispatch
-  into `Command(resume=…)`, which *replaces* the freshly built `HumanMessage`: the
-  follow-up's description is silently dropped and the old task resumes instead. Safe
-  in the common case (the parked owner is resumed first, in the same turn), but not
-  by construction.
+- **Two orchestrator turns on one conversation** — a second user message arriving mid-turn,
+  or a scheduled run landing on the same `context_id` from agent-runner.
+- **A stall-timeout abort** — the consumer is cancelled, but a remote A2A sub-agent keeps
+  executing on its thread while the model is told the task failed and may retry.
 
 ---
 
@@ -377,76 +342,48 @@ thread remain open, and each needs a claim on the thread itself (the
 
 ### The Two Paths for Context ID
 
-There are **two mechanisms** for passing context_id to subagents:
-
 | Path | Used By | Mechanism |
 |------|---------|-----------|
-| **State Path** | Dynamic subagents (in registry) | `a2a_tracking` passed in `subagent_state` |
-| **Args Injection** | general-purpose | `awrap_tool_call` injects into tool args |
-
-### State Path (Dynamic Subagents)
+| **State Path** | Registry subagents (local and remote) | `a2a_tracking` passed in `subagent_state`; `_extract_tracking_ids` waterfall |
+| **Fallback** | first call to an agent | `orchestrator_conversation_id` becomes the A2A `context_id` |
 
 ```python
-# In DynamicToolDispatchMiddleware._dispatch_task_tool():
-
-# 1. Prepare state including a2a_tracking
-excluded_keys = ("messages", "todos")
-subagent_state = {k: v for k, v in state.items() if k not in excluded_keys}
-subagent_state["messages"] = [HumanMessage(content=description)]
-
-# 2. Subagent extracts via _extract_tracking_ids()
-# In BaseA2ARunnable._extract_tracking_ids():
-agent_tracking = input_data.a2a_tracking.get(self.name, {})
-context_id = agent_tracking.get("context_id")
-task_id = agent_tracking.get("task_id")
+# BaseA2ARunnable._extract_tracking_ids():
+agent_tracking = input_data.a2a_tracking.get(self.tracking_key, {})
+context_id = agent_tracking.get("context_id") or input_data.orchestrator_conversation_id
+task_id = agent_tracking.get("task_id")        # only while the task is not complete
 ```
 
-### Response Flow: Extracting Metadata
+For a local agent the in-process executor stamps the task's own ids into the graph's
+`a2a_tracking` record, so `_astream_impl` sees the A2A task as its own.
 
-All subagents wrap their response content as JSON:
+### Response Flow: Typed, Not Enveloped
 
-```json
-{
-  "content": "The actual response text",
-  "a2a": {
-    "task_id": "uuid-1234",
-    "context_id": "uuid-5678",
-    "state": "completed",
-    "is_complete": true,
-    "requires_input": false,
-    "requires_auth": false
-  }
-}
+A sub-agent's result is a `TaskResponseData`, whichever transport produced it:
+
+```python
+TaskResponseData(
+    task_id="…", context_id="…",
+    state=TaskState.TASK_STATE_COMPLETED,          # protobuf enum value
+    messages=[AIMessage(content="The actual response text")],
+    metadata={...},                                 # the server's extras (auth details, session handles, raw interrupts)
+)
 ```
 
-**Unwrapping happens in DynamicToolDispatchMiddleware:**
-
-- **DynamicToolDispatchMiddleware._dispatch_task_tool()** - For all subagents in `subagent_registry`
-  - Parses JSON content
-  - Extracts `a2a` metadata
-  - Puts metadata in `ToolMessage.additional_kwargs["a2a_metadata"]`
-  - Returns clean content to LLM
-
-**Note:** The `general-purpose` subagent (from deepagents library) is **stateless** and does NOT use A2A tracking.
-It falls through to SubAgentMiddleware's handler and doesn't produce `a2a_metadata`.
+`DynamicToolDispatchMiddleware._extract_subagent_response` reads the text from the last
+message and builds `a2a_metadata` from the typed fields (`state` as the enum *name*, e.g.
+`TASK_STATE_COMPLETED`) plus the server's metadata minus the raw interrupts, and puts it in
+`ToolMessage.additional_kwargs["a2a_metadata"]`. There is no JSON in the message text.
 
 ### State Persistence: before_model
 
 ```python
 # A2ATaskTrackingMiddleware.before_model() runs at START of each iteration
 
-# 1. Find ToolMessage from previous iteration
-last_message = messages[-1]
-
-# 2. Extract a2a_metadata from additional_kwargs
-a2a_metadata = last_message.additional_kwargs.get("a2a_metadata")
-
-# 3. Update a2a_tracking state
-current_tracking[subagent_type]["context_id"] = a2a_metadata["context_id"]
-current_tracking[subagent_type]["task_id"] = a2a_metadata["task_id"]
-
-# 4. Return state update for LangGraph to merge
-return {"a2a_tracking": current_tracking}
+# 1. Every ToolMessage the step just wrote (parallel delegations return in one step)
+# 2. a2a_metadata from additional_kwargs, keyed by the issuing call's subagent_type
+# 3. task_id kept only while the task is not complete; context_id always kept
+# 4. Return {"a2a_tracking": ...} for LangGraph to merge
 ```
 
 ---
@@ -456,104 +393,58 @@ return {"a2a_tracking": current_tracking}
 ### First Turn: New Conversation
 
 ```
-User                LLM              DynamicToolDispatch     Subagent          A2ATracking
+User                LLM              DynamicToolDispatch     Subagent (server)   A2ATracking
   │                  │                       │                   │                   │
   │─────────────────▶│                       │                   │                   │
   │  "Create JIRA"   │                       │                   │                   │
-  │                  │                       │                   │                   │
   │                  │──task(jira-agent)────▶│                   │                   │
-  │                  │                       │                   │                   │
-  │                  │                       │──invoke(state)───▶│                   │
-  │                  │                       │  (no a2a_tracking)│                   │
-  │                  │                       │                   │                   │
-  │                  │                       │◀──JSON response───│                   │
-  │                  │                       │  {content, a2a}   │                   │
-  │                  │                       │                   │                   │
+  │                  │                       │──message/stream──▶│  opens task T     │
+  │                  │                       │  (proposed id T)  │  (context = conv) │
+  │                  │                       │◀──status events───│                   │
+  │                  │                       │  … completed(T)   │                   │
   │                  │◀──ToolMessage─────────│                   │                   │
-  │                  │  (a2a in kwargs)      │                   │                   │
-  │                  │                       │                   │                   │
+  │                  │  (a2a_metadata)       │                   │                   │
   │                  │ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │──before_model()──▶│
-  │                  │                       │                   │  extract IDs      │
-  │                  │                       │                   │  update state     │
-  │                  │                       │                   │                   │
-  │◀─────────────────│                       │                   │                   │
+  │◀─────────────────│                       │                   │  record ids       │
   │  "Created JIRA-123"                      │                   │                   │
 ```
 
-### Second Turn: Continuing Conversation
+### A Local Sub-Agent Needs an Approval
 
 ```
-User                LLM              DynamicToolDispatch     Subagent          A2ATracking
-  │                  │                       │                   │                   │
-  │─────────────────▶│                       │                   │                   │
-  │  "Add comment"   │                       │                   │                   │
-  │                  │                       │                   │                   │
-  │                  │──task(jira-agent)────▶│                   │                   │
-  │                  │                       │                   │                   │
-  │                  │                       │──invoke(state)───▶│                   │
-  │                  │                       │  a2a_tracking:    │                   │
-  │                  │                       │   jira-agent:     │                   │
-  │                  │                       │    context_id: X  │                   │
-  │                  │                       │    task_id: Y     │                   │
-  │                  │                       │                   │                   │
-  │                  │                       │   Subagent calls: │                   │
-  │                  │                       │   _extract_tracking_ids()             │
-  │                  │                       │   Uses context_id X                   │
-  │                  │                       │                   │                   │
-  │                  │                       │◀──JSON response───│                   │
-  │                  │                       │  (same context_id)│                   │
-  │                  │                       │                   │                   │
-  │                  │◀──ToolMessage─────────│                   │                   │
-  │                  │                       │                   │                   │
-  │◀─────────────────│                       │                   │                   │
-  │  "Comment added" │                       │                   │                   │
+User            Orchestrator graph      DynamicToolDispatch     Local server        Sub-agent graph
+  │                    │                        │                    │                    │
+  │──"who am I"───────▶│──task(github)─────────▶│──message(T)───────▶│──astream_graph────▶│
+  │                    │                        │                    │◀──GraphInterrupt───│ parked
+  │                    │                        │◀──input_required(T)│  (checkpointed)    │
+  │                    │                        │   + interrupts     │                    │
+  │                    │◀──interrupt(value)─────│  raises            │                    │
+  │◀──approval card────│  turn parks            │                    │                    │
+  │                    │                        │                    │                    │
+  │──approve──────────▶│  Command(resume)       │                    │                    │
+  │                    │──replay task(github)──▶│──tasks/get(T)─────▶│ parked             │
+  │                    │                        │  interrupt() → ans │                    │
+  │                    │                        │──message(T, ans)──▶│──Command(resume)──▶│
+  │                    │                        │◀──completed(T)─────│◀──result───────────│
+  │                    │◀──ToolMessage──────────│                    │                    │
+  │◀──"you are …"──────│                        │                    │                    │
 ```
 
-### General-Purpose Flow (Stateless - No A2A Tracking)
+### General-Purpose Fallback (Not in the Registry)
 
-The `general-purpose` subagent from the deepagents library is **stateless** and does NOT use
-A2A tracking. It's designed for one-shot research tasks that don't need conversation continuity.
-
-```
-User                LLM              DynamicToolDispatch     SubAgentMiddleware
-  │                  │                       │                   │
-  │─────────────────▶│                       │                   │
-  │  "Research X"    │                       │                   │
-  │                  │                       │                   │
-  │                  │──task(general-purpose)▶                   │
-  │                  │                       │                   │
-  │                  │                       │──Not in registry──│
-  │                  │                       │  return None      │
-  │                  │                       │                   │
-  │                  │                       │──Falls through────▶
-  │                  │                       │  to handler()     │
-  │                  │                       │                   │
-  │                  │                       │◀──result──────────│
-  │                  │                       │  (no A2A metadata)│
-  │                  │                       │                   │
-  │                  │◀──ToolMessage─────────│                   │
-  │                  │                       │                   │
-  │◀─────────────────│                       │                   │
-```
-
-**Key Difference:** No `a2a_metadata` in the response, so `A2ATaskTrackingMiddleware.before_model`
-has nothing to persist for `general-purpose` calls.
+A `subagent_type` that is not in `subagent_registry` returns `None` from the dispatch and falls
+through to deepagents' `SubAgentMiddleware`: no A2A task, no `a2a_metadata`, nothing for
+`before_model` to persist.
 
 ---
 
 ## Summary
 
-| Aspect | Dynamic Subagents | General-Purpose |
-|--------|-------------------|-----------------|
-| **Registered in** | `subagent_registry` | SubAgentMiddleware (deepagents) |
-| **Dispatched by** | DynamicToolDispatchMiddleware | SubAgentMiddleware (via handler fallback) |
-| **A2A Tracking** | Yes (multi-turn) | **No** (stateless) |
-| **Context ID source** | `state.a2a_tracking` | N/A |
-| **Response unwrapping** | DynamicToolDispatchMiddleware | N/A (no JSON wrapping) |
+| Aspect | Registry sub-agents (local & remote) | Fallback (not in registry) |
+|--------|--------------------------------------|----------------------------|
+| **Dispatched by** | DynamicToolDispatchMiddleware, as an A2A task | SubAgentMiddleware (deepagents) |
+| **Task lifecycle** | the sub-agent's server (HTTP or in-process) | N/A |
+| **Replay after an interrupt** | `tasks/get(delegation_task_id)` finds the parked task | N/A |
+| **A2A Tracking** | Yes (multi-turn) | No |
+| **Response shape** | typed `TaskResponseData` | plain text |
 | **State update** | A2ATaskTrackingMiddleware.before_model | N/A |
-
-**Key Insight:** The `general-purpose` subagent is a **stateless** agent from the deepagents library.
-It's designed for one-shot research tasks and does NOT participate in A2A tracking.
-
-For dynamic subagents (local or remote A2A), all paths converge at `before_model` for state persistence,
-ensuring consistent A2A tracking regardless of which middleware handled the actual dispatch.

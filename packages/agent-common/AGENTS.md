@@ -30,6 +30,16 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 ## Architecture Patterns
 
+### The in-process A2A server (a2a/local_server/) — ADR-0008
+
+Every `LocalA2ARunnable` is reached the way a remote agent is: through the A2A task lifecycle. `runnable.astream(input, config)` is the *client* side — it converts the `SubAgentInput` to an A2A message (`a2a/message_conversion.py`), calls `message/stream` on a per-runnable `DefaultRequestHandler` (`LocalA2AServer`, no HTTP), and translates the events with the same `A2AStreamTranslator` (`a2a/event_translation.py`) `A2AClientRunnable` uses. `runnable.astream_graph(input | Command, config)` is the *graph* side the server's `LocalSubAgentExecutor` drives (and the one a host that already IS the agent's A2A server drives directly).
+
+The executor owns the lifecycle: it asks the runnable for the graph's pending interrupts (`aget_pending_interrupts`) to tell an answer from new work, builds the id-keyed `Command(resume)` and fits the answer to the pending question (`local_server/resume.py`), publishes streamed content as artifacts and status lines in the shared extension vocabulary (`a2a/extensions.py` — moved here from the orchestrator), and turns a `GraphInterrupt` into `input_required`/`auth_required` with the raw interrupts on the status event's metadata. It serialises graph runs per conversation thread and rejects a NEW task on a thread parked on a question. A caller may name the task a message opens (`SubAgentInput.proposed_task_id`, honoured only when the id is free — `ProposedTaskIdContextBuilder`); the task store is process-wide (`set_local_task_store`, default in-memory per event loop). The SDK's live `ActiveTask` is a cache: `LocalA2AServer.send` closes the subscription and releases it when the stream ends (`release`; `aclose()` cuts off every live task), and a follow-up rebuilds from the store and the checkpoint — the same path a follow-up on another replica takes. Never keep a server alive to keep a parked task warm.
+
+Threads: `a2a/threads.py::local_sub_agent_thread_id(context_id, name)` = `{ctx}::dynamic-{name}` is the one convention for the orchestrator's delegation, its embedded path and agent-runner's scheduled runs; `seal_dangling_tool_calls` answers tool calls a crashed turn left open, in the next turn's input.
+
+There is no JSON envelope in results any more: a `TaskUpdate.data` is a typed `TaskResponseData` (task/context ids, protobuf state, plain text, server metadata).
+
 ### DynamicLocalAgentRunnable (agents/dynamic_agent.py)
 
 The primary agent implementation for all user-configured sub-agents. Wraps a LangGraph agent with lazy initialization, MCP tool discovery, and A2A protocol compliance.

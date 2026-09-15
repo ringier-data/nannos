@@ -530,7 +530,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             # Answer every call that has no result yet before ending. A tool call left
             # unanswered in the checkpoint is the mirror image of the orphaned result —
             # the next turn sends a tool_use with no tool_result, which providers reject
-            # just as hard (cf. ``_seal_dangling_tool_calls`` on the adoption path).
+            # just as hard (cf. ``a2a.threads.seal_dangling_tool_calls`` for a crashed turn).
             # Appending results can never remove a call, so this direction is always safe.
             blocked_by_id = {info["tool_call"]["id"]: info for info in blocked_calls}
             stop_messages = [

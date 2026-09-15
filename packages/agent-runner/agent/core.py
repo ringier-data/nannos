@@ -39,6 +39,7 @@ from agent_common.a2a.factory import make_a2a_async_runnable
 from agent_common.a2a.models import LocalFoundrySubAgentConfig
 from agent_common.a2a.stream_events import ArtifactUpdate, ErrorEvent, TaskResponseData, TaskUpdate
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM, SubAgentResponseSchema, get_response_format
+from agent_common.a2a.threads import local_sub_agent_thread_id
 from agent_common.agents.foundry_agent import create_foundry_local_subagent
 from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
@@ -320,19 +321,15 @@ async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> tupl
 def _extract_text_from_messages(messages: list) -> str | None:
     """Extract human-readable text from A2A response messages.
 
-    Messages produced by ``_wrap_message_with_metadata`` are AIMessages
-    whose ``content`` is a JSON string ``{"content": "...", "a2a": {...}}``.
-    This helper unwraps that JSON, falling back to plain text content.
+    A ``TaskResponseData``'s messages are AIMessages carrying the agent's plain
+    text (a string, or a list of content blocks); nothing is wrapped in them.
     """
     for msg in reversed(messages):
         raw = getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
         if not raw:
             continue
         if isinstance(raw, str):
-            try:
-                text = json.loads(raw).get("content", "")
-            except (json.JSONDecodeError, AttributeError):
-                text = raw
+            text = raw
         elif isinstance(raw, list):
             text = " ".join(c.get("text", "") for c in raw if isinstance(c, dict) and c.get("type") == "text").strip()
         else:
@@ -1030,12 +1027,16 @@ class AgentRunner(BaseAgent):
 
         mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
 
-        # Use natural A2A context_id as thread_id for conversation tracking.
-        # context_id should always be present in A2A protocol - fail loudly if missing.
+        # The run's conversation lives on the same checkpoint thread the
+        # orchestrator continues when a conversation adopts this run: keyed by the
+        # A2A context id AND the agent name (``local_sub_agent_thread_id``), so a
+        # later delegation sent with this context id lands on this thread without
+        # any checkpoint copying. context_id should always be present in A2A
+        # protocol - fail loudly if missing.
         if not context_id:
             raise ValueError(f"Missing context_id in A2A task for scheduled job {scheduled_job_id}")
 
-        thread_id = context_id
+        thread_id = local_sub_agent_thread_id(context_id, sub_agent_cfg["name"])
 
         result_summary: str | None = None
         task_state: str | None = None

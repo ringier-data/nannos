@@ -4,7 +4,6 @@ Stream response handling for OrchestratorDeepAgent.
 Handles parsing agent state, building response objects, and auth requirement detection.
 """
 
-import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -12,7 +11,6 @@ from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
-from ..middleware.task_refusal import is_concurrent_task_refusal
 from ..models import AgentStreamResponse
 
 logger = logging.getLogger(__name__)
@@ -83,7 +81,7 @@ class StreamHandler:
 
         # Collect all ToolMessages in the current turn
         for i, msg in enumerate(messages_to_check):
-            if isinstance(msg, ToolMessage) and not is_concurrent_task_refusal(msg):
+            if isinstance(msg, ToolMessage):
                 # Find the corresponding AIMessage with tool_calls
                 # Look backward from this ToolMessage within the current turn
                 for prev_msg in reversed(messages_to_check[:i]):
@@ -435,29 +433,11 @@ class StreamHandler:
                             # Filter: only process "task" tool calls (sub-agents)
                             if not (tool_call and tool_call.get("name") == "task"):
                                 continue
-                            # A concurrency refusal is not a delegation result.
-                            # It lands AFTER the owner's (siblings are written in
-                            # tool_calls order), so without this the reverse scan
-                            # would show the user "This call was NOT executed…"
-                            # as the answer and drop the real one.
-                            if is_concurrent_task_refusal(msg):
-                                continue
 
-                            # Extract content (sub-agent content may be JSON-wrapped).
-                            try:
-                                if isinstance(msg.content, str):
-                                    parsed_content = json.loads(msg.content)
-                                    if isinstance(parsed_content, dict):
-                                        extracted = parsed_content.get("message", msg.content)
-                                    elif isinstance(parsed_content, list):
-                                        extracted = (extract_text_from_content(parsed_content) or [""])[0]
-                                    else:
-                                        extracted = msg.content
-                                elif isinstance(msg.content, list):
-                                    extracted = (extract_text_from_content(msg.content) or [""])[0]
-                                else:
-                                    extracted = msg.content
-                            except json.JSONDecodeError:
+                            # The sub-agent's result is plain text (a string, or content blocks).
+                            if isinstance(msg.content, list):
+                                extracted = (extract_text_from_content(msg.content) or [""])[0]
+                            else:
                                 extracted = msg.content
 
                             extracted_str = extracted if isinstance(extracted, str) else ""

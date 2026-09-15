@@ -22,7 +22,9 @@ from a2a.types import (
     TaskStatusUpdateEvent,
 )
 from agent_common.a2a.authentication import AuthPayload
+from agent_common.a2a.base import LocalA2ARunnable
 from agent_common.a2a.client_runnable import A2AClientRunnable
+from agent_common.a2a.threads import local_sub_agent_thread_id
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.core.hitl_resume import (
     KIND_AUTH,
@@ -1044,7 +1046,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # keeps its own thread + __pregel_checkpointer for subgraph isolation.
             if embedded_runnable is not None:
                 configurable = {
-                    "thread_id": f"{task.context_id}::dynamic-{embedded_runnable.name}",
+                    "thread_id": local_sub_agent_thread_id(task.context_id, embedded_runnable.name),
                     "checkpoint_ns": "",
                 }
             else:
@@ -1842,7 +1844,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if dispatches:
             cancel_coros = []
             for dispatch in dispatches:
-                if dispatch.subagent_task_id and isinstance(dispatch.runnable, A2AClientRunnable):
+                if dispatch.subagent_task_id and isinstance(dispatch.runnable, (A2AClientRunnable, LocalA2ARunnable)):
                     logger.info(
                         "Propagating cancel to sub-agent %s (task_id=%s)",
                         dispatch.subagent_name,

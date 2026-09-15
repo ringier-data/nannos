@@ -815,19 +815,16 @@ class TestTwoLevelInterruptProxying:
         """Two-level, real separate-checkpoint dispatch: one blanket reject for N parallel calls.
 
         Mirrors production rather than a shared subgraph: the sub-agent runs on its OWN
-        thread/checkpointer. The orchestrator node detects the sub-agent's pending
-        interrupt in its checkpoint (PATH 1), surfaces it via its own ``interrupt()``,
-        and on resume rebuilds the sub-agent resume with the real
-        ``_build_subagent_resume_command`` (id-keyed map, local branch). The orchestrator
+        thread/checkpointer. The orchestrator node learns of the sub-agent's pending
+        interrupt, surfaces it via its own ``interrupt()``, and on resume the answer is
+        fitted to the sub-agent's interrupt with the real ``build_resume_command`` (the
+        id-keyed map the sub-agent's in-process A2A server builds). The orchestrator
         itself is resumed via the real ``executor._build_interrupt_resume_map``, which
         replicates the single blanket reject to the interrupt's action_request count and
         keys it by interrupt id. Exercises both helpers end to end.
         """
-        from unittest.mock import Mock
-
-        from agent_common.a2a.base import LocalA2ARunnable
+        from agent_common.a2a.local_server import build_resume_command
         from app.core.executor import OrchestratorDeepAgentExecutor
-        from app.middleware.dynamic_tool_dispatch import _build_subagent_resume_command
 
         # ── Sub-agent: real graph, its OWN checkpointer + thread (separate from orchestrator) ──
         inner_model = ScriptedChatModel(
@@ -851,10 +848,6 @@ class TestTwoLevelInterruptProxying:
         )
         inner_config = {"configurable": {"thread_id": "inner-single-reject"}}
 
-        # Stand-in for a local in-process sub-agent so _build_subagent_resume_command
-        # takes its LocalA2ARunnable (id-keyed map) branch.
-        local_runnable = Mock(spec=LocalA2ARunnable)
-
         async def delegate_to_subagent(state: State) -> dict:
             # PATH 1: if the sub-agent already has a pending interrupt in its checkpoint,
             # surface + resume it — do NOT re-run fresh input over an interrupted thread.
@@ -870,7 +863,7 @@ class TestTwoLevelInterruptProxying:
                 sub_interrupt = sub_state.interrupts[-1]
                 # First orchestrator pass: raises → orchestrator suspends. Resume: returns decisions.
                 user_decisions = interrupt(sub_interrupt.value)
-                resume_cmd = _build_subagent_resume_command(local_runnable, sub_interrupt, user_decisions)
+                resume_cmd = build_resume_command([sub_interrupt], user_decisions)
                 async for _ in inner_graph.astream(resume_cmd, inner_config, stream_mode="updates"):
                     pass
 

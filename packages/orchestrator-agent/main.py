@@ -65,6 +65,7 @@ from app.core.agent import OrchestratorDeepAgent
 from app.core.budget_guard import init_budget_guard
 from app.core.executor import OrchestratorDeepAgentExecutor
 from app.core.risk_score_api_client import HttpRiskScoreAPIClient
+from agent_common.a2a.local_server import set_local_task_store
 from app.core.task_store import create_task_store
 from app.models.config import AgentSettings
 
@@ -343,6 +344,10 @@ def create_app():
     push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
     agent_executor = OrchestratorDeepAgentExecutor(cost_logger=cost_logger)
     task_store, task_store_engine = create_task_store()
+    # Local sub-agents run behind in-process A2A servers (agent_common.a2a.local_server)
+    # and keep their tasks in the same store as the orchestrator's own, so a
+    # delegation parked on an approval survives a restart like any other task.
+    set_local_task_store(task_store)
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
         task_store=task_store,

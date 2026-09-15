@@ -115,7 +115,7 @@ async def test_input_data_carries_orchestrator_conversation_id():
         return
         yield  # make it an async generator
 
-    runnable.astream = fake_astream
+    runnable.astream_graph = fake_astream
 
     async for _ in agent.stream_subagent(
         runnable,
