@@ -506,7 +506,11 @@ def _refresh_if_stale(cache: dict, key: str, ttl: float, cond: threading.Conditi
             cache["last_error"] = None
         except Exception as e:
             cache["last_error"] = e
-            logger.debug("Background refresh of '%s' failed: %s", key, e)
+            # WARNING, not debug: these caches decide which model every agent call runs on, so
+            # a failure here surfaces later as an unexplained wrong-model or rejected call. At
+            # the INFO level deployments typically run, debug would leave no record of the
+            # cause at all — only of the downstream damage.
+            logger.warning("Background refresh of '%s' failed: %s", key, e)
         finally:
             with cond:
                 cache["ts"] = time.monotonic()  # set even on failure → back off a full TTL
@@ -617,6 +621,17 @@ def embedding_default_known_absent(multimodal: bool = False) -> bool:
     return absent and _DEFAULTS_CACHE.get("last_error") is None
 
 
+def _first_default(roles: tuple[str, ...], exclude: str) -> tuple[str, str] | None:
+    """The first ``(role, alias)`` among ``roles`` that has a default differing from
+    ``exclude``. ``exclude`` is the alias we're degrading away from — a role whose default
+    still points at it is no successor at all."""
+    for role in roles:
+        default = _default_alias_for(role)
+        if default and default != exclude:
+            return role, default
+    return None
+
+
 def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
     """Map a requested alias to one that's actually registered, degrading to the gateway's
     default for the first of ``roles`` that has one when the requested alias is retired.
@@ -626,18 +641,47 @@ def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
     models = _gateway_models()
     if not models or model_type in models:
         return model_type
-    for role in roles:
-        default = _default_alias_for(role)
-        if default and default != model_type:
-            logger.warning(
-                "%s model '%s' not registered on the gateway; falling back to default '%s' (role=%s)",
-                kind,
-                model_type,
-                default,
-                role,
-            )
-            return default
-    logger.warning("%s model '%s' not registered and no gateway default set; passing through", kind, model_type)
+
+    # Past this point the registry was read SUCCESSFULLY and doesn't have the alias, so
+    # passing it through is a guaranteed rejection — a default is the only way out. Read the
+    # defaults TWICE before giving up: an empty map with no recorded error re-arms the cache
+    # as cold (see _model_defaults), so the second read re-fetches synchronously instead of
+    # re-serving the same empty snapshot. Without the retry a single first-use read that
+    # happens to land empty is indistinguishable from "no default is configured", and one
+    # unlucky fetch is enough to fail open on an alias the gateway has already disowned.
+    found = _first_default(roles, model_type)
+    if found is None and not _DEFAULTS_CACHE["defaults"] and _DEFAULTS_CACHE["last_error"] is None:
+        found = _first_default(roles, model_type)
+    if found is not None:
+        role, default = found
+        logger.warning(
+            "%s model '%s' not registered on the gateway; falling back to default '%s' (role=%s)",
+            kind,
+            model_type,
+            default,
+            role,
+        )
+        return default
+
+    # No successor. ERROR, not WARNING: the gateway is about to reject this call, and the two
+    # causes need different fixes — an unreadable defaults endpoint is an outage, a missing
+    # default is an admin task. They were indistinguishable in the original message.
+    if _DEFAULTS_CACHE["last_error"] is not None:
+        logger.error(
+            "%s model '%s' is not registered and the model-defaults endpoint is unreadable (%s); "
+            "passing through — the gateway will reject it",
+            kind,
+            model_type,
+            _DEFAULTS_CACHE["last_error"],
+        )
+    else:
+        logger.error(
+            "%s model '%s' is not registered and no default is set for role(s) %s; passing through "
+            "— the gateway will reject it",
+            kind,
+            model_type,
+            ", ".join(roles),
+        )
     return model_type
 
 

@@ -36,6 +36,7 @@ from agent_common.core.model_factory import (
     create_model,
     is_gemini_model,
     require_default_model,
+    resolve_chat_model,
 )
 from agent_common.core.notify_user_tool import create_notify_user_tool
 from agent_common.core.step_budget import recursion_limit_for
@@ -941,7 +942,17 @@ class GraphFactory:
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
         """
-        effective_model: ModelType = model_type or require_default_model()
+        # Resolve BEFORE the cache key, not inside create_model. Keying on the *requested*
+        # alias means resolution runs only on a cache miss, so a model instance built while an
+        # alias was still live — or during a window where resolution failed open — is served
+        # for the process lifetime: _models is never evicted, and _graphs only on a store
+        # upgrade. A retired alias cached that way keeps being sent to the gateway long after
+        # the process knows its successor. Resolving here costs a cached dict read (60s TTL,
+        # refreshed off-thread) and lets a retirement heal on the next request rather than the
+        # next restart. Two aliases resolving to the same model now also share one graph
+        # instead of building two.
+        requested: ModelType = model_type or require_default_model()
+        effective_model: ModelType = resolve_chat_model(requested)
 
         cache_key = (effective_model, thinking_level)
 

@@ -114,10 +114,10 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
   };
 }
 
-const MODELS = {
-  ClaudeSonnet45: 'claude-sonnet-4.5',
-  GPT4o: 'gpt4o',
-};
+// No `model` is sent in request metadata on purpose: the orchestrator then runs the
+// console's "chat" default slot (require_default_model), which an admin repoints when a
+// model is retired. A hardcoded alias here outlives its registration on the gateway and
+// 400s ("Invalid model name") for every user who never picked a preferred model.
 
 /**
  * HTTP client to communicate with A2A server using @a2a-js/sdk
@@ -213,7 +213,6 @@ export class A2AClientService {
         metadata: {
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
-          model: MODELS.ClaudeSonnet45,
           messageFormatting: 'markdown',
         },
       };
@@ -285,7 +284,6 @@ export class A2AClientService {
       metadata: {
         senderEmail: request.senderEmail,
         emailSubject: request.subject,
-        model: MODELS.ClaudeSonnet45,
         messageFormatting: 'markdown',
       },
     };
@@ -338,7 +336,6 @@ export class A2AClientService {
         metadata: {
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
-          model: MODELS.ClaudeSonnet45,
           messageFormatting: 'markdown',
         },
       };
@@ -654,7 +651,6 @@ export class A2AClientService {
         metadata: {
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
-          model: MODELS.ClaudeSonnet45,
           messageFormatting: 'markdown',
         },
         // Use proper A2A configuration for push notifications (not metadata)
