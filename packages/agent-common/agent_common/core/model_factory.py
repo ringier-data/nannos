@@ -675,10 +675,14 @@ def _first_default(roles: tuple[str, ...], exclude: str, registered: dict[str, d
     return None
 
 
-def _default_points_at(roles: tuple[str, ...], alias: str) -> bool:
-    """Whether some role's default IS ``alias`` — a configured-but-retired default, which
-    needs a different fix (repoint it) than having no default at all."""
-    return any(_default_alias_for(role) == alias for role in roles)
+def _configured_defaults(roles: tuple[str, ...]) -> dict[str, str]:
+    """``{role: alias}`` for the roles that have a default set — registered or not.
+
+    Whether a default exists is a different question from whether it is usable, and the two
+    have different fixes: an unset default is an admin task, a default left on a dead alias
+    is one repoint away. Reporting the second as the first sends people looking in the wrong
+    place, which is the whole reason this module splits its failure messages."""
+    return {role: alias for role in roles if (alias := _default_alias_for(role))}
 
 
 def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
@@ -717,6 +721,7 @@ def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
     # cause needs a different fix — an unreadable defaults endpoint is an outage, a default
     # still pointing at the retired alias is one repoint away, an unset default is an admin
     # task. A single "no default set" message for all three misdirects whoever reads it.
+    configured = _configured_defaults(roles)
     if _DEFAULTS_CACHE["last_error"] is not None:
         logger.error(
             "%s model '%s' is not registered and the model-defaults endpoint is unreadable (%s); "
@@ -725,13 +730,24 @@ def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
             model_type,
             _DEFAULTS_CACHE["last_error"],
         )
-    elif _default_points_at(roles, model_type):
+    elif model_type in configured.values():
         logger.error(
             "%s model '%s' is not registered and the default for role(s) %s still points at it; "
             "repoint the default to a registered model — passing through, the gateway will reject it",
             kind,
             model_type,
-            ", ".join(roles),
+            ", ".join(configured),
+        )
+    elif configured:
+        # A default IS set for some role, it just isn't registered either. Same admin mistake
+        # as the branch above wearing a different name, so it gets the same instruction.
+        logger.error(
+            "%s model '%s' is not registered, and the default(s) for role(s) %s are not registered "
+            "either (%s); repoint to a registered model — passing through, the gateway will reject it",
+            kind,
+            model_type,
+            ", ".join(configured),
+            ", ".join(sorted(set(configured.values()))),
         )
     else:
         logger.error(

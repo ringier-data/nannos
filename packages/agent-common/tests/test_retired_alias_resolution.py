@@ -89,21 +89,34 @@ def test_unregistered_default_is_not_a_successor(seed_gateway, seed_defaults, ca
     with caplog.at_level("ERROR"):
         assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4.5"
     assert "falling back" not in caplog.text
+    # A default IS set here — reporting it as unset would send an admin to the wrong screen.
+    assert "no default is set" not in caplog.text
+    assert "are not registered either" in caplog.text
+    assert "also-retired" in caplog.text
 
 
-def test_concurrent_refresh_landing_mid_call_is_picked_up(seed_gateway, seed_defaults, monkeypatch):
-    """The second read is unconditional, so a refresh that populates the map between the two
-    reads is used rather than lost to a check-then-act on the first result."""
+def test_concurrent_refresh_landing_between_the_two_reads_is_picked_up(seed_gateway, seed_defaults, monkeypatch):
+    """A refresh that lands after the first read must be used, not lost to a check-then-act on
+    the first result.
+
+    The refresh has to land BETWEEN the reads for this to mean anything — populating the map
+    during the first read would let the retry be deleted with the test still green. So the
+    stub answers empty once and populated thereafter, and the call count pins that both reads
+    actually happened.
+    """
     seed_gateway(REGISTERED)
     seed_defaults({})
 
-    def _land_the_refresh():
-        # Stand in for the refresh thread landing between the two reads.
-        mf._DEFAULTS_CACHE["defaults"] = {"chat": "claude-sonnet-4-6"}
-        return False
+    reads: list[int] = []
 
-    monkeypatch.setattr(mf, "_rearm_defaults_if_unconfirmed", _land_the_refresh)
+    def _defaults_with_a_refresh_landing_after_the_first_read():
+        reads.append(1)
+        return {} if len(reads) == 1 else {"chat": "claude-sonnet-4-6"}
+
+    monkeypatch.setattr(mf, "_model_defaults", _defaults_with_a_refresh_landing_after_the_first_read)
+
     assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4-6"
+    assert len(reads) == 2, "the second read must happen — it is what sees the landed refresh"
 
 
 def test_rearm_is_rate_limited(seed_gateway, seed_defaults, monkeypatch):
