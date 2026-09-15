@@ -392,3 +392,50 @@ class TestStoreSelfHeal:
         assert factory._store is None
         assert factory._store_setup_complete is False
         assert factory._store_mode is None
+
+
+class TestModelAliasResolution:
+    """get_graph resolves the alias BEFORE keying its caches.
+
+    Keying on the requested alias means resolution only ever runs on a cache miss, so a model
+    built while an alias was still live — or during a window where resolution failed open —
+    is served for the process lifetime (_models is never evicted).
+    """
+
+    def test_graph_is_keyed_on_the_resolved_alias(self, mock_config):
+        factory = GraphFactory(config=mock_config)
+        with (
+            patch("app.core.graph_factory.resolve_chat_model", return_value="live-model") as resolve,
+            patch.object(factory, "_create_graph", return_value=MagicMock()) as create,
+        ):
+            factory._store_enabled = False
+            factory.get_graph("retired-model", thinking_level=None)
+
+        resolve.assert_called_once_with("retired-model")
+        assert ("live-model", None) in factory._graphs
+        assert ("retired-model", None) not in factory._graphs
+        create.assert_called_once_with("live-model", None)
+
+    def test_a_retired_alias_does_not_latch_after_the_snapshot_moves(self, mock_config):
+        """The point of resolving per request: once the registry moves, the next request
+        builds against the successor instead of replaying the cached dead alias."""
+        factory = GraphFactory(config=mock_config)
+        factory._store_enabled = False
+        with (
+            patch("app.core.graph_factory.resolve_chat_model", side_effect=["old-model", "new-model"]),
+            patch.object(factory, "_create_graph", side_effect=[MagicMock(), MagicMock()]),
+        ):
+            first = factory.get_graph("some-alias", thinking_level=None)
+            second = factory.get_graph("some-alias", thinking_level=None)
+
+        assert first is not second
+        assert {"old-model", "new-model"} == {alias for alias, _ in factory._graphs}
+
+    def test_create_model_is_told_the_alias_is_already_resolved(self, mock_config):
+        """Resolving again inside create_model could read a snapshot that moved in between,
+        leaving a cached graph whose key names one model and whose client calls another."""
+        factory = GraphFactory(config=mock_config)
+        with patch("app.core.graph_factory.create_model") as create_model:
+            factory._create_model("live-model", None)
+
+        assert create_model.call_args.kwargs["pre_resolved"] is True

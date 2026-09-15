@@ -132,11 +132,13 @@ def test_failed_fetch_stays_on_normal_ttl(monkeypatch):
 
 
 def test_empty_defaults_refetches_on_next_call(monkeypatch):
-    """Regression: the auto-set 'chat' default is visible on the next request after register.
+    """Regression: a newly-set 'chat' default is visible on the next request.
 
     Sibling to the gateway-models latch one layer down: with no defaults at all,
     require_default_model() must not keep raising NoDefaultModelError for a full _DEFAULTS_TTL
-    after the admin registers the first model (which auto-becomes the chat default).
+    after an admin sets the chat default. (Registering a model does NOT set one — nothing
+    writes model_defaults except an explicit set, so "models registered, default never set"
+    is a reachable state and this is the path out of it.)
     """
     monkeypatch.setattr(mf, "_DEFAULTS_CACHE", _cold_cache() | {"defaults": {}})
     fetched = {"defaults": {}}
