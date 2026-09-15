@@ -1,0 +1,62 @@
+# Nannos Model Gateway — proxy settings. THE source of truth for gateway behaviour.
+#
+# This file is committed and *consumed*, not an example: `scripts/start-local.sh` cats it
+# into the ephemeral local config, and a deployment's own config.yaml (a ConfigMap in k8s)
+# is expected to carry these blocks verbatim. It deliberately contains NO secrets, NO
+# `general_settings` and NO `model_list`:
+#
+#   - `general_settings` names environment variables that legitimately differ per
+#     environment (local reads LITELLM_DATABASE_URL, k8s reads DATABASE_URL), so it stays
+#     with each consumer.
+#   - `model_list` is deployment-specific and, in Nannos, is not file-based at all: models
+#     are registered at runtime from the console and stored in the proxy DB
+#     (`store_model_in_db`). See the package README.
+#
+# It exists because these settings have no single home otherwise: they are config-only, and
+# this repo ships no config.yaml, so the values lived once in the start-local.sh heredoc and
+# again in whatever config each deployment mounts (a ConfigMap, typically managed in a GitOps
+# repo) — held together by comments asserting the two matched. Nothing checks such a claim, so
+# the copies can disagree indefinitely, and a deployment left on `num_retries: 0` turns every
+# transient provider blip into a hard user-visible failure (nannos#204). Parity asserted in
+# prose is parity that has already drifted; parity by shared file is not.
+
+litellm_settings:
+  # Proxy-side usage/cost capture → console-backend. Resolved relative to the config dir,
+  # which is why custom_logger.py is baked next to the mounted config (see Dockerfile).
+  callbacks: custom_logger.proxy_handler_instance
+  # Total per-request bound for non-streaming calls; streaming hangs are caught by the
+  # client-side inter-chunk watchdog (Bedrock ignores stream_timeout).
+  request_timeout: 600
+  drop_params: true
+  # Let LiteLLM normalize provider-specific message sequencing. Bedrock's Converse API
+  # requires alternating user/assistant turns; agent loops with parallel tool calls produce
+  # consecutive user/tool blocks, which LiteLLM otherwise merges-and-warns about on every
+  # turn ("Potential consecutive user/tool blocks"). With this set it normalizes them
+  # cleanly (inserting a dummy assistant turn where needed) and stays quiet.
+  modify_params: true
+  # Emit structured (JSON) logs instead of colorized text, so the proxy's output is
+  # parseable by log aggregators.
+  json_logs: true
+
+# Resilience. These are what make a provider outage survivable, and they are config-only —
+# unlike the fallback *chains*, which are DB-backed and written by console-backend through
+# `POST /fallback` (see ADR-0008 and the console's tier groups). Declaring a chain without
+# these settings produces a fallback that never fires.
+router_settings:
+  # Gateway-native retries on transient failures/timeouts, replacing the per-call boto3
+  # retries dropped in the gateway migration. A Bedrock `ServiceUnavailableException` is
+  # usually a blip; without this it reaches the user as a hard failure.
+  num_retries: 2
+  # Failures (within a minute) before a deployment is pulled from the pool, and for how
+  # long. Kept deliberately low: with one deployment per alias, a cooldown is what lets the
+  # router give up on the primary and move to the fallback chain rather than retrying into
+  # a provider that is down.
+  allowed_fails: 3
+  cooldown_time: 30
+  # NOTE: no `fallbacks:` here on purpose. Chains live in the proxy DB so they cannot drift
+  # against the model registry, which is also DB-backed. Configure them in the console
+  # (Admin → Model Gateway → chat tiers), never here.
+  #
+  # NOTE: cooldown and rate-limit state is per-process. Running more than one proxy replica
+  # without `redis_host`/`redis_port`/`redis_password` means each replica rediscovers an
+  # outage independently.

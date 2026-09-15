@@ -93,6 +93,11 @@ metadata:
     app: litellm-proxy
     app.kubernetes.io/part-of: nannos
 data:
+  # The litellm_settings/router_settings blocks below are a VERBATIM copy of
+  # packages/litellm-proxy/litellm-settings.yaml — keep them in step, and prefer generating
+  # this ConfigMap from that file. They are duplicated here only because a ConfigMap cannot
+  # include another file. general_settings stays local: it names environment variables that
+  # legitimately differ per deployment.
   config.yaml: |
     litellm_settings:
       callbacks: custom_logger.proxy_handler_instance
@@ -100,12 +105,24 @@ data:
       # client-side inter-chunk watchdog since Bedrock ignores stream_timeout.
       request_timeout: 600
       drop_params: true
+      # Let LiteLLM normalize provider-specific message sequencing (Bedrock's Converse API
+      # requires alternating user/assistant turns; agent loops with parallel tool calls
+      # produce consecutive user/tool blocks).
+      modify_params: true
       # Gateway-native retries on transient failures/timeouts, replacing the
       # per-call boto3 retries dropped in the migration. Applies to all providers, so a
       # failed/timed-out non-streaming call is retried here, not at each app call site.
+      # Setting this to 0 disables failover entirely: a chain is only ever tried after the
+      # retries for a deployment are exhausted (the proxy warns at boot if you do).
       num_retries: 2
       # Structured (JSON) logs so cluster log aggregation can parse proxy output.
       json_logs: true
+    router_settings:
+      # Bench a deployment that keeps failing instead of sending every request into it.
+      # Without these a failover chain still fires per-request but the sick provider is
+      # retried forever, so every call pays the full retry budget before falling back.
+      allowed_fails: 3
+      cooldown_time: 30
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
       database_url: os.environ/DATABASE_URL

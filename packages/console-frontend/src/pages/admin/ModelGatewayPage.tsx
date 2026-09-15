@@ -33,6 +33,7 @@ import {
   type GatewayModel,
   type ModelRegistrationRequest,
   type RateCardPricingEntry,
+  roleLabel,
 } from '@/api/model-gateway';
 import { Button } from '@/components/ui/button';
 import {
@@ -49,6 +50,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
 import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
+import { FailoverChains } from '@/components/admin/FailoverChains';
 import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
@@ -225,18 +227,6 @@ const isEmbeddingRole = (role: DefaultRole): boolean => role === 'embedding' || 
 // remain the billing source of truth). Gateway costs are per-token.
 const perMillion = (v?: number | null): string | null =>
   v && v > 0 ? `$${(v * 1_000_000).toFixed(2)}/M` : null;
-
-// Human label for a default role / tier slot. Accepts a plain string because the gateway
-// types `default_roles` loosely; unknown roles fall through to their raw value.
-const roleLabel = (role: string): string =>
-  (({
-    chat: 'chat',
-    'chat:low': 'low tier',
-    'chat:premium': 'premium tier',
-    embedding: 'embedding',
-    multimodal_embedding: 'multimodal embedding',
-    search: 'search',
-  }) as Record<string, string>)[role] ?? role;
 
 export function ModelGatewayPage() {
   const queryClient = useQueryClient();
@@ -584,8 +574,12 @@ export function ModelGatewayPage() {
   const defaultMutation = useMutation({
     mutationFn: ({ modelId, role }: { modelId: string; role: DefaultRole }) =>
       setGatewayModelDefault(modelId, role),
-    onSuccess: (_r, { role }) => {
+    onSuccess: (result, { role }) => {
       toast.success(`Set as default ${role.replace('_', ' ')} (apps pick it up within ~60s)`);
+      // The default is stored even when its failover chain could not be re-declared on the
+      // proxy — a partial success the admin has to see, or the tier silently keeps routing to
+      // the previous head's chain until someone happens to open the failover card.
+      if (result?.warning) toast.warning(result.warning);
       invalidate();
     },
     onError: (e: unknown) => toast.error(`Set default failed: ${errMsg(e)}`),
@@ -696,6 +690,8 @@ export function ModelGatewayPage() {
       </div>
 
       <WebSearchSettings />
+
+      <FailoverChains />
 
       {/* Billing-provider consistency check (async — never blocks the model list) */}
       <ProviderMismatchBanner />

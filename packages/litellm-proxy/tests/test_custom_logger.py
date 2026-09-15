@@ -680,3 +680,184 @@ def test_strip_never_raises_on_odd_shapes():
         {},
     ):
         assert _run_deployment_hook(kwargs) is None
+
+
+# ---- cache_control allowlist (ADR-0008) -------------------------------------------------
+# The rule keeps markers only for deployments that speak Anthropic's idiom. These cover the
+# inversion from the old denylist: everything unlisted now strips instead of forwarding.
+
+
+def test_strip_for_azure_openai_deployment():
+    """An OpenAI-format provider must never receive Anthropic cache_control markers — the
+    old denylist forwarded them, and a fallback onto Azure would have carried them too."""
+    kwargs = _gemini_kwargs(model="azure/gpt-4o-deployment")
+    out = _run_deployment_hook(kwargs)
+    assert out is not None
+    assert "cache_control" not in out["messages"][0]["content"][0]
+
+
+def test_strip_for_plain_openai_deployment():
+    kwargs = _gemini_kwargs(model="openai/gpt-4o")
+    assert _run_deployment_hook(kwargs) is not None
+
+
+def test_strip_for_unknown_provider_fails_closed():
+    """An unlisted provider loses caching rather than risking a rejected request."""
+    kwargs = _gemini_kwargs(model="some-new-provider/some-model")
+    assert _run_deployment_hook(kwargs) is not None
+
+
+def test_no_strip_for_direct_anthropic_api():
+    kwargs = _gemini_kwargs(model="anthropic/claude-sonnet-4-6")
+    assert _run_deployment_hook(kwargs) is None
+
+
+def test_no_strip_for_bedrock_converse_provider():
+    kwargs = _gemini_kwargs(
+        model="eu.anthropic.claude-sonnet-4-6", custom_llm_provider="bedrock_converse"
+    )
+    assert _run_deployment_hook(kwargs) is None
+
+
+def test_strip_for_non_anthropic_bedrock_model():
+    """Bedrock serves Titan and Llama too; only its Anthropic models honour the markers."""
+    kwargs = _gemini_kwargs(model="bedrock/amazon.titan-embed-text-v2:0")
+    assert _run_deployment_hook(kwargs) is not None
+
+
+def test_bedrock_geographic_inference_profiles_keep_markers():
+    """Geographic profiles prefix the id, so markers match as substrings, not prefixes."""
+    for model in (
+        "bedrock/eu.anthropic.claude-sonnet-4-6",
+        "bedrock/us.anthropic.claude-sonnet-4-6",
+        "bedrock/anthropic.claude-haiku-4-5-20251001-v1:0",
+    ):
+        assert _run_deployment_hook(_gemini_kwargs(model=model)) is None, model
+
+
+# ---- startup resilience check (nannos#204) ----------------------------------------------
+
+
+def test_num_retries_zero_is_flagged():
+    warnings = cl.resilience_warnings({"litellm_settings": {"num_retries": 0}})
+    assert any("num_retries is 0" in w for w in warnings)
+
+
+def test_router_settings_num_retries_wins_over_litellm_settings():
+    """router_settings is the proxy's routing-level home; a non-zero there is fine even if
+    the legacy litellm_settings copy still says 0."""
+    warnings = cl.resilience_warnings(
+        {
+            "router_settings": {"num_retries": 2, "cooldown_time": 30},
+            "litellm_settings": {"num_retries": 0},
+        }
+    )
+    assert warnings == []
+
+
+def test_absent_num_retries_is_not_flagged():
+    """Absent means LiteLLM's own default applies — that was never the bug."""
+    assert not any(
+        "num_retries" in w for w in cl.resilience_warnings({"litellm_settings": {"drop_params": True}})
+    )
+    assert cl.resilience_warnings({}) == []  # not a proxy config at all — nothing to say
+
+
+def test_config_defined_fallbacks_are_flagged():
+    warnings = cl.resilience_warnings(
+        {"router_settings": {"num_retries": 2, "fallbacks": [{"a": ["b"]}]}}
+    )
+    assert any("drift" in w for w in warnings)
+
+
+def test_resilience_warnings_tolerates_odd_shapes():
+    for config in ({"router_settings": "nope"}, {"litellm_settings": []}, {"x": 1}):
+        assert cl.resilience_warnings(config) == []
+
+
+def test_config_check_never_raises_on_a_missing_file(caplog):
+    cl._check_config_resilience("/definitely/not/a/path/config.yaml")
+
+
+def test_shipped_settings_file_passes_its_own_check():
+    """litellm-settings.yaml is the file deployments are told to copy — it must not itself
+    trip the warning it exists to prevent."""
+    yaml = pytest.importorskip("yaml")
+    path = Path(__file__).resolve().parent.parent / "litellm-settings.yaml"
+    config = yaml.safe_load(path.read_text())
+    assert cl.resilience_warnings(config) == []
+    assert config["router_settings"]["num_retries"] > 0
+    assert config["litellm_settings"]["callbacks"] == "custom_logger.proxy_handler_instance"
+
+
+# ---- thinking_blocks normalization (ADR-0008, review round 1) ----------------------------
+# The app attaches signed thinking_blocks as a TOP-LEVEL message field, keyed on the requested
+# alias' provider. Under failover the alias no longer names the serving provider, so the strip
+# has to happen here, where the resolved deployment is known.
+
+
+def _thinking_kwargs(**overrides):
+    kwargs = {
+        "model": "bedrock/eu.anthropic.claude-sonnet-4-6",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "answer",
+                "thinking_blocks": [
+                    {"type": "thinking", "thinking": "reasoning", "signature": "sig"}
+                ],
+            },
+        ],
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_thinking_blocks_kept_for_anthropic_deployment():
+    assert _run_deployment_hook(_thinking_kwargs()) is None
+
+
+def test_thinking_blocks_stripped_on_failover_to_non_anthropic():
+    """The failover attempt must not carry a field the fallback provider does not define —
+    that would fail the very request the chain exists to save."""
+    kwargs = _thinking_kwargs(model="azure/gpt-4o-deployment")
+    out = _run_deployment_hook(kwargs)
+    assert out is not None
+    assert "thinking_blocks" not in out["messages"][1]
+    assert out["messages"][1]["content"] == "answer"
+
+
+def test_thinking_blocks_strip_is_copy_on_write():
+    """The Anthropic attempt of the same request must still see its blocks."""
+    original = _thinking_kwargs()["messages"]
+    _run_deployment_hook({"model": "openai/gpt-4o", "messages": original})
+    assert "thinking_blocks" in original[1]
+
+
+def test_unresolvable_provider_on_an_anthropic_model_warns(caplog):
+    """Fail-closed costs prompt caching at a 5-10x input multiple; it must not be silent."""
+    with caplog.at_level("WARNING"):
+        out = _run_deployment_hook(_gemini_kwargs(model="eu.anthropic.claude-sonnet-4-6"))
+    assert out is not None  # stripped
+    assert "provider could not be resolved" in caplog.text
+
+
+def test_unresolvable_provider_on_a_non_anthropic_model_stays_quiet(caplog):
+    with caplog.at_level("WARNING"):
+        _run_deployment_hook(_gemini_kwargs(model="some-model"))
+    assert "provider could not be resolved" not in caplog.text
+
+
+def test_missing_cooldown_settings_warns():
+    """A chain that is declared but never benches its sick deployment is failover in name only."""
+    warnings = cl.resilience_warnings(
+        {"litellm_settings": {"num_retries": 2}, "router_settings": {}}
+    )
+    assert any("allowed_fails" in w for w in warnings)
+
+
+def test_cooldown_warning_silent_when_either_is_set():
+    for router in ({"allowed_fails": 3}, {"cooldown_time": 30}, {"allowed_fails": 3, "cooldown_time": 30}):
+        warnings = cl.resilience_warnings({"litellm_settings": {"num_retries": 2}, "router_settings": router})
+        assert not any("allowed_fails" in w for w in warnings), router

@@ -64,6 +64,8 @@ def _looks_like_cost_map(raw: object) -> bool:
         except Exception:  # noqa: S112 - an unreadable entry simply doesn't count as evidence
             continue
     return tagged >= _MIN_COST_MAP_ENTRIES
+
+
 # Short TTL for the /model/info deployment list. Long enough to collapse the 2-3 repeated
 # fetches a single request fans out (System Status page; get_model/get_model_by_id lookups),
 # short enough that a write by another replica self-heals quickly. Our own writes invalidate
@@ -111,7 +113,16 @@ def thinking_levels_for(info: dict) -> list[str]:
 
 
 class ModelGatewayError(Exception):
-    """Raised when the gateway management API returns an error."""
+    """Raised when the gateway management API returns an error.
+
+    ``status_code`` carries the proxy's HTTP status when there was one (None for a transport
+    failure), so a caller can tell "the proxy said no such thing" from "the proxy is down" —
+    a distinction the fallback routes need, since absent is their desired end state.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ModelGatewayService:
@@ -179,13 +190,15 @@ class ModelGatewayService:
                 # Register/update echo the submitted litellm_params (incl. secrets) on validation
                 # errors, so the body never reaches logs or the admin. Opaque, expose_error ignored.
                 log("Gateway %s %s → %s (body suppressed: may echo credentials)", method, path, status)
-                raise ModelGatewayError(f"Gateway returned {status}") from e
+                raise ModelGatewayError(f"Gateway returned {status}", status_code=status) from e
             # No credentials in this request — log the truncated body for diagnosis (unchanged).
             log("Gateway %s %s → %s: %s", method, path, status, e.response.text[:300])
             # Surface the provider's reason to the admin only when the caller opted in (model test):
             # those errors are plain inference failures (e.g. wrong vertex_location → 404), no secrets.
             detail = _provider_error_detail(e.response) if expose_error else ""
-            raise ModelGatewayError(f"Gateway returned {status}" + (f": {detail}" if detail else "")) from e
+            raise ModelGatewayError(
+                f"Gateway returned {status}" + (f": {detail}" if detail else ""), status_code=status
+            ) from e
         except httpx.HTTPError as e:
             log = logger.debug if optional else logger.error
             log("Gateway %s %s unreachable: %s", method, path, e)
@@ -276,6 +289,61 @@ class ModelGatewayService:
     async def delete_model(self, model_id: str) -> None:
         await self._request("POST", "/model/delete", json={"id": model_id})
         self._invalidate_list_cache()
+
+    # --- Failover chains (nannos#204, ADR-0008) ------------------------------------------
+    # LiteLLM stores fallbacks in its own DB when store_model_in_db is on, alongside the
+    # model registry, so a chain cannot drift against the aliases it names. That is why the
+    # chain is projected here rather than written into the proxy's config.yaml, which in
+    # Nannos deliberately carries no model knowledge at all.
+
+    async def set_fallbacks(self, model_name: str, fallback_models: list[str]) -> None:
+        """Declare ``model_name``'s failover chain on the proxy (replaces any existing one).
+
+        An empty chain deletes the entry rather than writing a zero-length one: LiteLLM
+        treats a declared-but-empty fallback list as a configured route, and a stale empty
+        route is harder to notice than no route.
+        """
+        if not fallback_models:
+            await self.delete_fallbacks(model_name)
+            return
+        await self._request(
+            "POST",
+            "/fallback",
+            json={
+                "model": model_name,
+                "fallback_models": list(fallback_models),
+                "fallback_type": "general",
+            },
+        )
+
+    async def delete_fallbacks(self, model_name: str) -> None:
+        """Remove ``model_name``'s failover chain; a proxy holding no such entry is success.
+
+        The 404 must be swallowed here rather than by ``optional=True``, which only lowers the
+        log level and still raises. LiteLLM 404s ``DELETE /fallback/{model}`` when no entry
+        exists — the common case (a tier whose chain has always been empty), and letting that
+        propagate would abort a reprojection before it re-declared the new head's chain.
+        """
+        try:
+            await self._request("DELETE", f"/fallback/{model_name}", optional=True)
+        except ModelGatewayError as e:
+            if e.status_code != 404:
+                raise
+
+    async def get_fallbacks(self, model_name: str) -> list[str]:
+        """The failover chain the proxy currently holds for ``model_name`` (live, uncached).
+
+        Read back from the proxy rather than from our own table so drift between the two is
+        observable instead of assumed away.
+        """
+        try:
+            data = await self._request("GET", f"/fallback/{model_name}", optional=True)
+        except ModelGatewayError as e:
+            if e.status_code == 404:
+                return []  # no entry declared — a real, readable answer, not a failure
+            raise
+        models = data.get("fallback_models") or data.get("fallbacks") or []
+        return [m for m in models if isinstance(m, str)]
 
     async def get_model_by_id(self, model_id: str) -> dict | None:
         """The registered deployment with this gateway id, or None."""

@@ -146,7 +146,7 @@ def _sanitize_response_format(data: dict) -> None:
         _force_additional_properties_false(schema)
 
 
-# --- Gemini cache_control stripping ------------------------------------------------------
+# --- cache_control normalization at the resolved deployment (ADR-0008) ------------------
 # The app attaches Anthropic-style `cache_control: {"type": "ephemeral"}` markers to every
 # model's messages (ADR-0001: one ChatOpenAI client for all providers). On gemini-format
 # models LiteLLM turns those markers into EXPLICIT Vertex context caching: it creates a
@@ -164,22 +164,61 @@ def _sanitize_response_format(data: dict) -> None:
 # object — unlike Anthropic, where a moved breakpoint writes only the delta. Trade-off details:
 # README "Gemini cache_control stripping".
 #
-# Keyed on (provider, model prefix), not provider alone: Claude models served via vertex_ai
-# support cache_control natively and must keep their markers. Runs in the post-routing
-# deployment hook — provider identity doesn't exist pre-routing — and copies-on-write so a
-# retry/fallback of the same request to another provider still sees the original markers.
-_CACHE_CONTROL_STRIP_RULES: dict[str, tuple[str, ...]] = {
-    # provider -> model-name prefixes to strip (empty tuple = every model of that provider)
-    "vertex_ai": ("gemini",),
-    "gemini": (),  # Google AI Studio serves only gemini-format models
+# This is an ALLOWLIST: markers are kept only for deployments that speak Anthropic's
+# cache_control idiom, and stripped for everything else (ADR-0008). It used to be a denylist
+# naming vertex_ai/gemini, which fails open — any provider not on the list received Anthropic
+# markers, so a deployment on an OpenAI-format provider was already being sent a field it does
+# not define, and a *fallback* onto one would tear the safety net at the moment it was needed.
+# An allowlist fails the other way: an unlisted provider loses prompt caching (a measurable cost
+# regression) rather than risking a rejected request.
+#
+# Keyed on (provider, model markers), not provider alone: Bedrock and Vertex each serve both
+# Anthropic and non-Anthropic models, and only the Anthropic ones honour the markers. Bedrock
+# geographic inference profiles prefix the id (`eu.anthropic.claude-…`), so markers are matched
+# as substrings rather than prefixes. Runs in the post-routing deployment hook — provider
+# identity doesn't exist pre-routing — and copies-on-write so a retry/fallback of the same
+# request to another provider still sees the original markers.
+_CACHE_CONTROL_KEEP_RULES: dict[str, tuple[str, ...]] = {
+    # provider -> model-name markers to KEEP (empty tuple = every model of that provider)
+    "anthropic": (),  # the direct Anthropic API serves only Anthropic models
+    "bedrock": ("anthropic.", "claude"),
+    "bedrock_converse": ("anthropic.", "claude"),
+    "vertex_ai": ("claude",),  # Vertex also serves Gemini and Llama, which do not
 }
 
 
+# Model-name markers that say "this is an Anthropic model" regardless of provider. Used only to
+# notice the ambiguous case below, never to decide policy.
+_ANTHROPIC_MODEL_MARKERS = ("anthropic.", "claude")
+
+
+def _speaks_anthropic_idiom(provider: str | None, model: str) -> bool:
+    """Whether the resolved deployment understands Anthropic's message extensions."""
+    return not _should_strip_cache_control(provider, model)
+
+
 def _should_strip_cache_control(provider: str | None, model: str) -> bool:
-    prefixes = _CACHE_CONTROL_STRIP_RULES.get(provider or "")
-    if prefixes is None:
-        return False
-    return not prefixes or model.startswith(prefixes)
+    """True unless the resolved deployment speaks Anthropic's ``cache_control`` idiom.
+
+    Unknown or undeterminable providers strip: losing a cache discount is recoverable and shows
+    up in billing, while forwarding markers a provider rejects fails the call. That is a real
+    trade though — an Anthropic model whose provider can't be derived (a bare model id with no
+    prefix and no ``custom_llm_provider``, as a hand-written DB registration can produce) loses
+    prompt caching at a 5-10x input-cost multiple with nothing else to signal it — so that exact
+    case is logged rather than left silent.
+    """
+    keep_markers = _CACHE_CONTROL_KEEP_RULES.get(provider or "")
+    if keep_markers is None:
+        if any(marker in model for marker in _ANTHROPIC_MODEL_MARKERS):
+            logger.warning(
+                "[cache-control] stripping markers for '%s': provider could not be resolved "
+                "(provider=%r) but the model looks Anthropic. Prompt caching is lost for this "
+                "deployment — register it with an explicit provider prefix.",
+                model,
+                provider,
+            )
+        return True
+    return bool(keep_markers) and not any(marker in model for marker in keep_markers)
 
 
 def _strip_cache_control_entries(items: list) -> list | None:
@@ -216,6 +255,27 @@ def _strip_cache_control_entries(items: list) -> list | None:
         if new_item is not item:
             changed = True
         out.append(new_item)
+    return out if changed else None
+
+
+def _strip_thinking_blocks(messages: list) -> list | None:
+    """Return a copy of ``messages`` with top-level ``thinking_blocks`` removed, or None if none.
+
+    The app re-attaches each assistant turn's signed ``thinking_blocks`` as a TOP-LEVEL message
+    field, keyed on the *requested alias*' provider (agent_common model_factory). Under failover
+    the alias no longer names the serving provider, so an Anthropic-shaped request can reach a
+    non-Anthropic deployment carrying a field it does not define — failing the very request the
+    failover chain existed to save. Same copy-on-write discipline as the cache_control strip: the
+    router hands each attempt a shallow copy, so the Anthropic attempt must keep its blocks.
+    """
+    changed = False
+    out = []
+    for message in messages:
+        if isinstance(message, dict) and "thinking_blocks" in message:
+            out.append({k: v for k, v in message.items() if k != "thinking_blocks"})
+            changed = True
+        else:
+            out.append(message)
     return out if changed else None
 
 
@@ -528,10 +588,11 @@ class NannosCostLogger(CustomLogger):
         return data
 
     async def async_pre_call_deployment_hook(self, kwargs, call_type):
-        """Strip cache_control markers from requests routed to gemini-format deployments.
+        """Strip cache_control markers from deployments that don't speak Anthropic's idiom.
 
         Runs after the router picked a deployment (unlike ``async_pre_call_hook``), so the
-        provider/model are known. See ``_CACHE_CONTROL_STRIP_RULES`` for the why. Returning
+        provider/model are known — which is the only place the question has a correct answer
+        once failover is in play. See ``_CACHE_CONTROL_KEEP_RULES`` and ADR-0008 for the why. Returning
         the (mutated) kwargs replaces the request for this attempt only; returning None
         leaves it unchanged. Never raise — stripping is an optimization, not a gate.
         """
@@ -541,7 +602,7 @@ class NannosCostLogger(CustomLogger):
             if not provider and "/" in model:
                 provider = model.split("/", 1)[0]
             bare_model = model.split("/", 1)[1] if "/" in model else model
-            if not _should_strip_cache_control(provider, bare_model):
+            if _speaks_anthropic_idiom(provider, bare_model):
                 return None
             changed = False
             for key in ("messages", "tools"):
@@ -551,6 +612,12 @@ class NannosCostLogger(CustomLogger):
                     if stripped is not None:
                         kwargs[key] = stripped
                         changed = True
+            messages = kwargs.get("messages")
+            if isinstance(messages, list):
+                stripped = _strip_thinking_blocks(messages)
+                if stripped is not None:
+                    kwargs["messages"] = stripped
+                    changed = True
             return kwargs if changed else None
         except Exception as e:  # never break the call on a stripping failure
             logger.warning(
@@ -671,3 +738,75 @@ try:
     install_span_export_filter()
 except Exception as exc:  # noqa: BLE001 - telemetry must never block startup
     logger.info("[trace] span export filter not installed: %s", exc)
+
+
+# --- Startup resilience check (nannos#204) -----------------------------------------------
+# The fallback *chains* are DB-backed (console-backend writes them via POST /fallback), but
+# the settings that make a chain actually fire — retries and cooldowns — are config-only.
+# A deployment whose config.yaml sits on `num_retries: 0` therefore has failover on paper and
+# none in practice, with nothing to say so — and because the settings are duplicated between
+# this repo's local config and each deployment's own, a comment claiming the two match is the
+# only thing holding them together. This check makes that silence audible on every pod start.
+#
+# Warnings only — a proxy must always boot. See litellm-settings.yaml for the intended
+# values, which deployments are expected to copy verbatim.
+_CONFIG_PATH = os.environ.get("CONFIG_FILE_PATH") or "/etc/litellm/config.yaml"
+
+
+def resilience_warnings(config: dict) -> list[str]:
+    """Problems with a parsed proxy config that would silently disable failover.
+
+    Pure so it can be tested without a file. ``num_retries`` is only flagged when it is
+    explicitly 0 — absent means LiteLLM's own default applies, which is not the bug.
+    """
+    warnings: list[str] = []
+    router = config.get("router_settings") or {}
+    settings = config.get("litellm_settings") or {}
+    if not isinstance(router, dict) or not isinstance(settings, dict):
+        return warnings
+
+    retries = router.get("num_retries", settings.get("num_retries"))
+    if retries == 0:
+        warnings.append(
+            "num_retries is 0 — the gateway will not retry a transient provider failure, "
+            "and a fallback chain declared in the console will never fire. See "
+            "packages/litellm-proxy/litellm-settings.yaml."
+        )
+    # Cooldowns are what make a chain useful rather than merely present: without them a sick
+    # deployment is retried on every single request and each call pays its full retry budget
+    # before the chain is consulted. LiteLLM has defaults, so this is a nudge, not an error —
+    # but the shipped example carries them, and a config missing both usually means the file
+    # was copied before they existed.
+    # Gated on the config actually configuring a proxy: an empty or unrelated dict is not a
+    # deployment that forgot its cooldowns, it is simply not this file.
+    if settings and "allowed_fails" not in router and "cooldown_time" not in router:
+        warnings.append(
+            "router_settings has neither allowed_fails nor cooldown_time — a failing deployment "
+            "is never benched, so every request pays the full retry budget before its fallback "
+            "chain is tried. See packages/litellm-proxy/litellm-settings.yaml."
+        )
+    if router.get("fallbacks"):
+        warnings.append(
+            "router_settings.fallbacks is set in config — Nannos manages fallback chains in "
+            "the proxy DB (console → Model Gateway → chat tiers) so they cannot drift "
+            "against the model registry. A config-defined chain will not be visible there."
+        )
+    return warnings
+
+
+def _check_config_resilience(path: str = _CONFIG_PATH) -> None:
+    """Parse the mounted config and log any resilience warnings. Never raises."""
+    try:
+        import yaml  # provided by the upstream LiteLLM image
+
+        with open(path) as fh:
+            config = yaml.safe_load(fh) or {}
+        if not isinstance(config, dict):
+            return
+        for warning in resilience_warnings(config):
+            logger.warning("[gateway-config] %s", warning)
+    except Exception as exc:  # noqa: BLE001 - a config check must never block startup
+        logger.info("[gateway-config] resilience check skipped: %s", exc)
+
+
+_check_config_resilience()

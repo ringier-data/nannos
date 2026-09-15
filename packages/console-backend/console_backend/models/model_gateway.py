@@ -1,5 +1,7 @@
 """Schemas for runtime model registration via the Model Gateway."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 from .usage import RateCardPricingEntry
@@ -89,6 +91,36 @@ class WebSearchConfig(BaseModel):
     active_model_id: str | None = None
     active_model_name: str | None = None
     models: list[WebSearchModelOption] = Field(default_factory=list)
+
+
+class TierGroup(BaseModel):
+    """One chat tier's ordered models: the default, then its failover chain.
+
+    ``models`` is the whole group in routing order (``models[0] == default``); ``fallbacks``
+    is the tail on its own, which is what a client edits. Both are returned so a client never
+    has to re-derive one from the other and get the head wrong.
+    """
+
+    role: str
+    default: str | None = None
+    fallbacks: list[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
+    # Tri-state on purpose. "unknown" (the proxy could not be read) must not render as
+    # "in_sync": an unreachable gateway is exactly when an admin is checking failover, and
+    # collapsing the two would show every tier healthy in the one situation this feature
+    # exists to surface.
+    gateway_state: Literal["in_sync", "drifted", "unknown"] = "unknown"
+    # What the proxy actually holds, when it could be read and differs from `fallbacks`.
+    gateway_mismatch: list[str] | None = None
+
+
+class SetFailoverChainRequest(BaseModel):
+    """Replace a chat tier's failover chain. The tier's default stays its head."""
+
+    fallbacks: list[str] = Field(
+        default_factory=list,
+        description="Aliases to try, in order, when the tier's default is unavailable. Empty removes the chain.",
+    )
 
 
 class SetDefaultRequest(BaseModel):
