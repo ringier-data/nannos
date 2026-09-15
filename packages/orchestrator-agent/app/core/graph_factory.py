@@ -531,7 +531,12 @@ class GraphFactory:
         # LLM cost is captured at the Model Gateway now (proxy CustomLogger);
         # the in-app CostTrackingCallback is intentionally NOT attached here to avoid
         # double-counting. (cost_logger remains for the embeddings path until Phase 5.)
-        return create_model(model_type, thinking_level, callbacks=None)
+        #
+        # pre_resolved: get_graph already resolved this alias and keyed both caches on the
+        # result. Resolving a second time here would re-read a snapshot that may have moved
+        # in between, leaving a permanently-cached graph whose key names one model and whose
+        # client calls another. get_graph is the only path into here.
+        return create_model(model_type, thinking_level, callbacks=None, pre_resolved=True)
 
     def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
         """Get or create a model instance

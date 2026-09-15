@@ -320,6 +320,7 @@ def create_model(
     *,
     reasoning_effort: str | None = None,
     max_tokens: int | None = None,
+    pre_resolved: bool = False,
 ) -> BaseChatModel:
     """Create a gateway-backed chat model for the given alias.
 
@@ -353,7 +354,13 @@ def create_model(
 
     from ringier_a2a_sdk.cost_tracking.attribution import build_attribution_http_client
 
-    model_type = resolve_chat_model(model_type)
+    # `pre_resolved` says the caller already ran resolve_chat_model and is keying a cache on
+    # the result. Resolving again here would re-read a snapshot that may have moved in
+    # between, so the object could end up calling a different model than the key names — and
+    # since those caches are never evicted, that mismatch would outlive the process's next
+    # correct read. One resolution point per creation; other callers keep the safety net.
+    if not pre_resolved:
+        model_type = resolve_chat_model(model_type)
     # The proxy CostLogger is the single source of cost for all gateway traffic.
     # Drop any in-app CostTrackingCallback some call sites still pass, or the
     # call is double-counted — once proxy-side (correct provider) and once in-app (which
@@ -503,14 +510,22 @@ def _refresh_if_stale(cache: dict, key: str, ttl: float, cond: threading.Conditi
     def _run():
         try:
             cache[key] = fetch()
+            if cache["last_error"] is not None:
+                logger.info("Refresh of '%s' recovered", key)  # the counterpart to the transition WARNING
             cache["last_error"] = None
         except Exception as e:
+            # WARNING on the TRANSITION only, then debug: these caches decide which model every
+            # agent call runs on, so a failure here surfaces later as an unexplained
+            # wrong-model or rejected call, and at the INFO level deployments typically run,
+            # debug alone would leave no record of the cause — only of the downstream damage.
+            # Repeats stay at debug so a long outage doesn't emit a line per cache per minute
+            # per worker, and so environments deliberately run without a gateway (unit tests,
+            # local dev) don't trip warning gates on every cold cache.
+            if cache["last_error"] is None:
+                logger.warning("Background refresh of '%s' failed: %s", key, e)
+            else:
+                logger.debug("Background refresh of '%s' still failing: %s", key, e)
             cache["last_error"] = e
-            # WARNING, not debug: these caches decide which model every agent call runs on, so
-            # a failure here surfaces later as an unexplained wrong-model or rejected call. At
-            # the INFO level deployments typically run, debug would leave no record of the
-            # cause at all — only of the downstream damage.
-            logger.warning("Background refresh of '%s' failed: %s", key, e)
         finally:
             with cond:
                 cache["ts"] = time.monotonic()  # set even on failure → back off a full TTL
@@ -577,14 +592,39 @@ def _model_defaults() -> dict[str, str]:
     """{role: default_alias} from console-backend /api/v1/models/defaults (cached,
     refreshed off-thread)."""
     _refresh_if_stale(_DEFAULTS_CACHE, "defaults", _DEFAULTS_TTL, _DEFAULTS_LOCK, _fetch_model_defaults)
-    # No defaults at all is the fresh-deploy bootstrap state (see _gateway_models): keep it
-    # cold so the next call re-fetches synchronously. Registering the first model auto-sets
-    # it as the "chat" default, and require_default_model() must see that on the next request
-    # instead of raising NoDefaultModelError for up to _DEFAULTS_TTL. A genuine fetch failure
-    # (last_error set) stays on the normal TTL so a console-backend outage backs off.
-    if not _DEFAULTS_CACHE["defaults"] and _DEFAULTS_CACHE["last_error"] is None:
-        _DEFAULTS_CACHE["ts"] = _COLD
+    # An empty map with no recorded error is ambiguous — the fresh-deploy bootstrap state, or
+    # a read that landed badly — so re-arm the cache cold and let the NEXT read re-populate it
+    # synchronously, rather than serving "no default is configured" for a full TTL.
+    _rearm_defaults_if_unconfirmed()
     return _DEFAULTS_CACHE["defaults"]
+
+
+# Floor between two inline re-arms of the defaults cache. Re-population runs synchronously on
+# the caller's thread — which for the orchestrator is the event loop — so an unbounded re-arm
+# would put a blocking fetch in front of every read while the map stays empty. One per second
+# still picks up an admin setting the default promptly.
+_DEFAULTS_REARM_FLOOR = 1.0
+_last_defaults_rearm = _COLD
+
+
+def _rearm_defaults_if_unconfirmed() -> bool:
+    """Mark the defaults cache cold when its map is empty and no error was recorded — the one
+    state where "no default" may just mean "this read landed badly" — so the next read
+    re-populates it synchronously. Returns whether the cache was re-armed.
+
+    The decision is taken while holding the cache lock, so a refresh landing mid-call can't
+    make it stale: either we see the map that refresh wrote (and leave the cache alone), or we
+    see empty (and re-arm). A recorded error means the endpoint was tried and failed — that
+    backs off on the normal TTL instead, so an outage isn't hammered."""
+    global _last_defaults_rearm
+    with _DEFAULTS_LOCK:
+        if _DEFAULTS_CACHE["defaults"] or _DEFAULTS_CACHE["last_error"] is not None:
+            return False
+        if time.monotonic() - _last_defaults_rearm < _DEFAULTS_REARM_FLOOR:
+            return False
+        _last_defaults_rearm = time.monotonic()
+        _DEFAULTS_CACHE["ts"] = _COLD
+        return True
 
 
 def _default_alias_for(role: str) -> ModelType | None:
@@ -621,15 +661,24 @@ def embedding_default_known_absent(multimodal: bool = False) -> bool:
     return absent and _DEFAULTS_CACHE.get("last_error") is None
 
 
-def _first_default(roles: tuple[str, ...], exclude: str) -> tuple[str, str] | None:
-    """The first ``(role, alias)`` among ``roles`` that has a default differing from
-    ``exclude``. ``exclude`` is the alias we're degrading away from — a role whose default
-    still points at it is no successor at all."""
+def _first_default(roles: tuple[str, ...], exclude: str, registered: dict[str, dict]) -> tuple[str, str] | None:
+    """The first ``(role, alias)`` among ``roles`` whose default is a usable successor for
+    ``exclude`` — the alias we're degrading away from.
+
+    A successor must differ from ``exclude`` (a role still pointing at it leads nowhere) AND
+    be registered: degrading onto a second dead alias produces the same rejection as doing
+    nothing, with a log line claiming the degradation worked."""
     for role in roles:
         default = _default_alias_for(role)
-        if default and default != exclude:
+        if default and default != exclude and default in registered:
             return role, default
     return None
+
+
+def _default_points_at(roles: tuple[str, ...], alias: str) -> bool:
+    """Whether some role's default IS ``alias`` — a configured-but-retired default, which
+    needs a different fix (repoint it) than having no default at all."""
+    return any(_default_alias_for(role) == alias for role in roles)
 
 
 def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
@@ -643,15 +692,16 @@ def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
         return model_type
 
     # Past this point the registry was read SUCCESSFULLY and doesn't have the alias, so
-    # passing it through is a guaranteed rejection — a default is the only way out. Read the
-    # defaults TWICE before giving up: an empty map with no recorded error re-arms the cache
-    # as cold (see _model_defaults), so the second read re-fetches synchronously instead of
-    # re-serving the same empty snapshot. Without the retry a single first-use read that
-    # happens to land empty is indistinguishable from "no default is configured", and one
-    # unlucky fetch is enough to fail open on an alias the gateway has already disowned.
-    found = _first_default(roles, model_type)
-    if found is None and not _DEFAULTS_CACHE["defaults"] and _DEFAULTS_CACHE["last_error"] is None:
-        found = _first_default(roles, model_type)
+    # passing it through is a guaranteed rejection — a default is the only way out. Don't give
+    # up on one read of the defaults: an empty map with no recorded error is ambiguous between
+    # "nothing is configured" and "this read landed badly", and a first-use read that lands
+    # empty would otherwise fail open on an alias the gateway has already disowned. The second
+    # read is unconditional, so it picks up either a refresh that landed mid-call or the
+    # synchronous re-population that the first read's re-arm just armed
+    # (_rearm_defaults_if_unconfirmed, which is where the rate limiting lives).
+    found = _first_default(roles, model_type, models)
+    if found is None:
+        found = _first_default(roles, model_type, models)
     if found is not None:
         role, default = found
         logger.warning(
@@ -663,9 +713,10 @@ def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
         )
         return default
 
-    # No successor. ERROR, not WARNING: the gateway is about to reject this call, and the two
-    # causes need different fixes — an unreadable defaults endpoint is an outage, a missing
-    # default is an admin task. They were indistinguishable in the original message.
+    # No successor. ERROR, not WARNING: the gateway is about to reject this call, and each
+    # cause needs a different fix — an unreadable defaults endpoint is an outage, a default
+    # still pointing at the retired alias is one repoint away, an unset default is an admin
+    # task. A single "no default set" message for all three misdirects whoever reads it.
     if _DEFAULTS_CACHE["last_error"] is not None:
         logger.error(
             "%s model '%s' is not registered and the model-defaults endpoint is unreadable (%s); "
@@ -673,6 +724,14 @@ def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
             kind,
             model_type,
             _DEFAULTS_CACHE["last_error"],
+        )
+    elif _default_points_at(roles, model_type):
+        logger.error(
+            "%s model '%s' is not registered and the default for role(s) %s still points at it; "
+            "repoint the default to a registered model — passing through, the gateway will reject it",
+            kind,
+            model_type,
+            ", ".join(roles),
         )
     else:
         logger.error(

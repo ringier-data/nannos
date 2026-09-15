@@ -8,66 +8,42 @@ because nothing is configured from one that is empty because the first read land
 
 import time
 
-import pytest
 
 from agent_common.core import model_factory as mf
-
-
-@pytest.fixture(autouse=True)
-def restore_caches():
-    gw, defaults = dict(mf._GW_CACHE), dict(mf._DEFAULTS_CACHE)
-    yield
-    mf._GW_CACHE.clear()
-    mf._GW_CACHE.update(gw)
-    mf._DEFAULTS_CACHE.clear()
-    mf._DEFAULTS_CACHE.update(defaults)
-
-
-def _seed_gateway(models: dict):
-    # Fresh ts so _refresh_if_stale serves this snapshot without firing a (network) refresh.
-    mf._GW_CACHE.clear()
-    mf._GW_CACHE.update({"ts": time.monotonic(), "models": models, "inflight": False, "last_error": None})
-
-
-def _seed_defaults(defaults: dict, last_error=None):
-    mf._DEFAULTS_CACHE.clear()
-    mf._DEFAULTS_CACHE.update(
-        {"ts": time.monotonic(), "defaults": defaults, "inflight": False, "last_error": last_error}
-    )
 
 
 REGISTERED = {"claude-sonnet-4-6": {}, "claude-haiku-4-5": {}}
 
 
-def test_registered_alias_passes_through_untouched():
-    _seed_gateway(REGISTERED)
-    _seed_defaults({"chat": "claude-sonnet-4-6"})
+def test_registered_alias_passes_through_untouched(seed_gateway, seed_defaults):
+    seed_gateway(REGISTERED)
+    seed_defaults({"chat": "claude-sonnet-4-6"})
     assert mf.resolve_chat_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
 
 
-def test_retired_alias_degrades_to_chat_default():
-    _seed_gateway(REGISTERED)
-    _seed_defaults({"chat": "claude-sonnet-4-6"})
+def test_retired_alias_degrades_to_chat_default(seed_gateway, seed_defaults):
+    seed_gateway(REGISTERED)
+    seed_defaults({"chat": "claude-sonnet-4-6"})
     assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4-6"
 
 
-def test_unreadable_registry_passes_through():
+def test_unreadable_registry_passes_through(seed_defaults):
     """The gateway is the authority; with no registry snapshot we can't claim retirement."""
     mf._GW_CACHE.clear()
     mf._GW_CACHE.update({"ts": time.monotonic(), "models": {}, "inflight": False, "last_error": OSError("boom")})
-    _seed_defaults({"chat": "claude-sonnet-4-6"})
+    seed_defaults({"chat": "claude-sonnet-4-6"})
     assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4.5"
 
 
-def test_empty_unerrored_defaults_are_re_read_before_failing_open(monkeypatch):
+def test_empty_unerrored_defaults_are_re_read_before_failing_open(seed_gateway, seed_defaults, monkeypatch):
     """THE regression: a first-use defaults read that comes back empty-and-unerrored must be
     retried, not treated as 'no default configured'.
 
     An empty map with last_error None re-arms the cache as cold, so the second read refetches
     synchronously; giving up on the first read discards a default that is one call away.
     """
-    _seed_gateway(REGISTERED)
-    _seed_defaults({})  # empty, no error — the ambiguous state
+    seed_gateway(REGISTERED)
+    seed_defaults({})  # empty, no error — the ambiguous state
 
     fetches: list[int] = []
 
@@ -81,11 +57,11 @@ def test_empty_unerrored_defaults_are_re_read_before_failing_open(monkeypatch):
     assert fetches, "the second read must actually re-fetch, not re-serve the empty snapshot"
 
 
-def test_failed_defaults_fetch_does_not_retry(monkeypatch):
+def test_failed_defaults_fetch_does_not_retry(seed_gateway, seed_defaults, monkeypatch):
     """A recorded error means the endpoint was tried and failed — retrying in-line would
     hammer it during an outage. Back off (and log an ERROR) instead."""
-    _seed_gateway(REGISTERED)
-    _seed_defaults({}, last_error=OSError("console-backend unreachable"))
+    seed_gateway(REGISTERED)
+    seed_defaults({}, last_error=OSError("console-backend unreachable"))
 
     def _fetch():
         raise AssertionError("must not refetch while backing off from a failed fetch")
@@ -95,15 +71,66 @@ def test_failed_defaults_fetch_does_not_retry(monkeypatch):
     assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4.5"
 
 
-def test_default_pointing_at_the_retired_alias_is_not_a_successor():
-    """A default that still points at the alias being degraded away from is no way out."""
-    _seed_gateway(REGISTERED)
-    _seed_defaults({"chat": "claude-sonnet-4.5"})
-    assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4.5"
+def test_default_pointing_at_the_retired_alias_is_not_a_successor(seed_gateway, seed_defaults, caplog):
+    """A default that still points at the alias being degraded away from is no way out — and
+    says so, because the fix (repoint the default) differs from the one an unset default needs."""
+    seed_gateway(REGISTERED)
+    seed_defaults({"chat": "claude-sonnet-4.5"})
+    with caplog.at_level("ERROR"):
+        assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4.5"
+    assert "still points at it" in caplog.text
 
 
-def test_embedding_resolution_prefers_multimodal_role():
-    _seed_gateway({"gemini-embedding-2": {}, "titan-embed-text-v2:0": {}})
-    _seed_defaults({"embedding": "titan-embed-text-v2:0", "multimodal_embedding": "gemini-embedding-2"})
+def test_unregistered_default_is_not_a_successor(seed_gateway, seed_defaults, caplog):
+    """Degrading onto a second dead alias just moves the rejection; the registry is in scope
+    here, so a default that isn't registered must not be reported as a successful degrade."""
+    seed_gateway(REGISTERED)
+    seed_defaults({"chat": "also-retired"})
+    with caplog.at_level("ERROR"):
+        assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4.5"
+    assert "falling back" not in caplog.text
+
+
+def test_concurrent_refresh_landing_mid_call_is_picked_up(seed_gateway, seed_defaults, monkeypatch):
+    """The second read is unconditional, so a refresh that populates the map between the two
+    reads is used rather than lost to a check-then-act on the first result."""
+    seed_gateway(REGISTERED)
+    seed_defaults({})
+
+    def _land_the_refresh():
+        # Stand in for the refresh thread landing between the two reads.
+        mf._DEFAULTS_CACHE["defaults"] = {"chat": "claude-sonnet-4-6"}
+        return False
+
+    monkeypatch.setattr(mf, "_rearm_defaults_if_unconfirmed", _land_the_refresh)
+    assert mf.resolve_chat_model("claude-sonnet-4.5") == "claude-sonnet-4-6"
+
+
+def test_rearm_is_rate_limited(seed_gateway, seed_defaults, monkeypatch):
+    """Re-population runs synchronously on the caller's thread (the event loop, in the
+    orchestrator), so a persistently empty map must not put a fetch in front of every read."""
+    seed_gateway(REGISTERED)
+    seed_defaults({})
+    monkeypatch.setattr(mf, "_last_defaults_rearm", time.monotonic())  # just re-armed
+
+    fetches: list[int] = []
+    monkeypatch.setattr(mf, "_fetch_model_defaults", lambda: (fetches.append(1), {})[1])
+
+    mf.resolve_chat_model("claude-sonnet-4.5")
+    assert not fetches, "a re-arm inside the floor window must be skipped"
+
+
+def test_rearm_does_not_fire_while_backing_off_from_an_error(seed_defaults, monkeypatch):
+    """A recorded error means the endpoint was tried and failed; re-arming would turn every
+    read into a synchronous retry against an endpoint already known to be down."""
+    seed_defaults({}, last_error=OSError("console-backend unreachable"))
+    monkeypatch.setattr(mf, "_last_defaults_rearm", mf._COLD)
+    assert mf._rearm_defaults_if_unconfirmed() is False
+    assert mf._DEFAULTS_CACHE["ts"] != mf._COLD
+
+
+def test_embedding_resolution_prefers_multimodal_role(seed_gateway, seed_defaults):
+    seed_gateway({"gemini-embedding-2": {}, "titan-embed-text-v2:0": {}})
+    seed_defaults({"embedding": "titan-embed-text-v2:0", "multimodal_embedding": "gemini-embedding-2"})
     assert mf.resolve_embedding_model("retired-embed", multimodal=True) == "gemini-embedding-2"
     assert mf.resolve_embedding_model("retired-embed") == "titan-embed-text-v2:0"

@@ -114,11 +114,6 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
   };
 }
 
-// No `model` is sent in request metadata on purpose: the orchestrator then runs the
-// console's "chat" default slot (require_default_model), which an admin repoints when a
-// model is retired. A hardcoded alias here outlives its registration on the gateway and
-// 400s ("Invalid model name") for every user who never picked a preferred model.
-
 /**
  * HTTP client to communicate with A2A server using @a2a-js/sdk
  */
@@ -211,6 +206,9 @@ export class A2AClientService {
           ...(request.contextId && { contextId: request.contextId }),
         },
         metadata: {
+          // Deliberately no `model`: the orchestrator runs the console's "chat" default
+          // slot, which an admin repoints when a model is retired. See agent-common's
+          // require_default_model.
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
           messageFormatting: 'markdown',
@@ -282,6 +280,9 @@ export class A2AClientService {
         ...(request.contextId && { contextId: request.contextId }),
       },
       metadata: {
+        // Deliberately no `model`: the orchestrator runs the console's "chat" default
+        // slot, which an admin repoints when a model is retired. See agent-common's
+        // require_default_model.
         senderEmail: request.senderEmail,
         emailSubject: request.subject,
         messageFormatting: 'markdown',
@@ -334,6 +335,9 @@ export class A2AClientService {
           ...(request.contextId && { contextId: request.contextId }),
         },
         metadata: {
+          // Deliberately no `model`: the orchestrator runs the console's "chat" default
+          // slot, which an admin repoints when a model is retired. See agent-common's
+          // require_default_model.
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
           messageFormatting: 'markdown',
@@ -649,6 +653,9 @@ export class A2AClientService {
           ...(request.contextId && { contextId: request.contextId }),
         },
         metadata: {
+          // Deliberately no `model`: the orchestrator runs the console's "chat" default
+          // slot, which an admin repoints when a model is retired. See agent-common's
+          // require_default_model.
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
           messageFormatting: 'markdown',
