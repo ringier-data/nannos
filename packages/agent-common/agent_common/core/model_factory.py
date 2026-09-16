@@ -685,6 +685,30 @@ def _configured_defaults(roles: tuple[str, ...]) -> dict[str, str]:
     return {role: alias for role in roles if (alias := _default_alias_for(role))}
 
 
+def _successor_alias(
+    roles: tuple[str, ...], retired: str, registered: dict[str, dict]
+) -> tuple[str, str] | None:
+    """The ``(role, alias)`` to degrade ``retired`` onto, or None when no role offers one.
+
+    Reads the defaults TWICE, which is the part worth explaining. An empty defaults map with
+    no recorded error is ambiguous — either nothing is configured, or that one read landed
+    badly — and merely observing it re-arms the cache as cold (``_model_defaults`` →
+    ``_rearm_defaults_if_unconfirmed``). So the second read re-populates synchronously rather
+    than re-serving the snapshot that just came back empty. Giving up after one read is how a
+    single unlucky fetch turns into "no default is configured" and a request sent to an alias
+    the gateway has already disowned.
+
+    The second read is deliberately unconditional rather than guarded on "is the map still
+    empty". Guarding it would re-introduce a check-then-act: a refresh landing between the two
+    reads populates the map, the guard sees it as non-empty, and the successor that refresh
+    just delivered is skipped. Unconditional costs a dict lookup and cannot lose that race.
+    """
+    found = _first_default(roles, retired, registered)
+    if found is None:
+        found = _first_default(roles, retired, registered)  # see the docstring — not a typo
+    return found
+
+
 def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
     """Map a requested alias to one that's actually registered, degrading to the gateway's
     default for the first of ``roles`` that has one when the requested alias is retired.
@@ -696,16 +720,8 @@ def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
         return model_type
 
     # Past this point the registry was read SUCCESSFULLY and doesn't have the alias, so
-    # passing it through is a guaranteed rejection — a default is the only way out. Don't give
-    # up on one read of the defaults: an empty map with no recorded error is ambiguous between
-    # "nothing is configured" and "this read landed badly", and a first-use read that lands
-    # empty would otherwise fail open on an alias the gateway has already disowned. The second
-    # read is unconditional, so it picks up either a refresh that landed mid-call or the
-    # synchronous re-population that the first read's re-arm just armed
-    # (_rearm_defaults_if_unconfirmed, which is where the rate limiting lives).
-    found = _first_default(roles, model_type, models)
-    if found is None:
-        found = _first_default(roles, model_type, models)
+    # passing it through is a guaranteed rejection — a default is the only way out.
+    found = _successor_alias(roles, model_type, models)
     if found is not None:
         role, default = found
         logger.warning(
