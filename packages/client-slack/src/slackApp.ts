@@ -89,13 +89,22 @@ export async function startSlackApp(config: Config) {
      */
     const validateNotificationToken = async (token: string) => {
       const installations = await storage.botInstallation.listAll();
+
+      // Keyed by app_id to match InstallationRegistrar. Keying on bot_name gave two
+      // installations that share a display name one secret, so this loop returned whichever
+      // was created first and delivered the notification to the wrong workspace.
+      //
+      // Only the app_id secret is accepted: a job still bound to a channel registered under a
+      // bot_name dispatches a secret nothing here recognises, and is rejected. Those jobs are
+      // re-pointed as part of shipping this (ringier-data/nannos#249) rather than being carried
+      // by a second pass over the old keys, which would keep the display-name ambiguity alive.
       for (const bot of installations) {
         if (!bot.isActive) continue;
         try {
-          const secret = await installationSecretService.get(bot.botName);
+          const secret = await installationSecretService.get(bot.appId);
           if (secret && token === secret) return bot;
         } catch (err) {
-          logger.warn(`Failed to resolve secret for ${bot.botName}: ${err}`);
+          logger.warn(`Failed to resolve secret for appId=${bot.appId}: ${err}`);
         }
       }
       return null;

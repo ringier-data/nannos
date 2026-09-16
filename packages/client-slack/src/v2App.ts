@@ -7,7 +7,7 @@ import { Router } from '@koa/router';
 import { registerV2Routes } from './routes/v2routes.js';
 import { BotInstallationsController } from './controllers/BotInstallationsController.js';
 import { ConfigController } from './controllers/ConfigController.js';
-import { OpenApiRouter } from './routes/openApiRouter.js';
+import { OpenApiRouter, OpenApiValidationError } from './routes/openApiRouter.js';
 import { openApiUiMiddleware } from './middlewares/openApiUiMiddleware.js';
 import { Logger } from './utils/logger.js';
 import type { StorageProvider } from './storage/StorageProvider.js';
@@ -36,6 +36,24 @@ export const getV2App = (config: Config, storage: StorageProvider, oidcClient: O
     return next().finally(() => {
       requestLogger.info(`${ctx.method} ${ctx.path} - ${ctx.status}`);
     });
+  });
+
+  // Registered *inside* the request logger so the status below is set before the logger's
+  // `finally` reads it — otherwise a thrown request is logged as Koa's default 404 while the
+  // caller actually receives a 500, which sends anyone reading the logs after a phantom
+  // routing bug. Validation failures answer with the rejected field paths (never their
+  // values) so the admin UI can show which field was wrong.
+  app.use(async (ctx, next) => {
+    try {
+      await next();
+    } catch (err) {
+      if (err instanceof OpenApiValidationError) {
+        ctx.status = err.status;
+        ctx.body = { error: err.message, details: err.details };
+        return;
+      }
+      throw err;
+    }
   });
 
   app.use(

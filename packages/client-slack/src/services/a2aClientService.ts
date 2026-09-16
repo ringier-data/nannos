@@ -34,7 +34,7 @@ export interface SlackFileUrl {
 }
 
 export interface A2ASlackBasedRequest {
-  botName: string; // Installation identifier; must match the botName used to register delivery channels
+  installationId?: string; // Tenant key (Slack App ID); must match what InstallationRegistrar registers channels under
   userId: string; // Slack user ID
   teamId: string; // Slack team/workspace ID
   channelId: string; // Slack channel ID
@@ -199,9 +199,13 @@ export class A2AClientService {
         ...(request.contextId && { contextId: request.contextId }),
       },
       metadata: {
-        // installation = the botName this workspace's channels were registered under; lets the
-        // orchestrator scope delivery channels (console_list_delivery_channels) to this tenant.
-        installation: request.botName,
+        // installation = the key this workspace's channels are registered under — the Slack App
+        // ID, matching InstallationRegistrar. Lets the orchestrator scope delivery channels
+        // (console_list_delivery_channels) to this tenant. Slack sends api_app_id on every event
+        // and the bot token could not have been resolved without it, so this is set in practice;
+        // if it ever is not, console-backend reads absence as "no scoping", which over-lists
+        // rather than returning nothing.
+        installation: request.installationId,
         slackUserId: request.userId,
         slackTeamId: request.teamId,
         slackChannelId: request.channelId,

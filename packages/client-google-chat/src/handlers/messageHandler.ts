@@ -720,13 +720,14 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     const webhookUrl = new URL(`/api/v1/a2a/callback`, config.baseUrl).toString();
     const webhookToken = randomUUID();
 
-    // Resolve the installation (botName) this project's delivery channels were registered under,
-    // so the orchestrator can scope channels to this tenant. Falls back to '' (→ unscoped) if the
-    // project is somehow not in config; config.ts already fails fast on a missing bot_name.
-    const botName = config.googleChatConfigs.find((c) => c.projectNumber === projectId)?.botName ?? '';
+    // Resolve the installation key this project's delivery channels are registered under,
+    // so the orchestrator can scope channels to this tenant. Falls back to '' if the project is
+    // somehow not in config, which console-backend reads as "no scoping" — over-listing rather
+    // than returning nothing.
+    const installationId = config.googleChatConfigs.find((c) => c.projectNumber === projectId)?.projectName ?? '';
 
     const a2aRequest: A2AGoogleChatBasedRequest = {
-      botName,
+      installationId,
       userId,
       projectId,
       spaceId: source === 'space_message' ? spaceId: undefined,

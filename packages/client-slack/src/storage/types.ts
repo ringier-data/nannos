@@ -18,11 +18,11 @@ export interface UserAuthRecord extends UserAuthToken {}
  * Bot installation record — one row per registered Slack App persona
  */
 export interface BotInstallation {
-  appId: string; // Slack App ID (PK)
+  appId: string; // Slack App ID (PK); the tenant key for secrets and delivery-channel registration
   teamId: string; // Slack workspace/team ID
   botToken: string; // Slack bot token (xoxb-...)
   signingSecret: string; // Slack signing secret for this app
-  botName: string; // Display name shown in messages
+  botName: string; // Display name shown in messages — cosmetic only, never a lookup key
   avatarUrl?: string; // Optional bot avatar image URL
   hasAvatar: boolean; // Whether binary avatar data exists
   slashCommand: string; // e.g. '/nannos' or '/my-team-bot'

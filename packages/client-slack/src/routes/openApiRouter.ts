@@ -3,17 +3,56 @@ import Router from '@koa/router';
 import { Context, DefaultContext, DefaultState, Middleware, Next } from 'koa';
 import { $ZodType } from 'zod/v4/core';
 import * as z from 'zod';
-import { Ajv2020 as Ajv, ValidateFunction, ValidationError } from 'ajv/dist/2020.js';
+import { Ajv2020 as Ajv, ValidateFunction } from 'ajv/dist/2020.js';
 import * as addFormats from 'ajv-formats';
 import _ from 'lodash';
 
-export class OpenApiValidationError {
+/**
+ * Thrown when a request fails schema validation.
+ *
+ * Deliberately carries only the *shape* of the failure — which fields were rejected and why —
+ * never the submitted values. Request bodies here routinely contain Slack bot tokens and
+ * signing secrets, and an error object holding the raw body ends up verbatim in the logs the
+ * moment anything formats it.
+ *
+ * Extends Error so Koa treats it as a real failure with a status: a plain class is reported as
+ * "non-error thrown" and served as an opaque 500, which tells the caller nothing about which
+ * field was wrong.
+ */
+export class OpenApiValidationError extends Error {
+  /** Koa reads these off a thrown Error to build the response. */
+  public readonly status = 400;
+  public readonly expose = true;
+
   constructor(
-    public message: string,
-    public input: unknown,
-    public errors: ValidationError['errors']
-  ) {}
+    message: string,
+    public readonly details: ValidationDetail[]
+  ) {
+    super(message);
+    this.name = 'OpenApiValidationError';
+  }
 }
+
+/** One rejected field: where it was and what was wrong with it — never what it contained. */
+export interface ValidationDetail {
+  path: string;
+  message: string;
+}
+
+/**
+ * Reduce AJV errors to field paths and messages. `params` is included only for
+ * `additionalProperties`, whose param is the offending *key* name (not its value) and is the
+ * one detail that makes an otherwise unactionable error obvious.
+ */
+const toDetails = (errors: ValidateFunction['errors']): ValidationDetail[] =>
+  (errors ?? []).map((e) => {
+    // For additionalProperties the offending key lives in params, not in instancePath — which
+    // points at the *containing* object. Append it rather than substituting, so a rejected key
+    // on a nested object still reports where it was (`/config/extra`, not `/extra`).
+    const additional = (e.params as { additionalProperty?: string } | undefined)?.additionalProperty;
+    const path = additional ? `${e.instancePath}/${additional}` : e.instancePath;
+    return { path: path || '(root)', message: e.message ?? 'invalid' };
+  });
 
 type RouteSpec = Omit<ZodOpenApiOperationObject, 'responses'> & {
   responses?: ZodOpenApiOperationObject['responses'];
@@ -128,11 +167,9 @@ export class OpenApiRouter<StateT = DefaultState, ContextT = DefaultContext> {
 const validate = (type: 'body' | 'query' | 'path', schema: ValidateFunction, data: unknown) => {
   const result = schema(data);
   if (!result || schema.errors) {
-    if (schema.errors) {
-      throw new OpenApiValidationError(`Failed ${type} validation`, data, schema.errors);
-    } else {
-      throw new OpenApiValidationError('Failed validation', data, []);
-    }
+    const details = toDetails(schema.errors);
+    const summary = details.map((d) => `${d.path}: ${d.message}`).join('; ');
+    throw new OpenApiValidationError(`Failed ${type} validation${summary ? ` — ${summary}` : ''}`, details);
   }
 };
 
