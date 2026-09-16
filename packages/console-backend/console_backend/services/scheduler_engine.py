@@ -7,11 +7,13 @@ It owns:
   - Dispatching to agent-runner via the native a2a-sdk v1.1.0 streaming client
   - Recording outcomes in scheduled_job_runs
   - Advancing or disabling jobs based on results
+  - Resuming a run parked on its owner's answer (ADR-0009)
 """
 
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -25,7 +27,16 @@ from .llm_gateway import gateway_chat
 from .spend_attribution import SERVICE_SCHEDULER, billing_subject
 from .watch_evaluator import WatchEvaluator, WatchOutcome
 from ..models.delivery_channel import DEFAULT_MESSAGE_FORMATTING
-from ..models.scheduled_job import ConditionEvaluation, JobRunStatus, JobType, RunTrigger, ScheduledJob
+from ..models.notification import NotificationType
+from .notification_service import NotificationService
+from ..models.scheduled_job import (
+    ConditionEvaluation,
+    JobRunStatus,
+    JobType,
+    RunTrigger,
+    ScheduledJob,
+    ScheduledJobRun,
+)
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
 from ..services.scheduler_token_service import SchedulerTokenService
@@ -82,6 +93,49 @@ NOTICE_RETRY_INTERVAL_SECONDS = 300
 NOTICE_GIVE_UP_AFTER_SECONDS = 3600
 
 
+class AlreadyAnswered(Exception):
+    """The parked run this answer is for is no longer waiting for one.
+
+    An ordinary outcome, not a fault: cards are durable and clicks are late, so the same
+    ask can be answered twice — from the chat card and the console, or simply twice by a
+    person who did not see the first take effect. The second answer must do nothing
+    rather than resume a task that has since gone terminal.
+    """
+
+
+@dataclass(frozen=True)
+class DispatchOutcome:
+    """What one dispatch to agent-runner reported back.
+
+    A tuple until a parked run needed to carry two more things home (the task the
+    answer is addressed to, and the ask itself). Naming them is what keeps
+    ``_finalize``'s call sites readable — and a parked run whose task id went
+    missing is a job stopped with no way to restart it, so they are not optional
+    extras bolted onto a positional return.
+    """
+
+    status: JobRunStatus
+    result_summary: str | None = None
+    error_message: str | None = None
+    conversation_id: str | None = None
+    #: The non-terminal agent-runner task the answer is sent to. Parked runs only.
+    parked_task_id: str | None = None
+    #: The extension payload delivered with the ask. Parked runs only.
+    parked_payload: dict[str, Any] | None = None
+
+
+#: What the agent is told when the owner answers. Agent-facing, and deliberately blunt
+#: about the DECISION: on the fallback path where a server never routed the DataPart,
+#: these words are graded approve/reject/unclear by a classifier before the agent sees
+#: them (agent_common.core.hitl_resume.classify_reply), and an unclear verdict costs a
+#: whole extra round. Softening them is what makes them unclassifiable. Kept in step with
+#: client-slack's authResumeText.
+_AUTH_RESUME_TEXT = {
+    "approved": "I have completed the authorization. Please retry what needed it and continue.",
+    "declined": "I am not going to authorize this. Do not ask again — tell me what you cannot do without it.",
+}
+
+
 class SchedulerEngine:
     """Background tick loop that dispatches scheduled jobs to agent-runner."""
 
@@ -107,6 +161,9 @@ class SchedulerEngine:
         self._running = False
         self._task: asyncio.Task | None = None
         self._watch_evaluator = WatchEvaluator()
+        # Durable, console-side owner notices (a job stopping itself). Constructed here
+        # rather than injected: it is stateless and every caller would pass the same one.
+        self._notification_service = NotificationService()
         # Runs this process is dispatching right now. The healer must not touch them
         # however long they take — a slow agent is not a stuck run.
         self._in_flight: set[int] = set()
@@ -221,6 +278,33 @@ class SchedulerEngine:
             logger.warning("Job %d: could not deliver the recovery notice", job.id, exc_info=True)
             return False
 
+    async def _notify_job_paused(self, job: ScheduledJob, reason: str | None, run_id: int) -> None:
+        """Record, durably, that this job has stopped running and why.
+
+        Best-effort by construction: the job state and the run record are already
+        committed, and failing to write a notification must not undo them or fail the
+        tick. A lost notice is worse than none only if it is also silent here, so it is
+        logged at error level.
+        """
+        try:
+            async with self._db_session_factory() as db:
+                await self._notification_service.create_notification(
+                    db=db,
+                    user_id=job.user_id,
+                    notification_type=NotificationType.SCHEDULED_JOB_PAUSED,
+                    title=f"Scheduled job paused: {job.name}",
+                    message=(
+                        reason
+                        or "The job was stopped after repeated failures. Check its run history, "
+                        "fix what is failing, and resume it."
+                    ),
+                    metadata={"job_id": job.id, "run_id": run_id},
+                )
+                await db.commit()
+            logger.info("Job %d auto-paused; notified owner %s", job.id, job.user_id)
+        except Exception:
+            logger.exception("Job %d auto-paused but its owner could not be notified", job.id)
+
     async def _deliver_due_notices(self) -> None:
         """Deliver the notices owed to users whose runs were lost for good.
 
@@ -296,6 +380,159 @@ class SchedulerEngine:
         """
         logger.info("Manual run-now triggered for job %d by user request", job.id)
         await self._dispatch_job(job, run_id=run_id, trigger=RunTrigger.MANUAL)
+
+    async def resume_parked_run(
+        self,
+        job: ScheduledJob,
+        parked_run: ScheduledJobRun,
+        decision: str,
+        reply_to: dict[str, str] | None = None,
+    ) -> int:
+        """Answer a run parked on its owner, and run it to completion. Returns the new run id.
+
+        The owner pressed a button in the delivery channel (or in the console), and the
+        answer arrives here rather than travelling a chat turn. A chat turn is new work:
+        the orchestrator's dispatch proposes a fresh task id, the sub-agent's thread is
+        parked, and the executor rejects it. This addresses the task that is actually
+        waiting.
+
+        Why the scheduler brokers it at all, given the clicking user is present and their
+        own client could call agent-runner directly: a resumed run is a run. It is minutes
+        of tool calls and model spend that has to be recorded, heartbeated, and swept if
+        the process executing it dies. Every one of those is machinery this engine already
+        owns, and a client holding the stream on a floating promise owns none of it — an
+        agent-runner that died mid-resume would leave no record the run was ever attempted.
+
+        The caller has already CLAIMED the ask (``clear_parked_task``), so this is only
+        ever reached once per parked run — which is what stops a second click resuming a
+        task that has since gone terminal.
+
+        *decision* is passed through as the agent sees it. A decline resumes the task too:
+        the agent is told to stop and the run closes on its own terms, instead of staying
+        parked on a question that has been answered.
+        """
+        if parked_run.status != JobRunStatus.AUTH_REQUIRED or not parked_run.parked_task_id:
+            raise AlreadyAnswered(f"Run {parked_run.id} of job {job.id} is not waiting for an answer")
+
+        run_id: int | None = None
+        heartbeat: asyncio.Task[None] | None = None
+        try:
+            async with self._db_session_factory() as db:
+                run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
+                await db.commit()
+
+            logger.info(
+                "Resuming job %d run %d (%s) as run %d on parked task %s",
+                job.id,
+                parked_run.id,
+                decision,
+                run_id,
+                parked_run.parked_task_id,
+            )
+
+            self._in_flight.add(run_id)
+            heartbeat = asyncio.create_task(self._heartbeat(run_id), name=f"scheduler-heartbeat-{run_id}")
+
+            async with self._db_session_factory() as db:
+                try:
+                    access_token = await self._token_service.get_access_token(db, job.user_id)
+                except ValueError as e:
+                    await self._finalize(
+                        run_id=run_id,
+                        job=job,
+                        status=JobRunStatus.FAILED,
+                        error_message=str(e),
+                        delivered=False,
+                        trigger=RunTrigger.RESUMED,
+                        paused_reason="No offline token stored. User must re-grant scheduler consent.",
+                    )
+                    return run_id
+
+                owner_sub = await billing_subject(db, job.user_id, context=f"job {job.id}")
+                with attribution_scope(user_sub=owner_sub, scheduled_job_id=job.id, service=SERVICE_SCHEDULER):
+                    # THIS run's id, not the parked one's: the payload correlates to the
+                    # run now in flight, and above all a follow-up ask must point at the
+                    # run that is waiting. Sending the parked run's id meant the second
+                    # card addressed a run already answered, refused as "no longer
+                    # waiting". The task to continue needs nothing from here — it is
+                    # derived from the context, which the whole chain shares.
+                    _, metadata, push_config = await self._build_message_args(
+                        job, run_id, access_token, db
+                    )
+                    # Opaque to everything in between: the delivery channel put it on the
+                    # card and is the only thing that can read it back.
+                    if reply_to:
+                        metadata["reply_to_message"] = reply_to
+
+            # The run id in the metadata stays the PARKED run's. agent-runner derives the
+            # sub-agent's task id from (context_id, scheduled_job_run_id), so sending the
+            # new run's id would name a task that never existed and open a second one on a
+            # thread that is already parked. The new run is this engine's bookkeeping; the
+            # work being continued is still the parked occurrence's.
+            parts = [
+                {"kind": "data", "data": {"authorization": {"decision": decision}}},
+                {"kind": "text", "text": _AUTH_RESUME_TEXT[decision]},
+            ]
+
+            result_data = await dispatch_streaming(
+                agent_url=self._agent_runner_url,
+                access_token=access_token,
+                parts=parts,
+                metadata=metadata,
+                context_id=parked_run.conversation_id,
+                task_id=parked_run.parked_task_id,
+                push_config=push_config,
+            )
+
+            outcome = self._parse_result(result_data)
+            await self._finalize(
+                run_id=run_id,
+                job=job,
+                status=outcome.status,
+                result_summary=outcome.result_summary,
+                error_message=outcome.error_message,
+                conversation_id=outcome.conversation_id,
+                parked_task_id=outcome.parked_task_id,
+                parked_payload=outcome.parked_payload,
+                trigger=RunTrigger.RESUMED,
+                delivered=(job.delivery_channel_id is not None),
+            )
+            return run_id
+
+        except Exception as e:
+            if run_id is None:
+                raise
+            if isinstance(e, AgentUnreachable):
+                logger.warning("agent-runner unreachable resuming job %d: %s", job.id, e)
+                status, error_message = JobRunStatus.INTERRUPTED, str(e)
+            elif isinstance(e, httpx.HTTPStatusError):
+                logger.error("agent-runner HTTP error resuming job %d: %s", job.id, e)
+                status = JobRunStatus.FAILED
+                error_message = f"agent-runner HTTP {e.response.status_code}: {e.response.text[:500]}"
+            else:
+                logger.exception("Unexpected error resuming job %d", job.id)
+                status, error_message = JobRunStatus.FAILED, str(e)
+            try:
+                await self._finalize(
+                    run_id=run_id,
+                    job=job,
+                    status=status,
+                    error_message=error_message,
+                    delivered=False,
+                    trigger=RunTrigger.RESUMED,
+                )
+            except Exception:
+                logger.exception("Failed to finalize resumed run %s for job %d", run_id, job.id)
+            return run_id
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    pass
+            if run_id is not None:
+                self._in_flight.discard(run_id)
 
     async def _loop(self) -> None:
         while self._running:
@@ -429,17 +666,20 @@ class SchedulerEngine:
             )
 
             # Parse execution result from agent-runner response
-            status, result_summary, error_msg, conversation_id = self._parse_result(result_data)
+            outcome = self._parse_result(result_data)
 
             # Push notification is delivered by the A2A SDK (BasePushNotificationSender)
             # inside agent-runner when pushNotificationConfig is included in the payload.
             await self._finalize(
                 run_id=run_id,
                 job=job,
-                status=status,
-                result_summary=result_summary,
-                error_message=error_msg,
-                conversation_id=conversation_id,
+                status=outcome.status,
+                result_summary=outcome.result_summary,
+                error_message=outcome.error_message,
+                conversation_id=outcome.conversation_id,
+                parked_task_id=outcome.parked_task_id,
+                parked_payload=outcome.parked_payload,
+                trigger=trigger,
                 delivered=(job.delivery_channel_id is not None),
                 # From the local evaluation: the scheduler performed the check, so the
                 # runner has no reason to echo it back.
@@ -614,6 +854,10 @@ class SchedulerEngine:
         """The A2A message metadata every dispatch on behalf of *job* carries."""
         return {
             "scheduled_job_id": job.id,
+            # Carried so a notification can name the job in words. An ask especially:
+            # "Nannos needs permission" says nothing about which of a user's jobs has
+            # stopped, and the id is not something anyone recognises.
+            "scheduled_job_name": job.name,
             "job_type": job.job_type.value,
             # The job's IANA timezone, so the runner's tool-less LLM calls
             # (condition eval, notification generation) can be told "now".
@@ -688,24 +932,19 @@ class SchedulerEngine:
         row = result.scalar_one_or_none()
         return row
 
-    def _parse_result(self, data: dict[str, Any]) -> tuple[JobRunStatus, str | None, str | None, str | None]:
+    def _parse_result(self, data: dict[str, Any]) -> DispatchOutcome:
         """Extract structured result fields from agent-runner A2A response.
 
         Supports two response formats:
         1. A2A Task format: result is a Task object with artifacts containing JSON metadata
         2. Legacy custom format: result.metadata contains the scheduler fields directly
-
-        Returns:
-            Tuple of (status, result_summary, error_message, conversation_id)
         """
         # JSON-RPC error response (e.g. validation failure) — no "result" key
         if "error" in data and "result" not in data:
             error_msg = data["error"].get("message", "JSON-RPC error")
-            return (
-                JobRunStatus.FAILED,
-                None,
-                f"A2A request error: {error_msg}",
-                None,
+            return DispatchOutcome(
+                status=JobRunStatus.FAILED,
+                error_message=f"A2A request error: {error_msg}",
             )
 
         result = data.get("result", {})
@@ -756,11 +995,31 @@ class SchedulerEngine:
         except ValueError:
             status = JobRunStatus.SUCCESS
 
-        return (
-            status,
-            meta.get("agent_message"),
-            meta.get("error_message"),
-            conversation_id,
+        # A parked run carries the two things needed to reach it again. The task id is
+        # load-bearing: without it the run is stopped with nothing to address, so a
+        # payload claiming AUTH_REQUIRED without one is not a park at all and is
+        # recorded as a failure rather than silently stopping the job forever.
+        parked_task_id = meta.get("parked_task_id")
+        if status == JobRunStatus.AUTH_REQUIRED and not parked_task_id:
+            logger.error("agent-runner reported auth_required with no parked_task_id; treating as failed")
+            return DispatchOutcome(
+                status=JobRunStatus.FAILED,
+                result_summary=meta.get("agent_message"),
+                error_message=(
+                    "agent-runner reported that authorization is required but named no parked task, "
+                    "so there is nothing to resume."
+                ),
+                conversation_id=conversation_id,
+            )
+
+        parked_payload = meta.get("auth_payload")
+        return DispatchOutcome(
+            status=status,
+            result_summary=meta.get("agent_message"),
+            error_message=meta.get("error_message"),
+            conversation_id=conversation_id,
+            parked_task_id=parked_task_id if status == JobRunStatus.AUTH_REQUIRED else None,
+            parked_payload=parked_payload if isinstance(parked_payload, dict) else None,
         )
 
     async def _finalize(
@@ -776,18 +1035,33 @@ class SchedulerEngine:
         paused_reason: str | None = None,
         condition_evaluation: ConditionEvaluation | None = None,
         trigger: RunTrigger = RunTrigger.SCHEDULED,
+        parked_task_id: str | None = None,
+        parked_payload: dict[str, Any] | None = None,
     ) -> None:
         """Persist run outcome and advance job state.
 
-        An interrupted SCHEDULED run earns the job one fresh attempt. The marker goes
-        in the database rather than being retried here: the process that noticed the
-        interruption is often the one dying, and a retry that dies with it is no
-        retry at all. An interrupted RETRY has exhausted recovery and owes the user a
-        notice instead. An interrupted MANUAL run earns neither — the user is present.
+        An interrupted SCHEDULED or RESUMED run earns the job one fresh attempt. The
+        marker goes in the database rather than being retried here: the process that
+        noticed the interruption is often the one dying, and a retry that dies with it
+        is no retry at all. An interrupted RETRY has exhausted recovery and owes the
+        user a notice instead. An interrupted MANUAL run earns neither — the user is
+        present.
+
+        A RESUMED run earns the attempt for a reason worth stating, because the
+        opposite reads as obvious: by the time it dies the credential is stored at
+        the gateway, so a fresh run no longer asks for it and recovers the work the
+        parked run was trying to do. It does NOT advance ``next_run_at`` — the run it
+        continues already did — which is why *next_run_at* is left None for it and
+        ``complete_job``'s COALESCE keeps the schedule as written.
+
+        A parked run (AUTH_REQUIRED) earns no attempt at all: no retry conjures a
+        credential. It stops the job being claimed until the owner answers, which is
+        ``claim_due_jobs``' business, not this one's.
         """
         interrupted = status == JobRunStatus.INTERRUPTED
         now = datetime.now(timezone.utc)
-        retry_at = now + timedelta(seconds=RETRY_DELAY_SECONDS) if interrupted and trigger == RunTrigger.SCHEDULED else None
+        earns_retry = trigger in (RunTrigger.SCHEDULED, RunTrigger.RESUMED)
+        retry_at = now + timedelta(seconds=RETRY_DELAY_SECONDS) if interrupted and earns_retry else None
         # Recovery is exhausted: an interrupted run that was already the retry. Only this
         # terminal case is worth a message — an interruption the system absorbed is not
         # news, and a notice per interruption would be loudest exactly during an incident.
@@ -802,19 +1076,30 @@ class SchedulerEngine:
         if interrupted:
             consequence = {
                 RunTrigger.SCHEDULED: f"retrying at {retry_at.isoformat()}" if retry_at else "",
+                RunTrigger.RESUMED: f"retrying at {retry_at.isoformat()}" if retry_at else "",
                 RunTrigger.RETRY: "already the retry, giving up and owing the user a notice",
                 RunTrigger.MANUAL: "a manual run, not retried",
             }[trigger]
             logger.warning("Run %s of job %d was interrupted (%s); %s", run_id, job.id, error_message, consequence)
 
+        # A resumed run continues one whose occurrence already advanced the schedule;
+        # advancing again would silently skip the next one. So it re-sends the job's
+        # CURRENT next_run_at rather than a recomputed one — and deliberately not None,
+        # which is not "leave it alone" here: complete_job reads a NULL next_run_at as
+        # "nothing further is scheduled" and disables the job. The two meanings share a
+        # parameter, so a resumed run has to say the schedule it already has.
         try:
-            next_run_at = compute_next_run(
-                schedule_kind=job.schedule_kind,
-                cron_expr=job.cron_expr,
-                interval_seconds=job.interval_seconds,
-                run_at=job.run_at,
-                after=datetime.now(timezone.utc),
-                tz=job.timezone,
+            next_run_at = (
+                job.next_run_at
+                if trigger == RunTrigger.RESUMED
+                else compute_next_run(
+                    schedule_kind=job.schedule_kind,
+                    cron_expr=job.cron_expr,
+                    interval_seconds=job.interval_seconds,
+                    run_at=job.run_at,
+                    after=datetime.now(timezone.utc),
+                    tz=job.timezone,
+                )
             )
         except ValueError as e:
             # An unresolvable stored timezone must pause the job: raising here
@@ -860,7 +1145,7 @@ class SchedulerEngine:
                     {"job_id": job.id, "now": datetime.now(timezone.utc)},
                 )
 
-            await self._repo.complete_job(
+            enabled_after, reason_after = await self._repo.complete_job(
                 db=db,
                 job_id=job.id,
                 status=status,
@@ -870,6 +1155,16 @@ class SchedulerEngine:
                 paused_reason=paused_reason,
             )
             await db.commit()
+
+        # A job that stopped itself has to say so. Auto-pause is decided inside
+        # complete_job from consecutive_failures against max_failures, and until now it
+        # happened in silence: the job simply stopped producing, which is the one symptom
+        # its owner is least likely to notice. The delivery channel cannot carry this —
+        # it is optional, and a job without one is exactly the job whose silence goes
+        # unnoticed — so the notice is a durable console notification, which also
+        # survives the owner being offline in a way the WebSocket push does not.
+        if job.enabled and not enabled_after and not should_disable:
+            await self._notify_job_paused(job, reason_after, run_id)
 
         try:
             async with self._db_session_factory() as db:
@@ -883,6 +1178,8 @@ class SchedulerEngine:
                     delivered=delivered,
                     condition_evaluation=condition_evaluation,
                     notice_due_at=notice_due_at,
+                    parked_task_id=parked_task_id,
+                    parked_payload=parked_payload,
                 )
                 await db.commit()
         except Exception:

@@ -32,8 +32,13 @@ def _make_engine(*, channel: dict | None) -> SchedulerEngine:
     session.__aenter__.return_value = session
     session.__aexit__.return_value = False
 
+    repo = AsyncMock(spec=ScheduledJobRepository)
+    # complete_job reports the job state it left behind so _finalize can tell "this run
+    # stopped the job" from "it was already off"; a bare AsyncMock will not unpack.
+    repo.complete_job.return_value = (True, None)
+
     return SchedulerEngine(
-        repo=AsyncMock(spec=ScheduledJobRepository),
+        repo=repo,
         delivery_channel_repo=delivery_channel_repo,
         token_service=token_service,
         agent_runner_url="http://agent-runner:8000",

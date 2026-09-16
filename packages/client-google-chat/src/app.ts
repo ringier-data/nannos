@@ -19,6 +19,7 @@ import { recoverOrphanedTasks } from './utils/taskRecovery.js';
 import { handleIncomingMessage, type NormalizedMessage } from './handlers/messageHandler.js';
 import type { GoogleChatAttachment } from './utils/fileUtils.js';
 import { HandlerDependencies } from './handlers/types.js';
+import { ScheduledRunResumeService } from './services/scheduledRunResumeService.js';
 import { AppCommand, handleAppCommand } from './handlers/commandHandler.js';
 import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClickedHandler.js';
 import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
@@ -178,6 +179,19 @@ function setupServerTimeouts(server: Server, config: Config) {
       logger.info(`Feedback service enabled (console-backend: ${config.consoleBackend.url})`);
     }
 
+    // Answering a scheduled run parked on its owner's authorization. Same
+    // console-backend wire as feedback; without it a parked job still asks but its
+    // owner has no way to restart it, so this one is warned about rather than silent.
+    let scheduledRunResumeService: ScheduledRunResumeService | undefined;
+    if (config.consoleBackend) {
+      scheduledRunResumeService = new ScheduledRunResumeService(userAuthService, config);
+    } else {
+      logger.warn(
+        'Scheduled-run authorization disabled: CONSOLE_BACKEND_URL not set. A scheduled job ' +
+          'blocked on a credential will ask, but its owner will have no way to answer.'
+      );
+    }
+
     // Handler dependencies
     const handlerDeps: HandlerDependencies = {
       userAuthService,
@@ -190,6 +204,7 @@ function setupServerTimeouts(server: Server, config: Config) {
       scheduledRunStore: storage.scheduledRun,
       fileStorageService,
       feedbackService,
+      scheduledRunResumeService,
       config,
     };
 
@@ -462,9 +477,13 @@ function setupServerTimeouts(server: Server, config: Config) {
         }
         const task = event.task;
 
-        // Only process completed/failed notifications
         const state = task.status.state;
-        if (state !== 'completed' && state !== 'failed') {
+        // Actionable push states. `auth-required` joins completed/failed because a run
+        // that parked on its owner's credential HAS something to deliver — the ask
+        // itself — and it is the one notification the owner must see, since the job
+        // stays stopped until they answer. Dropping it here is why the card never
+        // arrived while ordinary results did (ADR-0009).
+        if (state !== 'completed' && state !== 'failed' && state !== 'auth-required') {
           logger.debug(`[A2ACallback] Ignoring notification with state=${state}`);
           res.status(200).json({ acknowledged: true });
           return;

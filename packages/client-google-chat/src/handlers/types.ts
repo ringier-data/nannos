@@ -12,6 +12,7 @@ import { FileStorageService } from "../services/fileStorageService.js";
 import { GoogleChatService } from "../services/googleChatService.js";
 import { UserAuthService } from "../services/userAuthService.js";
 import { Config } from '../config/config.js';
+import type { ScheduledRunResumeService } from '../services/scheduledRunResumeService.js';
 
 export interface HandlerDependencies {
   userAuthService: UserAuthService;
@@ -25,4 +26,10 @@ export interface HandlerDependencies {
   scheduledRunStore: IScheduledRunStore;
   feedbackService?: FeedbackService;
   config: Config;
+  /**
+   * Answers a scheduled run parked on its owner's authorization. Optional because it
+   * needs CONSOLE_BACKEND_URL; without it a parked job still asks but cannot be
+   * restarted from the card.
+   */
+  scheduledRunResumeService?: ScheduledRunResumeService;
 }

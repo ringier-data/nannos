@@ -3,6 +3,7 @@ import { UserAuthService } from '../services/userAuthService.js';
 import { A2AClientService } from '../services/a2aClientService.js';
 import { FileStorageService } from '../services/fileStorageService.js';
 import { FeedbackService } from '../services/feedbackService.js';
+import type { ScheduledRunResumeService } from '../services/scheduledRunResumeService.js';
 import type {
   IContextStore,
   IPendingRequestStore,
@@ -45,6 +46,7 @@ export async function registerListeners(
   botInstallationStore: IBotInstallationStore,
   feedbackService?: FeedbackService,
   scheduledRunStore?: IScheduledRunStore,
+  scheduledRunResumeService?: ScheduledRunResumeService,
 ): Promise<void> {
   // Register event listeners (botToken/botName resolved per-event via context)
   registerAppMentionListener(
@@ -122,9 +124,11 @@ export async function registerListeners(
   });
   registerHitlActions(app, makeHitlDeps);
   registerHitlModalHandler(app, makeHitlDeps);
-  // The in-task authorization card resumes the same way a HITL decision does,
-  // so it re-enters through the same per-event dependency factory.
-  registerInTaskAuthActions(app, makeHitlDeps);
+  // An interactive in-task authorization card resumes the same way a HITL decision
+  // does, so it re-enters through the same per-event dependency factory. A card
+  // raised by a SCHEDULED run cannot: its answer goes to console-backend, which owns
+  // the run and can address the task it parked (ADR-0009).
+  registerInTaskAuthActions(app, makeHitlDeps, scheduledRunResumeService);
 
   // Register reaction listeners for message feedback (requires console-backend)
   if (feedbackService) {

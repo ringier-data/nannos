@@ -26,6 +26,10 @@ class NotificationType(str, Enum):
     SECRET_PERMISSION_CHANGED = "secret_permission_changed"
     SYSTEM_ANNOUNCEMENT = "system_announcement"
     BUG_REPORT_FILED = "bug_report_filed"
+    #: A scheduled job stopped itself after too many consecutive failures. Durable and
+    #: console-side on purpose: a job's delivery channel is optional, and a job with no
+    #: channel is the one whose silence is hardest to notice.
+    SCHEDULED_JOB_PAUSED = "scheduled_job_paused"
 
 
 class ActivationSource(str, Enum):

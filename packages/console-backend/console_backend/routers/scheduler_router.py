@@ -21,7 +21,9 @@ from ..models.scheduled_job import (
     GenerateConditionRequest,
     GenerateConditionResponse,
     GenerateJobDraftRequest,
+    JobRunStatus,
     JobType,
+    ResumeRunRequest,
     ValidateArgsExprRequest,
     ValidateArgsExprResponse,
     RunNowResponse,
@@ -1024,6 +1026,26 @@ async def run_job_now(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     engine: SchedulerEngine = request.app.state.scheduler_engine
+
+    # A job blocked on its owner must not be run again until they answer. The schedule
+    # hold does that for scheduled occurrences by way of claim_due_jobs, but run-now
+    # bypasses the claim entirely — so without this check a few presses of "Run now"
+    # leave several parked runs, each with its own live ask. ADR-0009 states that at most
+    # one run of a job is ever parked and leans on it: no dedupe, no supersession, no
+    # cancel sweep. The invariant has to hold on every dispatch path, not just the one
+    # the claim covers.
+    #
+    # A resumed run that parks again is NOT a second park: it consumed the ask it was
+    # answering before it started, so there is still exactly one.
+    if await engine._repo.answerable_parked_run(db, job_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This job is waiting for your authorization. Answer that first — running "
+                "it again would stop at the same point."
+            ),
+        )
+
     # Recorded as MANUAL so that, should it be interrupted, neither _finalize nor the
     # healer treats a test press as a scheduled occurrence owed a retry.
     run_id: int = await engine._repo.create_run(db, job_id, trigger=RunTrigger.MANUAL)
@@ -1080,6 +1102,71 @@ async def resume_job(
     job = await service.get_job(db=db, job_id=job_id, user_id=current_user.id)
     assert job is not None
     return job
+
+
+@router.post(
+    "/jobs/{job_id}/runs/{run_id}/resume",
+    response_model=RunNowResponse,
+    status_code=202,
+    summary="Answer a run parked on the owner's authorization.",
+    description=(
+        "Continues a run that stopped because a tool needed the owner's credential. The "
+        "answer is delivered to the parked agent-runner task, the agent retries what was "
+        "blocked (or is told to stop, on a decline), and the result is delivered to the "
+        "job's channel like any other run. Returns 202 with the id of the new run that "
+        "carries the continued work; the parked run keeps its own record.\n\n"
+        "This is the endpoint the in-task-auth card posts to. It exists because a chat "
+        "turn cannot answer a parked scheduled run — the orchestrator would open a new "
+        "task on a thread that is already waiting, and the executor rejects it."
+    ),
+)
+async def resume_parked_run(
+    job_id: int,
+    run_id: int,
+    body: ResumeRunRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> RunNowResponse:
+    """Deliver the owner's answer to a parked run and continue it in the background."""
+    service = _get_scheduler_service(request)
+    # Both lookups are scoped to the caller, so another user's job or run is a 404
+    # rather than a permission error — the same shape every other route here uses.
+    job = await service.get_job(db=db, job_id=job_id, user_id=current_user.id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    run = await service.get_run(db=db, job_id=job_id, run_id=run_id, user_id=current_user.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # A run that is not parked has nothing waiting for this answer. 409 rather than 400:
+    # the request is well formed and was valid when the card was rendered — the run has
+    # since been answered, superseded or closed. Cards are durable and clicks are late,
+    # so this is an ordinary outcome and the client says "already handled".
+    if run.status != JobRunStatus.AUTH_REQUIRED or not run.parked_task_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This run is not waiting for authorization; it may already have been answered.",
+        )
+
+    engine: SchedulerEngine = request.app.state.scheduler_engine
+    # Claim the ask HERE, before backgrounding, so a second click is answered with a 409
+    # rather than disappearing into a task nobody is waiting on. The parked run keeps its
+    # AUTH_REQUIRED status — it is a true record of how that occurrence ended — so the
+    # task id is what says a question is still outstanding, and clearing it is the claim.
+    # The check above is the cheap path; this conditional write is what actually decides,
+    # because two clicks can pass the check together.
+    if not await engine._repo.clear_parked_task(db, run_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This run has already been answered.",
+        )
+    await db.commit()
+
+    background_tasks.add_task(engine.resume_parked_run, job, run, body.decision, body.reply_to)
+    return RunNowResponse(job_id=job_id, run_id=run_id, status="resuming")
 
 
 @router.get(

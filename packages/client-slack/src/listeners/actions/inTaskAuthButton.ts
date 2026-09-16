@@ -2,6 +2,7 @@ import { App } from '@slack/bolt';
 import { Logger } from '../../utils/logger.js';
 import { handleIncomingMessage, HandlerDependencies, NormalizedMessage } from '../events/messageHandler.js';
 import { recordDecision } from '../../utils/taskResponseHandler.js';
+import type { ScheduledRunResumeService } from '../../services/scheduledRunResumeService.js';
 import {
   AUTH_ACTION_DECLINE,
   AUTH_ACTION_DONE,
@@ -24,7 +25,11 @@ import {
  * Nothing is lost by a misclick: the decision reached the agent, and asking
  * again re-runs the tool and raises a fresh card.
  */
-export function registerInTaskAuthActions(app: App, makeDeps: () => HandlerDependencies): void {
+export function registerInTaskAuthActions(
+  app: App,
+  makeDeps: () => HandlerDependencies,
+  resumeService?: ScheduledRunResumeService,
+): void {
   const logger = Logger.getLogger('inTaskAuthButton');
 
   // The "Authorize" button is a URL button — Slack still delivers the click, and
@@ -53,7 +58,7 @@ export function registerInTaskAuthActions(app: App, makeDeps: () => HandlerDepen
 
       try {
         const decoded = JSON.parse(Buffer.from(actionValue, 'base64').toString());
-        const { taskId, tool, subject } = decoded;
+        const { taskId, tool, subject, replyTo } = decoded;
 
         logger.info(`In-task auth ${decision} by user ${userId} for task ${taskId}${tool ? ` tool ${tool}` : ''}`);
 
@@ -68,6 +73,55 @@ export function registerInTaskAuthActions(app: App, makeDeps: () => HandlerDepen
           subject || tool || undefined,
           decision === 'approved'
         );
+
+        // A SCHEDULED run's ask carries where its answer goes, and it is not here.
+        // Sending it as a chat turn would open a NEW delegation task on a sub-agent
+        // thread that is already parked, and the executor would reject it — so the
+        // owner would see nothing happen. console-backend owns the run and can
+        // address the parked task directly (ADR-0009).
+        if (replyTo) {
+          if (!resumeService) {
+            logger.error(
+              `Cannot answer scheduled run: CONSOLE_BACKEND_URL is not configured, so this ` +
+                `client has nowhere to send the authorization ${decision}`
+            );
+            return;
+          }
+          await recordDecision(
+            client,
+            channelId,
+            messageTs,
+            decoded.streamMessageTs,
+            decision === 'approved' ? 'Authorized' : 'Authorization declined',
+            subject || tool || undefined,
+            decision === 'approved'
+          );
+          const outcome = await resumeService.resume(
+            userId,
+            (body as any).team?.id || '',
+            replyTo,
+            decision,
+            // This card's own message: the run's result threads under the ask that
+            // unblocked it, so the two read as one exchange rather than two notices.
+            { channel: channelId, ts: messageTs }
+          );
+          if (outcome.kind === 'already-handled') {
+            // Cards are durable and clicks are late. Not an error: say so plainly
+            // rather than leaving the owner wondering whether it worked.
+            await client.chat.postEphemeral({
+              channel: channelId,
+              user: userId,
+              text: 'That scheduled run is no longer waiting — it looks like it has already been answered.',
+            });
+          } else if (outcome.kind === 'failed') {
+            await client.chat.postEphemeral({
+              channel: channelId,
+              user: userId,
+              text: `Sorry, I could not deliver that answer (${outcome.reason}). Please try again.`,
+            });
+          }
+          return;
+        }
 
         const syntheticMessage: NormalizedMessage = {
           userId,

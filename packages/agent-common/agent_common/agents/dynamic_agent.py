@@ -40,6 +40,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.callbacks import Callbacks
+import httpx
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -91,8 +92,9 @@ from agent_common.core.graph_utils import (
     isolate_parent_stream_context,
 )
 from agent_common.core.model_factory import get_model_input_capabilities
-from agent_common.core.catalogue_ingest import fetch_catalogue_mcp
+from agent_common.core.catalogue_ingest import fetch_catalogue
 from agent_common.core.notify_user_tool import NOTE_KIND, USER_NOTE_EVENT
+from agent_common.core.stream_watchdog import watch_stream_with_resume
 from agent_common.core.step_budget import (
     DEFAULT_SUB_AGENT_MAX_MODEL_CALLS,
     recursion_limit_for,
@@ -137,6 +139,10 @@ logger = logging.getLogger(__name__)
 # Binding at all also matters: langgraph propagates `recursion_limit` into a
 # child graph that does not set its own, so without the `with_config` below every
 # sub-agent would inherit the orchestrator's.
+#: Timeout for one stateless ``tools/list`` POST. Generous: a cold gateway can take
+#: seconds to answer, and falling back to an SDK session is slower than waiting.
+_CATALOGUE_LIST_TIMEOUT_S = 30.0
+
 SUB_AGENT_MAX_MODEL_CALLS_ENV = "SUB_AGENT_MAX_MODEL_CALLS_PER_TURN"
 _SUB_AGENT_MAX_MODEL_CALLS = resolve_max_model_calls(
     SUB_AGENT_MAX_MODEL_CALLS_ENV, DEFAULT_SUB_AGENT_MAX_MODEL_CALLS
@@ -306,6 +312,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         tool_risk_cache: ToolRiskCache | None = None,
         tool_bypass_rules: dict[str, Any] | None = None,
         pending_bypass_rules: list[dict[str, Any]] | None = None,
+        max_model_calls: int | None = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -347,6 +354,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 (``ToolCatalogMiddleware``). Takes precedence over ``inject_all_tools``.
             risk_scorer: Optional function to score tool calls for conditional HITL.
             tool_risk_cache: Optional cache for tool risk scores to optimize conditional HITL.
+            max_model_calls: Model calls this agent may make in one turn, overriding
+                SUB_AGENT_MAX_MODEL_CALLS_PER_TURN. A host whose turns are not
+                interactive delegations sets its own: an unattended scheduled run gets a
+                larger budget than a delegated one precisely because nothing notices it
+                stopping a call short and nothing re-delegates it.
             tool_bypass_rules: Optional dict of tool bypass rules for conditional HITL.
             pending_bypass_rules: Optional list of bypass rules that are pending user approval during the current session.
                 This object is a reference to UserConfig._pending_bypass_rules and is updated in-place when the user approves bypasses, allowing to collect
@@ -375,10 +387,16 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self.console_backend_client_id = console_backend_client_id or os.getenv(
             "CONSOLE_BACKEND_CLIENT_ID", "agent-console"
         )
+        # Trailing slash deliberate: console-backend mounts its MCP app at "/mcp/" and
+        # answers "/mcp" with a 307. The SDK session follows that; the stateless
+        # tools/list POST does not (by design — it will not chase a redirect it cannot
+        # vouch for), so every listing fell back to a session and logged a warning for a
+        # URL that was one character short.
         self.console_backend_mcp_url = os.getenv("CONSOLE_BACKEND_MCP_URL", "") or (
-            f"{os.getenv('CONSOLE_BACKEND_URL', '')}/mcp" if os.getenv("CONSOLE_BACKEND_URL") else ""
+            f"{os.getenv('CONSOLE_BACKEND_URL', '').rstrip('/')}/mcp/" if os.getenv("CONSOLE_BACKEND_URL") else ""
         )
         self.sandbox_pool = sandbox_pool
+        self.max_model_calls = max_model_calls or _SUB_AGENT_MAX_MODEL_CALLS
         self.extra_middlewares = extra_middlewares
         # Embedded Nannos (ADR-0004): two independent capabilities of a scoped domain
         # agent, both off by default so ordinary/scheduled LOCAL sub-agents are
@@ -1060,29 +1078,45 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # Console-backend names (console_*/scheduler_*) come from the ``console`` connection,
         # everything else from the gateway connection(s); a connection that can serve none of
         # the wanted names is not listed at all.
-        for conn_name, connection in connections.items():
-            is_console = conn_name == "console"
-            server_wanted = sorted(n for n in wanted if is_console_backend_tool(n) == is_console)
-            if not server_wanted:
-                continue
+        #
+        # The listing goes through ``fetch_catalogue``, which tries a stateless tools/list
+        # POST before opening an SDK session and remembers per URL whether that worked.
+        # Both paths hit the same URL with the same bearer, so the per-user view is
+        # identical; the stateless one just skips the handshake and the pydantic parse.
+        # It matters most on a cold start with nothing cached — a scheduled run is
+        # entirely cold starts — which is why this is shared rather than living in the
+        # service that noticed it first.
+        async with httpx.AsyncClient(timeout=_CATALOGUE_LIST_TIMEOUT_S) as http_client:
+            for conn_name, connection in connections.items():
+                is_console = conn_name == "console"
+                server_wanted = sorted(n for n in wanted if is_console_backend_tool(n) == is_console)
+                if not server_wanted:
+                    continue
 
-            def _open_session(name: str = conn_name) -> Any:
-                return client.session(name)
+                def _open_session(name: str = conn_name) -> Any:
+                    return client.session(name)
 
-            catalogue = await fetch_catalogue_mcp(_open_session, server_slug=conn_name)
-            for name in server_wanted:
-                entry = catalogue.tools.get(name)
-                if entry is None:
-                    continue  # not offered to this user by this server
-                tools.append(
-                    make_lazy_tool(
-                        entry,
-                        server_name=catalogue.server_name,
-                        connection=_call_connection(connection),
-                        callbacks=callbacks,
-                        tool_interceptors=interceptors,
-                    )
+                conn = connection if isinstance(connection, dict) else {}
+                catalogue = await fetch_catalogue(
+                    server_slug=conn_name,
+                    url=conn.get("url", ""),
+                    headers=conn.get("headers"),
+                    http_client=http_client if conn.get("url") else None,
+                    session_factory=_open_session,
                 )
+                for name in server_wanted:
+                    entry = catalogue.tools.get(name)
+                    if entry is None:
+                        continue  # not offered to this user by this server
+                    tools.append(
+                        make_lazy_tool(
+                            entry,
+                            server_name=catalogue.server_name,
+                            connection=_call_connection(connection),
+                            callbacks=callbacks,
+                            tool_interceptors=interceptors,
+                        )
+                    )
         logger.info("Resolved %d/%d MCP tools for %s via tools/list", len(tools), len(wanted), self.name)
         return tools
 
@@ -1587,12 +1621,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # Derived against *this* graph: the extra_middlewares assembled above vary
         # per sub-agent (HITL, tool catalog, PTC), so the super-steps a model call
         # costs is not a constant across sub-agents, let alone across releases.
-        recursion_limit = recursion_limit_for(graph, _SUB_AGENT_MAX_MODEL_CALLS)
+        recursion_limit = recursion_limit_for(graph, self.max_model_calls)
         logger.debug(
             "Sub-agent '%s' graph bound to recursion_limit=%d (%d model calls per turn)",
             self.name,
             recursion_limit,
-            _SUB_AGENT_MAX_MODEL_CALLS,
+            self.max_model_calls,
         )
         return graph.with_config({"recursion_limit": recursion_limit})
 
@@ -1887,15 +1921,18 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             # suppressed + persisted and the post-stream aget_state check below
             # re-raises them. The contextvar must stay active for the whole
             # iteration, so the de-nesting wraps the astream generator itself.
-            async def _denested_agent_astream() -> AsyncIterable[Any]:
+            async def _denested_agent_astream(resuming: bool = False) -> AsyncIterable[Any]:
                 # denest_parent_pregel_context: run as a standalone Pregel root.
                 # isolate_parent_stream_context: drop the inherited
                 # StreamMessagesHandler so this sub-agent's token/tool-call chunks
                 # do not leak into the orchestrator's `messages` stream (where they
                 # would surface unattributed, e.g. an unprefixed "Using eval…").
+                #
+                # *resuming* re-enters the checkpoint with no new input, which is what
+                # the stall watchdog below needs to pick pending work back up.
                 with denest_parent_pregel_context(), isolate_parent_stream_context():
                     async for _part in agent.astream(
-                        agent_input,
+                        None if resuming else agent_input,
                         config=standalone_config,
                         stream_mode=["custom", "messages"],
                         context=subagent_context,
@@ -1903,7 +1940,17 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     ):
                         yield _part
 
-            async for part in _denested_agent_astream():
+            # A stalled model stream gets one automatic resume from the checkpoint
+            # rather than failing the whole delegation — a cold-cache prompt ingestion
+            # can outrun the first-token budget without anything being wrong. The
+            # orchestrator's own graph has had this for a while; the sub-agent path did
+            # not, which meant every delegated turn (and every scheduled run, once
+            # agent-runner moved onto this class) was one slow first token away from a
+            # hard failure. See ADR-0009's convergence consequences.
+            async for part in watch_stream_with_resume(
+                _denested_agent_astream,
+                label=f"sub-agent:{self.name}",
+            ):
                 part_type = part["type"]
 
                 # Capture tool calls and stream content from message chunks

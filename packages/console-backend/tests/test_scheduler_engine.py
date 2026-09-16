@@ -10,23 +10,26 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
+import unittest.mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from console_backend.models.notification import NotificationType
 from console_backend.models.scheduled_job import (
     JobRunStatus,
     JobType,
     RunTrigger,
     ScheduledJob,
     ScheduleKind,
+    ScheduledJobRun,
 )
 from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
 from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
 
 from console_backend.services.watch_evaluator import WatchOutcome
-from console_backend.services.scheduler_engine import SchedulerEngine
+from console_backend.services.scheduler_engine import AlreadyAnswered, SchedulerEngine
 from console_backend.services.scheduler_token_service import SchedulerTokenService
 from console_backend.utils.a2a_dispatch import AgentUnreachable
 from sqlalchemy import text
@@ -42,6 +45,14 @@ def _make_engine(
     socket_manager: Any = None,
 ) -> SchedulerEngine:
     repo = repo or AsyncMock(spec=ScheduledJobRepository)
+    # complete_job reports the job state it left behind, so _finalize can tell "this run
+    # stopped the job" from "it was already off" and notify the owner. A bare AsyncMock
+    # returns something that will not unpack; the default here is "still enabled, not
+    # paused", which is what nearly every test means.
+    if isinstance(repo.complete_job, unittest.mock.NonCallableMock | unittest.mock.Mock) and not isinstance(
+        repo.complete_job.return_value, tuple
+    ):
+        repo.complete_job.return_value = (True, None)
     token_service = token_service or AsyncMock(spec=SchedulerTokenService)
     delivery_channel_repo = AsyncMock(spec=DeliveryChannelRepository)
     delivery_channel_repo.get_channel_for_dispatch.return_value = None
@@ -90,11 +101,11 @@ class TestParseResult:
     def test_rpc_error_returns_failed(self):
         """JSON-RPC error (no 'result') → JobRunStatus.FAILED."""
         data = {"error": {"code": -32603, "message": "Internal error"}}
-        status, summary, error_msg, conv_id = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.FAILED
-        assert "A2A request error: Internal error" in (error_msg or "")
-        assert summary is None
+        assert outcome.status == JobRunStatus.FAILED
+        assert "A2A request error: Internal error" in (outcome.error_message or "")
+        assert outcome.result_summary is None
 
     def test_a2a_task_format_success(self):
         """A2A Task artifact format with scheduler_status=success → SUCCESS."""
@@ -109,12 +120,12 @@ class TestParseResult:
                 "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}],
             }
         }
-        status, summary, error_msg, conv_id = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.SUCCESS
-        assert summary == "Daily report generated."
-        assert error_msg is None
-        assert conv_id == "ctx-123"
+        assert outcome.status == JobRunStatus.SUCCESS
+        assert outcome.result_summary == "Daily report generated."
+        assert outcome.error_message is None
+        assert outcome.conversation_id == "ctx-123"
 
     def test_a2a_task_format_condition_not_met(self):
         """A2A Task artifact with condition_not_met → CONDITION_NOT_MET."""
@@ -125,9 +136,9 @@ class TestParseResult:
                 "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}],
             }
         }
-        status, summary, error_msg, conv_id = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.CONDITION_NOT_MET
+        assert outcome.status == JobRunStatus.CONDITION_NOT_MET
 
     def test_a2a_task_format_failed(self):
         """A2A Task artifact with scheduler_status=failed → FAILED."""
@@ -138,10 +149,10 @@ class TestParseResult:
                 "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}],
             }
         }
-        status, summary, error_msg, conv_id = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.FAILED
-        assert error_msg == "Tool error"
+        assert outcome.status == JobRunStatus.FAILED
+        assert outcome.error_message == "Tool error"
 
     def test_legacy_format_extracts_from_metadata(self):
         """Legacy format: result.metadata contains scheduler fields directly."""
@@ -153,24 +164,24 @@ class TestParseResult:
                 }
             }
         }
-        status, summary, error_msg, conv_id = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.SUCCESS
-        assert summary == "Done!"
+        assert outcome.status == JobRunStatus.SUCCESS
+        assert outcome.result_summary == "Done!"
 
     def test_missing_scheduler_status_defaults_to_success(self):
         """When scheduler_status is absent, defaults to success."""
         data = {"result": {"metadata": {"agent_message": "something happened"}}}
-        status, summary, _, _ = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.SUCCESS
+        assert outcome.status == JobRunStatus.SUCCESS
 
     def test_unknown_status_string_defaults_to_success(self):
         """Unrecognised scheduler_status string falls back to SUCCESS."""
         data = {"result": {"metadata": {"scheduler_status": "unknown_status_xyz"}}}
-        status, _, _, _ = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.SUCCESS
+        assert outcome.status == JobRunStatus.SUCCESS
 
     def test_task_state_failed_fallback(self):
         """When artifact has no scheduler_status, task.status.state=failed → FAILED."""
@@ -181,9 +192,9 @@ class TestParseResult:
                 "artifacts": [],
             }
         }
-        status, _, _, _ = self.engine._parse_result(data)
+        outcome = self.engine._parse_result(data)
 
-        assert status == JobRunStatus.FAILED
+        assert outcome.status == JobRunStatus.FAILED
 
 
 def _pg_engine(pg_session: AsyncSession) -> SchedulerEngine:
@@ -338,7 +349,7 @@ class TestFinalizeAdvancesDespiteRunWriteFailure:
     @pytest.mark.asyncio
     async def test_run_write_failure_does_not_block_schedule_advance(self):
         repo = AsyncMock(spec=ScheduledJobRepository)
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
         repo.complete_run = AsyncMock(side_effect=RuntimeError("column does not exist"))
 
         engine = _make_engine(repo=repo)
@@ -358,7 +369,7 @@ class TestFinalizeAdvancesDespiteRunWriteFailure:
         result the user already has. The fallback touches only columns the table has
         always had — the write that shaped this code failed on a column it did not."""
         repo = AsyncMock(spec=ScheduledJobRepository)
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
         repo.complete_run = AsyncMock(side_effect=RuntimeError("column does not exist"))
         repo.close_run_minimally = AsyncMock()
 
@@ -373,7 +384,7 @@ class TestFinalizeAdvancesDespiteRunWriteFailure:
         """Ordering, not just independence — the advance cannot be the write's hostage."""
         calls: list[str] = []
         repo = AsyncMock(spec=ScheduledJobRepository)
-        repo.complete_job = AsyncMock(side_effect=lambda **_: calls.append("job"))
+        repo.complete_job = AsyncMock(side_effect=lambda **_: (calls.append("job"), (True, None))[1])
         repo.complete_run = AsyncMock(side_effect=lambda **_: calls.append("run"))
 
         engine = _make_engine(repo=repo)
@@ -390,7 +401,7 @@ class TestDispatchJobNoToken:
         """dispatch_job() auto-pauses the job when SchedulerTokenService raises ValueError."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run.return_value = 1
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
         repo.complete_run = AsyncMock()
 
         token_service = AsyncMock(spec=SchedulerTokenService)
@@ -423,7 +434,7 @@ class TestFinalizeJobState:
         """A once-only job (schedule_kind=ONCE) has no next_run_at, so enabled=False after success."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         engine = _make_engine(repo=repo)
 
@@ -457,7 +468,7 @@ class TestFinalizeJobState:
         """On failure the status reaches the repo, which is what increments consecutive_failures."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         engine = _make_engine(repo=repo)
         interval_job = make_job(schedule_kind=ScheduleKind.INTERVAL, interval_seconds=300)
@@ -474,7 +485,7 @@ class TestFinalizeJobState:
         """CONDITION_NOT_MET is treated as success (no failure increment)."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         engine = _make_engine(repo=repo)
         watch_job = make_job(job_type=JobType.WATCH, schedule_kind=ScheduleKind.INTERVAL, interval_seconds=60)
@@ -489,7 +500,7 @@ class TestFinalizeJobState:
         """Watch job with destroy_after_trigger=True is disabled via SQL after SUCCESS."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         mock_db = AsyncMock()
         mock_db.commit = AsyncMock()
@@ -521,7 +532,7 @@ class TestFinalizeJobState:
         """Watch job with destroy_after_trigger=False stays enabled after SUCCESS."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         mock_db = AsyncMock()
         mock_db.commit = AsyncMock()
@@ -552,7 +563,7 @@ class TestFinalizeJobState:
         """paused_reason is forwarded to complete_job so the repo can persist it."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         engine = _make_engine(repo=repo)
         interval_job = make_job()
@@ -573,7 +584,7 @@ class TestFinalizeJobState:
         """WebSocket notification is sent when socket_notification_manager is provided."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         socket_manager = AsyncMock()
         socket_manager.send_notification = AsyncMock(return_value=True)
@@ -602,7 +613,7 @@ class TestDispatchErrorHandling:
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run = AsyncMock(return_value=99)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
         token_service = AsyncMock(spec=SchedulerTokenService)
         token_service.get_access_token = AsyncMock(return_value="token-xyz")
 
@@ -631,7 +642,7 @@ class TestDispatchErrorHandling:
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run = AsyncMock(return_value=99)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
         token_service = AsyncMock(spec=SchedulerTokenService)
         token_service.get_access_token = AsyncMock(return_value="token-xyz")
 
@@ -731,7 +742,7 @@ class TestFinalizeInvalidTimezone:
     async def test_invalid_timezone_pauses_job(self):
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.complete_run = AsyncMock()
-        repo.complete_job = AsyncMock()
+        repo.complete_job = AsyncMock(return_value=(True, None))
 
         engine = _make_engine(repo=repo)
         job = make_job(schedule_kind=ScheduleKind.CRON, interval_seconds=None)
@@ -1131,6 +1142,33 @@ class TestVoiceCallDispatch:
         dispatch.assert_not_called()
 
 
+def _make_job(**overrides: Any) -> ScheduledJob:
+    """A minimal enabled task job.
+
+    ``TestAttributionScope`` has always called this and it was never defined, so those
+    three tests have never run. Added here rather than left red: the attribution scope
+    they cover is what keeps a scheduled run's spend attributed to the job instead of
+    reading as the owner's own chat usage.
+    """
+    defaults: dict[str, Any] = {
+        "id": 1,
+        "user_id": "user-1",
+        "name": "Test job",
+        "job_type": JobType.TASK,
+        "schedule_kind": ScheduleKind.INTERVAL,
+        "interval_seconds": 3600,
+        "timezone": "UTC",
+        "enabled": True,
+        "next_run_at": datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc),
+        "consecutive_failures": 0,
+        "max_failures": 3,
+        "created_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+        "delivered": False,
+    }
+    return ScheduledJob(**{**defaults, **overrides})
+
+
 class TestAttributionScope:
     """Every gateway call a dispatch makes bills to the job's owner and the job.
 
@@ -1372,3 +1410,186 @@ class TestConditionEvaluationIsPersisted:
             await engine._dispatch_job(make_job(job_type=JobType.TASK, sub_agent_id=42))
 
         assert repo.complete_run.call_args[1]["condition_evaluation"] is None
+
+
+class TestParkedRuns:
+    """A run blocked on the owner's credential parks; it neither fails nor succeeds.
+
+    See docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
+    """
+
+    def setup_method(self):
+        self.engine = _make_engine()
+
+    @staticmethod
+    def _result(meta: dict) -> dict:
+        return {
+            "result": {
+                "kind": "task",
+                "contextId": "ctx-parked",
+                "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}],
+            }
+        }
+
+    def test_a_parked_payload_carries_the_task_and_the_ask_home(self):
+        ask = {"requires_auth": True, "auth_requirement": {"service": "github", "auth_methods": []}}
+        outcome = self.engine._parse_result(
+            self._result(
+                {
+                    "scheduler_status": "auth_required",
+                    "agent_message": "I need access to GitHub.",
+                    "parked_task_id": "outer-task-1",
+                    "auth_payload": ask,
+                }
+            )
+        )
+        assert outcome.status == JobRunStatus.AUTH_REQUIRED
+        # Both are needed to reach the run again: one to address the task, one to put
+        # the question to its owner.
+        assert outcome.parked_task_id == "outer-task-1"
+        assert outcome.parked_payload == ask
+
+    def test_a_park_with_no_task_to_address_is_a_failure_not_a_stopped_job(self):
+        """Recording it as parked would stop the job with nothing able to restart it.
+
+        The schedule hold means a parked run blocks every later occurrence, so a park
+        nobody can answer is a job silently retired — worse than a failure, which at
+        least shows up and eventually pauses the job with a reason.
+        """
+        outcome = self.engine._parse_result(
+            self._result({"scheduler_status": "auth_required", "agent_message": "blocked"})
+        )
+        assert outcome.status == JobRunStatus.FAILED
+        assert "nothing to resume" in (outcome.error_message or "")
+
+    def test_an_ordinary_run_carries_no_parked_state(self):
+        outcome = self.engine._parse_result(
+            self._result({"scheduler_status": "success", "agent_message": "Done."})
+        )
+        assert outcome.status == JobRunStatus.SUCCESS
+        assert outcome.parked_task_id is None
+        assert outcome.parked_payload is None
+
+
+class TestAutoPauseIsNotSilent:
+    """A job that stops itself has to say so.
+
+    Auto-pause is decided inside ``complete_job`` from consecutive_failures against
+    max_failures, and it used to happen in silence: the job simply stopped producing,
+    which is the one symptom its owner is least likely to notice. The delivery channel
+    cannot carry the notice — it is optional, and a job without one is exactly the job
+    whose silence goes unnoticed — so it is a durable console notification.
+    """
+
+    @staticmethod
+    def _job(enabled: bool = True) -> ScheduledJob:
+        return ScheduledJob(
+            id=7,
+            user_id="user-1",
+            name="QA GitHub Identity Check",
+            job_type=JobType.TASK,
+            schedule_kind=ScheduleKind.INTERVAL,
+            interval_seconds=3600,
+            timezone="UTC",
+            enabled=enabled,
+            next_run_at=datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc),
+            consecutive_failures=2,
+            max_failures=3,
+            created_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            delivered=False,
+        )
+
+    async def _finalize(self, repo_result, job):
+        engine = _make_engine()
+        engine._repo.complete_job = AsyncMock(return_value=repo_result)
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+        await engine._finalize(run_id=99, job=job, status=JobRunStatus.FAILED, error_message="boom")
+        return engine._notification_service
+
+    @pytest.mark.asyncio
+    async def test_the_owner_is_told_when_a_run_stops_their_job(self):
+        notifications = await self._finalize((False, "Auto-paused after 3 consecutive failures"), self._job())
+        notifications.create_notification.assert_awaited_once()
+        kwargs = notifications.create_notification.await_args.kwargs
+        assert kwargs["user_id"] == "user-1"
+        assert kwargs["notification_type"] == NotificationType.SCHEDULED_JOB_PAUSED
+        # The reason the job carries, not a generic line: it is what tells the owner
+        # whether to fix the job or just resume it.
+        assert "3 consecutive failures" in kwargs["message"]
+        assert kwargs["metadata"] == {"job_id": 7, "run_id": 99}
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_failure_that_leaves_the_job_running_says_nothing(self):
+        """One failed run is not news; the run history already records it."""
+        notifications = await self._finalize((True, None), self._job())
+        notifications.create_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_job_that_was_already_paused_is_not_announced_again(self):
+        notifications = await self._finalize((False, "Auto-paused after 3 consecutive failures"), self._job(enabled=False))
+        notifications.create_notification.assert_not_awaited()
+
+
+class TestAnAskIsAnsweredOnce:
+    """Claiming the ask is what makes a second click harmless.
+
+    The parked run KEEPS its ``auth_required`` status after being answered — that is a
+    true record of how the occurrence ended — so the status cannot say whether a question
+    is still outstanding. ``parked_task_id`` does. Without clearing it the console went on
+    offering the card after the answer, and the second press reached a task that had since
+    gone terminal, surfacing the A2A server's raw "task is in terminal state" at the user.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_claim_is_conditional_so_only_one_click_wins(self):
+        repo = ScheduledJobRepository()
+        db = AsyncMock()
+        # Second caller: the row no longer has a task id, so nothing is updated.
+        db.execute = AsyncMock(return_value=MagicMock(rowcount=0))
+        assert await repo.clear_parked_task(db, 616) is False
+
+        db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        assert await repo.clear_parked_task(db, 616) is True
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_is_no_longer_waiting_is_refused_not_resumed(self):
+        engine = _make_engine()
+        answered = ScheduledJobRun(
+            id=616,
+            job_id=7,
+            started_at=datetime(2026, 9, 15, 21, 33, tzinfo=timezone.utc),
+            status=JobRunStatus.AUTH_REQUIRED,
+            delivered=True,
+            parked_task_id=None,  # claimed by whoever answered first
+        )
+        with pytest.raises(AlreadyAnswered):
+            await engine.resume_parked_run(TestAutoPauseIsNotSilent._job(), answered, "approved")
+
+
+class TestOnlyOneRunIsEverParked:
+    """The invariant has to hold on every dispatch path, not just the claim's.
+
+    ADR-0009 leans on "at most one run of a job is ever parked" — it is what removes the
+    dedupe, the supersession rule and the cancel sweep. ``claim_due_jobs`` enforces it
+    for scheduled occurrences, but ``run_now`` bypasses the claim entirely, so a few
+    presses left several parked runs each holding its own live ask. Observed in testing
+    as an authorization card that would not go away: it was a *different*, older parked
+    run than the one just answered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_lookup_keys_on_answerability_not_status(self):
+        """An answered run keeps `auth_required` forever; only the task id clears."""
+        repo = ScheduledJobRepository()
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=MagicMock(mappings=lambda: MagicMock(first=lambda: None)))
+
+        assert await repo.answerable_parked_run(db, 15) is None
+
+        sql = db.execute.await_args.args[0].text
+        assert "parked_task_id IS NOT NULL" in sql, (
+            "keying on status alone would find runs that have already been answered"
+        )
+        assert "status = 'auth_required'" in sql

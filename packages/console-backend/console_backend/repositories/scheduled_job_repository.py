@@ -80,6 +80,8 @@ def _row_to_run(row: Any) -> ScheduledJobRun:
         last_seen_at=row.get("last_seen_at"),
         trigger=RunTrigger(row.get("trigger", RunTrigger.SCHEDULED.value)),
         notice_due_at=row.get("notice_due_at"),
+        parked_task_id=row.get("parked_task_id"),
+        parked_payload=row.get("parked_payload"),
     )
 
 
@@ -218,7 +220,8 @@ class ScheduledJobRepository(AuditedRepository):
                   )
                   AND NOT EXISTS (
                         SELECT 1 FROM scheduled_job_runs r
-                        WHERE r.job_id = j.id AND r.status = 'running'
+                        WHERE r.job_id = j.id
+                          AND r.status IN ('running', 'auth_required')
                   )
                 ORDER BY COALESCE(j.retry_at, j.next_run_at) ASC
                 LIMIT :limit
@@ -255,13 +258,26 @@ class ScheduledJobRepository(AuditedRepository):
         last_check_result: dict[str, Any] | None = None,
         paused_reason: str | None = None,
         retry_at: datetime | None = None,
-    ) -> None:
+    ) -> tuple[bool, str | None]:
         """Update a job after execution: advance schedule, track failures, auto-pause on threshold.
 
-        Takes the run's status rather than a success flag because there are three
-        outcomes, not two. Only a FAILED run moves ``consecutive_failures`` up and
-        only a successful one resets it; an INTERRUPTED run leaves it alone in both
-        directions. See docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md.
+        Returns ``(enabled, paused_reason)`` as this write left them. The caller compares
+        against the state it already held to tell "this run stopped the job" from "it was
+        already off" — which it needs in order to tell the owner, and which it cannot
+        learn by re-reading: the auto-pause decision is made inside this statement, from
+        ``consecutive_failures`` against ``max_failures``.
+
+        Takes the run's status rather than a success flag because there are more than
+        two outcomes. Only a FAILED run moves ``consecutive_failures`` up and only a
+        successful one resets it; INTERRUPTED and AUTH_REQUIRED leave it alone in both
+        directions, because neither is evidence about the job. See
+        docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md and
+        docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
+
+        An AUTH_REQUIRED run still advances ``next_run_at`` like any other. What stops
+        the job running is ``claim_due_jobs``, which will not claim a job whose run is
+        parked — so the schedule stays honest about when the job was due, and the job
+        catches up with one occurrence once the owner answers.
 
         *retry_at* schedules the one fresh attempt an interruption earns. It is
         only ever written, never cleared here: runs of one job can complete out of
@@ -273,7 +289,7 @@ class ScheduledJobRepository(AuditedRepository):
         failed = status == JobRunStatus.FAILED
         success = status in (JobRunStatus.SUCCESS, JobRunStatus.CONDITION_NOT_MET)
 
-        await db.execute(
+        result = await db.execute(
             text("""
                 UPDATE scheduled_jobs
                 SET
@@ -299,6 +315,7 @@ class ScheduledJobRepository(AuditedRepository):
                     last_check_result    = COALESCE(CAST(:last_check_result AS jsonb), last_check_result),
                     updated_at           = :now
                 WHERE id = :job_id
+                RETURNING enabled, paused_reason
             """),
             {
                 "job_id": job_id,
@@ -318,6 +335,8 @@ class ScheduledJobRepository(AuditedRepository):
                 "now": now,
             },
         )
+        row = result.mappings().first()
+        return (bool(row["enabled"]), row["paused_reason"]) if row else (True, None)
 
     async def update_job(
         self,
@@ -537,6 +556,8 @@ class ScheduledJobRepository(AuditedRepository):
         delivered: bool = False,
         condition_evaluation: ConditionEvaluation | None = None,
         notice_due_at: datetime | None = None,
+        parked_task_id: str | None = None,
+        parked_payload: dict[str, Any] | None = None,
     ) -> bool:
         """Finalise a run record with execution outcome. Returns whether a row changed.
 
@@ -549,6 +570,12 @@ class ScheduledJobRepository(AuditedRepository):
         that this run was lost for good. Same statement on purpose: the process
         recording an interruption may be the one dying, and a run that is interrupted
         but owes nothing would leave the user untold.
+
+        *parked_task_id* and *parked_payload* are the parked agent-runner task and the ask
+        delivered with it, on an AUTH_REQUIRED run. Written here rather than by a later
+        update for the same reason as the notice: the run and the reason it stopped are
+        one fact, and a run recorded as parked with no way to reach the task would be a
+        job stopped with no way to restart it.
         """
         result = await db.execute(
             text("""
@@ -561,7 +588,9 @@ class ScheduledJobRepository(AuditedRepository):
                     conversation_id  = :conversation_id,
                     delivered        = :delivered,
                     condition_evaluation = :condition_evaluation,
-                    notice_due_at    = COALESCE(CAST(:notice_due_at AS timestamptz), notice_due_at)
+                    notice_due_at    = COALESCE(CAST(:notice_due_at AS timestamptz), notice_due_at),
+                    parked_task_id     = COALESCE(:parked_task_id, parked_task_id),
+                    parked_payload     = COALESCE(CAST(:parked_payload AS jsonb), parked_payload)
                 WHERE id = :run_id
                   AND status = 'running'
             """),
@@ -580,6 +609,8 @@ class ScheduledJobRepository(AuditedRepository):
                     else None
                 ),
                 "notice_due_at": notice_due_at,
+                "parked_task_id": parked_task_id,
+                "parked_payload": json.dumps(parked_payload) if parked_payload is not None else None,
             },
         )
         return result.rowcount > 0
@@ -607,6 +638,50 @@ class ScheduledJobRepository(AuditedRepository):
             """),
             {"run_id": run_id, "status": status.value, "error_message": error_message},
         )
+
+    async def answerable_parked_run(self, db: AsyncSession, job_id: int) -> ScheduledJobRun | None:
+        """The run of *job_id* still waiting on its owner, if any.
+
+        ``parked_task_id`` rather than status is what makes a run answerable: the status
+        stays ``auth_required`` for good, because it is a true record of how that
+        occurrence ended, while the task id is cleared the moment somebody answers.
+        """
+        result = await db.execute(
+            text("""
+                SELECT * FROM scheduled_job_runs
+                WHERE job_id = :job_id
+                  AND status = 'auth_required'
+                  AND parked_task_id IS NOT NULL
+                ORDER BY started_at DESC
+                LIMIT 1
+            """),
+            {"job_id": job_id},
+        )
+        row = result.mappings().first()
+        return _row_to_run(row) if row is not None else None
+
+    async def clear_parked_task(self, db: AsyncSession, run_id: int) -> bool:
+        """Mark a parked run as no longer answerable. Returns whether it still was.
+
+        Called once the owner's answer has been accepted. The run KEEPS its
+        ``AUTH_REQUIRED`` status — it is a true record of how that occurrence ended, and
+        rewriting it would lose that — so the task id is what says whether there is still
+        a question outstanding. Without this the ask never goes away: the console would
+        go on offering a card for a task that has since gone terminal, and a second click
+        would surface the A2A server's "task is in terminal state" at the user.
+
+        The write is conditional, so two clicks racing produce one resume: the loser sees
+        no row updated and is told the run has already been answered.
+        """
+        result = await db.execute(
+            text("""
+                UPDATE scheduled_job_runs
+                SET parked_task_id = NULL
+                WHERE id = :run_id AND parked_task_id IS NOT NULL
+            """),
+            {"run_id": run_id},
+        )
+        return result.rowcount > 0
 
     async def get_run(
         self,

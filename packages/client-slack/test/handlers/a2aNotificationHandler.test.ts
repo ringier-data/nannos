@@ -134,3 +134,153 @@ describe('handleA2ANotification scheduled-run provenance', () => {
     expect(scheduledRunStore.set).not.toHaveBeenCalled();
   });
 });
+
+describe('a run parked on the owner authorization', () => {
+  const parkedPayload = {
+    scheduler_status: 'auth_required',
+    agent_message: 'Nannos needs your permission to use GitHub: https://github.example/authorize',
+    user_sub: 'sub-1',
+    scheduled_job_id: 10,
+    scheduled_job_run_id: 77,
+    parked_task_id: 'outer-task-1',
+    auth_payload: {
+      requires_auth: true,
+      auth_requirement: {
+        service: 'github',
+        auth_methods: [{ method: 'oauth2', auth_url: 'https://github.example/authorize' }],
+      },
+    },
+    reply_to: {
+      service: 'console-backend',
+      endpoint: 'scheduled_run_resume',
+      scheduled_job_id: 10,
+      scheduled_job_run_id: 77,
+    },
+  };
+
+  test('is delivered as the authorization card, with the prose still on the message', async () => {
+    const slackClient = mockSlackClient();
+    await handleA2ANotification(makeTask(parkedPayload, 'ctx-parked'), botInstallation, {
+      userAuthStorage: mockUserAuthStorage(),
+      scheduledRunStore: mockScheduledRunStore(),
+      slackClientFactory: () => slackClient as unknown as WebClient,
+    });
+
+    const posted = (slackClient.chat.postMessage as jest.Mock).mock.calls[0][0] as {
+      text: string;
+      blocks?: unknown[];
+    };
+    expect(posted.blocks).toBeDefined();
+    // The prose survives alongside the card: it is what a notification digest shows,
+    // and it carries the authorize URL for any surface that renders no blocks.
+    expect(posted.text).toContain('https://github.example/authorize');
+  });
+
+  test('is NOT adoptable: no provenance is recorded for the ask', async () => {
+    // ADR-0008 keys an adopted sub-agent's memory by the RUN, and says that holds only
+    // because "a run is adoptable exactly once". A parked run delivers twice — the ask
+    // now, the result after it is answered — so recording both would put two
+    // conversations on one sub-agent thread, which is the case that ADR names as broken.
+    const store = mockScheduledRunStore();
+    await handleA2ANotification(makeTask(parkedPayload, 'ctx-parked'), botInstallation, {
+      userAuthStorage: mockUserAuthStorage(),
+      scheduledRunStore: store,
+      slackClientFactory: () => mockSlackClient() as unknown as WebClient,
+    });
+
+    expect(store.set).not.toHaveBeenCalled();
+  });
+
+  test('the result delivered after the answer IS adoptable', async () => {
+    const store = mockScheduledRunStore();
+    await handleA2ANotification(
+      makeTask({ ...parkedPayload, scheduler_status: 'success', auth_payload: undefined }, 'ctx-parked'),
+      botInstallation,
+      {
+        userAuthStorage: mockUserAuthStorage(),
+        scheduledRunStore: store,
+        slackClientFactory: () => mockSlackClient() as unknown as WebClient,
+      }
+    );
+
+    expect(store.set).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('what the ask says and where its answer lands', () => {
+  const base = {
+    scheduler_status: 'auth_required',
+    agent_message: 'Permission needed: https://gatana.example/begin',
+    user_sub: 'sub-1',
+    scheduled_job_id: 15,
+    scheduled_job_name: 'QA GitHub Identity Check',
+    scheduled_job_run_id: 77,
+    auth_payload: {
+      requires_auth: true,
+      auth_requirement: {
+        service: 'gateway',
+        resource: 'github_get_teams',
+        auth_methods: [{ method: 'oauth2', auth_url: 'https://gatana.example/begin' }],
+      },
+    },
+  };
+
+  test('names the tool and the job, not just "permission to continue"', async () => {
+    // "Authorization needed for gateway / Nannos needs your permission before it can
+    // continue" told the owner neither what was being authorized nor which of their
+    // jobs had stopped. `resource` carries the tool; `scheduled_job_name` the job.
+    const slackClient = mockSlackClient();
+    await handleA2ANotification(makeTask(base, 'ctx-1'), botInstallation, {
+      userAuthStorage: mockUserAuthStorage(),
+      scheduledRunStore: mockScheduledRunStore(),
+      slackClientFactory: () => slackClient as unknown as WebClient,
+    });
+
+    const posted = (slackClient.chat.postMessage as jest.Mock).mock.calls[0][0] as { blocks: unknown[] };
+    const rendered = JSON.stringify(posted.blocks);
+    expect(rendered).toContain('github_get_teams');
+    expect(rendered).toContain('QA GitHub Identity Check');
+  });
+
+  test('a resumed run replies under the ask that unblocked it', async () => {
+    const slackClient = mockSlackClient();
+    await handleA2ANotification(
+      makeTask(
+        {
+          ...base,
+          scheduler_status: 'success',
+          auth_payload: undefined,
+          agent_message: 'GitHub connection confirmed.',
+          reply_to_message: { channel: 'D1', ts: '111.222' },
+        },
+        'ctx-1'
+      ),
+      botInstallation,
+      {
+        userAuthStorage: mockUserAuthStorage(),
+        scheduledRunStore: mockScheduledRunStore(),
+        slackClientFactory: () => slackClient as unknown as WebClient,
+      }
+    );
+
+    const posted = (slackClient.chat.postMessage as jest.Mock).mock.calls[0][0] as { thread_ts?: string };
+    expect(posted.thread_ts).toBe('111.222');
+  });
+
+  test('an ordinary result is not threaded under someone else channel message', async () => {
+    const slackClient = mockSlackClient();
+    await handleA2ANotification(
+      makeTask({ ...base, scheduler_status: 'success', auth_payload: undefined,
+                 reply_to_message: { channel: 'D-OTHER', ts: '999.000' } }, 'ctx-1'),
+      botInstallation,
+      {
+        userAuthStorage: mockUserAuthStorage(),
+        scheduledRunStore: mockScheduledRunStore(),
+        slackClientFactory: () => slackClient as unknown as WebClient,
+      }
+    );
+
+    const posted = (slackClient.chat.postMessage as jest.Mock).mock.calls[0][0] as { thread_ts?: string };
+    expect(posted.thread_ts).toBeUndefined();
+  });
+});

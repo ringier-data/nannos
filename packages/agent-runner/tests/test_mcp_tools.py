@@ -314,11 +314,21 @@ class TestSdkFallback:
 
 
 class TestRunnerWiring:
-    def test_core_no_longer_lists_the_whole_gateway(self):
+    def test_core_delegates_resolution_and_never_lists_the_whole_gateway(self):
+        """The runner builds the shared sub-agent and lets it resolve tools.
+
+        It used to own an ``McpToolResolver``; ADR-0009 converged it onto
+        ``DynamicLocalAgentRunnable``, which lists per-user and hands back lazy tools
+        bound to a call-time bearer. What must stay true either way is the thing this
+        test was written for: nothing here asks the gateway for its whole tool list.
+        """
         import inspect
 
         import agent.core as core
 
         src = inspect.getsource(core)
         assert "MultiServerMCPClient" not in src and "get_tools()" not in src
-        assert "McpToolResolver(" in src and "UserTokenProvider(" in src
+        assert "DynamicLocalAgentRunnable(" in src
+        # The per-run provider still belongs to the runner: it owns the user's token and
+        # the leeway, and hands them to the shared runnable rather than the reverse.
+        assert "UserTokenProvider(" in src

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { FeedbackService } from '../services/feedbackService.js';
 import { ContextRecord, IContextStore } from '../storage/types.js';
 import { Logger } from '../utils/logger.js';
+import type { ReplyTo } from '../services/scheduledRunResumeService.js';
 import { handleIncomingMessage, NormalizedMessage } from './messageHandler.js';
 import { HandlerDependencies } from "./types.js";
 import { GoogleChatService } from '../services/googleChatService.js';
@@ -293,7 +294,12 @@ async function handleHitlFeedbackCardClick(payload: ButtonClickedPayload, deps: 
 async function handleInTaskAuthCardClick(payload: ButtonClickedPayload, deps: HandlerDependencies) {
   const logger = Logger.getLogger('handleInTaskAuthCardClick');
 
-  const params = payload.actionParameters as unknown as { taskId?: string; tool?: string; subject?: string };
+  const params = payload.actionParameters as unknown as {
+    taskId?: string;
+    tool?: string;
+    subject?: string;
+    replyTo?: ReplyTo;
+  };
   const decision: AuthDecision = payload.action === 'approved' ? 'approved' : 'declined';
   const subject = params.subject || params.tool;
 
@@ -308,6 +314,41 @@ async function handleInTaskAuthCardClick(payload: ButtonClickedPayload, deps: Ha
         : `🚫 Authorization declined${subject ? ` — ${subject}` : ''}`,
     cardsV2: [],
   });
+
+  // A SCHEDULED run's ask says where its answer goes, and it is not the orchestrator.
+  // Sent as a chat turn it would open a NEW delegation task on a sub-agent thread that
+  // is already parked, and the executor would reject it — the owner would press the
+  // button and watch nothing happen. console-backend owns the run and can address the
+  // task it parked (ADR-0009).
+  if (params.replyTo) {
+    if (!deps.scheduledRunResumeService) {
+      logger.error(
+        'Cannot answer scheduled run: CONSOLE_BACKEND_URL is not configured, so this client ' +
+          `has nowhere to send the authorization ${decision}`
+      );
+      return;
+    }
+    const outcome = await deps.scheduledRunResumeService.resume(
+      payload.userId,
+      payload.projectId,
+      params.replyTo,
+      decision
+    );
+    if (outcome.kind !== 'resumed') {
+      // Cards are durable and clicks are late, so "already handled" is an ordinary
+      // outcome rather than an error — but the owner still needs to be told, or they
+      // are left believing a job is about to run when it is not.
+      await deps.chatService.sendPrivateTextMessage(
+        payload.projectId,
+        payload.spaceId,
+        payload.userId,
+        outcome.kind === 'already-handled'
+          ? 'That scheduled run is no longer waiting — it looks like it has already been answered.'
+          : `Sorry, I could not deliver that answer (${outcome.reason}). Please try again.`
+      );
+    }
+    return;
+  }
 
   const syntheticMessage: NormalizedMessage = {
     userId: payload.userId,

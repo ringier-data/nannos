@@ -10,7 +10,9 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from a2a.types import Message, Part, Role
+from a2a.types import Message, Part, Role, TaskState
+from google.protobuf.json_format import ParseDict
+from google.protobuf.struct_pb2 import Value
 
 import agent.core as core
 
@@ -261,7 +263,7 @@ class TestDispatchShapes:
         agent_runner._fetch_sub_agent_config = AsyncMock(
             return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
         )
-        agent_runner._execute_sub_agent = AsyncMock(return_value=("Handled it.", "completed"))
+        agent_runner._execute_sub_agent = AsyncMock(return_value=core.SubAgentRun(message="Handled it.", task_state="completed"))
         items = await self._run(agent_runner, self._task(5), "Triage this: {}")
 
         prompt = agent_runner._execute_sub_agent.await_args[1]["prompt"]
@@ -274,7 +276,7 @@ class TestDispatchShapes:
         agent_runner._fetch_sub_agent_config = AsyncMock(
             return_value={"type": "automated", "name": "debug", "sub_agent_id": 5}
         )
-        agent_runner._execute_sub_agent = AsyncMock(return_value=("Investigated.", "completed"))
+        agent_runner._execute_sub_agent = AsyncMock(return_value=core.SubAgentRun(message="Investigated.", task_state="completed"))
         items = await self._run(agent_runner, self._task("5"), "Investigate bug report abc.")
 
         agent_runner._fetch_sub_agent_config.assert_awaited_once()
@@ -292,7 +294,7 @@ class TestDispatchShapes:
         agent_runner._fetch_sub_agent_config = AsyncMock(
             return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
         )
-        agent_runner._execute_sub_agent = AsyncMock(return_value=("done", "completed"))
+        agent_runner._execute_sub_agent = AsyncMock(return_value=core.SubAgentRun(message="done", task_state="completed"))
         await self._run(agent_runner, self._task(5), "")
 
         assert agent_runner._execute_sub_agent.await_args[1]["prompt"] == "Execute your configured task."
@@ -320,16 +322,16 @@ class TestRemoteAgentContextPropagation:
 
         captured = {}
 
-        async def fake_collect(runnable, input_data):
+        async def fake_collect(runnable, input_data, config=None):
             captured["input_data"] = input_data
-            return "done", "completed"
+            return core.SubAgentRun(message="done", task_state="completed")
 
         agent_runner._get_oauth2_client = MagicMock()
 
         with (
             patch("httpx.AsyncClient") as mock_cls,
             patch("agent.core.make_a2a_async_runnable", return_value=MagicMock()),
-            patch("agent.core._collect_stream_text", side_effect=fake_collect),
+            patch("agent.core._collect_sub_agent_run", side_effect=fake_collect),
         ):
             mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
             mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -348,7 +350,7 @@ class TestRemoteAgentContextPropagation:
                 context_id="run-ctx-1",
             )
 
-        assert result == ("done", "completed")
+        assert result == core.SubAgentRun(message="done", task_state="completed")
         assert captured["input_data"].orchestrator_conversation_id == "run-ctx-1"
         assert captured["input_data"].scheduled_job_id == 10
 
@@ -407,7 +409,7 @@ class TestDeliveryChannelFormatting:
         agent_runner._fetch_sub_agent_config = AsyncMock(
             return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
         )
-        agent_runner._execute_sub_agent = AsyncMock(return_value=("done", "completed"))
+        agent_runner._execute_sub_agent = AsyncMock(return_value=core.SubAgentRun(message="done", task_state="completed"))
         async for _ in agent_runner._stream_impl(
             [Message(role=Role.ROLE_USER, parts=[Part(text="Report on campaign 450.")], message_id="msg-f")],
             self._user_config(),
@@ -458,16 +460,16 @@ class TestDeliveryChannelFormatting:
 
         captured = {}
 
-        async def fake_collect(runnable, input_data):
+        async def fake_collect(runnable, input_data, config=None):
             captured["input_data"] = input_data
-            return "done", "completed"
+            return core.SubAgentRun(message="done", task_state="completed")
 
         agent_runner._get_oauth2_client = MagicMock()
 
         with (
             patch("httpx.AsyncClient") as mock_cls,
             patch("agent.core.make_a2a_async_runnable", return_value=MagicMock()),
-            patch("agent.core._collect_stream_text", side_effect=fake_collect),
+            patch("agent.core._collect_sub_agent_run", side_effect=fake_collect),
         ):
             mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
             mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -500,16 +502,16 @@ class TestDeliveryChannelFormatting:
 
         captured = {}
 
-        async def fake_collect(runnable, input_data):
+        async def fake_collect(runnable, input_data, config=None):
             captured["input_data"] = input_data
-            return "done", "completed"
+            return core.SubAgentRun(message="done", task_state="completed")
 
         agent_runner._get_oauth2_client = MagicMock()
 
         with (
             patch("httpx.AsyncClient") as mock_cls,
             patch("agent.core.make_a2a_async_runnable", return_value=MagicMock()),
-            patch("agent.core._collect_stream_text", side_effect=fake_collect),
+            patch("agent.core._collect_sub_agent_run", side_effect=fake_collect),
         ):
             mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
             mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -566,3 +568,364 @@ class TestSubAgentSystemPrompt:
             core._build_sub_agent_system_prompt("You triage alerts.", "unknown-channel")
         )
         assert 'format=' not in core._build_sub_agent_system_prompt("You triage alerts.", "markdown")
+
+
+class TestParkedOnAuthorization:
+    """A run blocked on the OWNER's credential asks, instead of lying either way.
+
+    Before this, the gateway's `need-credentials` reached the model as an ordinary tool
+    message and the model's paraphrase decided the run's fate: `failed` spent the job's
+    max_failures budget on a condition no retry can fix, `completed` left a green run
+    that did nothing. See
+    docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
+    """
+
+    AUTH_PAYLOAD = {
+        "requires_auth": True,
+        "auth_requirement": {
+            "service": "github",
+            "auth_methods": [{"method": "oauth2", "auth_url": "https://github.example/authorize"}],
+        },
+    }
+
+    @staticmethod
+    def _task(task_id: str = "outer-task-1") -> MagicMock:
+        task = MagicMock()
+        task.id = task_id
+        task.context_id = "ctx-parked"
+        task.history = [
+            MagicMock(metadata={"sub_agent_id": 5, "scheduled_job_id": 10, "scheduled_job_run_id": 77})
+        ]
+        return task
+
+    @staticmethod
+    def _user_config() -> MagicMock:
+        user_config = MagicMock()
+        user_config.user_sub = "sub-1"
+        user_config.access_token = MagicMock()
+        user_config.access_token.get_secret_value.return_value = "bearer-token"
+        return user_config
+
+    async def _run(self, agent_runner, task, parts) -> tuple[list[dict], list]:
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
+        )
+        responses = []
+        async for response in agent_runner._stream_impl(
+            [Message(role=Role.ROLE_USER, parts=parts, message_id="msg-p")],
+            self._user_config(),
+            task,
+        ):
+            responses.append(response)
+        return [json.loads(r.content) for r in responses if r.content.startswith("{")], responses
+
+    @pytest.mark.asyncio
+    async def test_a_parked_run_reports_the_ask_and_leaves_its_task_open(self, agent_runner):
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(
+                message="I need access to GitHub.",
+                task_state="auth_required",
+                auth_payload=self.AUTH_PAYLOAD,
+            )
+        )
+        items, responses = await self._run(agent_runner, self._task(), [Part(text="Do the thing.")])
+
+        parked = next(i for i in items if i.get("scheduler_status") == "auth_required")
+        assert parked["auth_payload"] == self.AUTH_PAYLOAD
+        # The OUTER task id: the only one anything outside this process can address.
+        assert parked["parked_task_id"] == "outer-task-1"
+        # Logical, never a URL — the client resolves its own console-backend base, so
+        # nothing off a webhook is ever trusted as an address.
+        assert parked["reply_to"]["service"] == "console-backend"
+        assert parked["reply_to"]["endpoint"] == "scheduled_run_resume"
+        assert parked["reply_to"]["scheduled_job_run_id"] == 77
+
+        # Non-terminal on purpose: the A2A handler accepts the owner's answer only
+        # while the task it is addressed to has not reached a terminal state.
+        assert responses[-1].state == TaskState.TASK_STATE_AUTH_REQUIRED
+
+    @pytest.mark.asyncio
+    async def test_the_ask_still_parses_as_the_payload_every_client_already_reads(self, agent_runner):
+        """The ask rides INSIDE the scheduler payload, never replacing it.
+
+        `getSchedulerPayload` in each chat client does `JSON.parse` on part zero and
+        gives up silently when that fails. A status message shaped only by the
+        in-task-auth extension would put prose there and the whole notification would
+        vanish in three clients at once.
+        """
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(
+                message="I need access to GitHub.",
+                task_state="auth_required",
+                auth_payload=self.AUTH_PAYLOAD,
+            )
+        )
+        items, _ = await self._run(agent_runner, self._task(), [Part(text="Do the thing.")])
+        parked = next(i for i in items if i.get("scheduler_status") == "auth_required")
+        # The fields a client that never learned any of this still reads.
+        assert parked["agent_message"] == "I need access to GitHub."
+        assert parked["user_sub"] == "sub-1"
+        assert parked["scheduled_job_id"] == 10
+
+    @pytest.mark.asyncio
+    async def test_a_park_with_no_ask_is_not_a_park(self, agent_runner):
+        """Parking with nothing to ask would stop the job on an unanswerable question."""
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(message="blocked", task_state="auth_required", auth_payload=None)
+        )
+        items, responses = await self._run(agent_runner, self._task(), [Part(text="Do the thing.")])
+        assert not any(i.get("scheduler_status") == "auth_required" for i in items)
+        assert responses[-1].state == TaskState.TASK_STATE_COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_an_authorization_answer_resumes_the_task_the_run_parked(self, agent_runner):
+        """The answer must find the parked task, not open a second one beside it.
+
+        The sub-agent's task id is derived from (context, run) rather than stored, so
+        the resume recomputes the same id the original run proposed. Opening a new task
+        on a parked thread is what the executor rejects.
+        """
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(message="Done.", task_state="completed")
+        )
+        answer = Part(data=ParseDict({"authorization": {"decision": "approved"}}, Value()))
+        await self._run(agent_runner, self._task(), [answer, Part(text="I authorized it.")])
+
+        resume_task_id = agent_runner._execute_sub_agent.await_args.kwargs["resume_task_id"]
+        assert resume_task_id == core.scheduled_run_task_id("ctx-parked")
+
+    @pytest.mark.asyncio
+    async def test_ordinary_work_opens_a_task_rather_than_resuming_one(self, agent_runner):
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(message="Done.", task_state="completed")
+        )
+        await self._run(agent_runner, self._task(), [Part(text="Do the thing.")])
+        assert agent_runner._execute_sub_agent.await_args.kwargs["resume_task_id"] is None
+
+
+class TestAFailedSubAgentIsNotGreen:
+    """A sub-agent that blew up must not be recorded as a successful run.
+
+    Regression: moving the LangGraph path behind ``LocalA2ARunnable.astream`` changed how
+    a crash arrives. That method catches every exception and yields an ErrorEvent rather
+    than raising, so ``_stream_impl``'s except branch — the only thing that used to write
+    `failed` — stopped being reached for a local agent. The run was then recorded green
+    with the traceback sitting in the result text, which is the exact failure mode
+    ADR-0009 exists to remove. Seen in production as a "Success" row reading
+    "Error: the greenlet library is required to use this function".
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_errored_sub_agent_run_is_recorded_failed(self, agent_runner):
+        task = MagicMock()
+        task.id = "outer-task-2"
+        task.context_id = "ctx-failed"
+        task.history = [MagicMock(metadata={"sub_agent_id": 5, "scheduled_job_id": 10})]
+
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(
+                message="Error: No module named 'greenlet'", task_state="failed"
+            )
+        )
+
+        responses = []
+        async for r in agent_runner._stream_impl(
+            [Message(role=Role.ROLE_USER, parts=[Part(text="Do the thing.")], message_id="m")],
+            TestParkedOnAuthorization._user_config(),
+            task,
+        ):
+            responses.append(r)
+
+        items = [json.loads(r.content) for r in responses if r.content.startswith("{")]
+        result = items[-1]
+        assert result["scheduler_status"] == "failed"
+        # Under the key the scheduler reads a failure from, not only in the prose.
+        assert "greenlet" in result["error_message"]
+        assert responses[-1].state == TaskState.TASK_STATE_FAILED
+
+    @pytest.mark.asyncio
+    async def test_a_completed_run_is_still_success(self, agent_runner):
+        task = MagicMock()
+        task.id = "outer-task-3"
+        task.context_id = "ctx-ok"
+        task.history = [MagicMock(metadata={"sub_agent_id": 5, "scheduled_job_id": 10})]
+
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(message="All done.", task_state="completed")
+        )
+
+        responses = []
+        async for r in agent_runner._stream_impl(
+            [Message(role=Role.ROLE_USER, parts=[Part(text="Do the thing.")], message_id="m")],
+            TestParkedOnAuthorization._user_config(),
+            task,
+        ):
+            responses.append(r)
+
+        result = [json.loads(r.content) for r in responses if r.content.startswith("{")][-1]
+        assert result["scheduler_status"] == "success"
+        assert "error_message" not in result
+
+
+class TestEmptyWhitelistMeaning:
+    """An empty tool list means "everything" for general-purpose, and ONLY for it.
+
+    The general-purpose agent is configured with no whitelist, and in a conversation the
+    orchestrator reads that as the whole registry (handed over as a lazy catalog). A
+    scheduled run used to read the same empty list as "no tools", so the agent replied
+    that the tools it was asked to use do not exist — same agent, same configuration,
+    opposite capability depending on who started it.
+
+    Every OTHER agent keeps the existing meaning: an empty list is an empty list. A
+    purpose-built sub-agent must not silently acquire the whole gateway because nobody
+    filled its whitelist in.
+    """
+
+    def test_general_purpose_takes_the_full_catalogue(self):
+        assert core._is_full_catalogue_agent({"name": "general-purpose", "mcp_tools": []}) is True
+
+    def test_an_ordinary_agent_does_not(self):
+        assert core._is_full_catalogue_agent({"name": "qa-github-check", "mcp_tools": []}) is False
+        assert core._is_full_catalogue_agent({"name": "triage"}) is False
+
+    def test_the_backend_can_still_open_the_list_explicitly(self):
+        """Mirrors the orchestrator's ``config.all_tools`` (ADR-0006, embed-bound agents)."""
+        assert core._is_full_catalogue_agent({"name": "cockpit", "all_tools": True}) is True
+
+
+class TestSchedulerMetadataOnAResume:
+    """The ids come from the message being handled, not from the end of task history.
+
+    Reading ``task.history[-1]`` was correct exactly while every dispatch opened a fresh
+    task. The moment one CONTINUES a task — which is how an authorization answer reaches
+    a parked run — the last history entry is the AGENT's own message (the auth_required
+    payload it published), not the user's new one. Every id then came back None, the run
+    took the no-sub-agent branch, and it echoed the authorization answer back as its
+    result: a "successful" run that did none of the work it was resumed to do.
+    """
+
+    @staticmethod
+    def _continued_task() -> MagicMock:
+        task = MagicMock()
+        task.id = "outer-task-9"
+        task.context_id = "ctx-resume"
+        # What a continued task looks like: the original dispatch, then the agent's own
+        # parked status message, which carries no scheduler metadata.
+        task.history = [
+            MagicMock(metadata={"sub_agent_id": 5, "scheduled_job_id": 10, "scheduled_job_run_id": 77}),
+            MagicMock(metadata=None),
+        ]
+        return task
+
+    @pytest.mark.asyncio
+    async def test_the_resume_finds_its_job_run_and_parked_task(self, agent_runner):
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "general-purpose", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(message="Retried and done.", task_state="completed")
+        )
+
+        answer = Message(
+            role=Role.ROLE_USER,
+            parts=[
+                Part(data=ParseDict({"authorization": {"decision": "approved"}}, Value())),
+                Part(text="I have completed the authorization."),
+            ],
+            message_id="msg-resume",
+        )
+        # The metadata rides the message being handled, exactly as the scheduler sends it.
+        answer.metadata.update({"sub_agent_id": 5, "scheduled_job_id": 10, "scheduled_job_run_id": 77})
+
+        responses = []
+        async for r in agent_runner._stream_impl([answer], TestParkedOnAuthorization._user_config(), self._continued_task()):
+            responses.append(r)
+
+        # The sub-agent actually ran, addressed to the task the earlier run parked.
+        agent_runner._execute_sub_agent.assert_awaited_once()
+        kwargs = agent_runner._execute_sub_agent.await_args.kwargs
+        assert kwargs["resume_task_id"] == core.scheduled_run_task_id("ctx-resume")
+        assert kwargs["scheduled_job_id"] == 10
+
+        result = [json.loads(r.content) for r in responses if r.content.startswith("{")][-1]
+        # Not the answer echoed back at the user.
+        assert result["agent_message"] == "Retried and done."
+        assert result["scheduled_job_id"] == 10
+
+
+class TestASecondAuthorizationInOneRun:
+    """One authorization can lead straight to another, and the two run ids diverge.
+
+    Every link is a new run row on the SAME context, so there is ONE sub-agent task for
+    the whole chain — which is why the task id is keyed on the context and not on a run.
+    Keying it per run gave the second answer an id nothing had ever opened, and the
+    resume died on "Task ... not found".
+
+    The run ids still diverge for correlation: the payload, and above all the reply
+    target of a follow-up ask, must name the run that is waiting NOW. Sending the parked
+    run's id there made the second card address a run already answered, refused with
+    "That scheduled run is no longer waiting".
+    """
+
+    @staticmethod
+    def _resume_task(parked_run_id: int, new_run_id: int) -> MagicMock:
+        task = MagicMock()
+        task.id = "outer-task-chain"
+        task.context_id = "ctx-chain"
+        task.history = [MagicMock(metadata=None)]
+        return task
+
+    @pytest.mark.asyncio
+    async def test_the_follow_up_ask_points_at_the_run_that_is_now_waiting(self, agent_runner):
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "general-purpose", "sub_agent_id": 5}
+        )
+        # The resumed run parks AGAIN on a second service.
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(
+                message="Now I also need Jira.",
+                task_state="auth_required",
+                auth_payload=TestParkedOnAuthorization.AUTH_PAYLOAD,
+            )
+        )
+
+        answer = Message(
+            role=Role.ROLE_USER,
+            parts=[Part(data=ParseDict({"authorization": {"decision": "approved"}}, Value()))],
+            message_id="msg-chain",
+        )
+        answer.metadata.update(
+            {
+                "sub_agent_id": 5,
+                "scheduled_job_id": 10,
+                "scheduled_job_run_id": 653,  # the NEW run carrying the continued work
+            }
+        )
+
+        responses = []
+        async for r in agent_runner._stream_impl(
+            [answer], TestParkedOnAuthorization._user_config(), self._resume_task(652, 653)
+        ):
+            responses.append(r)
+
+        # Continued the task run 652 parked...
+        assert agent_runner._execute_sub_agent.await_args.kwargs["resume_task_id"] == (
+            core.scheduled_run_task_id("ctx-chain")
+        )
+
+        # ...and the new ask points at 653, the run that is waiting now.
+        parked = [json.loads(r.content) for r in responses if r.content.startswith("{")][-1]
+        assert parked["scheduler_status"] == "auth_required"
+        assert parked["reply_to"]["scheduled_job_run_id"] == 653
+        assert parked["scheduled_job_run_id"] == 653

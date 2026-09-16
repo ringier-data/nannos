@@ -78,3 +78,38 @@ describe('parseA2APushEvent', () => {
     expect(parseA2APushEvent({ statusUpdate: { taskId: 'x' } }).type).toBe('invalid'); // no status
   });
 });
+
+describe('a run parked on its owner authorization', () => {
+  // The push sender emits the parked run as a TaskStatusUpdateEvent, not a Task: only
+  // `completed` adds an artifact, so `auth_required` carries its whole payload — the ask,
+  // the parked task id, the reply target — in the status message. The callback route then
+  // decides whether the state is actionable, and `auth-required` has to be, because the
+  // job stays stopped until its owner answers.
+  test('a proto auth-required status update becomes an actionable task with its payload', () => {
+    const payload = JSON.stringify({
+      scheduler_status: 'auth_required',
+      agent_message: 'Nannos needs your permission to use gateway.',
+      parked_task_id: 'outer-task-1',
+      auth_payload: { requires_auth: true },
+    });
+    const event = parseA2APushEvent({
+      statusUpdate: {
+        taskId: 'outer-task-1',
+        contextId: 'ctx-parked',
+        status: {
+          state: 'TASK_STATE_AUTH_REQUIRED',
+          message: { parts: [{ text: payload }] },
+        },
+      },
+    });
+
+    expect(event.type).toBe('task');
+    if (event.type !== 'task') return;
+    // Hyphenated, which is what the route's actionable-state check must match.
+    expect(event.task.status.state).toBe('auth-required');
+    expect(event.task.id).toBe('outer-task-1');
+    expect(event.task.contextId).toBe('ctx-parked');
+    const part = event.task.status.message?.parts[0];
+    expect(part && 'text' in part ? JSON.parse(part.text).parked_task_id : null).toBe('outer-task-1');
+  });
+});

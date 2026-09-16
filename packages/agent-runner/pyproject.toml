@@ -26,6 +26,12 @@ dependencies = [
     "psycopg>=3.2.0",
     "psycopg-binary>=3.2.0",
     "psycopg-pool>=3.2.0",
+    # The A2A DatabaseTaskStore (agent/task_store.py) runs SQLAlchemy's asyncio engine,
+    # and that engine needs greenlet — which plain "sqlalchemy" does not pull in. It
+    # resolved locally only because something else in the tree happened to bring both;
+    # in the image it did not, and the first scheduled run died on "the greenlet library
+    # is required to use this function". The [asyncio] extra is what makes it explicit.
+    "sqlalchemy[asyncio]>=2.0.0",
     # HTTP client
     "httpx>=0.28.1",
     # Watch condition evaluation

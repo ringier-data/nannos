@@ -16,6 +16,7 @@ Now a run has the same shape as an orchestrator sub-agent (see ``agent_common``)
 * **Credentials** — a per-run :class:`UserTokenProvider`; tool connections carry no
   ``Authorization`` header, :func:`bearer_interceptor` mints one per call (memoised until
   ``MCP_TOKEN_LEEWAY_SECONDS`` before ``exp``), so a token expiring mid-run is re-minted.
+
 """
 
 from __future__ import annotations
@@ -112,6 +113,24 @@ class McpToolResolver:
         return catalogue
 
     # -- resolution ----------------------------------------------------------------------
+    async def resolve_all(self) -> list[BaseTool]:
+        """Every tool this user is offered, across both servers.
+
+        What an EMPTY whitelist means for a full-catalogue agent. The general-purpose
+        agent is configured with no tool list at all, and in a conversation that means
+        "everything" — the orchestrator hands it the whole registry as a lazy catalog.
+        A scheduled run of the same agent used to read the empty list as "nothing" and
+        run with no MCP tools whatsoever, so the agent would report that the tools it
+        was asked to use do not exist. Same agent, same configuration, opposite
+        capability depending on who started it.
+
+        Returned lazily (:class:`LazyMcpTool`), so nothing decodes a schema until it is
+        called: the caller passes these as a *catalog* the model searches, never as
+        tools bound into the graph — binding a whole gateway is what OOM-killed the
+        orchestrator before catalog mode existed.
+        """
+        return await self._resolve(None)
+
     async def resolve(self, wanted: Iterable[str]) -> list[BaseTool]:
         """Tools for ``wanted`` names: one ``tools/list`` per server the whitelist needs.
 
@@ -119,8 +138,13 @@ class McpToolResolver:
         is offered; names no server lists are logged and skipped (the whitelist filter the
         runner always applied).
         """
+        return await self._resolve(set(wanted))
+
+    async def _resolve(self, wanted: set[str] | None) -> list[BaseTool]:
+        """Shared listing. ``wanted is None`` means "everything this user is offered"."""
         started = time.monotonic()
-        names = set(wanted)
+        names = wanted if wanted is not None else set()
+        list_everything = wanted is None
         self.stats = {"source": {}}
         interceptors = [bearer_interceptor(self.token_provider, self.audience_for)]
         connections = {
@@ -129,7 +153,7 @@ class McpToolResolver:
                 (GATEWAY_SERVER, lambda n: not is_console_tool(n)),
                 (CONSOLE_SERVER, is_console_tool),
             )
-            if any(predicate(n) for n in names)
+            if list_everything or any(predicate(n) for n in names)
         }
 
         def _server_for(name: str) -> str:
@@ -146,7 +170,12 @@ class McpToolResolver:
         async with httpx.AsyncClient(timeout=self._timeout.total_seconds(), follow_redirects=True) as http_client:
             for server, connection in connections.items():
                 catalogue = await self._list_server(server, http_client)
-                for name in sorted(n for n in names if _server_for(n) == server):
+                server_names = (
+                    sorted(catalogue.tools)
+                    if list_everything
+                    else sorted(n for n in names if _server_for(n) == server)
+                )
+                for name in server_names:
                     entry = catalogue.tools.get(name)
                     if entry is None:
                         continue  # not offered to this user by this server
@@ -159,13 +188,13 @@ class McpToolResolver:
                         )
                     )
 
-        unresolved = names - {t.name for t in tools}
+        unresolved = set() if list_everything else names - {t.name for t in tools}
         self.stats["unresolved"] = sorted(unresolved)
         self.stats["seconds"] = round(time.monotonic() - started, 3)
         logger.info(
-            "Resolved %d/%d MCP tools in %.3fs via tools/list (%s)%s",
+            "Resolved %d/%s MCP tools in %.3fs via tools/list (%s)%s",
             len(tools),
-            len(names),
+            "all" if list_everything else len(names),
             self.stats["seconds"],
             ", ".join(f"{s}={src}" for s, src in self.stats["source"].items()) or "no listing",
             f"; not offered by any server: {sorted(unresolved)}" if unresolved else "",

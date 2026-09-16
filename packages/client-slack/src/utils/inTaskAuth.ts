@@ -49,24 +49,29 @@ export interface AuthPrompt {
  * in order"), but a card offers one way forward, and a method without a URL is
  * nothing a Slack button can act on.
  */
+export function authPromptFromPayload(data: Record<string, unknown> | undefined): AuthPrompt | null {
+  const requirement = data?.auth_requirement;
+  if (typeof requirement !== 'object' || requirement === null) return null;
+  const req = requirement as { service?: unknown; resource?: unknown; auth_methods?: unknown };
+  const methods = Array.isArray(req.auth_methods) ? req.auth_methods : [];
+  const withUrl = methods.find(
+    (m) => typeof (m as { auth_url?: unknown })?.auth_url === 'string' && (m as { auth_url: string }).auth_url
+  ) as { auth_url?: string } | undefined;
+  return {
+    ...(withUrl?.auth_url && { authUrl: withUrl.auth_url }),
+    // `resource` is the specific thing that needed the credential (the tool
+    // call); `service` is who it belongs to. The card names them differently.
+    ...(typeof req.resource === 'string' && req.resource && { tool: req.resource }),
+    ...(typeof req.service === 'string' && req.service && { service: req.service }),
+  };
+}
+
 function readAuthDataPart(parts: Part[] | undefined): AuthPrompt | null {
   for (const part of parts ?? []) {
     if (part.kind !== 'data') continue;
     const data = (part as { kind: 'data'; data: Record<string, unknown> }).data;
-    const requirement = data?.auth_requirement;
-    if (typeof requirement !== 'object' || requirement === null) continue;
-    const req = requirement as { service?: unknown; resource?: unknown; auth_methods?: unknown };
-    const methods = Array.isArray(req.auth_methods) ? req.auth_methods : [];
-    const withUrl = methods.find(
-      (m) => typeof (m as { auth_url?: unknown })?.auth_url === 'string' && (m as { auth_url: string }).auth_url
-    ) as { auth_url?: string } | undefined;
-    return {
-      ...(withUrl?.auth_url && { authUrl: withUrl.auth_url }),
-      // `resource` is the specific thing that needed the credential (the tool
-      // call); `service` is who it belongs to. The card names them differently.
-      ...(typeof req.resource === 'string' && req.resource && { tool: req.resource }),
-      ...(typeof req.service === 'string' && req.service && { service: req.service }),
-    };
+    const prompt = authPromptFromPayload(data);
+    if (prompt) return prompt;
   }
   return null;
 }
@@ -149,6 +154,20 @@ export interface AuthWidgetData extends AuthPrompt {
   contextId: string;
   channelId: string;
   threadTs: string;
+  /**
+   * Where the answer goes, when this ask came from a SCHEDULED run rather than a
+   * chat turn. Its presence is what routes the answer to console-backend instead of
+   * back into the conversation: a scheduled run's parked task cannot be answered by
+   * a chat turn, which arrives as new work and is rejected (ADR-0009).
+   */
+  replyTo?: Record<string, unknown>;
+  /**
+   * Why this ask exists, in words, when the caller knows. A scheduled run passes the
+   * job's name: "Nannos needs your permission" says nothing about WHICH of a person's
+   * jobs has stopped, and a job id is not something anyone recognises. Interactive
+   * chat leaves it unset — the user is looking at the conversation that caused it.
+   */
+  reason?: string;
   /** Existing plan-widget ts, carried through the resume. */
   planMessageTs?: string;
   /** Open thinking-steps stream ts, so the resume continues the same widget. */
@@ -173,6 +192,7 @@ export function buildAuthRequiredWidget(data: AuthWidgetData): any[] {
     channelId: data.channelId,
     threadTs: data.threadTs,
     subject,
+    ...(data.replyTo ? { replyTo: data.replyTo } : {}),
     ...(data.tool ? { tool: data.tool } : {}),
     ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
     ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
@@ -186,9 +206,13 @@ export function buildAuthRequiredWidget(data: AuthWidgetData): any[] {
         type: 'mrkdwn',
         text: [
           `*🔐 ${subject ? `Authorization needed for ${subject}` : 'Authorization needed'}*`,
+          // What is being authorized, then why it is being asked. Without the second
+          // line a scheduled ask arrives with no indication of which job stopped, and
+          // without the first it cannot say more than "permission to continue".
           data.tool
             ? `Nannos needs your permission to use \`${data.tool}\`.`
             : 'Nannos needs your permission before it can continue.',
+          ...(data.reason ? [data.reason] : []),
         ].join('\n'),
       },
     },

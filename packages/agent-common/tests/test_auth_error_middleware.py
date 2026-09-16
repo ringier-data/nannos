@@ -7,7 +7,7 @@ import pytest
 from a2a.types import TaskState
 from langchain_core.messages import ToolMessage
 
-from app.middleware.auth_error_middleware import _RETRY, AuthErrorDetectionMiddleware
+from agent_common.middleware.auth_error_middleware import _RETRY, AuthErrorDetectionMiddleware
 
 
 @pytest.fixture
@@ -353,7 +353,7 @@ async def test_unclear_resume_hands_the_reply_to_the_model(middleware):
     request = _resumable_request()
     handler = AsyncMock()
 
-    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
+    with patch("agent_common.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
         result = await middleware._after_auth_interrupt("damn I missclicked, try again", request, "github_get_me")
 
     handler.assert_not_awaited()
@@ -379,7 +379,7 @@ async def test_free_text_meaning_done_retries_the_tool(middleware):
     """
     request = _resumable_request()
 
-    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="approve")):
+    with patch("agent_common.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="approve")):
         result = await middleware._after_auth_interrupt("ok I logged in, go ahead", request, "github_get_me")
 
     assert result is _RETRY
@@ -390,7 +390,7 @@ async def test_free_text_meaning_no_is_a_refusal(middleware):
     request = _resumable_request()
     handler = AsyncMock()
 
-    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="reject")):
+    with patch("agent_common.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value="reject")):
         result = await middleware._after_auth_interrupt(
             "no, the permissions are too wide", request, "github_get_me"
         )
@@ -520,7 +520,7 @@ async def test_pending_reply_rules_them_out_too(middleware):
     """The unclear branch carried the same invitation."""
     request = _resumable_request("eval")
 
-    with patch("app.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
+    with patch("agent_common.middleware.auth_error_middleware.classify_reply", AsyncMock(return_value=None)):
         result = await middleware._after_auth_interrupt(
             "hmm let me think", request, "eval", AUTH_REQUIREMENT
         )
@@ -540,7 +540,7 @@ async def test_pending_reply_rules_them_out_too(middleware):
 def _authorization_answer(answer):
     """Patch the probe so the middleware sees this as the task's auth answer."""
     return patch(
-        "app.middleware.auth_error_middleware.pending_authorization_answer",
+        "agent_common.middleware.auth_error_middleware.pending_authorization_answer",
         return_value=answer,
     )
 

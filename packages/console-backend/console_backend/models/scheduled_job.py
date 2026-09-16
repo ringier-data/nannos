@@ -49,6 +49,15 @@ class JobRunStatus(str, Enum):
     #: it earns one fresh attempt. See
     #: docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md.
     INTERRUPTED = "interrupted"
+    #: A tool needed the job OWNER's credential and nothing in the runtime can
+    #: supply it. Neutral about the job like INTERRUPTED — no ``max_failures``,
+    #: no auto-pause — but it earns no retry, because a credential does not
+    #: arrive on ``retry_at``, and it HOLDS the job's schedule: ``claim_due_jobs``
+    #: will not claim the job again until the owner answers. That is what keeps a
+    #: blocked job from parking one occurrence per tick, each burning a full
+    #: dispatch and each leaving its own answerable card. See
+    #: docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
+    AUTH_REQUIRED = "auth_required"
 
 
 class RunTrigger(str, Enum):
@@ -60,6 +69,13 @@ class RunTrigger(str, Enum):
     SCHEDULED = "scheduled"
     RETRY = "retry"
     MANUAL = "manual"
+    #: The run an authorization answer creates when it continues a parked one. The
+    #: parked run is already terminal, so its row is not reopened. Behaves like
+    #: SCHEDULED — one fresh attempt if interrupted, and it earns that attempt
+    #: because by then the credential exists, so a fresh run no longer asks — but
+    #: it never advances ``next_run_at``, which the parked run already did. See
+    #: docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
+    RESUMED = "resumed"
 
 
 class ConditionEvaluation(BaseModel):
@@ -119,6 +135,37 @@ class ScheduledJobRun(BaseModel):
     #: interrupted run that was already the retry; cleared once the notice is delivered
     #: or abandoned.
     notice_due_at: datetime | None = None
+    #: The A2A task id of the parked agent-runner task, on a run that stopped waiting
+    #: for its owner. The run ends with that task left non-terminal on purpose: the
+    #: answer is a ``message/send`` addressed to it, which the request handler accepts
+    #: only while it has not reached a terminal state. Named for the mechanism — the
+    #: STATUS says which question is pending, and only ``AUTH_REQUIRED`` parks today.
+    parked_task_id: str | None = None
+    #: The extension payload delivered with the ask — for AUTH_REQUIRED, the in-task-auth
+    #: ``AuthPayload.client_payload()``. Stored so the console can render the same ask
+    #: the chat client rendered, rather than pointing the owner at a message elsewhere
+    #: to go and find.
+    parked_payload: dict[str, Any] | None = None
+
+
+class ResumeRunRequest(BaseModel):
+    """The owner's answer to a run parked on their authorization.
+
+    A decline is an answer, not an absence of one: it resumes the parked task too, so
+    the agent is told to stop and the run closes on its own terms rather than staying
+    parked on a question that has been settled.
+    """
+
+    #: Literal rather than str so the generated client cannot send a third word, and so
+    #: the two values match what every other surface already sends for this decision
+    #: (client-slack's ``authorizationDataPart``, the Embed SDK's auth card).
+    decision: Literal["approved", "declined"]
+    #: Where the ask was posted, so the resumed run's result can land as a REPLY to it
+    #: rather than as a loose message. Only the client that rendered the card knows this,
+    #: and only at the moment it is clicked — so it travels with the answer rather than
+    #: being stored when the ask went out. Opaque here: the scheduler passes it through
+    #: to the delivery channel, which is the only thing that can interpret it.
+    reply_to: dict[str, str] | None = None
 
 
 class RunNowResponse(BaseModel):
