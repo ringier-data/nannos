@@ -62,11 +62,6 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
   };
 }
 
-const MODELS = {
-  ClaudeSonnet45: 'claude-sonnet-4.5',
-  GPT4o: 'gpt4o',
-};
-
 /**
  * HTTP client to communicate with A2A server using @a2a-js/sdk
  */
@@ -163,7 +158,10 @@ export class A2AClientService {
         googleChatSpaceId: request.spaceId,
         googleChatThreadId: request.threadId,
         googleChatMessageId: request.messageId,
-        model: MODELS.ClaudeSonnet45,
+        // No `model` is sent on purpose: the orchestrator then runs the console's
+        // "chat" default slot (require_default_model), which an admin repoints when a
+        // model is retired. A hardcoded alias here outlives its registration on the
+        // gateway and 400s ("Invalid model name") for every user who never picked one.
         messageFormatting: 'google-chat',
       },
     };

@@ -114,11 +114,6 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
   };
 }
 
-const MODELS = {
-  ClaudeSonnet45: 'claude-sonnet-4.5',
-  GPT4o: 'gpt4o',
-};
-
 /**
  * HTTP client to communicate with A2A server using @a2a-js/sdk
  */
@@ -211,9 +206,11 @@ export class A2AClientService {
           ...(request.contextId && { contextId: request.contextId }),
         },
         metadata: {
+          // Deliberately no `model`: the orchestrator runs the console's "chat" default
+          // slot, which an admin repoints when a model is retired. See agent-common's
+          // require_default_model.
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
-          model: MODELS.ClaudeSonnet45,
           messageFormatting: 'markdown',
         },
       };
@@ -283,9 +280,11 @@ export class A2AClientService {
         ...(request.contextId && { contextId: request.contextId }),
       },
       metadata: {
+        // Deliberately no `model`: the orchestrator runs the console's "chat" default
+        // slot, which an admin repoints when a model is retired. See agent-common's
+        // require_default_model.
         senderEmail: request.senderEmail,
         emailSubject: request.subject,
-        model: MODELS.ClaudeSonnet45,
         messageFormatting: 'markdown',
       },
     };
@@ -336,9 +335,11 @@ export class A2AClientService {
           ...(request.contextId && { contextId: request.contextId }),
         },
         metadata: {
+          // Deliberately no `model`: the orchestrator runs the console's "chat" default
+          // slot, which an admin repoints when a model is retired. See agent-common's
+          // require_default_model.
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
-          model: MODELS.ClaudeSonnet45,
           messageFormatting: 'markdown',
         },
       };
@@ -652,9 +653,11 @@ export class A2AClientService {
           ...(request.contextId && { contextId: request.contextId }),
         },
         metadata: {
+          // Deliberately no `model`: the orchestrator runs the console's "chat" default
+          // slot, which an admin repoints when a model is retired. See agent-common's
+          // require_default_model.
           senderEmail: request.senderEmail,
           emailSubject: request.subject,
-          model: MODELS.ClaudeSonnet45,
           messageFormatting: 'markdown',
         },
         // Use proper A2A configuration for push notifications (not metadata)
