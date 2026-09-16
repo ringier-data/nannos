@@ -67,7 +67,11 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
   for (const bot of active) {
     try {
       await registerOne(deps, {
-        installationId: bot.botName,
+        // app_id, not bot_name: the Slack App ID is this table's primary key, is unique per
+        // workspace install, and is already what every other runtime path routes on. bot_name
+        // is a display string — two workspaces may legitimately both call their bot "Nannos",
+        // and keying on it silently collapsed them onto one channel and one secret.
+        installationId: bot.appId,
         name: `Slack ${bot.botName} (${bot.teamId})`,
         description: `Slack workspace ${bot.teamId} via ${bot.botName} (${bot.slashCommand})`,
       });

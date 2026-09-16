@@ -23,7 +23,7 @@ export interface Config {
   readonly googleChatConfigs: {
     projectName: string;
     projectNumber: string; // GCP project number for verifying Google-signed tokens
-    botName: string; // Bot display name; used as the installation_id for delivery-channel registration
+    botName: string; // Bot display name — cosmetic only, never a lookup key
     googleApplicationCredentials: any;
   }[];
   readonly storage: StorageConfig;
@@ -95,9 +95,9 @@ export async function getConfigFromEnv(): Promise<Config> {
     if (!process.env[envVarName]) {
       throw new Error(`Please provide ${envVarName}`);
     }
-    // bot_name is load-bearing: it is the installation_id used for delivery-channel
-    // registration and the SSM key for the inbound notification secret. A missing
-    // value would silently break both, so fail fast at startup instead.
+    // bot_name is only a display string now — projectName is the tenant key — but it still
+    // labels the channel in the console, so an absent one leaves an unidentifiable channel.
+    // Fail fast rather than registering it.
     if (!project.bot_name) {
       throw new Error(`Missing bot_name for Google Chat project '${project.name}' in GCP_CHAT_PROJECTS`);
     }

@@ -55,7 +55,9 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
   for (const project of config.googleChatConfigs) {
     try {
       await registerOne(deps, {
-        installationId: project.botName,
+        // The GCP project name identifies the tenant; bot_name is a display string two
+        // projects may legitimately share, which collapsed them onto one channel and secret.
+        installationId: project.projectName,
         name: `Google Chat ${project.botName} (${project.projectName})`,
         description: `Google Chat project ${project.projectName} via ${project.botName}`,
       });
