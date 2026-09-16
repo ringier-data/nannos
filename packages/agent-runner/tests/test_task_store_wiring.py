@@ -47,3 +47,48 @@ class TestBothStoresAreDurable:
         # in different tables and only one of them would survive.
         assert "set_local_task_store(task_store)" in src
         assert "task_store=task_store," in src
+
+
+class TestDurabilityIsGatedTheSameWayTheCheckpointerIs:
+    """A password must not decide whether the task store is durable.
+
+    ``core.py``'s checkpointer asks only for ``POSTGRES_HOST``. If the store asked for a
+    password too, an IAM / trust / .pgpass deployment would get a durable checkpointer
+    beside a volatile store — the split ADR-0009 decision 3 forbids. It fails only at the
+    moment it matters: a restart between the park and the answer leaves the graph
+    resumable and the task it is addressed by gone.
+    """
+
+    def test_a_passwordless_host_still_gets_the_durable_store(self, monkeypatch):
+        from agent import task_store as ts
+
+        monkeypatch.setenv("POSTGRES_HOST", "db.internal")
+        monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+        monkeypatch.delenv("POSTGRES_SCHEMA", raising=False)
+
+        store, engine = ts.create_task_store()
+        try:
+            assert engine is not None, "a passwordless host fell back to the in-memory store"
+            assert store.__class__.__name__ == "DatabaseTaskStore"
+        finally:
+            if engine is not None:
+                engine.sync_engine.dispose()
+
+    def test_no_host_is_the_only_in_memory_case(self, monkeypatch):
+        from agent import task_store as ts
+
+        monkeypatch.delenv("POSTGRES_HOST", raising=False)
+        store, engine = ts.create_task_store()
+        assert engine is None
+        assert store.__class__.__name__ == "InMemoryTaskStore"
+
+    def test_the_configured_schema_pins_the_search_path(self):
+        """Without this the table lands in the role default, where another replica's
+        search_path may not find it."""
+        from agent import task_store as ts
+
+        assert ts.schema_connect_args("nannos_runner") == {"options": "-csearch_path=nannos_runner"}
+        # Unset means "whatever the role defaults to", which is the pre-existing
+        # single-environment behaviour and must not become a literal empty search_path.
+        assert ts.schema_connect_args(None) == {}
+        assert ts.schema_connect_args("") == {}

@@ -29,7 +29,7 @@ from console_backend.repositories.scheduled_job_repository import ScheduledJobRe
 from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
 
 from console_backend.services.watch_evaluator import WatchOutcome
-from console_backend.services.scheduler_engine import AlreadyAnswered, SchedulerEngine
+from console_backend.services.scheduler_engine import SchedulerEngine
 from console_backend.services.scheduler_token_service import SchedulerTokenService
 from console_backend.utils.a2a_dispatch import AgentUnreachable
 from sqlalchemy import text
@@ -195,6 +195,58 @@ class TestParseResult:
         outcome = self.engine._parse_result(data)
 
         assert outcome.status == JobRunStatus.FAILED
+
+    def test_an_unparseable_park_is_not_recorded_green(self):
+        """The dangerous input is the status text that does NOT parse as JSON.
+
+        A park whose payload is prose, truncated, or written by an older runner has no
+        ``scheduler_status`` at all. Defaulting every non-failed task state to success
+        recorded it as a plain SUCCESS: ``consecutive_failures`` reset, the ask dropped,
+        and the run green — the exact outcome ADR-0009 exists to abolish, on the one path
+        where nothing is left to resume it with. It is a failure, which at least counts.
+        """
+        data = {
+            "result": {
+                "kind": "task",
+                "status": {"state": "auth_required"},
+                "artifacts": [{"parts": [{"kind": "text", "text": "I need you to log in first."}]}],
+            }
+        }
+        outcome = self.engine._parse_result(data)
+
+        assert outcome.status == JobRunStatus.FAILED
+        assert outcome.parked_task_id is None
+
+    def test_a_park_that_names_its_task_is_still_a_park(self):
+        """The guard above must not swallow the good case."""
+        import json as _json
+
+        data = {
+            "result": {
+                "kind": "task",
+                "status": {"state": "auth_required"},
+                "artifacts": [
+                    {
+                        "parts": [
+                            {
+                                "kind": "text",
+                                "text": _json.dumps(
+                                    {
+                                        "scheduler_status": "auth_required",
+                                        "parked_task_id": "task-abc",
+                                        "agent_message": "Authorize GitHub to continue.",
+                                    }
+                                ),
+                            }
+                        ]
+                    }
+                ],
+            }
+        }
+        outcome = self.engine._parse_result(data)
+
+        assert outcome.status == JobRunStatus.AUTH_REQUIRED
+        assert outcome.parked_task_id == "task-abc"
 
 
 def _pg_engine(pg_session: AsyncSession) -> SchedulerEngine:
@@ -1564,8 +1616,13 @@ class TestAnAskIsAnsweredOnce:
             delivered=True,
             parked_task_id=None,  # claimed by whoever answered first
         )
-        with pytest.raises(AlreadyAnswered):
-            await engine.resume_parked_run(TestAutoPauseIsNotSilent._job(), answered, "approved")
+        # Logged and refused, not raised: this body runs as a Starlette background task,
+        # where an exception escapes into nothing at all. Nothing is dispatched and no run
+        # row is opened for an answer there was no question for.
+        engine._repo.create_run = AsyncMock()
+        result = await engine.resume_parked_run(TestAutoPauseIsNotSilent._job(), answered, "approved")
+        assert result == 616
+        engine._repo.create_run.assert_not_awaited()
 
 
 class TestOnlyOneRunIsEverParked:

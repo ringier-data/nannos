@@ -670,13 +670,22 @@ class TestParkedOnAuthorization:
 
     @pytest.mark.asyncio
     async def test_a_park_with_no_ask_is_not_a_park(self, agent_runner):
-        """Parking with nothing to ask would stop the job on an unanswerable question."""
+        """Parking with nothing to ask would stop the job on an unanswerable question.
+
+        It is reported as a FAILURE, not as a success. The owner has nothing to click,
+        so holding the schedule would stop the job on a question nobody was asked — but
+        recording it green would reset ``consecutive_failures`` on a run that did
+        nothing, which is the silently-green run this ADR exists to abolish. A failure
+        at least retries, and counts.
+        """
         agent_runner._execute_sub_agent = AsyncMock(
             return_value=core.SubAgentRun(message="blocked", task_state="auth_required", auth_payload=None)
         )
         items, responses = await self._run(agent_runner, self._task(), [Part(text="Do the thing.")])
         assert not any(i.get("scheduler_status") == "auth_required" for i in items)
-        assert responses[-1].state == TaskState.TASK_STATE_COMPLETED
+        assert responses[-1].state == TaskState.TASK_STATE_FAILED
+        failed = next(i for i in items if i.get("scheduler_status") == "failed")
+        assert failed["error_message"] == "Stopped for authorization but produced no ask to answer"
 
     @pytest.mark.asyncio
     async def test_an_authorization_answer_resumes_the_task_the_run_parked(self, agent_runner):

@@ -204,6 +204,19 @@ class ScheduledJobRepository(AuditedRepository):
         by the healer within about a minute; a healthy one keeps the job for as long
         as it runs, so runs of the same job never overlap.
 
+        A run parked on its owner holds the schedule the same way — but the two are
+        not tested the same way. ``running`` is a status a run leaves; ``auth_required``
+        is one it keeps for good, as a true record of how that occurrence ended. So
+        what holds the schedule is an *answerable* park, ``parked_task_id IS NOT NULL``,
+        cleared the moment somebody answers — the same key ``answerable_parked_run``
+        uses. Testing the status alone would mean the first park stopped the job
+        forever: still enabled, never claimed, no pause notification, silent.
+
+        The two are separate ``NOT EXISTS`` clauses rather than one ``status IN (…)``
+        because a partial index cannot serve an ``IN`` predicate. Split, each arm is an
+        index probe (``idx_scheduled_job_runs_running``, ``idx_scheduled_job_runs_parked``)
+        instead of a scan of the job's whole run history, per candidate job, per tick.
+
         ``retry_at`` is cleared on claim, so an attempt is handed out once even if
         several schedulers tick together.
         """
@@ -221,7 +234,13 @@ class ScheduledJobRepository(AuditedRepository):
                   AND NOT EXISTS (
                         SELECT 1 FROM scheduled_job_runs r
                         WHERE r.job_id = j.id
-                          AND r.status IN ('running', 'auth_required')
+                          AND r.status = 'running'
+                  )
+                  AND NOT EXISTS (
+                        SELECT 1 FROM scheduled_job_runs r
+                        WHERE r.job_id = j.id
+                          AND r.status = 'auth_required'
+                          AND r.parked_task_id IS NOT NULL
                   )
                 ORDER BY COALESCE(j.retry_at, j.next_run_at) ASC
                 LIMIT :limit
@@ -504,6 +523,16 @@ class ScheduledJobRepository(AuditedRepository):
         purpose and are not quietly resumed. A stale ``retry`` run has exhausted
         recovery, so it is marked as owing the user a notice at *notice_due_at*
         instead. A ``manual`` run earns neither: the user was present.
+
+        A ``resumed`` run earns the attempt too (ADR-0009 decision 7). Nobody is present
+        — the click that started it is long gone — and the ask it answered has already
+        been consumed, so without this the job would stop for good on an authorization
+        that actually succeeded. The fresh attempt is cheap by then: the credential is
+        stored at the gateway, so an ordinary occurrence no longer blocks on it and
+        recovers the work the resume was carrying. This is also what makes the window
+        between claiming the ask and dispatching the resume survivable — the run row is
+        written with the claim, so a process that dies in between leaves a stale
+        ``running`` row here rather than nothing at all.
         """
         result = await db.execute(
             text("""
@@ -528,7 +557,7 @@ class ScheduledJobRepository(AuditedRepository):
                         updated_at = NOW()
                     FROM stale
                     WHERE j.id = stale.job_id
-                      AND stale.trigger = 'scheduled'
+                      AND stale.trigger IN ('scheduled', 'resumed')
                       AND j.deleted_at IS NULL
                       AND j.paused_reason IS NULL
                     RETURNING j.id

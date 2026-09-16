@@ -87,15 +87,6 @@ export function registerInTaskAuthActions(
             );
             return;
           }
-          await recordDecision(
-            client,
-            channelId,
-            messageTs,
-            decoded.streamMessageTs,
-            decision === 'approved' ? 'Authorized' : 'Authorization declined',
-            subject || tool || undefined,
-            decision === 'approved'
-          );
           const outcome = await resumeService.resume(
             userId,
             (body as any).team?.id || '',

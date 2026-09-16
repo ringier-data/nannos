@@ -925,7 +925,15 @@ class AgentRunner(BaseAgent):
         # client parses part zero as this JSON, and a client that has not learned the
         # in-task-auth card still has to be able to post something the owner can act on.
         parked = sub_agent_task_state == "auth_required"
-        if parked and not auth_payload:
+        # A park the owner cannot answer is not a park. Reaching this means the agent
+        # stopped on KIND_AUTH but no ask survived (``auth_info`` metadata missing, or
+        # ``AuthPayload(**auth_info)`` raising), so there is nothing to deliver and
+        # nothing to click. Recording it green would reset ``consecutive_failures`` on a
+        # run that did nothing, and recording it as a park would hold the job's schedule
+        # on a question nobody was asked — the two failures this ADR exists to abolish,
+        # arriving together. It is reported as a failure, which at least retries.
+        park_without_ask = parked and not auth_payload
+        if park_without_ask:
             logger.warning(
                 "Job %s parked on authorization but produced no ask; the owner would have "
                 "nothing to answer, so this is reported as a failure instead",
@@ -941,7 +949,7 @@ class AgentRunner(BaseAgent):
         # silently-green run this ADR exists to abolish, arriving through the ADR's own
         # refactor. The task state is the authority on how the run ended; the status
         # follows it.
-        failed = sub_agent_task_state == "failed"
+        failed = sub_agent_task_state == "failed" or park_without_ask
 
         result_meta = {
             "scheduler_status": (
@@ -960,8 +968,20 @@ class AgentRunner(BaseAgent):
             "task_state": sub_agent_task_state,
             # Same text as agent_message, under the key a failure is read from. The
             # error branch above sets both for a raised exception; a sub-agent that
-            # reported its own failure has to be told apart the same way.
-            **({"error_message": agent_message} if failed else {}),
+            # reported its own failure has to be told apart the same way. A park with
+            # no ask has no message of its own worth forwarding, so it says what
+            # happened rather than passing on whatever prose the model left behind.
+            **(
+                {
+                    "error_message": (
+                        "Stopped for authorization but produced no ask to answer"
+                        if park_without_ask
+                        else agent_message
+                    )
+                }
+                if failed
+                else {}
+            ),
             "user_sub": user_config.user_sub,
             "sub_agent_name": sub_agent_name,
             "prompt": prompt,

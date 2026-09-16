@@ -41,9 +41,14 @@ ALTER TABLE scheduled_job_runs
 -- The set claim_due_jobs scans to decide whether a job is blocked on its owner.
 -- Mirrors idx_scheduled_job_runs_running: a parked run holds the job's schedule
 -- exactly as a running one does, so the guard needs both lookups to be cheap.
+--
+-- parked_task_id IS NOT NULL is part of the predicate, not just of the query.
+-- 'auth_required' is a status a run keeps forever, so indexing on it alone would
+-- accumulate every occurrence that ever parked; what holds the schedule, and what
+-- answerable_parked_run looks for, is the far smaller set still awaiting an answer.
 CREATE INDEX idx_scheduled_job_runs_parked
     ON scheduled_job_runs (job_id, started_at)
-    WHERE status = 'auth_required';
+    WHERE status = 'auth_required' AND parked_task_id IS NOT NULL;
 
 -- rambler down
 

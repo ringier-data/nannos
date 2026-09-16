@@ -93,16 +93,6 @@ NOTICE_RETRY_INTERVAL_SECONDS = 300
 NOTICE_GIVE_UP_AFTER_SECONDS = 3600
 
 
-class AlreadyAnswered(Exception):
-    """The parked run this answer is for is no longer waiting for one.
-
-    An ordinary outcome, not a fault: cards are durable and clicks are late, so the same
-    ask can be answered twice — from the chat card and the console, or simply twice by a
-    person who did not see the first take effect. The second answer must do nothing
-    rather than resume a task that has since gone terminal.
-    """
-
-
 @dataclass(frozen=True)
 class DispatchOutcome:
     """What one dispatch to agent-runner reported back.
@@ -387,6 +377,7 @@ class SchedulerEngine:
         parked_run: ScheduledJobRun,
         decision: str,
         reply_to: dict[str, str] | None = None,
+        run_id: int | None = None,
     ) -> int:
         """Answer a run parked on its owner, and run it to completion. Returns the new run id.
 
@@ -403,23 +394,47 @@ class SchedulerEngine:
         owns, and a client holding the stream on a floating promise owns none of it — an
         agent-runner that died mid-resume would leave no record the run was ever attempted.
 
-        The caller has already CLAIMED the ask (``clear_parked_task``), so this is only
-        ever reached once per parked run — which is what stops a second click resuming a
-        task that has since gone terminal.
+        The caller has already CLAIMED the ask (``clear_parked_task``) and written the
+        run row this continues under (*run_id*), in one transaction, so this is only ever
+        reached once per parked run — which is what stops a second click resuming a task
+        that has since gone terminal — and a process that dies before reaching here
+        leaves a stale ``running`` row the healer can recover instead of nothing at all.
+        *run_id* is optional only for direct callers in tests; the router always supplies
+        it.
 
         *decision* is passed through as the agent sees it. A decline resumes the task too:
         the agent is told to stop and the run closes on its own terms, instead of staying
         parked on a question that has been answered.
         """
+        # Not a race gate — the router's conditional ``clear_parked_task`` is, and it runs
+        # before this. It reads the PRE-clear snapshot it was handed, so on the production
+        # path the task id is always still set here and this never fires; it is a
+        # sanity check for a direct caller that assembled a run object by hand. Logged
+        # rather than raised: this body runs as a Starlette background task, where an
+        # exception escapes into nothing and the run row would be left running forever.
         if parked_run.status != JobRunStatus.AUTH_REQUIRED or not parked_run.parked_task_id:
-            raise AlreadyAnswered(f"Run {parked_run.id} of job {job.id} is not waiting for an answer")
+            logger.error(
+                "Refusing to resume run %d of job %d: it is not waiting for an answer",
+                parked_run.id,
+                job.id,
+            )
+            if run_id is not None:
+                await self._finalize(
+                    run_id=run_id,
+                    job=job,
+                    status=JobRunStatus.FAILED,
+                    error_message="This run was not waiting for an answer.",
+                    delivered=False,
+                    trigger=RunTrigger.RESUMED,
+                )
+            return run_id or parked_run.id
 
-        run_id: int | None = None
         heartbeat: asyncio.Task[None] | None = None
         try:
-            async with self._db_session_factory() as db:
-                run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
-                await db.commit()
+            if run_id is None:
+                async with self._db_session_factory() as db:
+                    run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
+                    await db.commit()
 
             logger.info(
                 "Resuming job %d run %d (%s) as run %d on parked task %s",
@@ -464,11 +479,6 @@ class SchedulerEngine:
                     if reply_to:
                         metadata["reply_to_message"] = reply_to
 
-            # The run id in the metadata stays the PARKED run's. agent-runner derives the
-            # sub-agent's task id from (context_id, scheduled_job_run_id), so sending the
-            # new run's id would name a task that never existed and open a second one on a
-            # thread that is already parked. The new run is this engine's bookkeeping; the
-            # work being continued is still the parked occurrence's.
             parts = [
                 {"kind": "data", "data": {"authorization": {"decision": decision}}},
                 {"kind": "text", "text": _AUTH_RESUME_TEXT[decision]},
@@ -982,6 +992,16 @@ class SchedulerEngine:
                     meta.setdefault("scheduler_status", "failed")
                 elif task_state == "completed":
                     meta.setdefault("scheduler_status", "success")
+                elif task_state == "auth_required":
+                    # This is the arm that reaches here: a park whose status text did not
+                    # parse as JSON (prose, truncation, an older runner) has no
+                    # ``scheduler_status`` at all, and defaulting it to success would
+                    # record a parked run green, reset ``consecutive_failures`` and drop
+                    # the ask. Say what the task state said, and let the parked_task_id
+                    # guard below decide — with nothing parsed there is no task id, so it
+                    # resolves to a failure, which is the honest reading of a park nobody
+                    # can answer.
+                    meta.setdefault("scheduler_status", "auth_required")
                 else:
                     meta.setdefault("scheduler_status", "success")
 
@@ -1212,6 +1232,11 @@ class SchedulerEngine:
                 "status": status.value,
                 "result_summary": result_summary,
                 "error_message": error_message,
+                # The badge cannot be derived from the status alone: a run keeps
+                # 'auth_required' after it is answered, so "still waiting" is the task
+                # id. Without it here a parked run-now renders in the past tense
+                # ("Stopped for authorization") until the polled table corrects it.
+                "parked_task_id": parked_task_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 

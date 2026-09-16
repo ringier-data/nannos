@@ -75,6 +75,10 @@ interface SchedulerNotification {
   status: JobRunStatus;
   result_summary?: string;
   error_message?: string;
+  // Carried because the badge cannot be derived from the status alone: a run keeps
+  // `auth_required` after it is answered, so "still waiting" is the task id. Without it
+  // a run-now that parks renders in the past tense until the polled table corrects it.
+  parked_task_id?: string | null;
   timestamp: string;
 }
 
@@ -83,6 +87,7 @@ interface RunNowResult {
   result_summary?: string | null;
   error_message?: string | null;
   delivered?: boolean | null;
+  parked_task_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------

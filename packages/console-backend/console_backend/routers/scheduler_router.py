@@ -1113,8 +1113,10 @@ async def resume_job(
         "Continues a run that stopped because a tool needed the owner's credential. The "
         "answer is delivered to the parked agent-runner task, the agent retries what was "
         "blocked (or is told to stop, on a decline), and the result is delivered to the "
-        "job's channel like any other run. Returns 202 with the id of the new run that "
-        "carries the continued work; the parked run keeps its own record.\n\n"
+        "job's channel like any other run. Returns 202 with the id of the new RESUMED run "
+        "that carries the continued work — it is created before this responds, so the id "
+        "is real and pollable; the parked run keeps its own record and stays "
+        "`auth_required` for good.\n\n"
         "This is the endpoint the in-task-auth card posts to. It exists because a chat "
         "turn cannot answer a parked scheduled run — the orchestrator would open a new "
         "task on a thread that is already waiting, and the executor rejects it."
@@ -1163,10 +1165,20 @@ async def resume_parked_run(
             status_code=status.HTTP_409_CONFLICT,
             detail="This run has already been answered.",
         )
+    # The resumed run row is written in the SAME transaction that consumes the ask, so
+    # the two cannot come apart. Backgrounding the insert instead left a window — a pod
+    # roll or an OOM between the commit and the task — where the ask was spent and no run
+    # existed: the card vanished (it needs ``parked_task_id``), a second click 409'd, and
+    # nothing swept it, because the healer only looks at ``running`` rows. Writing the row
+    # here means a death in that window leaves exactly such a row, and a ``resumed`` run
+    # earns the fresh attempt ADR-0007 gives any interrupted one.
+    resumed_run_id = await engine._repo.create_run(db, job_id, trigger=RunTrigger.RESUMED)
     await db.commit()
 
-    background_tasks.add_task(engine.resume_parked_run, job, run, body.decision, body.reply_to)
-    return RunNowResponse(job_id=job_id, run_id=run_id, status="resuming")
+    background_tasks.add_task(
+        engine.resume_parked_run, job, run, body.decision, body.reply_to, resumed_run_id
+    )
+    return RunNowResponse(job_id=job_id, run_id=resumed_run_id, status="resuming")
 
 
 @router.get(
