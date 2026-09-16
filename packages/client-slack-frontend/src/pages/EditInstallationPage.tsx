@@ -33,8 +33,15 @@ export function EditInstallationPage() {
 
   const handleSubmit = async (data: InstallationFormData) => {
     if (!appId) return
+    // Spelled out rather than spread from `data`: the form is shared with the create flow, so
+    // it carries `appId`, which here belongs in the path and is rejected as an unknown property
+    // by the update schema. Listing the fields keeps that contract visible at the call site.
     const body = {
-      ...data,
+      teamId: data.teamId,
+      botToken: data.botToken,
+      signingSecret: data.signingSecret,
+      botName: data.botName,
+      slashCommand: data.slashCommand,
       avatarUrl: data.avatarUrl || undefined,
     }
     const res = await client.put({
