@@ -50,24 +50,27 @@ export interface AuthPrompt {
  * in order"), but a card offers one way forward, and a method without a URL is
  * nothing a Slack button can act on.
  */
+export function authPromptFromPayload(data: Record<string, unknown> | undefined): AuthPrompt | null {
+  const requirement = data?.auth_requirement;
+  if (typeof requirement !== 'object' || requirement === null) return null;
+  const req = requirement as { service?: unknown; resource?: unknown; auth_methods?: unknown };
+  const methods = Array.isArray(req.auth_methods) ? req.auth_methods : [];
+  const withUrl = methods.find(
+    (m) => typeof (m as { auth_url?: unknown })?.auth_url === 'string' && (m as { auth_url: string }).auth_url
+  ) as { auth_url?: string } | undefined;
+  return {
+    ...(withUrl?.auth_url && { authUrl: withUrl.auth_url }),
+    ...(typeof req.resource === 'string' && req.resource && { tool: req.resource }),
+    ...(typeof req.service === 'string' && req.service && { service: req.service }),
+  };
+}
+
 function readAuthDataPart(parts: Part[] | undefined): AuthPrompt | null {
   for (const part of parts ?? []) {
     if (part.kind !== 'data') continue;
     const data = (part as { kind: 'data'; data: Record<string, unknown> }).data;
-    const requirement = data?.auth_requirement;
-    if (typeof requirement !== 'object' || requirement === null) continue;
-    const req = requirement as { service?: unknown; resource?: unknown; auth_methods?: unknown };
-    const methods = Array.isArray(req.auth_methods) ? req.auth_methods : [];
-    const withUrl = methods.find(
-      (m) => typeof (m as { auth_url?: unknown })?.auth_url === 'string' && (m as { auth_url: string }).auth_url
-    ) as { auth_url?: string } | undefined;
-    return {
-      ...(withUrl?.auth_url && { authUrl: withUrl.auth_url }),
-      // `resource` is the specific thing that needed the credential (the tool
-      // call); `service` is who it belongs to. The card names them differently.
-      ...(typeof req.resource === 'string' && req.resource && { tool: req.resource }),
-      ...(typeof req.service === 'string' && req.service && { service: req.service }),
-    };
+    const prompt = authPromptFromPayload(data);
+    if (prompt) return prompt;
   }
   return null;
 }

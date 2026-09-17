@@ -18,6 +18,7 @@ import {
   generateConditionApiV1SchedulerGenerateConditionPost,
   generateJobDraftApiV1SchedulerGenerateJobDraftPost,
   invokeMcpToolApiV1McpToolsInvokePost,
+  resumeParkedRunApiV1SchedulerJobsJobIdRunsRunIdResumePost,
   validateArgsExprApiV1SchedulerValidateArgsExprPost,
   validateConditionApiV1SchedulerValidateConditionPost,
 } from './generated/sdk.gen';
@@ -380,6 +381,30 @@ export async function runJobNow(jobId: number): Promise<RunNowResponse> {
   const { data, error } = await (client as any).post({
     url: `/api/v1/scheduler/jobs/${jobId}/run-now`,
     body: {},
+  });
+  if (error) throw new Error(formatApiError(error));
+  return data as RunNowResponse;
+}
+
+/**
+ * Answer a run parked on the owner's authorization.
+ *
+ * The console is the second surface for this ask — the first is the job's delivery
+ * channel, where most owners live. It matters that it is offered here too: a person
+ * looking at a stopped job should be able to restart it from the page that told them
+ * it was stopped, rather than be sent to find a chat message.
+ *
+ * Goes through the generated operation rather than a raw post: the body is a single
+ * literal union the backend already describes, so there is nothing wider to carry.
+ */
+export async function resumeParkedRun(
+  jobId: number,
+  runId: number,
+  decision: 'approved' | 'declined',
+): Promise<RunNowResponse> {
+  const { data, error } = await resumeParkedRunApiV1SchedulerJobsJobIdRunsRunIdResumePost({
+    path: { job_id: jobId, run_id: runId },
+    body: { decision },
   });
   if (error) throw new Error(formatApiError(error));
   return data as RunNowResponse;

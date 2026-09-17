@@ -26,23 +26,27 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import httpx
 from a2a.types import AgentCard, Message, Task, TaskState
+from agent_common.a2a.authentication import AuthPayload
 from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.config import A2AClientConfig
 from agent_common.a2a.factory import make_a2a_async_runnable
-from agent_common.a2a.models import LocalFoundrySubAgentConfig
+from agent_common.a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
 from agent_common.a2a.stream_events import ArtifactUpdate, ErrorEvent, TaskResponseData, TaskUpdate
-from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM, SubAgentResponseSchema, get_response_format
+from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM
 from agent_common.a2a.threads import local_sub_agent_thread_id
+from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import create_foundry_local_subagent
 from agent_common.core.document_store_tools import create_document_store_tools
-from agent_common.core.graph_utils import build_sub_agent_graph
+from agent_common.core.graph_utils import create_indexing_backend_factory
 from agent_common.core.message_formatting import (
     formatting_prompt_block,
     formatting_rules,
@@ -56,15 +60,16 @@ from agent_common.core.model_factory import (
 )
 from agent_common.core.step_budget import (
     DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS,
-    recursion_limit_for,
     resolve_max_model_calls,
 )
-from agent_common.core.stream_watchdog import watch_stream_with_resume
 from agent_common.core.token_provider import DEFAULT_LEEWAY_S, UserTokenProvider
 from agent_common.core.tool_catalogue import sanitize_tool_name
+from agent_common.middleware.auth_error_middleware import AuthErrorDetectionMiddleware
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Struct
 from object_storage import get_object_storage_service
+
+from agent.mcp_tools import McpToolResolver
 
 if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
@@ -77,8 +82,6 @@ from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
-
-from agent.mcp_tools import McpToolResolver
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +117,8 @@ _MAX_MODEL_CALLS_ENV = "AGENT_RUNNER_MAX_MODEL_CALLS_PER_TURN"
 _MAX_MODEL_CALLS_PER_TURN = resolve_max_model_calls(
     _MAX_MODEL_CALLS_ENV, DEFAULT_SCHEDULED_RUN_MAX_MODEL_CALLS
 )
+
+
 
 
 def _build_postgres_conn() -> str | None:
@@ -174,6 +179,25 @@ def _create_checkpointer() -> tuple[MemorySaver, AsyncConnectionPool | None]:
         schema or "<role default>",
     )
     return MemorySaver(), pool
+
+
+def _authorization_answer(messages: list[Message]) -> dict[str, Any] | None:
+    """The ``{"authorization": {...}}`` DataPart, when this dispatch is an answer.
+
+    The scheduler sends it when the owner has answered a parked run. Its presence is
+    what tells this dispatch apart from fresh work: the same job, the same sub-agent
+    and the same prompt would otherwise open a second task on a thread that is already
+    waiting, and the executor would reject it.
+    """
+    for message in messages:
+        for part in message.parts:
+            if part.WhichOneof("content") != "data":
+                continue
+            data = MessageToDict(part.data)
+            authorization = data.get("authorization") if isinstance(data, dict) else None
+            if isinstance(authorization, dict):
+                return authorization
+    return None
 
 
 def _extract_text_from_message(message: Message) -> str:
@@ -238,12 +262,19 @@ def _build_sub_agent_system_prompt(system_prompt: str, message_formatting: str) 
     return "\n\n".join(parts)
 
 
-def _extract_message_metadata(task: Task) -> dict[str, Any]:
-    """Extract scheduler metadata from the A2A task's message history.
+def _extract_message_metadata(task: Task, messages: list[Message] | None = None) -> dict[str, Any]:
+    """Extract scheduler metadata from the message being handled.
 
-    The scheduler engine injects metadata (user_access_token, sub_agent_id,
-    scheduled_job_id, scheduled_job_run_id) into the A2A message.
-    These end up in task.history[-1].metadata when the message is processed.
+    The scheduler engine injects metadata (sub_agent_id, scheduled_job_id,
+    scheduled_job_run_id, messageFormatting) into the A2A message it sends.
+
+    *messages* — what this invocation was actually given — is read first, and the task's
+    history only as a fallback. Reading history alone was correct exactly while every
+    dispatch opened a fresh task, and silently wrong the moment one CONTINUED a task:
+    a resumed run's history ends with the AGENT's own last message (the auth_required
+    payload), not the user's new one, so every id came back None. The run then took the
+    no-sub-agent branch and echoed the authorization answer back as its result — a
+    "successful" run that did none of the work it was resumed to finish.
 
     SECURITY NOTE: user_id is NOT extracted from message metadata as it would be
     unverified user input. Instead, fetch it from agent-console backend using the
@@ -255,67 +286,196 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
     Returns:
         Dict of scheduler metadata, or empty dict if not found.
     """
+    def _as_dict(meta: Any) -> dict[str, Any]:
+        # Over gRPC the metadata is a protobuf Struct; dict() would only convert the
+        # top level, leaving nested values as Structs that support ["key"] but not
+        # .get(). Convert the whole tree to plain Python instead.
+        return MessageToDict(meta) if isinstance(meta, Struct) else dict(meta)
+
     try:
-        if task.history:
-            last_msg = task.history[-1]
+        for message in reversed(messages or []):
+            if getattr(message, "metadata", None):
+                return _as_dict(message.metadata)
+        # Fallback: the last message in history that carries any. Walked backwards
+        # rather than taking [-1], so an agent message appended after the user's does
+        # not hide it.
+        for last_msg in reversed(list(task.history or [])):
             if hasattr(last_msg, "metadata") and last_msg.metadata:
                 meta = last_msg.metadata
-                # Over gRPC the metadata is a protobuf Struct; dict() would only
-                # convert the top level, leaving nested values as
-                # Structs that support ["key"] but not .get(). Convert the whole
-                # tree to plain Python instead.
-                if isinstance(meta, Struct):
-                    return MessageToDict(meta)
-                return dict(meta)
+                return _as_dict(meta)
     except Exception:
-        pass
+        logger.exception("Could not read scheduler metadata off the incoming message")
     return {}
 
 
 # A2A task states worth reporting as a run's terminal task_state (see
-# _collect_stream_text). Non-terminal states (working, ...) map to None:
+# _collect_sub_agent_run). Non-terminal states (working, ...) map to None:
 # they carry no information about how the run ended.
+#
+# ``auth_required`` is terminal for the RUN while being non-terminal for the TASK,
+# and that is the whole mechanism: the run stops and reports, the task stays open
+# so the owner's answer has something to address. See
+# docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
 _TERMINAL_TASK_STATE_NAMES = {
     TaskState.TASK_STATE_COMPLETED: "completed",
     TaskState.TASK_STATE_INPUT_REQUIRED: "input_required",
     TaskState.TASK_STATE_FAILED: "failed",
+    TaskState.TASK_STATE_AUTH_REQUIRED: "auth_required",
 }
 
+#: Namespace for the A2A task id of a scheduled run's sub-agent delegation.
+#: The orchestrator derives its delegation task ids from the tool call, because
+#: LangGraph replays that call byte-identical. agent-runner has no outer graph and
+#: no replay, so it derives from the thing that IS deterministic here: the run.
+_SCHEDULED_RUN_TASK_NAMESPACE = uuid.UUID("b3a7c15e-4d92-4f8a-9c61-7e2d8f0a3b54")
 
-async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> tuple[str | None, str | None]:
-    """Collect the final text result from an A2A runnable's stream.
 
-    Accumulates non-intermediate ``ArtifactUpdate`` content (the main
-    response chunks).  Falls back
-    to extracting text from the last ``TaskResponseData`` messages when
+def _is_full_catalogue_agent(sub_agent_cfg: dict) -> bool:
+    """Whether an empty tool whitelist means "everything" for this sub-agent.
+
+    Mirrors the orchestrator's rule (``app/utils.py``): the general-purpose agent, or a
+    sub-agent whose authority deliberately left the list open. Kept as one predicate so
+    the two services cannot drift into disagreeing about what an empty list means — the
+    drift is invisible from either side and shows up only as an agent insisting a tool
+    does not exist.
+    """
+    return bool(sub_agent_cfg.get("all_tools")) or sub_agent_cfg.get("name") == "general-purpose"
+
+
+def scheduled_run_task_id(context_id: str) -> str:
+    """The sub-agent task id for a scheduled run's conversation, derived not stored.
+
+    Proposed when the first run opens the task, and addressed again by every
+    authorization answer that continues it — so a resume finds the parked task instead
+    of opening a second one on a thread that is already waiting. Nothing persists it.
+
+    Keyed on the CONTEXT alone, not on the run. A resumed run can park again (one
+    authorization leading to another), and each link in that chain is a new run row on
+    the SAME context and the same ``{ctx}::dynamic-{name}`` thread — so there is one
+    sub-agent task throughout. Deriving per run gave the second answer an id nothing had
+    ever opened, and the resume died on "Task ... not found" with the chain unfinishable.
+    One context is one sub-agent conversation: a scheduled run has a single sub-agent, and
+    every run of a job gets its own context.
+    """
+    return str(uuid.uuid5(_SCHEDULED_RUN_TASK_NAMESPACE, context_id))
+
+
+def sub_agent_task_ids(context_id: str | None, *, is_resume: bool) -> tuple[str | None, str | None]:
+    """``(task_id, proposed_task_id)`` for one dispatch of the scheduled sub-agent.
+
+    The id is the same value in both cases — :func:`scheduled_run_task_id` of this
+    conversation — and *which field it travels in* is the entire difference between
+    "answer the question this thread is waiting on" and "start new work":
+
+    * a resume sets ``task_id``, addressing the task the parked run left open, which is
+      the only thing the executor will accept a message for on a parked thread;
+    * fresh work sets ``proposed_task_id``, since a proposal on a thread that already has
+      a task would be dropped as taken.
+
+    One function so one site owns that invariant. It used to be derived at the caller
+    *and* recomputed at the destination, with a comment in each file explaining which
+    result belonged in which field.
+    """
+    derived = scheduled_run_task_id(context_id) if context_id else None
+    return (derived, None) if is_resume else (None, derived)
+
+
+class CatalogueDiscoveryError(Exception):
+    """Listing the tool catalogue failed, after retries.
+
+    Reported as an INTERRUPTED run rather than a FAILED one, which is the whole reason
+    this exists as its own type. Discovery reaches the gateway and Keycloak before the
+    job's own work begins, so its failure is evidence about the infrastructure and not
+    about the job — the same distinction ADR-0007 draws for a run whose process died.
+    Left as FAILED it moved ``consecutive_failures``, so a gateway outage marched an
+    otherwise healthy job toward ``max_failures`` and auto-pause, and the jobs it
+    disabled were the ones configured to reach the most tools.
+
+    As INTERRUPTED it also earns the one fresh attempt ADR-0007 grants, which is the
+    right remedy here: by the next tick the gateway is usually back, and nothing about
+    the job needed changing.
+    """
+
+
+@dataclass(frozen=True)
+class SubAgentRun:
+    """What one sub-agent execution reported back.
+
+    A tuple until a parked run had a third thing to carry home. The ask is not an
+    optional extra: a run that reports ``auth_required`` without one leaves the
+    scheduler with a stopped job and no question to put to its owner.
+    """
+
+    message: str | None = None
+    #: Terminal A2A task state as a scheduler-facing string, or None if never reported.
+    task_state: str | None = None
+    #: The in-task-auth client payload, on an ``auth_required`` run only.
+    auth_payload: dict[str, Any] | None = None
+
+
+async def _collect_sub_agent_run(
+    runnable: Any, input_data: SubAgentInput, config: dict[str, Any] | None = None
+) -> SubAgentRun:
+    """Run one A2A exchange with a sub-agent and reduce its stream to a result.
+
+    Accumulates non-intermediate ``ArtifactUpdate`` content (the main response
+    chunks), falling back to text from the last ``TaskResponseData`` messages when
     neither artifact nor message content was streamed.
 
-    Returns ``(text, task_state)``: the accumulated text (None if the stream
-    produced no readable content) and the run's terminal task state as a
-    scheduler-facing string (``completed`` | ``input_required`` | ``failed``),
-    or None when the stream never reported one. ``input_required`` matters
-    downstream: it tells a conversation adopting this run that the sub-agent
-    asked the user a question and is waiting for the answer.
+    The terminal task state is reported as a scheduler-facing string. Two of them
+    mean the run stopped waiting for a person rather than finishing:
+    ``input_required`` tells a conversation adopting this run that the sub-agent
+    asked a question, and ``auth_required`` means the run is parked on a credential
+    only its owner can grant — the ask travels with it.
     """
     parts: list[str] = []
     last_data: TaskResponseData = TaskResponseData()
 
-    async for item in runnable.astream(input_data.model_dump()):
+    payload = input_data.model_dump()
+    # A local runnable REQUIRES the caller's config (it carries the checkpointer and the
+    # cost-tracking context); a remote one takes the message and ignores it.
+    stream = runnable.astream(payload, config) if config is not None else runnable.astream(payload)
+
+    async for item in stream:
         if isinstance(item, ArtifactUpdate) and item.event_metadata is None:
             if item.content:
                 parts.append(item.content)
         elif isinstance(item, TaskUpdate):
             last_data = item.data
         elif isinstance(item, ErrorEvent):
-            return (f"Error: {item.error}" if item.error else None), "failed"
+            return SubAgentRun(
+                message=(f"Error: {item.error}" if item.error else None),
+                task_state="failed",
+            )
 
     task_state = _TERMINAL_TASK_STATE_NAMES.get(last_data.state)
+    text = ("".join(parts).strip() or None) if parts else _extract_text_from_messages(last_data.messages)
+    return SubAgentRun(message=text, task_state=task_state, auth_payload=_client_auth_payload(last_data))
 
-    if parts:
-        return ("".join(parts).strip() or None), task_state
 
-    # Fallback: extract text from the last TaskResponseData messages
-    return _extract_text_from_messages(last_data.messages), task_state
+def _client_auth_payload(data: TaskResponseData) -> dict[str, Any] | None:
+    """The half of an ``auth_required`` task's ask that may cross to an end user.
+
+    ``A2AStreamTranslator`` leaves the parsed requirement on the task metadata as
+    ``auth_info`` (a full ``AuthPayload`` dump). Round-tripping it through
+    ``client_payload`` rather than forwarding it is not ceremony: that method builds
+    its output field by field from the requirement, so a client secret cannot be
+    emitted even if a future field carries one. The payload is stored on the run row
+    and rendered by three chat clients and the console, which is exactly the blast
+    radius that argues for a serializer that *cannot* leak rather than a convention
+    that says not to.
+    """
+    if data.state != TaskState.TASK_STATE_AUTH_REQUIRED:
+        return None
+    auth_info = data.metadata.get("auth_info")
+    if not isinstance(auth_info, dict):
+        logger.warning("auth_required task carried no auth_info metadata; the ask will have no URL")
+        return None
+    try:
+        return AuthPayload(**auth_info).client_payload()
+    except Exception:
+        logger.exception("Could not read the in-task-auth payload off an auth_required task")
+        return None
 
 
 def _extract_text_from_messages(messages: list) -> str | None:
@@ -680,7 +840,7 @@ class AgentRunner(BaseAgent):
         yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Executing scheduled job...")
 
         # Extract scheduler-specific metadata from the message
-        message_meta = _extract_message_metadata(task)
+        message_meta = _extract_message_metadata(task, messages)
 
         # Struct numbers arrive as floats (protobuf doubles); coerce the ids back
         # to int — e.g. the sub-agent config URL path rejects "42.0". Numeric strings are
@@ -722,11 +882,37 @@ class AgentRunner(BaseAgent):
         sub_agent_task_state: str | None = None
         sub_agent_name: str | None = None
         prompt: str | None = None
+        auth_payload: dict[str, Any] | None = None
+
+        # An answer to a run this service parked earlier. The scheduler addressed THIS
+        # task by id — which the handler accepted only because the parked run left it
+        # non-terminal — so the sub-agent task to continue is the one that run derived,
+        # not a new one.
+        #
+        # Only WHETHER this is a resume travels down; the id itself is derived once, at
+        # the point that uses it (``_run_langgraph_agent``). Passing the id meant two
+        # sites computed ``scheduled_run_task_id`` from the same context and two comments
+        # had to keep explaining which of the results went in which field.
+        authorization = _authorization_answer(messages)
+        is_resume = bool(authorization and task.context_id)
+        if authorization:
+            logger.info(
+                "Job %s run %s: resuming the parked task for context %s (%s)",
+                scheduled_job_id,
+                scheduled_job_run_id,
+                task.context_id,
+                authorization.get("decision"),
+            )
 
         # Correlation ids echoed back in every result so the delivery channel can
         # link a notification (and later thread replies) to this job/run/sub-agent.
         correlation_meta = {
             "scheduled_job_id": scheduled_job_id,
+            "scheduled_job_name": message_meta.get("scheduled_job_name"),
+            # Echoed untouched so the delivery channel can post this run's result as a
+            # reply to the ask that unblocked it. Meaningless here; only the client that
+            # rendered the card can read it.
+            "reply_to_message": message_meta.get("reply_to_message"),
             "scheduled_job_run_id": scheduled_job_run_id or None,
             "sub_agent_id": sub_agent_id,
         }
@@ -740,7 +926,7 @@ class AgentRunner(BaseAgent):
                 # branch below still knows which sub-agent was targeted.
                 sub_agent_cfg = await self._fetch_sub_agent_config(sub_agent_id, user_access_token)
                 sub_agent_name = sub_agent_cfg["name"]
-                agent_message, sub_agent_task_state = await self._execute_sub_agent(
+                run = await self._execute_sub_agent(
                     sub_agent_cfg=sub_agent_cfg,
                     prompt=prompt,
                     raw_a2a_messages=messages,
@@ -751,12 +937,31 @@ class AgentRunner(BaseAgent):
                     user_id=user_id,
                     context_id=task.context_id,
                     message_formatting=message_formatting,
+                    is_resume=is_resume,
                 )
+                agent_message, sub_agent_task_state = run.message, run.task_state
+                auth_payload = run.auth_payload
             except Exception as exc:
-                logger.exception(f"Sub-agent execution failed for job {scheduled_job_id}")
+                # A catalogue that could not be listed is the infrastructure's failure,
+                # not the job's: it happens before the job's own work starts, no change
+                # to the job would prevent it, and counting it would auto-pause the jobs
+                # configured to reach the most tools during a gateway outage. Reported as
+                # INTERRUPTED, which leaves ``consecutive_failures`` alone and earns the
+                # one fresh attempt ADR-0007 grants — by the next tick the gateway is
+                # usually back.
+                interrupted = isinstance(exc, CatalogueDiscoveryError)
+                if interrupted:
+                    logger.warning(
+                        "Tool discovery failed for job %s; reporting the run as interrupted "
+                        "rather than failed: %s",
+                        scheduled_job_id,
+                        exc,
+                    )
+                else:
+                    logger.exception(f"Sub-agent execution failed for job {scheduled_job_id}")
                 error_message = str(exc)
                 result_meta = {
-                    "scheduler_status": "failed",
+                    "scheduler_status": "interrupted" if interrupted else "failed",
                     "error_message": error_message,
                     "agent_message": agent_message,
                     "user_sub": user_config.user_sub,
@@ -770,8 +975,70 @@ class AgentRunner(BaseAgent):
                 )
                 return
 
+        # A run blocked on the owner's credential is neither a success nor a failure,
+        # and it is the one outcome that leaves work to come back to. The ask travels
+        # INSIDE this payload rather than replacing the status message: every delivery
+        # client parses part zero as this JSON, and a client that has not learned the
+        # in-task-auth card still has to be able to post something the owner can act on.
+        parked = sub_agent_task_state == "auth_required"
+        # A park the owner cannot answer is not a park. Reaching this means the agent
+        # stopped on KIND_AUTH but no ask survived (``auth_info`` metadata missing, or
+        # ``AuthPayload(**auth_info)`` raising), so there is nothing to deliver and
+        # nothing to click. Recording it green would reset ``consecutive_failures`` on a
+        # run that did nothing, and recording it as a park would hold the job's schedule
+        # on a question nobody was asked — the two failures this ADR exists to abolish,
+        # arriving together. It is reported as a failure, which at least retries.
+        park_without_ask = parked and not auth_payload
+        if park_without_ask:
+            logger.warning(
+                "Job %s parked on authorization but produced no ask; the owner would have "
+                "nothing to answer, so this is reported as a failure instead",
+                scheduled_job_id,
+            )
+
+        # Only a SCHEDULED run may park, and this is the boundary that enforces it —
+        # ``AuthErrorDetectionMiddleware`` is installed for every caller of this path, and
+        # agent-runner serves more than the scheduler (the skill-security assessor and the
+        # debug agent dispatch here too, with no ``scheduled_job_id``).
+        #
+        # A park with no job is structurally unanswerable, not merely unattended. Parking
+        # holds a job's SCHEDULE, the ask is delivered on the job's channel, and the answer
+        # comes back through console-backend addressed to a RUN — none of which exist here.
+        # The task would stay non-terminal in a store that is now durable, so nothing would
+        # ever close it and nothing could ever answer it: a permanent orphan per occurrence.
+        # Reported as a failure instead, which the caller can see and act on. Same shape as
+        # the risk_scorer=None constraint below — a structural guarantee enforced at the
+        # boundary rather than assumed from the caller's metadata.
+        park_without_job = parked and scheduled_job_id is None
+        if park_without_job:
+            logger.warning(
+                "A non-scheduled run stopped for authorization; there is no job to hold and "
+                "nobody to ask, so it is reported as a failure rather than parked (sub-agent %s)",
+                sub_agent_name,
+            )
+
+        # A sub-agent that FAILED must not be recorded green. Going through
+        # ``LocalA2ARunnable.astream`` changed how a crash arrives here: it catches every
+        # exception and yields an ErrorEvent instead of raising, so the exception branch
+        # above — the only thing that used to write ``failed`` — is never reached for a
+        # local agent any more. Left alone that turns "the agent blew up" into a success
+        # row whose result text happens to start with "Error:", which is exactly the
+        # silently-green run this ADR exists to abolish, arriving through the ADR's own
+        # refactor. The task state is the authority on how the run ended; the status
+        # follows it.
+        failed = sub_agent_task_state == "failed" or park_without_ask or park_without_job
+
+        # The one combination that actually publishes a park. Stated once rather than
+        # re-derived as ``parked and auth_payload`` at each site: that form silently
+        # excludes only ``park_without_ask``, so a park with a perfectly good ask but no
+        # job to hold would still have announced itself as AUTH_REQUIRED while being
+        # yielded as FAILED — a payload disagreeing with its own task state.
+        publishes_park = parked and not park_without_ask and not park_without_job
+
         result_meta = {
-            "scheduler_status": "success",
+            "scheduler_status": (
+                "auth_required" if publishes_park else "failed" if failed else "success"
+            ),
             # No sub-agent means there is nothing to run: the dispatch carries the text
             # to deliver and echoing it back is what the delivery channel picks up. That
             # is a watch whose outcome is a notification — the scheduler decided the
@@ -783,11 +1050,65 @@ class AgentRunner(BaseAgent):
             # and forward it in the conversation-origin DataPart so the
             # adopting orchestrator can frame the user's reply correctly.
             "task_state": sub_agent_task_state,
+            # Same text as agent_message, under the key a failure is read from. The
+            # error branch above sets both for a raised exception; a sub-agent that
+            # reported its own failure has to be told apart the same way. A park with
+            # no ask has no message of its own worth forwarding, so it says what
+            # happened rather than passing on whatever prose the model left behind.
+            **(
+                {
+                    "error_message": (
+                        "Stopped for authorization but produced no ask to answer"
+                        if park_without_ask
+                        else "Stopped for authorization, which only a scheduled run can be asked for"
+                        if park_without_job
+                        else agent_message
+                    )
+                }
+                if failed
+                else {}
+            ),
             "user_sub": user_config.user_sub,
             "sub_agent_name": sub_agent_name,
             "prompt": prompt,
             **correlation_meta,
         }
+        if failed:
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_FAILED,
+                content=json.dumps(result_meta, default=str),
+            )
+            return
+
+        if publishes_park:
+            result_meta["auth_payload"] = auth_payload
+            # The task the answer is addressed to: this one, the OUTER task, not the
+            # sub-agent's. The sub-agent's is derived from the run and never leaves
+            # this process; this is the only id anything outside can reach.
+            result_meta["parked_task_id"] = task.id
+            # Where the answer goes, declared rather than hardcoded in three clients. A
+            # pushed A2A task carries no statement of where its server lives, and the
+            # one A2A server a chat client is configured with is the orchestrator —
+            # right for a chat turn, wrong for a scheduled run. Logical, not a URL: the
+            # client resolves its own console-backend base from its own configuration,
+            # so there is no address off a webhook for anyone to trust.
+            result_meta["reply_to"] = {
+                "service": "console-backend",
+                "endpoint": "scheduled_run_resume",
+                "scheduled_job_id": scheduled_job_id,
+                "scheduled_job_run_id": scheduled_job_run_id or None,
+            }
+            # AUTH_REQUIRED, not COMPLETED, and deliberately non-terminal: the A2A
+            # request handler accepts a message addressed to this task only while it has
+            # not reached a terminal state, and that message is how the owner's answer
+            # gets back in. The push sender fires on every event, not only terminal
+            # ones, so the ask is delivered by the same path a result is.
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_AUTH_REQUIRED,
+                content=json.dumps(result_meta, default=str),
+            )
+            return
+
         yield AgentStreamResponse(
             state=TaskState.TASK_STATE_COMPLETED,
             content=json.dumps(result_meta, default=str),
@@ -898,7 +1219,8 @@ class AgentRunner(BaseAgent):
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
         message_formatting: str = "markdown",
-    ) -> tuple[str | None, str | None]:
+        is_resume: bool = False,
+    ) -> SubAgentRun:
         """Dispatch a sub-agent config to the appropriate execution method.
 
         Args:
@@ -914,12 +1236,16 @@ class AgentRunner(BaseAgent):
             message_formatting: Rendering rules of the channel this run's message is
                 delivered to ("slack", "google-chat", "plain", "markdown").
 
+            is_resume: Whether this dispatch is an authorization answer continuing a
+                run this service parked, rather than fresh work. The task id it implies
+                is derived where it is used, not passed. LangGraph agents only —
+                nothing else can park.
+
         Returns:
-            (agent_message, task_state) — task_state is the sub-agent's
-            terminal A2A task state ("completed" | "input_required" |
-            "failed") when it reported one, else None. It rides the result
-            metadata so a conversation later adopting this run knows whether
-            the run finished or is waiting for the user's answer.
+            The run's message, its terminal A2A task state, and the ask when it parked.
+            The task state rides the result metadata so a conversation later adopting
+            this run knows whether it finished, asked a question, or is waiting on the
+            owner's credential.
         """
         agent_type = sub_agent_cfg["type"]
 
@@ -935,6 +1261,7 @@ class AgentRunner(BaseAgent):
                 scheduled_job_run_id=scheduled_job_run_id,
                 context_id=context_id,
                 message_formatting=message_formatting,
+                is_resume=is_resume,
             )
         elif agent_type == "foundry":
             return await self._run_foundry_agent(
@@ -973,37 +1300,32 @@ class AgentRunner(BaseAgent):
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
         message_formatting: str = "markdown",
-    ) -> tuple[str | None, str | None]:
-        """Run a one-shot LangGraph agent using agent-common's model factory.
+        is_resume: bool = False,
+    ) -> SubAgentRun:
+        """Run the scheduled sub-agent behind the in-process A2A server.
 
-        Uses create_model() for multi-provider support (Bedrock, OpenAI, Google)
-        instead of hardcoded ChatBedrockConverse.
+        agent-runner used to assemble a graph here and call ``graph.astream``. It now
+        builds the same ``DynamicLocalAgentRunnable`` the orchestrator's local
+        sub-agents are, and drives it through ``LocalA2ARunnable.astream`` — which is a
+        client of ``LocalA2AServer``. That is what makes a run blocked on a credential
+        an A2A task in ``auth_required`` carrying the in-task-auth DataPart: the same
+        bytes an interactive chat produces, produced by the same code. See
+        docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
 
-        Args:
-            sub_agent_cfg: Result of _fetch_sub_agent_config().
-            prompt: The user message to process.
-            user_access_token: Token passed through to the MCP gateway.
-            user_sub: OIDC subject identifier for cost tracking.
-            scheduled_job_id: The ID of the scheduled job.
-            scheduled_job_run_id: The ID of the scheduled job run, used for checkpoint isolation and logging.
-            user_id: Verified database user UUID (fetched from backend, used for docstore namespace).
-            context_id: Natural A2A context_id for thread isolation (conversation_id).
+        *is_resume* selects which field the sub-agent's task id travels in, and that is
+        the whole difference between answering a pending question and starting work:
+        addressing the task a previous run PARKED, or proposing a new one. The id is the
+        same value either way — it is derived here, from the context, and this is the one
+        place that derives it.
 
-        Returns:
-            (agent_message, task_state) — task_state is the sub-agent's
-            structured-response state ("completed" | "input_required" |
-            "failed"), or None when no structured response was produced.
+        Returns the run's message, its terminal task state, and — when it parked — the
+        ask to put to the owner.
         """
-        # Ensure the document store is ready before building the graph (which binds self.store).
-        # Idempotent and cheap once set up; on a cold start it retries until the gateway/embedding
-        # default resolves, so semantic memory self-heals without a restart.
+        # Idempotent and cheap once set up; on a cold start it retries until the
+        # gateway/embedding default resolves, so semantic memory self-heals.
         await self.ensure_store_ready()
 
-        system_prompt: str = sub_agent_cfg["system_prompt"]
-        mcp_tool_names: list[str] = sub_agent_cfg["mcp_tools"]
         model_name: str = sub_agent_cfg["model"]
-
-        # Validate and create LLM via agent-common model factory
         if not is_valid_model(model_name):
             default_model = get_default_model()
             if not default_model:
@@ -1016,220 +1338,208 @@ class AgentRunner(BaseAgent):
             )
             model_name = default_model
 
-        # Determine thinking level
         thinking_level = None
         if sub_agent_cfg.get("enable_thinking") and sub_agent_cfg.get("thinking_level"):
             thinking_level = sub_agent_cfg["thinking_level"]
 
         llm = create_model(model_name, thinking_level=thinking_level)
 
-        full_system_prompt = _build_sub_agent_system_prompt(system_prompt, message_formatting)
-
-        mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
-
-        # The run's conversation lives on the same checkpoint thread the
-        # orchestrator continues when a conversation adopts this run: keyed by the
-        # A2A context id AND the agent name (``local_sub_agent_thread_id``), so a
-        # later delegation sent with this context id lands on this thread without
-        # any checkpoint copying. context_id should always be present in A2A
-        # protocol - fail loudly if missing.
+        # context_id should always be present in the A2A protocol — fail loudly if not.
+        # It is the run's conversation, and with the agent name it is the checkpoint
+        # thread a conversation adopting this run later continues.
         if not context_id:
             raise ValueError(f"Missing context_id in A2A task for scheduled job {scheduled_job_id}")
 
-        thread_id = local_sub_agent_thread_id(context_id, sub_agent_cfg["name"])
+        # The channel's rendering rules are baked into the system prompt here rather
+        # than passed alongside it, because the shared runnable does not read
+        # ``message_formatting`` — it only forwards it on the wire. Left to the shared
+        # path, a Slack notification would arrive as raw Markdown again.
+        config = LocalLangGraphSubAgentConfig(
+            name=sub_agent_cfg["name"],
+            description=sub_agent_cfg.get("description") or f"Scheduled sub-agent {sub_agent_cfg['name']}",
+            system_prompt=_build_sub_agent_system_prompt(sub_agent_cfg["system_prompt"], message_formatting),
+            mcp_tools=sub_agent_cfg.get("mcp_tools") or None,
+            model_name=model_name,
+            sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
+            sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
+            sandbox_enabled=bool(sub_agent_cfg.get("sandbox_enabled", False)),
+        )
 
-        result_summary: str | None = None
-        task_state: str | None = None
-
-        # Sandbox lifecycle
-        sandbox_active = sub_agent_cfg.get("sandbox_enabled", False) and self._sandbox_pool is not None
-        if sub_agent_cfg.get("sandbox_enabled", False) and not self._sandbox_pool:
+        if config.sandbox_enabled and self._sandbox_pool is None:
             logger.warning(
                 "Sub-agent '%s' has sandbox_enabled=true but no SANDBOX_PROVIDER configured; "
                 "running without sandbox for job %s",
-                sub_agent_cfg["name"],
+                config.name,
                 scheduled_job_id,
             )
 
-        pooled_sandbox = None
+        # One provider per run: every exchange goes through it, and tools mint their
+        # bearer at call time so a token expiring mid-run is re-exchanged.
+        token_provider = UserTokenProvider(
+            user_access_token,
+            self._get_oauth2_client().exchange_token,
+            leeway_seconds=_MCP_TOKEN_LEEWAY_SECONDS,
+        )
 
-        async def _run_graph(tools: list) -> None:
-            nonlocal result_summary, task_state, pooled_sandbox
-
-            extra_middlewares = None
-            sandbox_backend_factory = None
-
-            if sandbox_active:
-                pooled_sandbox = await self._sandbox_pool.acquire(thread_id, sub_agent_cfg["name"])
-
-                from agent_common.core.graph_utils import create_sandboxed_backend_factory
-                from deepagents.backends import StateBackend
-
-                sandbox_backend_factory = create_sandboxed_backend_factory(
-                    sandbox_backend=pooled_sandbox.backend,
-                    base_backend=StateBackend(),
-                )
-
-            # Determine structured output strategy (mutates tools in-place for Bedrock/Anthropic+thinking)
-            response_format = get_response_format(model_name, tools, thinking_enabled=bool(thinking_level))
-
-            graph = build_sub_agent_graph(
-                model=llm,
-                tools=tools,
-                system_prompt=full_system_prompt,
-                checkpointer=self._checkpointer,
-                store=self.store,
-                cost_logger=self._cost_logger,
-                response_format=response_format,
-                exclude_deep_agents_middlewares=False,
-                backend_factory=sandbox_backend_factory,
-                extra_middlewares=extra_middlewares,
-            )
-            recursion_limit = recursion_limit_for(graph, _MAX_MODEL_CALLS_PER_TURN)
-            logger.debug(
-                "Sub-agent graph bound to recursion_limit=%d (%d model calls per turn)",
-                recursion_limit,
-                _MAX_MODEL_CALLS_PER_TURN,
-            )
-            graph = graph.with_config({"recursion_limit": recursion_limit})
-
-            config = self.create_runnable_config(
-                user_sub=user_sub,
-                conversation_id=thread_id,
-                thread_id=thread_id,
-                scheduled_job_id=scheduled_job_id,
-                sub_agent_id=sub_agent_cfg["sub_agent_id"],
-                sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
-            )
-            # Inject metadata consumed by IndexingStoreBackend and document-store tools.
-            # user_id  — verified database UUID (fetched from backend) for docstore namespace.
-            # assistant_id — scopes the filesystem namespace per-user (mirrors personal
-            #               conversation scope used by the orchestrator when no Slack channel).
-            if self.store is not None:
-                config["metadata"] = {
-                    "user_id": user_id or user_sub,
-                    "assistant_id": user_id or user_sub,
-                }
-            # For local LLM execution, convert all parts (including DataParts) to text.
-            # text_only=True serializes DataParts as JSON strings which LLMs can read.
-            # (NonStandardContentBlock from text_only=False is rejected by Bedrock Converse)
-            if raw_a2a_messages:
-                text_content = "\n".join(
-                    a2a_parts_to_content(msg.parts, text_only=True) for msg in raw_a2a_messages if msg.parts
-                ).strip()
-                messages = [HumanMessage(content=text_content)] if text_content else [HumanMessage(content=prompt)]
-            else:
-                messages = [HumanMessage(content=prompt)]
-
-            # Use astream for proper streaming support (respects recursion_limit set with .with_config())
-            # stream_mode="values" with version="v2" yields StreamPart dicts:
-            #   {"type": "values", "ns": (), "data": <state snapshot>}
-            # We consume all and use the final state.
-            final_state = None
-            # Auto-resume once on a watchdog stall (e.g. slow cold-cache prompt
-            # ingestion tripping the first-token budget) instead of hard-failing the
-            # whole sub-agent run; the checkpointer (Postgres, or the MemorySaver
-            # placeholder) lets the resume pick up pending work with input=None.
-            async for part in watch_stream_with_resume(
-                lambda resuming: graph.astream(
-                    None if resuming else {"messages": messages}, config=config, stream_mode="values", version="v2"
-                ),
-                label="agent-runner",
-            ):
-                if part["type"] == "values":
-                    final_state = part["data"]
-                # Future: could yield progress events here for streaming execution
-
-            output_messages = final_state.get("messages", []) if final_state else []
-
-            # 1. Check for structured_response (AutoStrategy / ToolStrategy output)
-            structured_response = final_state.get("structured_response") if final_state else None
-            if structured_response and isinstance(structured_response, SubAgentResponseSchema):
-                result_summary = structured_response.message
-                task_state = structured_response.task_state
-            elif isinstance(output_messages, list):
-                # 2. Check message tool_calls for SubAgentResponseSchema (Bedrock + thinking)
-                for msg in reversed(output_messages):
-                    if hasattr(msg, "tool_calls"):
-                        for tool_call in msg.tool_calls:
-                            if tool_call.get("name") == "SubAgentResponseSchema":
-                                try:
-                                    schema = SubAgentResponseSchema(**tool_call.get("args", {}))
-                                    result_summary = schema.message
-                                    task_state = schema.task_state
-                                except Exception:
-                                    pass
-                    if result_summary:
-                        break
-
-                # # 3. Fallback: plain AIMessage text content
-                # if not result_summary:
-                #     for msg in reversed(output_messages):
-                #         if isinstance(msg, AIMessage) and msg.content:
-                #             content = msg.content
-                #             if isinstance(content, list):
-                #                 result_summary = " ".join(
-                #                     c.get("text", "")
-                #                     for c in content
-                #                     if isinstance(c, dict) and c.get("type") == "text"
-                #                 ).strip()
-                #             elif isinstance(content, str):
-                #                 result_summary = content.strip()
-                #             if result_summary:
-                #                 break
-
-        # Build docstore tools if postgres store is configured
-        docstore_tools: list = []
+        docstore_user_id = user_id or user_sub
+        orchestrator_tools: list = []
         if self.store is not None and _DOCUMENT_STORE_S3_BUCKET:
-            # Use verified database user_id (fetched from backend) to match orchestrator's namespace.
-            # Fall back to user_sub if backend fetch failed or user_id is None.
-            docstore_user_id = user_id or user_sub
-            docstore_tools = create_document_store_tools(
+            orchestrator_tools = create_document_store_tools(
                 store=self.store,
                 storage=get_object_storage_service(),
                 s3_bucket=_DOCUMENT_STORE_S3_BUCKET,
                 user_id=docstore_user_id,
             )
-            logger.info(
-                "Added %d docstore tools for job %s: %s",
-                len(docstore_tools),
-                scheduled_job_id,
-                [t.name for t in docstore_tools],
+
+        # Built here rather than left to the shared runnable's default so the embedding
+        # spend of document indexing still reaches this service's cost logger — the one
+        # thing the old inline graph passed that the shared path does not.
+        backend_factory = None
+        if self.store is not None:
+            backend_factory = create_indexing_backend_factory(
+                store=self.store,
+                model_name=model_name,
+                cost_logger=self._cost_logger,
             )
 
-        try:
-            if mcp_tool_names:
-                # Tools come from the shared catalogue (stateless tools/list, SDK fallback) as
-                # LazyMcpTools on token-free connections; a per-run UserTokenProvider mints
-                # the bearer at call time, so a token expiring mid-run is re-exchanged.
-                resolver = McpToolResolver(
-                    token_provider=UserTokenProvider(
-                        user_access_token,
-                        self._get_oauth2_client().exchange_token,
-                        leeway_seconds=_MCP_TOKEN_LEEWAY_SECONDS,
-                    ),
-                    gateway_url=_MCP_GATEWAY_URL,
-                    gateway_client_id=_MCP_GATEWAY_CLIENT_ID,
-                    console_mcp_url=f"{_CONSOLE_BACKEND_URL}/mcp",
-                    console_client_id=_CONSOLE_BACKEND_CLIENT_ID,
-                    timeout=mcp_timeout,
-                    stateless_list=_MCP_CATALOGUE_STATELESS_LIST,
-                )
-                tools = await resolver.resolve(mcp_tool_names)  # logs what was resolved and how
-                await _run_graph(tools + docstore_tools)
-            else:
-                await _run_graph(docstore_tools)
-        finally:
-            if pooled_sandbox is not None and self._sandbox_pool is not None:
-                await self._sandbox_pool.release(thread_id, sub_agent_cfg["name"])
+        # An EMPTY whitelist does not mean "no tools" for a full-catalogue agent. The
+        # general-purpose agent is configured with no tool list, and in a conversation
+        # that means everything — the orchestrator hands it the whole registry as a lazy
+        # catalog (utils.py, ``config.name == "general-purpose" or config.all_tools``).
+        # A scheduled run read the same empty list as "nothing" and ran with no MCP tools
+        # at all, so the agent answered that the tools it was asked to use do not exist:
+        # same agent, same configuration, opposite capability depending on who started it.
+        #
+        # Handed over as a CATALOG rather than bound: these are lazy tools the model
+        # reaches through search/describe, and binding a whole gateway is what OOM-killed
+        # the orchestrator before catalog mode existed.
+        tool_catalog: dict[str, Any] | None = None
+        if not config.mcp_tools and _is_full_catalogue_agent(sub_agent_cfg):
+            resolver = McpToolResolver(
+                token_provider=token_provider,
+                gateway_url=_MCP_GATEWAY_URL,
+                gateway_client_id=_MCP_GATEWAY_CLIENT_ID,
+                console_mcp_url=f"{_CONSOLE_BACKEND_URL}/mcp",
+                console_client_id=_CONSOLE_BACKEND_CLIENT_ID,
+                timeout=timedelta(seconds=_MCP_TIMEOUT_SECONDS),
+                stateless_list=_MCP_CATALOGUE_STATELESS_LIST,
+            )
+            # Wrapped so the reporting path can tell "the gateway was unreachable" from
+            # "the job's work failed". The listing is retried inside the resolver first;
+            # reaching here means it stayed down.
+            try:
+                catalogue_tools = await resolver.resolve_all()
+            except Exception as exc:
+                raise CatalogueDiscoveryError(
+                    f"could not list the tool catalogue for sub-agent '{config.name}': {exc}"
+                ) from exc
+            tool_catalog = {tool.name: tool for tool in catalogue_tools}
+            logger.info(
+                "Sub-agent '%s' has no whitelist and takes the full catalogue: %d tools for job %s",
+                config.name,
+                len(tool_catalog),
+                scheduled_job_id,
+            )
 
+        runnable = DynamicLocalAgentRunnable(
+            config=config,
+            model=llm,
+            orchestrator_tools=orchestrator_tools,
+            oauth2_client=self._get_oauth2_client(),
+            user_token=user_access_token,
+            checkpointer=self._checkpointer,
+            store=self.store,
+            backend_factory=backend_factory,
+            sub_agent_id=config.sub_agent_id,
+            user_id=docstore_user_id,
+            mcp_gateway_url=_MCP_GATEWAY_URL,
+            mcp_gateway_client_id=_MCP_GATEWAY_CLIENT_ID,
+            console_backend_client_id=_CONSOLE_BACKEND_CLIENT_ID,
+            sandbox_pool=self._sandbox_pool,
+            # A per-run provider so a token expiring mid-run is re-exchanged at call
+            # time rather than baked into the tools at discovery.
+            token_provider=token_provider,
+            tool_catalog=tool_catalog,
+            # Detecting the gateway's ``need-credentials`` is what this whole path
+            # exists for; without the interrupt there is nothing for the executor to
+            # publish as ``auth_required``.
+            extra_middlewares=[AuthErrorDetectionMiddleware()],
+            # NO risk_scorer, and this is load-bearing rather than an omission: with one,
+            # ``build_sub_agent_graph`` installs ConditionalHumanInTheLoopMiddleware and a
+            # risky tool would park the run as ``input_required`` — an approval nobody is
+            # there to give, on a job that would then stop until a human it never asked
+            # answers. Only KIND_AUTH may park a scheduled run (ADR-0009 Constraints).
+            risk_scorer=None,
+            # The scheduled-run budget, not the delegation one. Converging on the shared
+            # runnable would otherwise have cut an unattended turn from this service's
+            # deployed number to the interactive sub-agent default — a budget change
+            # nobody asked for, visible only as runs quietly stopping short.
+            max_model_calls=_MAX_MODEL_CALLS_PER_TURN,
+        )
+
+        # ``context_id`` is the caller's ``task.context_id``, handed down unchanged, so a
+        # resume recomputes exactly the id the parked run proposed.
+        task_id, proposed_task_id = sub_agent_task_ids(context_id, is_resume=is_resume)
+        tracking: dict[str, Any] = {
+            runnable.tracking_key: {
+                "context_id": context_id,
+                "task_id": task_id or "",
+                "is_complete": False,
+            }
+        }
+
+        messages = self._input_messages(prompt, raw_a2a_messages)
+        input_data = SubAgentInput(
+            messages=messages,
+            a2a_tracking=tracking,
+            orchestrator_conversation_id=context_id,
+            scheduled_job_id=scheduled_job_id,
+            message_formatting=message_formatting,
+            # Honoured only when opening a task. On a resume the live task_id above is
+            # what addresses the parked one; a proposal would be dropped as taken.
+            proposed_task_id=proposed_task_id,
+        )
+
+        parent_config = self.create_runnable_config(
+            user_sub=user_sub,
+            conversation_id=context_id,
+            thread_id=local_sub_agent_thread_id(context_id, config.name),
+            scheduled_job_id=scheduled_job_id,
+            sub_agent_id=config.sub_agent_id,
+            sub_agent_config_version_id=config.sub_agent_config_version_id,
+        )
+        if self.store is not None:
+            # Consumed by IndexingStoreBackend and the document-store tools.
+            parent_config["metadata"] = {
+                "user_id": docstore_user_id,
+                "assistant_id": docstore_user_id,
+            }
+        run = await _collect_sub_agent_run(runnable, input_data, parent_config)
         logger.info(
             "LangGraph agent execution complete for job %s: %d chars (task_state=%s)",
             scheduled_job_id,
-            len(result_summary or ""),
-            task_state,
+            len(run.message or ""),
+            run.task_state,
         )
-        return result_summary, task_state
+        return run
+
+    @staticmethod
+    def _input_messages(prompt: str, raw_a2a_messages: list[Message] | None) -> list[HumanMessage]:
+        """The turn's input, with DataParts flattened to text.
+
+        ``text_only=True`` serialises DataParts as JSON strings the model can read;
+        the alternative (NonStandardContentBlock) is rejected by Bedrock Converse.
+        This is also how an authorization answer reaches a resumed run on the
+        fallback path — the DataPart the executor routes to the parked interrupt is
+        read there, not here.
+        """
+        if raw_a2a_messages:
+            text_content = "\n".join(
+                a2a_parts_to_content(msg.parts, text_only=True) for msg in raw_a2a_messages if msg.parts
+            ).strip()
+            if text_content:
+                return [HumanMessage(content=text_content)]
+        return [HumanMessage(content=prompt)]
 
     def int_to_uuid(self, value: int) -> str:
         """Convert an integer ID to a UUID string format used by Foundry.
@@ -1247,7 +1557,7 @@ class AgentRunner(BaseAgent):
         scheduled_job_id: int,
         scheduled_job_run_id: int,
         message_formatting: str = "markdown",
-    ) -> tuple[str | None, str | None]:
+    ) -> SubAgentRun:
         """Run a Foundry query-API agent using agent-common's foundry module.
 
         Args:
@@ -1261,7 +1571,8 @@ class AgentRunner(BaseAgent):
                 go into the prompt; whether the Foundry-side agent honours them is its
                 own business, but a run that is never told cannot get it right.
         Returns:
-            (result_summary, task_state) — see _collect_stream_text.
+            The run's message and terminal task state. Neither a Foundry nor a
+            remote agent can park: only a local sub-agent's KIND_AUTH interrupt does.
         """
         # Build LocalFoundrySubAgentConfig from the backend response
         foundry_config = LocalFoundrySubAgentConfig(
@@ -1297,7 +1608,8 @@ class AgentRunner(BaseAgent):
         input_data = SubAgentInput(
             messages=[{"role": "user", "content": foundry_prompt}],
         )
-        result_summary, task_state = await _collect_stream_text(compiled_subagent["runnable"], input_data)
+        run = await _collect_sub_agent_run(compiled_subagent["runnable"], input_data)
+        result_summary, task_state = run.message, run.task_state
 
         logger.info(
             "Foundry agent execution complete for job %d: %d chars (task_state=%s)",
@@ -1305,7 +1617,7 @@ class AgentRunner(BaseAgent):
             len(result_summary or ""),
             task_state,
         )
-        return result_summary, task_state
+        return SubAgentRun(message=result_summary, task_state=task_state)
 
     def _get_oauth2_client(self) -> OidcOAuth2Client:
         """Lazily create an OAuth2 client for outbound A2A agent communication.
@@ -1334,7 +1646,7 @@ class AgentRunner(BaseAgent):
         scheduled_job_run_id: int,
         context_id: str | None = None,
         message_formatting: str = "markdown",
-    ) -> tuple[str | None, str | None]:
+    ) -> SubAgentRun:
         """Run a remote A2A agent by discovering its agent card and invoking it.
 
         Uses lossless A2A→HumanMessage conversion so DataParts and TextParts
@@ -1362,7 +1674,8 @@ class AgentRunner(BaseAgent):
                 A2A message metadata so the remote agent applies them itself.
 
         Returns:
-            (result_summary, task_state) — see _collect_stream_text.
+            The run's message and terminal task state. Neither a Foundry nor a
+            remote agent can park: only a local sub-agent's KIND_AUTH interrupt does.
         """
         agent_url: str | None = sub_agent_cfg.get("agent_url")
         if not agent_url:
@@ -1423,7 +1736,8 @@ class AgentRunner(BaseAgent):
             # too, so sending it would put a no-op instruction on the wire.
             message_formatting=message_formatting if formatting_rules(message_formatting) else None,
         )
-        result_summary, task_state = await _collect_stream_text(runnable, input_data)
+        run = await _collect_sub_agent_run(runnable, input_data)
+        result_summary, task_state = run.message, run.task_state
 
         logger.info(
             "Remote agent execution complete for job %d: %d chars (task_state=%s)",
@@ -1431,4 +1745,4 @@ class AgentRunner(BaseAgent):
             len(result_summary or ""),
             task_state,
         )
-        return result_summary, task_state
+        return SubAgentRun(message=result_summary, task_state=task_state)

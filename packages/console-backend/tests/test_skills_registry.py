@@ -65,6 +65,94 @@ class TestSkillSecurityService:
         verdict = await service.assess_skill(files, db=mock_db, user_access_token=None)
         assert verdict.verdict == "caution"
 
+    async def _assess_with_dispatch_result(self, service, result_data):
+        """Drive the agent path with a canned ``dispatch_streaming`` result."""
+        mock_oauth = MagicMock()
+        mock_oauth.exchange_token = AsyncMock(return_value="exchanged")
+        service.configure(agent_runner_url="http://localhost:5005", oauth_service=mock_oauth)
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = 7  # an active assessor
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        files = [SkillFile(path="SKILL.md", content="# Skill")]
+        with patch(
+            "console_backend.services.skill_security_service.dispatch_streaming",
+            AsyncMock(return_value=result_data),
+        ):
+            return await service.assess_skill(files, db=mock_db, user_access_token="tok")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_assessor_run_is_unavailable_not_a_verdict(self, service):
+        """A non-completed run must not be parsed as an assessment.
+
+        ``dispatch_streaming`` shapes a failed run's status message into the artifact slot
+        (it used to drop it entirely), so "there is text" stopped implying "there is an
+        assessment". Parsed anyway, a failure became a verdict of "caution" with no
+        indicators — a record that looks real while losing the ``assessment_unavailable``
+        indicator and its warning. The run's terminal state is what decides.
+        """
+        verdict = await self._assess_with_dispatch_result(
+            service,
+            {
+                "result": {
+                    "kind": "task",
+                    "status": {"state": "failed"},
+                    "artifacts": [
+                        {"parts": [{"kind": "text", "text": '{"scheduler_status": "failed", "error_message": "boom"}'}]}
+                    ],
+                }
+            },
+        )
+
+        assert verdict.verdict == "caution"
+        assert any(i.category == "assessment_unavailable" for i in verdict.indicators), (
+            "a failed run must be recorded as unavailable, not as an assessment"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_parked_assessor_run_is_unavailable_too(self, service):
+        """Every non-completed state counts, not just 'failed'."""
+        verdict = await self._assess_with_dispatch_result(
+            service,
+            {
+                "result": {
+                    "kind": "task",
+                    "status": {"state": "auth_required"},
+                    "artifacts": [{"parts": [{"kind": "text", "text": "{}"}]}],
+                }
+            },
+        )
+
+        assert verdict.verdict == "caution"
+        assert any(i.category == "assessment_unavailable" for i in verdict.indicators)
+
+    @pytest.mark.asyncio
+    async def test_a_completed_run_is_still_parsed_normally(self, service):
+        """The guard must not swallow a real assessment."""
+        verdict = await self._assess_with_dispatch_result(
+            service,
+            {
+                "result": {
+                    "kind": "task",
+                    "status": {"state": "completed"},
+                    "artifacts": [
+                        {
+                            "parts": [
+                                {
+                                    "kind": "text",
+                                    "text": '{"verdict": "safe", "reasoning": "Nothing alarming.", "indicators": []}',
+                                }
+                            ]
+                        }
+                    ],
+                }
+            },
+        )
+
+        assert verdict.verdict == "safe"
+        assert verdict.reasoning == "Nothing alarming."
+        assert not any(i.category == "assessment_unavailable" for i in verdict.indicators)
+
     @pytest.mark.asyncio
     async def test_fallback_when_no_assessor_agent(self, service):
         """Returns caution when assessor agent not found in DB."""

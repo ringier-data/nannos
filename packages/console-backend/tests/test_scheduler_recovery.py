@@ -490,3 +490,144 @@ class TestNoticeDebt:
         owed = {row["id"]: row["owed"] for row in r.mappings().all()}
         assert owed[retry_run] is True, "recovery is exhausted; nothing else will tell the user"
         assert owed[first_run] is False, "this one earned a retry — silence is correct"
+
+
+class TestAParkHoldsTheScheduleOnlyWhileItIsAnswerable:
+    """ADR-0009: a parked run holds its job's schedule — until somebody answers it.
+
+    The two halves are easy to conflate and the second one is load-bearing. A parked run
+    keeps ``status = 'auth_required'`` FOREVER, as a true record of how that occurrence
+    ended, so testing the status alone means the first park stops the job permanently:
+    still enabled, never claimed again, no pause notification, nothing in the UI to say
+    why. What actually holds the schedule is an *answerable* park — ``parked_task_id IS
+    NOT NULL`` — which ``clear_parked_task`` NULLs the moment the owner answers.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_unanswered_park_holds_the_schedule(self, pg_session: AsyncSession):
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "parked", next_run_at="NOW() - INTERVAL '1 minute'")
+        run_id = await seed_run(pg_session, job_id, status="auth_required", completed_at="NOW()")
+        await pg_session.execute(
+            text("UPDATE scheduled_job_runs SET parked_task_id = 'task-abc' WHERE id = :id"),
+            {"id": run_id},
+        )
+        await pg_session.commit()
+
+        claimed = await repo.claim_due_jobs(pg_session, limit=10)
+        await pg_session.commit()
+        assert job_id not in [c.job.id for c in claimed]
+
+    @pytest.mark.asyncio
+    async def test_an_answered_park_releases_it(self, pg_session: AsyncSession):
+        """The regression: without keying on parked_task_id the job never runs again."""
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "answered", next_run_at="NOW() - INTERVAL '1 minute'")
+        run_id = await seed_run(pg_session, job_id, status="auth_required", completed_at="NOW()")
+        await pg_session.execute(
+            text("UPDATE scheduled_job_runs SET parked_task_id = 'task-abc' WHERE id = :id"),
+            {"id": run_id},
+        )
+        await pg_session.commit()
+
+        assert await repo.clear_parked_task(pg_session, run_id) is True
+        await pg_session.commit()
+
+        claimed = await repo.claim_due_jobs(pg_session, limit=10)
+        await pg_session.commit()
+        assert job_id in [c.job.id for c in claimed]
+        # And the record of how that occurrence ended survives the release.
+        assert await run_status(pg_session, run_id) == "auth_required"
+
+    @pytest.mark.asyncio
+    async def test_an_interrupted_resume_earns_the_job_a_fresh_attempt(self, pg_session: AsyncSession):
+        """ADR-0009 decision 7: a resumed run behaves like a scheduled one.
+
+        Nobody is present — the click that started it is long gone — and the ask it
+        answered is already spent, so without the retry a process death mid-resume stops
+        the job for good. This is also what makes the window between claiming the ask and
+        dispatching the resume survivable.
+        """
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "resumed", next_run_at="NOW() + INTERVAL '1 hour'")
+        run_id = await seed_run(
+            pg_session,
+            job_id,
+            trigger="resumed",
+            last_seen_at="NOW() - INTERVAL '10 minutes'",
+        )
+        await pg_session.commit()
+
+        swept = await repo.interrupt_stale_runs(
+            pg_session,
+            stale_after_seconds=60,
+            exclude_run_ids=[],
+            retry_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            notice_due_at=datetime.now(timezone.utc) + timedelta(seconds=90),
+            heartbeatless_after_seconds=1800,
+        )
+        await pg_session.commit()
+
+        assert run_id in swept
+        assert await run_status(pg_session, run_id) == "interrupted"
+        assert await job_retry_at(pg_session, job_id) is not None
+
+
+class TestAResumedRunDoesNotOwnTheSchedule:
+    """A resumed run must say nothing about ``next_run_at`` — not re-state it.
+
+    It continues an occurrence that already advanced the schedule, so advancing again
+    would skip the next one. It used to express that by echoing back the value it read
+    when the owner clicked, because a NULL ``next_run_at`` also means "retire this job"
+    and there was no way to say "I have nothing to say about the schedule".
+
+    That echo was a lost update. A schedule edit recomputes ``next_run_at`` from the new
+    definition, so an owner who changed the time while the resumed run was in flight had
+    their new time overwritten by the old one when it finalised — and the job then fired
+    on a schedule they had already replaced.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_concurrent_schedule_edit_survives(self, pg_session: AsyncSession):
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "sched-edit", next_run_at="NOW() + INTERVAL '1 hour'")
+        await pg_session.commit()
+
+        # The owner edits the schedule while the resumed run is in flight.
+        edited = datetime.now(timezone.utc) + timedelta(hours=8)
+        await pg_session.execute(
+            text("UPDATE scheduled_jobs SET next_run_at = :t WHERE id = :id"), {"t": edited, "id": job_id}
+        )
+        await pg_session.commit()
+
+        # The resumed run finalises afterwards, carrying a snapshot from before the edit.
+        await repo.complete_job(
+            pg_session,
+            job_id,
+            status=JobRunStatus.SUCCESS,
+            next_run_at=None,
+            leave_schedule=True,
+        )
+        await pg_session.commit()
+
+        row = await pg_session.execute(
+            text("SELECT next_run_at, enabled FROM scheduled_jobs WHERE id = :id"), {"id": job_id}
+        )
+        current, enabled = row.first()
+        assert current == edited, "the owner's new schedule was overwritten by the resumed run"
+        # And leave_schedule must not be read as "retire this job".
+        assert enabled is True
+
+    @pytest.mark.asyncio
+    async def test_a_null_next_run_at_still_retires_a_job(self, pg_session: AsyncSession):
+        """The other meaning of NULL is untouched: a once-job and an unresolvable
+        timezone both rely on it to stop the job."""
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "retire")
+        await pg_session.commit()
+
+        await repo.complete_job(pg_session, job_id, status=JobRunStatus.SUCCESS, next_run_at=None)
+        await pg_session.commit()
+
+        row = await pg_session.execute(text("SELECT enabled FROM scheduled_jobs WHERE id = :id"), {"id": job_id})
+        assert row.scalar_one() is False

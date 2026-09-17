@@ -42,6 +42,23 @@ _TERMINAL_STATES: dict[int, str] = {
     TaskState.TASK_STATE_FAILED: "failed",
     TaskState.TASK_STATE_CANCELED: "failed",
     TaskState.TASK_STATE_REJECTED: "failed",
+    # Terminal for the RUN while non-terminal for the TASK: the run stops and reports,
+    # and the task stays open so its owner's answer has something to address (ADR-0009).
+    TaskState.TASK_STATE_AUTH_REQUIRED: "auth_required",
+}
+
+#: States whose payload arrives as the STATUS MESSAGE rather than an artifact.
+#:
+#: ``BaseAgentExecutor`` adds an artifact only for ``completed``; ``failed``,
+#: ``auth_required`` and ``input_required`` publish their content as the status
+#: message alone. Harvesting artifacts only was therefore silently dropping the entire
+#: result of every one of those — a failed run reached the scheduler with no error text
+#: at all, and a parked run would have lost the ask, the task id and the reply target,
+#: leaving the scheduler to record it as an ordinary success.
+_STATES_CARRYING_PAYLOAD_IN_STATUS = {
+    TaskState.TASK_STATE_FAILED,
+    TaskState.TASK_STATE_AUTH_REQUIRED,
+    TaskState.TASK_STATE_INPUT_REQUIRED,
 }
 
 # Agent cards are static per URL; cache them so we don't refetch on every dispatch.
@@ -88,9 +105,19 @@ async def _resolve_card(agent_url: str, http_client: httpx.AsyncClient) -> Agent
     return card
 
 
-def _build_message(parts: list[dict[str, Any]], metadata: dict[str, Any], context_id: str | None) -> Message:
+def _build_message(
+    parts: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    context_id: str | None,
+    task_id: str | None = None,
+) -> Message:
     """Build a proto A2A Message from the same {kind,text|data} part dicts the callers used to
-    put in the JSON-RPC payload."""
+    put in the JSON-RPC payload.
+
+    *task_id* addresses an EXISTING task instead of opening a new one — the answer to a
+    run parked on its owner (ADR-0009). The server accepts it only while that task is
+    non-terminal, which is why a parked run leaves its task open.
+    """
     a2a_parts: list[Part] = []
     for p in parts:
         kind = p.get("kind")
@@ -105,6 +132,7 @@ def _build_message(parts: list[dict[str, Any]], metadata: dict[str, Any], contex
         parts=a2a_parts,
         message_id=str(uuid.uuid4()),
         context_id=context_id or "",
+        task_id=task_id or "",
         metadata=metadata,
     )
 
@@ -121,6 +149,7 @@ async def dispatch_streaming(
     parts: list[dict[str, Any]],
     metadata: dict[str, Any],
     context_id: str | None = None,
+    task_id: str | None = None,
     push_config: dict[str, str] | None = None,
     timeout_read: float = 300.0,
 ) -> dict[str, Any]:
@@ -132,6 +161,8 @@ async def dispatch_streaming(
         access_token: Bearer token presented on the agent card fetch and every request.
         parts: Message parts as ``{"kind": "text", "text": ...}`` / ``{"kind": "data", "data": {...}}``.
         metadata: Message-level metadata (scheduled_job_id, sub_agent_id, watch config, …).
+        task_id: Address an existing, non-terminal task instead of opening a new one —
+            how an authorization answer reaches a parked run (ADR-0009).
         push_config: Optional ``{"url", "token"}`` registered as the task's push-notification
             target (the SDK injects it into every request's configuration).
         timeout_read: Per-event read timeout — SSE keeps bytes flowing so this is the inter-event gap.
@@ -152,6 +183,7 @@ async def dispatch_streaming(
             parts=parts,
             metadata=metadata,
             context_id=context_id,
+            task_id=task_id,
             push_config=push_config,
             timeout_read=timeout_read,
         )
@@ -168,10 +200,16 @@ async def _dispatch_streaming(
     parts: list[dict[str, Any]],
     metadata: dict[str, Any],
     context_id: str | None,
+    task_id: str | None,
     push_config: dict[str, str] | None,
     timeout_read: float,
 ) -> dict[str, Any]:
     last_text: str | None = None
+    #: Text from a status message that IS the result (see
+    #: ``_STATES_CARRYING_PAYLOAD_IN_STATUS``). Kept apart from ``last_text`` so an
+    #: ordinary "working" status never overwrites a streamed artifact, and preferred at
+    #: the end because for those states there is no artifact to prefer instead.
+    status_payload_text: str | None = None
     result_context_id: str | None = context_id
     final_state = "completed"
 
@@ -187,7 +225,7 @@ async def _dispatch_streaming(
             )
         client = ClientFactory(ClientConfig(**config_kwargs)).create(card)
 
-        message = _build_message(parts, metadata, context_id)
+        message = _build_message(parts, metadata, context_id, task_id)
         async for chunk in client.send_message(SendMessageRequest(message=message)):
             payload = chunk.WhichOneof("payload")
             if payload == "artifact_update":
@@ -203,6 +241,10 @@ async def _dispatch_streaming(
                 result_context_id = ev.context_id or result_context_id
                 if ev.status.state in _TERMINAL_STATES:
                     final_state = _TERMINAL_STATES[ev.status.state]
+                if ev.status.state in _STATES_CARRYING_PAYLOAD_IN_STATUS and ev.status.HasField("message"):
+                    text = _join_text_parts(ev.status.message.parts)
+                    if text:
+                        status_payload_text = text
             elif payload == "task":
                 task = chunk.task
                 result_context_id = task.context_id or result_context_id
@@ -223,6 +265,11 @@ async def _dispatch_streaming(
         "status": {"state": final_state},
         "artifacts": [],
     }
-    if last_text is not None:
-        task_obj["artifacts"] = [{"parts": [{"kind": "text", "text": last_text}]}]
+    # The status payload wins where there is one: those states publish no artifact, so
+    # anything in ``last_text`` is a leftover from an earlier streamed chunk, not the
+    # result. Shaped as an artifact regardless, because that is where ``_parse_result``
+    # looks and this function's contract is the legacy consumer shape.
+    result_text = status_payload_text if status_payload_text is not None else last_text
+    if result_text is not None:
+        task_obj["artifacts"] = [{"parts": [{"kind": "text", "text": result_text}]}]
     return {"result": task_obj}

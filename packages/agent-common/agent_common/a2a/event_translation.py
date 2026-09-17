@@ -101,6 +101,14 @@ def parse_auth_payload(task_status: Any) -> Dict[str, Any]:
     """
     message_text = "Authentication required for downstream service"
     service_name = "unknown_service"
+    #: The specific thing that needed the credential — the tool call, normally. Carried
+    #: through because it is the only part of this payload that tells a person WHAT is
+    #: being authorized: the service is often a gateway slug, so a card built without
+    #: the resource can only manage "Nannos needs your permission before it can
+    #: continue". Producers set it (``AuthPayload.for_service(resource=...)``) and this
+    #: reconstruction used to drop it, so every consumer reading the parsed payload
+    #: rather than the raw DataPart lost the tool name.
+    resource: str | None = None
     auth_methods: list[dict[str, Any]] = []
     required_scopes: list[str] = ["read"]
 
@@ -115,6 +123,7 @@ def parse_auth_payload(task_status: Any) -> Dict[str, Any]:
                 requirement = auth_data.get("auth_requirement") if isinstance(auth_data, dict) else None
                 source = requirement if isinstance(requirement, dict) else auth_data
                 service_name = source.get("service", service_name) or service_name
+                resource = source.get("resource") or resource
                 for method_data in source.get("auth_methods", []) or []:
                     auth_methods.append(AuthenticationMethod(**method_data).model_dump())
                 if source.get("required_scopes"):
@@ -133,6 +142,7 @@ def parse_auth_payload(task_status: Any) -> Dict[str, Any]:
 
     service_auth_requirement = ServiceAuthRequirement(
         service=service_name,
+        resource=resource,
         auth_methods=[AuthenticationMethod(**method) for method in auth_methods]
         if auth_methods
         else [AuthenticationMethod(method="oauth2", description="Authentication required", instructions=message_text)],
@@ -148,6 +158,7 @@ def parse_auth_payload(task_status: Any) -> Dict[str, Any]:
         "auth_methods": [method.model_dump() for method in service_auth_requirement.auth_methods],
         "required_scopes": service_auth_requirement.required_scopes,
         "service": service_name,
+        "resource": resource,
         "instructions": message_text,
         "ciba_supported": any(method.method == "ciba" for method in service_auth_requirement.auth_methods),
         "device_code_supported": any(

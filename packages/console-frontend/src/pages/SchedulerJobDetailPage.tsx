@@ -17,6 +17,7 @@ import {
   Send,
   Undo2,
   Pencil,
+  KeyRound,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -57,6 +58,7 @@ import {
   listRuns,
   pauseJob,
   resumeJob,
+  resumeParkedRun,
   deleteJob,
 } from '@/api/scheduler';
 import { consoleListSubAgentsOptions, consoleListMcpToolsOptions } from '@/api/generated/@tanstack/react-query.gen';
@@ -73,6 +75,10 @@ interface SchedulerNotification {
   status: JobRunStatus;
   result_summary?: string;
   error_message?: string;
+  // Carried because the badge cannot be derived from the status alone: a run keeps
+  // `auth_required` after it is answered, so "still waiting" is the task id. Without it
+  // a run-now that parks renders in the past tense until the polled table corrects it.
+  parked_task_id?: string | null;
   timestamp: string;
 }
 
@@ -81,6 +87,7 @@ interface RunNowResult {
   result_summary?: string | null;
   error_message?: string | null;
   delivered?: boolean | null;
+  parked_task_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +155,8 @@ function nowDatetimeLocal(timeZone?: string | null): string {
 // Run status badge
 // ---------------------------------------------------------------------------
 
-function RunStatusBadge({ status }: { status: ScheduledJobRun['status'] }) {
+function RunStatusBadge({ run }: { run: Pick<ScheduledJobRun, 'status' | 'parked_task_id'> }) {
+  const status = run.status;
   switch (status) {
     case 'success':
       return (
@@ -179,6 +187,24 @@ function RunStatusBadge({ status }: { status: ScheduledJobRun['status'] }) {
       return (
         <Badge variant="outline" className="gap-1 text-muted-foreground">
           <AlertCircle className="h-3 w-3" /> Interrupted
+        </Badge>
+      );
+    case 'auth_required':
+      // Neither a success nor a failure: a tool needed the owner's credential and the
+      // run stopped to ask. Showing it as either is how this gap stayed invisible.
+      //
+      // Present tense only while it is actually still waiting. The STATUS stays
+      // `auth_required` for good — it is a true record of how that occurrence ended —
+      // so a run that has been answered would otherwise keep claiming to want something,
+      // and a chain of them (one authorization leading to the next) reads as several
+      // open questions when only the last one is live.
+      return run.parked_task_id ? (
+        <Badge variant="outline" className="gap-1 border-amber-500 text-amber-600">
+          <KeyRound className="h-3 w-3" /> Waiting for authorization
+        </Badge>
+      ) : (
+        <Badge variant="outline" className="gap-1 text-muted-foreground">
+          <KeyRound className="h-3 w-3" /> Stopped for authorization
         </Badge>
       );
     default:
@@ -897,6 +923,104 @@ function EditForm({ job }: { job: ScheduledJob }) {
 }
 
 // ---------------------------------------------------------------------------
+// The ask a parked run is waiting on
+// ---------------------------------------------------------------------------
+
+/** The authorize URL and the service it belongs to, out of the stored ask. */
+function readParkedAsk(run: ScheduledJobRun): { authUrl?: string; subject?: string } | null {
+  const payload = run.parked_payload as
+    | { auth_requirement?: { service?: string; resource?: string; auth_methods?: { auth_url?: string }[] } }
+    | null
+    | undefined;
+  const requirement = payload?.auth_requirement;
+  if (!requirement) return null;
+  const withUrl = (requirement.auth_methods ?? []).find((m) => !!m?.auth_url);
+  return {
+    ...(withUrl?.auth_url ? { authUrl: withUrl.auth_url } : {}),
+    ...(requirement.service || requirement.resource
+      ? { subject: requirement.service || requirement.resource }
+      : {}),
+  };
+}
+
+/**
+ * Offer the owner the way out of a stopped job.
+ *
+ * A parked run holds the job's schedule, so this is not decoration: until it is
+ * answered the job does not run at all. The chat client that delivered the ask is
+ * where most owners will answer it, but an owner who came here instead should not be
+ * sent away to find a message.
+ */
+function ParkedRunNotice({ jobId, run }: { jobId: number; run: ScheduledJobRun }) {
+  const qc = useQueryClient();
+  const [pending, setPending] = useState<'approved' | 'declined' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const ask = readParkedAsk(run);
+
+  const answer = async (decision: 'approved' | 'declined') => {
+    setPending(decision);
+    setError(null);
+    try {
+      await resumeParkedRun(jobId, run.id, decision);
+      // `jobId` is a number (parseInt of the route param) and the query keys hold it as
+      // one. Passing String(jobId) here matched nothing, so the ask stayed on screen
+      // until the 15s poll happened to refresh it — which reads as the button not
+      // working, on the one control whose whole job is to unblock a stopped job.
+      qc.invalidateQueries({ queryKey: ['scheduler-job', jobId] });
+      qc.invalidateQueries({ queryKey: ['scheduler-runs', jobId] });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  return (
+    <div className="mb-4 rounded-lg border border-amber-500/50 bg-amber-50/50 p-4 dark:bg-amber-950/20">
+      <div className="flex items-start gap-3">
+        <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+        <div className="flex-1 space-y-2">
+          <p className="text-sm font-medium">
+            {ask?.subject
+              ? `This job needs your permission to use ${ask.subject}.`
+              : 'This job needs your permission before it can continue.'}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            It will not run again until you answer. Authorize in your browser, then confirm here.
+          </p>
+          {/* Name the run this belongs to. The notice is deliberately a banner and not a
+              row control — the job not running at all is a fact about the JOB, and in a
+              row you would only find it by scrolling the history. But a banner that names
+              no occurrence is ambiguous the moment more than one run is involved, which
+              is exactly how it read when an older parked run was the one still waiting. */}
+          <p className="text-xs text-muted-foreground">
+            Waiting since {formatDate(run.started_at)} · run #{run.id}
+          </p>
+          {error && <p className="text-xs text-destructive">{error}</p>}
+          <div className="flex flex-wrap gap-2 pt-1">
+            {ask?.authUrl && (
+              <Button asChild size="sm" variant="default">
+                <a href={ask.authUrl} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="mr-1 h-3 w-3" /> Authorize
+                </a>
+              </Button>
+            )}
+            <Button size="sm" variant="outline" disabled={pending !== null} onClick={() => answer('approved')}>
+              {pending === 'approved' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+              Done, continue
+            </Button>
+            <Button size="sm" variant="ghost" disabled={pending !== null} onClick={() => answer('declined')}>
+              {pending === 'declined' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+              Don't allow
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Run history table
 // ---------------------------------------------------------------------------
 
@@ -935,7 +1059,7 @@ function RunHistoryTable({ runs }: { runs: ScheduledJobRun[] }) {
               <td className="px-4 py-3 text-muted-foreground">{formatDate(run.started_at)}</td>
               <td className="px-4 py-3 text-muted-foreground">{formatDuration(run.started_at, run.completed_at)}</td>
               <td className="px-4 py-3">
-                <RunStatusBadge status={run.status} />
+                <RunStatusBadge run={run} />
               </td>
               <td className="px-4 py-3 max-w-xs">
                 {run.status === 'failed' && run.error_message ? (
@@ -1071,6 +1195,15 @@ export function SchedulerJobDetailPage() {
     refetchInterval: 15_000, // refresh run history every 15s
   });
 
+  // At most one run of a job is ever parked (claim_due_jobs will not claim a job while
+  // one is), so the first match is the one waiting — and the reason the job is idle.
+  //
+  // `parked_task_id` is what makes it still ANSWERABLE, not the status: an answered run
+  // keeps `auth_required` forever, because that is a true record of how that occurrence
+  // ended. Keying the card on status alone left it on screen after the answer, and a
+  // second click hit a task that had since gone terminal.
+  const parkedRun = runs.find((r) => r.status === 'auth_required' && r.parked_task_id);
+
   const pauseMutation = useMutation({
     mutationFn: () => pauseJob(jobId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scheduler-job', jobId] }),
@@ -1152,7 +1285,7 @@ export function SchedulerJobDetailPage() {
                 runNowResult && (
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <RunStatusBadge status={runNowResult.status} />
+                      <RunStatusBadge run={runNowResult} />
                       {runNowResult.result_summary && <span className="text-xs">{runNowResult.result_summary}</span>}
                       {runNowResult.error_message && <span className="text-xs">{runNowResult.error_message}</span>}
                     </div>
@@ -1184,6 +1317,7 @@ export function SchedulerJobDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {parkedRun && <ParkedRunNotice jobId={Number(jobId)} run={parkedRun} />}
               <RunHistoryTable runs={runs} />
             </CardContent>
           </Card>

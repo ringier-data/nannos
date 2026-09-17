@@ -22,7 +22,6 @@ from a2a.server.routes import (
 from a2a.server.tasks import (
     BasePushNotificationSender,
     InMemoryPushNotificationConfigStore,
-    InMemoryTaskStore,
 )
 from a2a.types import (
     AgentCapabilities,
@@ -34,6 +33,7 @@ from a2a.types import (
     SecurityScheme,
     StringList,
 )
+from agent_common.a2a.local_server import set_local_task_store
 from dotenv import load_dotenv
 from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
@@ -47,6 +47,7 @@ from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 from starlette.applications import Starlette
 
 from agent import AgentRunner
+from agent.task_store import create_task_store
 
 # Load environment variables
 load_dotenv()
@@ -55,9 +56,21 @@ load_dotenv()
 logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("agent"))
 configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
+# Most of what a scheduled run now DOES happens inside agent-common — the sub-agent
+# runnable, tool resolution, the PTC exposure, the auth interrupt. Without this its INFO
+# logs never reach the handler and the service runs blind through its own hot path: only
+# WARNING and above got through, which is why a run could report that a tool "does not
+# exist" with nothing in the log to say what the sandbox had been given. The orchestrator
+# has configured this logger all along (its main.py); agent-runner needed it once it
+# started sharing that code (ADR-0009).
+configure_existing_logger(logging.getLogger("agent_common"))
 
 # Initialize agent globally for reload support
 agent = AgentRunner()
+
+#: Engine behind the A2A task store, disposed on shutdown. Module-level because the store
+#: is built with the app (so both handlers share one) and closed by the lifespan.
+_task_store_engine = None
 
 
 @asynccontextmanager
@@ -100,6 +113,8 @@ async def lifespan(app) -> AsyncIterator[None]:
     await agent.shutdown_sandbox_pool()
     await agent.teardown_checkpointer()
     await agent.close()
+    if _task_store_engine is not None:
+        await _task_store_engine.dispose()
     logger.info("Application shutdown - Agent Runner closed")
 
 
@@ -159,10 +174,25 @@ def create_app():
         config_store=push_config_store,
     )
 
+    # ONE durable task store, shared by the HTTP request handler and every in-process
+    # sub-agent server in this process.
+    #
+    # Both halves matter and they are not the same task. The OUTER task is this
+    # handler's: it is what a parked run leaves non-terminal, and what the owner's
+    # authorization answer is addressed to by id. The INNER task is the sub-agent's,
+    # inside LocalA2AServer. Making only one of them durable is a trap that looks fine
+    # until a restart — the sub-agent's task is found, the outer one is gone, and the
+    # resume dies on "Task ... not found" with the job stopped for good. agent-runner is
+    # the service that gets OOMKilled, so that is the ordinary case, not the edge one.
+    # See ADR-0009 decision 3.
+    global _task_store_engine
+    task_store, _task_store_engine = create_task_store()
+    set_local_task_store(task_store)
+
     # Create request handler (A2A v1.0+ requires the agent_card)
     request_handler = DefaultRequestHandler(
         agent_executor=BaseAgentExecutor(agent=agent),
-        task_store=InMemoryTaskStore(),
+        task_store=task_store,
         agent_card=agent_card,
         push_config_store=push_config_store,
         push_sender=push_sender,

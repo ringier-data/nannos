@@ -6,6 +6,7 @@ test_with_a_token_provider_tools_are_token_free_and_mint_per_call`` for the runn
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -23,7 +24,12 @@ from agent_common.core.catalogue_ingest import (
     stateless_supported,
 )
 from agent_common.core.token_provider import UserTokenProvider
-from agent_common.core.tool_catalogue import LazyMcpTool
+from agent_common.core.tool_catalogue import (
+    CatalogueTool,
+    LazyMcpTool,
+    ServerCatalogue,
+    ToolCard,
+)
 
 from agent.mcp_tools import McpToolResolver
 
@@ -36,6 +42,14 @@ def _jwt(aud: str, ttl: float = 900) -> str:
         return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
 
     return f"{seg({'alg': 'none'})}.{seg({'exp': time.time() + ttl, 'aud': aud})}.sig"
+
+
+def _entry(name: str, server: str = "gateway") -> CatalogueTool:
+    """One catalogue entry, for tests that stub ``fetch_catalogue`` instead of serving HTTP."""
+    return CatalogueTool(
+        card=ToolCard(name=name, description=f"{name} description", param_names=("q",), server_name=server),
+        schema_bytes=b'{"type": "object", "properties": {"q": {"type": "string"}}}',
+    )
 
 
 def _tools_list_reply(names: list[str]) -> dict[str, Any]:
@@ -314,11 +328,253 @@ class TestSdkFallback:
 
 
 class TestRunnerWiring:
-    def test_core_no_longer_lists_the_whole_gateway(self):
+    def test_core_delegates_resolution_and_never_lists_the_whole_gateway(self):
+        """The runner builds the shared sub-agent and lets it resolve tools.
+
+        It used to own an ``McpToolResolver``; ADR-0009 converged it onto
+        ``DynamicLocalAgentRunnable``, which lists per-user and hands back lazy tools
+        bound to a call-time bearer. What must stay true either way is the thing this
+        test was written for: nothing here asks the gateway for its whole tool list.
+        """
         import inspect
 
         import agent.core as core
 
         src = inspect.getsource(core)
         assert "MultiServerMCPClient" not in src and "get_tools()" not in src
-        assert "McpToolResolver(" in src and "UserTokenProvider(" in src
+        assert "DynamicLocalAgentRunnable(" in src
+        # The per-run provider still belongs to the runner: it owns the user's token and
+        # the leeway, and hands them to the shared runnable rather than the reverse.
+        assert "UserTokenProvider(" in src
+
+
+class TestListingSurvivesATransientGateway:
+    """A transient gateway must not fail a whole scheduled run on the first try.
+
+    Nobody is watching a scheduled run, so a blip an interactive user would shrug off by
+    asking again arrived as the job's own failure. The orchestrator has retried its
+    listings all along (``_get_catalogue_with_retry``); this is the same policy from the
+    same ``is_retryable_mcp_error`` predicate.
+
+    These patch ``fetch_catalogue`` rather than serving HTTP, because the retried unit is
+    one full listing: ``fetch_catalogue`` answers a failed stateless POST by falling back
+    to the SDK session on its own, so a raw 503 never reaches the retry loop — what does
+    is the error raised once both paths are exhausted.
+    """
+
+    @staticmethod
+    def _transient() -> Exception:
+        """What a 503 looks like by the time the MCP client is done with it."""
+        response = httpx.Response(503, request=httpx.Request("POST", GATEWAY_URL))
+        return ExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [httpx.HTTPStatusError("503", request=response.request, response=response)],
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_transient_failure_is_retried_and_then_succeeds(self, provider, monkeypatch):
+        monkeypatch.setattr("agent_common.core.catalogue_ingest.asyncio.sleep", AsyncMock())
+        calls: list[str] = []
+
+        async def flaky(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            calls.append(server_slug)
+            if len(calls) == 1:
+                raise TestListingSurvivesATransientGateway._transient()
+            return ServerCatalogue(
+                server_name=server_slug,
+                tools={"github_search": _entry("github_search")},
+                interface_hash="h",
+                source="stateless",
+            )
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", flaky)
+        tools = await _resolver(provider).resolve(["github_search"])
+
+        assert [t.name for t in tools] == ["github_search"]
+        assert len(calls) == 2, "the transient failure was retried rather than failing the run"
+
+    @pytest.mark.asyncio
+    async def test_a_non_retryable_failure_fails_immediately(self, provider, monkeypatch):
+        """A rejected token is not a blip — retrying only delays the auth error."""
+        sleep = AsyncMock()
+        monkeypatch.setattr("agent_common.core.catalogue_ingest.asyncio.sleep", sleep)
+        calls: list[str] = []
+
+        async def forbidden(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            calls.append(server_slug)
+            response = httpx.Response(403, request=httpx.Request("POST", GATEWAY_URL))
+            raise httpx.HTTPStatusError("403", request=response.request, response=response)
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", forbidden)
+        with pytest.raises(httpx.HTTPStatusError):
+            await _resolver(provider).resolve(["github_search"])
+
+        assert len(calls) == 1, "a 403 must not be retried"
+        sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_that_stays_down_gives_up_after_three_attempts(self, provider, monkeypatch):
+        monkeypatch.setattr("agent_common.core.catalogue_ingest.asyncio.sleep", AsyncMock())
+        calls: list[str] = []
+
+        async def down(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            calls.append(server_slug)
+            raise TestListingSurvivesATransientGateway._transient()
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", down)
+        with pytest.raises(ExceptionGroup):
+            await _resolver(provider).resolve(["github_search"])
+
+        assert len(calls) == 3, "bounded: a gateway that is down is not a gateway that is blipping"
+
+
+class TestBothServersAreListedConcurrently:
+    """The two listings are independent endpoints, so the run pays the slower, not the sum.
+
+    Discovery was measured as the largest contributor to time-to-first-token in the
+    orchestrator, which gathers for this reason. A scheduled run has no warm parent
+    registry to inherit from (``_pre_resolved_tools_for`` has no analogue here), so it
+    pays a full listing on every run.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_two_listings_overlap(self, provider, monkeypatch):
+        in_flight = 0
+        peak = 0
+
+        async def slow(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.05)
+                name = "console_create_skill" if server_slug == "console" else "github_search"
+                return ServerCatalogue(
+                    server_name=server_slug,
+                    tools={name: _entry(name, server_slug)},
+                    interface_hash="h",
+                    source="stateless",
+                )
+            finally:
+                in_flight -= 1
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", slow)
+        tools = await _resolver(provider).resolve(["github_search", "console_create_skill"])
+
+        assert {t.name for t in tools} == {"github_search", "console_create_skill"}
+        assert peak == 2, "the gateway and console listings ran at the same time"
+
+    @pytest.mark.asyncio
+    async def test_the_process_wide_cap_bounds_concurrent_runs(self, provider, monkeypatch):
+        """What the semaphore is actually for — the peak ACROSS runs, not within one.
+
+        One run lists two servers, so per-run concurrency was never the risk. The
+        scheduler claims up to ``claim_limit`` jobs a tick and dispatches them together,
+        and agent-runner is the service that gets OOMKilled — so listing the two servers
+        concurrently doubled what the process holds open at the peak. The orchestrator
+        learned the same lesson at ~31 concurrent fetches; its cap is process-wide for
+        exactly this reason, since a per-run limit still allows limit x N.
+        """
+        monkeypatch.setattr("agent.mcp_tools._DISCOVERY_CONCURRENCY", 3)
+        monkeypatch.setattr("agent_common.core.catalogue_ingest._DISCOVERY_SEMAPHORE", None)
+        in_flight = 0
+        peak = 0
+
+        async def slow(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                name = "console_create_skill" if server_slug == "console" else "github_search"
+                return ServerCatalogue(
+                    server_name=server_slug,
+                    tools={name: _entry(name, server_slug)},
+                    interface_hash="h",
+                    source="stateless",
+                )
+            finally:
+                in_flight -= 1
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", slow)
+        # Five concurrent runs, two listings each: ten fetches wanting to be in flight.
+        await asyncio.gather(
+            *(
+                _resolver(provider).resolve(["github_search", "console_create_skill"])
+                for _ in range(5)
+            )
+        )
+
+        assert peak <= 3, f"the process-wide cap did not hold (peak={peak})"
+
+
+class TestAFailedListingLeavesNoOrphan:
+    """One server failing must not leave the other listing running past the HTTP client.
+
+    ``asyncio.gather`` does not cancel siblings when one raises. The surviving listing
+    outlived the ``async with httpx.AsyncClient(...)`` that closes the client under it,
+    retried against a closed client, and ended with nobody retrieving its exception —
+    asyncio then logs "Task exception was never retrieved". Harmless to the run's outcome
+    and pure noise in the logs of the service whose logs matter most during an outage.
+
+    Deliberately does NOT stub ``asyncio.sleep``: the other tests here patch it through
+    ``catalogue_ingest.asyncio``, which is the global module, so the stub would swallow
+    this test's own sleep and the sibling would finish instantly whether or not it was
+    awaited — the assertion would hold either way. Nothing retries here anyway (a 403 is
+    not retryable), so there is no backoff to skip.
+    """
+
+    @staticmethod
+    def _forbidden() -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", GATEWAY_URL)
+        return httpx.HTTPStatusError("403", request=request, response=httpx.Response(403, request=request))
+
+    @pytest.mark.asyncio
+    async def test_the_sibling_is_awaited_before_the_failure_propagates(self, provider, monkeypatch):
+        finished: list[str] = []
+
+        async def one_fails(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            if server_slug == "gateway":
+                raise TestAFailedListingLeavesNoOrphan._forbidden()
+            # Genuinely still in flight when the gateway's failure propagates.
+            await asyncio.sleep(0.05)
+            finished.append(server_slug)
+            return ServerCatalogue(
+                server_name=server_slug,
+                tools={"console_create_skill": _entry("console_create_skill", server_slug)},
+                interface_hash="h",
+                source="stateless",
+            )
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", one_fails)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await _resolver(provider).resolve(["github_search", "console_create_skill"])
+
+        # Checked at the moment the failure surfaces: with a bare gather the sibling is
+        # still sleeping here, and goes on to use a client that is already closing.
+        assert finished == ["console"], "the sibling listing was not awaited before the failure propagated"
+
+    @pytest.mark.asyncio
+    async def test_the_failure_still_propagates_rather_than_degrading(self, provider, monkeypatch):
+        """Awaiting the sibling must not turn a failed listing into a partial catalogue.
+
+        Fail-don't-degrade is ADR-0009's stated policy for discovery: a partial catalogue
+        is a silently less capable run, not a smaller one.
+        """
+
+        async def one_fails(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            if server_slug == "gateway":
+                raise TestAFailedListingLeavesNoOrphan._forbidden()
+            return ServerCatalogue(
+                server_name=server_slug,
+                tools={"console_create_skill": _entry("console_create_skill", server_slug)},
+                interface_hash="h",
+                source="stateless",
+            )
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", one_fails)
+
+        # Not "the console half of the catalogue" — an error.
+        with pytest.raises(httpx.HTTPStatusError):
+            await _resolver(provider).resolve(["github_search", "console_create_skill"])

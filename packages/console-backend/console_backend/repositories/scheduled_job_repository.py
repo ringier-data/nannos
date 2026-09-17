@@ -80,6 +80,8 @@ def _row_to_run(row: Any) -> ScheduledJobRun:
         last_seen_at=row.get("last_seen_at"),
         trigger=RunTrigger(row.get("trigger", RunTrigger.SCHEDULED.value)),
         notice_due_at=row.get("notice_due_at"),
+        parked_task_id=row.get("parked_task_id"),
+        parked_payload=row.get("parked_payload"),
     )
 
 
@@ -202,6 +204,19 @@ class ScheduledJobRepository(AuditedRepository):
         by the healer within about a minute; a healthy one keeps the job for as long
         as it runs, so runs of the same job never overlap.
 
+        A run parked on its owner holds the schedule the same way — but the two are
+        not tested the same way. ``running`` is a status a run leaves; ``auth_required``
+        is one it keeps for good, as a true record of how that occurrence ended. So
+        what holds the schedule is an *answerable* park, ``parked_task_id IS NOT NULL``,
+        cleared the moment somebody answers — the same key ``answerable_parked_run``
+        uses. Testing the status alone would mean the first park stopped the job
+        forever: still enabled, never claimed, no pause notification, silent.
+
+        The two are separate ``NOT EXISTS`` clauses rather than one ``status IN (…)``
+        because a partial index cannot serve an ``IN`` predicate. Split, each arm is an
+        index probe (``idx_scheduled_job_runs_running``, ``idx_scheduled_job_runs_parked``)
+        instead of a scan of the job's whole run history, per candidate job, per tick.
+
         ``retry_at`` is cleared on claim, so an attempt is handed out once even if
         several schedulers tick together.
         """
@@ -218,7 +233,14 @@ class ScheduledJobRepository(AuditedRepository):
                   )
                   AND NOT EXISTS (
                         SELECT 1 FROM scheduled_job_runs r
-                        WHERE r.job_id = j.id AND r.status = 'running'
+                        WHERE r.job_id = j.id
+                          AND r.status = 'running'
+                  )
+                  AND NOT EXISTS (
+                        SELECT 1 FROM scheduled_job_runs r
+                        WHERE r.job_id = j.id
+                          AND r.status = 'auth_required'
+                          AND r.parked_task_id IS NOT NULL
                   )
                 ORDER BY COALESCE(j.retry_at, j.next_run_at) ASC
                 LIMIT :limit
@@ -255,13 +277,38 @@ class ScheduledJobRepository(AuditedRepository):
         last_check_result: dict[str, Any] | None = None,
         paused_reason: str | None = None,
         retry_at: datetime | None = None,
-    ) -> None:
+        leave_schedule: bool = False,
+    ) -> tuple[bool, str | None]:
         """Update a job after execution: advance schedule, track failures, auto-pause on threshold.
 
-        Takes the run's status rather than a success flag because there are three
-        outcomes, not two. Only a FAILED run moves ``consecutive_failures`` up and
-        only a successful one resets it; an INTERRUPTED run leaves it alone in both
-        directions. See docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md.
+        Returns ``(enabled, paused_reason)`` as this write left them. The caller compares
+        against the state it already held to tell "this run stopped the job" from "it was
+        already off" — which it needs in order to tell the owner, and which it cannot
+        learn by re-reading: the auto-pause decision is made inside this statement, from
+        ``consecutive_failures`` against ``max_failures``.
+
+        Takes the run's status rather than a success flag because there are more than
+        two outcomes. Only a FAILED run moves ``consecutive_failures`` up and only a
+        successful one resets it; INTERRUPTED and AUTH_REQUIRED leave it alone in both
+        directions, because neither is evidence about the job. See
+        docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md and
+        docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
+
+        An AUTH_REQUIRED run still advances ``next_run_at`` like any other. What stops
+        the job running is ``claim_due_jobs``, which will not claim a job whose run is
+        parked — so the schedule stays honest about when the job was due, and the job
+        catches up with one occurrence once the owner answers.
+
+        *leave_schedule* says this run does not own the schedule: the job's
+        ``next_run_at`` and ``enabled`` are whatever else has set them. A NULL
+        ``next_run_at`` otherwise carries two meanings at once — the COALESCE keeps the
+        column, and the CASE below retires the job — so a caller that merely has nothing
+        to say about the schedule could not say so, and had to echo back a value it read
+        earlier instead. That read is what made a resumed run overwrite a concurrent
+        schedule edit with a snapshot from before it: the owner's new time was silently
+        replaced by the old one for an occurrence. With this flag the column is resolved
+        against the row's own current value inside this statement, so there is no stale
+        write left to lose the edit — not merely a narrower window in which to lose it.
 
         *retry_at* schedules the one fresh attempt an interruption earns. It is
         only ever written, never cleared here: runs of one job can complete out of
@@ -273,7 +320,7 @@ class ScheduledJobRepository(AuditedRepository):
         failed = status == JobRunStatus.FAILED
         success = status in (JobRunStatus.SUCCESS, JobRunStatus.CONDITION_NOT_MET)
 
-        await db.execute(
+        result = await db.execute(
             text("""
                 UPDATE scheduled_jobs
                 SET
@@ -286,7 +333,7 @@ class ScheduledJobRepository(AuditedRepository):
                     next_run_at          = COALESCE(:next_run_at, next_run_at),
                     retry_at             = COALESCE(CAST(:retry_at AS timestamptz), retry_at),
                     enabled              = CASE
-                        WHEN :next_run_at IS NULL                                        THEN FALSE
+                        WHEN :next_run_at IS NULL AND NOT :leave_schedule                 THEN FALSE
                         WHEN :failed AND (consecutive_failures + 1) >= max_failures      THEN FALSE
                         ELSE enabled
                     END,
@@ -299,6 +346,7 @@ class ScheduledJobRepository(AuditedRepository):
                     last_check_result    = COALESCE(CAST(:last_check_result AS jsonb), last_check_result),
                     updated_at           = :now
                 WHERE id = :job_id
+                RETURNING enabled, paused_reason
             """),
             {
                 "job_id": job_id,
@@ -306,6 +354,7 @@ class ScheduledJobRepository(AuditedRepository):
                 "success": success,
                 "last_run_at": now,
                 "next_run_at": next_run_at,
+                "leave_schedule": leave_schedule,
                 "retry_at": retry_at,
                 "paused_reason": paused_reason,
                 # `is not None`, not truthiness: `{}` is a real response (a tool with no
@@ -318,6 +367,8 @@ class ScheduledJobRepository(AuditedRepository):
                 "now": now,
             },
         )
+        row = result.mappings().first()
+        return (bool(row["enabled"]), row["paused_reason"]) if row else (True, None)
 
     async def update_job(
         self,
@@ -485,6 +536,16 @@ class ScheduledJobRepository(AuditedRepository):
         purpose and are not quietly resumed. A stale ``retry`` run has exhausted
         recovery, so it is marked as owing the user a notice at *notice_due_at*
         instead. A ``manual`` run earns neither: the user was present.
+
+        A ``resumed`` run earns the attempt too (ADR-0009 decision 7). Nobody is present
+        — the click that started it is long gone — and the ask it answered has already
+        been consumed, so without this the job would stop for good on an authorization
+        that actually succeeded. The fresh attempt is cheap by then: the credential is
+        stored at the gateway, so an ordinary occurrence no longer blocks on it and
+        recovers the work the resume was carrying. This is also what makes the window
+        between claiming the ask and dispatching the resume survivable — the run row is
+        written with the claim, so a process that dies in between leaves a stale
+        ``running`` row here rather than nothing at all.
         """
         result = await db.execute(
             text("""
@@ -509,7 +570,7 @@ class ScheduledJobRepository(AuditedRepository):
                         updated_at = NOW()
                     FROM stale
                     WHERE j.id = stale.job_id
-                      AND stale.trigger = 'scheduled'
+                      AND stale.trigger IN ('scheduled', 'resumed')
                       AND j.deleted_at IS NULL
                       AND j.paused_reason IS NULL
                     RETURNING j.id
@@ -537,6 +598,8 @@ class ScheduledJobRepository(AuditedRepository):
         delivered: bool = False,
         condition_evaluation: ConditionEvaluation | None = None,
         notice_due_at: datetime | None = None,
+        parked_task_id: str | None = None,
+        parked_payload: dict[str, Any] | None = None,
     ) -> bool:
         """Finalise a run record with execution outcome. Returns whether a row changed.
 
@@ -549,6 +612,12 @@ class ScheduledJobRepository(AuditedRepository):
         that this run was lost for good. Same statement on purpose: the process
         recording an interruption may be the one dying, and a run that is interrupted
         but owes nothing would leave the user untold.
+
+        *parked_task_id* and *parked_payload* are the parked agent-runner task and the ask
+        delivered with it, on an AUTH_REQUIRED run. Written here rather than by a later
+        update for the same reason as the notice: the run and the reason it stopped are
+        one fact, and a run recorded as parked with no way to reach the task would be a
+        job stopped with no way to restart it.
         """
         result = await db.execute(
             text("""
@@ -561,7 +630,9 @@ class ScheduledJobRepository(AuditedRepository):
                     conversation_id  = :conversation_id,
                     delivered        = :delivered,
                     condition_evaluation = :condition_evaluation,
-                    notice_due_at    = COALESCE(CAST(:notice_due_at AS timestamptz), notice_due_at)
+                    notice_due_at    = COALESCE(CAST(:notice_due_at AS timestamptz), notice_due_at),
+                    parked_task_id     = COALESCE(:parked_task_id, parked_task_id),
+                    parked_payload     = COALESCE(CAST(:parked_payload AS jsonb), parked_payload)
                 WHERE id = :run_id
                   AND status = 'running'
             """),
@@ -580,6 +651,8 @@ class ScheduledJobRepository(AuditedRepository):
                     else None
                 ),
                 "notice_due_at": notice_due_at,
+                "parked_task_id": parked_task_id,
+                "parked_payload": json.dumps(parked_payload) if parked_payload is not None else None,
             },
         )
         return result.rowcount > 0
@@ -607,6 +680,50 @@ class ScheduledJobRepository(AuditedRepository):
             """),
             {"run_id": run_id, "status": status.value, "error_message": error_message},
         )
+
+    async def answerable_parked_run(self, db: AsyncSession, job_id: int) -> ScheduledJobRun | None:
+        """The run of *job_id* still waiting on its owner, if any.
+
+        ``parked_task_id`` rather than status is what makes a run answerable: the status
+        stays ``auth_required`` for good, because it is a true record of how that
+        occurrence ended, while the task id is cleared the moment somebody answers.
+        """
+        result = await db.execute(
+            text("""
+                SELECT * FROM scheduled_job_runs
+                WHERE job_id = :job_id
+                  AND status = 'auth_required'
+                  AND parked_task_id IS NOT NULL
+                ORDER BY started_at DESC
+                LIMIT 1
+            """),
+            {"job_id": job_id},
+        )
+        row = result.mappings().first()
+        return _row_to_run(row) if row is not None else None
+
+    async def clear_parked_task(self, db: AsyncSession, run_id: int) -> bool:
+        """Mark a parked run as no longer answerable. Returns whether it still was.
+
+        Called once the owner's answer has been accepted. The run KEEPS its
+        ``AUTH_REQUIRED`` status — it is a true record of how that occurrence ended, and
+        rewriting it would lose that — so the task id is what says whether there is still
+        a question outstanding. Without this the ask never goes away: the console would
+        go on offering a card for a task that has since gone terminal, and a second click
+        would surface the A2A server's "task is in terminal state" at the user.
+
+        The write is conditional, so two clicks racing produce one resume: the loser sees
+        no row updated and is told the run has already been answered.
+        """
+        result = await db.execute(
+            text("""
+                UPDATE scheduled_job_runs
+                SET parked_task_id = NULL
+                WHERE id = :run_id AND parked_task_id IS NOT NULL
+            """),
+            {"run_id": run_id},
+        )
+        return result.rowcount > 0
 
     async def get_run(
         self,

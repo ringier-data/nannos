@@ -1154,7 +1154,7 @@ procs:
 
   orchestrator:
     cwd: "$ROOT_DIR/packages/orchestrator-agent"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5679} main.py --host 0.0.0.0 --port 10001 --reload 2>&1 | tee $_LOG_DIR/orchestrator.log"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5679} -m uvicorn main:app --host 0.0.0.0 --port 10001 --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/orchestrator.log"
     env:
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "orchestrator"
@@ -1204,7 +1204,7 @@ procs:
 
   runner:
     cwd: "$ROOT_DIR/packages/agent-runner"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5682} main.py --host 0.0.0.0 --port 5005 --reload 2>&1 | tee $_LOG_DIR/runner.log"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5682} -m uvicorn main:app --host 0.0.0.0 --port 5005 --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/runner.log"
     env:
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "agent-runner"

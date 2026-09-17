@@ -1,0 +1,15 @@
+-- rambler up
+-- A job that auto-pauses stops running entirely, and until now it did so in silence:
+-- consecutive_failures crosses max_failures, the job is disabled with a paused_reason,
+-- and nothing tells its owner. The run history records it, but only somebody who goes
+-- looking will find out — and the reason to go looking is that the job stopped
+-- producing, which is precisely what they will not notice.
+--
+-- The delivery channel cannot carry this: a job may have none at all (it is optional),
+-- and that is exactly the job most likely to stop unnoticed. A durable console
+-- notification reaches the owner either way, and survives them being offline, which the
+-- WebSocket push does not.
+ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'scheduled_job_paused';
+-- rambler down
+-- NOTE: PostgreSQL does not support removing enum values, so the value added above is
+-- intentionally irreversible.

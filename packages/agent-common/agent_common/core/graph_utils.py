@@ -722,6 +722,12 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         collected: list[BaseTool] = []
         seen: set[str] = set()
         excluded = self._excluded_ptc_names | {self._tool_name}
+        # Where each tool came from, for the log at the end. What the sandbox can
+        # actually call has been invisible twice now: the failure surfaces as the model
+        # reporting that a tool "does not exist", which reads like a configuration
+        # problem and is indistinguishable from one without this.
+        from_context = 0
+        from_request = 0
 
         for tool in self._static_ptc_tools:
             if tool.name in seen:
@@ -747,6 +753,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 if name in _PTC_SANDBOX_TOOLS and not self._supports_execution:
                     continue
                 seen.add(name)
+                from_context += 1
                 collected.append(
                     wrap_tool_for_ptc(
                         tool,
@@ -769,6 +776,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             collected = self._without_raw_listers(collected)
             if self._is_core_only(collected):
                 collected = self._with_discovery(collected)
+            self._log_exposure(collected, from_context, from_request, request, broadened=False)
             return collected
 
         def _consider(tool: Any) -> None:
@@ -807,6 +815,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         for tool in list(getattr(request, "tools", []) or []):
             if isinstance(tool, BaseTool):
                 had_request_tools = True
+                from_request += 1
             _consider(tool)
 
         # Interrupt *resume* only: the eval tool node replays without a preceding
@@ -832,7 +841,38 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         if self._is_core_only(collected):
             collected = self._with_discovery(collected)
 
+        self._log_exposure(collected, from_context, from_request, request, broadened=True)
         return collected
+
+    def _log_exposure(
+        self,
+        collected: list[BaseTool],
+        from_context: int,
+        from_request: int,
+        request: Any,
+        *,
+        broadened: bool,
+    ) -> None:
+        """Say what ``eval`` can call this turn, and where it came from.
+
+        One line, at INFO, because the alternative has now cost two debugging sessions:
+        when the namespace is short the model simply reports that the tool "does not
+        exist", which is indistinguishable from a misconfigured integration. The counts
+        separate the three suppliers — the static baseline, the runtime context registry
+        (catalog mode), and the model's bound list — so a missing tool points at one.
+        """
+        if not logger.isEnabledFor(logging.INFO):
+            return
+        checkpointed = self._checkpointed_exposure(request)
+        logger.info(
+            "[PTC] eval namespace: %d tools (context-registry=%d, request-tools=%d, "
+            "broadened=%s, resume-filtered-to=%s)",
+            len(collected),
+            from_context,
+            from_request,
+            broadened,
+            len(checkpointed) if checkpointed is not None else "n/a",
+        )
 
     @staticmethod
     def _without_raw_listers(collected: list[BaseTool]) -> list[BaseTool]:
@@ -1209,6 +1249,23 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             turn.tool_call_history = {
                 k: list(v) for k, v in (state.get(TOOL_CALL_HISTORY_STATE_KEY) or {}).items()
             }
+            # Repopulate the PTC namespace before EITHER path runs the code. On an
+            # interrupt resume the graph may have been rebuilt (fresh middleware
+            # instance, different request or pod), so the upstream
+            # ``langchain_quickjs`` cache is empty — and the model-call hook that
+            # normally fills it does NOT run on resume: only this interrupted eval
+            # tool node replays. Without it the REPL installs an EMPTY ``tools``
+            # namespace and the replayed code throws ``TypeError: ... is not a
+            # function``, which reads to the model as the tool not existing.
+            #
+            # This used to live in ``_run_guarded_eval``, so it only ran for agents
+            # WITH a risk scorer. An agent without one — a scheduled run, which must
+            # not park on a tool approval nobody is there to give (ADR-0009) — took
+            # the unguarded branch below and never rebuilt anything. Its every resumed
+            # turn came back with "tools.X is not a function" and the agent duly
+            # reported that its tools do not exist. The rebuild has nothing to do with
+            # HITL, so it does not belong on the HITL path.
+            self._ensure_ptc_namespace(request, thread_id)
             try:
                 if not self._ptc_enabled or self._ptc_risk_scorer is None:
                     result = await self._run_eval_with_guidance(request, handler, thread_id)
@@ -1217,24 +1274,28 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             finally:
                 end_ptc_turn(thread_id)
 
+    def _ensure_ptc_namespace(self, request: Any, thread_id: Any) -> None:
+        """Make sure this thread's ``tools.*`` bridges exist before ``eval`` runs.
+
+        Idempotent: on the normal path the model-call hook has already filled the
+        cache and this is a dict lookup.
+        """
+        if not self._ptc_enabled or self._ptc_tools_by_thread.get(thread_id):
+            return
+        rebuilt = tuple(self._collect_ptc_tools(request))
+        self._ptc_tools_by_thread[thread_id] = rebuilt
+        logger.info(
+            "[PTC] rebuilt the eval namespace for a replayed tool node: %d tools", len(rebuilt)
+        )
+
     async def _run_guarded_eval(
         self, request: Any, handler: Any, thread_id: Any, turn: Any
     ) -> Any:
         """The HITL loop for a guarded ``eval`` — see ``awrap_tool_call``."""
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
-        # On an interrupt *resume* the graph may have been rebuilt (a fresh
-        # middleware instance on a different request/pod), so the upstream
-        # ``langchain_quickjs`` middleware's per-instance ``_ptc_tools_by_thread``
-        # cache is empty — and the model-call hook that normally populates it does
-        # NOT run on resume (only this interrupted eval tool node replays). Without
-        # the cache the eval REPL installs an empty ``tools`` namespace and the
-        # replayed ``code`` throws ``TypeError: ... is not a function``, derailing
-        # the model with a bogus error. Repopulate the cache here (idempotent on
-        # the normal path, where the model hook already filled it) so the fresh
-        # per-call REPL reinstalls the same PTC bindings the original ``eval`` used.
-        if self._ptc_enabled and not self._ptc_tools_by_thread.get(thread_id):
-            self._ptc_tools_by_thread[thread_id] = tuple(self._collect_ptc_tools(request))
+        # The namespace is rebuilt in ``awrap_tool_call``, before either eval path —
+        # it is a resume concern, not a HITL one.
         ask_round = 0
         while True:
             clear_ptc_pending(thread_id)

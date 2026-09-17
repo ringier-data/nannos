@@ -10,6 +10,8 @@
  */
 
 import { Logger } from '../utils/logger.js';
+import { authPromptFromPayload } from '../utils/inTaskAuth.js';
+import type { ReplyTo } from '../services/scheduledRunResumeService.js';
 import { HandlerDependencies } from './types.js';
 import { Task } from '@a2a-js/sdk';
 
@@ -17,6 +19,21 @@ const logger = Logger.getLogger('a2aNotificationHandler');
 
 interface SchedulerPayload {
   scheduler_status: string;
+  /**
+   * The in-task-auth ask, when the run PARKED on its owner's credential. Carried
+   * inside this payload rather than as the status message itself: part zero is parsed
+   * as this JSON, so a status message shaped only by the auth extension would fail
+   * `JSON.parse` and the notification would be dropped entirely. See ADR-0009.
+   */
+  auth_payload?: Record<string, unknown>;
+  /** Where the answer goes. Logical, never a URL — see ScheduledRunResumeService. */
+  reply_to?: ReplyTo;
+  /**
+   * Where the ask this run is continuing was posted, echoed back untouched by
+   * console-backend. Only this client can read it: it is the space and thread of a
+   * message this client sent, and it travelled with the click that answered the ask.
+   */
+  reply_to_message?: { space?: string; thread?: string };
   agent_message: string;
   user_sub: string;
   // Correlation fields echoed by agent-runner so thread replies under the
@@ -76,6 +93,8 @@ export async function handleA2ANotification(
     return;
   }
 
+  const parked = schedulerPayload.scheduler_status === 'auth_required';
+
   // Look up the Google Chat user by their OIDC sub for this project
   const userAuth = await userAuthStorage.findByOidcSub(schedulerPayload.user_sub, projectId);
   if (!userAuth) {
@@ -95,7 +114,46 @@ export async function handleA2ANotification(
       return;
     }
 
-    const sentMessage = await chatService.sendTextMessage(projectId, dmSpace.name, schedulerPayload.agent_message);
+    // A parked run asks rather than reports, using the card this client already
+    // renders for an interactive authorization. Only where the answer goes differs,
+    // which is what `replyTo` carries into the button parameters.
+    const authPrompt = parked ? authPromptFromPayload(schedulerPayload.auth_payload) : null;
+    // Whatever a resumed run produces belongs under the ask that unblocked it: the owner
+    // sees one exchange — "I need permission", "here is what I did" — instead of loose
+    // notices they have to connect themselves. That includes a SECOND ask, when one
+    // authorization leads straight to another: the chain stays legible as a chain
+    // (ADR-0009 calls it load-bearing).
+    //
+    // Only when the ask was posted in the space this notification is going to, since it
+    // is this client's own message it threads under. The coordinates came back untouched
+    // from console-backend, which stores them opaquely.
+    const askThreadId =
+      schedulerPayload.reply_to_message?.space === dmSpace.name
+        ? schedulerPayload.reply_to_message?.thread
+        : undefined;
+    const sentMessage = authPrompt
+      ? await chatService.sendMessage({
+          projectId,
+          spaceId: dmSpace.name,
+          // The prose stays alongside the card: it carries the authorize URL for any
+          // surface that shows text without rendering cards.
+          text: schedulerPayload.agent_message,
+          cardsV2: [
+            chatService.buildInTaskAuthCard(deps.config, authPrompt, {
+              taskId: task.id,
+              replyTo: schedulerPayload.reply_to,
+            }),
+          ],
+          ...(askThreadId
+            ? { threadId: askThreadId, messageReplyOption: 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' as const }
+            : {}),
+        })
+      : await chatService.sendTextMessage(
+          projectId,
+          dmSpace.name,
+          schedulerPayload.agent_message,
+          askThreadId
+        );
 
     logger.info(
       `[A2ACallback] Sent notification to user ${userAuth.userId} in space ${dmSpace.name}`
@@ -105,8 +163,12 @@ export async function handleA2ANotification(
     // a thread reply under it can be correlated to the scheduled job/run and
     // forwarded to the orchestrator as a conversation-origin DataPart (see
     // messageHandler).
+    // NOT for the ask: ADR-0008 keys an adopted sub-agent's memory by the RUN only
+    // because "a run is adoptable exactly once", and recording the ask too would give
+    // one run two adoptable threads onto one sub-agent conversation. Nothing is lost —
+    // a prose reply cannot resume a parked run anyway.
     const threadName = sentMessage.thread?.name;
-    if (threadName && task.contextId) {
+    if (threadName && task.contextId && !parked) {
       try {
         await scheduledRunStore.set({
           contextKey: scheduledRunStore.buildKey(threadName),

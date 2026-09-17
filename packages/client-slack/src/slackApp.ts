@@ -8,6 +8,7 @@ import { UserAuthService } from './services/userAuthService.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { FeedbackService } from './services/feedbackService.js';
+import { ScheduledRunResumeService } from './services/scheduledRunResumeService.js';
 import { registerListeners } from './listeners/index.js';
 import { handleOAuthCallback, generateCallbackHTML } from './utils/oauthCallback.js';
 import { processPendingRequest } from './utils/processPendingRequest.js';
@@ -23,6 +24,7 @@ let userAuthService: UserAuthService;
 let a2aClientService: A2AClientService;
 let fileStorageService: FileStorageService;
 let feedbackService: FeedbackService | undefined;
+let scheduledRunResumeService: ScheduledRunResumeService | undefined;
 let storage: StorageProvider;
 
 // Initialize logger early
@@ -286,9 +288,13 @@ export async function startSlackApp(config: Config) {
           }
           const task = event.task;
 
-          // Only process completed/failed notifications
+          // Actionable push states. `auth-required` joins completed/failed because a run
+          // that parked on its owner's credential HAS something to deliver — the ask
+          // itself — and it is the one notification the owner must see, since the job
+          // stays stopped until they answer. Dropping it here is why the card never
+          // arrived while ordinary results did (ADR-0009).
           const state = task.status.state;
-          if (state !== 'completed' && state !== 'failed') {
+          if (state !== 'completed' && state !== 'failed' && state !== 'auth-required') {
             logger.debug(`[A2ACallback] Ignoring notification with state=${state}`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ acknowledged: true }));
@@ -382,6 +388,19 @@ export async function startSlackApp(config: Config) {
       );
     }
 
+    // Answering a scheduled run parked on its owner's authorization. Same
+    // console-backend wire as feedback, and unavailable for the same reason when the
+    // URL is unset — except the cost is higher here: without it a parked job stays
+    // stopped, because the card is the only way to restart it.
+    if (config.consoleBackend) {
+      scheduledRunResumeService = new ScheduledRunResumeService(userAuthService, config);
+    } else {
+      logger.warn(
+        'Scheduled-run authorization disabled: CONSOLE_BACKEND_URL not set. A scheduled job ' +
+          'blocked on a credential will ask, but its owner will have no way to answer.'
+      );
+    }
+
     // Log every incoming Slack event for observability
     app.use(async ({ body, next }) => {
       const eventType = (body as any).event?.type || (body as any).command || (body as any).type || 'unknown';
@@ -407,6 +426,7 @@ export async function startSlackApp(config: Config) {
       storage.botInstallation,
       feedbackService,
       storage.scheduledRun,
+      scheduledRunResumeService,
     );
 
     // Start the app
