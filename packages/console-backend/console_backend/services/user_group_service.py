@@ -67,6 +67,7 @@ class UserGroupService:
         self._notification_service = notification_service
         self._keycloak_service = keycloak_admin_service
         self._outbound_scim_push_service = None
+        self._scheduler_service = None
 
     def set_repository(self, user_group_repository):
         """Set the user group repository (dependency injection)."""
@@ -83,6 +84,10 @@ class UserGroupService:
     def set_keycloak_service(self, keycloak_admin_service: KeycloakAdminService | None):
         """Set the Keycloak admin service (dependency injection)."""
         self._keycloak_service = keycloak_admin_service
+
+    def set_scheduler_service(self, scheduler_service) -> None:
+        """Default scheduled jobs follow membership like default agents do (ADR-0010)."""
+        self._scheduler_service = scheduler_service
 
     def set_outbound_scim_push_service(self, service):
         """Set the outbound SCIM push service (dependency injection)."""
@@ -731,6 +736,14 @@ class UserGroupService:
             logger.error(f"Failed to auto-activate default agents: {e}")
             # Don't raise - member addition succeeded, activation failure is non-critical
 
+        # Default scheduled jobs of the group become subscriptions of the new members
+        # (ADR-0010) — enabled, inherited, under each member's own identity.
+        if self._scheduler_service is not None:
+            try:
+                await self._scheduler_service.on_members_added(db, actor, group_id, user_ids)
+            except Exception as e:
+                logger.error(f"Failed to activate default scheduled jobs for new members: {e}")
+
         # Fetch and return added members
         member_query = text("""
             SELECT u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
@@ -1115,6 +1128,15 @@ class UserGroupService:
         except Exception as e:
             logger.error(f"Failed to cleanup activations on member removal: {e}")
             # Don't raise - member removal succeeded, cleanup failure is logged
+
+        # Scheduled-job standing that came through this group goes with the membership
+        # (ADR-0010): group-default subscriptions are removed, self-made ones on a grant
+        # the member no longer holds are disabled with "access revoked".
+        if self._scheduler_service is not None and removed:
+            try:
+                await self._scheduler_service.on_members_removed(db, actor, group_id, removed)
+            except Exception as e:
+                logger.error(f"Failed to withdraw scheduled-job subscriptions on member removal: {e}")
 
         return removed
 

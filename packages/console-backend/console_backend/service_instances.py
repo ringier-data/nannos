@@ -353,6 +353,10 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.scheduler_service.set_sub_agent_service(app.state.sub_agent_service)
     app.state.scheduler_service.set_delivery_channel_repository(app.state.delivery_channel_repository)
     app.state.scheduler_service.set_user_settings_service(app.state.user_settings_service)
+    app.state.scheduler_service.set_notification_service(app.state.notification_service)
+    # Group membership changes drive default-job subscriptions (ADR-0010), as they do
+    # default-agent activations.
+    app.state.user_group_service.set_scheduler_service(app.state.scheduler_service)
 
     app.state.scheduler_engine = SchedulerEngine(
         repo=app.state.scheduled_job_repository,
@@ -363,6 +367,7 @@ async def initialize_services(app: "FastAPI") -> None:
         socket_notification_manager=app.state.socket_notification_manager,
         tick_interval_seconds=config.scheduler.tick_interval_seconds,
         claim_limit=config.scheduler.claim_limit,
+        agent_access_check=app.state.scheduler_service.subscriber_can_run_agent,
     )
 
     # Initialize playbook service (connects to docstore database)

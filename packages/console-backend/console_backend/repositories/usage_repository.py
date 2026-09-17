@@ -540,7 +540,8 @@ class UsageRepository:
             FROM usage_logs u
             LEFT JOIN usage_billing_units t ON u.id = t.usage_log_id
             LEFT JOIN sub_agents sa ON u.sub_agent_id = sa.id AND sa.deleted_at IS NULL
-            LEFT JOIN scheduled_jobs sj ON u.scheduled_job_id = sj.id
+            LEFT JOIN scheduled_job_subscriptions sjs ON u.scheduled_job_id = sjs.id
+            LEFT JOIN scheduled_job_definitions sj ON sjs.definition_id = sj.id
             LEFT JOIN catalogs c ON u.catalog_id = c.id
             {where_clause}
             GROUP BY u.id, sa.name, sj.name, c.name

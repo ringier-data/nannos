@@ -350,6 +350,19 @@ class SubAgentService:
                     -- An embed activation (ADR-0006) is itself the grant: the binding's azp
                     -- authorised the user; there is no owner/public/group relation to lean on.
                     OR usa.activated_by = :embed_source
+                    -- An inline `automated` agent is part of the scheduled job definition
+                    -- that names it and travels with it (ADR-0010): a subscriber runs it
+                    -- under their own identity, so they must be able to read its config.
+                    -- Only automated agents — sharing a job never grants a regular agent.
+                    OR (sa.type = 'automated' AND EXISTS (
+                        SELECT 1
+                        FROM scheduled_job_subscriptions sjs
+                        JOIN scheduled_job_definitions sjd ON sjd.id = sjs.definition_id
+                        WHERE sjd.sub_agent_id = sa.id
+                          AND sjs.user_id = :user_id
+                          AND sjs.deleted_at IS NULL
+                          AND sjd.deleted_at IS NULL
+                    ))
                 ) {activation_filter}
             """
             if status_filter:
