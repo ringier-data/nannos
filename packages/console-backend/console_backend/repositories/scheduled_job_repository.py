@@ -277,6 +277,7 @@ class ScheduledJobRepository(AuditedRepository):
         last_check_result: dict[str, Any] | None = None,
         paused_reason: str | None = None,
         retry_at: datetime | None = None,
+        leave_schedule: bool = False,
     ) -> tuple[bool, str | None]:
         """Update a job after execution: advance schedule, track failures, auto-pause on threshold.
 
@@ -297,6 +298,17 @@ class ScheduledJobRepository(AuditedRepository):
         the job running is ``claim_due_jobs``, which will not claim a job whose run is
         parked — so the schedule stays honest about when the job was due, and the job
         catches up with one occurrence once the owner answers.
+
+        *leave_schedule* says this run does not own the schedule: the job's
+        ``next_run_at`` and ``enabled`` are whatever else has set them. A NULL
+        ``next_run_at`` otherwise carries two meanings at once — the COALESCE keeps the
+        column, and the CASE below retires the job — so a caller that merely has nothing
+        to say about the schedule could not say so, and had to echo back a value it read
+        earlier instead. That read is what made a resumed run overwrite a concurrent
+        schedule edit with a snapshot from before it: the owner's new time was silently
+        replaced by the old one for an occurrence. With this flag the column is resolved
+        against the row's own current value inside this statement, so there is no stale
+        write left to lose the edit — not merely a narrower window in which to lose it.
 
         *retry_at* schedules the one fresh attempt an interruption earns. It is
         only ever written, never cleared here: runs of one job can complete out of
@@ -321,7 +333,7 @@ class ScheduledJobRepository(AuditedRepository):
                     next_run_at          = COALESCE(:next_run_at, next_run_at),
                     retry_at             = COALESCE(CAST(:retry_at AS timestamptz), retry_at),
                     enabled              = CASE
-                        WHEN :next_run_at IS NULL                                        THEN FALSE
+                        WHEN :next_run_at IS NULL AND NOT :leave_schedule                 THEN FALSE
                         WHEN :failed AND (consecutive_failures + 1) >= max_failures      THEN FALSE
                         ELSE enabled
                     END,
@@ -342,6 +354,7 @@ class ScheduledJobRepository(AuditedRepository):
                 "success": success,
                 "last_run_at": now,
                 "next_run_at": next_run_at,
+                "leave_schedule": leave_schedule,
                 "retry_at": retry_at,
                 "paused_reason": paused_reason,
                 # `is not None`, not truthiness: `{}` is a real response (a tool with no

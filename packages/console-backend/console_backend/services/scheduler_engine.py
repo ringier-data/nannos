@@ -1102,16 +1102,22 @@ class SchedulerEngine:
             }[trigger]
             logger.warning("Run %s of job %d was interrupted (%s); %s", run_id, job.id, error_message, consequence)
 
-        # A resumed run continues one whose occurrence already advanced the schedule;
-        # advancing again would silently skip the next one. So it re-sends the job's
-        # CURRENT next_run_at rather than a recomputed one — and deliberately not None,
-        # which is not "leave it alone" here: complete_job reads a NULL next_run_at as
-        # "nothing further is scheduled" and disables the job. The two meanings share a
-        # parameter, so a resumed run has to say the schedule it already has.
+        # A resumed run continues one whose occurrence already advanced the schedule, so
+        # advancing again would silently skip the next one — it says NOTHING about the
+        # schedule instead (``leave_schedule``), rather than re-sending the value it read
+        # when the owner clicked.
+        #
+        # That echo was a lost update. ``job`` is a snapshot taken in the router at click
+        # time, and a schedule edit recomputes ``next_run_at`` from the new definition
+        # (scheduler_service.update_job), so an owner who edited the schedule while the
+        # resumed run was in flight had their new time overwritten by the old one when it
+        # finalised — the job then firing on a schedule they had already replaced. Saying
+        # nothing leaves whatever the edit computed in place, with no window at all.
+        leave_schedule = trigger == RunTrigger.RESUMED
         try:
             next_run_at = (
-                job.next_run_at
-                if trigger == RunTrigger.RESUMED
+                None
+                if leave_schedule
                 else compute_next_run(
                     schedule_kind=job.schedule_kind,
                     cron_expr=job.cron_expr,
@@ -1173,6 +1179,7 @@ class SchedulerEngine:
                 retry_at=retry_at,
                 last_check_result=last_check_result,
                 paused_reason=paused_reason,
+                leave_schedule=leave_schedule,
             )
             await db.commit()
 
