@@ -13,6 +13,7 @@ SYSTEM_ROLE_CAPABILITIES = {
         "groups": {"read"},  # View groups they're in (intersection applies)
         "members": {"read", "write"},  # View/manage members (intersection applies)
         "sub_agents": {"read", "write"},  # View/manage sub-agents (intersection applies)
+        "scheduled_jobs": {"read", "write"},  # Subscribe to / edit shared job definitions (intersection applies)
         "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
         "catalogs": {"read", "write"},  # View/manage catalogs (intersection applies)
         "bug_reports": {"read", "write"},  # View/resolve own bug reports (no intersection)
@@ -25,6 +26,7 @@ SYSTEM_ROLE_CAPABILITIES = {
             "write",
             "approve",  # Approve sub-agents in accessible groups (intersection applies, requires admin-mode)
         },
+        "scheduled_jobs": {"read", "write"},  # Subscribe to / edit shared job definitions (intersection applies)
         "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
         "catalogs": {"read", "write"},  # View/manage catalogs (intersection applies)
         "bug_reports": {"read", "triage"},  # View own reports, triage any accessible (no intersection)
@@ -51,6 +53,12 @@ SYSTEM_ROLE_CAPABILITIES = {
             "read.admin",  # View all sub-agents system-wide (bypasses intersection, requires admin-mode)
             "write.admin",  # Modify all sub-agents system-wide (bypasses intersection, requires admin-mode)
             "approve.admin",  # Approve ANY sub-agent system-wide (bypasses intersection, requires admin-mode)
+        },
+        "scheduled_jobs": {
+            "read",
+            "write",
+            "read.admin",  # View all job definitions system-wide (bypasses intersection, requires admin-mode)
+            "write.admin",  # Modify/delete/publish all job definitions (bypasses intersection, requires admin-mode)
         },
         "secrets": {
             "read",
@@ -83,18 +91,21 @@ SYSTEM_ROLE_CAPABILITIES = {
 GROUP_ROLE_CAPABILITIES = {
     "read": {
         "sub_agents": {"read"},  # Read-only access to sub-agents
+        "scheduled_jobs": {"read"},  # May subscribe to shared job definitions
         "members": {"read"},  # Can view group members
         "secrets": {"read"},  # Read-only access to secrets
         "catalogs": {"read"},  # Read-only access to catalogs
     },
     "write": {
         "sub_agents": {"read", "write"},  # Full sub-agent access
+        "scheduled_jobs": {"read", "write"},  # Subscribe to and edit shared job definitions
         "members": {"read"},  # Can view group members
         "secrets": {"read"},  # Read access to secrets
         "catalogs": {"read", "write"},  # Read/write access to catalogs
     },
     "manager": {
         "sub_agents": {"read", "write"},  # Full sub-agent access
+        "scheduled_jobs": {"read", "write"},  # Subscribe to and edit shared job definitions
         "members": {"read", "write"},  # Can view and manage group membership
         "secrets": {"read", "write"},  # Read/write access to secrets
         "catalogs": {"read", "write"},  # Read/write access to catalogs
