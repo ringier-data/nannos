@@ -669,6 +669,39 @@ class TestParkedOnAuthorization:
         assert parked["scheduled_job_id"] == 10
 
     @pytest.mark.asyncio
+    async def test_only_a_scheduled_run_may_park(self, agent_runner):
+        """agent-runner serves more than the scheduler, and a park with no job is an orphan.
+
+        ``AuthErrorDetectionMiddleware`` is installed for every caller of this path, and
+        the skill-security assessor and debug agent dispatch here with no
+        ``scheduled_job_id``. Such a park is structurally unanswerable, not merely
+        unattended: parking holds a JOB's schedule, the ask rides the JOB's delivery
+        channel, and the answer comes back addressed to a RUN — none of which exist. The
+        task would sit non-terminal in a store that is now durable, so nothing would close
+        it and nothing could answer it. Enforced at the boundary, like the
+        ``risk_scorer=None`` constraint, rather than assumed from the caller's metadata.
+        """
+        task = self._task(task_id="outer-task-assessor")
+        task.history = [MagicMock(metadata={"sub_agent_id": 5})]  # no scheduled_job_id
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(
+                message="I need access to GitHub.",
+                task_state="auth_required",
+                auth_payload=self.AUTH_PAYLOAD,
+            )
+        )
+
+        items, responses = await self._run(agent_runner, task, [Part(text="Assess this skill.")])
+
+        assert not any(i.get("scheduler_status") == "auth_required" for i in items), (
+            "a caller with no job must not be handed a park it can never answer"
+        )
+        result = items[-1]
+        assert result["scheduler_status"] == "failed"
+        assert "parked_task_id" not in result, "nothing should be left open to address"
+        assert responses[-1].state == TaskState.TASK_STATE_FAILED
+
+    @pytest.mark.asyncio
     async def test_a_park_with_no_ask_is_not_a_park(self, agent_runner):
         """Parking with nothing to ask would stop the job on an unanswerable question.
 

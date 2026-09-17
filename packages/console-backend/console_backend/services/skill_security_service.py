@@ -179,6 +179,30 @@ class SkillSecurityService:
             timeout_read=float(ASSESSOR_TIMEOUT_SECONDS),
         )
 
+        # How the run ENDED, before reading what it returned. A non-completed run still
+        # carries text now — ``dispatch_streaming`` shapes the status message of a failed
+        # or parked run into the artifact slot, because harvesting artifacts alone used to
+        # drop the entire result of those states. That is right for its callers, but it
+        # means "there is text" no longer implies "there is an assessment": a failed run's
+        # payload parses, and ``_parse_assessment_response`` would turn it into a verdict
+        # of "caution" with no indicators and "No reasoning provided." — a record that
+        # looks like a real assessment and silently loses the ``assessment_unavailable``
+        # indicator and its warning.
+        #
+        # Tested as "not completed" rather than "failed" so every other terminal state
+        # counts too, ``auth_required`` included. ``final_state`` defaults to "completed",
+        # so a healthy run is never caught by this.
+        state = (result_data["result"].get("status") or {}).get("state")
+        if state != "completed":
+            # The error text is worth carrying: it is what the harvesting above made
+            # available, and it turns the caller's warning from "unavailable" into why.
+            detail = ""
+            for artifact in result_data["result"].get("artifacts", []):
+                for part in artifact.get("parts", []):
+                    if part.get("kind") == "text":
+                        detail += part.get("text", "")
+            raise RuntimeError(f"Assessor agent run ended as '{state}': {detail[:500] or 'no detail'}")
+
         artifacts = result_data["result"].get("artifacts", [])
         response_text = ""
         if artifacts:

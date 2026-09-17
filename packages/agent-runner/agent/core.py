@@ -973,6 +973,27 @@ class AgentRunner(BaseAgent):
                 scheduled_job_id,
             )
 
+        # Only a SCHEDULED run may park, and this is the boundary that enforces it —
+        # ``AuthErrorDetectionMiddleware`` is installed for every caller of this path, and
+        # agent-runner serves more than the scheduler (the skill-security assessor and the
+        # debug agent dispatch here too, with no ``scheduled_job_id``).
+        #
+        # A park with no job is structurally unanswerable, not merely unattended. Parking
+        # holds a job's SCHEDULE, the ask is delivered on the job's channel, and the answer
+        # comes back through console-backend addressed to a RUN — none of which exist here.
+        # The task would stay non-terminal in a store that is now durable, so nothing would
+        # ever close it and nothing could ever answer it: a permanent orphan per occurrence.
+        # Reported as a failure instead, which the caller can see and act on. Same shape as
+        # the risk_scorer=None constraint below — a structural guarantee enforced at the
+        # boundary rather than assumed from the caller's metadata.
+        park_without_job = parked and scheduled_job_id is None
+        if park_without_job:
+            logger.warning(
+                "A non-scheduled run stopped for authorization; there is no job to hold and "
+                "nobody to ask, so it is reported as a failure rather than parked (sub-agent %s)",
+                sub_agent_name,
+            )
+
         # A sub-agent that FAILED must not be recorded green. Going through
         # ``LocalA2ARunnable.astream`` changed how a crash arrives here: it catches every
         # exception and yields an ErrorEvent instead of raising, so the exception branch
@@ -982,11 +1003,18 @@ class AgentRunner(BaseAgent):
         # silently-green run this ADR exists to abolish, arriving through the ADR's own
         # refactor. The task state is the authority on how the run ended; the status
         # follows it.
-        failed = sub_agent_task_state == "failed" or park_without_ask
+        failed = sub_agent_task_state == "failed" or park_without_ask or park_without_job
+
+        # The one combination that actually publishes a park. Stated once rather than
+        # re-derived as ``parked and auth_payload`` at each site: that form silently
+        # excludes only ``park_without_ask``, so a park with a perfectly good ask but no
+        # job to hold would still have announced itself as AUTH_REQUIRED while being
+        # yielded as FAILED — a payload disagreeing with its own task state.
+        publishes_park = parked and not park_without_ask and not park_without_job
 
         result_meta = {
             "scheduler_status": (
-                "auth_required" if (parked and auth_payload) else "failed" if failed else "success"
+                "auth_required" if publishes_park else "failed" if failed else "success"
             ),
             # No sub-agent means there is nothing to run: the dispatch carries the text
             # to deliver and echoing it back is what the delivery channel picks up. That
@@ -1009,6 +1037,8 @@ class AgentRunner(BaseAgent):
                     "error_message": (
                         "Stopped for authorization but produced no ask to answer"
                         if park_without_ask
+                        else "Stopped for authorization, which only a scheduled run can be asked for"
+                        if park_without_job
                         else agent_message
                     )
                 }
@@ -1027,7 +1057,7 @@ class AgentRunner(BaseAgent):
             )
             return
 
-        if parked and auth_payload:
+        if publishes_park:
             result_meta["auth_payload"] = auth_payload
             # The task the answer is addressed to: this one, the OUTER task, not the
             # sub-agent's. The sub-agent's is derived from the run and never leaves
