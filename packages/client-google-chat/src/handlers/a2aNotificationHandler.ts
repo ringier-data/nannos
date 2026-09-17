@@ -28,6 +28,12 @@ interface SchedulerPayload {
   auth_payload?: Record<string, unknown>;
   /** Where the answer goes. Logical, never a URL — see ScheduledRunResumeService. */
   reply_to?: ReplyTo;
+  /**
+   * Where the ask this run is continuing was posted, echoed back untouched by
+   * console-backend. Only this client can read it: it is the space and thread of a
+   * message this client sent, and it travelled with the click that answered the ask.
+   */
+  reply_to_message?: { space?: string; thread?: string };
   agent_message: string;
   user_sub: string;
   // Correlation fields echoed by agent-runner so thread replies under the
@@ -112,6 +118,19 @@ export async function handleA2ANotification(
     // renders for an interactive authorization. Only where the answer goes differs,
     // which is what `replyTo` carries into the button parameters.
     const authPrompt = parked ? authPromptFromPayload(schedulerPayload.auth_payload) : null;
+    // Whatever a resumed run produces belongs under the ask that unblocked it: the owner
+    // sees one exchange — "I need permission", "here is what I did" — instead of loose
+    // notices they have to connect themselves. That includes a SECOND ask, when one
+    // authorization leads straight to another: the chain stays legible as a chain
+    // (ADR-0009 calls it load-bearing).
+    //
+    // Only when the ask was posted in the space this notification is going to, since it
+    // is this client's own message it threads under. The coordinates came back untouched
+    // from console-backend, which stores them opaquely.
+    const askThreadId =
+      schedulerPayload.reply_to_message?.space === dmSpace.name
+        ? schedulerPayload.reply_to_message?.thread
+        : undefined;
     const sentMessage = authPrompt
       ? await chatService.sendMessage({
           projectId,
@@ -125,8 +144,16 @@ export async function handleA2ANotification(
               replyTo: schedulerPayload.reply_to,
             }),
           ],
+          ...(askThreadId
+            ? { threadId: askThreadId, messageReplyOption: 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' as const }
+            : {}),
         })
-      : await chatService.sendTextMessage(projectId, dmSpace.name, schedulerPayload.agent_message);
+      : await chatService.sendTextMessage(
+          projectId,
+          dmSpace.name,
+          schedulerPayload.agent_message,
+          askThreadId
+        );
 
     logger.info(
       `[A2ACallback] Sent notification to user ${userAuth.userId} in space ${dmSpace.name}`

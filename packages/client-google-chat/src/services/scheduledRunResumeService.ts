@@ -14,7 +14,7 @@
  * records the continued work as a run of its own. That last part is why the
  * scheduler brokers it rather than this client calling agent-runner — a resumed
  * run is minutes of tool calls that must be heartbeated and swept if the process
- * executing them dies, and a floating promise in a Slack handler owns none of it.
+ * executing them dies, and a floating promise in a chat handler owns none of it.
  *
  * The URL is built from THIS client's own configuration. The ask declares a
  * logical target (`{service, endpoint}`), never an address: the payload arrives
@@ -89,6 +89,17 @@ export class ScheduledRunResumeService {
     projectId: string,
     replyTo: ReplyTo,
     decision: AuthDecision,
+    /**
+     * Where the card is, so the resumed run's result comes back as a REPLY to it
+     * instead of a loose message. Only this client knows it, and only now — the ask
+     * went out before anyone had clicked anything.
+     *
+     * Google Chat's coordinates are a space and a thread, where Slack's are a channel
+     * and a message ts. Neither side of the trip interprets them: console-backend
+     * stores the object opaquely and hands it back to whichever client delivers the
+     * result, which is the only thing that can read it.
+     */
+    askMessage?: { space: string; thread: string },
   ): Promise<ResumeOutcome> {
     if (!isResumeTarget(replyTo)) {
       logger.warn(`Refusing to post an authorization answer to an unrecognised target: ${JSON.stringify(replyTo)}`);
@@ -111,7 +122,10 @@ export class ScheduledRunResumeService {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({
+          decision,
+          ...(askMessage ? { reply_to: { space: askMessage.space, thread: askMessage.thread } } : {}),
+        }),
       });
 
       if (response.status === 409) {

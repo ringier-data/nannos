@@ -332,7 +332,11 @@ async function handleInTaskAuthCardClick(payload: ButtonClickedPayload, deps: Ha
       payload.userId,
       payload.projectId,
       params.replyTo,
-      decision
+      decision,
+      // This card's own thread: whatever the resumed run produces — including a second
+      // ask, when one authorization leads to another — lands under the ask that
+      // unblocked it, so the chain reads as one exchange rather than loose notices.
+      { space: payload.spaceId, thread: payload.threadId }
     );
     if (outcome.kind !== 'resumed') {
       // Cards are durable and clicks are late, so "already handled" is an ordinary
