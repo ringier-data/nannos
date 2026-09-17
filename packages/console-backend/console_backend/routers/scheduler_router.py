@@ -1056,6 +1056,15 @@ async def run_job_now(
 
     engine: SchedulerEngine = request.app.state.scheduler_engine
 
+    # Suspension holds EVERY subscription out of the claim; run-now bypasses the claim,
+    # so it has to honour the same hold or a read-level subscriber could run a job its
+    # writer stopped for everyone.
+    if job.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This job is suspended for everyone; it cannot be run until it is resumed.",
+        )
+
     # A job blocked on its owner must not be run again until they answer. The schedule
     # hold does that for scheduled occurrences by way of claim_due_jobs, but run-now
     # bypasses the claim entirely — so without this check a few presses of "Run now"
@@ -1184,6 +1193,12 @@ async def resume_parked_run(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This run is not waiting for authorization; it may already have been answered.",
+        )
+
+    if job.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This job is suspended for everyone; answer again once it is resumed.",
         )
 
     engine: SchedulerEngine = request.app.state.scheduler_engine
@@ -1332,6 +1347,29 @@ async def unsubscribe_definition(
     service = _get_scheduler_service(request)
     if not await service.unsubscribe(db, definition_id, current_user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="You are not subscribed to this job")
+
+
+@router.delete(
+    "/definitions/{definition_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a scheduled job definition for every subscriber.",
+    description=(
+        "Owner or administrator only. Removes the definition and every subscription to it. "
+        "The owner's own job id does the same through `scheduler_delete_job`; this is the path "
+        "for an owner who has unsubscribed, and for administrators."
+    ),
+)
+async def delete_definition(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth),
+) -> None:
+    service = _get_scheduler_service(request)
+    try:
+        await service.delete_definition(db, definition_id, current_user, is_admin=is_admin_mode(request, current_user))
+    except (LookupError, SchedulerAccessError) as e:
+        raise _translate(e) from e
 
 
 @router.post(

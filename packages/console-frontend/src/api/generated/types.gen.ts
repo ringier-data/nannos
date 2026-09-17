@@ -13212,6 +13212,36 @@ export type SchedulerUnsubscribeJobResponses = {
 
 export type SchedulerUnsubscribeJobResponse = SchedulerUnsubscribeJobResponses[keyof SchedulerUnsubscribeJobResponses];
 
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}';
+};
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteError = DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteErrors[keyof DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteErrors];
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponse = DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponses[keyof DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponses];
+
 export type SchedulerCopyJobData = {
     body?: never;
     path: {

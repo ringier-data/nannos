@@ -562,7 +562,7 @@ class TestUpdateJobUnsetSentinel:
     ):
         """A task has no condition to keep — the guard is watch-only."""
         db = AsyncMock()
-        existing_job = make_job(user_id=actor.id, job_type=JobType.TASK)
+        existing_job = make_job(user_id=actor.id, job_type=JobType.TASK, cel_expr="result", llm_condition="x")
         mock_repo.get_job.side_effect = [existing_job, existing_job]
 
         await service.update_job(

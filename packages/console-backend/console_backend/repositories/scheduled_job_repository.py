@@ -19,6 +19,7 @@ from croniter import croniter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..authorization import GROUP_ROLE_CAPABILITIES
 from ..models.audit import AuditAction, AuditEntityType
 from ..models.scheduled_job import (
     ConditionEvaluation,
@@ -38,6 +39,25 @@ from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
 
+
+def _roles_with(action: str) -> str:
+    """SQL list of group roles whose capabilities include *action* on scheduled_jobs —
+    derived from GROUP_ROLE_CAPABILITIES so the three permission fragments below and
+    the capability table cannot drift apart."""
+    roles = sorted(r for r, caps in GROUP_ROLE_CAPABILITIES.items() if action in caps.get("scheduled_jobs", set()))
+    return ", ".join(f"'{r}'" for r in roles)
+
+
+_WRITE_ROLES = _roles_with("write")
+_READ_ROLES = _roles_with("read")
+
+#: One grant a viewer holds through a LIVE group: the grant row, the membership, and the
+#: group itself (a soft-deleted group grants nothing). Parameterised on the viewer column.
+_GRANT_JOIN = """
+    FROM scheduled_job_definition_permissions p
+    JOIN user_group_members m ON m.user_group_id = p.user_group_id
+    JOIN user_groups ug ON ug.id = p.user_group_id AND ug.deleted_at IS NULL
+"""
 
 #: The job view. Trigger columns carry the trigger IN FORCE: the subscription's override
 #: when it has one (``s.schedule_kind IS NOT NULL``), else the definition's defaults. The
@@ -86,14 +106,14 @@ _JOB_VIEW_SELECT = """
            CASE
                WHEN d.owner_user_id = s.user_id THEN 'owner'
                WHEN EXISTS (
-                   SELECT 1
-                   FROM scheduled_job_definition_permissions p
-                   JOIN user_group_members m ON m.user_group_id = p.user_group_id
+                   SELECT 1 """ + _GRANT_JOIN + """
                    WHERE p.definition_id = d.id
                      AND m.user_id = s.user_id
                      AND 'write' = ANY(p.permissions)
-                     AND m.group_role IN ('write', 'manager')
+                     AND m.group_role IN (""" + _WRITE_ROLES + """)
                ) THEN 'write'
+               -- A subscriber whose grant has since gone still reads as 'read': the
+               -- subscription is theirs to manage, whatever they may do to the definition.
                ELSE 'read'
            END                                                                          AS effective_permission,
            s.created_at, s.updated_at, s.deleted_at
@@ -359,11 +379,21 @@ class ScheduledJobRepository(AuditedRepository):
                 UPDATE scheduled_job_subscriptions
                 SET deleted_at = :now, updated_at = :now
                 WHERE definition_id = :id AND deleted_at IS NULL
-                RETURNING user_id
+                RETURNING id, user_id
             """),
             {"id": definition_id, "now": now},
         )
-        subscribers = [r["user_id"] for r in result.mappings().all()]
+        subscribers = []
+        for row in result.mappings().all():
+            subscribers.append(row["user_id"])
+            await self.audit_service.log_action(
+                db=db,
+                actor=actor,
+                entity_type=AuditEntityType.SCHEDULED_JOB_SUBSCRIPTION,
+                entity_id=str(row["id"]),
+                action=AuditAction.DELETE,
+                changes={"soft_delete": True, "cascade_from_definition": definition_id, "user_id": row["user_id"]},
+            )
         await self.delete(db=db, actor=actor, entity_id=definition_id)
         return subscribers
 
@@ -525,15 +555,19 @@ class ScheduledJobRepository(AuditedRepository):
         activations: list[dict[str, Any]],
         activated_by: str,
         group_id: int | None,
+        revoked_reason: str | None = None,
     ) -> list[str]:
         """Create a subscription for every user in *activations* who has none yet.
 
-        Each entry is ``{"user_id", "next_run_at", "delivery_channel_id"}`` — the first
-        occurrence is computed by the caller in that user's own timezone. Idempotent on
+        Each entry is ``{"user_id", "next_run_at", "delivery_channel_id", "enabled",
+        "paused_reason"}`` — the first occurrence is computed by the caller in that user's
+        own timezone (and a one-shot whose time has passed arrives disabled). Idempotent on
         the live (definition, user) pair; a user who already subscribes keeps their row
         and, when *group_id* is given, gains it in ``activated_by_groups`` so a later
-        leave from that group is accounted for. Returns the ids of users whose
-        subscription was CREATED — the ones owed the consent notice.
+        leave from that group is accounted for. A kept row that was stopped with
+        *revoked_reason* (access withdrawn on an earlier leave) is switched back on: the
+        member is back, and their customisation with them. Returns the ids of users whose
+        subscription was created or re-enabled — the ones owed the consent notice.
         """
         if not activations:
             return []
@@ -547,7 +581,7 @@ class ScheduledJobRepository(AuditedRepository):
                          next_run_at, enabled, delivery_channel_id, created_at, updated_at)
                     VALUES
                         (:definition_id, :user_id, :activated_by, CAST(:groups AS jsonb),
-                         :next_run_at, TRUE, :delivery_channel_id, :now, :now)
+                         :next_run_at, :enabled, :delivery_channel_id, :now, :now)
                     ON CONFLICT (definition_id, user_id) WHERE deleted_at IS NULL DO NOTHING
                     RETURNING id
                 """),
@@ -557,6 +591,7 @@ class ScheduledJobRepository(AuditedRepository):
                     "activated_by": activated_by,
                     "groups": json.dumps([group_id]) if group_id is not None else None,
                     "next_run_at": entry["next_run_at"],
+                    "enabled": entry.get("enabled", True),
                     "delivery_channel_id": entry.get("delivery_channel_id"),
                     "now": now,
                 },
@@ -576,12 +611,19 @@ class ScheduledJobRepository(AuditedRepository):
                             "user_id": entry["user_id"],
                             "activated_by": activated_by,
                             "group_id": group_id,
+                            "paused_reason": entry.get("paused_reason"),
                         }
                     },
                 )
+                if entry.get("paused_reason"):
+                    await db.execute(
+                        text("UPDATE scheduled_job_subscriptions SET paused_reason = :r WHERE id = :id"),
+                        {"r": entry["paused_reason"], "id": row["id"]},
+                    )
             elif group_id is not None:
-                # Already subscribed: record that this group also stands behind it.
-                await db.execute(
+                # Already subscribed: record that this group also stands behind it, and
+                # lift a stop that access withdrawal put there — the member is back.
+                result = await db.execute(
                     text("""
                         UPDATE scheduled_job_subscriptions
                         SET activated_by_groups = (
@@ -589,16 +631,33 @@ class ScheduledJobRepository(AuditedRepository):
                                     COALESCE(activated_by_groups, '[]'::jsonb) || CAST(:group AS jsonb)
                                 ) AS g
                             ),
+                            enabled       = CASE WHEN paused_reason = :revoked THEN TRUE ELSE enabled END,
+                            retry_at      = CASE WHEN paused_reason = :revoked THEN NULL ELSE retry_at END,
+                            paused_reason = CASE WHEN paused_reason = :revoked THEN NULL ELSE paused_reason END,
                             updated_at = :now
                         WHERE definition_id = :definition_id AND user_id = :user_id AND deleted_at IS NULL
+                        RETURNING id, enabled, (paused_reason IS NULL AND enabled) AS live
                     """),
                     {
                         "definition_id": definition_id,
                         "user_id": entry["user_id"],
                         "group": json.dumps([group_id]),
+                        "revoked": revoked_reason,
                         "now": now,
                     },
                 )
+                row = result.mappings().first()
+                if row is not None:
+                    await self.audit_service.log_action(
+                        db=db,
+                        actor=actor,
+                        entity_type=AuditEntityType.SCHEDULED_JOB_SUBSCRIPTION,
+                        entity_id=str(row["id"]),
+                        action=AuditAction.UPDATE,
+                        changes={"after": {"activated_by_groups_add": group_id, "enabled": row["enabled"]}},
+                    )
+                    if revoked_reason is not None and row["live"] and entry.get("_was_revoked"):
+                        created.append(entry["user_id"])
         return created
 
     async def group_backed_subscriptions(
@@ -620,8 +679,19 @@ class ScheduledJobRepository(AuditedRepository):
         )
         return [dict(r) for r in result.mappings().all()]
 
-    async def remove_group_from_subscription(self, db: AsyncSession, subscription_id: int, group_id: int) -> None:
-        """Drop *group_id* from a subscription's ``activated_by_groups``."""
+    async def remove_group_from_subscription(
+        self, db: AsyncSession, actor: User, subscription_id: int, group_id: int
+    ) -> None:
+        """Drop *group_id* from a subscription's ``activated_by_groups`` — audited, since
+        this record decides whether a later leave removes the subscription."""
+        await self.audit_service.log_action(
+            db=db,
+            actor=actor,
+            entity_type=AuditEntityType.SCHEDULED_JOB_SUBSCRIPTION,
+            entity_id=str(subscription_id),
+            action=AuditAction.UPDATE,
+            changes={"after": {"activated_by_groups_remove": group_id}},
+        )
         await db.execute(
             text("""
                 UPDATE scheduled_job_subscriptions
@@ -640,27 +710,31 @@ class ScheduledJobRepository(AuditedRepository):
     # Access: who may read/write a definition
     # ------------------------------------------------------------------
 
-    async def user_permission(self, db: AsyncSession, definition_id: int, user_id: str) -> str | None:
+    async def user_permission(
+        self, db: AsyncSession, definition_id: int, user_id: str, ignore_group: int | None = None
+    ) -> str | None:
         """'owner' | 'write' | 'read' | None for *user_id* on *definition_id*.
 
         Authorization model: effective = resource permissions ∩ group-role capabilities,
-        as for sub-agents. A public definition grants read to everyone.
+        as for sub-agents. A public definition grants read to everyone. *ignore_group*
+        answers "what would they still reach without this group" — for a grant revocation
+        or a group deletion that has not been written yet.
         """
         result = await db.execute(
             text("""
                 SELECT d.owner_user_id, d.is_public,
                        COALESCE((
-                           SELECT array_agg(DISTINCT x)
-                           FROM scheduled_job_definition_permissions p
-                           JOIN user_group_members m ON m.user_group_id = p.user_group_id
+                           SELECT array_agg(DISTINCT x) """ + _GRANT_JOIN + """
                            CROSS JOIN LATERAL unnest(p.permissions) AS x
                            WHERE p.definition_id = d.id AND m.user_id = :user_id
-                             AND (x = 'read' OR m.group_role IN ('write', 'manager'))
+                             AND p.user_group_id IS DISTINCT FROM :ignore_group
+                             AND (   (x = 'read'  AND m.group_role IN (""" + _READ_ROLES + """))
+                                  OR (x = 'write' AND m.group_role IN (""" + _WRITE_ROLES + """)))
                        ), ARRAY[]::text[]) AS grants
                 FROM scheduled_job_definitions d
                 WHERE d.id = :id AND d.deleted_at IS NULL
             """),
-            {"id": definition_id, "user_id": user_id},
+            {"id": definition_id, "user_id": user_id, "ignore_group": ignore_group},
         )
         row = result.mappings().first()
         if row is None:
@@ -740,6 +814,7 @@ class ScheduledJobRepository(AuditedRepository):
                 SELECT DISTINCT m.user_id
                 FROM user_group_members m
                 JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL
+                JOIN user_groups ug ON ug.id = m.user_group_id AND ug.deleted_at IS NULL
                 WHERE m.user_group_id = ANY(:ids)
             """),
             {"ids": group_ids},
@@ -760,10 +835,9 @@ class ScheduledJobRepository(AuditedRepository):
                        CASE
                            WHEN d.owner_user_id = :user_id THEN 'owner'
                            WHEN EXISTS (
-                               SELECT 1 FROM scheduled_job_definition_permissions p
-                               JOIN user_group_members m ON m.user_group_id = p.user_group_id
+                               SELECT 1 """ + _GRANT_JOIN + """
                                WHERE p.definition_id = d.id AND m.user_id = :user_id
-                                 AND 'write' = ANY(p.permissions) AND m.group_role IN ('write', 'manager')
+                                 AND 'write' = ANY(p.permissions) AND m.group_role IN (""" + _WRITE_ROLES + """)
                            ) THEN 'write'
                            ELSE 'read'
                        END AS effective_permission
@@ -773,10 +847,13 @@ class ScheduledJobRepository(AuditedRepository):
                   AND (
                         d.owner_user_id = :user_id
                      OR d.is_public = TRUE
+                     -- The same predicate user_permission applies, so nothing is listed
+                     -- that subscribe would then refuse.
                      OR EXISTS (
-                            SELECT 1 FROM scheduled_job_definition_permissions p
-                            JOIN user_group_members m ON m.user_group_id = p.user_group_id
+                            SELECT 1 """ + _GRANT_JOIN + """
                             WHERE p.definition_id = d.id AND m.user_id = :user_id
+                              AND (   ('read'  = ANY(p.permissions) AND m.group_role IN (""" + _READ_ROLES + """))
+                                   OR ('write' = ANY(p.permissions) AND m.group_role IN (""" + _WRITE_ROLES + """)))
                         )
                   )
                 ORDER BY d.updated_at DESC
@@ -831,7 +908,8 @@ class ScheduledJobRepository(AuditedRepository):
         return [r["definition_id"] for r in result.mappings().all()]
 
     async def add_group_default(self, db: AsyncSession, group_id: int, definition_id: int, actor: User) -> bool:
-        """Record a default. Returns False if it already was one."""
+        """Record a default (audited on the definition: it subscribes every current and
+        future member of the group). Returns False if it already was one."""
         result = await db.execute(
             text("""
                 INSERT INTO user_group_default_jobs (user_group_id, definition_id, created_by_user_id)
@@ -841,14 +919,104 @@ class ScheduledJobRepository(AuditedRepository):
             """),
             {"group_id": group_id, "definition_id": definition_id, "user_id": actor.id},
         )
-        return result.first() is not None
+        added = result.first() is not None
+        if added:
+            await self.audit_service.log_action(
+                db=db,
+                actor=actor,
+                entity_type=self.entity_type,
+                entity_id=str(definition_id),
+                action=AuditAction.ASSIGN,
+                changes={"after": {"group_default": group_id}},
+            )
+        return added
 
-    async def remove_group_default(self, db: AsyncSession, group_id: int, definition_id: int) -> bool:
+    async def remove_group_default(self, db: AsyncSession, group_id: int, definition_id: int, actor: User) -> bool:
         result = await db.execute(
             text("DELETE FROM user_group_default_jobs WHERE user_group_id = :group_id AND definition_id = :definition_id"),
             {"group_id": group_id, "definition_id": definition_id},
         )
-        return result.rowcount > 0
+        removed = result.rowcount > 0
+        if removed:
+            await self.audit_service.log_action(
+                db=db,
+                actor=actor,
+                entity_type=self.entity_type,
+                entity_id=str(definition_id),
+                action=AuditAction.UNASSIGN,
+                changes={"before": {"group_default": group_id}},
+            )
+        return removed
+
+    async def group_default_ids_for_group(self, db: AsyncSession, group_id: int) -> list[int]:
+        """Every default row of *group_id*, deleted definitions included — for cleaning up
+        after a group is (soft-)deleted, which fires no FK cascade."""
+        result = await db.execute(
+            text("SELECT definition_id FROM user_group_default_jobs WHERE user_group_id = :g"), {"g": group_id}
+        )
+        return [r["definition_id"] for r in result.mappings().all()]
+
+    async def owner_channel_id(self, db: AsyncSession, definition_id: int, owner_user_id: str) -> int | None:
+        """The owner's subscription's delivery channel — what a new subscription inherits."""
+        result = await db.execute(
+            text("""
+                SELECT delivery_channel_id FROM scheduled_job_subscriptions
+                WHERE definition_id = :d AND user_id = :u AND deleted_at IS NULL
+            """),
+            {"d": definition_id, "u": owner_user_id},
+        )
+        return result.scalar_one_or_none()
+
+    async def agent_is_automated(self, db: AsyncSession, sub_agent_id: int) -> bool:
+        """Whether *sub_agent_id* is an inline ``automated`` agent — one that belongs to the
+        definition naming it and travels with it."""
+        result = await db.execute(
+            text("SELECT type = 'automated' FROM sub_agents WHERE id = :id AND deleted_at IS NULL"),
+            {"id": sub_agent_id},
+        )
+        return bool(result.scalar_one_or_none())
+
+    async def subscriber_can_run_agent(self, db: AsyncSession, user_id: str, sub_agent_id: int) -> bool:
+        """Whether *user_id* may run *sub_agent_id* right now — one EXISTS, evaluated on
+        every dispatch.
+
+        Reproduces the access arms of ``SubAgentService.get_accessible_sub_agents`` (owner,
+        public, group grant, embed activation) plus ADR-0010's own: an inline ``automated``
+        agent is reachable for anyone holding a live subscription to a definition that names
+        it. Kept here, not delegated to that service, because the listing hydrates every
+        accessible agent's whole config to answer a boolean.
+        """
+        result = await db.execute(
+            text("""
+                SELECT EXISTS (
+                    SELECT 1 FROM sub_agents sa
+                    WHERE sa.id = :agent_id AND sa.deleted_at IS NULL
+                      AND (
+                            sa.owner_user_id = :user_id
+                         OR sa.is_public = TRUE
+                         OR EXISTS (
+                                SELECT 1 FROM sub_agent_permissions sap
+                                JOIN user_group_members m ON m.user_group_id = sap.user_group_id
+                                JOIN user_groups ug ON ug.id = sap.user_group_id AND ug.deleted_at IS NULL
+                                WHERE sap.sub_agent_id = sa.id AND m.user_id = :user_id
+                            )
+                         OR EXISTS (
+                                SELECT 1 FROM user_sub_agent_activations usa
+                                WHERE usa.sub_agent_id = sa.id AND usa.user_id = :user_id
+                                  AND usa.activated_by = 'embed'
+                            )
+                         OR (sa.type = 'automated' AND EXISTS (
+                                SELECT 1 FROM scheduled_job_subscriptions sjs
+                                JOIN scheduled_job_definitions sjd ON sjd.id = sjs.definition_id
+                                WHERE sjd.sub_agent_id = sa.id AND sjs.user_id = :user_id
+                                  AND sjs.deleted_at IS NULL AND sjd.deleted_at IS NULL
+                            ))
+                      )
+                )
+            """),
+            {"agent_id": sub_agent_id, "user_id": user_id},
+        )
+        return bool(result.scalar_one())
 
     async def definitions_shared_to_group(self, db: AsyncSession, group_id: int) -> list[int]:
         """Ids of live definitions with any grant to *group_id*."""
@@ -856,6 +1024,7 @@ class ScheduledJobRepository(AuditedRepository):
             text("""
                 SELECT p.definition_id FROM scheduled_job_definition_permissions p
                 JOIN scheduled_job_definitions d ON d.id = p.definition_id AND d.deleted_at IS NULL
+                JOIN user_groups ug ON ug.id = p.user_group_id AND ug.deleted_at IS NULL
                 WHERE p.user_group_id = :group_id
             """),
             {"group_id": group_id},

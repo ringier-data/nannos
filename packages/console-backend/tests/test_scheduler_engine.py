@@ -59,6 +59,9 @@ def _make_engine(
     if db_session_factory is None:
         db_session_factory = _make_mock_session_factory()
     return SchedulerEngine(
+        # Allow-all, explicitly: the check is required so a production site cannot
+        # forget it; tests that exercise it replace this attribute.
+        agent_access_check=AsyncMock(return_value=True),
         repo=repo,
         delivery_channel_repo=delivery_channel_repo,
         token_service=token_service,
@@ -1718,7 +1721,43 @@ class TestSubscriberAgentAccessIsCheckedAtDispatch:
         assert repo.complete_job.call_args[1]["retry_at"] is None
 
     @pytest.mark.asyncio
-    async def test_no_check_configured_dispatches_as_before(self):
+    async def test_the_check_is_required_at_construction(self):
+        with pytest.raises(TypeError):
+            SchedulerEngine(  # type: ignore[call-arg]
+                repo=AsyncMock(spec=ScheduledJobRepository),
+                delivery_channel_repo=AsyncMock(spec=DeliveryChannelRepository),
+                token_service=AsyncMock(spec=SchedulerTokenService),
+                agent_runner_url="http://runner",
+                db_session_factory=_make_mock_session_factory(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_run_is_checked_too(self):
+        """A parked run can wait for days; access is judged when the answer arrives."""
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 9
+        repo.complete_job = AsyncMock(return_value=(False, "Agent not accessible"))
+        repo.complete_run = AsyncMock()
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+        engine._agent_access_check = AsyncMock(return_value=False)
+        job = make_job(user_id="subscriber", owner_user_id="owner", sub_agent_id=42)
+        parked = ScheduledJobRun(
+            id=8, job_id=job.id, started_at=datetime.now(timezone.utc), status=JobRunStatus.AUTH_REQUIRED,
+            delivered=False, parked_task_id="task-1", conversation_id="ctx-1",
+        )
+
+        with patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+            await engine.resume_parked_run(job, parked, "approved", run_id=9)
+
+        dispatch.assert_not_called()
+        repo.disable_subscription.assert_awaited_once()
+        assert repo.complete_run.call_args[1]["status"] == JobRunStatus.FAILED
+        assert repo.complete_job.call_args[1]["status"] == JobRunStatus.INTERRUPTED
+
+    @pytest.mark.asyncio
+    async def test_an_allowed_subscriber_dispatches_as_before(self):
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run.return_value = 1
         repo.complete_job = AsyncMock(return_value=(True, None))
@@ -1726,7 +1765,6 @@ class TestSubscriberAgentAccessIsCheckedAtDispatch:
         token_service = AsyncMock(spec=SchedulerTokenService)
         token_service.get_access_token.return_value = "token"
         engine = _make_engine(repo=repo, token_service=token_service)
-        assert engine._agent_access_check is None
 
         with patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
             dispatch.return_value = {"result": {"kind": "task", "status": {"state": "completed"}, "artifacts": []}}

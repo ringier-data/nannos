@@ -8,7 +8,7 @@ subscriptions the way they move default agents.
 """
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -21,6 +21,7 @@ from console_backend.models.scheduled_job import (
     ScheduleKind,
     TriggerPolicy,
 )
+from console_backend.models.sub_agent import SubAgentType
 from console_backend.models.user import User, UserRole, UserSettings, UserStatus
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
 from console_backend.services.audit_service import AuditService
@@ -101,11 +102,22 @@ async def world(pg_session: AsyncSession):
     settings.get_settings.side_effect = lambda db, uid: UserSettings(user_id=uid, timezone=TZ[uid.split("-", 1)[1]])
     channels = AsyncMock()
     channels.get_channel_by_id.return_value = object()
-    service = SchedulerService(repository=repo)
+    # Only what sharing an inline automated agent consults: its type.
+    sub_agents = AsyncMock()
+    sub_agents.get_sub_agent_by_id.return_value = MagicMock(type=SubAgentType.AUTOMATED, name="inline-auto")
+    service = SchedulerService(repository=repo, sub_agent_service=sub_agents)
     service.set_user_settings_service(settings)
     service.set_delivery_channel_repository(channels)
     service.set_notification_service(NotificationService())
     return {"db": pg_session, "users": users, "group": gid, "service": service, "repo": repo}
+
+
+async def _audit_actions(db: AsyncSession, entity_type: str) -> list[str]:
+    rows = await db.execute(
+        text("SELECT action::text FROM audit_logs WHERE entity_type = CAST(:t AS audit_entity_type) ORDER BY id"),
+        {"t": entity_type},
+    )
+    return [r[0] for r in rows.fetchall()]
 
 
 async def _notifications(db: AsyncSession, user_id: str) -> list[str]:
@@ -170,6 +182,49 @@ class TestSharingAndSubscribing:
         # Idempotent.
         assert (await svc.subscribe(db, job.definition_id, u["member"])).id == mine.id
         assert NotificationType.JOB_SHARED.value in await _notifications(db, u["member"].id)
+        # Every write left its audit row: the share on the definition, the subscriptions.
+        assert "permission_update" in await _audit_actions(db, "scheduled_job")
+        assert await _audit_actions(db, "scheduled_job_subscription") == ["create", "create"]
+
+    @pytest.mark.asyncio
+    async def test_write_implies_read(self, world):
+        """A grant of ['write'] alone must not list a job that subscribe then refuses."""
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["write"]}], u["owner"]
+        )
+        perms = await svc.get_permissions(db, job.definition_id, u["owner"])
+        assert perms[0]["permissions"] == ["read", "write"]
+        listed = await svc.list_available_definitions(db, u["member"].id)
+        assert [d.id for d in listed] == [job.definition_id]
+        assert (await svc.subscribe(db, job.definition_id, u["member"])).effective_permission == "read"
+
+    @pytest.mark.asyncio
+    async def test_a_past_one_shot_arrives_disabled(self, world):
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(
+            db,
+            _watch_create(
+                schedule_kind=ScheduleKind.ONCE,
+                cron_expr=None,
+                run_at=datetime.now(timezone.utc) + timedelta(seconds=2),
+            ),
+            u["owner"],
+        )
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"]
+        )
+        await db.execute(
+            text("UPDATE scheduled_job_definitions SET run_at = NOW() - INTERVAL '1 hour' WHERE id = :id"),
+            {"id": job.definition_id},
+        )
+        await db.commit()
+
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        assert mine.enabled is False and "already ran" in (mine.paused_reason or "")
+        assert await world["repo"].claim_due_jobs(db) == []
+        await db.rollback()
 
     @pytest.mark.asyncio
     async def test_write_permission_follows_grant_and_group_role(self, world):
@@ -229,6 +284,53 @@ class TestOneUpdatePathRoutesEachField:
         # A reader cannot move everyone's default.
         with pytest.raises(SchedulerAccessError):
             await svc.update_job(db, mine.id, ScheduledJobUpdate(cron_expr="0 7 * * *", scope="everyone"), u["member"])
+
+        # "Everyone" includes the editor: the owner's own override from above is gone.
+        owners = await svc.get_job(db, job.id, u["owner"].id)
+        assert owners is not None and owners.trigger_inherited is True and owners.cron_expr == "0 10 * * 1-5"
+
+    @pytest.mark.asyncio
+    async def test_an_unchanged_echo_of_the_form_is_not_an_edit(self, shared):
+        """The console resends every field prefilled; a reader saving only their own
+        delivery must not be refused for 'editing' a name they did not change, and an
+        owner's save must not turn into a private override or a revision bump."""
+        svc, db, u, job, mine = shared["service"], shared["db"], shared["users"], shared["job"], shared["mine"]
+
+        saved = await svc.update_job(
+            db,
+            mine.id,
+            ScheduledJobUpdate(enabled=False, cron_expr=mine.cron_expr, schedule_kind=mine.schedule_kind, max_failures=3),
+            u["member"],
+            name=mine.name,
+            prompt=mine.prompt,
+        )
+        assert saved is not None and saved.enabled is False and saved.trigger_inherited is True
+
+        before = await shared["repo"].get_definition(db, job.definition_id)
+        saved = await svc.update_job(
+            db, job.id, ScheduledJobUpdate(cron_expr=job.cron_expr, schedule_kind=job.schedule_kind), u["owner"], name=job.name
+        )
+        after = await shared["repo"].get_definition(db, job.definition_id)
+        assert saved is not None and saved.trigger_inherited is True
+        assert before is not None and after is not None and after["revision"] == before["revision"]
+
+    @pytest.mark.asyncio
+    async def test_fixed_binds_the_sole_subscriber_too(self, world):
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(db, _watch_create(trigger_policy=TriggerPolicy.FIXED), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        # The owner leaves; the reader is now the only subscriber — still bound.
+        assert await svc.unsubscribe(db, job.definition_id, u["owner"])
+        with pytest.raises(ValueError, match="fixed"):
+            await svc.update_job(db, mine.id, ScheduledJobUpdate(interval_seconds=60, schedule_kind=ScheduleKind.INTERVAL), u["member"])
+        # …while the owner, unsubscribed, can still delete the definition by its own id.
+        await svc.delete_definition(db, job.definition_id, u["owner"])
+        assert await svc.get_job(db, mine.id, u["member"].id) is None
+        with pytest.raises(LookupError):
+            await svc.delete_definition(db, job.definition_id, u["member"])
 
     @pytest.mark.asyncio
     async def test_fixed_policy_resets_overrides_and_tells_the_subscriber(self, shared):
@@ -367,6 +469,61 @@ class TestGroupDefaultsFollowMembership:
         await svc.set_group_default_jobs(db, gid, [], u["owner"])
         await db.commit()
         assert {j.user_id for j in await svc.repo.list_subscriptions(db, job.definition_id)} == {u["owner"].id}
+        actions = await _audit_actions(db, "scheduled_job")
+        assert "assign" in actions and "unassign" in actions
+        assert "delete" in await _audit_actions(db, "scheduled_job_subscription")
+
+    @pytest.mark.asyncio
+    async def test_a_returning_member_gets_their_stopped_subscription_back(self, world):
+        """Self-subscribed, removed (access revoked → disabled), re-added: the group
+        default switches the kept row back on and tells them."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"])
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        await svc.update_job(db, mine.id, ScheduledJobUpdate(cron_expr="0 12 * * *"), u["member"])
+        await svc.set_group_default_jobs(db, gid, [job.definition_id], u["owner"])
+        await db.commit()
+
+        await db.execute(
+            text("DELETE FROM user_group_members WHERE user_group_id = :g AND user_id = :u"),
+            {"g": gid, "u": u["member"].id},
+        )
+        await svc.on_members_removed(db, u["owner"], gid, [u["member"].id])
+        await db.commit()
+        theirs = await svc.get_job(db, mine.id, u["member"].id)
+        assert theirs is not None and theirs.enabled is False
+
+        await db.execute(
+            text("INSERT INTO user_group_members (user_group_id, user_id, group_role) VALUES (:g, :u, 'read')"),
+            {"g": gid, "u": u["member"].id},
+        )
+        before = len(await _notifications(db, u["member"].id))
+        await svc.on_members_added(db, u["owner"], gid, [u["member"].id])
+        await db.commit()
+        theirs = await svc.get_job(db, mine.id, u["member"].id)
+        assert theirs is not None and theirs.enabled is True and theirs.paused_reason is None
+        assert theirs.cron_expr == "0 12 * * *"  # their customisation survived
+        assert theirs.activated_by_groups == [gid]
+        assert len(await _notifications(db, u["member"].id)) == before + 1
+
+    @pytest.mark.asyncio
+    async def test_deleting_the_group_ends_every_grant_through_it(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"])
+        await svc.set_group_default_jobs(db, gid, [job.definition_id], u["owner"])
+        await db.commit()
+        assert len(await svc.repo.list_subscriptions(db, job.definition_id)) == 3
+
+        await svc.on_group_deleted(db, u["owner"], gid)
+        await db.execute(text("UPDATE user_groups SET deleted_at = NOW() WHERE id = :g"), {"g": gid})
+        await db.commit()
+
+        assert {j.user_id for j in await svc.repo.list_subscriptions(db, job.definition_id)} == {u["owner"].id}
+        assert await svc.repo.get_group_default_definition_ids(db, gid) == []
+        assert await svc.list_available_definitions(db, u["member"].id) == []
+        assert await svc.repo.user_permission(db, job.definition_id, u["member"].id) is None
 
     @pytest.mark.asyncio
     async def test_revoking_the_grant_disables_a_self_made_subscription(self, world):
@@ -406,3 +563,32 @@ class TestRunsAreTheSubscribers:
         assert await svc.get_run(db, mine.id, run_id, u["owner"].id) is None
         assert (await svc.list_runs(db, job.id, u["owner"].id)) == []
         assert timedelta(0) <= datetime.now(timezone.utc) - run.started_at < timedelta(minutes=1)
+
+
+class TestSubscriberAgentAccessQuery:
+    @pytest.mark.asyncio
+    async def test_inline_automated_agent_travels_with_the_definition(self, world):
+        svc, db, u, repo = world["service"], world["db"], world["users"], world["repo"]
+        agent_id = (
+            await db.execute(
+                text(
+                    "INSERT INTO sub_agents (name, owner_user_id, type) VALUES ('inline-auto', :o, 'automated') RETURNING id"
+                ),
+                {"o": u["owner"].id},
+            )
+        ).scalar_one()
+        job = await svc.create_job(
+            db, _watch_create(sub_agent_id=None), u["owner"]
+        )
+        await db.execute(
+            text("UPDATE scheduled_job_definitions SET sub_agent_id = :a WHERE id = :d"),
+            {"a": agent_id, "d": job.definition_id},
+        )
+        await svc.update_permissions(db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"])
+        await db.commit()
+
+        assert await repo.subscriber_can_run_agent(db, u["owner"].id, agent_id) is True
+        assert await repo.subscriber_can_run_agent(db, u["member"].id, agent_id) is False
+        await svc.subscribe(db, job.definition_id, u["member"])
+        assert await repo.subscriber_can_run_agent(db, u["member"].id, agent_id) is True
+        assert await repo.subscriber_can_run_agent(db, u["outsider"].id, agent_id) is False
