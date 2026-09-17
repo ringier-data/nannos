@@ -231,13 +231,30 @@ class McpToolResolver:
             # was already measured as the largest contributor to time-to-first-token in the
             # orchestrator, which gathers for the same reason.
             #
-            # Not return_exceptions: a partial catalogue is not a smaller catalogue, it is a
-            # silently less capable run. Fail-don't-degrade for discovery is ADR-0009's
-            # stated policy — the first failure propagates and the run reports it.
-            listed = await asyncio.gather(
-                *(self._list_server_with_retry(server, http_client) for server in connections)
+            # ``return_exceptions`` here is about AWAITING, not about tolerating. A partial
+            # catalogue is still not a smaller catalogue but a silently less capable run,
+            # so the first failure is re-raised below and fail-don't-degrade (ADR-0009) is
+            # unchanged.
+            #
+            # What it fixes is that a bare ``gather`` does not cancel the siblings when one
+            # raises: the other listing kept running, outlived the ``async with`` that
+            # closes the HTTP client under it, retried against a closed client, and ended
+            # with nobody retrieving its exception ("Task exception was never retrieved").
+            # Awaiting every task before propagating means none of them outlives the client.
+            #
+            # The cost is that a failure now waits for the slower listing instead of
+            # returning at the faster one's error. With two tasks, each already bounded by
+            # the same timeout and awaited together on the success path anyway, that is
+            # cheaper than a TaskGroup — which cancels siblings but would wrap what
+            # propagates in an ExceptionGroup, changing the error a caller reports.
+            results = await asyncio.gather(
+                *(self._list_server_with_retry(server, http_client) for server in connections),
+                return_exceptions=True,
             )
-            catalogues = dict(zip(connections, listed, strict=True))
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            catalogues = dict(zip(connections, results, strict=True))
             for server, connection in connections.items():
                 catalogue = catalogues[server]
                 server_names = (

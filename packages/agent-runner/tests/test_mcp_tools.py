@@ -506,3 +506,75 @@ class TestBothServersAreListedConcurrently:
         )
 
         assert peak <= 3, f"the process-wide cap did not hold (peak={peak})"
+
+
+class TestAFailedListingLeavesNoOrphan:
+    """One server failing must not leave the other listing running past the HTTP client.
+
+    ``asyncio.gather`` does not cancel siblings when one raises. The surviving listing
+    outlived the ``async with httpx.AsyncClient(...)`` that closes the client under it,
+    retried against a closed client, and ended with nobody retrieving its exception —
+    asyncio then logs "Task exception was never retrieved". Harmless to the run's outcome
+    and pure noise in the logs of the service whose logs matter most during an outage.
+
+    Deliberately does NOT stub ``asyncio.sleep``: the other tests here patch it through
+    ``catalogue_ingest.asyncio``, which is the global module, so the stub would swallow
+    this test's own sleep and the sibling would finish instantly whether or not it was
+    awaited — the assertion would hold either way. Nothing retries here anyway (a 403 is
+    not retryable), so there is no backoff to skip.
+    """
+
+    @staticmethod
+    def _forbidden() -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", GATEWAY_URL)
+        return httpx.HTTPStatusError("403", request=request, response=httpx.Response(403, request=request))
+
+    @pytest.mark.asyncio
+    async def test_the_sibling_is_awaited_before_the_failure_propagates(self, provider, monkeypatch):
+        finished: list[str] = []
+
+        async def one_fails(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            if server_slug == "gateway":
+                raise TestAFailedListingLeavesNoOrphan._forbidden()
+            # Genuinely still in flight when the gateway's failure propagates.
+            await asyncio.sleep(0.05)
+            finished.append(server_slug)
+            return ServerCatalogue(
+                server_name=server_slug,
+                tools={"console_create_skill": _entry("console_create_skill", server_slug)},
+                interface_hash="h",
+                source="stateless",
+            )
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", one_fails)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await _resolver(provider).resolve(["github_search", "console_create_skill"])
+
+        # Checked at the moment the failure surfaces: with a bare gather the sibling is
+        # still sleeping here, and goes on to use a client that is already closing.
+        assert finished == ["console"], "the sibling listing was not awaited before the failure propagated"
+
+    @pytest.mark.asyncio
+    async def test_the_failure_still_propagates_rather_than_degrading(self, provider, monkeypatch):
+        """Awaiting the sibling must not turn a failed listing into a partial catalogue.
+
+        Fail-don't-degrade is ADR-0009's stated policy for discovery: a partial catalogue
+        is a silently less capable run, not a smaller one.
+        """
+
+        async def one_fails(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            if server_slug == "gateway":
+                raise TestAFailedListingLeavesNoOrphan._forbidden()
+            return ServerCatalogue(
+                server_name=server_slug,
+                tools={"console_create_skill": _entry("console_create_skill", server_slug)},
+                interface_hash="h",
+                source="stateless",
+            )
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", one_fails)
+
+        # Not "the console half of the catalogue" — an error.
+        with pytest.raises(httpx.HTTPStatusError):
+            await _resolver(provider).resolve(["github_search", "console_create_skill"])
