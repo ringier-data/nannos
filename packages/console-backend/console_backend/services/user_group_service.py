@@ -521,6 +521,22 @@ class UserGroupService:
                 raise ValueError(
                     f"Cannot delete group: {count} sub-agents are assigned. Use force=true to delete anyway."
                 )
+            job_count = (
+                await db.execute(
+                    text("SELECT COUNT(*) FROM scheduled_job_definition_permissions WHERE user_group_id = :group_id"),
+                    {"group_id": group_id},
+                )
+            ).scalar() or 0
+            if job_count > 0:
+                raise ValueError(
+                    f"Cannot delete group: {job_count} scheduled jobs are shared with it. Use force=true to delete anyway."
+                )
+
+        # Every scheduled-job grant through this group ends with it (ADR-0010): defaults
+        # are removed and members' standing withdrawn BEFORE the soft delete, while the
+        # membership can still be read. A soft delete fires no FK cascade.
+        if self._scheduler_service is not None:
+            await self._scheduler_service.on_group_deleted(db, actor, group_id)
 
         try:
             # Get Keycloak group ID before soft delete

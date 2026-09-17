@@ -62,6 +62,11 @@ _DEFINITION_FIELDS = frozenset(
 _TRIGGER_FIELDS = frozenset({"schedule_kind", "cron_expr", "interval_seconds", "run_at", "timezone"})
 #: Fields that are always the caller's own subscription.
 _SUBSCRIPTION_FIELDS = frozenset({"enabled", "delivery_channel_id"})
+#: Every field of ScheduledJobUpdate is routed somewhere. A field added to the model
+#: without a home here fails at import instead of being silently dropped by PATCH.
+assert _DEFINITION_FIELDS | _TRIGGER_FIELDS | _SUBSCRIPTION_FIELDS | {"scope"} == set(
+    ScheduledJobUpdate.model_fields
+), "ScheduledJobUpdate has a field update_job does not route"
 
 #: What a subscriber whose access was revoked is told on their own (self-made)
 #: subscription. Re-granting access lets them enable it again with their customisation.
@@ -167,6 +172,31 @@ class SchedulerService:
         return run_at
 
     @staticmethod
+    def _same_definition_value(job: ScheduledJob, key: str, value: Any) -> bool:
+        """Whether *value* equals what the definition already holds for *key* (JSON fields
+        are compared as objects, since they arrive serialised)."""
+        current = getattr(job, key, None)
+        if key in ("check_args", "check_args_exprs"):
+            if value is None or current is None:
+                return value is None and current is None
+            return json.loads(value) == current
+        if key == "trigger_policy":
+            return current is not None and current.value == value
+        return current == value
+
+    @staticmethod
+    def _same_trigger_value(job: ScheduledJob, key: str, value: Any) -> bool:
+        current = getattr(job, key)
+        if key == "schedule_kind":
+            return current == ScheduleKind(value)
+        if key == "run_at" and value is not None and current is not None:
+            if value.tzinfo is None:
+                # A naive echo of a stored instant: compare as the wall-clock the form shows.
+                return current.astimezone(resolve_timezone(job.timezone)).replace(tzinfo=None) == value
+            return current == value
+        return current == value
+
+    @staticmethod
     def _effective_tz(*candidates: str | None) -> str | None:
         """First non-empty timezone of the inheritance chain: subscription, definition, subscriber."""
         for tz in candidates:
@@ -201,12 +231,11 @@ class SchedulerService:
         because access can be revoked after a definition was shared.
 
         An inline ``automated`` agent travels with the definition: it is reachable for
-        anyone holding a subscription to a definition that names it (see the
-        subscription arm in ``SubAgentService.get_accessible_sub_agents``), so this one
-        check covers both kinds.
+        anyone holding a subscription to a definition that names it, so this one check
+        covers both kinds. One EXISTS query (``ScheduledJobRepository.subscriber_can_run_agent``)
+        rather than the accessible-agents listing, which hydrates every agent's config.
         """
-        accessible = await self.sub_agents.get_accessible_sub_agents(db, user_id)
-        return any(sa.id == sub_agent_id for sa in accessible)
+        return await self.repo.subscriber_can_run_agent(db, user_id, sub_agent_id)
 
     async def _assert_groups_can_reach_agent(self, db: AsyncSession, sub_agent_id: int | None, group_ids: list[int]) -> None:
         """A definition may not be shared to a group whose members cannot reach its agent
@@ -272,6 +301,23 @@ class SchedulerService:
     # Create
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _first_occurrence(definition: dict[str, Any], tz: str, now: datetime) -> tuple[datetime, bool, str | None]:
+        """``(next_run_at, enabled, paused_reason)`` for a fresh subscription.
+
+        A one-shot whose time has already passed arrives DISABLED with a reason: writing
+        its past ``run_at`` as ``next_run_at`` with ``enabled`` would make the claim fire it
+        on the next tick, once per new subscriber — the same state ``resume_job`` refuses
+        to re-enable.
+        """
+        kind = ScheduleKind(definition["schedule_kind"])
+        next_run_at = first_run_at(
+            kind, definition.get("cron_expr"), definition.get("interval_seconds"), definition.get("run_at"), tz=tz, after=now
+        )
+        if kind == ScheduleKind.ONCE and next_run_at <= now:
+            return next_run_at, False, "This one-time job already ran before you subscribed"
+        return next_run_at, True, None
+
     async def _own_subscription_fields(
         self,
         db: AsyncSession,
@@ -282,7 +328,7 @@ class SchedulerService:
         activated_by_groups: list[int] | None = None,
         subscriber_tz: str | None = None,
     ) -> dict[str, Any]:
-        """The row for a fresh, inherited, enabled subscription of *user_id*.
+        """The row for a fresh, inherited subscription of *user_id*.
 
         The first occurrence is computed in the SUBSCRIBER's timezone when the definition
         names none — the whole point of a null default timezone. *subscriber_tz* saves
@@ -290,21 +336,15 @@ class SchedulerService:
         """
         tz = self._effective_tz(definition.get("timezone"), subscriber_tz) or await self._user_timezone(db, user_id)
         now = datetime.now(timezone.utc)
-        next_run_at = first_run_at(
-            ScheduleKind(definition["schedule_kind"]),
-            definition.get("cron_expr"),
-            definition.get("interval_seconds"),
-            definition.get("run_at"),
-            tz=tz,
-            after=now,
-        )
+        next_run_at, enabled, paused_reason = self._first_occurrence(definition, tz, now)
         return {
             "definition_id": definition["id"],
             "user_id": user_id,
             "activated_by": activated_by,
             "activated_by_groups": json.dumps(activated_by_groups) if activated_by_groups else None,
             "next_run_at": next_run_at,
-            "enabled": True,
+            "enabled": enabled,
+            "paused_reason": paused_reason,
             "delivery_channel_id": delivery_channel_id,
             "created_at": now,
             "updated_at": now,
@@ -562,6 +602,14 @@ class SchedulerService:
         if data.trigger_policy is not None:
             def_fields["trigger_policy"] = data.trigger_policy.value
 
+        # A value equal to what the definition already holds is not an edit. The console
+        # resends the whole form, so without this a plain subscriber could never save
+        # their own delivery or enabled state (every save would carry `name`), and an
+        # owner's every save would bump the revision.
+        for key in list(def_fields):
+            if key in _DEFINITION_FIELDS and self._same_definition_value(job, key, def_fields[key]):
+                del def_fields[key]
+
         # --- subscription fields ---
         if delivery_channel_id is not _UNSET:
             if delivery_channel_id is not None:
@@ -578,7 +626,13 @@ class SchedulerService:
             sub_fields["retry_at"] = None
 
         # --- trigger ---
-        trigger_touched = any(getattr(data, f) is not None for f in _TRIGGER_FIELDS)
+        # Touched means CHANGED: the console resends every trigger field prefilled from
+        # the job, and treating an unchanged echo as an edit would turn every save into a
+        # private override (or, alone, a revision bump).
+        trigger_touched = any(
+            getattr(data, f) is not None and not self._same_trigger_value(job, f, getattr(data, f))
+            for f in _TRIGGER_FIELDS
+        )
         trigger_target: str | None = None
         if trigger_touched:
             others = job.subscriber_count > 1
@@ -589,7 +643,9 @@ class SchedulerService:
                 scope = "everyone" if (not others and self._can_write(perm)) else "mine"
             if scope == "everyone" and not self._can_write(perm):
                 raise SchedulerAccessError("Changing everyone's schedule needs write permission on this job")
-            if scope == "mine" and job.trigger_policy == TriggerPolicy.FIXED and others:
+            # FIXED is enforced whatever the subscriber count: a sole read-only subscriber
+            # must not be able to hammer the owner's check tool on their own tick either.
+            if scope == "mine" and job.trigger_policy == TriggerPolicy.FIXED:
                 raise ValueError(
                     "This job's schedule is fixed by its owner: subscribers cannot change their own. "
                     "Change the default with scope='everyone' (needs write) or ask the owner."
@@ -616,6 +672,20 @@ class SchedulerService:
                     after=now,
                 )
                 def_fields.update(merged)
+                # "Everyone" includes the editor: their own override, if any, goes, so the
+                # new default is what they see and what runs for them.
+                if not job.trigger_inherited or job.timezone_override:
+                    sub_fields.update(
+                        {"schedule_kind": None, "cron_expr": None, "interval_seconds": None, "run_at": None, "timezone": None}
+                    )
+                    sub_fields["next_run_at"] = first_run_at(
+                        ScheduleKind(merged["schedule_kind"]),
+                        merged["cron_expr"],
+                        merged["interval_seconds"],
+                        merged["run_at"],
+                        tz=merged["timezone"] or (await self._user_timezone(db, actor.id)),
+                        after=now,
+                    )
             else:
                 merged = self._merge_trigger(
                     data,
@@ -717,6 +787,29 @@ class SchedulerService:
             await db.commit()
         return True
 
+    async def delete_definition(self, db: AsyncSession, definition_id: int, actor: User, is_admin: bool = False) -> None:
+        """Delete a definition (and every subscription) by its own id — the owner's path
+        when they have unsubscribed, and the admin's. Raises LookupError / SchedulerAccessError."""
+        await self._require(db, definition_id, actor, "owner", is_admin)
+        definition = await self.repo.get_definition(db, definition_id)
+        assert definition is not None
+        subscribers = await self.repo.delete_definition(db, actor, definition_id)
+        await db.commit()
+        await self._notify(
+            db,
+            [
+                NotificationData(
+                    user_id=uid,
+                    notification_type=NotificationType.JOB_DELETED,
+                    title=f"Scheduled job deleted: {definition['name']}",
+                    message=f"'{definition['name']}' was deleted by its owner, so it no longer runs for you.",
+                    metadata={"definition_id": definition_id},
+                )
+                for uid in subscribers
+                if uid != actor.id
+            ],
+        )
+
     async def subscribe(self, db: AsyncSession, definition_id: int, actor: User, is_admin: bool = False) -> ScheduledJob:
         """Activate the caller on a definition they can read. Idempotent: an existing
         live subscription is returned as is."""
@@ -726,8 +819,14 @@ class SchedulerService:
             return existing
         definition = await self.repo.get_definition(db, definition_id)
         assert definition is not None
-        if definition.get("sub_agent_id") is not None and not await self.subscriber_can_run_agent(
-            db, actor.id, definition["sub_agent_id"]
+        # A regular agent must already be reachable; an inline automated one becomes
+        # reachable BY subscribing (it travels with the definition), so it is not checked
+        # here — the dispatcher re-checks either kind on every run.
+        agent_id = definition.get("sub_agent_id")
+        if (
+            agent_id is not None
+            and not await self.repo.agent_is_automated(db, agent_id)
+            and not await self.subscriber_can_run_agent(db, actor.id, agent_id)
         ):
             raise ValueError("You cannot subscribe: this job runs a sub-agent you do not have access to")
         channel = await self._default_channel_for(db, definition)
@@ -751,8 +850,7 @@ class SchedulerService:
         """The channel a new subscription inherits: the owner's, since the channel is
         tenant-scoped and valid for every member of that tenant. The recipient is always
         the subscriber's own DM."""
-        owner_sub = await self.repo.get_subscription_for(db, definition["id"], definition["owner_user_id"])
-        return owner_sub.delivery_channel_id if owner_sub else None
+        return await self.repo.owner_channel_id(db, definition["id"], definition["owner_user_id"])
 
     async def copy_definition(self, db: AsyncSession, definition_id: int, actor: User, is_admin: bool = False) -> ScheduledJob:
         """A new definition owned by the caller, initialised from one they can read, with
@@ -1041,12 +1139,18 @@ class SchedulerService:
         await self._require(db, definition_id, actor, "write", is_admin)
         definition = await self.repo.get_definition(db, definition_id)
         assert definition is not None
+        # Write implies read: a grant of ['write'] alone would list the job to a read-role
+        # member and then refuse their subscribe.
+        group_permissions = [
+            {**p, "permissions": sorted(set(p["permissions"]) | ({"read"} if "write" in p["permissions"] else set()))}
+            for p in group_permissions
+        ]
         new_groups = [p["user_group_id"] for p in group_permissions]
         await self._assert_groups_can_reach_agent(db, definition.get("sub_agent_id"), new_groups)
 
         added, removed, changed = await self.repo.replace_permissions(db, actor, definition_id, group_permissions)
         for group_id in removed:
-            await self.repo.remove_group_default(db, group_id, definition_id)
+            await self.repo.remove_group_default(db, group_id, definition_id, actor)
             members = await self.repo.group_member_ids(db, [group_id])
             await self._withdraw_access(db, actor, [definition_id], members, group_id)
         await db.commit()
@@ -1098,9 +1202,11 @@ class SchedulerService:
         rows = await self.repo.group_backed_subscriptions(db, definition_ids, user_ids, group_id)
         now = datetime.now(timezone.utc)
         for row in rows:
-            still_reaches = await self.repo.user_permission(db, row["definition_id"], row["user_id"]) is not None
+            still_reaches = await self.repo.user_permission(
+                db, row["definition_id"], row["user_id"], ignore_group=group_id
+            ) is not None
             if row["via_group"]:
-                await self.repo.remove_group_from_subscription(db, row["id"], group_id)
+                await self.repo.remove_group_from_subscription(db, actor, row["id"], group_id)
                 remaining = [g for g in (row["groups"] or []) if g != group_id]
                 if row["activated_by"] == "group" and not remaining:
                     await self.repo.delete_subscription(db, actor, row["id"])
@@ -1134,21 +1240,20 @@ class SchedulerService:
         activations = []
         for uid in user_ids:
             tz = self._effective_tz(definition.get("timezone"), tzs.get(uid)) or default_timezone_name()
+            next_run_at, enabled, paused_reason = self._first_occurrence(definition, tz, now)
             activations.append(
                 {
                     "user_id": uid,
                     "delivery_channel_id": channel,
-                    "next_run_at": first_run_at(
-                        ScheduleKind(definition["schedule_kind"]),
-                        definition.get("cron_expr"),
-                        definition.get("interval_seconds"),
-                        definition.get("run_at"),
-                        tz=tz,
-                        after=now,
-                    ),
+                    "next_run_at": next_run_at,
+                    "enabled": enabled,
+                    "paused_reason": paused_reason,
+                    "_was_revoked": True,
                 }
             )
-        created = await self.repo.bulk_subscribe(db, actor, definition_id, activations, "group", group_id)
+        created = await self.repo.bulk_subscribe(
+            db, actor, definition_id, activations, "group", group_id, revoked_reason=_ACCESS_REVOKED_REASON
+        )
         if created and self._notification_service is not None:
             await self._notification_service.bulk_create_notifications(
                 db,
@@ -1182,7 +1287,7 @@ class SchedulerService:
             await self.repo.add_group_default(db, group_id, did, actor)
             await self._activate_default(db, actor, group_id, did, members)
         for did in current - wanted:
-            await self.repo.remove_group_default(db, group_id, did)
+            await self.repo.remove_group_default(db, group_id, did, actor)
             await self._withdraw_default(db, actor, group_id, did, members)
 
     async def add_group_default_job(self, db: AsyncSession, group_id: int, definition_id: int, actor: User) -> None:
@@ -1192,7 +1297,7 @@ class SchedulerService:
             await self._activate_default(db, actor, group_id, definition_id, await self.repo.group_member_ids(db, [group_id]))
 
     async def remove_group_default_job(self, db: AsyncSession, group_id: int, definition_id: int, actor: User) -> None:
-        if await self.repo.remove_group_default(db, group_id, definition_id):
+        if await self.repo.remove_group_default(db, group_id, definition_id, actor):
             await self._withdraw_default(db, actor, group_id, definition_id, await self.repo.group_member_ids(db, [group_id]))
 
     async def _withdraw_default(
@@ -1203,7 +1308,7 @@ class SchedulerService:
         for row in await self.repo.group_backed_subscriptions(db, [definition_id], user_ids, group_id):
             if not row["via_group"]:
                 continue
-            await self.repo.remove_group_from_subscription(db, row["id"], group_id)
+            await self.repo.remove_group_from_subscription(db, actor, row["id"], group_id)
             remaining = [g for g in (row["groups"] or []) if g != group_id]
             if row["activated_by"] == "group" and not remaining:
                 await self.repo.delete_subscription(db, actor, row["id"])
@@ -1213,6 +1318,18 @@ class SchedulerService:
         becomes a subscription of each new member. Does not commit."""
         for did in await self.repo.get_group_default_definition_ids(db, group_id):
             await self._activate_default(db, actor, group_id, did, user_ids)
+
+    async def on_group_deleted(self, db: AsyncSession, actor: User, group_id: int) -> None:
+        """A group is being (soft-)deleted: every grant through it is gone. Its default
+        rows are removed (a soft delete fires no FK cascade) and each member's standing
+        is withdrawn as on leave. Runs BEFORE the group row is soft-deleted, while the
+        membership can still be read. Does not commit."""
+        members = await self.repo.group_member_ids(db, [group_id])
+        for did in await self.repo.group_default_ids_for_group(db, group_id):
+            await self.repo.remove_group_default(db, group_id, did, actor)
+        shared = await self.repo.definitions_shared_to_group(db, group_id)
+        if shared and members:
+            await self._withdraw_access(db, actor, shared, members, group_id)
 
     async def on_members_removed(self, db: AsyncSession, actor: User, group_id: int, user_ids: list[str]) -> None:
         """On leave: group-default subscriptions from this group are removed; self-made

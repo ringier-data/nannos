@@ -94,8 +94,10 @@ async def seed_job(
     )
     # A watch job: 'task' carries a check constraint requiring a sub-agent, and the job
     # type is irrelevant to what these tests exercise. The definition holds the schedule
-    # (its defaults); the subscription inherits it and carries the bookkeeping. Both rows
-    # take the same id, as every migrated job does, so the returned id addresses both.
+    # (its defaults); the subscription inherits it and carries the bookkeeping. The two
+    # rows deliberately get DIFFERENT ids (migrated jobs share theirs, fresh ones do not),
+    # so a query that confused the two would fail here. The returned id is the
+    # subscription's — the job id.
     if schedule_kind == "once":
         interval_seconds, run_at = "NULL", "NOW() - INTERVAL '1 hour'"
     else:
@@ -119,10 +121,16 @@ async def seed_job(
                 (id, definition_id, user_id, next_run_at, enabled, consecutive_failures,
                  paused_reason, retry_at)
             VALUES
-                (:id, :id, :uid, {next_run_at}, {enabled}, :cf, :paused_reason, {retry_at or "NULL"})
+                (:id, :definition_id, :uid, {next_run_at}, {enabled}, :cf, :paused_reason, {retry_at or "NULL"})
             RETURNING id
         """),
-        {"id": definition_id, "uid": user_id, "cf": consecutive_failures, "paused_reason": paused_reason},
+        {
+            "id": definition_id + 1000,
+            "definition_id": definition_id,
+            "uid": user_id,
+            "cf": consecutive_failures,
+            "paused_reason": paused_reason,
+        },
     )
     job_id = result.mappings().first()["id"]
     # Keep the subscription sequence ahead of the ids we placed by hand.

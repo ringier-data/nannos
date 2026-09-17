@@ -140,12 +140,15 @@ class SchedulerEngine:
         socket_notification_manager: SocketNotificationManager | None = None,
         tick_interval_seconds: int = 30,
         claim_limit: int = 10,
-        agent_access_check: Callable[[Any, str, int], Awaitable[bool]] | None = None,
+        *,
+        agent_access_check: Callable[[Any, str, int], Awaitable[bool]],
     ) -> None:
         self._repo = repo
         # (db, subscriber user id, sub_agent_id) -> may this subscriber run that agent
-        # right now. Injected rather than imported so the engine keeps no dependency on
-        # the sub-agent service; None skips the check (tests).
+        # right now (ADR-0010). Required, not defaulted: a construction site that forgot
+        # it would silently run revoked agents, so it fails with a TypeError instead.
+        # Injected rather than imported so the engine keeps no dependency on the
+        # sub-agent service; tests pass an explicit allow-all.
         self._agent_access_check = agent_access_check
         self._delivery_channel_repo = delivery_channel_repo
         self._token_service = token_service
@@ -469,6 +472,11 @@ class SchedulerEngine:
                     )
                     return run_id
 
+                # A parked run can wait for days; the subscriber's access to the agent is
+                # judged when the answer arrives, as on any other dispatch.
+                if not await self._subscriber_may_run(db, job, run_id, RunTrigger.RESUMED):
+                    return run_id
+
                 owner_sub = await billing_subject(db, job.user_id, context=f"job {job.id}")
                 with attribution_scope(user_sub=owner_sub, scheduled_job_id=job.id, service=SERVICE_SCHEDULER):
                     # THIS run's id, not the parked one's: the payload correlates to the
@@ -622,18 +630,8 @@ class SchedulerEngine:
                 # (ADR-0010). Missing access pauses this one subscription — a durable
                 # notice, no failure count, nobody else's subscription touched. Under the
                 # old single-owner row this could not happen: the owner chose the agent.
-                if job.sub_agent_id is not None and self._agent_access_check is not None:
-                    if not await self._agent_access_check(db, job.user_id, job.sub_agent_id):
-                        await self._finalize(
-                            run_id=run_id,
-                            job=job,
-                            status=JobRunStatus.FAILED,
-                            error_message="You no longer have access to the sub-agent this job runs.",
-                            delivered=False,
-                            paused_reason="Agent not accessible: you no longer have access to the sub-agent this job runs.",
-                            counts_as_failure=False,
-                        )
-                        return
+                if not await self._subscriber_may_run(db, job, run_id, trigger):
+                    return
 
                 # Who this run bills to, for every gateway call under it. The two LLM calls
                 # below (the watch judge, the notification writer) used to run inside the
@@ -760,6 +758,26 @@ class SchedulerEngine:
             except asyncio.CancelledError:
                 pass
             self._in_flight.discard(run_id)
+
+    async def _subscriber_may_run(self, db: Any, job: ScheduledJob, run_id: int, trigger: RunTrigger) -> bool:
+        """The per-dispatch access check (ADR-0010), shared by every path that dispatches.
+
+        False means the run has been finalised as a pause of this one subscription: a
+        durable notice, no failure count, nobody else's subscription touched.
+        """
+        if job.sub_agent_id is None or await self._agent_access_check(db, job.user_id, job.sub_agent_id):
+            return True
+        await self._finalize(
+            run_id=run_id,
+            job=job,
+            status=JobRunStatus.FAILED,
+            error_message="You no longer have access to the sub-agent this job runs.",
+            delivered=False,
+            paused_reason="Agent not accessible: you no longer have access to the sub-agent this job runs.",
+            trigger=trigger,
+            counts_as_failure=False,
+        )
+        return False
 
     async def _build_message_args(
         self,
