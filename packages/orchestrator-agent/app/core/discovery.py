@@ -24,7 +24,6 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import (
     format_mcp_error,
     get_mcp_http_status_error,
-    is_retryable_mcp_error,
     log_mcp_gateway_error,
 )
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
@@ -32,16 +31,10 @@ from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 from ..models.config import AgentSettings
 from agent_common.core.catalogue_ingest import STATELESS_TIMEOUT_S, fetch_catalogue
 from agent_common.core.token_provider import UserTokenProvider, bearer_interceptor
+from agent_common.core.catalogue_ingest import fetch_with_retry
 from agent_common.core.tool_catalogue import ServerCatalogue, build_lazy_tools
 
 logger = logging.getLogger(__name__)
-
-# Process-wide bound on concurrent MCP tool-catalogue fetches; see
-# ToolDiscoveryService._discovery_semaphore for why this is not per-call.
-# Created lazily so the configured limit is read at first use rather than import.
-_DISCOVERY_SEMAPHORE: asyncio.Semaphore | None = None
-_DISCOVERY_SEMAPHORE_LIMIT: int | None = None
-
 
 async def _console_attribution_interceptor(request, handler):
     """Stamp the caller's cost-attribution (user_sub, conversation_id, sub_agent_id, …) on every
@@ -270,25 +263,6 @@ class ToolDiscoveryService:
                 logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
             return []
 
-    def _discovery_semaphore(self) -> asyncio.Semaphore:
-        """Process-wide bound on concurrent MCP catalogue fetches.
-
-        Deliberately module-level, NOT per-call: discovery runs per user on cache
-        miss, so a per-invocation semaphore would still allow limit x N concurrent
-        fetches when N users hit a cold cache together — with a limit of 5, seven
-        simultaneous users already exceed the ~31 that OOMKilled the pod. What has
-        to be capped is what the *process* holds open at once.
-
-        The cost is that unrelated users' cold discoveries queue behind each other.
-        That is the intended trade: bounded memory over parallel cold starts.
-        """
-        global _DISCOVERY_SEMAPHORE, _DISCOVERY_SEMAPHORE_LIMIT
-        limit = self.config.MCP_DISCOVERY_CONCURRENCY
-        if _DISCOVERY_SEMAPHORE is None or _DISCOVERY_SEMAPHORE_LIMIT != limit:
-            _DISCOVERY_SEMAPHORE = asyncio.Semaphore(limit)
-            _DISCOVERY_SEMAPHORE_LIMIT = limit
-        return _DISCOVERY_SEMAPHORE
-
     async def _ingest_server(
         self,
         server_name: str,
@@ -322,10 +296,20 @@ class ToolDiscoveryService:
         max_retries: int = 3,
         initial_delay: float = 1.0,
     ) -> ServerCatalogue:
-        """Fetch a server's catalogue with exponential backoff retry for transient errors.
+        """Fetch a server's catalogue under the shared retry + concurrency policy.
 
-        Retries on HTTP 502, 503, 504 errors with exponential backoff.
-        Non-retryable errors (4xx, connection refused, etc.) fail immediately.
+        The policy — which failures count as transient, the exponential backoff, and the
+        process-wide cap on fetches held open at once — is
+        ``agent_common.core.catalogue_ingest.fetch_with_retry``, shared with agent-runner
+        so the two services cannot drift apart on it. The cap stays process-wide there for
+        the reason it was introduced here: a per-call limit still allows ``limit x N``, and
+        an unbounded fan-out reached ~31 concurrent fetches and OOMKilled the pod
+        (2026-08-15).
+
+        What is deliberately NOT shared is what a failure means. This caller gathers with
+        ``return_exceptions=True`` and tolerates a partial catalogue, because a user's turn
+        is better served by most of their tools than by an error; a scheduled run does the
+        opposite (ADR-0009).
 
         Args:
             client: MultiServerMCPClient instance (owns the per-server MCP connections)
@@ -341,48 +325,13 @@ class ToolDiscoveryService:
         Raises:
             Exception: If all retries are exhausted or a non-retryable error occurs
         """
-        last_error = None
-        delay = initial_delay
-
-        for attempt in range(max_retries):
-            try:
-                # Hold a slot only for the fetch itself. Keeping it across the
-                # backoff sleep below would let a few flaky servers idle away the
-                # whole budget while healthy ones wait on a user-facing path.
-                async with self._discovery_semaphore():
-                    catalogue = await self._ingest_server(server_name, client, connection, http_client=http_client)
-
-                if attempt > 0:
-                    logger.info(f"Successfully loaded MCP tools from {server_name} on attempt {attempt + 1}")
-                return catalogue
-
-            except Exception as e:
-                last_error = e
-
-                # Check if this is a retryable error
-                is_retryable = is_retryable_mcp_error(e)
-
-                if not is_retryable or attempt >= max_retries - 1:
-                    # Non-retryable error or exhausted retries
-                    if is_retryable:
-                        error_msg = format_mcp_error(e)
-                        logger.error(
-                            f"Failed to load MCP tools from {server_name} after {attempt + 1} attempts: {error_msg}"
-                        )
-                    else:
-                        logger.error(f"Non-retryable error loading MCP tools from {server_name}: {e}")
-                    raise
-
-                # Retryable error - wait and retry
-                logger.warning(
-                    f"Transient error loading MCP tools from {server_name} (attempt {attempt + 1}/{max_retries}): {e}. "
-                    f"Retrying in {delay:.1f}s..."
-                )
-                await asyncio.sleep(delay)
-                delay *= 2  # Exponential backoff
-
-        # Should never reach here, but just in case
-        raise last_error or Exception(f"Failed to load MCP tools from {server_name}")
+        return await fetch_with_retry(
+            lambda: self._ingest_server(server_name, client, connection, http_client=http_client),
+            server_slug=server_name,
+            concurrency=self.config.MCP_DISCOVERY_CONCURRENCY,
+            max_attempts=max_retries,
+            initial_delay=initial_delay,
+        )
 
     def make_token_provider(self, token: str) -> UserTokenProvider:
         """A per-user provider of exchanged MCP bearer tokens (see agent_common.core.token_provider).

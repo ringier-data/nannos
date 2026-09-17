@@ -373,7 +373,7 @@ class TestListingSurvivesATransientGateway:
 
     @pytest.mark.asyncio
     async def test_a_transient_failure_is_retried_and_then_succeeds(self, provider, monkeypatch):
-        monkeypatch.setattr("agent.mcp_tools.asyncio.sleep", AsyncMock())
+        monkeypatch.setattr("agent_common.core.catalogue_ingest.asyncio.sleep", AsyncMock())
         calls: list[str] = []
 
         async def flaky(*, server_slug: str, **kw: Any) -> ServerCatalogue:
@@ -397,7 +397,7 @@ class TestListingSurvivesATransientGateway:
     async def test_a_non_retryable_failure_fails_immediately(self, provider, monkeypatch):
         """A rejected token is not a blip — retrying only delays the auth error."""
         sleep = AsyncMock()
-        monkeypatch.setattr("agent.mcp_tools.asyncio.sleep", sleep)
+        monkeypatch.setattr("agent_common.core.catalogue_ingest.asyncio.sleep", sleep)
         calls: list[str] = []
 
         async def forbidden(*, server_slug: str, **kw: Any) -> ServerCatalogue:
@@ -414,7 +414,7 @@ class TestListingSurvivesATransientGateway:
 
     @pytest.mark.asyncio
     async def test_a_gateway_that_stays_down_gives_up_after_three_attempts(self, provider, monkeypatch):
-        monkeypatch.setattr("agent.mcp_tools.asyncio.sleep", AsyncMock())
+        monkeypatch.setattr("agent_common.core.catalogue_ingest.asyncio.sleep", AsyncMock())
         calls: list[str] = []
 
         async def down(*, server_slug: str, **kw: Any) -> ServerCatalogue:
@@ -476,7 +476,7 @@ class TestBothServersAreListedConcurrently:
         exactly this reason, since a per-run limit still allows limit x N.
         """
         monkeypatch.setattr("agent.mcp_tools._DISCOVERY_CONCURRENCY", 3)
-        monkeypatch.setattr("agent.mcp_tools._DISCOVERY_SEMAPHORE", None)
+        monkeypatch.setattr("agent_common.core.catalogue_ingest._DISCOVERY_SEMAPHORE", None)
         in_flight = 0
         peak = 0
 

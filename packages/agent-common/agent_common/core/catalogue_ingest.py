@@ -27,14 +27,16 @@ a silent fall-back to the slow path must be visible, not mysterious.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
+from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
 
 from agent_common.core.tool_catalogue import (
     CatalogueTool,
@@ -42,6 +44,8 @@ from agent_common.core.tool_catalogue import (
     build_server_catalogue,
     make_catalogue_tool,
 )
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -386,3 +390,102 @@ async def fetch_catalogue(
             set_stateless_supported(url, True)
             return catalogue
     return await fetch_catalogue_mcp(session_factory, server_slug=server_slug)
+
+
+# ── retry + concurrency policy ──────────────────────────────────────────────────────
+#
+# Both services that list MCP catalogues had grown their own copy of this: the
+# orchestrator over many gateway servers on a user-facing turn, agent-runner over its
+# two on a scheduled run. The policy is the same in both and the drift is invisible
+# until it bites, so it lives here once. What is NOT shared is what each caller does
+# with a failure — the orchestrator gathers with ``return_exceptions=True`` and
+# tolerates a partial catalogue, a scheduled run fails the whole listing
+# (fail-don't-degrade, ADR-0009) — and that stays at the call sites.
+
+#: Process-wide cap on concurrent catalogue fetches, rebuilt when the limit changes.
+_DISCOVERY_SEMAPHORE: asyncio.Semaphore | None = None
+_DISCOVERY_SEMAPHORE_LIMIT: int | None = None
+
+
+def discovery_semaphore(limit: int) -> asyncio.Semaphore:
+    """The process-wide cap on catalogue fetches held open at once.
+
+    **Process-wide, not per call.** A per-invocation semaphore still allows ``limit x N``
+    for N concurrent callers, which is exactly the shape that failed: an unbounded fan-out
+    reached ~31 concurrent fetches and OOMKilled the orchestrator (2026-08-15), and with a
+    limit of 5 seven simultaneous cold users would exceed that again. What has to be capped
+    is what the *process* holds open.
+
+    The cost is that unrelated callers' cold discoveries queue behind each other. That is
+    the intended trade: bounded memory over parallel cold starts.
+
+    Created lazily rather than at import, because a module-level
+    :class:`asyncio.Semaphore` binds to whichever loop imported the module — not
+    necessarily the one serving requests.
+    """
+    global _DISCOVERY_SEMAPHORE, _DISCOVERY_SEMAPHORE_LIMIT
+    if _DISCOVERY_SEMAPHORE is None or _DISCOVERY_SEMAPHORE_LIMIT != limit:
+        _DISCOVERY_SEMAPHORE = asyncio.Semaphore(limit)
+        _DISCOVERY_SEMAPHORE_LIMIT = limit
+    return _DISCOVERY_SEMAPHORE
+
+
+async def fetch_with_retry(
+    fetch: Callable[[], Awaitable[T]],
+    *,
+    server_slug: str,
+    concurrency: int,
+    max_attempts: int = 3,
+    initial_delay: float = 1.0,
+) -> T:
+    """Run *fetch* under the process-wide cap, retrying only transient failures.
+
+    *fetch* is a zero-argument coroutine factory so this owns no knowledge of how a
+    catalogue is obtained — the orchestrator passes its SDK-plus-stateless ingest, the
+    runner its ``fetch_catalogue`` call, and neither has to be reshaped to share the
+    policy.
+
+    Retryable means :func:`is_retryable_mcp_error`: a 502/503/504 or a timeout, unwrapped
+    from the anyio ``ExceptionGroup`` the MCP client raises. A 4xx or a refused connection
+    fails immediately — retrying a rejected token only delays the auth error the caller
+    needs to report.
+
+    The semaphore slot covers the fetch alone and is released across the backoff sleep:
+    holding it while waiting would let a few flaky servers idle away the whole budget
+    while healthy fetches — possibly another user's, on a user-facing path — wait behind
+    them.
+    """
+    delay = initial_delay
+    for attempt in range(max_attempts):
+        try:
+            async with discovery_semaphore(concurrency):
+                result = await fetch()
+            if attempt:
+                logger.info(
+                    "Loaded MCP catalogue from '%s' on attempt %d/%d", server_slug, attempt + 1, max_attempts
+                )
+            return result
+        except Exception as exc:
+            retryable = is_retryable_mcp_error(exc)
+            if not retryable or attempt >= max_attempts - 1:
+                if retryable:
+                    logger.error(
+                        "Failed to load MCP catalogue from '%s' after %d attempts: %s",
+                        server_slug,
+                        attempt + 1,
+                        format_mcp_error(exc),
+                    )
+                else:
+                    logger.error("Non-retryable error loading MCP catalogue from '%s': %s", server_slug, exc)
+                raise
+            logger.warning(
+                "Transient error loading MCP catalogue from '%s' (attempt %d/%d): %s. Retrying in %.1fs...",
+                server_slug,
+                attempt + 1,
+                max_attempts,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")  # pragma: no cover - the loop either returns or raises

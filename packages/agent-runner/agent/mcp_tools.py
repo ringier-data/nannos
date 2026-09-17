@@ -31,13 +31,12 @@ from typing import Any
 
 import httpx
 from agent_common.agents.dynamic_agent import is_console_backend_tool
-from agent_common.core.catalogue_ingest import fetch_catalogue
+from agent_common.core.catalogue_ingest import fetch_catalogue, fetch_with_retry
 from agent_common.core.token_provider import UserTokenProvider, bearer_interceptor
 from agent_common.core.tool_catalogue import ServerCatalogue, make_lazy_tool
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from ringier_a2a_sdk.utils.mcp_errors import is_retryable_mcp_error
 
 logger = logging.getLogger(__name__)
 
@@ -59,23 +58,9 @@ _RETRY_BASE_DELAY_SECONDS = 1.0
 #: gets OOMKilled. Listing the two servers concurrently doubled what one run holds open at
 #: the peak (1 → 2), which is a good trade for latency only if the total stays bounded.
 #:
-#: Same env var and default as the orchestrator, which learned this the hard way: an
-#: unbounded fan-out reached ~31 concurrent fetches and OOMKilled the pod (2026-08-15).
-#: Process-wide rather than per-run for the reason given there — a per-call limit still
-#: allows ``limit x N``.
+#: Same env var and default as the orchestrator — the cap itself now lives in
+#: ``agent_common.core.catalogue_ingest`` and is shared with it.
 _DISCOVERY_CONCURRENCY = max(1, int(os.getenv("MCP_DISCOVERY_CONCURRENCY", "5")))
-
-#: Created lazily: a module-level ``asyncio.Semaphore`` would bind to whatever loop
-#: imported this module, which is not necessarily the one serving requests.
-_DISCOVERY_SEMAPHORE: asyncio.Semaphore | None = None
-
-
-def _discovery_semaphore() -> asyncio.Semaphore:
-    """The process-wide cap on concurrent listings. See :data:`_DISCOVERY_CONCURRENCY`."""
-    global _DISCOVERY_SEMAPHORE
-    if _DISCOVERY_SEMAPHORE is None:
-        _DISCOVERY_SEMAPHORE = asyncio.Semaphore(_DISCOVERY_CONCURRENCY)
-    return _DISCOVERY_SEMAPHORE
 
 
 GATEWAY_SERVER = "gateway"
@@ -136,52 +121,30 @@ class McpToolResolver:
     async def _list_server_with_retry(
         self, server_name: str, http_client: httpx.AsyncClient
     ) -> ServerCatalogue:
-        """``_list_server`` with exponential backoff on transient gateway errors.
+        """``_list_server`` under the shared retry + concurrency policy.
 
-        Mirrors the orchestrator's ``_get_catalogue_with_retry``: retried only when
-        ``is_retryable_mcp_error`` says the failure is transient (a 502/503/504 or a
-        timeout, unwrapped from the anyio ``ExceptionGroup`` the MCP client raises), and
-        a 4xx or a refused connection fails immediately — retrying a rejected token just
-        delays the auth error the run needs to report.
+        The policy itself (which failures are transient, how long to back off, and the
+        process-wide cap on fetches held open at once) is
+        ``agent_common.core.catalogue_ingest.fetch_with_retry``, shared with the
+        orchestrator so the two cannot drift.
 
-        The unit retried is the *whole* listing of one server, not the stateless POST
+        What is NOT shared is what a failure means: the orchestrator tolerates a partial
+        catalogue, and a scheduled run does not (fail-don't-degrade, ADR-0009), so the
+        gather at the call site below has no ``return_exceptions``.
+
+        Note the retried unit is the *whole* listing of one server, not the stateless POST
         alone: ``fetch_catalogue`` already answers a failed stateless attempt by falling
         back to the SDK session and only raises once both have failed. So a gateway 503
-        reaches here as the SDK path's error, and one attempt here is one full
+        reaches the policy as the SDK path's error, and one attempt is one full
         stateless-then-SDK cycle.
-
-        Without this, a scheduled run had no tolerance at all for a gateway that was
-        briefly unreachable — and because nobody is watching a scheduled run, that
-        arrived as the job's failure rather than as the infrastructure's.
         """
-        delay = _RETRY_BASE_DELAY_SECONDS
-        for attempt in range(_LIST_MAX_ATTEMPTS):
-            try:
-                # The slot covers the fetch only, never the backoff sleep below: holding it
-                # while waiting would let one flaky server idle away a slot that a healthy
-                # listing — possibly another run's — could be using.
-                async with _discovery_semaphore():
-                    catalogue = await self._list_server(server_name, http_client)
-                if attempt:
-                    logger.info(
-                        "Listed %s on attempt %d/%d", server_name, attempt + 1, _LIST_MAX_ATTEMPTS
-                    )
-                return catalogue
-            except Exception as exc:
-                last = attempt >= _LIST_MAX_ATTEMPTS - 1
-                if last or not is_retryable_mcp_error(exc):
-                    raise
-                logger.warning(
-                    "tools/list for %s failed (attempt %d/%d), retrying in %.1fs: %s",
-                    server_name,
-                    attempt + 1,
-                    _LIST_MAX_ATTEMPTS,
-                    delay,
-                    exc,
-                )
-                await asyncio.sleep(delay)
-                delay *= 2
-        raise AssertionError("unreachable")  # pragma: no cover - loop either returns or raises
+        return await fetch_with_retry(
+            lambda: self._list_server(server_name, http_client),
+            server_slug=server_name,
+            concurrency=_DISCOVERY_CONCURRENCY,
+            max_attempts=_LIST_MAX_ATTEMPTS,
+            initial_delay=_RETRY_BASE_DELAY_SECONDS,
+        )
 
     async def _list_server(self, server_name: str, http_client: httpx.AsyncClient) -> ServerCatalogue:
         """``tools/list`` for one server via ``catalogue_ingest.fetch_catalogue`` (stateless → SDK).

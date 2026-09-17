@@ -85,10 +85,55 @@ class TestDurabilityIsGatedTheSameWayTheCheckpointerIs:
     def test_the_configured_schema_pins_the_search_path(self):
         """Without this the table lands in the role default, where another replica's
         search_path may not find it."""
-        from agent import task_store as ts
+        from ringier_a2a_sdk.agent.task_store import schema_connect_args
 
-        assert ts.schema_connect_args("nannos_runner") == {"options": "-csearch_path=nannos_runner"}
+        assert schema_connect_args("nannos_runner") == {"options": "-csearch_path=nannos_runner"}
         # Unset means "whatever the role defaults to", which is the pre-existing
         # single-environment behaviour and must not become a literal empty search_path.
-        assert ts.schema_connect_args(None) == {}
-        assert ts.schema_connect_args("") == {}
+        assert schema_connect_args(None) == {}
+        assert schema_connect_args("") == {}
+
+
+class TestTheTwoServicesDifferOnlyWhereTheyMustNot:
+    """What agent-runner passes the shared store, and what the orchestrator deliberately
+    does not.
+
+    The store is one function now (``ringier_a2a_sdk.agent.task_store``). Two arguments
+    are the whole difference, and both are load-bearing: the table name keeps the two
+    services from reaching each other's tasks, and the schema is pinned only for the
+    NEW table, because pinning an existing one would not move it — it would create an
+    empty one elsewhere and hide the tasks the service already had.
+    """
+
+    def test_agent_runner_names_its_own_table_and_pins_its_schema(self, monkeypatch):
+        from agent import task_store as ts
+
+        captured: dict[str, object] = {}
+
+        def fake(**kw: object) -> tuple[object, None]:
+            captured.update(kw)
+            return object(), None
+
+        monkeypatch.setattr(ts, "_create_task_store", fake)
+        monkeypatch.setenv("POSTGRES_HOST", "db.internal")
+        monkeypatch.setenv("POSTGRES_SCHEMA", "nannos_runner")
+        ts.create_task_store()
+
+        assert captured["table_name"] == "agent_runner_tasks", "must not share the orchestrator's table"
+        assert captured["schema"] == "nannos_runner"
+
+    def test_the_orchestrator_passes_neither(self):
+        """Read from the source: importing the orchestrator package here would drag in its
+        settings. The two omissions are the decision, so they are asserted as such."""
+        import pathlib
+
+        src = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "orchestrator-agent"
+            / "app"
+            / "core"
+            / "task_store.py"
+        ).read_text()
+        body = src[src.index("return _create_task_store("):]
+        assert "table_name=" not in body, "the orchestrator keeps the SDK default table it already owns"
+        assert "schema=" not in body, "pinning it would hide the tasks it already has"
