@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Iterable
 from datetime import timedelta
@@ -49,6 +50,33 @@ _LIST_MAX_ATTEMPTS = 3
 #: critical path, and the errors it covers — a rolling gateway deploy, a pod restart —
 #: resolve in seconds or not at all.
 _RETRY_BASE_DELAY_SECONDS = 1.0
+
+#: How many ``tools/list`` fetches this PROCESS may hold open at once, across all runs.
+#:
+#: A single run only ever lists two servers, so this is not about one run's fan-out. It is
+#: about the process: the scheduler claims up to ``claim_limit`` jobs per tick and
+#: dispatches them concurrently, so the runs overlap, and agent-runner is the service that
+#: gets OOMKilled. Listing the two servers concurrently doubled what one run holds open at
+#: the peak (1 → 2), which is a good trade for latency only if the total stays bounded.
+#:
+#: Same env var and default as the orchestrator, which learned this the hard way: an
+#: unbounded fan-out reached ~31 concurrent fetches and OOMKilled the pod (2026-08-15).
+#: Process-wide rather than per-run for the reason given there — a per-call limit still
+#: allows ``limit x N``.
+_DISCOVERY_CONCURRENCY = max(1, int(os.getenv("MCP_DISCOVERY_CONCURRENCY", "5")))
+
+#: Created lazily: a module-level ``asyncio.Semaphore`` would bind to whatever loop
+#: imported this module, which is not necessarily the one serving requests.
+_DISCOVERY_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _discovery_semaphore() -> asyncio.Semaphore:
+    """The process-wide cap on concurrent listings. See :data:`_DISCOVERY_CONCURRENCY`."""
+    global _DISCOVERY_SEMAPHORE
+    if _DISCOVERY_SEMAPHORE is None:
+        _DISCOVERY_SEMAPHORE = asyncio.Semaphore(_DISCOVERY_CONCURRENCY)
+    return _DISCOVERY_SEMAPHORE
+
 
 GATEWAY_SERVER = "gateway"
 CONSOLE_SERVER = "console"
@@ -129,7 +157,11 @@ class McpToolResolver:
         delay = _RETRY_BASE_DELAY_SECONDS
         for attempt in range(_LIST_MAX_ATTEMPTS):
             try:
-                catalogue = await self._list_server(server_name, http_client)
+                # The slot covers the fetch only, never the backoff sleep below: holding it
+                # while waiting would let one flaky server idle away a slot that a healthy
+                # listing — possibly another run's — could be using.
+                async with _discovery_semaphore():
+                    catalogue = await self._list_server(server_name, http_client)
                 if attempt:
                     logger.info(
                         "Listed %s on attempt %d/%d", server_name, attempt + 1, _LIST_MAX_ATTEMPTS

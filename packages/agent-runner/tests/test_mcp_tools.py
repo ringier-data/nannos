@@ -463,3 +463,46 @@ class TestBothServersAreListedConcurrently:
 
         assert {t.name for t in tools} == {"github_search", "console_create_skill"}
         assert peak == 2, "the gateway and console listings ran at the same time"
+
+    @pytest.mark.asyncio
+    async def test_the_process_wide_cap_bounds_concurrent_runs(self, provider, monkeypatch):
+        """What the semaphore is actually for — the peak ACROSS runs, not within one.
+
+        One run lists two servers, so per-run concurrency was never the risk. The
+        scheduler claims up to ``claim_limit`` jobs a tick and dispatches them together,
+        and agent-runner is the service that gets OOMKilled — so listing the two servers
+        concurrently doubled what the process holds open at the peak. The orchestrator
+        learned the same lesson at ~31 concurrent fetches; its cap is process-wide for
+        exactly this reason, since a per-run limit still allows limit x N.
+        """
+        monkeypatch.setattr("agent.mcp_tools._DISCOVERY_CONCURRENCY", 3)
+        monkeypatch.setattr("agent.mcp_tools._DISCOVERY_SEMAPHORE", None)
+        in_flight = 0
+        peak = 0
+
+        async def slow(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                name = "console_create_skill" if server_slug == "console" else "github_search"
+                return ServerCatalogue(
+                    server_name=server_slug,
+                    tools={name: _entry(name, server_slug)},
+                    interface_hash="h",
+                    source="stateless",
+                )
+            finally:
+                in_flight -= 1
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", slow)
+        # Five concurrent runs, two listings each: ten fetches wanting to be in flight.
+        await asyncio.gather(
+            *(
+                _resolver(provider).resolve(["github_search", "console_create_skill"])
+                for _ in range(5)
+            )
+        )
+
+        assert peak <= 3, f"the process-wide cap did not hold (peak={peak})"
