@@ -11,6 +11,7 @@ It owns:
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
 import logging
 from dataclasses import dataclass
@@ -139,8 +140,16 @@ class SchedulerEngine:
         socket_notification_manager: SocketNotificationManager | None = None,
         tick_interval_seconds: int = 30,
         claim_limit: int = 10,
+        *,
+        agent_access_check: Callable[[Any, str, int], Awaitable[bool]],
     ) -> None:
         self._repo = repo
+        # (db, subscriber user id, sub_agent_id) -> may this subscriber run that agent
+        # right now (ADR-0010). Required, not defaulted: a construction site that forgot
+        # it would silently run revoked agents, so it fails with a TypeError instead.
+        # Injected rather than imported so the engine keeps no dependency on the
+        # sub-agent service; tests pass an explicit allow-all.
+        self._agent_access_check = agent_access_check
         self._delivery_channel_repo = delivery_channel_repo
         self._token_service = token_service
         self._agent_runner_url = agent_runner_url.rstrip("/")
@@ -463,6 +472,11 @@ class SchedulerEngine:
                     )
                     return run_id
 
+                # A parked run can wait for days; the subscriber's access to the agent is
+                # judged when the answer arrives, as on any other dispatch.
+                if not await self._subscriber_may_run(db, job, run_id, RunTrigger.RESUMED):
+                    return run_id
+
                 owner_sub = await billing_subject(db, job.user_id, context=f"job {job.id}")
                 with attribution_scope(user_sub=owner_sub, scheduled_job_id=job.id, service=SERVICE_SCHEDULER):
                     # THIS run's id, not the parked one's: the payload correlates to the
@@ -611,6 +625,14 @@ class SchedulerEngine:
                     )
                     return
 
+                # The SUBSCRIBER's access to the definition's agent, checked at every
+                # dispatch because it can be revoked after the definition was shared
+                # (ADR-0010). Missing access pauses this one subscription — a durable
+                # notice, no failure count, nobody else's subscription touched. Under the
+                # old single-owner row this could not happen: the owner chose the agent.
+                if not await self._subscriber_may_run(db, job, run_id, trigger):
+                    return
+
                 # Who this run bills to, for every gateway call under it. The two LLM calls
                 # below (the watch judge, the notification writer) used to run inside the
                 # agent, where these same ContextVars carried the owner and the job id for
@@ -736,6 +758,26 @@ class SchedulerEngine:
             except asyncio.CancelledError:
                 pass
             self._in_flight.discard(run_id)
+
+    async def _subscriber_may_run(self, db: Any, job: ScheduledJob, run_id: int, trigger: RunTrigger) -> bool:
+        """The per-dispatch access check (ADR-0010), shared by every path that dispatches.
+
+        False means the run has been finalised as a pause of this one subscription: a
+        durable notice, no failure count, nobody else's subscription touched.
+        """
+        if job.sub_agent_id is None or await self._agent_access_check(db, job.user_id, job.sub_agent_id):
+            return True
+        await self._finalize(
+            run_id=run_id,
+            job=job,
+            status=JobRunStatus.FAILED,
+            error_message="You no longer have access to the sub-agent this job runs.",
+            delivered=False,
+            paused_reason="Agent not accessible: you no longer have access to the sub-agent this job runs.",
+            trigger=trigger,
+            counts_as_failure=False,
+        )
+        return False
 
     async def _build_message_args(
         self,
@@ -1057,8 +1099,13 @@ class SchedulerEngine:
         trigger: RunTrigger = RunTrigger.SCHEDULED,
         parked_task_id: str | None = None,
         parked_payload: dict[str, Any] | None = None,
+        counts_as_failure: bool = True,
     ) -> None:
         """Persist run outcome and advance job state.
+
+        *counts_as_failure* False records a FAILED run without moving
+        ``consecutive_failures``: the stop is about the subscriber's standing (an agent
+        they can no longer reach), not about the job, and the pause reason says so.
 
         An interrupted SCHEDULED or RESUMED run earns the job one fresh attempt. The
         marker goes in the database rather than being retried here: the process that
@@ -1159,22 +1206,21 @@ class SchedulerEngine:
                     "Job %d: Disabling watch job after successful trigger (destroy_after_trigger=True)",
                     job.id,
                 )
-                # Disable the job via direct SQL (system action, no user actor)
-                await db.execute(
-                    text("""
-                        UPDATE scheduled_jobs
-                        SET enabled = FALSE,
-                            paused_reason = 'Watch condition met (one-time trigger)',
-                            updated_at = :now
-                        WHERE id = :job_id
-                    """),
-                    {"job_id": job.id, "now": datetime.now(timezone.utc)},
-                )
+                # A system action, no user actor. Per SUBSCRIPTION: the watch fired for
+                # this subscriber, so this subscriber's job is done; nobody else's is.
+                await self._repo.disable_subscription(db, job.id, "Watch condition met (one-time trigger)")
+
+            # A stop that is about the subscriber's standing, not the job: written as a
+            # real pause (enabled = FALSE + reason) so the claim loop leaves it alone —
+            # complete_job only flips enabled on the failure threshold, which this must
+            # never contribute to.
+            if not counts_as_failure and paused_reason:
+                await self._repo.disable_subscription(db, job.id, paused_reason)
 
             enabled_after, reason_after = await self._repo.complete_job(
                 db=db,
-                job_id=job.id,
-                status=status,
+                subscription_id=job.id,
+                status=status if counts_as_failure else JobRunStatus.INTERRUPTED,
                 next_run_at=next_run_at,
                 retry_at=retry_at,
                 last_check_result=last_check_result,

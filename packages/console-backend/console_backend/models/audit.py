@@ -18,7 +18,8 @@ class AuditEntityType(str, Enum):
     SESSION = "session"  # For session-related events like admin mode activation
     SECRET = "secret"  # For secrets management operations
     RATE_CARD = "rate_card"  # For LLM pricing rate cards
-    SCHEDULED_JOB = "scheduled_job"  # For scheduler job CRUD operations
+    SCHEDULED_JOB = "scheduled_job"  # A scheduled job DEFINITION (pre-split rows read as their definition)
+    SCHEDULED_JOB_SUBSCRIPTION = "scheduled_job_subscription"  # One user's subscription to a definition
     DELIVERY_CHANNEL = "delivery_channel"  # For delivery channel registration/management
     CATALOG = "catalog"  # For catalog management operations
     BUG_REPORT = "bug_report"  # For bug report operations
@@ -51,6 +52,13 @@ class AuditAction(str, Enum):
     IMPERSONATION_START = "impersonation_start"
     IMPERSONATION_END = "impersonation_end"
     REVOKE = "revoke"
+    # Shared scheduled jobs (ADR-0010): definition-level stop/restart, the
+    # subscriber relationship, and a writer clearing every trigger override.
+    SUSPEND = "suspend"
+    UNSUSPEND = "unsuspend"
+    SUBSCRIBE = "subscribe"
+    UNSUBSCRIBE = "unsubscribe"
+    RESET_OVERRIDES = "reset_overrides"
 
 
 class AuditLog(BaseModel):

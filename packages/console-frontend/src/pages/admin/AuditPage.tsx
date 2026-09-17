@@ -43,6 +43,11 @@ const actionColors: Record<AuditAction, 'default' | 'secondary' | 'destructive' 
   impersonation_start: 'default',
   impersonation_end: 'outline',
   revoke: 'destructive',
+  suspend: 'destructive',
+  unsuspend: 'default',
+  subscribe: 'default',
+  unsubscribe: 'outline',
+  reset_overrides: 'secondary',
 };
 
 const entityTypeLabels: Record<AuditEntityType, string> = {
@@ -53,6 +58,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   secret: 'Secret',
   rate_card: 'Rate Card',
   scheduled_job: 'Scheduled Job',
+  scheduled_job_subscription: 'Scheduled Job Subscription',
   delivery_channel: 'Delivery Channel',
   catalog: 'Catalog',
   bug_report: 'Bug Report',

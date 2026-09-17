@@ -38,6 +38,7 @@ def _make_engine(*, channel: dict | None) -> SchedulerEngine:
     repo.complete_job.return_value = (True, None)
 
     return SchedulerEngine(
+        agent_access_check=AsyncMock(return_value=True),
         repo=repo,
         delivery_channel_repo=delivery_channel_repo,
         token_service=token_service,

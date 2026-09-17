@@ -9,6 +9,7 @@ from ..dependencies import (
     require_group_member,
     require_group_member_management_permission,
 )
+from ..models.scheduled_job import GroupDefaultJobsSet, JobDefinitionRefWithStatus
 from ..models.user import PaginationMeta, User
 from ..models.user_group import (
     GroupMemberAdd,
@@ -290,6 +291,88 @@ async def get_group_accessible_agents(
     )
 
     return sub_agents
+
+
+@router.get("/{group_id}/accessible-jobs", response_model=list[JobDefinitionRefWithStatus])
+async def get_group_accessible_jobs(
+    group_id: int,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> list[JobDefinitionRefWithStatus]:
+    """Scheduled job definitions shared with this group, flagged with which are its
+    default jobs (activated for every current and future member). Requires group member role."""
+    await require_group_member(request, group_id, db, user)
+    if await get_user_group_service(request).get_group(db, group_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    rows = await request.app.state.scheduler_service.list_group_definitions(db, group_id)
+    return [JobDefinitionRefWithStatus(**row) for row in rows]
+
+
+@router.put("/{group_id}/default-jobs", status_code=status.HTTP_204_NO_CONTENT)
+async def set_group_default_jobs(
+    group_id: int,
+    request: Request,
+    db: DbSession,
+    request_body: GroupDefaultJobsSet,
+    user: User = Depends(require_auth),
+) -> None:
+    """Set (replace) the group's default scheduled jobs (ADR-0010).
+
+    Requires group manager role or system admin. Only definitions already shared with the
+    group qualify — a default never grants access by itself. Every current member is
+    subscribed to a newly added default (enabled, under their own identity); subscriptions
+    that only a removed default stood behind are removed.
+    """
+    await require_group_member_management_permission(request, group_id, db, user)
+    if await get_user_group_service(request).get_group(db, group_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    try:
+        await request.app.state.scheduler_service.set_group_default_jobs(
+            db=db, group_id=group_id, definition_ids=request_body.definition_ids, actor=user
+        )
+        await db.commit()
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{group_id}/default-jobs/{definition_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def add_group_default_job(
+    group_id: int,
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> None:
+    """Make one shared job a default of the group and subscribe every current member."""
+    await require_group_member_management_permission(request, group_id, db, user)
+    if await get_user_group_service(request).get_group(db, group_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    try:
+        await request.app.state.scheduler_service.add_group_default_job(
+            db=db, group_id=group_id, definition_id=definition_id, actor=user
+        )
+        await db.commit()
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.delete("/{group_id}/default-jobs/{definition_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_group_default_job(
+    group_id: int,
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> None:
+    """Stop a job being a default of the group; members' self-made subscriptions stay."""
+    await require_group_member_management_permission(request, group_id, db, user)
+    if await get_user_group_service(request).get_group(db, group_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    await request.app.state.scheduler_service.remove_group_default_job(
+        db=db, group_id=group_id, definition_id=definition_id, actor=user
+    )
+    await db.commit()
 
 
 @router.put("/{group_id}/default-agents")

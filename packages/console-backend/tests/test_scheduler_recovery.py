@@ -29,13 +29,13 @@ class TestFailureAccounting:
 
         async def _failures() -> int:
             r = await pg_session.execute(
-                text("SELECT consecutive_failures FROM scheduled_jobs WHERE id = :id"), {"id": job_id}
+                text("SELECT consecutive_failures FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
             )
             return r.scalar_one()
 
         await repo.complete_job(
             db=pg_session,
-            job_id=job_id,
+            subscription_id=job_id,
             status=JobRunStatus.INTERRUPTED,
             next_run_at=datetime.now(timezone.utc) + timedelta(hours=1),
             retry_at=datetime.now(timezone.utc),
@@ -45,7 +45,7 @@ class TestFailureAccounting:
 
         await repo.complete_job(
             db=pg_session,
-            job_id=job_id,
+            subscription_id=job_id,
             status=JobRunStatus.FAILED,
             next_run_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
@@ -62,7 +62,7 @@ class TestFailureAccounting:
         for _ in range(3):
             await repo.complete_job(
                 db=pg_session,
-                job_id=job_id,
+                subscription_id=job_id,
                 status=JobRunStatus.INTERRUPTED,
                 next_run_at=datetime.now(timezone.utc) + timedelta(hours=1),
                 retry_at=datetime.now(timezone.utc),
@@ -70,7 +70,7 @@ class TestFailureAccounting:
         await pg_session.commit()
 
         r = await pg_session.execute(
-            text("SELECT enabled, paused_reason FROM scheduled_jobs WHERE id = :id"), {"id": job_id}
+            text("SELECT enabled, paused_reason FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
         )
         row = r.mappings().first()
         assert row["enabled"] is True
@@ -91,7 +91,7 @@ class TestRetryMarkerSurvivesOtherCompletions:
 
         await repo.complete_job(
             db=pg_session,
-            job_id=job_id,
+            subscription_id=job_id,
             status=JobRunStatus.SUCCESS,
             next_run_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
@@ -369,7 +369,7 @@ class TestNoticeDebt:
         # The next occurrence ran and delivered.
         await pg_session.execute(
             text("""
-                INSERT INTO scheduled_job_runs (job_id, started_at, completed_at, status, delivered)
+                INSERT INTO scheduled_job_runs (subscription_id, started_at, completed_at, status, delivered)
                 VALUES (:job_id, NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '4 minutes', 'success', TRUE)
             """),
             {"job_id": job_id},
@@ -401,7 +401,7 @@ class TestNoticeDebt:
         # The next occurrence started and is still in flight — nothing delivered.
         await pg_session.execute(
             text("""
-                INSERT INTO scheduled_job_runs (job_id, started_at, status, last_seen_at)
+                INSERT INTO scheduled_job_runs (subscription_id, started_at, status, last_seen_at)
                 VALUES (:job_id, NOW() - INTERVAL '5 minutes', 'running', NOW())
             """),
             {"job_id": job_id},
@@ -596,7 +596,7 @@ class TestAResumedRunDoesNotOwnTheSchedule:
         # The owner edits the schedule while the resumed run is in flight.
         edited = datetime.now(timezone.utc) + timedelta(hours=8)
         await pg_session.execute(
-            text("UPDATE scheduled_jobs SET next_run_at = :t WHERE id = :id"), {"t": edited, "id": job_id}
+            text("UPDATE scheduled_job_subscriptions SET next_run_at = :t WHERE id = :id"), {"t": edited, "id": job_id}
         )
         await pg_session.commit()
 
@@ -611,7 +611,7 @@ class TestAResumedRunDoesNotOwnTheSchedule:
         await pg_session.commit()
 
         row = await pg_session.execute(
-            text("SELECT next_run_at, enabled FROM scheduled_jobs WHERE id = :id"), {"id": job_id}
+            text("SELECT next_run_at, enabled FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
         )
         current, enabled = row.first()
         assert current == edited, "the owner's new schedule was overwritten by the resumed run"
@@ -629,5 +629,5 @@ class TestAResumedRunDoesNotOwnTheSchedule:
         await repo.complete_job(pg_session, job_id, status=JobRunStatus.SUCCESS, next_run_at=None)
         await pg_session.commit()
 
-        row = await pg_session.execute(text("SELECT enabled FROM scheduled_jobs WHERE id = :id"), {"id": job_id})
+        row = await pg_session.execute(text("SELECT enabled FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id})
         assert row.scalar_one() is False

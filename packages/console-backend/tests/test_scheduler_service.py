@@ -106,7 +106,8 @@ class TestCreateJobAutoSubAgent:
         # Accessible agents — newly created agent included
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
 
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         expected_job = make_job(job_id=1, sub_agent_id=99)
         mock_repo.get_job.return_value = expected_job
 
@@ -131,7 +132,7 @@ class TestCreateJobAutoSubAgent:
         mock_sub_agent_service.create_sub_agent.assert_awaited_once()
 
         # The new sub-agent's ID was passed to repo.create_job
-        create_call_fields = mock_repo.create_job.call_args[1]["fields"]
+        create_call_fields = mock_repo.create_definition.call_args[1]["fields"]
         assert create_call_fields["sub_agent_id"] == 99
 
         assert result.sub_agent_id == 99
@@ -148,7 +149,8 @@ class TestCreateJobAutoSubAgent:
         created_agent.id = 77
         mock_sub_agent_service.create_sub_agent.return_value = created_agent
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=77)
 
         create_data = ScheduledJobCreate(
@@ -184,7 +186,8 @@ class TestCreateJobAutoSubAgent:
         created_agent.id = 55
         mock_sub_agent_service.create_sub_agent.return_value = created_agent
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=55)
 
         create_data = ScheduledJobCreate(
@@ -237,7 +240,8 @@ class TestCreateJobAccessControl:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=42)
 
         result = await service.create_job(
@@ -274,7 +278,8 @@ class TestCreateJobAccessControl:
     ):
         """Watch jobs without sub_agent_id skip access control checks."""
         db = AsyncMock()
-        mock_repo.create_job.return_value = 5
+        mock_repo.create_definition.return_value = 5
+        mock_repo.create_subscription.return_value = 5
         now = datetime.now(timezone.utc)
         watch_job = ScheduledJob(
             id=5,
@@ -323,7 +328,8 @@ class TestCreateJobNextRunAt:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
 
         before = datetime.now(timezone.utc)
         returned_job = make_job(job_id=1)
@@ -331,7 +337,7 @@ class TestCreateJobNextRunAt:
 
         await service.create_job(db=db, data=_make_interval_create(), actor=actor)
 
-        fields = mock_repo.create_job.call_args[1]["fields"]
+        fields = mock_repo.create_subscription.call_args[1]["fields"]
         assert fields["next_run_at"] is not None
         assert fields["next_run_at"] >= before
 
@@ -344,7 +350,8 @@ class TestCreateJobNextRunAt:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
 
         run_at = datetime(2027, 6, 15, 8, 0, 0, tzinfo=timezone.utc)
@@ -358,7 +365,7 @@ class TestCreateJobNextRunAt:
         )
         await service.create_job(db=db, data=once_data, actor=actor)
 
-        fields = mock_repo.create_job.call_args[1]["fields"]
+        fields = mock_repo.create_subscription.call_args[1]["fields"]
         assert fields["next_run_at"] == run_at
 
 
@@ -373,17 +380,14 @@ class TestUpdateJobUnsetSentinel:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.return_value = existing_job
-        mock_repo.update_job.return_value = None
         mock_repo.get_job.side_effect = [existing_job, make_job(user_id=actor.id)]
 
         update_data = ScheduledJobUpdate()  # no fields set
         await service.update_job(db=db, job_id=1, data=update_data, actor=actor)
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
-        # Only 'updated_at' should be in the patch; no user-controlled fields
-        assert "name" not in fields
-        assert "prompt" not in fields
-        assert "check_tool" not in fields
+        # Nothing to route to either side: neither row is touched.
+        mock_repo.update_definition.assert_not_awaited()
+        mock_repo.update_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_explicit_none_clears_field(
@@ -393,14 +397,13 @@ class TestUpdateJobUnsetSentinel:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.return_value = existing_job
-        mock_repo.update_job.return_value = None
         mock_repo.get_job.side_effect = [existing_job, make_job(user_id=actor.id)]
 
         update_data = ScheduledJobUpdate()
         # We pass name=None explicitly — should be included in fields
         await service.update_job(db=db, job_id=1, data=update_data, actor=actor, name=None)
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert "name" in fields
         assert fields["name"] is None
 
@@ -421,7 +424,8 @@ class TestUpdateJobUnsetSentinel:
             await service.update_job(
                 db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, delivery_channel_id=1
             )
-        mock_repo.update_job.assert_not_awaited()
+        mock_repo.update_definition.assert_not_awaited()
+        mock_repo.update_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_update_clearing_delivery_channel_skips_validation(
@@ -435,14 +439,13 @@ class TestUpdateJobUnsetSentinel:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
 
         await service.update_job(
             db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, delivery_channel_id=None
         )
 
         mock_delivery_channel_repo.get_channel_by_id.assert_not_awaited()
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["delivery_channel_id"] is None
 
     @pytest.mark.asyncio
@@ -457,7 +460,6 @@ class TestUpdateJobUnsetSentinel:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id, job_type=JobType.WATCH, sub_agent_id=None)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
@@ -467,7 +469,7 @@ class TestUpdateJobUnsetSentinel:
         )
 
         mock_sub_agent_service.get_accessible_sub_agents.assert_awaited_once()
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert fields["sub_agent_id"] == 42
 
     @pytest.mark.asyncio
@@ -482,14 +484,13 @@ class TestUpdateJobUnsetSentinel:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id, job_type=JobType.WATCH)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
 
         await service.update_job(
             db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=None
         )
 
         mock_sub_agent_service.get_accessible_sub_agents.assert_not_awaited()
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert fields["sub_agent_id"] is None
 
     @pytest.mark.asyncio
@@ -504,7 +505,8 @@ class TestUpdateJobUnsetSentinel:
             await service.update_job(
                 db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=None
             )
-        mock_repo.update_job.assert_not_awaited()
+        mock_repo.update_definition.assert_not_awaited()
+        mock_repo.update_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_update_cannot_strip_a_watch_of_both_conditions(
@@ -530,7 +532,8 @@ class TestUpdateJobUnsetSentinel:
                 cel_expr=None,
                 llm_condition=None,
             )
-        mock_repo.update_job.assert_not_awaited()
+        mock_repo.update_definition.assert_not_awaited()
+        mock_repo.update_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_update_can_clear_one_condition_while_the_other_stands(
@@ -545,13 +548,12 @@ class TestUpdateJobUnsetSentinel:
             llm_condition="somebody external is invited",
         )
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
 
         await service.update_job(
             db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, cel_expr=None
         )
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert fields["cel_expr"] is None
 
     @pytest.mark.asyncio
@@ -560,9 +562,8 @@ class TestUpdateJobUnsetSentinel:
     ):
         """A task has no condition to keep — the guard is watch-only."""
         db = AsyncMock()
-        existing_job = make_job(user_id=actor.id, job_type=JobType.TASK)
+        existing_job = make_job(user_id=actor.id, job_type=JobType.TASK, cel_expr="result", llm_condition="x")
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
 
         await service.update_job(
             db=db,
@@ -573,7 +574,7 @@ class TestUpdateJobUnsetSentinel:
             llm_condition=None,
         )
 
-        assert mock_repo.update_job.await_count == 1
+        assert mock_repo.update_definition.await_count == 1
 
     @pytest.mark.asyncio
     async def test_update_returns_none_for_other_users_job(
@@ -591,7 +592,7 @@ class TestUpdateJobUnsetSentinel:
 class TestUpdateJobScheduleSwitch:
     """Switching schedule_kind must clear the stale schedule columns and recompute next_run_at.
 
-    The DB check constraint scheduled_jobs_schedule_config requires exactly one
+    The DB check constraint scheduled_job_definitions_schedule_config requires exactly one
     schedule config; leaving e.g. cron_expr set while switching to 'once' used to
     surface as an IntegrityError 500 (prod incident 2026-08-03, job 4).
     """
@@ -602,23 +603,23 @@ class TestUpdateJobScheduleSwitch:
     ):
         db = AsyncMock()
         existing_job = make_job(
-            user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None
+            user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None, cron_expr="0 8 * * *"
         )
-        existing_job.cron_expr = "0 8 * * *"
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
+        mock_repo.list_subscriptions.return_value = [existing_job]
+        mock_repo.user_timezones.return_value = {}
 
         run_at = datetime.now(timezone.utc) + timedelta(minutes=1)
         data = ScheduledJobUpdate(schedule_kind=ScheduleKind.ONCE, run_at=run_at)
         await service.update_job(db=db, job_id=1, data=data, actor=actor)
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert fields["schedule_kind"] == "once"
         assert fields["run_at"] == run_at
         assert fields["cron_expr"] is None
         assert fields["interval_seconds"] is None
-        # once-jobs run at run_at itself
-        assert fields["next_run_at"] == run_at
+        # once-jobs run at run_at itself — recomputed onto the inherited subscription
+        assert mock_repo.update_subscription.call_args[1]["fields"]["next_run_at"] == run_at
 
     @pytest.mark.asyncio
     async def test_interval_to_cron_clears_interval(
@@ -627,17 +628,18 @@ class TestUpdateJobScheduleSwitch:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id)  # interval job
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
+        mock_repo.list_subscriptions.return_value = [existing_job]
+        mock_repo.user_timezones.return_value = {}
 
         data = ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 8 * * *")
         await service.update_job(db=db, job_id=1, data=data, actor=actor)
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert fields["schedule_kind"] == "cron"
         assert fields["cron_expr"] == "0 8 * * *"
         assert fields["interval_seconds"] is None
         assert fields["run_at"] is None
-        assert fields["next_run_at"] > datetime.now(timezone.utc)
+        assert mock_repo.update_subscription.call_args[1]["fields"]["next_run_at"] > datetime.now(timezone.utc)
 
     @pytest.mark.asyncio
     async def test_switch_to_once_without_run_at_raises(
@@ -651,7 +653,8 @@ class TestUpdateJobScheduleSwitch:
             await service.update_job(
                 db=db, job_id=1, data=ScheduledJobUpdate(schedule_kind=ScheduleKind.ONCE), actor=actor
             )
-        mock_repo.update_job.assert_not_awaited()
+        mock_repo.update_definition.assert_not_awaited()
+        mock_repo.update_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_switch_to_cron_without_expr_raises(
@@ -665,7 +668,8 @@ class TestUpdateJobScheduleSwitch:
             await service.update_job(
                 db=db, job_id=1, data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON), actor=actor
             )
-        mock_repo.update_job.assert_not_awaited()
+        mock_repo.update_definition.assert_not_awaited()
+        mock_repo.update_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_schedule_only_patch_recomputes_next_run_at(
@@ -676,17 +680,20 @@ class TestUpdateJobScheduleSwitch:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id)  # interval 3600s
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
+        mock_repo.list_subscriptions.return_value = [existing_job]
+        mock_repo.user_timezones.return_value = {}
 
         before = datetime.now(timezone.utc)
         await service.update_job(
             db=db, job_id=1, data=ScheduledJobUpdate(interval_seconds=120), actor=actor
         )
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        # Alone, the owner's schedule edit is the job's default; the inherited
+        # subscription's next occurrence follows it.
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert fields["interval_seconds"] == 120
-        assert "next_run_at" in fields
-        assert timedelta(seconds=100) < fields["next_run_at"] - before < timedelta(seconds=140)
+        next_run_at = mock_repo.update_subscription.call_args[1]["fields"]["next_run_at"]
+        assert timedelta(seconds=100) < next_run_at - before < timedelta(seconds=140)
 
     @pytest.mark.asyncio
     async def test_non_schedule_patch_leaves_schedule_untouched(
@@ -695,19 +702,19 @@ class TestUpdateJobScheduleSwitch:
         db = AsyncMock()
         existing_job = make_job(user_id=actor.id)
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
 
         await service.update_job(
             db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, name="renamed"
         )
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         for f in ("schedule_kind", "cron_expr", "interval_seconds", "run_at", "next_run_at"):
             assert f not in fields
+        mock_repo.update_subscription.assert_not_awaited()
 
 
 class TestJobTimezone:
-    """Jobs snapshot the owner's settings timezone and evaluate cron in it."""
+    """A definition names a zone only when the user did; cron is evaluated in the resolved zone."""
 
     @staticmethod
     def _cron_create(timezone_name: str | None = None) -> ScheduledJobCreate:
@@ -734,14 +741,23 @@ class TestJobTimezone:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
 
         await service.create_job(db=db, data=self._cron_create(), actor=actor)
 
+        from zoneinfo import ZoneInfo
+
+        # The definition names NO zone — unset means each subscriber's own, so the job
+        # stays correct if it is later shared (ADR-0010) — while the creator's own
+        # subscription is computed in the creator's settings timezone, looked up once.
         mock_user_settings_service.get_settings.assert_awaited_once()
-        fields = mock_repo.create_job.call_args[1]["fields"]
-        assert fields["timezone"] == "Europe/Zurich"
+        fields = mock_repo.create_definition.call_args[1]["fields"]
+        assert fields["timezone"] is None
+        next_run_at = mock_repo.create_subscription.call_args[1]["fields"]["next_run_at"]
+        local = next_run_at.astimezone(ZoneInfo("Europe/Zurich"))
+        assert (local.hour, local.minute) == (8, 0)
 
     @pytest.mark.asyncio
     async def test_create_explicit_timezone_skips_settings_lookup(
@@ -756,13 +772,14 @@ class TestJobTimezone:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
 
         await service.create_job(db=db, data=self._cron_create("America/New_York"), actor=actor)
 
         mock_user_settings_service.get_settings.assert_not_awaited()
-        fields = mock_repo.create_job.call_args[1]["fields"]
+        fields = mock_repo.create_definition.call_args[1]["fields"]
         assert fields["timezone"] == "America/New_York"
 
     @pytest.mark.asyncio
@@ -776,12 +793,13 @@ class TestJobTimezone:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
 
         await service.create_job(db=db, data=self._cron_create(), actor=actor)
 
-        next_run_at = mock_repo.create_job.call_args[1]["fields"]["next_run_at"]
+        next_run_at = mock_repo.create_subscription.call_args[1]["fields"]["next_run_at"]
         local = next_run_at.astimezone(ZoneInfo("Europe/Zurich"))
         assert (local.hour, local.minute) == (8, 0)
 
@@ -796,7 +814,8 @@ class TestJobTimezone:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
 
         once_data = ScheduledJobCreate(
@@ -809,9 +828,9 @@ class TestJobTimezone:
         )
         await service.create_job(db=db, data=once_data, actor=actor)
 
-        fields = mock_repo.create_job.call_args[1]["fields"]
+        fields = mock_repo.create_definition.call_args[1]["fields"]
         assert fields["run_at"] == datetime(2027, 6, 15, 14, 30, tzinfo=ZoneInfo("Europe/Zurich"))
-        assert fields["next_run_at"] == fields["run_at"]
+        assert mock_repo.create_subscription.call_args[1]["fields"]["next_run_at"] == fields["run_at"]
 
     @pytest.mark.asyncio
     async def test_update_timezone_recomputes_next_run_at(
@@ -821,19 +840,19 @@ class TestJobTimezone:
 
         db = AsyncMock()
         existing_job = make_job(
-            user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None
+            user_id=actor.id, schedule_kind=ScheduleKind.CRON, interval_seconds=None, cron_expr="0 8 * * *"
         )
-        existing_job.cron_expr = "0 8 * * *"
         mock_repo.get_job.side_effect = [existing_job, existing_job]
-        mock_repo.update_job.return_value = None
+        mock_repo.list_subscriptions.return_value = [existing_job]
+        mock_repo.user_timezones.return_value = {}
 
         await service.update_job(
             db=db, job_id=1, data=ScheduledJobUpdate(timezone="Asia/Tokyo"), actor=actor
         )
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert fields["timezone"] == "Asia/Tokyo"
-        local = fields["next_run_at"].astimezone(ZoneInfo("Asia/Tokyo"))
+        local = mock_repo.update_subscription.call_args[1]["fields"]["next_run_at"].astimezone(ZoneInfo("Asia/Tokyo"))
         assert (local.hour, local.minute) == (8, 0)
 
 
@@ -853,7 +872,8 @@ class TestResumeJob:
 
         with pytest.raises(ValueError, match="already run"):
             await service.resume_job(db=AsyncMock(), job_id=1, actor=actor)
-        mock_repo.update_job.assert_not_awaited()
+        mock_repo.update_definition.assert_not_awaited()
+        mock_repo.update_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_resume_future_once_job_re_enables(
@@ -867,7 +887,7 @@ class TestResumeJob:
         mock_repo.get_job.return_value = job
 
         assert await service.resume_job(db=AsyncMock(), job_id=1, actor=actor) is True
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["enabled"] is True
 
     @pytest.mark.asyncio
@@ -904,7 +924,8 @@ class TestSettingsTimezoneFallback:
         accessible = MagicMock()
         accessible.id = 42
         mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
-        mock_repo.create_job.return_value = 1
+        mock_repo.create_definition.return_value = 1
+        mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
 
         data = ScheduledJobCreate(
@@ -917,8 +938,13 @@ class TestSettingsTimezoneFallback:
         )
         await service.create_job(db=AsyncMock(), data=data, actor=actor)
 
-        fields = mock_repo.create_job.call_args[1]["fields"]
-        assert fields["timezone"] == "Asia/Tokyo"
+        from zoneinfo import ZoneInfo
+
+        # The definition still names no zone; the creator's first occurrence resolves
+        # through the deployment default.
+        assert mock_repo.create_definition.call_args[1]["fields"]["timezone"] is None
+        next_run_at = mock_repo.create_subscription.call_args[1]["fields"]["next_run_at"]
+        assert next_run_at.astimezone(ZoneInfo("Asia/Tokyo")).hour == 8
 
     @pytest.mark.asyncio
     async def test_invalid_settings_timezone_raises_clean_value_error(
@@ -990,7 +1016,7 @@ class TestEnabledToggleIsADeliberateStop:
 
         await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(enabled=False), actor=actor)
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["enabled"] is False
         assert fields["paused_reason"], "without a reason a retry would resurrect the disabled job"
         assert fields["retry_at"] is None
@@ -1006,7 +1032,7 @@ class TestEnabledToggleIsADeliberateStop:
 
         await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(enabled=True), actor=actor)
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["enabled"] is True
         assert fields["paused_reason"] is None
         assert fields["retry_at"] is None
@@ -1019,7 +1045,7 @@ class TestEnabledToggleIsADeliberateStop:
 
         await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(), actor=actor, name="Renamed")
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_definition.call_args[1]["fields"]
         assert "paused_reason" not in fields
         assert "retry_at" not in fields
 
@@ -1033,7 +1059,7 @@ class TestPauseAndResumeDropThePendingRetry:
 
         assert await service.pause_job(db=AsyncMock(), job_id=1, actor=actor) is True
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["retry_at"] is None
         assert fields["paused_reason"]
 
@@ -1046,6 +1072,6 @@ class TestPauseAndResumeDropThePendingRetry:
 
         assert await service.resume_job(db=AsyncMock(), job_id=1, actor=actor) is True
 
-        fields = mock_repo.update_job.call_args[1]["fields"]
+        fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["retry_at"] is None
         assert fields["enabled"] is True

@@ -16,11 +16,13 @@ from sqlalchemy.exc import IntegrityError
 
 
 from ..db.session import DbSession
-from ..dependencies import require_auth, require_auth_or_bearer_token
+from ..dependencies import is_admin_mode, require_auth, require_auth_or_bearer_token
 from ..models.scheduled_job import (
     GenerateConditionRequest,
     GenerateConditionResponse,
     GenerateJobDraftRequest,
+    JobGroupPermissionResponse,
+    JobPermissionsUpdate,
     JobRunStatus,
     JobType,
     ResumeRunRequest,
@@ -34,6 +36,8 @@ from ..models.scheduled_job import (
     ScheduledJobRun,
     ScheduledJobUpdate,
     ScheduleKind,
+    SharedJobDefinition,
+    SuspendJobRequest,
     ValidateConditionRequest,
     ValidateConditionResponse,
 )
@@ -53,7 +57,7 @@ from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 
 from ..services.spend_attribution import SERVICE_CONSOLE
 from ..services.scheduler_engine import SchedulerEngine
-from ..services.scheduler_service import _UNSET, SchedulerService
+from ..services.scheduler_service import _UNSET, SchedulerAccessError, SchedulerService
 from ..utils.timezones import resolve_timezone
 from .mcp_router import MCPTool, _list_mcp_tools, rank_mcp_tools
 
@@ -865,8 +869,11 @@ async def _validate_cel_condition(data: ValidateConditionRequest) -> ValidateCon
         "`llm_condition` (judged by a model), or both (the CEL gate runs first, the model judges "
         "what it returned) — so the scheduler can poll before optionally invoking an agent. "
         "Supply a `delivery_channel_id` referencing a registered delivery channel. "
-        "Cron expressions are evaluated in the job's `timezone` (defaults to the user's settings timezone), "
-        "so write them as the user's local wall-clock time — never convert to UTC."
+        "Cron expressions are evaluated in the job's `timezone`, so write them as the user's local "
+        "wall-clock time — never convert to UTC. Leave `timezone` unset unless the user named a zone: "
+        "unset means each subscriber's own, so the job stays correct if it is later shared to a group. "
+        "The creator is the job's owner and its first subscriber; it can be shared later with "
+        "`scheduler_share_job`."
     ),
     operation_id="scheduler_create_job",
     tags=["MCP"],
@@ -888,8 +895,13 @@ async def create_job(
 @router.get(
     "/jobs",
     response_model=list[ScheduledJob],
-    summary="List scheduled jobs.",
-    description="Returns all scheduled jobs owned by the current user.",
+    summary="List my scheduled jobs.",
+    description=(
+        "Returns every scheduled job the current user is subscribed to — their own and shared "
+        "ones they have activated. `effective_permission` says whether they may edit what the "
+        "job does ('owner'/'write') or only their own schedule, delivery and enabled state ('read'). "
+        "Jobs shared with the user but not yet activated are listed by `scheduler_list_shared_jobs`."
+    ),
     tags=["MCP"],
     operation_id="scheduler_list_jobs",
 )
@@ -926,7 +938,15 @@ async def get_job(
     "/jobs/{job_id}",
     response_model=ScheduledJob,
     summary="Update a scheduled job.",
-    description="Partial update — only supplied fields are changed.",
+    description=(
+        "Partial update — only supplied fields are changed. Each field is routed to where it "
+        "lives: what the job DOES (name, prompt, agent, check, condition, max_failures, "
+        "trigger_policy) needs write permission; `enabled` and `delivery_channel_id` are always "
+        "the caller's own. Schedule fields (schedule_kind, cron_expr, interval_seconds, run_at, "
+        "timezone) are ambiguous only when the job has OTHER subscribers: pass `scope='mine'` to "
+        "change just the caller's schedule or `scope='everyone'` to change the job's default; "
+        "without a scope, 'mine' is assumed — ask the user which they meant first."
+    ),
     tags=["MCP"],
     operation_id="scheduler_update_job",
 )
@@ -948,6 +968,7 @@ async def update_job(
             job_id=job_id,
             data=data,
             actor=current_user,
+            is_admin=is_admin_mode(request, current_user),
             name=data.name if "name" in data.model_fields_set else _UNSET,
             prompt=data.prompt if "prompt" in data.model_fields_set else _UNSET,
             notification_message=(
@@ -963,6 +984,8 @@ async def update_job(
             ),
             sub_agent_id=data.sub_agent_id if "sub_agent_id" in data.model_fields_set else _UNSET,
         )
+    except SchedulerAccessError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except IntegrityError as e:
@@ -984,6 +1007,10 @@ async def update_job(
     "/jobs/{job_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a scheduled job.",
+    description=(
+        "For a job the caller owns: deletes it for EVERY subscriber. For a shared job the "
+        "caller merely subscribes to: removes only the caller's subscription (unsubscribe)."
+    ),
     tags=["MCP"],
     operation_id="scheduler_delete_job",
 )
@@ -994,7 +1021,9 @@ async def delete_job(
     current_user: User = Depends(require_auth_or_bearer_token),
 ) -> None:
     service = _get_scheduler_service(request)
-    ok = await service.delete_job(db=db, job_id=job_id, actor=current_user)
+    ok = await service.delete_job(
+        db=db, job_id=job_id, actor=current_user, is_admin=is_admin_mode(request, current_user)
+    )
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
@@ -1027,6 +1056,15 @@ async def run_job_now(
 
     engine: SchedulerEngine = request.app.state.scheduler_engine
 
+    # Suspension holds EVERY subscription out of the claim; run-now bypasses the claim,
+    # so it has to honour the same hold or a read-level subscriber could run a job its
+    # writer stopped for everyone.
+    if job.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This job is suspended for everyone; it cannot be run until it is resumed.",
+        )
+
     # A job blocked on its owner must not be run again until they answer. The schedule
     # hold does that for scheduled occurrences by way of claim_due_jobs, but run-now
     # bypasses the claim entirely — so without this check a few presses of "Run now"
@@ -1057,7 +1095,11 @@ async def run_job_now(
 @router.post(
     "/jobs/{job_id}/pause",
     response_model=ScheduledJob,
-    summary="Pause a scheduled job.",
+    summary="Pause a scheduled job for me.",
+    description=(
+        "Disables the caller's own subscription; on a shared job nobody else is affected. "
+        "To stop a shared job for everyone, use `scheduler_suspend_job` (needs write)."
+    ),
     tags=["MCP"],
     operation_id="scheduler_pause_job",
 )
@@ -1153,6 +1195,12 @@ async def resume_parked_run(
             detail="This run is not waiting for authorization; it may already have been answered.",
         )
 
+    if job.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This job is suspended for everyone; answer again once it is resumed.",
+        )
+
     engine: SchedulerEngine = request.app.state.scheduler_engine
     # Claim the ask HERE, before backgrounding, so a second click is answered with a 409
     # rather than disappearing into a task nobody is waiting on. The parked run keeps its
@@ -1218,3 +1266,293 @@ async def get_run(
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     return run
+
+
+# ---------------------------------------------------------------------------
+# Sharing (ADR-0010): definitions, subscriptions, permissions
+# ---------------------------------------------------------------------------
+
+
+def _translate(e: Exception) -> HTTPException:
+    """The service's exceptions as HTTP: not-found, forbidden, bad request."""
+    if isinstance(e, LookupError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e) or "Job not found")
+    if isinstance(e, SchedulerAccessError):
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.get(
+    "/definitions",
+    response_model=list[SharedJobDefinition],
+    summary="List scheduled job definitions available to me.",
+    description=(
+        "Every job definition the caller can reach — their own, public templates, and jobs "
+        "shared with one of their groups — with `subscription_id` set when they are already "
+        "subscribed. Subscribe with `scheduler_subscribe_job` to run one under your own account, "
+        "or copy it with `scheduler_copy_job` to make an independent version you own."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_list_shared_jobs",
+)
+async def list_shared_definitions(
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> list[SharedJobDefinition]:
+    service = _get_scheduler_service(request)
+    return await service.list_available_definitions(db, current_user.id)
+
+
+@router.post(
+    "/definitions/{definition_id}/subscribe",
+    response_model=ScheduledJob,
+    status_code=status.HTTP_201_CREATED,
+    summary="Subscribe to a shared scheduled job.",
+    description=(
+        "Activates the job for the caller: it will run under THEIR account, with their "
+        "credentials, on the job's default schedule (in their own timezone unless the job pins "
+        "one), delivering to their own DM. Returns the caller's job (subscription). Idempotent."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_subscribe_job",
+)
+async def subscribe_definition(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> ScheduledJob:
+    service = _get_scheduler_service(request)
+    try:
+        return await service.subscribe(db, definition_id, current_user, is_admin=is_admin_mode(request, current_user))
+    except (LookupError, SchedulerAccessError, ValueError) as e:
+        raise _translate(e) from e
+
+
+@router.post(
+    "/definitions/{definition_id}/unsubscribe",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Unsubscribe from a shared scheduled job.",
+    description="Removes only the caller's own subscription; the job itself and other subscribers are untouched.",
+    tags=["MCP"],
+    operation_id="scheduler_unsubscribe_job",
+)
+async def unsubscribe_definition(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> None:
+    service = _get_scheduler_service(request)
+    if not await service.unsubscribe(db, definition_id, current_user):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="You are not subscribed to this job")
+
+
+@router.delete(
+    "/definitions/{definition_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a scheduled job definition for every subscriber.",
+    description=(
+        "Owner or administrator only. Removes the definition and every subscription to it. "
+        "The owner's own job id does the same through `scheduler_delete_job`; this is the path "
+        "for an owner who has unsubscribed, and for administrators."
+    ),
+)
+async def delete_definition(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth),
+) -> None:
+    service = _get_scheduler_service(request)
+    try:
+        await service.delete_definition(db, definition_id, current_user, is_admin=is_admin_mode(request, current_user))
+    except (LookupError, SchedulerAccessError) as e:
+        raise _translate(e) from e
+
+
+@router.post(
+    "/definitions/{definition_id}/copy",
+    response_model=ScheduledJob,
+    status_code=status.HTTP_201_CREATED,
+    summary="Copy a scheduled job into one I own.",
+    description=(
+        "A new, independent job owned by the caller, initialised from one they can read, with "
+        "no link back: later edits to the original do not reach it. Use this to diverge; "
+        "subscribe instead to keep following the author's version."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_copy_job",
+)
+async def copy_definition(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> ScheduledJob:
+    service = _get_scheduler_service(request)
+    try:
+        return await service.copy_definition(
+            db, definition_id, current_user, is_admin=is_admin_mode(request, current_user)
+        )
+    except (LookupError, SchedulerAccessError, ValueError) as e:
+        raise _translate(e) from e
+
+
+@router.get(
+    "/definitions/{definition_id}/permissions",
+    response_model=list[JobGroupPermissionResponse],
+    summary="Group permissions on a scheduled job definition.",
+)
+async def get_definition_permissions(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth),
+) -> list[JobGroupPermissionResponse]:
+    service = _get_scheduler_service(request)
+    try:
+        perms = await service.get_permissions(
+            db, definition_id, current_user, is_admin=is_admin_mode(request, current_user)
+        )
+    except (LookupError, SchedulerAccessError) as e:
+        raise _translate(e) from e
+    return [JobGroupPermissionResponse(**p) for p in perms]
+
+
+@router.put(
+    "/definitions/{definition_id}/permissions",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Share a scheduled job with groups.",
+    description=(
+        "Replaces the job's group permissions. 'read' lets members subscribe (run it under their "
+        "own account) or copy it; 'write' additionally lets them edit what it does, suspend it and "
+        "share it on. Needs write on the job. A job whose sub-agent the group cannot reach cannot "
+        "be shared to it — share the agent first; sharing a job never grants agent access. "
+        "Members of groups gaining or losing access are notified."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_share_job",
+)
+async def update_definition_permissions(
+    definition_id: int,
+    data: JobPermissionsUpdate,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> None:
+    service = _get_scheduler_service(request)
+    try:
+        await service.update_permissions(
+            db,
+            definition_id,
+            [{"user_group_id": gp.user_group_id, "permissions": gp.permissions} for gp in data.group_permissions],
+            current_user,
+            is_admin=is_admin_mode(request, current_user),
+        )
+    except (LookupError, SchedulerAccessError, ValueError) as e:
+        raise _translate(e) from e
+
+
+@router.post(
+    "/definitions/{definition_id}/suspend",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Suspend a scheduled job for every subscriber.",
+    description=(
+        "Stops the job for EVERYONE until it is resumed with `scheduler_unsuspend_job`; each "
+        "subscriber's own enabled/disabled choice is preserved. Needs write on the job. To stop "
+        "only your own copy, use `scheduler_pause_job`."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_suspend_job",
+)
+async def suspend_definition(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    data: SuspendJobRequest | None = None,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> None:
+    service = _get_scheduler_service(request)
+    try:
+        await service.suspend(
+            db,
+            definition_id,
+            current_user,
+            reason=data.reason if data else None,
+            is_admin=is_admin_mode(request, current_user),
+        )
+    except (LookupError, SchedulerAccessError) as e:
+        raise _translate(e) from e
+
+
+@router.post(
+    "/definitions/{definition_id}/unsuspend",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Lift a scheduled job's suspension.",
+    description="The job runs again for every subscriber who has it enabled. Needs write on the job.",
+    tags=["MCP"],
+    operation_id="scheduler_unsuspend_job",
+)
+async def unsuspend_definition(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> None:
+    service = _get_scheduler_service(request)
+    try:
+        await service.unsuspend(db, definition_id, current_user, is_admin=is_admin_mode(request, current_user))
+    except (LookupError, SchedulerAccessError) as e:
+        raise _translate(e) from e
+
+
+@router.post(
+    "/definitions/{definition_id}/reset-overrides",
+    summary="Reset every subscriber's schedule to the job's default.",
+    description=(
+        "Clears each subscriber's own schedule so all of them follow the job's default again "
+        "(including future changes to it). Needs write on the job. Affected subscribers are "
+        "notified. Returns how many were reset."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_reset_job_schedules",
+)
+async def reset_definition_overrides(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> dict[str, int]:
+    service = _get_scheduler_service(request)
+    try:
+        count = await service.reset_overrides(
+            db, definition_id, current_user, is_admin=is_admin_mode(request, current_user)
+        )
+    except (LookupError, SchedulerAccessError) as e:
+        raise _translate(e) from e
+    return {"reset": count}
+
+
+@router.put(
+    "/definitions/{definition_id}/public",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Publish or unpublish a job definition as an org-wide template (admin).",
+)
+async def set_definition_public(
+    definition_id: int,
+    request: Request,
+    db: DbSession,
+    is_public: bool,
+    current_user: User = Depends(require_auth),
+) -> None:
+    """Unlike sub-agents, only an administrator (in admin mode) may publish a job: a
+    public definition is a curated template visible to the whole organisation."""
+    if not is_admin_mode(request, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator (admin mode) required")
+    service = _get_scheduler_service(request)
+    try:
+        await service.set_public(db, definition_id, current_user, is_public)
+    except LookupError as e:
+        raise _translate(e) from e

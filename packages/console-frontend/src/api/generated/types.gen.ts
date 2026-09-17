@@ -153,14 +153,14 @@ export type ApplyUpdateRequest = {
  *
  * Audit action enum.
  */
-export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update' | 'impersonation_start' | 'impersonation_end' | 'revoke';
+export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update' | 'impersonation_start' | 'impersonation_end' | 'revoke' | 'suspend' | 'unsuspend' | 'subscribe' | 'unsubscribe' | 'reset_overrides';
 
 /**
  * AuditEntityType
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting' | 'voice_session';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'scheduled_job_subscription' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting' | 'voice_session';
 
 /**
  * AuditLog
@@ -2195,6 +2195,18 @@ export type GenerateJobDraftRequest = {
 };
 
 /**
+ * GroupDefaultJobsSet
+ *
+ * Request to set (replace) a group's default job definitions.
+ */
+export type GroupDefaultJobsSet = {
+    /**
+     * Definition Ids
+     */
+    definition_ids: Array<number>;
+};
+
+/**
  * GroupMemberAdd
  *
  * Request to add members to a group.
@@ -2277,6 +2289,83 @@ export type ImpersonateStartRequest = {
      * Target User Id
      */
     target_user_id: string;
+};
+
+/**
+ * JobDefinitionRefWithStatus
+ *
+ * A definition a group can reach, with its group-default flag.
+ */
+export type JobDefinitionRefWithStatus = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    job_type: JobType;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    /**
+     * Is Default
+     */
+    is_default?: boolean;
+    /**
+     * Suspended
+     */
+    suspended?: boolean;
+};
+
+/**
+ * JobGroupPermission
+ *
+ * Permission assignment for a group on a job definition.
+ */
+export type JobGroupPermission = {
+    /**
+     * User Group Id
+     */
+    user_group_id: number;
+    /**
+     * Permissions
+     */
+    permissions: Array<ItemsEnum>;
+};
+
+/**
+ * JobGroupPermissionResponse
+ *
+ * One group's permissions on a job definition.
+ */
+export type JobGroupPermissionResponse = {
+    /**
+     * User Group Id
+     */
+    user_group_id: number;
+    /**
+     * User Group Name
+     */
+    user_group_name: string;
+    /**
+     * Permissions
+     */
+    permissions: Array<ItemsEnum>;
+};
+
+/**
+ * JobPermissionsUpdate
+ *
+ * Replace the group permissions of a job definition (read = may subscribe, write = may edit).
+ */
+export type JobPermissionsUpdate = {
+    /**
+     * Group Permissions
+     */
+    group_permissions: Array<JobGroupPermission>;
 };
 
 /**
@@ -3254,7 +3343,7 @@ export type NotificationListResponse = {
  *
  * Notification type enum matching database enum.
  */
-export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_permission_changed' | 'group_added' | 'group_removed' | 'role_updated' | 'approval_requested' | 'approval_completed' | 'approval_rejected' | 'agent_shared' | 'agent_access_revoked' | 'secret_shared' | 'secret_access_revoked' | 'secret_permission_changed' | 'system_announcement' | 'bug_report_filed' | 'scheduled_job_paused';
+export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_permission_changed' | 'group_added' | 'group_removed' | 'role_updated' | 'approval_requested' | 'approval_completed' | 'approval_rejected' | 'agent_shared' | 'agent_access_revoked' | 'secret_shared' | 'secret_access_revoked' | 'secret_permission_changed' | 'system_announcement' | 'bug_report_filed' | 'scheduled_job_paused' | 'job_shared' | 'job_access_revoked' | 'job_permission_changed' | 'job_subscription_activated' | 'job_subscription_reset' | 'job_suspended' | 'job_resumed' | 'job_deleted';
 
 /**
  * OrchestratorThinkingLevel
@@ -4100,7 +4189,16 @@ export type ScheduleKind = 'cron' | 'once' | 'interval';
 /**
  * ScheduledJob
  *
- * Full scheduled job representation returned by the API.
+ * A scheduled job as one user sees it: their SUBSCRIPTION with the DEFINITION folded in.
+ *
+ * ``id`` is the subscription id — what every client, link and notification has always
+ * called the job id — and ``user_id`` is the subscriber. The definition's fields are
+ * flattened onto it rather than nested because the split is a storage fact, not a
+ * UI concept (ADR-0010): an unshared job is still one form, and a plain subscriber
+ * sees the same page with the definition fields read-only. The trigger fields carry
+ * the trigger IN FORCE for this subscription (its override, else the defaults);
+ * ``trigger_inherited`` says which, and ``trigger_defaults`` carries the defaults
+ * themselves for a writer editing the group's schedule.
  */
 export type ScheduledJob = {
     /**
@@ -4111,6 +4209,15 @@ export type ScheduledJob = {
      * User Id
      */
     user_id: string;
+    /**
+     * Definition Id
+     */
+    definition_id: number;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    effective_permission?: EffectivePermissionEnum;
     /**
      * Sub Agent Id
      */
@@ -4137,6 +4244,16 @@ export type ScheduledJob = {
      * Run At
      */
     run_at?: string | null;
+    /**
+     * Trigger Inherited
+     */
+    trigger_inherited?: boolean;
+    /**
+     * Timezone Override
+     */
+    timezone_override?: string | null;
+    trigger_defaults?: TriggerDefaults | null;
+    trigger_policy?: TriggerPolicy;
     /**
      * Next Run At
      */
@@ -4216,6 +4333,38 @@ export type ScheduledJob = {
      */
     paused_reason?: string | null;
     /**
+     * Revision
+     */
+    revision?: number;
+    /**
+     * Is Public
+     */
+    is_public?: boolean;
+    /**
+     * Suspended At
+     */
+    suspended_at?: string | null;
+    /**
+     * Suspended By User Id
+     */
+    suspended_by_user_id?: string | null;
+    /**
+     * Suspended Reason
+     */
+    suspended_reason?: string | null;
+    /**
+     * Activated By
+     */
+    activated_by?: string;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
+    /**
+     * Subscriber Count
+     */
+    subscriber_count?: number;
+    /**
      * Created At
      */
     created_at: string;
@@ -4260,7 +4409,7 @@ export type ScheduledJobCreate = {
     /**
      * Timezone
      *
-     * IANA timezone (e.g. 'Europe/Zurich') in which cron_expr and timezone-naive run_at values are interpreted. Defaults to the timezone from the user's settings.
+     * IANA timezone (e.g. 'Europe/Zurich') in which cron_expr and timezone-naive run_at values are interpreted. Leave unset unless the user named a zone: unset means EACH SUBSCRIBER's own settings timezone, so '0 9 * * 1-5' reads as 09:00 local for everyone the job is later shared with. An explicit zone pins it for all.
      */
     timezone?: string | null;
     /**
@@ -4275,6 +4424,10 @@ export type ScheduledJobCreate = {
      * Required when schedule_kind='once'
      */
     run_at?: string | null;
+    /**
+     * Whether subscribers of this job (once shared) may change their own schedule: 'overridable' or 'fixed'. Defaults to 'fixed' for watches and 'overridable' for tasks.
+     */
+    trigger_policy?: TriggerPolicy | null;
     /**
      * Prompt
      *
@@ -4376,7 +4529,7 @@ export type ScheduledJobDraft = {
     /**
      * Timezone
      *
-     * IANA timezone (e.g. 'Europe/Zurich') in which cron_expr and timezone-naive run_at values are interpreted. Defaults to the timezone from the user's settings.
+     * IANA timezone (e.g. 'Europe/Zurich') in which cron_expr and timezone-naive run_at values are interpreted. Leave unset unless the user named a zone: unset means EACH SUBSCRIBER's own settings timezone, so '0 9 * * 1-5' reads as 09:00 local for everyone the job is later shared with. An explicit zone pins it for all.
      */
     timezone?: string | null;
     /**
@@ -4391,6 +4544,10 @@ export type ScheduledJobDraft = {
      * Required when schedule_kind='once'
      */
     run_at?: string | null;
+    /**
+     * Whether subscribers of this job (once shared) may change their own schedule: 'overridable' or 'fixed'. Defaults to 'fixed' for watches and 'overridable' for tasks.
+     */
+    trigger_policy?: TriggerPolicy | null;
     /**
      * Prompt
      *
@@ -4526,6 +4683,12 @@ export type ScheduledJobRun = {
  * ScheduledJobUpdate
  *
  * Request body for updating an existing scheduled job. All fields optional.
+ *
+ * One update path: each field is routed server-side to where it lives. Definition
+ * fields (name, prompt, agent, check, condition, max_failures, ...) need ``write``
+ * on the definition; subscription fields (enabled, delivery_channel_id) are always
+ * the caller's own. Only the trigger is ambiguous, and only once the definition has
+ * other subscribers — ``scope`` decides it then.
  */
 export type ScheduledJobUpdate = {
     /**
@@ -4551,6 +4714,16 @@ export type ScheduledJobUpdate = {
      * Run At
      */
     run_at?: string | null;
+    /**
+     * Scope
+     *
+     * Where a schedule change lands when the job has OTHER subscribers: 'mine' changes only your own schedule (an override), 'everyone' changes the job's default schedule for every subscriber who has not customised theirs (needs write permission). Meaningless while you are the only subscriber — both do the same. With other subscribers and no scope, 'mine' is assumed; ask the user which they meant before changing everyone's.
+     */
+    scope?: _0Enum2 | null;
+    /**
+     * Definition field: whether subscribers may keep their own schedule ('overridable') or must follow the default ('fixed'). Setting 'fixed' resets every override.
+     */
+    trigger_policy?: TriggerPolicy | null;
     /**
      * Prompt
      */
@@ -5048,6 +5221,77 @@ export type SetDefaultRequest = {
 };
 
 /**
+ * SharedJobDefinition
+ *
+ * A job definition the viewer can reach but need not be subscribed to.
+ *
+ * What the "available jobs" listing shows: enough to decide whether to subscribe or
+ * copy, plus the viewer's own subscription id when they already have one.
+ */
+export type SharedJobDefinition = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    job_type: JobType;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    /**
+     * Owner Email
+     */
+    owner_email?: string | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Prompt
+     */
+    prompt?: string | null;
+    /**
+     * Check Tool
+     */
+    check_tool?: string | null;
+    trigger_defaults: TriggerDefaults;
+    trigger_policy: TriggerPolicy;
+    /**
+     * Is Public
+     */
+    is_public: boolean;
+    /**
+     * Suspended At
+     */
+    suspended_at?: string | null;
+    /**
+     * Revision
+     */
+    revision: number;
+    /**
+     * Subscriber Count
+     */
+    subscriber_count: number;
+    effective_permission: EffectivePermissionEnum;
+    /**
+     * Subscription Id
+     */
+    subscription_id?: number | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
  * SkillActivationListResponse
  *
  * Response for listing activations for an agent.
@@ -5349,7 +5593,7 @@ export type SkillDefinition = {
      *
      * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
-    scope?: _0Enum2 | null;
+    scope?: _0Enum3 | null;
 };
 
 /**
@@ -5889,7 +6133,7 @@ export type SubAgent = {
     /**
      * Effective Permission
      */
-    effective_permission?: _0Enum3 | null;
+    effective_permission?: EffectivePermissionEnum | null;
     /**
      * Deleted At
      */
@@ -6403,7 +6647,7 @@ export type SubAgentListItem = {
     /**
      * Effective Permission
      */
-    effective_permission?: _0Enum3 | null;
+    effective_permission?: EffectivePermissionEnum | null;
     /**
      * Deleted At
      */
@@ -6650,6 +6894,18 @@ export type SubAgentVersionApproval = {
 };
 
 /**
+ * SuspendJobRequest
+ *
+ * Why a definition is being suspended; shown to every subscriber.
+ */
+export type SuspendJobRequest = {
+    /**
+     * Reason
+     */
+    reason?: string | null;
+};
+
+/**
  * ThinkingLevel
  *
  * Reasoning effort (LiteLLM convention). Per-model support comes from the gateway.
@@ -6819,6 +7075,48 @@ export type ToolRiskScoreUpsertRequest = {
      */
     allowed_actions?: Array<string>;
 };
+
+/**
+ * TriggerDefaults
+ *
+ * A definition's trigger defaults — what an inherited subscription follows.
+ *
+ * Surfaced alongside the effective trigger so a writer can edit "everyone's default"
+ * while seeing what their own subscription actually uses. A None timezone means
+ * "each subscriber's own".
+ */
+export type TriggerDefaults = {
+    schedule_kind: ScheduleKind;
+    /**
+     * Cron Expr
+     */
+    cron_expr?: string | null;
+    /**
+     * Interval Seconds
+     */
+    interval_seconds?: number | null;
+    /**
+     * Run At
+     */
+    run_at?: string | null;
+    /**
+     * Timezone
+     */
+    timezone?: string | null;
+};
+
+/**
+ * TriggerPolicy
+ *
+ * Whether a subscriber may change their own trigger after activation.
+ *
+ * A property of the DEFINITION. ``fixed`` means every subscription's trigger mirrors
+ * the definition's defaults and the subscriber's only knobs are ``enabled`` and the
+ * delivery target; ``overridable`` lets each subscriber keep their own schedule.
+ * Watches default to fixed — the tick is part of what a watch means — and tasks to
+ * overridable; an author can pin a task or relax a watch. See ADR-0010.
+ */
+export type TriggerPolicy = 'overridable' | 'fixed';
 
 /**
  * UnbillableDeployment
@@ -8236,6 +8534,8 @@ export type _0Enum = 'markdown' | 'slack' | 'google-chat' | 'plain';
  */
 export type RoleEnum = 'read' | 'write' | 'manager';
 
+export type ItemsEnum = 'read' | 'write';
+
 /**
  * Role
  */
@@ -8266,15 +8566,18 @@ export type FlowDirectionEnum = 'input' | 'output' | 'other';
 export type DecisionEnum = 'approved' | 'declined';
 
 /**
+ * Effective Permission
+ */
+export type EffectivePermissionEnum = 'owner' | 'write' | 'read';
+
+export type _0Enum2 = 'mine' | 'everyone';
+
+/**
  * Op
  */
 export type OpEnum = 'add' | 'remove' | 'replace';
 
-export type ItemsEnum = 'read' | 'write';
-
-export type _0Enum2 = 'standalone' | 'sub-agent';
-
-export type _0Enum3 = 'owner' | 'write' | 'read';
+export type _0Enum3 = 'standalone' | 'sub-agent';
 
 /**
  * Reason
@@ -10947,6 +11250,136 @@ export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetRespons
 
 export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponse = GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses[keyof GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses];
 
+export type GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/accessible-jobs';
+};
+
+export type GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetError = GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetErrors[keyof GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetErrors];
+
+export type GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetResponses = {
+    /**
+     * Response Get Group Accessible Jobs Api V1 Groups  Group Id  Accessible Jobs Get
+     *
+     * Successful Response
+     */
+    200: Array<JobDefinitionRefWithStatus>;
+};
+
+export type GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetResponse = GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetResponses[keyof GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetResponses];
+
+export type SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutData = {
+    body: GroupDefaultJobsSet;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-jobs';
+};
+
+export type SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutError = SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutErrors[keyof SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutErrors];
+
+export type SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponse = SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponses[keyof SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponses];
+
+export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-jobs/{definition_id}';
+};
+
+export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteError = RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteErrors[keyof RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteErrors];
+
+export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponse = RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponses[keyof RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponses];
+
+export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-jobs/{definition_id}';
+};
+
+export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostError = AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostErrors[keyof AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostErrors];
+
+export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponse = AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponses[keyof AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponses];
+
 export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData = {
     body: SubAgentAdd;
     path: {
@@ -12700,6 +13133,338 @@ export type GetRunApiV1SchedulerJobsJobIdRunsRunIdGetResponses = {
 };
 
 export type GetRunApiV1SchedulerJobsJobIdRunsRunIdGetResponse = GetRunApiV1SchedulerJobsJobIdRunsRunIdGetResponses[keyof GetRunApiV1SchedulerJobsJobIdRunsRunIdGetResponses];
+
+export type SchedulerListSharedJobsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/scheduler/definitions';
+};
+
+export type SchedulerListSharedJobsResponses = {
+    /**
+     * Response Scheduler List Shared Jobs
+     *
+     * Successful Response
+     */
+    200: Array<SharedJobDefinition>;
+};
+
+export type SchedulerListSharedJobsResponse = SchedulerListSharedJobsResponses[keyof SchedulerListSharedJobsResponses];
+
+export type SchedulerSubscribeJobData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/subscribe';
+};
+
+export type SchedulerSubscribeJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerSubscribeJobError = SchedulerSubscribeJobErrors[keyof SchedulerSubscribeJobErrors];
+
+export type SchedulerSubscribeJobResponses = {
+    /**
+     * Successful Response
+     */
+    201: ScheduledJob;
+};
+
+export type SchedulerSubscribeJobResponse = SchedulerSubscribeJobResponses[keyof SchedulerSubscribeJobResponses];
+
+export type SchedulerUnsubscribeJobData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/unsubscribe';
+};
+
+export type SchedulerUnsubscribeJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerUnsubscribeJobError = SchedulerUnsubscribeJobErrors[keyof SchedulerUnsubscribeJobErrors];
+
+export type SchedulerUnsubscribeJobResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SchedulerUnsubscribeJobResponse = SchedulerUnsubscribeJobResponses[keyof SchedulerUnsubscribeJobResponses];
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}';
+};
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteError = DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteErrors[keyof DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteErrors];
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponse = DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponses[keyof DeleteDefinitionApiV1SchedulerDefinitionsDefinitionIdDeleteResponses];
+
+export type SchedulerCopyJobData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/copy';
+};
+
+export type SchedulerCopyJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerCopyJobError = SchedulerCopyJobErrors[keyof SchedulerCopyJobErrors];
+
+export type SchedulerCopyJobResponses = {
+    /**
+     * Successful Response
+     */
+    201: ScheduledJob;
+};
+
+export type SchedulerCopyJobResponse = SchedulerCopyJobResponses[keyof SchedulerCopyJobResponses];
+
+export type GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/permissions';
+};
+
+export type GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetError = GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetErrors[keyof GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetErrors];
+
+export type GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetResponses = {
+    /**
+     * Response Get Definition Permissions Api V1 Scheduler Definitions  Definition Id  Permissions Get
+     *
+     * Successful Response
+     */
+    200: Array<JobGroupPermissionResponse>;
+};
+
+export type GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetResponse = GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetResponses[keyof GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetResponses];
+
+export type SchedulerShareJobData = {
+    body: JobPermissionsUpdate;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/permissions';
+};
+
+export type SchedulerShareJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerShareJobError = SchedulerShareJobErrors[keyof SchedulerShareJobErrors];
+
+export type SchedulerShareJobResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SchedulerShareJobResponse = SchedulerShareJobResponses[keyof SchedulerShareJobResponses];
+
+export type SchedulerSuspendJobData = {
+    /**
+     * Data
+     */
+    body?: SuspendJobRequest | null;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/suspend';
+};
+
+export type SchedulerSuspendJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerSuspendJobError = SchedulerSuspendJobErrors[keyof SchedulerSuspendJobErrors];
+
+export type SchedulerSuspendJobResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SchedulerSuspendJobResponse = SchedulerSuspendJobResponses[keyof SchedulerSuspendJobResponses];
+
+export type SchedulerUnsuspendJobData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/unsuspend';
+};
+
+export type SchedulerUnsuspendJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerUnsuspendJobError = SchedulerUnsuspendJobErrors[keyof SchedulerUnsuspendJobErrors];
+
+export type SchedulerUnsuspendJobResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SchedulerUnsuspendJobResponse = SchedulerUnsuspendJobResponses[keyof SchedulerUnsuspendJobResponses];
+
+export type SchedulerResetJobSchedulesData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/definitions/{definition_id}/reset-overrides';
+};
+
+export type SchedulerResetJobSchedulesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerResetJobSchedulesError = SchedulerResetJobSchedulesErrors[keyof SchedulerResetJobSchedulesErrors];
+
+export type SchedulerResetJobSchedulesResponses = {
+    /**
+     * Response Scheduler Reset Job Schedules
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: number;
+    };
+};
+
+export type SchedulerResetJobSchedulesResponse = SchedulerResetJobSchedulesResponses[keyof SchedulerResetJobSchedulesResponses];
+
+export type SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutData = {
+    body?: never;
+    path: {
+        /**
+         * Definition Id
+         */
+        definition_id: number;
+    };
+    query: {
+        /**
+         * Is Public
+         */
+        is_public: boolean;
+    };
+    url: '/api/v1/scheduler/definitions/{definition_id}/public';
+};
+
+export type SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutError = SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutErrors[keyof SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutErrors];
+
+export type SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutResponse = SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutResponses[keyof SetDefinitionPublicApiV1SchedulerDefinitionsDefinitionIdPublicPutResponses];
 
 export type ListChannelsApiV1DeliveryChannelsGetData = {
     body?: never;
