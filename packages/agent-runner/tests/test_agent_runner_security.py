@@ -734,8 +734,16 @@ class TestParkedOnAuthorization:
         answer = Part(data=ParseDict({"authorization": {"decision": "approved"}}, Value()))
         await self._run(agent_runner, self._task(), [answer, Part(text="I authorized it.")])
 
-        resume_task_id = agent_runner._execute_sub_agent.await_args.kwargs["resume_task_id"]
-        assert resume_task_id == core.scheduled_run_task_id("ctx-parked")
+        # The boundary carries WHETHER this is a resume; the id it implies is derived at
+        # the one site that uses it (``sub_agent_task_ids``), which is pinned separately.
+        assert agent_runner._execute_sub_agent.await_args.kwargs["is_resume"] is True
+        # What makes deriving it downstream equivalent to deriving it here: the context
+        # the destination derives from is THIS task's, handed over unmodified. If that
+        # ever stops being true, the resume starts addressing a task nobody opened.
+        assert agent_runner._execute_sub_agent.await_args.kwargs["context_id"] == "ctx-parked"
+        assert core.sub_agent_task_ids("ctx-parked", is_resume=True)[0] == (
+            core.scheduled_run_task_id("ctx-parked")
+        )
 
     @pytest.mark.asyncio
     async def test_ordinary_work_opens_a_task_rather_than_resuming_one(self, agent_runner):
@@ -743,7 +751,7 @@ class TestParkedOnAuthorization:
             return_value=core.SubAgentRun(message="Done.", task_state="completed")
         )
         await self._run(agent_runner, self._task(), [Part(text="Do the thing.")])
-        assert agent_runner._execute_sub_agent.await_args.kwargs["resume_task_id"] is None
+        assert agent_runner._execute_sub_agent.await_args.kwargs["is_resume"] is False
 
 
 class TestAFailedSubAgentIsNotGreen:
@@ -959,7 +967,10 @@ class TestSchedulerMetadataOnAResume:
         # The sub-agent actually ran, addressed to the task the earlier run parked.
         agent_runner._execute_sub_agent.assert_awaited_once()
         kwargs = agent_runner._execute_sub_agent.await_args.kwargs
-        assert kwargs["resume_task_id"] == core.scheduled_run_task_id("ctx-resume")
+        assert kwargs["is_resume"] is True
+        assert core.sub_agent_task_ids("ctx-resume", is_resume=True)[0] == (
+            core.scheduled_run_task_id("ctx-resume")
+        )
         assert kwargs["scheduled_job_id"] == 10
 
         result = [json.loads(r.content) for r in responses if r.content.startswith("{")][-1]
@@ -1025,7 +1036,8 @@ class TestASecondAuthorizationInOneRun:
             responses.append(r)
 
         # Continued the task run 652 parked...
-        assert agent_runner._execute_sub_agent.await_args.kwargs["resume_task_id"] == (
+        assert agent_runner._execute_sub_agent.await_args.kwargs["is_resume"] is True
+        assert core.sub_agent_task_ids("ctx-chain", is_resume=True)[0] == (
             core.scheduled_run_task_id("ctx-chain")
         )
 
@@ -1034,3 +1046,37 @@ class TestASecondAuthorizationInOneRun:
         assert parked["scheduler_status"] == "auth_required"
         assert parked["reply_to"]["scheduled_job_run_id"] == 653
         assert parked["scheduled_job_run_id"] == 653
+
+
+class TestWhichIdGoesInWhichField:
+    """The one site that decides how a dispatch addresses the sub-agent's task.
+
+    The id is the same value either way — ``scheduled_run_task_id`` of the conversation
+    — and the field it travels in is the whole difference between answering a pending
+    question and starting work. It used to be derived at the caller AND recomputed at the
+    destination, with a comment in each file explaining which result belonged where; the
+    two were provably equal (``context_id`` is the caller's ``task.context_id``, passed
+    down unmodified through a single call chain that never rebinds it), which is why the
+    derivation could collapse to one place.
+    """
+
+    def test_a_resume_addresses_the_parked_task(self):
+        task_id, proposed = core.sub_agent_task_ids("ctx-1", is_resume=True)
+        assert task_id == core.scheduled_run_task_id("ctx-1")
+        # A proposal on a thread that already has a task would be dropped as taken.
+        assert proposed is None
+
+    def test_fresh_work_proposes_one_instead(self):
+        task_id, proposed = core.sub_agent_task_ids("ctx-1", is_resume=False)
+        assert task_id is None
+        assert proposed == core.scheduled_run_task_id("ctx-1")
+
+    def test_both_paths_mean_the_same_id(self):
+        """Which is what makes the field, not the value, the carrier of the meaning."""
+        resumed, _ = core.sub_agent_task_ids("ctx-1", is_resume=True)
+        _, proposed = core.sub_agent_task_ids("ctx-1", is_resume=False)
+        assert resumed == proposed
+
+    def test_no_context_means_no_id_either_way(self):
+        assert core.sub_agent_task_ids(None, is_resume=True) == (None, None)
+        assert core.sub_agent_task_ids(None, is_resume=False) == (None, None)

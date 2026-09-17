@@ -360,6 +360,26 @@ def scheduled_run_task_id(context_id: str) -> str:
     return str(uuid.uuid5(_SCHEDULED_RUN_TASK_NAMESPACE, context_id))
 
 
+def sub_agent_task_ids(context_id: str | None, *, is_resume: bool) -> tuple[str | None, str | None]:
+    """``(task_id, proposed_task_id)`` for one dispatch of the scheduled sub-agent.
+
+    The id is the same value in both cases — :func:`scheduled_run_task_id` of this
+    conversation — and *which field it travels in* is the entire difference between
+    "answer the question this thread is waiting on" and "start new work":
+
+    * a resume sets ``task_id``, addressing the task the parked run left open, which is
+      the only thing the executor will accept a message for on a parked thread;
+    * fresh work sets ``proposed_task_id``, since a proposal on a thread that already has
+      a task would be dropped as taken.
+
+    One function so one site owns that invariant. It used to be derived at the caller
+    *and* recomputed at the destination, with a comment in each file explaining which
+    result belonged in which field.
+    """
+    derived = scheduled_run_task_id(context_id) if context_id else None
+    return (derived, None) if is_resume else (None, derived)
+
+
 class CatalogueDiscoveryError(Exception):
     """Listing the tool catalogue failed, after retries.
 
@@ -868,16 +888,19 @@ class AgentRunner(BaseAgent):
         # task by id — which the handler accepted only because the parked run left it
         # non-terminal — so the sub-agent task to continue is the one that run derived,
         # not a new one.
+        #
+        # Only WHETHER this is a resume travels down; the id itself is derived once, at
+        # the point that uses it (``_run_langgraph_agent``). Passing the id meant two
+        # sites computed ``scheduled_run_task_id`` from the same context and two comments
+        # had to keep explaining which of the results went in which field.
         authorization = _authorization_answer(messages)
-        resume_task_id = (
-            scheduled_run_task_id(task.context_id) if authorization and task.context_id else None
-        )
+        is_resume = bool(authorization and task.context_id)
         if authorization:
             logger.info(
-                "Job %s run %s: resuming parked task %s (%s)",
+                "Job %s run %s: resuming the parked task for context %s (%s)",
                 scheduled_job_id,
                 scheduled_job_run_id,
-                resume_task_id,
+                task.context_id,
                 authorization.get("decision"),
             )
 
@@ -914,7 +937,7 @@ class AgentRunner(BaseAgent):
                     user_id=user_id,
                     context_id=task.context_id,
                     message_formatting=message_formatting,
-                    resume_task_id=resume_task_id,
+                    is_resume=is_resume,
                 )
                 agent_message, sub_agent_task_state = run.message, run.task_state
                 auth_payload = run.auth_payload
@@ -1196,7 +1219,7 @@ class AgentRunner(BaseAgent):
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
         message_formatting: str = "markdown",
-        resume_task_id: str | None = None,
+        is_resume: bool = False,
     ) -> SubAgentRun:
         """Dispatch a sub-agent config to the appropriate execution method.
 
@@ -1213,8 +1236,9 @@ class AgentRunner(BaseAgent):
             message_formatting: Rendering rules of the channel this run's message is
                 delivered to ("slack", "google-chat", "plain", "markdown").
 
-            resume_task_id: The task a previous run parked, when this dispatch is an
-                authorization answer rather than fresh work. LangGraph agents only —
+            is_resume: Whether this dispatch is an authorization answer continuing a
+                run this service parked, rather than fresh work. The task id it implies
+                is derived where it is used, not passed. LangGraph agents only —
                 nothing else can park.
 
         Returns:
@@ -1237,7 +1261,7 @@ class AgentRunner(BaseAgent):
                 scheduled_job_run_id=scheduled_job_run_id,
                 context_id=context_id,
                 message_formatting=message_formatting,
-                resume_task_id=resume_task_id,
+                is_resume=is_resume,
             )
         elif agent_type == "foundry":
             return await self._run_foundry_agent(
@@ -1276,7 +1300,7 @@ class AgentRunner(BaseAgent):
         context_id: str | None = None,
         raw_a2a_messages: list[Message] | None = None,
         message_formatting: str = "markdown",
-        resume_task_id: str | None = None,
+        is_resume: bool = False,
     ) -> SubAgentRun:
         """Run the scheduled sub-agent behind the in-process A2A server.
 
@@ -1288,9 +1312,11 @@ class AgentRunner(BaseAgent):
         bytes an interactive chat produces, produced by the same code. See
         docs/adr/0009-authorization-parks-a-scheduled-run-it-does-not-fail-it.md.
 
-        *resume_task_id* addresses the task a previous run PARKED instead of proposing
-        a new one. Both ids are the same derived value; which field it travels in is
-        what tells the executor "answer the pending question" from "start work".
+        *is_resume* selects which field the sub-agent's task id travels in, and that is
+        the whole difference between answering a pending question and starting work:
+        addressing the task a previous run PARKED, or proposing a new one. The id is the
+        same value either way — it is derived here, from the context, and this is the one
+        place that derives it.
 
         Returns the run's message, its terminal task state, and — when it parked — the
         ask to put to the owner.
@@ -1451,8 +1477,9 @@ class AgentRunner(BaseAgent):
             max_model_calls=_MAX_MODEL_CALLS_PER_TURN,
         )
 
-        task_id = resume_task_id or None
-        derived_task_id = scheduled_run_task_id(context_id)
+        # ``context_id`` is the caller's ``task.context_id``, handed down unchanged, so a
+        # resume recomputes exactly the id the parked run proposed.
+        task_id, proposed_task_id = sub_agent_task_ids(context_id, is_resume=is_resume)
         tracking: dict[str, Any] = {
             runnable.tracking_key: {
                 "context_id": context_id,
@@ -1470,7 +1497,7 @@ class AgentRunner(BaseAgent):
             message_formatting=message_formatting,
             # Honoured only when opening a task. On a resume the live task_id above is
             # what addresses the parked one; a proposal would be dropped as taken.
-            proposed_task_id=None if task_id else derived_task_id,
+            proposed_task_id=proposed_task_id,
         )
 
         parent_config = self.create_runnable_config(
