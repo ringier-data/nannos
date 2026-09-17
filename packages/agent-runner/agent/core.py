@@ -360,6 +360,23 @@ def scheduled_run_task_id(context_id: str) -> str:
     return str(uuid.uuid5(_SCHEDULED_RUN_TASK_NAMESPACE, context_id))
 
 
+class CatalogueDiscoveryError(Exception):
+    """Listing the tool catalogue failed, after retries.
+
+    Reported as an INTERRUPTED run rather than a FAILED one, which is the whole reason
+    this exists as its own type. Discovery reaches the gateway and Keycloak before the
+    job's own work begins, so its failure is evidence about the infrastructure and not
+    about the job — the same distinction ADR-0007 draws for a run whose process died.
+    Left as FAILED it moved ``consecutive_failures``, so a gateway outage marched an
+    otherwise healthy job toward ``max_failures`` and auto-pause, and the jobs it
+    disabled were the ones configured to reach the most tools.
+
+    As INTERRUPTED it also earns the one fresh attempt ADR-0007 grants, which is the
+    right remedy here: by the next tick the gateway is usually back, and nothing about
+    the job needed changing.
+    """
+
+
 @dataclass(frozen=True)
 class SubAgentRun:
     """What one sub-agent execution reported back.
@@ -902,10 +919,26 @@ class AgentRunner(BaseAgent):
                 agent_message, sub_agent_task_state = run.message, run.task_state
                 auth_payload = run.auth_payload
             except Exception as exc:
-                logger.exception(f"Sub-agent execution failed for job {scheduled_job_id}")
+                # A catalogue that could not be listed is the infrastructure's failure,
+                # not the job's: it happens before the job's own work starts, no change
+                # to the job would prevent it, and counting it would auto-pause the jobs
+                # configured to reach the most tools during a gateway outage. Reported as
+                # INTERRUPTED, which leaves ``consecutive_failures`` alone and earns the
+                # one fresh attempt ADR-0007 grants — by the next tick the gateway is
+                # usually back.
+                interrupted = isinstance(exc, CatalogueDiscoveryError)
+                if interrupted:
+                    logger.warning(
+                        "Tool discovery failed for job %s; reporting the run as interrupted "
+                        "rather than failed: %s",
+                        scheduled_job_id,
+                        exc,
+                    )
+                else:
+                    logger.exception(f"Sub-agent execution failed for job {scheduled_job_id}")
                 error_message = str(exc)
                 result_meta = {
-                    "scheduler_status": "failed",
+                    "scheduler_status": "interrupted" if interrupted else "failed",
                     "error_message": error_message,
                     "agent_message": agent_message,
                     "user_sub": user_config.user_sub,
@@ -1335,7 +1368,15 @@ class AgentRunner(BaseAgent):
                 timeout=timedelta(seconds=_MCP_TIMEOUT_SECONDS),
                 stateless_list=_MCP_CATALOGUE_STATELESS_LIST,
             )
-            catalogue_tools = await resolver.resolve_all()
+            # Wrapped so the reporting path can tell "the gateway was unreachable" from
+            # "the job's work failed". The listing is retried inside the resolver first;
+            # reaching here means it stayed down.
+            try:
+                catalogue_tools = await resolver.resolve_all()
+            except Exception as exc:
+                raise CatalogueDiscoveryError(
+                    f"could not list the tool catalogue for sub-agent '{config.name}': {exc}"
+                ) from exc
             tool_catalog = {tool.name: tool for tool in catalogue_tools}
             logger.info(
                 "Sub-agent '%s' has no whitelist and takes the full catalogue: %d tools for job %s",

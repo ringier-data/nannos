@@ -21,6 +21,7 @@ Now a run has the same shape as an orchestrator sub-agent (see ``agent_common``)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Iterable
@@ -35,8 +36,19 @@ from agent_common.core.tool_catalogue import ServerCatalogue, make_lazy_tool
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
+from ringier_a2a_sdk.utils.mcp_errors import is_retryable_mcp_error
 
 logger = logging.getLogger(__name__)
+
+#: How many times a ``tools/list`` is attempted before the run gives up on a server.
+#: Three matches the orchestrator. Past that a gateway is not blipping, it is down, and
+#: a scheduled run waiting longer only delays the report.
+_LIST_MAX_ATTEMPTS = 3
+
+#: First backoff, doubled per attempt (1s, 2s). Short on purpose: this sits on the run's
+#: critical path, and the errors it covers — a rolling gateway deploy, a pod restart —
+#: resolve in seconds or not at all.
+_RETRY_BASE_DELAY_SECONDS = 1.0
 
 GATEWAY_SERVER = "gateway"
 CONSOLE_SERVER = "console"
@@ -93,6 +105,52 @@ class McpToolResolver:
         return connection
 
     # -- listing -------------------------------------------------------------------------
+    async def _list_server_with_retry(
+        self, server_name: str, http_client: httpx.AsyncClient
+    ) -> ServerCatalogue:
+        """``_list_server`` with exponential backoff on transient gateway errors.
+
+        Mirrors the orchestrator's ``_get_catalogue_with_retry``: retried only when
+        ``is_retryable_mcp_error`` says the failure is transient (a 502/503/504 or a
+        timeout, unwrapped from the anyio ``ExceptionGroup`` the MCP client raises), and
+        a 4xx or a refused connection fails immediately — retrying a rejected token just
+        delays the auth error the run needs to report.
+
+        The unit retried is the *whole* listing of one server, not the stateless POST
+        alone: ``fetch_catalogue`` already answers a failed stateless attempt by falling
+        back to the SDK session and only raises once both have failed. So a gateway 503
+        reaches here as the SDK path's error, and one attempt here is one full
+        stateless-then-SDK cycle.
+
+        Without this, a scheduled run had no tolerance at all for a gateway that was
+        briefly unreachable — and because nobody is watching a scheduled run, that
+        arrived as the job's failure rather than as the infrastructure's.
+        """
+        delay = _RETRY_BASE_DELAY_SECONDS
+        for attempt in range(_LIST_MAX_ATTEMPTS):
+            try:
+                catalogue = await self._list_server(server_name, http_client)
+                if attempt:
+                    logger.info(
+                        "Listed %s on attempt %d/%d", server_name, attempt + 1, _LIST_MAX_ATTEMPTS
+                    )
+                return catalogue
+            except Exception as exc:
+                last = attempt >= _LIST_MAX_ATTEMPTS - 1
+                if last or not is_retryable_mcp_error(exc):
+                    raise
+                logger.warning(
+                    "tools/list for %s failed (attempt %d/%d), retrying in %.1fs: %s",
+                    server_name,
+                    attempt + 1,
+                    _LIST_MAX_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise AssertionError("unreachable")  # pragma: no cover - loop either returns or raises
+
     async def _list_server(self, server_name: str, http_client: httpx.AsyncClient) -> ServerCatalogue:
         """``tools/list`` for one server via ``catalogue_ingest.fetch_catalogue`` (stateless → SDK).
 
@@ -162,14 +220,31 @@ class McpToolResolver:
         # Exchange up front for every audience the run needs: discovery used to do this, and
         # a user token that is expired or revoked must fail the run here, not surface as a
         # run that "succeeded" without ever being able to call a tool.
+        #
+        # Doing it here also keeps the token work serialised ahead of the concurrent listing
+        # below: by then every audience is memoised in the provider, so the gathered listings
+        # only ever read it rather than racing to mint the same token twice.
         for server in connections:
             await self.token_provider.get(self.audience_for(server))
 
         tools: list[BaseTool] = []
         # follow_redirects: console-backend's ``/mcp`` mount answers ``307 → /mcp/``.
         async with httpx.AsyncClient(timeout=self._timeout.total_seconds(), follow_redirects=True) as http_client:
+            # Both servers at once. They are independent endpoints with their own audience
+            # and their own token, so the sequential loop this replaced paid the slower of
+            # the two plus the faster one on the run's critical path for nothing. Listing
+            # was already measured as the largest contributor to time-to-first-token in the
+            # orchestrator, which gathers for the same reason.
+            #
+            # Not return_exceptions: a partial catalogue is not a smaller catalogue, it is a
+            # silently less capable run. Fail-don't-degrade for discovery is ADR-0009's
+            # stated policy — the first failure propagates and the run reports it.
+            listed = await asyncio.gather(
+                *(self._list_server_with_retry(server, http_client) for server in connections)
+            )
+            catalogues = dict(zip(connections, listed, strict=True))
             for server, connection in connections.items():
-                catalogue = await self._list_server(server, http_client)
+                catalogue = catalogues[server]
                 server_names = (
                     sorted(catalogue.tools)
                     if list_everything

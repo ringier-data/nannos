@@ -196,6 +196,41 @@ class TestParseResult:
 
         assert outcome.status == JobRunStatus.FAILED
 
+    def test_a_discovery_failure_is_recorded_interrupted(self):
+        """The contract with agent-runner for a gateway outage.
+
+        agent-runner reports ``interrupted`` when it could not list the tool catalogue
+        after retries. It has to survive the trip: INTERRUPTED leaves
+        ``consecutive_failures`` alone in both directions and earns one fresh attempt,
+        whereas FAILED would march an otherwise healthy job toward auto-pause every time
+        the gateway blinked.
+        """
+        data = {
+            "result": {
+                "kind": "task",
+                "status": {"state": "failed"},
+                "artifacts": [
+                    {
+                        "parts": [
+                            {
+                                "kind": "text",
+                                "text": json.dumps(
+                                    {
+                                        "scheduler_status": "interrupted",
+                                        "error_message": "could not list the tool catalogue: 503",
+                                    }
+                                ),
+                            }
+                        ]
+                    }
+                ],
+            }
+        }
+        outcome = self.engine._parse_result(data)
+
+        assert outcome.status == JobRunStatus.INTERRUPTED
+        assert "503" in outcome.error_message
+
     def test_an_unparseable_park_is_not_recorded_green(self):
         """The dangerous input is the status text that does NOT parse as JSON.
 

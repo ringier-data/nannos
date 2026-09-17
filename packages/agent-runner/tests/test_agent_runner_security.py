@@ -784,6 +784,69 @@ class TestAFailedSubAgentIsNotGreen:
         assert result["scheduler_status"] == "success"
         assert "error_message" not in result
 
+    @pytest.mark.asyncio
+    async def test_a_catalogue_that_could_not_be_listed_is_interrupted_not_failed(self, agent_runner):
+        """Discovery is infrastructure, so its failure is not evidence about the job.
+
+        It happens before the job's own work begins and no change to the job would
+        prevent it. Recorded FAILED it moved ``consecutive_failures``, so a gateway
+        outage marched healthy jobs toward ``max_failures`` — and the jobs it disabled
+        were the ones configured to reach the most tools. INTERRUPTED leaves the counter
+        alone in both directions (ADR-0007) and earns the one fresh attempt, which is the
+        right remedy: by the next tick the gateway is usually back.
+        """
+        task = MagicMock()
+        task.id = "outer-task-4"
+        task.context_id = "ctx-nogateway"
+        task.history = [MagicMock(metadata={"sub_agent_id": 5, "scheduled_job_id": 10})]
+
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "general-purpose", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(
+            side_effect=core.CatalogueDiscoveryError(
+                "could not list the tool catalogue for sub-agent 'general-purpose': 503"
+            )
+        )
+
+        responses = []
+        async for r in agent_runner._stream_impl(
+            [Message(role=Role.ROLE_USER, parts=[Part(text="Do the thing.")], message_id="m")],
+            TestParkedOnAuthorization._user_config(),
+            task,
+        ):
+            responses.append(r)
+
+        result = [json.loads(r.content) for r in responses if r.content.startswith("{")][-1]
+        assert result["scheduler_status"] == "interrupted", "a gateway outage is not the job's failure"
+        assert "503" in result["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_sub_agent_exception_is_still_failed(self, agent_runner):
+        """The classification must stay narrow: only discovery is exempt."""
+        task = MagicMock()
+        task.id = "outer-task-5"
+        task.context_id = "ctx-boom"
+        task.history = [MagicMock(metadata={"sub_agent_id": 5, "scheduled_job_id": 10})]
+
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            return_value={"type": "automated", "name": "triage", "sub_agent_id": 5}
+        )
+        agent_runner._execute_sub_agent = AsyncMock(side_effect=RuntimeError("boom"))
+
+        responses = []
+        async for r in agent_runner._stream_impl(
+            [Message(role=Role.ROLE_USER, parts=[Part(text="Do the thing.")], message_id="m")],
+            TestParkedOnAuthorization._user_config(),
+            task,
+        ):
+            responses.append(r)
+
+        result = [json.loads(r.content) for r in responses if r.content.startswith("{")][-1]
+        assert result["scheduler_status"] == "failed"
+
 
 class TestEmptyWhitelistMeaning:
     """An empty tool list means "everything" for general-purpose, and ONLY for it.

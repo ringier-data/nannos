@@ -6,6 +6,7 @@ test_with_a_token_provider_tools_are_token_free_and_mint_per_call`` for the runn
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -23,7 +24,12 @@ from agent_common.core.catalogue_ingest import (
     stateless_supported,
 )
 from agent_common.core.token_provider import UserTokenProvider
-from agent_common.core.tool_catalogue import LazyMcpTool
+from agent_common.core.tool_catalogue import (
+    CatalogueTool,
+    LazyMcpTool,
+    ServerCatalogue,
+    ToolCard,
+)
 
 from agent.mcp_tools import McpToolResolver
 
@@ -36,6 +42,14 @@ def _jwt(aud: str, ttl: float = 900) -> str:
         return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
 
     return f"{seg({'alg': 'none'})}.{seg({'exp': time.time() + ttl, 'aud': aud})}.sig"
+
+
+def _entry(name: str, server: str = "gateway") -> CatalogueTool:
+    """One catalogue entry, for tests that stub ``fetch_catalogue`` instead of serving HTTP."""
+    return CatalogueTool(
+        card=ToolCard(name=name, description=f"{name} description", param_names=("q",), server_name=server),
+        schema_bytes=b'{"type": "object", "properties": {"q": {"type": "string"}}}',
+    )
 
 
 def _tools_list_reply(names: list[str]) -> dict[str, Any]:
@@ -332,3 +346,120 @@ class TestRunnerWiring:
         # The per-run provider still belongs to the runner: it owns the user's token and
         # the leeway, and hands them to the shared runnable rather than the reverse.
         assert "UserTokenProvider(" in src
+
+
+class TestListingSurvivesATransientGateway:
+    """A transient gateway must not fail a whole scheduled run on the first try.
+
+    Nobody is watching a scheduled run, so a blip an interactive user would shrug off by
+    asking again arrived as the job's own failure. The orchestrator has retried its
+    listings all along (``_get_catalogue_with_retry``); this is the same policy from the
+    same ``is_retryable_mcp_error`` predicate.
+
+    These patch ``fetch_catalogue`` rather than serving HTTP, because the retried unit is
+    one full listing: ``fetch_catalogue`` answers a failed stateless POST by falling back
+    to the SDK session on its own, so a raw 503 never reaches the retry loop — what does
+    is the error raised once both paths are exhausted.
+    """
+
+    @staticmethod
+    def _transient() -> Exception:
+        """What a 503 looks like by the time the MCP client is done with it."""
+        response = httpx.Response(503, request=httpx.Request("POST", GATEWAY_URL))
+        return ExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [httpx.HTTPStatusError("503", request=response.request, response=response)],
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_transient_failure_is_retried_and_then_succeeds(self, provider, monkeypatch):
+        monkeypatch.setattr("agent.mcp_tools.asyncio.sleep", AsyncMock())
+        calls: list[str] = []
+
+        async def flaky(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            calls.append(server_slug)
+            if len(calls) == 1:
+                raise TestListingSurvivesATransientGateway._transient()
+            return ServerCatalogue(
+                server_name=server_slug,
+                tools={"github_search": _entry("github_search")},
+                interface_hash="h",
+                source="stateless",
+            )
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", flaky)
+        tools = await _resolver(provider).resolve(["github_search"])
+
+        assert [t.name for t in tools] == ["github_search"]
+        assert len(calls) == 2, "the transient failure was retried rather than failing the run"
+
+    @pytest.mark.asyncio
+    async def test_a_non_retryable_failure_fails_immediately(self, provider, monkeypatch):
+        """A rejected token is not a blip — retrying only delays the auth error."""
+        sleep = AsyncMock()
+        monkeypatch.setattr("agent.mcp_tools.asyncio.sleep", sleep)
+        calls: list[str] = []
+
+        async def forbidden(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            calls.append(server_slug)
+            response = httpx.Response(403, request=httpx.Request("POST", GATEWAY_URL))
+            raise httpx.HTTPStatusError("403", request=response.request, response=response)
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", forbidden)
+        with pytest.raises(httpx.HTTPStatusError):
+            await _resolver(provider).resolve(["github_search"])
+
+        assert len(calls) == 1, "a 403 must not be retried"
+        sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_that_stays_down_gives_up_after_three_attempts(self, provider, monkeypatch):
+        monkeypatch.setattr("agent.mcp_tools.asyncio.sleep", AsyncMock())
+        calls: list[str] = []
+
+        async def down(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            calls.append(server_slug)
+            raise TestListingSurvivesATransientGateway._transient()
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", down)
+        with pytest.raises(ExceptionGroup):
+            await _resolver(provider).resolve(["github_search"])
+
+        assert len(calls) == 3, "bounded: a gateway that is down is not a gateway that is blipping"
+
+
+class TestBothServersAreListedConcurrently:
+    """The two listings are independent endpoints, so the run pays the slower, not the sum.
+
+    Discovery was measured as the largest contributor to time-to-first-token in the
+    orchestrator, which gathers for this reason. A scheduled run has no warm parent
+    registry to inherit from (``_pre_resolved_tools_for`` has no analogue here), so it
+    pays a full listing on every run.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_two_listings_overlap(self, provider, monkeypatch):
+        in_flight = 0
+        peak = 0
+
+        async def slow(*, server_slug: str, **kw: Any) -> ServerCatalogue:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.05)
+                name = "console_create_skill" if server_slug == "console" else "github_search"
+                return ServerCatalogue(
+                    server_name=server_slug,
+                    tools={name: _entry(name, server_slug)},
+                    interface_hash="h",
+                    source="stateless",
+                )
+            finally:
+                in_flight -= 1
+
+        monkeypatch.setattr("agent.mcp_tools.fetch_catalogue", slow)
+        tools = await _resolver(provider).resolve(["github_search", "console_create_skill"])
+
+        assert {t.name for t in tools} == {"github_search", "console_create_skill"}
+        assert peak == 2, "the gateway and console listings ran at the same time"
