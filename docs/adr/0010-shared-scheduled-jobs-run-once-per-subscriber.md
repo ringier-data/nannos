@@ -1,5 +1,6 @@
 ---
-status: proposed (2026-09-17)
+status: proposed (2026-09-17); implemented in console-backend, the console, the
+  task-scheduler prompt and the orchestrator's origin frame, pending review
 ---
 
 # Shared scheduled jobs run once per subscriber
@@ -54,7 +55,10 @@ whose credential is missing, not whoever authored the prompt.
    — one run, owner's identity, owner-chosen audience, the same disclosure act
    as a person posting a report. A *delivery target* (channel plus recipient;
    today's DM-only becomes the default) is reserved now and implemented later.
-   Fanning one run out to N DMs is deliberately not offered.
+   Fanning one run out to N DMs is deliberately not offered. The target is also
+   what an *activation notice* uses: a member auto-subscribed by a group default
+   is told in the console and again where their results will land, because the
+   console is not where most of them live.
 
 6. **Definitions are not versioned.** Sub-agent versions exist for an approval
    flow and for things that pin to a version; jobs have neither, and a subscriber
@@ -110,7 +114,20 @@ whose credential is missing, not whoever authored the prompt.
 - Replying under a delivered run (a threaded reply in the bot's DM) adopts the
   subscriber's own run, unchanged; requests in that conversation follow the same
   server-side routing, and the conversation-origin frame carries `shared_by` /
-  `activated_by` so the model can answer "why do I get this".
+  `activated_by` so the model can answer "why do I get this". Those two are
+  *resolved by the orchestrator from console-backend* under the authenticated
+  user's token, alongside the ownership check adoption already makes — not
+  carried in the client's DataPart. Who shared a job with whom is precisely the
+  claim a forged origin would want to make, and the alternative cost a schema
+  change in three delivery clients' provenance stores to be less trustworthy.
+- The delivered result of a shared job carries one provenance line, appended by
+  agent-runner from a dispatch-metadata field rather than by each delivery
+  channel: one seam where every run's output is already composed.
+- Not built: a subscriber cannot clear their own trigger override and go back to
+  inheriting. *Reset to defaults* (decision 4) is a writer action over every
+  subscription, so a member who customised their time is pinned until the owner
+  resets everyone. The console states which of the two a subscription is on
+  rather than offering a button it has no route for.
 - Cost scales with subscribers rather than with definitions. That is the honest
   price of per-user data, and the shared-space delivery target (decision 5) is
   the sanctioned way to pay it once when the data is genuinely shared.

@@ -796,6 +796,29 @@ changes what runs under *your* identity or what you own (`job_shared`, `job_acce
 `job_permission_changed`, `job_subscription_activated`, `job_subscription_reset`, `job_suspended`,
 `job_resumed`, `job_deleted`); a writer editing a shared prompt is deliberately not one of them.
 
+**Two things reach a subscriber outside the console.** A member the group default just
+auto-subscribed gets an **activation notice** on their own delivery channel as well as the console
+notification — `SchedulerService._dm_activations`, sent *after* the caller's commit (a DM saying a
+job now runs under your identity must not arrive for a row a rollback removed) through
+`SchedulerEngine.send_plain_notice`, which is the scheduler's one way of posting a line under a
+subscriber's identity while running no agent. And every delivered run of a job whose subscriber is
+not its owner carries a **provenance line** — `SchedulerEngine._provenance_line` puts it in the
+dispatch metadata as `scheduled_job_provenance`, and agent-runner appends it to `agent_message`,
+where every run's output is already composed. One seam, rather than the same footer in three
+delivery clients; `None` for a job nobody else runs, which is most of them.
+
+**What the model may do with all this** is the same set of routes with `tags=["MCP"]`:
+`scheduler_list_shared_jobs`, `scheduler_subscribe_job` / `_unsubscribe_job`, `scheduler_copy_job`,
+`scheduler_share_job`, `scheduler_suspend_job` / `_unsuspend_job`,
+`scheduler_reset_job_schedules`, `scheduler_add_group_default_job` / `_remove_group_default_job`,
+plus one read tool on groups — `console_list_my_groups` (`GET /api/v1/groups/summaries`), which
+returns id, name, description and **member_count only**: a share is decided on "which group, and
+how many people does that mean", and the identities are not part of that question. `is_public` is
+admin-only and not exposed. The vocabulary itself is a DB seed, so it ships as prompt migration
+102 (targeted `replace()` calls in the style of 085, checked at the text level by
+`tests/test_migration_102_task_scheduler_sharing.py` — an unmatched search string is a silent
+no-op in SQL).
+
 ### Scheduled Run Vocabulary and Interruption (services/scheduler_engine.py)
 
 The reasoning lives in `docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md`; this section is
