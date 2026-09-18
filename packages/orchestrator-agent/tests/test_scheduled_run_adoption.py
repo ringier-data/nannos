@@ -46,10 +46,18 @@ ORIGIN = {
     "scheduler_status": "success",
 }
 
-JOB = {"id": 7, "sub_agent_id": 5, "name": "daily-report"}
+# The user's own job: `user_id` is the subscriber and `owner_user_id` the definition's
+# owner (ADR-0010), equal here, so there is no sharing provenance to resolve.
+JOB = {"id": 7, "sub_agent_id": 5, "name": "daily-report", "user_id": "u1", "owner_user_id": "u1"}
 RUN = {"id": 42, "job_id": 7, "conversation_id": "server-run-ctx"}
 
-VALIDATED = {"sub_agent_id": 5, "conversation_id": "server-run-ctx", "job_id": 7, "run_id": 42}
+VALIDATED = {
+    "sub_agent_id": 5,
+    "conversation_id": "server-run-ctx",
+    "job_id": 7,
+    "run_id": 42,
+    "provenance": None,
+}
 
 
 def _remote_runnable(name: str = "Report Agent") -> A2AClientRunnable:
@@ -124,6 +132,17 @@ class TestValidateScheduledRunOrigin:
         assert "/api/v1/scheduler/jobs/7/runs/42" in paths
         for call in mock_client.get.await_args_list:
             assert call.kwargs["headers"]["Authorization"] == "Bearer tok"
+
+    @pytest.mark.asyncio
+    async def test_a_shared_job_resolves_its_provenance_server_side(self):
+        # Never from the DataPart: who shared a job with whom is exactly the claim a
+        # forged origin would want to make.
+        shared = {**JOB, "owner_user_id": "boss", "owner_email": "boss@x.test", "activated_by": "group"}
+        with _patched_backend(job=shared):
+            result = await _validate()
+
+        assert result is not None
+        assert result["provenance"] == {"shared_by": "boss@x.test", "activated_by": "group"}
 
     @pytest.mark.asyncio
     async def test_unowned_job_is_rejected(self):
