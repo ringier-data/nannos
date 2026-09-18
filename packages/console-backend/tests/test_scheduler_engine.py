@@ -1007,6 +1007,56 @@ class TestBuildMessageArgs:
         assert metadata["messageFormatting"] == "slack"
 
 
+class TestProvenanceTravelsWithTheDispatch:
+    """A run of a shared job says why its subscriber is receiving it (ADR-0010).
+
+    Carried in the dispatch metadata and appended by agent-runner, where every run's
+    output is composed — one seam instead of the same footer in three delivery clients.
+    """
+
+    def test_an_unshared_job_carries_none(self):
+        assert SchedulerEngine._provenance_line(make_job()) is None
+
+    def test_a_subscribed_job_names_the_owner(self):
+        line = SchedulerEngine._provenance_line(
+            make_job(user_id="member", owner_user_id="boss", owner_email="boss@x.test", name="Monday report")
+        )
+        assert line is not None
+        assert "you subscribed to 'Monday report'" in line and "boss@x.test" in line
+
+    def test_a_group_default_says_it_was_not_their_doing(self):
+        line = SchedulerEngine._provenance_line(
+            make_job(
+                user_id="member",
+                owner_user_id="boss",
+                owner_email="boss@x.test",
+                activated_by="group",
+            )
+        )
+        assert line is not None and "default job of one of your groups" in line
+
+    def test_a_vanished_owner_still_produces_a_line(self):
+        # owner_email is a LEFT join: a deleted account leaves the job runnable.
+        line = SchedulerEngine._provenance_line(make_job(user_id="member", owner_user_id="ghost"))
+        assert line is not None and "another user" in line
+
+    @pytest.mark.asyncio
+    async def test_the_metadata_key_is_present_and_null_when_there_is_nothing_to_say(self):
+        engine = _make_engine()
+        _, metadata, _ = await engine._build_message_args(
+            make_job(), run_id=3, access_token="tok", db=AsyncMock()
+        )
+        assert metadata["scheduled_job_provenance"] is None
+
+        _, shared_meta, _ = await engine._build_message_args(
+            make_job(user_id="member", owner_user_id="boss", owner_email="boss@x.test"),
+            run_id=3,
+            access_token="tok",
+            db=AsyncMock(),
+        )
+        assert "boss@x.test" in shared_meta["scheduled_job_provenance"]
+
+
 class TestWatchEvaluatedBeforeDispatch:
     """A watch's condition is decided here, before anything is dispatched.
 

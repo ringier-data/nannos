@@ -236,8 +236,33 @@ class SchedulerEngine:
         carries the truth, and a notifier that retries during an incident is how one
         unhealthy process becomes a stampede.
         """
+        # Plain text, like every other notification the scheduler writes itself: it
+        # goes out verbatim on whichever channel the job notifies, and Slack renders
+        # Markdown literally.
+        delivered = await self.send_plain_notice(
+            job,
+            f"'{job.name}' could not run. The process handling it stopped before it finished, "
+            f"twice in a row, so there is no result for this run. The schedule is unchanged and "
+            f"the next run will go ahead as normal.",
+            what="recovery notice",
+        )
+        if delivered:
+            logger.info("Job %d: told the user the run was lost", job.id)
+        return delivered
+
+    async def send_plain_notice(
+        self, job: ScheduledJob, text_body: str, *, what: str = "notice", with_provenance: bool = True
+    ) -> bool:
+        """Post one line of plain text to a job's own delivery channel, under the
+        SUBSCRIBER's identity, running no agent.
+
+        The scheduler's only way of reaching a person where their job's results land. A
+        console notification says a thing happened; this says it where they are. Returns
+        whether the message is settled — delivered, or owed to nobody because the job
+        notifies no channel. False means the attempt failed.
+        """
         if job.delivery_channel_id is None:
-            logger.info("Job %d has no delivery channel; recovery notice not sent", job.id)
+            logger.info("Job %d has no delivery channel; %s not sent", job.id, what)
             return True
 
         try:
@@ -248,19 +273,14 @@ class SchedulerEngine:
                     return True
                 access_token = await self._token_service.get_access_token(db, job.user_id)
 
-            # Plain text, like every other notification the scheduler writes itself: it
-            # goes out verbatim on whichever channel the job notifies, and Slack renders
-            # Markdown literally.
-            text_body = (
-                f"'{job.name}' could not run. The process handling it stopped before it finished, "
-                f"twice in a row, so there is no result for this run. The schedule is unchanged and "
-                f"the next run will go ahead as normal."
-            )
-
             # No sub_agent_id: the runner delivers and runs nothing. No
             # scheduled_job_run_id either — this notice is not a run.
             metadata = self._base_metadata(job)
             metadata["messageFormatting"] = self._message_formatting(channel)
+            if not with_provenance:
+                # A notice that already explains itself — the activation DM says in
+                # so many words why this job now runs for this person.
+                metadata["scheduled_job_provenance"] = None
             await dispatch_streaming(
                 agent_url=self._agent_runner_url,
                 access_token=access_token,
@@ -271,10 +291,9 @@ class SchedulerEngine:
                 # working agent would only make a dead runner take five minutes to admit it.
                 timeout_read=NOTIFY_TIMEOUT_SECONDS,
             )
-            logger.info("Job %d: told the user the run was lost", job.id)
             return True
         except Exception:
-            logger.warning("Job %d: could not deliver the recovery notice", job.id, exc_info=True)
+            logger.warning("Job %d: could not deliver the %s", job.id, what, exc_info=True)
             return False
 
     async def _notify_job_paused(self, job: ScheduledJob, reason: str | None, run_id: int) -> None:
@@ -902,10 +921,30 @@ class SchedulerEngine:
         return parts, metadata, push_config
 
     @staticmethod
+    def _provenance_line(job: ScheduledJob) -> str | None:
+        """Why this person is receiving this, for a job they did not author (ADR-0010).
+
+        None for an unshared job — which is every job until somebody shares one, and the
+        reason this is a line appended to a result rather than a field every client had
+        to learn to render. A subscriber of a shared job gets one sentence naming the
+        owner and, when a group default put it there, that it was not their own doing.
+        """
+        if job.owner_user_id == job.user_id:
+            return None
+        owner = job.owner_email or "another user"
+        if job.activated_by == "group":
+            return f"(You receive this because '{job.name}', shared by {owner}, is a default job of one of your groups.)"
+        return f"(You receive this because you subscribed to '{job.name}', shared by {owner}.)"
+
+    @staticmethod
     def _base_metadata(job: ScheduledJob) -> dict[str, Any]:
         """The A2A message metadata every dispatch on behalf of *job* carries."""
         return {
             "scheduled_job_id": job.id,
+            # Appended to the delivered result by agent-runner, where every dispatch's
+            # output is composed — one seam instead of the same footer in three clients.
+            # Absent (None) on the jobs that are nobody else's, which is most of them.
+            "scheduled_job_provenance": SchedulerEngine._provenance_line(job),
             # Carried so a notification can name the job in words. An ask especially:
             # "Nannos needs permission" says nothing about which of a user's jobs has
             # stopped, and the id is not something anyone recognises.

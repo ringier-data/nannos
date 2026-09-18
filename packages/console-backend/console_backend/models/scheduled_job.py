@@ -235,6 +235,9 @@ class ScheduledJob(BaseModel):
     definition_id: int
     #: Who owns the definition. Equal to ``user_id`` for an unshared job.
     owner_user_id: str
+    #: The owner's email, for naming them on a shared job ("shared with you by …").
+    #: None when the owner's account is gone, which leaves the job runnable regardless.
+    owner_email: str | None = None
     #: What ``user_id`` may do with the definition.
     effective_permission: EffectivePermission = "owner"
     sub_agent_id: int | None = None

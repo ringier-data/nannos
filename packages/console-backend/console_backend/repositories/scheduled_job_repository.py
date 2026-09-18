@@ -75,6 +75,7 @@ _JOB_VIEW_SELECT = """
            s.definition_id,
            s.user_id,
            d.owner_user_id,
+           ou.email AS owner_email,
            d.sub_agent_id,
            d.name,
            d.job_type,
@@ -120,6 +121,9 @@ _JOB_VIEW_SELECT = """
     FROM scheduled_job_subscriptions s
     JOIN scheduled_job_definitions d ON d.id = s.definition_id
     LEFT JOIN user_settings us ON us.user_id = s.user_id
+    -- Who to name when a run of a shared job arrives ("shared with you by …"). A LEFT
+    -- join: a deleted owner leaves the job perfectly runnable for its subscribers.
+    LEFT JOIN users ou ON ou.id = d.owner_user_id
 """
 
 
@@ -131,6 +135,7 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         user_id=row["user_id"],
         definition_id=row["definition_id"],
         owner_user_id=row["owner_user_id"],
+        owner_email=row.get("owner_email"),
         effective_permission=row.get("effective_permission") or "owner",
         sub_agent_id=row["sub_agent_id"],
         name=row["name"],

@@ -31,6 +31,8 @@ def make_job(
     consecutive_failures: int = 0,
     delivery_channel_id: int | None = None,
     name: str = "Test Job",
+    owner_email: str | None = None,
+    activated_by: str = "user",
 ) -> ScheduledJob:
     """An enabled interval task job due in an hour, unless told otherwise.
 
@@ -44,6 +46,8 @@ def make_job(
         user_id=user_id,
         definition_id=definition_id if definition_id is not None else job_id,
         owner_user_id=owner_user_id or user_id,
+        owner_email=owner_email,
+        activated_by=activated_by,
         effective_permission=effective_permission,  # type: ignore[arg-type]
         subscriber_count=subscriber_count,
         sub_agent_id=sub_agent_id,

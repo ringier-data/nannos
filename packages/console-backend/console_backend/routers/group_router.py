@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from ..db.session import DbSession
 from ..dependencies import (
     require_auth,
+    require_auth_or_bearer_token,
     require_group_admin_or_admin,
     require_group_member,
     require_group_member_management_permission,
@@ -13,6 +14,7 @@ from ..models.scheduled_job import GroupDefaultJobsSet, JobDefinitionRefWithStat
 from ..models.user import PaginationMeta, User
 from ..models.user_group import (
     GroupMemberAdd,
+    GroupSummary,
     GroupMemberListResponse,
     GroupMemberRemove,
     GroupMemberUpdate,
@@ -53,6 +55,44 @@ async def list_my_groups(
 
     groups = await user_group_service.list_user_groups(db, user.id)
     return groups
+
+
+@router.get(
+    "/summaries",
+    response_model=list[GroupSummary],
+    summary="List the groups I belong to, with their member counts.",
+    description=(
+        "The groups the caller is a member of: id, name, description and how many members "
+        "each has. Deliberately without the member list — the count is what an approval "
+        "needs ('activate for 12 members of Sales?'), and the identities are not the "
+        "model's business. Use the id with `scheduler_share_job` or "
+        "`scheduler_add_group_default_job`."
+    ),
+    tags=["MCP"],
+    operation_id="console_list_my_groups",
+)
+async def list_my_group_summaries(
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> list[GroupSummary]:
+    """Declared ahead of ``/{group_id}`` on purpose: a literal segment only wins when it
+    is matched first, and ``group_id`` is an int, so this path would otherwise 422."""
+    user_group_service = get_user_group_service(request)
+    if not await user_group_service.check_user_permission(db, user.id, "groups", "read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions: groups.read required",
+        )
+    return [
+        GroupSummary(
+            id=g.id,
+            name=g.name,
+            description=g.description,
+            member_count=g.member_count,
+        )
+        for g in await user_group_service.list_user_groups(db, user.id)
+    ]
 
 
 @router.get("/{group_id}", response_model=UserGroupDetailResponse)
@@ -336,13 +376,27 @@ async def set_group_default_jobs(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.post("/{group_id}/default-jobs/{definition_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/{group_id}/default-jobs/{definition_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Make a shared job a default of a group.",
+    description=(
+        "Activates the job for EVERY current and future member of the group: each of them "
+        "gets their own subscription, enabled, running under their own account and "
+        "delivering to them. It does not grant access — share the job with the group first "
+        "(`scheduler_share_job`). Needs group-manager rights. Members are notified. Check "
+        "the group's size with `console_list_my_groups` and confirm the number with the "
+        "user before calling this."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_add_group_default_job",
+)
 async def add_group_default_job(
     group_id: int,
     definition_id: int,
     request: Request,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> None:
     """Make one shared job a default of the group and subscribe every current member."""
     await require_group_member_management_permission(request, group_id, db, user)
@@ -357,13 +411,24 @@ async def add_group_default_job(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.delete("/{group_id}/default-jobs/{definition_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{group_id}/default-jobs/{definition_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Stop a job being a default of a group.",
+    description=(
+        "New members are no longer subscribed automatically, and the subscriptions this "
+        "default created are removed. A member who subscribed themselves keeps theirs. "
+        "The group keeps its access to the job. Needs group-manager rights."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_remove_group_default_job",
+)
 async def remove_group_default_job(
     group_id: int,
     definition_id: int,
     request: Request,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> None:
     """Stop a job being a default of the group; members' self-made subscriptions stay."""
     await require_group_member_management_permission(request, group_id, db, user)

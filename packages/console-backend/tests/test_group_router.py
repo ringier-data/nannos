@@ -232,6 +232,50 @@ class TestGroupListingEndpoints:
         assert data[1]["name"] == "Test Group 2"
 
 
+class TestGroupSummariesForTheModel:
+    """``console_list_my_groups`` (ADR-0010): the groups the model may reason about.
+
+    Deliberately narrower than ``list_my_groups``: a share or a group default is decided
+    on "which group, and how many people does that mean", and the member identities are
+    not part of that question — so they are not in the payload the model sees.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_names_and_counts_without_member_identities(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        summaries = await group_router.list_my_group_summaries(mock_request, pg_session, mock_user)
+
+        assert [s.name for s in summaries] == ["Test Group 1", "Test Group 2"]
+        assert all(s.member_count >= 1 for s in summaries)
+        assert not any("member" in field for s in summaries for field in s.model_dump() if field != "member_count")
+
+    @pytest.mark.asyncio
+    async def test_the_literal_path_wins_over_the_group_id_route(
+        self,
+        client_with_db,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        # /summaries would otherwise be matched by /{group_id} and 422 on the converter,
+        # which is why the route is declared ahead of it.
+        client_with_db._transport.app.dependency_overrides[group_router.require_auth] = lambda: mock_user
+        client_with_db._transport.app.dependency_overrides[group_router.require_auth_or_bearer_token] = (
+            lambda: mock_user
+        )
+        response = await client_with_db.get("/api/v1/groups/summaries")
+
+        assert response.status_code == 200
+        assert [g["name"] for g in response.json()] == ["Test Group 1", "Test Group 2"]
+        assert "members" not in response.json()[0]
+
+
 class TestGroupDetailEndpoint:
     """Test get_group endpoint."""
 

@@ -88,6 +88,10 @@ class SchedulerService:
         self._delivery_channel_repo: "DeliveryChannelRepository | None" = None
         self._user_settings_service: UserSettingsService | None = None
         self._notification_service: "NotificationService | None" = None
+        #: ``(job, text) -> delivered`` — posts one plain line to a subscription's own
+        #: delivery channel under the subscriber's identity. The engine owns the dispatch;
+        #: injected so this service keeps no dependency on it (and tests can leave it out).
+        self._notice_sender: Any = None
 
     def set_repository(self, repository: ScheduledJobRepository) -> None:
         self._repo = repository
@@ -103,6 +107,14 @@ class SchedulerService:
 
     def set_notification_service(self, notification_service: "NotificationService") -> None:
         self._notification_service = notification_service
+
+    def set_notice_sender(self, sender: Any) -> None:
+        """``async (job, text) -> bool``, the scheduler engine's plain-notice dispatch.
+
+        Set after the engine is constructed (it takes this service's access check in its
+        own constructor), so the two are wired in that order rather than together.
+        """
+        self._notice_sender = sender
 
     async def _validate_delivery_channel(self, db: AsyncSession, channel_id: int) -> None:
         """Ensure the referenced delivery channel exists before it reaches the FK constraint.
@@ -1227,13 +1239,18 @@ class SchedulerService:
         """Definitions shared to a group, flagged with which are its defaults."""
         return await self.repo.list_group_definitions(db, group_id)
 
-    async def _activate_default(self, db: AsyncSession, actor: User, group_id: int, definition_id: int, user_ids: list[str]) -> None:
+    async def _activate_default(self, db: AsyncSession, actor: User, group_id: int, definition_id: int, user_ids: list[str]) -> list[str]:
         """Subscribe *user_ids* to *definition_id* as a group default — enabled, inherited,
-        each first occurrence in the member's own timezone — and DM-less consent notice
-        in the console for everyone whose subscription was created."""
+        each first occurrence in the member's own timezone — and a consent notice in the
+        console for everyone whose subscription was created.
+
+        Returns those user ids. The matching DM goes out from ``_dm_activations`` once the
+        caller has committed: a message telling someone a job now runs under their identity
+        must not arrive for a subscription that a later rollback removed.
+        """
         definition = await self.repo.get_definition(db, definition_id)
         if definition is None or not user_ids:
-            return
+            return []
         channel = await self._default_channel_for(db, definition)
         tzs = await self.repo.user_timezones(db, user_ids)
         now = datetime.now(timezone.utc)
@@ -1271,6 +1288,39 @@ class SchedulerService:
                     for uid in created
                 ],
             )
+        return created
+
+    async def _dm_activations(self, db: AsyncSession, definition_id: int, user_ids: list[str]) -> None:
+        """Tell each newly auto-subscribed member, where their results will land, that a
+        job now runs under their account (ADR-0010).
+
+        The console notification written by ``_activate_default`` is the durable record;
+        this is the one that reaches a person who does not open the console. Best effort
+        throughout: a job with no delivery channel gets none, and a failed dispatch is
+        logged and dropped — the subscription is already real either way.
+
+        MUST be called after the caller's commit: it reads the subscriptions back.
+        """
+        if not user_ids or self._notice_sender is None:
+            return
+        definition = await self.repo.get_definition(db, definition_id)
+        if definition is None:
+            return
+        for uid in user_ids:
+            job = await self.repo.get_subscription_for(db, definition_id, uid)
+            if job is None:
+                continue
+            try:
+                await self._notice_sender(
+                    job,
+                    f"'{job.name}' now runs under your account, because it is a default job of one of "
+                    "your groups. Its results will arrive here. You can turn it off or change its "
+                    "schedule in the console, or just ask me to.",
+                    what="activation notice",
+                    with_provenance=False,
+                )
+            except Exception:
+                logger.warning("Could not DM the activation notice for job %d", job.id, exc_info=True)
 
     async def set_group_default_jobs(
         self, db: AsyncSession, group_id: int, definition_ids: list[int], actor: User
@@ -1283,18 +1333,27 @@ class SchedulerService:
         current = set(await self.repo.get_group_default_definition_ids(db, group_id))
         wanted = set(definition_ids)
         members = await self.repo.group_member_ids(db, [group_id])
+        activated: list[tuple[int, list[str]]] = []
         for did in wanted - current:
             await self.repo.add_group_default(db, group_id, did, actor)
-            await self._activate_default(db, actor, group_id, did, members)
+            activated.append((did, await self._activate_default(db, actor, group_id, did, members)))
         for did in current - wanted:
             await self.repo.remove_group_default(db, group_id, did, actor)
             await self._withdraw_default(db, actor, group_id, did, members)
+        await db.commit()
+        for did, created in activated:
+            await self._dm_activations(db, did, created)
 
     async def add_group_default_job(self, db: AsyncSession, group_id: int, definition_id: int, actor: User) -> None:
         if not await self.repo.group_has_grant(db, definition_id, group_id):
             raise ValueError("This job is not shared with the group. Share it first.")
-        if await self.repo.add_group_default(db, group_id, definition_id, actor):
-            await self._activate_default(db, actor, group_id, definition_id, await self.repo.group_member_ids(db, [group_id]))
+        if not await self.repo.add_group_default(db, group_id, definition_id, actor):
+            return
+        created = await self._activate_default(
+            db, actor, group_id, definition_id, await self.repo.group_member_ids(db, [group_id])
+        )
+        await db.commit()
+        await self._dm_activations(db, definition_id, created)
 
     async def remove_group_default_job(self, db: AsyncSession, group_id: int, definition_id: int, actor: User) -> None:
         if await self.repo.remove_group_default(db, group_id, definition_id, actor):
@@ -1315,9 +1374,22 @@ class SchedulerService:
 
     async def on_members_added(self, db: AsyncSession, actor: User, group_id: int, user_ids: list[str]) -> None:
         """Mirror of default-agent activation on join: every default job of the group
-        becomes a subscription of each new member. Does not commit."""
+        becomes a subscription of each new member.
+
+        COMMITS, unlike the other ``on_*`` hooks: the activation DM has to be sent after
+        the subscriptions are durable, and it is sent from here. By this point the
+        membership its caller wrote is settled — the only work left in ``add_members`` is
+        reading the rows back — and the caller already treats this whole step as
+        best-effort.
+        """
+        activated: list[tuple[int, list[str]]] = []
         for did in await self.repo.get_group_default_definition_ids(db, group_id):
-            await self._activate_default(db, actor, group_id, did, user_ids)
+            activated.append((did, await self._activate_default(db, actor, group_id, did, user_ids)))
+        if not activated:
+            return
+        await db.commit()
+        for did, created in activated:
+            await self._dm_activations(db, did, created)
 
     async def on_group_deleted(self, db: AsyncSession, actor: User, group_id: int) -> None:
         """A group is being (soft-)deleted: every grant through it is gone. Its default

@@ -372,6 +372,9 @@ async def initialize_services(app: "FastAPI") -> None:
         claim_limit=config.scheduler.claim_limit,
         agent_access_check=app.state.scheduler_service.subscriber_can_run_agent,
     )
+    # The other direction of the same pair: the service tells a newly auto-subscribed
+    # member where their results will land, and the engine owns that dispatch (ADR-0010).
+    app.state.scheduler_service.set_notice_sender(app.state.scheduler_engine.send_plain_notice)
 
     # Initialize playbook service (connects to docstore database)
     from .db.docstore import get_docstore_session_factory

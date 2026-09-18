@@ -546,6 +546,78 @@ class TestGroupDefaultsFollowMembership:
         assert await svc.list_available_definitions(db, u["member"].id) == []
 
 
+class TestActivationIsAnnouncedWhereTheResultsLand:
+    """A group default switches a job on under someone else's identity. The console
+    notification is the durable record; the DM is what reaches a person who never opens
+    the console (ADR-0010)."""
+
+    @pytest.mark.asyncio
+    async def test_every_activated_member_is_dmd_once_the_subscription_is_durable(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        sent: list[tuple[int, str, bool]] = []
+
+        async def notice_sender(job, text_body, *, what="notice", with_provenance=True):
+            # The subscription must be committed by the time this runs: a DM saying a job
+            # now runs for you, sent for a row a rollback removed, is the one failure mode
+            # worth pinning.
+            assert (
+                await svc.repo.get_subscription_for(db, job.definition_id, job.user_id)
+            ) is not None
+            sent.append((job.id, text_body, with_provenance))
+            return True
+
+        svc.set_notice_sender(notice_sender)
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+
+        await svc.add_group_default_job(db, gid, job.definition_id, u["owner"])
+
+        # Every member the default created a subscription for, the owner included —
+        # the owner already had one, so they are not activated again.
+        assert {sid for sid, _, _ in sent} == {
+            s.id
+            for s in await svc.repo.list_subscriptions(db, job.definition_id)
+            if s.user_id in (u["member"].id, u["writer"].id)
+        }
+        body = sent[0][1]
+        assert "default job of one of your groups" in body
+        # The text already says why; the delivered-run provenance footer would repeat it.
+        assert all(with_provenance is False for _, _, with_provenance in sent)
+
+    @pytest.mark.asyncio
+    async def test_a_default_that_activates_nobody_sends_nothing(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        sent: list[int] = []
+        svc.set_notice_sender(lambda job, text_body, **kw: sent.append(job.id) or True)
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        await svc.add_group_default_job(db, gid, job.definition_id, u["owner"])
+        sent.clear()
+
+        # Already a default: nothing is created, so nobody is told again.
+        await svc.add_group_default_job(db, gid, job.definition_id, u["owner"])
+        assert sent == []
+
+
+class TestTheJobViewNamesItsOwner:
+    @pytest.mark.asyncio
+    async def test_a_subscriber_sees_who_shared_it(self, world):
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+
+        assert mine.owner_email == u["owner"].email
+        # Their own job names them: the console reads "is this mine" off the row.
+        assert job.owner_email == u["owner"].email and job.owner_user_id == job.user_id
+
+
 class TestRunsAreTheSubscribers:
     @pytest.mark.asyncio
     async def test_runs_hang_off_the_subscription_and_stay_user_scoped(self, world):
