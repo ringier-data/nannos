@@ -18,6 +18,8 @@ import {
   Undo2,
   Pencil,
   KeyRound,
+  Users,
+  Ban,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -61,12 +63,22 @@ import {
   resumeParkedRun,
   deleteJob,
 } from '@/api/scheduler';
-import { consoleListSubAgentsOptions, consoleListMcpToolsOptions } from '@/api/generated/@tanstack/react-query.gen';
+import {
+  consoleListSubAgentsOptions,
+  consoleListMcpToolsOptions,
+  schedulerSuspendJobMutation,
+  schedulerUnsuspendJobMutation,
+  schedulerResetJobSchedulesMutation,
+} from '@/api/generated/@tanstack/react-query.gen';
+import { JobPermissionsDialog } from '@/components/scheduler/JobPermissionsDialog';
+import { SharingBadge } from '@/components/scheduler/sharing';
+import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
 import { useAuth } from '@/contexts/AuthContext';
 import { CronField } from '@/components/CronField';
 import { describeCron } from '@/lib/cron';
 import { DetailSkeleton } from '@/components/skeletons';
 import { io } from 'socket.io-client';
+import { toast } from 'sonner';
 
 interface SchedulerNotification {
   job_id: number;
@@ -105,6 +117,17 @@ function formatDuration(start: string | null | undefined, end: string | null | u
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
   return `${Math.round(ms / 60_000)}m`;
+}
+
+/** The job's DEFAULT schedule in words — what an inherited subscription follows. */
+function defaultScheduleLabel(job: ScheduledJob): string {
+  const t = job.trigger_defaults;
+  if (!t) return '\u2014';
+  if (t.schedule_kind === 'cron') return t.cron_expr ?? '\u2014';
+  if (t.schedule_kind === 'interval')
+    return t.interval_seconds ? `every ${t.interval_seconds}s` : '\u2014';
+  if (t.schedule_kind === 'once' && t.run_at) return new Date(t.run_at).toLocaleString();
+  return '\u2014';
 }
 
 function scheduleLabel(job: ScheduledJob): string {
@@ -242,6 +265,49 @@ function JobHeader({
   isPendingDelete: boolean;
   isRunningNow: boolean;
 }) {
+  const qc = useQueryClient();
+  const [sharing, setSharing] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const canWrite = job.effective_permission !== 'read';
+  const others = subscriberCount(job) > 1;
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['scheduler-job', job.id] });
+    qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+  };
+  const onSharingError = (err: unknown) =>
+    toast.error('That did not work', { description: formatApiError(err) });
+
+  const suspend = useMutation({
+    ...schedulerSuspendJobMutation(),
+    onSuccess: () => {
+      toast.success('Suspended for every subscriber');
+      invalidate();
+    },
+    onError: onSharingError,
+  });
+  const unsuspend = useMutation({
+    ...schedulerUnsuspendJobMutation(),
+    onSuccess: () => {
+      toast.success('Running again');
+      invalidate();
+    },
+    onError: onSharingError,
+  });
+  const resetSchedules = useMutation({
+    ...schedulerResetJobSchedulesMutation(),
+    onSuccess: (result) => {
+      toast.success(
+        result.reset === 0
+          ? 'Nobody had their own schedule'
+          : `${result.reset} subscriber${result.reset === 1 ? '' : 's'} back on the default`,
+      );
+      invalidate();
+    },
+    onError: onSharingError,
+  });
+  const definitionAction = { path: { definition_id: job.definition_id } };
+
   return (
     <div className="flex flex-wrap items-start justify-between gap-4">
       <div>
@@ -255,8 +321,16 @@ function JobHeader({
           </Badge>
           <span className="font-mono">{scheduleLabel(job)}</span>
           {job.schedule_kind === 'cron' && job.timezone && <span className="text-xs">({job.timezone})</span>}
+          <SharingBadge job={job} />
           <span>·</span>
-          {job.enabled ? (
+          {/* Suspension outranks the viewer's own state: it stops every subscriber, and
+              each of them keeps their own on/off choice for when it is lifted. */}
+          {job.suspended_at ? (
+            <span className="flex items-center gap-1 text-muted-foreground">
+              <Ban className="h-3.5 w-3.5" /> Suspended for everyone
+              {job.suspended_reason && <span className="text-xs">({job.suspended_reason})</span>}
+            </span>
+          ) : job.enabled ? (
             <span className="flex items-center gap-1 text-green-600">
               <CheckCircle2 className="h-3.5 w-3.5" /> Active
             </span>
@@ -267,6 +341,17 @@ function JobHeader({
             </span>
           )}
         </div>
+        {/* Why this person has this job at all, in words rather than a hover. Only for a
+            job they did not author — for their own there is nothing to explain. */}
+        {!isOwnJob(job) && (
+          <p className="mt-1 text-sm text-muted-foreground">
+            {job.activated_by === 'group'
+              ? `Activated for you because this job is a default of one of your groups. Shared by ${job.owner_email ?? 'another user'}.`
+              : `Shared with you by ${job.owner_email ?? 'another user'}.`}{' '}
+            It runs under your account, with your credentials.
+            {!canWrite && ' You can change your own schedule and delivery; the rest is theirs.'}
+          </p>
+        )}
       </div>
 
       <div className="flex gap-2">
@@ -291,21 +376,136 @@ function JobHeader({
           </TooltipContent>
         </Tooltip>
         {job.enabled ? (
-          <Button variant="outline" size="sm" disabled={isPendingPause} onClick={onPause}>
-            <Pause className="mr-1.5 h-4 w-4" />
-            Pause
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="sm" disabled={isPendingPause} onClick={onPause}>
+                <Pause className="mr-1.5 h-4 w-4" />
+                Pause
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {others ? 'Stops the job for you only' : 'Stops the job until you resume it'}
+            </TooltipContent>
+          </Tooltip>
         ) : (
           <Button variant="outline" size="sm" disabled={isPendingResume} onClick={onResume}>
             <Play className="mr-1.5 h-4 w-4" />
             Resume
           </Button>
         )}
-        <Button variant="destructive" size="sm" className="ml-2" disabled={isPendingDelete} onClick={onDelete}>
-          <Trash2 className="mr-1.5 h-4 w-4" />
-          Delete
-        </Button>
+
+        {/* Sharing. The whole group is absent for a job the viewer only runs: sharing it
+            on, suspending it and resetting other people's schedules are all writer
+            actions on the definition. */}
+        {canWrite && (
+          <>
+            <Button variant="outline" size="sm" onClick={() => setSharing(true)}>
+              <Users className="mr-1.5 h-4 w-4" />
+              Share
+            </Button>
+            {job.suspended_at ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={unsuspend.isPending}
+                onClick={() => unsuspend.mutate(definitionAction)}
+              >
+                <Play className="mr-1.5 h-4 w-4" />
+                Resume for everyone
+              </Button>
+            ) : (
+              others && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={suspend.isPending}
+                      onClick={() => suspend.mutate({ ...definitionAction, body: { reason: null } })}
+                    >
+                      <Ban className="mr-1.5 h-4 w-4" />
+                      Suspend for all
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Stops the job for all {subscriberCount(job)} subscribers. Each keeps their own
+                    on/off choice for when you resume it.
+                  </TooltipContent>
+                </Tooltip>
+              )
+            )}
+            {others && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="sm" onClick={() => setResetting(true)}>
+                    <Undo2 className="mr-1.5 h-4 w-4" />
+                    Reset schedules
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Puts every subscriber back on the job's default schedule
+                </TooltipContent>
+              </Tooltip>
+            )}
+          </>
+        )}
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="ml-2"
+              disabled={isPendingDelete}
+              onClick={onDelete}
+            >
+              <Trash2 className="mr-1.5 h-4 w-4" />
+              {isOwnJob(job) ? 'Delete' : 'Stop running this'}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {isOwnJob(job)
+              ? others
+                ? `Deletes the job for you and ${subscriberCount(job) - 1} other subscriber${subscriberCount(job) > 2 ? 's' : ''}`
+                : 'Deletes the job'
+              : 'Removes only your own activation'}
+          </TooltipContent>
+        </Tooltip>
       </div>
+
+      <JobPermissionsDialog
+        definitionId={job.definition_id}
+        jobName={job.name}
+        open={sharing}
+        onOpenChange={setSharing}
+      />
+
+      {/* Clearing other people's customisation is somebody else's schedule changing
+          without them asking, so it is confirmed rather than done on a click. */}
+      <AlertDialog open={resetting} onOpenChange={(o) => !o && setResetting(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Put everyone back on the default schedule?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Every subscriber who set their own schedule for <strong>{job.name}</strong> will
+              follow the job's default ({defaultScheduleLabel(job)}) again, including later
+              changes to it. They are told. Your own schedule is reset too.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resetSchedules.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={resetSchedules.isPending}
+              onClick={() => {
+                setResetting(false);
+                resetSchedules.mutate(definitionAction);
+              }}
+            >
+              {resetSchedules.isPending ? 'Resetting…' : 'Reset'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -376,6 +576,22 @@ function EditForm({ job }: { job: ScheduledJob }) {
   const [watch, setWatch] = useState<WatchFieldsValue>(() => watchValueFromJob(job));
   const [aiQuery, setAiQuery] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+
+  // ── What the viewer is allowed to change (ADR-0010) ──────────────────────
+  // The job view is the SUBSCRIPTION with the definition folded in, and
+  // `effective_permission` is the viewer's standing on the definition half. A reader
+  // owns their subscription — their delivery target, their on/off state — and nothing
+  // else; a writer owns what the job does.
+  const canWrite = job.effective_permission !== 'read';
+  const others = subscriberCount(job) > 1;
+  const triggerFixed = job.trigger_policy === 'fixed';
+  // FIXED means the owner pins the tick — a watch's tick is part of what the watch
+  // means — so only a writer, changing it for everyone, may touch it.
+  const canEditTrigger = canWrite || !triggerFixed;
+  // The one extra choice a shared job adds to this page, and only once there is somebody
+  // else to be ambiguous about. Defaults to the narrowest effect.
+  const [scope, setScope] = useState<'mine' | 'everyone'>('mine');
+  const showScope = others && canWrite && !triggerFixed;
 
   // ── Data queries ──────────────────────────────────────────────────────────
   const { data: subAgentsData } = useQuery(
@@ -588,6 +804,12 @@ function EditForm({ job }: { job: ScheduledJob }) {
       // is explicitly present in the request.
       delivery_channel_id: deliveryChannel ? parseInt(deliveryChannel) : null,
       voice_call: voiceCall,
+      // Only meaningful for a schedule change on a job somebody else also runs; the
+      // backend ignores it otherwise and picks the narrowest effect itself. A fixed
+      // trigger leaves 'everyone' as the only legal target.
+      ...(others && (showScope || triggerFixed)
+        ? { scope: triggerFixed ? 'everyone' : scope }
+        : {}),
     };
 
     // A paused job does not run whatever you save, and nothing on the way out says so:
@@ -608,7 +830,9 @@ function EditForm({ job }: { job: ScheduledJob }) {
           <CardTitle>Job configuration</CardTitle>
           <CardDescription>
             {editing
-              ? 'Editing — change the fields below, then save.'
+              ? canWrite
+                ? 'Editing — change the fields below, then save.'
+                : `Editing. ${job.owner_email ?? 'The owner'} owns what this job does; you can change your own schedule and where its results go.`
               : 'Read-only. Click Edit configuration to make changes.'}
           </CardDescription>
         </div>
@@ -642,74 +866,125 @@ function EditForm({ job }: { job: ScheduledJob }) {
       </CardHeader>
       <CardContent>
         <fieldset disabled={!editing} className="m-0 grid min-w-0 gap-4 border-0 p-0">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="grid gap-1.5">
-              <Label>Name</Label>
-              <Input
-                value={name}
-                onChange={(e) => {
-                  setName(e.target.value);
+          {/* What the job DOES belongs to the definition, so a reader may look but not
+              touch it. One boundary rather than a per-field list: the backend's rule is
+              the same shape — a reader may change nothing on the definition at all. */}
+          <fieldset disabled={!canWrite} className="m-0 grid min-w-0 gap-4 border-0 p-0">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-1.5">
+                <Label>Name</Label>
+                <Input
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    touch();
+                  }}
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label>Max failures before pause</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={maxFailures}
+                  onChange={(e) => {
+                    setMaxFailures(parseInt(e.target.value) || 3);
+                    touch();
+                  }}
+                />
+              </div>
+            </div>
+          </fieldset>
+
+          {/* The schedule is the one field group that can belong to either side. */}
+          <fieldset disabled={!canEditTrigger} className="m-0 grid min-w-0 gap-4 border-0 p-0">
+            {showScope && (
+              <div className="grid gap-1.5">
+                <Label>A schedule change applies to</Label>
+                <Select value={scope} onValueChange={(v) => setScope(v as 'mine' | 'everyone')}>
+                  <SelectTrigger className="sm:w-[320px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="mine">Just me</SelectItem>
+                    <SelectItem value="everyone">Everyone's default</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {scope === 'mine'
+                    ? 'Only your own runs move. The other subscribers keep theirs.'
+                    : `Changes the job's default, so every subscriber who has not set their own schedule follows it — including you.`}
+                </p>
+              </div>
+            )}
+            {others && !showScope && canWrite && triggerFixed && (
+              <p className="text-xs text-muted-foreground">
+                This job's schedule is fixed, so a change applies to every subscriber.
+              </p>
+            )}
+            {others && !canWrite && (
+              <p className="text-xs text-muted-foreground">
+                {triggerFixed
+                  ? `The schedule is fixed by ${job.owner_email ?? 'the owner'} and cannot be changed here.`
+                  : job.trigger_inherited
+                    ? `You follow the job's default schedule, including later changes to it. Changing it here makes it yours alone.`
+                    : `This is your own schedule. The job's default is ${defaultScheduleLabel(job)}.`}
+              </p>
+            )}
+            {others && canWrite && !job.trigger_inherited && (
+              <p className="text-xs text-muted-foreground">
+                You run on your own schedule; the job's default is {defaultScheduleLabel(job)}.
+              </p>
+            )}
+
+            {job.schedule_kind === 'cron' && (
+              <CronField
+                value={cronExpr}
+                onChange={(v) => {
+                  setCronExpr(v);
                   touch();
                 }}
+                timezone={job.timezone}
               />
-            </div>
-            <div className="grid gap-1.5">
-              <Label>Max failures before pause</Label>
-              <Input
-                type="number"
-                min={1}
-                max={20}
-                value={maxFailures}
-                onChange={(e) => {
-                  setMaxFailures(parseInt(e.target.value) || 3);
-                  touch();
-                }}
-              />
-            </div>
-          </div>
+            )}
 
-          {job.schedule_kind === 'cron' && (
-            <CronField
-              value={cronExpr}
-              onChange={(v) => {
-                setCronExpr(v);
-                touch();
-              }}
-              timezone={job.timezone}
-            />
-          )}
+            {job.schedule_kind === 'interval' && (
+              <div className="grid gap-1.5">
+                <Label>Interval (seconds)</Label>
+                <Input
+                  type="number"
+                  min={60}
+                  value={intervalSeconds}
+                  onChange={(e) => {
+                    setIntervalSeconds(e.target.value);
+                    touch();
+                  }}
+                />
+              </div>
+            )}
 
-          {job.schedule_kind === 'interval' && (
-            <div className="grid gap-1.5">
-              <Label>Interval (seconds)</Label>
-              <Input
-                type="number"
-                min={60}
-                value={intervalSeconds}
-                onChange={(e) => {
-                  setIntervalSeconds(e.target.value);
-                  touch();
-                }}
-              />
-            </div>
-          )}
+            {job.schedule_kind === 'once' && (
+              <div className="grid gap-1.5">
+                <Label>Run at</Label>
+                <Input
+                  type="datetime-local"
+                  min={nowDatetimeLocal(job.timezone)}
+                  value={runAt}
+                  onChange={(e) => {
+                    setRunAt(e.target.value);
+                    touch();
+                  }}
+                />
+                {job.timezone && (
+                  <p className="text-xs text-muted-foreground">Interpreted in {job.timezone}</p>
+                )}
+              </div>
+            )}
+          </fieldset>
 
-          {job.schedule_kind === 'once' && (
-            <div className="grid gap-1.5">
-              <Label>Run at</Label>
-              <Input
-                type="datetime-local"
-                min={nowDatetimeLocal(job.timezone)}
-                value={runAt}
-                onChange={(e) => {
-                  setRunAt(e.target.value);
-                  touch();
-                }}
-              />
-              {job.timezone && <p className="text-xs text-muted-foreground">Interpreted in {job.timezone}</p>}
-            </div>
-          )}
-
+          {/* Everything from here to the delivery channel is definition-owned too. */}
+          <fieldset disabled={!canWrite} className="m-0 grid min-w-0 gap-4 border-0 p-0">
           {/* Sub-agent picker (task jobs) */}
           {job.job_type === 'task' && (
             <>
@@ -722,7 +997,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
                     touch();
                   }}
                   subAgents={subAgents}
-                  disabled={!editing}
+                  disabled={!editing || !canWrite}
                 />
                 <p className="text-xs text-muted-foreground">
                   {subAgents.find((sa) => sa.id === parseInt(subAgentId))?.type === 'automated'
@@ -758,7 +1033,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
           {job.job_type === 'watch' && (
             <>
               {/* Describe-the-job entry point, above the fields it writes into. */}
-              {editing && (
+              {editing && canWrite && (
                 <div className="bg-muted grid gap-2.5 rounded-md border p-3.5">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <Sparkles className="size-3.5" />
@@ -789,7 +1064,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
               {/* The same fields the create dialog renders. `read` shows values as text;
                   the check only runs while editing, since it is a real call. */}
               <WatchFields
-                mode={editing ? 'edit' : 'read'}
+                mode={editing && canWrite ? 'edit' : 'read'}
                 value={watch}
                 onChange={(next) => {
                   setWatch((w) => ({ ...w, ...next }));
@@ -813,7 +1088,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
                 setVoiceCall(v);
                 touch();
               }}
-              disabled={!editing}
+              disabled={!editing || !canWrite}
             />
             <Label htmlFor="voice-call-edit" className="cursor-pointer text-sm">
               Deliver as a phone call
@@ -823,7 +1098,10 @@ function EditForm({ job }: { job: ScheduledJob }) {
             </span>
           </div>
 
-          {/* Delivery channel */}
+          </fieldset>
+
+          {/* Delivery channel — the subscriber's own, on a shared job as on any other:
+              a run of a job someone else authored still lands where THIS person reads. */}
           <div className="grid gap-1.5">
             <Label>Delivery channel</Label>
             {/* "_none" is a sentinel: a SelectItem cannot carry an empty value, so the

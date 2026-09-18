@@ -2254,6 +2254,34 @@ export type GroupMemberUpdate = {
 };
 
 /**
+ * GroupSummary
+ *
+ * A group as the model is allowed to see it: what it is and how big it is.
+ *
+ * Deliberately narrower than ``UserGroupWithMembers``: a share or a group default is
+ * decided on "which group, and how many people does that mean", and the member
+ * identities are not part of that question. See ADR-0010.
+ */
+export type GroupSummary = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Member Count
+     */
+    member_count?: number;
+};
+
+/**
  * HTTPValidationError
  */
 export type HttpValidationError = {
@@ -4217,6 +4245,10 @@ export type ScheduledJob = {
      * Owner User Id
      */
     owner_user_id: string;
+    /**
+     * Owner Email
+     */
+    owner_email?: string | null;
     effective_permission?: EffectivePermissionEnum;
     /**
      * Sub Agent Id
@@ -11051,6 +11083,24 @@ export type ListMyGroupsApiV1GroupsGetResponses = {
 
 export type ListMyGroupsApiV1GroupsGetResponse = ListMyGroupsApiV1GroupsGetResponses[keyof ListMyGroupsApiV1GroupsGetResponses];
 
+export type ConsoleListMyGroupsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/groups/summaries';
+};
+
+export type ConsoleListMyGroupsResponses = {
+    /**
+     * Response Console List My Groups
+     *
+     * Successful Response
+     */
+    200: Array<GroupSummary>;
+};
+
+export type ConsoleListMyGroupsResponse = ConsoleListMyGroupsResponses[keyof ConsoleListMyGroupsResponses];
+
 export type GetGroupApiV1GroupsGroupIdGetData = {
     body?: never;
     path: {
@@ -11312,7 +11362,7 @@ export type SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponses = {
 
 export type SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponse = SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponses[keyof SetGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutResponses];
 
-export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteData = {
+export type SchedulerRemoveGroupDefaultJobData = {
     body?: never;
     path: {
         /**
@@ -11328,25 +11378,25 @@ export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDelete
     url: '/api/v1/groups/{group_id}/default-jobs/{definition_id}';
 };
 
-export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteErrors = {
+export type SchedulerRemoveGroupDefaultJobErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteError = RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteErrors[keyof RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteErrors];
+export type SchedulerRemoveGroupDefaultJobError = SchedulerRemoveGroupDefaultJobErrors[keyof SchedulerRemoveGroupDefaultJobErrors];
 
-export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponses = {
+export type SchedulerRemoveGroupDefaultJobResponses = {
     /**
      * Successful Response
      */
     204: void;
 };
 
-export type RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponse = RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponses[keyof RemoveGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdDeleteResponses];
+export type SchedulerRemoveGroupDefaultJobResponse = SchedulerRemoveGroupDefaultJobResponses[keyof SchedulerRemoveGroupDefaultJobResponses];
 
-export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostData = {
+export type SchedulerAddGroupDefaultJobData = {
     body?: never;
     path: {
         /**
@@ -11362,23 +11412,23 @@ export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostData 
     url: '/api/v1/groups/{group_id}/default-jobs/{definition_id}';
 };
 
-export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostErrors = {
+export type SchedulerAddGroupDefaultJobErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostError = AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostErrors[keyof AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostErrors];
+export type SchedulerAddGroupDefaultJobError = SchedulerAddGroupDefaultJobErrors[keyof SchedulerAddGroupDefaultJobErrors];
 
-export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponses = {
+export type SchedulerAddGroupDefaultJobResponses = {
     /**
      * Successful Response
      */
     204: void;
 };
 
-export type AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponse = AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponses[keyof AddGroupDefaultJobApiV1GroupsGroupIdDefaultJobsDefinitionIdPostResponses];
+export type SchedulerAddGroupDefaultJobResponse = SchedulerAddGroupDefaultJobResponses[keyof SchedulerAddGroupDefaultJobResponses];
 
 export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData = {
     body: SubAgentAdd;

@@ -17,6 +17,8 @@ import {
   listUsersApiV1AdminUsersGetOptions,
   getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
   setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation,
+  getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions,
+  setGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutMutation,
   consoleListMcpServersOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { RoleEnum, McpGatewayStatusResponse, McpGatewayServerPermissionsResponse } from '@/api/generated';
@@ -105,6 +107,16 @@ export function GroupDetailPage() {
   // Accessible agents queries
   const { data: defaultAgentsData, isLoading: defaultAgentsLoading } = useQuery({
     ...getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
+      path: { group_id: groupId },
+    }),
+    enabled: !isNaN(groupId),
+  });
+
+  // Scheduled jobs shared with this group, flagged with which are its defaults
+  // (ADR-0010). Sharing a job is done from the job's own page; this is where a
+  // manager decides whether the whole group runs it.
+  const { data: accessibleJobsData, isLoading: accessibleJobsLoading } = useQuery({
+    ...getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions({
       path: { group_id: groupId },
     }),
     enabled: !isNaN(groupId),
@@ -290,6 +302,8 @@ export function GroupDetailPage() {
   const availableUsers = allUsers.filter((u) => u.status === 'active' && !memberUserIds.has(u.id));
 
   const accessibleAgents = defaultAgentsData ?? [];
+  const accessibleJobs = accessibleJobsData ?? [];
+  const defaultJobIds = accessibleJobs.filter((j) => j.is_default).map((j) => j.id);
   const defaultAgents = accessibleAgents.filter((a: any) => a.is_default);
 
   const gatewayPermissions = gatewayServers?.permissions ?? [];
@@ -352,6 +366,36 @@ export function GroupDetailPage() {
       path: { group_id: groupId, user_id: userId },
       body: { role },
     });
+  };
+
+  // Turning a job on for the whole group starts a run per member under their own
+  // identity, so the confirmation names the number of people rather than the job.
+  const [pendingDefaultJob, setPendingDefaultJob] = useState<{ id: number; name: string } | null>(
+    null,
+  );
+
+  const setDefaultJobsMutation = useMutation({
+    ...setGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutMutation(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions({
+          path: { group_id: groupId },
+        }).queryKey,
+      });
+      toast.success('Default jobs updated');
+    },
+    onError: (err) => toast.error('Could not update default jobs', { description: String(err) }),
+  });
+
+  const writeDefaultJobs = (definition_ids: number[]) =>
+    setDefaultJobsMutation.mutate({ path: { group_id: groupId }, body: { definition_ids } });
+
+  const handleToggleDefaultJob = (jobId: number, currentlyDefault: boolean, jobName: string) => {
+    if (currentlyDefault) {
+      writeDefaultJobs(defaultJobIds.filter((id) => id !== jobId));
+      return;
+    }
+    setPendingDefaultJob({ id: jobId, name: jobName });
   };
 
   const handleToggleDefault = (agentId: number, currentlyDefault: boolean) => {
@@ -549,6 +593,91 @@ export function GroupDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Default scheduled jobs (ADR-0010). Same shape as the agents card above, and
+          deliberately so: a job shared with the group is activated for every member the
+          same way a default agent is. Unlike agents there is no approval state — a job
+          either reaches this group or it does not. */}
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>Accessible Scheduled Jobs</CardTitle>
+            <CardDescription>
+              Jobs shared with this group. Making one a default activates it for every current
+              and future member, each running it under their own account.
+            </CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="border rounded-lg">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-16">Default</TableHead>
+                  <TableHead>Job Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Owner</TableHead>
+                  <TableHead className="w-24">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {accessibleJobsLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-8">
+                      Loading...
+                    </TableCell>
+                  </TableRow>
+                ) : accessibleJobs.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                      No jobs are shared with this group. Share one from its own page in the
+                      Scheduler first.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  accessibleJobs.map((job) => (
+                    <TableRow key={job.id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={job.is_default}
+                          onCheckedChange={() =>
+                            handleToggleDefaultJob(job.id, !!job.is_default, job.name)
+                          }
+                          disabled={setDefaultJobsMutation.isPending}
+                        />
+                      </TableCell>
+                      <TableCell className="font-medium">{job.name}</TableCell>
+                      <TableCell className="capitalize">{job.job_type}</TableCell>
+                      <TableCell>{job.owner_user_id}</TableCell>
+                      <TableCell>
+                        {job.suspended ? (
+                          <Badge variant="secondary">Suspended</Badge>
+                        ) : (
+                          <span className="text-muted-foreground text-sm">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <ConfirmDialog
+        open={pendingDefaultJob !== null}
+        onOpenChange={(open) => !open && setPendingDefaultJob(null)}
+        title="Activate this job for everyone in the group?"
+        description={`"${pendingDefaultJob?.name}" will start running for all ${membersMeta.total} member${
+          membersMeta.total === 1 ? '' : 's'
+        } of ${group?.name}, each under their own account and using their own credentials. They will be told, and can turn it off.`}
+        confirmLabel="Activate"
+        onConfirm={() => {
+          if (pendingDefaultJob) writeDefaultJobs([...defaultJobIds, pendingDefaultJob.id]);
+          setPendingDefaultJob(null);
+        }}
+      />
 
       {/* MCP Gateway Server Access */}
       {isAdminView && gatewayStatus?.managed && (
