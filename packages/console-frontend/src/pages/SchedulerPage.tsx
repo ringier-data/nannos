@@ -74,7 +74,7 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { SharedJobDefinition } from '@/api/generated/types.gen';
 import { SharingBadge } from '@/components/scheduler/sharing';
-import { subscriberCount } from '@/lib/sharedJobs';
+import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
 import { CronField } from '@/components/CronField';
 import { AgentActionFields } from '@/components/AgentActionFields';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
@@ -1136,6 +1136,7 @@ export function SchedulerPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              aria-label={`Pause ${job.name}`}
                               disabled={pauseMutation.isPending}
                               onClick={() => pauseMutation.mutate(job.id)}
                             >
@@ -1150,6 +1151,7 @@ export function SchedulerPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              aria-label={`Resume ${job.name}`}
                               disabled={resumeMutation.isPending}
                               onClick={() => resumeMutation.mutate(job.id)}
                             >
@@ -1165,6 +1167,9 @@ export function SchedulerPage() {
                             variant="ghost"
                             size="sm"
                             className="text-destructive hover:text-destructive"
+                            aria-label={`${
+                              isOwnJob(job) ? 'Delete' : 'Remove from my jobs'
+                            }: ${job.name}`}
                             disabled={deleteMutation.isPending}
                             onClick={() => setDeleteTarget(job)}
                           >
@@ -1172,7 +1177,7 @@ export function SchedulerPage() {
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          {job.owner_user_id === job.user_id ? 'Delete' : 'Remove from my jobs'}
+                          {isOwnJob(job) ? 'Delete' : 'Remove from my jobs'}
                         </TooltipContent>
                       </Tooltip>
                     </div>
