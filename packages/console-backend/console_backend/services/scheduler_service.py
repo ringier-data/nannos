@@ -265,6 +265,15 @@ class SchedulerService:
             raise ValueError(f"Sub-agent {sub_agent_id} not found")
         if agent.type == SubAgentType.AUTOMATED:
             return
+        # A PUBLIC agent is reachable by everyone without a grant — that is the whole
+        # meaning of the flag, and ``subscriber_can_run_agent`` honours it at dispatch.
+        # ``validate_agents_for_group`` does not: it answers the narrower question it was
+        # written for ("has this group been granted this agent"), so without this the
+        # gate refused every job running a public or system agent — `general-purpose`
+        # among them — telling the owner to "share the agent with the group first" for an
+        # agent the group already reaches and that nobody can grant.
+        if getattr(agent, "is_public", False):
+            return
         for group_id in group_ids:
             try:
                 await self.sub_agents.validate_agents_for_group(db, agent_ids=[sub_agent_id], group_id=group_id)

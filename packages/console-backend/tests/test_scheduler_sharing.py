@@ -89,6 +89,21 @@ def _watch_create(**overrides) -> ScheduledJobCreate:
     return ScheduledJobCreate(**fields)
 
 
+def _task_create(**overrides) -> ScheduledJobCreate:
+    """A TASK job, which is the shape that actually carries a ``sub_agent_id`` — and so
+    the only one the agent-reachability gate looks at."""
+    fields = dict(
+        name="Monday report",
+        job_type=JobType.TASK,
+        schedule_kind=ScheduleKind.CRON,
+        cron_expr="0 9 * * 1-5",
+        prompt="do the thing",
+        trigger_policy=TriggerPolicy.OVERRIDABLE,
+    )
+    fields.update(overrides)
+    return ScheduledJobCreate(**fields)
+
+
 @pytest_asyncio.fixture
 async def world(pg_session: AsyncSession):
     """Users in four timezones, one group (member: read, writer: write), a wired service."""
@@ -963,3 +978,72 @@ class TestAGroupDefaultOnlyAnnouncesItselfToPeopleItActuallyActivated:
 
         assert u["member"].id in dmd
         assert NotificationType.JOB_SUBSCRIPTION_ACTIVATED.value in await _notifications(db, u["member"].id)
+
+
+class TestTheAgentReachabilityGateHonoursPublicAgents:
+    """Sharing is refused when the group cannot reach the job's sub-agent — but "cannot
+    reach" must mean what it means everywhere else. A PUBLIC agent is reachable by
+    everyone without a grant (that is the whole flag), yet the gate asked only
+    ``sub_agent_permissions``, so no job running a public/system agent — `general-purpose`
+    among them — could be shared at all.
+    """
+
+    @staticmethod
+    def _agent(**kw):
+        agent = MagicMock(**kw)
+        agent.name = kw.get("name", "some-agent")
+        return agent
+
+    @staticmethod
+    async def _seed_agent(svc, db, *, name: str, is_public: bool) -> int:
+        """A real row (the definition's FK needs one), and the CREATOR's own access let
+        through — that check is not what is under test, so the group gate is left as the
+        only judge."""
+        agent_id = (
+            await db.execute(
+                text(
+                    "INSERT INTO sub_agents (name, owner_user_id, type, is_public) "
+                    "VALUES (:n, 'system', 'local', :p) RETURNING id"
+                ),
+                {"n": name, "p": is_public},
+            )
+        ).scalar_one()
+        svc.schedulable_sub_agents = AsyncMock(return_value=[MagicMock(id=agent_id)])
+        return agent_id
+
+    @pytest.mark.asyncio
+    async def test_a_public_agent_needs_no_group_grant(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        svc.sub_agents.get_sub_agent_by_id.return_value = self._agent(
+            type=SubAgentType.LOCAL, is_public=True, name="general-purpose"
+        )
+        agent_id = await self._seed_agent(svc, db, name="general-purpose", is_public=True)
+        # The grant-only validator would refuse; reachability does not depend on it.
+        svc.sub_agents.validate_agents_for_group.side_effect = ValueError(
+            "Group does not have permission to sub-agent 'general-purpose'. Add permissions first."
+        )
+        job = await svc.create_job(db, _task_create(sub_agent_id=agent_id), u["owner"])
+
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+
+        assert [p["user_group_id"] for p in await svc.get_permissions(db, job.definition_id, u["owner"])] == [gid]
+
+    @pytest.mark.asyncio
+    async def test_a_private_agent_the_group_cannot_reach_is_still_refused(self, world):
+        """The gate still does its job — sharing must not hand out agent access."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        svc.sub_agents.get_sub_agent_by_id.return_value = self._agent(
+            type=SubAgentType.LOCAL, is_public=False, name="private-agent"
+        )
+        agent_id = await self._seed_agent(svc, db, name="private-agent", is_public=False)
+        svc.sub_agents.validate_agents_for_group.side_effect = ValueError(
+            "Group does not have permission to sub-agent 'private-agent'. Add permissions first."
+        )
+        job = await svc.create_job(db, _task_create(sub_agent_id=agent_id), u["owner"])
+
+        with pytest.raises(ValueError, match="cannot reach"):
+            await svc.update_permissions(
+                db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+            )
