@@ -429,7 +429,9 @@ export function JobPermissionsDialog({
                                       <p className="max-w-xs">
                                         {role === 'none'
                                           ? 'Give the group access first.'
-                                          : `Activates the job for all ${group.member_count} members.`}
+                                          : group.member_count === 1
+                                            ? 'Activates the job for the 1 member.'
+                                            : `Activates the job for all ${group.member_count} members.`}
                                       </p>
                                     </TooltipContent>
                                   </Tooltip>
@@ -466,8 +468,8 @@ export function JobPermissionsDialog({
           <AlertDialogHeader>
             <AlertDialogTitle>Activate this job for everyone in the group?</AlertDialogTitle>
             <AlertDialogDescription>
-              "{jobName}" will start running for all {affectedMembers}{' '}
-              {affectedMembers === 1 ? 'member' : 'members'} of{' '}
+              "{jobName}" will start running for{' '}
+              {affectedMembers === 1 ? 'the 1 member' : `all ${affectedMembers} members`} of{' '}
               {newDefaults
                 .map((id) => availableGroups.find((g) => g.id === id)?.name ?? `group ${id}`)
                 .join(', ')}
