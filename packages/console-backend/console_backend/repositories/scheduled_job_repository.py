@@ -516,6 +516,32 @@ class ScheduledJobRepository(AuditedRepository):
         found = {r["user_id"]: r["timezone"] for r in result.mappings().all()}
         return {uid: found.get(uid) for uid in user_ids}
 
+    async def clear_trigger_override(
+        self, db: AsyncSession, actor: User, subscription_id: int, next_run_at: datetime
+    ) -> None:
+        """Reset ONE subscription to inherited — the subscriber's own counterpart to
+        ``clear_trigger_overrides``.
+
+        Audited as RESET_OVERRIDES rather than a plain update: going back to inheriting
+        is the same act as the writer's reset, and reading the audit log for "who stopped
+        following the default, and when" should not depend on which door it came through.
+        """
+        await self._subs.update(
+            db=db,
+            actor=actor,
+            entity_id=subscription_id,
+            fields={
+                "schedule_kind": None,
+                "cron_expr": None,
+                "interval_seconds": None,
+                "run_at": None,
+                "timezone": None,
+                "next_run_at": next_run_at,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            custom_action=AuditAction.RESET_OVERRIDES,
+        )
+
     async def clear_trigger_overrides(
         self, db: AsyncSession, actor: User, definition_id: int, next_runs: dict[int, datetime]
     ) -> list[int]:

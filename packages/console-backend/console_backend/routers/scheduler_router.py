@@ -57,7 +57,7 @@ from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 
 from ..services.spend_attribution import SERVICE_CONSOLE
 from ..services.scheduler_engine import SchedulerEngine
-from ..services.scheduler_service import _UNSET, SchedulerAccessError, SchedulerService
+from ..services.scheduler_service import _TRIGGER_FIELDS, _UNSET, SchedulerAccessError, SchedulerService
 from ..utils.timezones import resolve_timezone
 from .mcp_router import MCPTool, _list_mcp_tools, rank_mcp_tools
 
@@ -959,6 +959,21 @@ async def update_job(
 ) -> ScheduledJob:
     service = _get_scheduler_service(request)
 
+    # A trigger field is "touched" only when it arrives non-null, so an explicit null
+    # trigger used to be indistinguishable from an absent one: the request returned 200
+    # and changed nothing, which reads as "your override is cleared" when it is not.
+    # Clearing one is a real operation now, and it has its own route.
+    explicit_trigger_nulls = {f for f in _TRIGGER_FIELDS if f in data.model_fields_set}
+    if explicit_trigger_nulls and all(getattr(data, f) is None for f in explicit_trigger_nulls):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Sending a null schedule does not clear your own schedule. To follow the job's "
+                "default again, call scheduler_follow_default_schedule; to do it for every "
+                "subscriber, call scheduler_reset_job_schedules (needs write permission)."
+            ),
+        )
+
     # Use model_fields_set to detect which fields were explicitly provided
     # If field is in model_fields_set, pass its value (including None to clear)
     # If field is not in model_fields_set, pass _UNSET to keep current value
@@ -1143,6 +1158,38 @@ async def resume_job(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     job = await service.get_job(db=db, job_id=job_id, user_id=current_user.id)
     assert job is not None
+    return job
+
+
+@router.post(
+    "/jobs/{job_id}/follow-default-schedule",
+    response_model=ScheduledJob,
+    summary="Follow the job's default schedule again, dropping your own.",
+    description=(
+        "Clears the caller's own schedule for a shared job so it follows the job's default "
+        "once more, including later changes to it. Only the caller's subscription is touched — "
+        "other subscribers and the job's default are untouched, and it needs no write "
+        "permission. Idempotent: a job you already follow the default for is returned "
+        "unchanged. Use `scheduler_reset_job_schedules` to do this to every subscriber (needs "
+        "write)."
+    ),
+    tags=["MCP"],
+    operation_id="scheduler_follow_default_schedule",
+)
+async def follow_default_schedule(
+    job_id: int,
+    request: Request,
+    db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
+) -> ScheduledJob:
+    service = _get_scheduler_service(request)
+    try:
+        job = await service.follow_default_schedule(db=db, job_id=job_id, actor=current_user)
+    except ValueError as e:
+        # An unresolvable stored timezone, as on resume: actionable, not a 500.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job
 
 

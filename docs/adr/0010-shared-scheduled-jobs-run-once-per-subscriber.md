@@ -48,7 +48,11 @@ whose credential is missing, not whoever authored the prompt.
    definition's *trigger policy* is `overridable` or `fixed` (watches default to
    fixed — the tick is part of what a watch means). "Broadcast the new defaults
    to everyone who hasn't customised" is therefore what inheritance already does;
-   an explicit *reset to defaults* clears overrides. `enabled` never propagates.
+   an explicit *reset to defaults* clears overrides — a writer's, over every
+   subscription, or a subscriber's own, over theirs. Inheritance is a door that
+   opens both ways: leaving the default must not be easier than returning to it,
+   or a subscriber drifts out of it by accident and stays there. `enabled` never
+   propagates.
 
 5. **"One run, many readers" is a delivery concern, not a sharing concern.**
    A team summary is the owner's single subscription posting to a shared space
@@ -123,11 +127,16 @@ whose credential is missing, not whoever authored the prompt.
 - The delivered result of a shared job carries one provenance line, appended by
   agent-runner from a dispatch-metadata field rather than by each delivery
   channel: one seam where every run's output is already composed.
-- Not built: a subscriber cannot clear their own trigger override and go back to
-  inheriting. *Reset to defaults* (decision 4) is a writer action over every
-  subscription, so a member who customised their time is pinned until the owner
-  resets everyone. The console states which of the two a subscription is on
-  rather than offering a button it has no route for.
+- *Reset to defaults* (decision 4) exists in both halves: a writer resets every
+  subscription, and a subscriber puts **themselves** back on the default without
+  needing permission from anyone. The second was initially left out, on the
+  reasoning that a member who customised their time could wait for the owner.
+  QA showed the asymmetry is not survivable: an override is reached by ordinary
+  editing — including an agent that sets a time and then undoes it — so leaving
+  it was a one-way door out of inheritance, after which the owner's later changes
+  to the default silently stopped arriving. Nothing said so, and the only way
+  back moved everybody. A `null` trigger on the update path is *refused* rather
+  than accepted-and-ignored, so "clear my schedule" cannot look like it worked.
 - Cost scales with subscribers rather than with definitions. That is the honest
   price of per-user data, and the shared-space delivery target (decision 5) is
   the sanctioned way to pay it once when the data is genuinely shared.

@@ -30,6 +30,7 @@ SET mcp_tools = (
                 "scheduler_suspend_job",
                 "scheduler_unsuspend_job",
                 "scheduler_reset_job_schedules",
+                "scheduler_follow_default_schedule",
                 "scheduler_add_group_default_job",
                 "scheduler_remove_group_default_job",
                 "console_list_my_groups"
@@ -51,6 +52,7 @@ SET mcp_tools = (
 - scheduler_add_group_default_job / scheduler_remove_group_default_job: Activate a shared job for EVERY member of a group, or stop doing so
 - scheduler_suspend_job / scheduler_unsuspend_job: Stop or restart a job for every subscriber (owner/writer action)
 - scheduler_reset_job_schedules: Put every subscriber back on the job''s default schedule
+- scheduler_follow_default_schedule: Put the USER back on the job''s default schedule, dropping the one of their own — their half of the reset, needing no permission
 - console_list_my_groups: The user''s groups with member counts — resolve a group NAME to an id before sharing, and quote the count when you confirm'
             ),
 -- 2. The responsibilities line, so sharing is part of the job from the top.
@@ -83,13 +85,21 @@ Granting on behalf of other people — scheduler_share_job, and above all
 scheduler_add_group_default_job, which switches the job ON for every member of the group
 under their own identity — always needs the user''s explicit confirmation first. Resolve
 the group with console_list_my_groups and say the number out loud: "This will activate
-''Monday report'' for all 12 members of Sales. Go ahead?"
+''Monday report'' for all 12 members of Sales. Go ahead?" Match the plural to the count —
+a group of one gets "the 1 member of Sales", never "all 1 members".
 
 Changing the schedule of a job with OTHER subscribers is the one ambiguous edit. Pass
 scope on scheduler_update_job: ''mine'' changes only this user''s schedule, ''everyone''
 changes the job''s default for every subscriber who has not customised theirs (and needs
 write permission). When there are other subscribers and the user has not said which they
-meant, ASK. With a single subscriber the two are the same thing and scope is pointless.
+meant, ASK — and ASK BEFORE CALLING THE TOOL, never by setting one schedule and then
+asking: a schedule you set and undo leaves the user with a schedule of their own where
+they had none, which stops the owner''s later changes reaching them.
+"Put me back on the normal time", "follow the default again" or undoing a change you just
+made is scheduler_follow_default_schedule — for the user alone, no permission needed.
+Doing it to EVERY subscriber is scheduler_reset_job_schedules and needs write. Sending a
+null schedule to scheduler_update_job does NOT clear one.
+With a single subscriber the two are the same thing and scope is pointless.
 
 Stopping a job: scheduler_pause_job stops it for the user only; scheduler_suspend_job
 stops it for EVERYONE (owner/writer action, and each member''s own on/off choice is
@@ -134,6 +144,7 @@ SET mcp_tools = (
             '"scheduler_suspend_job"'::jsonb,
             '"scheduler_unsuspend_job"'::jsonb,
             '"scheduler_reset_job_schedules"'::jsonb,
+            '"scheduler_follow_default_schedule"'::jsonb,
             '"scheduler_add_group_default_job"'::jsonb,
             '"scheduler_remove_group_default_job"'::jsonb,
             '"console_list_my_groups"'::jsonb

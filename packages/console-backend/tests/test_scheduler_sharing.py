@@ -664,3 +664,101 @@ class TestSubscriberAgentAccessQuery:
         await svc.subscribe(db, job.definition_id, u["member"])
         assert await repo.subscriber_can_run_agent(db, u["member"].id, agent_id) is True
         assert await repo.subscriber_can_run_agent(db, u["outsider"].id, agent_id) is False
+
+
+class TestASubscriberCanGoBackToInheriting:
+    """The subscriber's half of "reset to defaults" (ADR-0010). Without it an override is
+    a one-way door: the owner's later changes to the default silently stop arriving, and
+    only the owner could undo it, for everybody at once."""
+
+    async def _subscribed_with_own_schedule(self, svc, db, u, gid):
+        """A job the owner shares, that `member` subscribes to and then overrides."""
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        mine = await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="30 6 * * *"),
+            actor=u["member"],
+        )
+        assert mine.trigger_inherited is False
+        return job, mine
+
+    @pytest.mark.asyncio
+    async def test_it_clears_only_the_callers_own_override(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job, mine = await self._subscribed_with_own_schedule(svc, db, u, gid)
+        # The writer diverges too, so we can see they are left alone.
+        theirs = await svc.subscribe(db, job.definition_id, u["writer"])
+        theirs = await svc.update_job(
+            db,
+            job_id=theirs.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="45 7 * * *"),
+            actor=u["writer"],
+        )
+
+        back = await svc.follow_default_schedule(db, mine.id, u["member"])
+
+        assert back is not None
+        assert back.trigger_inherited is True
+        assert back.cron_expr == "0 9 * * 1-5", "the default is what they now run on"
+        # Nobody else moved, and the job's own default is untouched.
+        assert (await svc.get_job(db, theirs.id, u["writer"].id)).cron_expr == "45 7 * * *"
+        definition = await svc.repo.get_definition(db, job.definition_id)
+        assert definition["cron_expr"] == "0 9 * * 1-5"
+        assert definition["revision"] == 1, "a subscriber's own schedule is not a definition edit"
+
+    @pytest.mark.asyncio
+    async def test_the_first_run_is_recomputed_in_the_subscribers_timezone(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        _job, mine = await self._subscribed_with_own_schedule(svc, db, u, gid)
+
+        back = await svc.follow_default_schedule(db, mine.id, u["member"])
+
+        # 09:00 of the definition's cron, read in the member's own zone — not the owner's.
+        assert back.next_run_at is not None
+        assert back.next_run_at.astimezone(ZoneInfo(TZ["member"])).hour == 9
+
+    @pytest.mark.asyncio
+    async def test_it_needs_no_write_permission(self, world):
+        """A reader owns their own schedule; giving it up is theirs to do."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        _job, mine = await self._subscribed_with_own_schedule(svc, db, u, gid)
+        assert mine.effective_permission == "read"
+
+        assert (await svc.follow_default_schedule(db, mine.id, u["member"])).trigger_inherited is True
+
+    @pytest.mark.asyncio
+    async def test_it_is_idempotent(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        _job, mine = await self._subscribed_with_own_schedule(svc, db, u, gid)
+
+        first = await svc.follow_default_schedule(db, mine.id, u["member"])
+        again = await svc.follow_default_schedule(db, mine.id, u["member"])
+
+        assert again.trigger_inherited is True
+        assert again.next_run_at == first.next_run_at, "a second call is not a reschedule"
+
+    @pytest.mark.asyncio
+    async def test_somebody_elses_subscription_is_not_found(self, world):
+        """Not a 403: the job view is viewer-relative, so another person's subscription
+        simply is not one of yours."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        _job, mine = await self._subscribed_with_own_schedule(svc, db, u, gid)
+
+        assert await svc.follow_default_schedule(db, mine.id, u["writer"]) is None
+        assert (await svc.get_job(db, mine.id, u["member"].id)).trigger_inherited is False
+
+    @pytest.mark.asyncio
+    async def test_it_is_audited_as_a_reset(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        _job, mine = await self._subscribed_with_own_schedule(svc, db, u, gid)
+
+        await svc.follow_default_schedule(db, mine.id, u["member"])
+
+        # "Who stopped following the default, and when" must not depend on which door
+        # the reset came through.
+        assert "reset_overrides" in await _audit_actions(db, "scheduled_job_subscription")

@@ -1105,6 +1105,44 @@ class SchedulerService:
             ],
         )
 
+    async def follow_default_schedule(self, db: AsyncSession, job_id: int, actor: User) -> ScheduledJob | None:
+        """The caller's own subscription follows the job's default schedule again.
+
+        The subscriber's counterpart to ``reset_overrides``: that one is a writer acting
+        over everybody, this one is a person undoing their own divergence. Without it an
+        override is a one-way door — a subscriber who once set their own time, or whose
+        agent set one for them, could never get back to "whatever the owner says", and
+        every later change to the default would silently stop reaching them.
+
+        Idempotent: a subscription that already inherits is returned unchanged, because
+        "make me follow the default" is a statement about the end state, not an event.
+        """
+        job = await self.repo.get_job(db, job_id)
+        if job is None or job.user_id != actor.id:
+            return None
+        if job.trigger_inherited and not job.timezone_override:
+            return job
+        definition = await self.repo.get_definition(db, job.definition_id)
+        assert definition is not None
+        tz = self._effective_tz(definition.get("timezone"), await self._user_timezone(db, actor.id)) or (
+            default_timezone_name()
+        )
+        await self.repo.clear_trigger_override(
+            db,
+            actor,
+            job_id,
+            first_run_at(
+                ScheduleKind(definition["schedule_kind"]),
+                definition.get("cron_expr"),
+                definition.get("interval_seconds"),
+                definition.get("run_at"),
+                tz=tz,
+                after=datetime.now(timezone.utc),
+            ),
+        )
+        await db.commit()
+        return await self.repo.get_job(db, job_id)
+
     async def reset_overrides(self, db: AsyncSession, definition_id: int, actor: User, is_admin: bool = False) -> int:
         """Writer action: every subscription follows the defaults again. Returns how many changed."""
         await self._require(db, definition_id, actor, "write", is_admin)

@@ -20,6 +20,7 @@ import {
   KeyRound,
   Users,
   Ban,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -68,6 +69,7 @@ import {
   consoleListMcpToolsOptions,
   schedulerSuspendJobMutation,
   schedulerUnsuspendJobMutation,
+  schedulerFollowDefaultScheduleMutation,
   schedulerResetJobSchedulesMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { JobPermissionsDialog } from '@/components/scheduler/JobPermissionsDialog';
@@ -683,6 +685,22 @@ function EditForm({ job }: { job: ScheduledJob }) {
     }
   }
 
+  // Going back to inheriting is not part of the form: it clears fields rather than
+  // setting them, and it lands immediately so the form can reload showing the default.
+  const followDefault = useMutation({
+    ...schedulerFollowDefaultScheduleMutation(),
+    onSuccess: () => {
+      toast.success("Following the job's default schedule again");
+      qc.invalidateQueries({ queryKey: ['scheduler-job', job.id] });
+      qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+      setDirty(false);
+      setEditing(false);
+    },
+    onError: (err) => {
+      toast.error('That did not work', { description: formatApiError(err) });
+    },
+  });
+
   // ── Save ──────────────────────────────────────────────────────────────────
   const mutation = useMutation({
     mutationFn: async ({ body, resume }: { body: Record<string, unknown>; resume: boolean }) => {
@@ -942,6 +960,22 @@ function EditForm({ job }: { job: ScheduledJob }) {
               <p className="text-xs text-muted-foreground">
                 You run on your own schedule; the job's default is {defaultScheduleLabel(job)}.
               </p>
+            )}
+            {/* Leaving the default is one click; without this, coming back was a favour
+                only the owner could do — and only for everybody at once. */}
+            {sharedTrigger && !triggerFixed && !job.trigger_inherited && (
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={followDefault.isPending}
+                  onClick={() => followDefault.mutate({ path: { job_id: job.id } })}
+                >
+                  <RotateCcw className="mr-1.5 h-4 w-4" />
+                  Follow the job's default again
+                </Button>
+              </div>
             )}
 
             {job.schedule_kind === 'cron' && (

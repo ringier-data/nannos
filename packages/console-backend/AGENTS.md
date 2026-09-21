@@ -810,7 +810,10 @@ delivery clients; `None` for a job nobody else runs, which is most of them.
 **What the model may do with all this** is the same set of routes with `tags=["MCP"]`:
 `scheduler_list_shared_jobs`, `scheduler_subscribe_job` / `_unsubscribe_job`, `scheduler_copy_job`,
 `scheduler_share_job`, `scheduler_suspend_job` / `_unsuspend_job`,
-`scheduler_reset_job_schedules`, `scheduler_add_group_default_job` / `_remove_group_default_job`,
+`scheduler_reset_job_schedules` / `scheduler_follow_default_schedule` (every subscriber, needing
+write, versus the caller's own, needing nothing — inheritance is a door that opens both ways, and
+a `null` trigger on `scheduler_update_job` is REFUSED rather than silently ignored, so "clear my
+schedule" cannot look like it worked), `scheduler_add_group_default_job` / `_remove_group_default_job`,
 plus one read tool on groups — `console_list_my_groups` (`GET /api/v1/groups/summaries`), which
 returns id, name, description and **member_count only**: a share is decided on "which group, and
 how many people does that mean", and the identities are not part of that question. `is_public` is

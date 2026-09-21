@@ -13084,6 +13084,36 @@ export type SchedulerResumeJobResponses = {
 
 export type SchedulerResumeJobResponse = SchedulerResumeJobResponses[keyof SchedulerResumeJobResponses];
 
+export type SchedulerFollowDefaultScheduleData = {
+    body?: never;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}/follow-default-schedule';
+};
+
+export type SchedulerFollowDefaultScheduleErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerFollowDefaultScheduleError = SchedulerFollowDefaultScheduleErrors[keyof SchedulerFollowDefaultScheduleErrors];
+
+export type SchedulerFollowDefaultScheduleResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScheduledJob;
+};
+
+export type SchedulerFollowDefaultScheduleResponse = SchedulerFollowDefaultScheduleResponses[keyof SchedulerFollowDefaultScheduleResponses];
+
 export type ResumeParkedRunApiV1SchedulerJobsJobIdRunsRunIdResumePostData = {
     body: ResumeRunRequest;
     path: {
