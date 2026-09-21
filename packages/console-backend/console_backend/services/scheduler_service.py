@@ -71,6 +71,11 @@ assert _DEFINITION_FIELDS | _TRIGGER_FIELDS | _SUBSCRIPTION_FIELDS | {"scope"} =
 #: What a subscriber whose access was revoked is told on their own (self-made)
 #: subscription. Re-granting access lets them enable it again with their customisation.
 _ACCESS_REVOKED_REASON = "Access to this shared job was revoked"
+#: Why a subscription of an elapsed one-shot is switched off. Two wordings for the same
+#: fact, because arriving at a job that already ran and being moved onto one are
+#: different stories for the person reading the pause reason.
+_ELAPSED_ONCE_ON_SUBSCRIBE = "This one-time job already ran before you subscribed"
+_ELAPSED_ONCE_ON_INHERIT = "This one-time job had already run when this schedule took effect"
 
 
 class SchedulerAccessError(PermissionError):
@@ -314,21 +319,42 @@ class SchedulerService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _first_occurrence(definition: dict[str, Any], tz: str, now: datetime) -> tuple[datetime, bool, str | None]:
-        """``(next_run_at, enabled, paused_reason)`` for a fresh subscription.
+    def _first_occurrence(
+        definition: dict[str, Any], tz: str, now: datetime, reason: str = _ELAPSED_ONCE_ON_SUBSCRIBE
+    ) -> tuple[datetime, bool, str | None]:
+        """``(next_run_at, enabled, paused_reason)`` for a subscription adopting *definition*'s trigger.
 
-        A one-shot whose time has already passed arrives DISABLED with a reason: writing
-        its past ``run_at`` as ``next_run_at`` with ``enabled`` would make the claim fire it
-        on the next tick, once per new subscriber — the same state ``resume_job`` refuses
-        to re-enable.
+        A one-shot whose time has already passed must arrive DISABLED with a reason:
+        writing its past ``run_at`` as ``next_run_at`` with ``enabled`` would make the
+        claim fire it on the next tick — the same state ``resume_job`` refuses to
+        re-enable. *reason* names how the subscription got here, because the four ways in
+        (subscribe, copy, a group default, and dropping an override) read differently to
+        the person who finds their job switched off.
         """
         kind = ScheduleKind(definition["schedule_kind"])
         next_run_at = first_run_at(
             kind, definition.get("cron_expr"), definition.get("interval_seconds"), definition.get("run_at"), tz=tz, after=now
         )
         if kind == ScheduleKind.ONCE and next_run_at <= now:
-            return next_run_at, False, "This one-time job already ran before you subscribed"
+            return next_run_at, False, reason
         return next_run_at, True, None
+
+    def _adopted_trigger_fields(self, definition: dict[str, Any], tz: str, now: datetime) -> dict[str, Any]:
+        """The timing columns for an EXISTING subscription that has just started following
+        *definition*'s trigger — dropping an override, or the default moving under it.
+
+        Never re-enables: a subscription switched off for its own reasons stays off. It
+        only ever *adds* a stop, for the one case where inheriting would otherwise arm a
+        one-shot that has already fired (found in review: three paths wrote a past
+        ``next_run_at`` onto an enabled row, and the claim fires whatever it finds due).
+        """
+        next_run_at, enabled, paused_reason = self._first_occurrence(
+            definition, tz, now, reason=_ELAPSED_ONCE_ON_INHERIT
+        )
+        fields: dict[str, Any] = {"next_run_at": next_run_at, "updated_at": now}
+        if not enabled:
+            fields |= {"enabled": False, "paused_reason": paused_reason, "retry_at": None}
+        return fields
 
     async def _own_subscription_fields(
         self,
@@ -474,16 +500,8 @@ class SchedulerService:
         now = datetime.now(timezone.utc)
         for s in inherited:
             tz = self._effective_tz(definition.get("timezone"), tzs.get(s.user_id)) or default_timezone_name()
-            next_run_at = first_run_at(
-                ScheduleKind(definition["schedule_kind"]),
-                definition.get("cron_expr"),
-                definition.get("interval_seconds"),
-                definition.get("run_at"),
-                tz=tz,
-                after=now,
-            )
             await self.repo.update_subscription(
-                db=db, actor=actor, subscription_id=s.id, fields={"next_run_at": next_run_at, "updated_at": now}
+                db=db, actor=actor, subscription_id=s.id, fields=self._adopted_trigger_fields(definition, tz, now)
             )
 
     def _merge_trigger(
@@ -1070,18 +1088,11 @@ class SchedulerService:
         overridden = [s for s in subs if not s.trigger_inherited]
         tzs = await self.repo.user_timezones(db, [s.user_id for s in overridden])
         now = datetime.now(timezone.utc)
-        next_runs: dict[int, datetime] = {}
+        timings: dict[int, dict[str, Any]] = {}
         for s in overridden:
             tz = self._effective_tz(definition.get("timezone"), tzs.get(s.user_id)) or default_timezone_name()
-            next_runs[s.id] = first_run_at(
-                ScheduleKind(definition["schedule_kind"]),
-                definition.get("cron_expr"),
-                definition.get("interval_seconds"),
-                definition.get("run_at"),
-                tz=tz,
-                after=now,
-            )
-        return await self.repo.clear_trigger_overrides(db, actor, definition["id"], next_runs)
+            timings[s.id] = self._adopted_trigger_fields(definition, tz, now)
+        return await self.repo.clear_trigger_overrides(db, actor, definition["id"], timings)
 
     async def _notify_reset(
         self, db: AsyncSession, actor: User, definition: dict[str, Any], subscription_ids: list[int]
@@ -1128,17 +1139,7 @@ class SchedulerService:
             default_timezone_name()
         )
         await self.repo.clear_trigger_override(
-            db,
-            actor,
-            job_id,
-            first_run_at(
-                ScheduleKind(definition["schedule_kind"]),
-                definition.get("cron_expr"),
-                definition.get("interval_seconds"),
-                definition.get("run_at"),
-                tz=tz,
-                after=datetime.now(timezone.utc),
-            ),
+            db, actor, job_id, self._adopted_trigger_fields(definition, tz, datetime.now(timezone.utc))
         )
         await db.commit()
         return await self.repo.get_job(db, job_id)
@@ -1303,11 +1304,17 @@ class SchedulerService:
                     "next_run_at": next_run_at,
                     "enabled": enabled,
                     "paused_reason": paused_reason,
-                    "_was_revoked": True,
                 }
             )
         created = await self.repo.bulk_subscribe(
-            db, actor, definition_id, activations, "group", group_id, revoked_reason=_ACCESS_REVOKED_REASON
+            db,
+            actor,
+            definition_id,
+            activations,
+            "group",
+            group_id,
+            revoked_reason=_ACCESS_REVOKED_REASON,
+            elapsed_once_reason=_ELAPSED_ONCE_ON_INHERIT,
         )
         if created and self._notification_service is not None:
             # The console shares and sets the group default in one Save, so a member can

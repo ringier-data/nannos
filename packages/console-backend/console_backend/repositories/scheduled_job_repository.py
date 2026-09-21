@@ -517,10 +517,14 @@ class ScheduledJobRepository(AuditedRepository):
         return {uid: found.get(uid) for uid in user_ids}
 
     async def clear_trigger_override(
-        self, db: AsyncSession, actor: User, subscription_id: int, next_run_at: datetime
+        self, db: AsyncSession, actor: User, subscription_id: int, timing: dict[str, Any]
     ) -> None:
         """Reset ONE subscription to inherited — the subscriber's own counterpart to
         ``clear_trigger_overrides``.
+
+        *timing* is the caller's ``_adopted_trigger_fields``: the recomputed
+        ``next_run_at`` plus, for an elapsed one-shot, the stop that keeps the claim from
+        firing it. Computed by the caller, which knows the subscriber's timezone.
 
         Audited as RESET_OVERRIDES rather than a plain update: going back to inheriting
         is the same act as the writer's reset, and reading the audit log for "who stopped
@@ -536,21 +540,21 @@ class ScheduledJobRepository(AuditedRepository):
                 "interval_seconds": None,
                 "run_at": None,
                 "timezone": None,
-                "next_run_at": next_run_at,
-                "updated_at": datetime.now(timezone.utc),
+                **timing,
             },
             custom_action=AuditAction.RESET_OVERRIDES,
         )
 
     async def clear_trigger_overrides(
-        self, db: AsyncSession, actor: User, definition_id: int, next_runs: dict[int, datetime]
+        self, db: AsyncSession, actor: User, definition_id: int, timings: dict[int, dict[str, Any]]
     ) -> list[int]:
         """Reset every override on a definition's subscriptions to inherited.
 
-        *next_runs* maps subscription id → its recomputed first occurrence under the
-        defaults (computed by the caller, who knows each subscriber's timezone). Only
-        subscriptions that actually carried an override are touched; their ids are
-        returned so the caller can notify exactly those subscribers.
+        *timings* maps subscription id → the timing columns it takes on under the
+        defaults (``_adopted_trigger_fields``: recomputed ``next_run_at``, plus the stop
+        an elapsed one-shot needs). Computed by the caller, who knows each subscriber's
+        timezone. Only subscriptions that actually carried an override are touched; their
+        ids are returned so the caller can notify exactly those subscribers.
         """
         result = await db.execute(
             text("""
@@ -570,9 +574,8 @@ class ScheduledJobRepository(AuditedRepository):
                 "run_at": None,
                 "timezone": None,
                 "updated_at": now,
+                **timings.get(sid, {}),
             }
-            if sid in next_runs:
-                fields["next_run_at"] = next_runs[sid]
             await self._subs.update(
                 db=db, actor=actor, entity_id=sid, fields=fields, custom_action=AuditAction.RESET_OVERRIDES
             )
@@ -587,6 +590,7 @@ class ScheduledJobRepository(AuditedRepository):
         activated_by: str,
         group_id: int | None,
         revoked_reason: str | None = None,
+        elapsed_once_reason: str | None = None,
     ) -> list[str]:
         """Create a subscription for every user in *activations* who has none yet.
 
@@ -597,8 +601,11 @@ class ScheduledJobRepository(AuditedRepository):
         and, when *group_id* is given, gains it in ``activated_by_groups`` so a later
         leave from that group is accounted for. A kept row that was stopped with
         *revoked_reason* (access withdrawn on an earlier leave) is switched back on: the
-        member is back, and their customisation with them. Returns the ids of users whose
-        subscription was created or re-enabled — the ones owed the consent notice.
+        member is back, and their customisation with them — unless its effective trigger
+        is a one-shot that has already fired, which keeps a stop reading
+        *elapsed_once_reason* instead of coming back armed. Returns the ids of users whose
+        subscription was created or re-enabled — the ones owed the consent notice, judged
+        on the row's state BEFORE this call.
         """
         if not activations:
             return []
@@ -654,26 +661,59 @@ class ScheduledJobRepository(AuditedRepository):
             elif group_id is not None:
                 # Already subscribed: record that this group also stands behind it, and
                 # lift a stop that access withdrawal put there — the member is back.
+                # ``was_revoked`` must be read BEFORE the update: ``RETURNING`` sees only
+                # the new row, so a post-update "is it live" test is true for every
+                # member who was never revoked — and they would then be told a job they
+                # subscribed to themselves "now runs under your account because it is a
+                # default job of one of your groups". Only a member this call actually
+                # brought back is news.
                 result = await db.execute(
                     text("""
-                        UPDATE scheduled_job_subscriptions
-                        SET activated_by_groups = (
-                                SELECT jsonb_agg(DISTINCT g) FROM jsonb_array_elements(
-                                    COALESCE(activated_by_groups, '[]'::jsonb) || CAST(:group AS jsonb)
-                                ) AS g
-                            ),
-                            enabled       = CASE WHEN paused_reason = :revoked THEN TRUE ELSE enabled END,
-                            retry_at      = CASE WHEN paused_reason = :revoked THEN NULL ELSE retry_at END,
-                            paused_reason = CASE WHEN paused_reason = :revoked THEN NULL ELSE paused_reason END,
-                            updated_at = :now
-                        WHERE definition_id = :definition_id AND user_id = :user_id AND deleted_at IS NULL
-                        RETURNING id, enabled, (paused_reason IS NULL AND enabled) AS live
+                        WITH before AS (
+                            SELECT s.id,
+                                   (s.paused_reason IS NOT NULL AND s.paused_reason = :revoked) AS was_revoked,
+                                   -- The EFFECTIVE trigger, override first: a one-shot
+                                   -- whose moment has passed must not come back armed
+                                   -- with its old past next_run_at, which the claim
+                                   -- would fire at once. ``resume_job`` refuses the same
+                                   -- state by hand; this is the path that bypassed it.
+                                   (COALESCE(s.schedule_kind, d.schedule_kind) = 'once'
+                                    AND COALESCE(s.run_at, d.run_at) <= :now) AS elapsed_once
+                            FROM scheduled_job_subscriptions s
+                            JOIN scheduled_job_definitions d ON d.id = s.definition_id
+                            WHERE s.definition_id = :definition_id AND s.user_id = :user_id
+                              AND s.deleted_at IS NULL
+                            FOR UPDATE OF s
+                        ), updated AS (
+                            UPDATE scheduled_job_subscriptions s
+                            SET activated_by_groups = (
+                                    SELECT jsonb_agg(DISTINCT g) FROM jsonb_array_elements(
+                                        COALESCE(s.activated_by_groups, '[]'::jsonb) || CAST(:group AS jsonb)
+                                    ) AS g
+                                ),
+                                enabled       = CASE WHEN b.was_revoked AND NOT b.elapsed_once
+                                                     THEN TRUE ELSE s.enabled END,
+                                retry_at      = CASE WHEN b.was_revoked THEN NULL ELSE s.retry_at END,
+                                -- Access is theirs again either way, so the revoked
+                                -- reason is stale; an elapsed one-shot keeps a stop, but
+                                -- one that says why it will not run.
+                                paused_reason = CASE WHEN b.was_revoked AND b.elapsed_once THEN :elapsed
+                                                     WHEN b.was_revoked THEN NULL
+                                                     ELSE s.paused_reason END,
+                                updated_at = :now
+                            FROM before b
+                            WHERE s.id = b.id
+                            RETURNING s.id, s.enabled
+                        )
+                        SELECT u.id, u.enabled, b.was_revoked
+                        FROM updated u JOIN before b ON b.id = u.id
                     """),
                     {
                         "definition_id": definition_id,
                         "user_id": entry["user_id"],
                         "group": json.dumps([group_id]),
                         "revoked": revoked_reason,
+                        "elapsed": elapsed_once_reason,
                         "now": now,
                     },
                 )
@@ -687,7 +727,7 @@ class ScheduledJobRepository(AuditedRepository):
                         action=AuditAction.UPDATE,
                         changes={"after": {"activated_by_groups_add": group_id, "enabled": row["enabled"]}},
                     )
-                    if revoked_reason is not None and row["live"] and entry.get("_was_revoked"):
+                    if row["was_revoked"] and row["enabled"]:
                         created.append(entry["user_id"])
         return created
 

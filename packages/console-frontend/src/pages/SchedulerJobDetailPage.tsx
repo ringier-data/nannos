@@ -121,6 +121,25 @@ function formatDuration(start: string | null | undefined, end: string | null | u
   return `${Math.round(ms / 60_000)}m`;
 }
 
+/**
+ * The effective trigger, as a string that changes whenever the server's does.
+ *
+ * Used as the edit form's `key`: the form seeds its schedule fields from the job once,
+ * so a trigger that moves underneath it (the viewer dropping their own schedule, or a
+ * writer resetting everyone's) has to remount the form rather than leave it holding —
+ * and then resaving — the values that were just cleared.
+ */
+function triggerIdentity(job: ScheduledJob): string {
+  return [
+    job.schedule_kind,
+    job.cron_expr,
+    job.interval_seconds,
+    job.run_at,
+    job.timezone,
+    job.trigger_inherited,
+  ].join('|');
+}
+
 /** The job's DEFAULT schedule in words — what an inherited subscription follows. */
 function defaultScheduleLabel(job: ScheduledJob): string {
   const t = job.trigger_defaults;
@@ -1625,7 +1644,12 @@ export function SchedulerJobDetailPage() {
             />
           )}
 
-          <EditForm job={job} />
+          {/* Keyed on the trigger the server reports, so a schedule that changed under
+              the form — dropping your own schedule, or the owner resetting everyone's —
+              remounts it on the new values. Without this the form keeps the old
+              override in `useState` and the next save resends it, quietly recreating the
+              override the user just cleared. */}
+          <EditForm key={triggerIdentity(job)} job={job} />
 
           <Card>
             <CardHeader>

@@ -37,7 +37,13 @@ SET mcp_tools = (
             ]'::jsonb
         ) AS t
     ),
-    system_prompt = replace(
+    -- Guarded so the up is re-runnable after the down. The down deliberately KEEPS the
+    -- prompt text (only mcp_tools go), and every search string below is a substring of
+    -- its own replacement — so an ungurded `rambler down` → `rambler up` would insert the
+    -- tool list, the `- Sharing:` line and the <sharing> block a SECOND time. The tools
+    -- assignment above is left unguarded on purpose: the down really did remove those,
+    -- and re-adding them is idempotent (`jsonb_agg(DISTINCT …)`).
+    system_prompt = CASE WHEN cv.system_prompt LIKE '%<sharing>%' THEN cv.system_prompt ELSE replace(
         replace(
             replace(
                 cv.system_prompt,
@@ -111,14 +117,15 @@ whether the user subscribed themselves or a group default did it for them.
 </sharing>
 
 <best_practices>'
-    ),
-    -- The agent card description, which is what the orchestrator routes on.
-    description = replace(
+    ) END,
+    -- The agent card description, which is what the orchestrator routes on. Guarded for
+    -- the same reason as the prompt above.
+    description = CASE WHEN cv.description LIKE '%Share jobs with groups%' THEN cv.description ELSE replace(
         cv.description,
         '- List, view, update, pause, or resume existing schedules',
         '- List, view, update, pause, or resume existing schedules
 - Share jobs with groups, subscribe to shared jobs, or make one a group''s default'
-    )
+    ) END
 FROM sub_agents sa
 WHERE cv.sub_agent_id = sa.id
   AND sa.name = 'task-scheduler'

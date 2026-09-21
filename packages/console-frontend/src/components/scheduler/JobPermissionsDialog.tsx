@@ -243,7 +243,15 @@ export function JobPermissionsDialog({
           ),
       ]);
       toast.success('Sharing updated');
-      await queryClient.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+      // Both keys: sharing changes `subscriber_count`, and the detail page this dialog
+      // was opened from decides its whole sharing surface from it — the badge, "Suspend
+      // for all"/"Reset schedules", and what the pause and delete tooltips say. Keyed on
+      // the prefix because the dialog knows the DEFINITION id, not the subscription id
+      // the detail query is keyed by.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['scheduler-jobs'] }),
+        queryClient.invalidateQueries({ queryKey: ['scheduler-job'] }),
+      ]);
       onOpenChange(false);
     } catch (err) {
       toast.error('Could not update sharing', { description: getErrorMessage(err) });

@@ -498,14 +498,18 @@ class TestGroupDefaultsFollowMembership:
             text("INSERT INTO user_group_members (user_group_id, user_id, group_role) VALUES (:g, :u, 'read')"),
             {"g": gid, "u": u["member"].id},
         )
-        before = len(await _notifications(db, u["member"].id))
         await svc.on_members_added(db, u["owner"], gid, [u["member"].id])
         await db.commit()
         theirs = await svc.get_job(db, mine.id, u["member"].id)
         assert theirs is not None and theirs.enabled is True and theirs.paused_reason is None
         assert theirs.cron_expr == "0 12 * * *"  # their customisation survived
         assert theirs.activated_by_groups == [gid]
-        assert len(await _notifications(db, u["member"].id)) == before + 1
+        # They are told they are back — asserted as the fact, not as a count: the
+        # activation also retracts their now-untrue "subscribe to run it" invitation, so
+        # the total does not move.
+        assert await _notifications(db, u["member"].id) == [
+            NotificationType.JOB_SUBSCRIPTION_ACTIVATED.value
+        ]
 
     @pytest.mark.asyncio
     async def test_deleting_the_group_ends_every_grant_through_it(self, world):
@@ -762,3 +766,200 @@ class TestASubscriberCanGoBackToInheriting:
         # "Who stopped following the default, and when" must not depend on which door
         # the reset came through.
         assert "reset_overrides" in await _audit_actions(db, "scheduled_job_subscription")
+
+
+class TestInheritingAnElapsedOneShotDoesNotArmIt:
+    """Adopting a definition's trigger must not write a past ``next_run_at`` onto an
+    enabled row: ``claim_due_jobs`` fires whatever it finds due, so a finished one-shot
+    would run again — once per subscriber dragged onto it. Found in review round 2; the
+    subscribe path already guarded this, three later paths did not.
+    """
+
+    async def _elapsed_once_shared(self, svc, db, u, gid):
+        """A ``once`` job whose moment has passed, shared to the group. The definition is
+        aged by hand because ``create_job`` rightly refuses a past ``run_at``."""
+        job = await svc.create_job(
+            db,
+            _watch_create(
+                schedule_kind=ScheduleKind.ONCE,
+                cron_expr=None,
+                run_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+            u["owner"],
+        )
+        await db.execute(
+            text("UPDATE scheduled_job_definitions SET run_at = :t WHERE id = :d"),
+            {"t": datetime.now(timezone.utc) - timedelta(days=2), "d": job.definition_id},
+        )
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        return job
+
+    @pytest.mark.asyncio
+    async def test_dropping_an_override_switches_it_off_instead(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await self._elapsed_once_shared(svc, db, u, gid)
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        # Their own future cron is live and legitimate …
+        mine = await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 9 * * *"),
+            actor=u["member"],
+        )
+        await svc.repo.update_subscription(
+            db=db, actor=u["member"], subscription_id=mine.id, fields={"enabled": True, "paused_reason": None}
+        )
+
+        back = await svc.follow_default_schedule(db, mine.id, u["member"])
+
+        assert back.trigger_inherited is True
+        assert back.enabled is False, "inheriting an elapsed one-shot must not leave it armed"
+        assert "already run" in (back.paused_reason or "")
+
+    @pytest.mark.asyncio
+    async def test_a_writers_reset_switches_them_off_instead(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await self._elapsed_once_shared(svc, db, u, gid)
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 9 * * *"),
+            actor=u["member"],
+        )
+        await svc.repo.update_subscription(
+            db=db, actor=u["member"], subscription_id=mine.id, fields={"enabled": True, "paused_reason": None}
+        )
+
+        await svc.reset_overrides(db, job.definition_id, u["owner"])
+
+        after = await svc.get_job(db, mine.id, u["member"].id)
+        assert after.trigger_inherited is True
+        assert after.enabled is False
+        assert "already run" in (after.paused_reason or "")
+
+    @pytest.mark.asyncio
+    async def test_a_live_recurring_default_is_left_enabled(self, world):
+        """The guard adds a stop only for the elapsed one-shot — it must not switch off a
+        subscription that is simply adopting a healthy cron."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="15 4 * * *"),
+            actor=u["member"],
+        )
+
+        back = await svc.follow_default_schedule(db, mine.id, u["member"])
+
+        assert back.trigger_inherited is True
+        assert back.enabled is True
+        assert back.paused_reason is None
+
+    @pytest.mark.asyncio
+    async def test_a_returning_member_does_not_resurrect_a_finished_one_shot(self, world):
+        """Leaving and rejoining the group lifts the access stop — but a one-shot that
+        already fired must not come back armed with its past ``next_run_at``, which the
+        claim would run immediately. ``resume_job`` refuses that state by hand; this path
+        used to bypass it.
+        """
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await svc.create_job(
+            db,
+            _watch_create(
+                schedule_kind=ScheduleKind.ONCE,
+                cron_expr=None,
+                run_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+            u["owner"],
+        )
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        await svc.set_group_default_jobs(db, gid, [job.definition_id], u["owner"])
+        # Its moment passes.
+        await db.execute(
+            text("UPDATE scheduled_job_definitions SET run_at = :t WHERE id = :d"),
+            {"t": datetime.now(timezone.utc) - timedelta(days=2), "d": job.definition_id},
+        )
+        await db.commit()
+
+        await db.execute(
+            text("DELETE FROM user_group_members WHERE user_group_id = :g AND user_id = :u"),
+            {"g": gid, "u": u["member"].id},
+        )
+        await svc.on_members_removed(db, u["owner"], gid, [u["member"].id])
+        await db.execute(
+            text("INSERT INTO user_group_members (user_group_id, user_id, group_role) VALUES (:g, :u, 'read')"),
+            {"g": gid, "u": u["member"].id},
+        )
+        await svc.on_members_added(db, u["owner"], gid, [u["member"].id])
+        await db.commit()
+
+        theirs = await svc.get_job(db, mine.id, u["member"].id)
+        assert theirs.enabled is False, "a finished one-shot must not be re-armed"
+        # The access stop is gone — they do have access again — replaced by the real reason.
+        assert theirs.paused_reason == "This one-time job had already run when this schedule took effect"
+
+
+class TestAGroupDefaultOnlyAnnouncesItselfToPeopleItActuallyActivated:
+    """A member who already runs a job must not be told it "now runs under your account
+    because it is a default job of one of your groups" — they chose it themselves. Found
+    in review round 2: the live-check read the row AFTER the update, so everybody healthy
+    looked freshly activated.
+    """
+
+    async def _shared(self, svc, db, u, gid):
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        return job
+
+    @pytest.mark.asyncio
+    async def test_an_existing_subscriber_is_not_announced_to(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        dmd: list[str] = []
+        svc.set_notice_sender(lambda job, text_body, **kw: dmd.append(job.user_id) or True)
+        job = await self._shared(svc, db, u, gid)
+        # The member opts in on their own, BEFORE the job becomes a group default.
+        await svc.subscribe(db, job.definition_id, u["member"])
+        before = await _notifications(db, u["member"].id)
+
+        await svc.add_group_default_job(db, gid, job.definition_id, u["owner"])
+
+        after = await _notifications(db, u["member"].id)
+        assert [n for n in after if n not in before] == [], "nothing new is owed to a self-subscriber"
+        assert u["member"].id not in dmd
+        # The writer, who was not subscribed, IS activated and told.
+        assert u["writer"].id in dmd
+
+    @pytest.mark.asyncio
+    async def test_a_member_brought_back_after_revocation_is_announced_to(self, world):
+        """The case the flag was meant for still works: a stop that access withdrawal put
+        there is lifted, and that IS news."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await self._shared(svc, db, u, gid)
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        # Access withdrawn: the self-made subscription is stopped with the revoked reason.
+        await svc.update_permissions(db, job.definition_id, [], u["owner"])
+        stopped = await svc.get_job(db, mine.id, u["member"].id)
+        assert stopped.enabled is False
+
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        dmd: list[str] = []
+        svc.set_notice_sender(lambda job, text_body, **kw: dmd.append(job.user_id) or True)
+        await svc.add_group_default_job(db, gid, job.definition_id, u["owner"])
+
+        assert u["member"].id in dmd
+        assert NotificationType.JOB_SUBSCRIPTION_ACTIVATED.value in await _notifications(db, u["member"].id)

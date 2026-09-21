@@ -82,6 +82,7 @@ import { argsModeFor, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
 import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
+import { toast } from 'sonner';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -909,6 +910,14 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
   const qc = useQueryClient();
   const { data: definitions = [] } = useQuery(schedulerListSharedJobsOptions());
 
+  // Both can fail on a definition that was reachable when the list loaded and is not
+  // any more — access revoked, or the job's agent no longer shared with the viewer. With
+  // no onError the spinner just stops and the row sits there, which reads as "nothing
+  // happened" rather than "that is no longer yours to activate".
+  const onActivateError = (err: unknown) => {
+    toast.error('That did not work', { description: formatApiError(err) });
+    qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+  };
   const subscribe = useMutation({
     ...schedulerSubscribeJobMutation(),
     onSuccess: (job) => {
@@ -916,6 +925,7 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
       qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
       onOpen(job.id);
     },
+    onError: onActivateError,
   });
   const copy = useMutation({
     ...schedulerCopyJobMutation(),
@@ -924,6 +934,7 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
       qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
       onOpen(job.id);
     },
+    onError: onActivateError,
   });
 
   // Anything already activated is in the viewer's own table above; showing it twice
@@ -1045,7 +1056,14 @@ export function SchedulerPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (jobId: number) => deleteJob(jobId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['scheduler-jobs'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+      // On a job the viewer does not own this was an UNSUBSCRIBE, so the definition
+      // belongs back in "Shared with you" — which filters on a cached
+      // `subscription_id == null`. Without this the job leaves both tables and looks
+      // deleted, flatly contradicting the dialog's "you can activate it again later".
+      qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+    },
   });
 
   return (
