@@ -584,6 +584,12 @@ function EditForm({ job }: { job: ScheduledJob }) {
   // else; a writer owns what the job does.
   const canWrite = job.effective_permission !== 'read';
   const others = subscriberCount(job) > 1;
+  // Whether "is this the job's schedule or mine?" is a question with two answers. It is
+  // whenever somebody else owns the default (they can move it under you) OR somebody
+  // else follows it (you can move away from them) — NOT only when a second subscriber
+  // exists: an owner may unsubscribe and keep the definition, which leaves a lone
+  // subscriber whose trigger still diverges from a default they do not control.
+  const sharedTrigger = !isOwnJob(job) || others;
   const triggerFixed = job.trigger_policy === 'fixed';
   // FIXED means the owner pins the tick — a watch's tick is part of what the watch
   // means — so only a writer, changing it for everyone, may touch it.
@@ -923,7 +929,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
                 This job's schedule is fixed, so a change applies to every subscriber.
               </p>
             )}
-            {others && !canWrite && (
+            {sharedTrigger && !canWrite && (
               <p className="text-xs text-muted-foreground">
                 {triggerFixed
                   ? `The schedule is fixed by ${job.owner_email ?? 'the owner'} and cannot be changed here.`
@@ -932,7 +938,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
                     : `This is your own schedule. The job's default is ${defaultScheduleLabel(job)}.`}
               </p>
             )}
-            {others && canWrite && !job.trigger_inherited && (
+            {sharedTrigger && canWrite && !job.trigger_inherited && (
               <p className="text-xs text-muted-foreground">
                 You run on your own schedule; the job's default is {defaultScheduleLabel(job)}.
               </p>
