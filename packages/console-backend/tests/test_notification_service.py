@@ -321,3 +321,67 @@ async def test_get_unread_count(pg_session: AsyncSession):
     # Count after marking some read
     count = await service.get_unread_count(pg_session, "user-1")
     assert count == 3
+
+
+@pytest.mark.asyncio
+async def test_supersede_notifications_drops_only_unread_matching(pg_session: AsyncSession):
+    """An activation supersedes the share invitation it makes untrue (ADR-0010).
+
+    Read notices, other definitions and other types survive: superseding rewrites what
+    somebody has not seen yet, never what they have.
+    """
+    service = NotificationService()
+    await pg_session.execute(
+        text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, role) VALUES
+              ('sup-1', 'sup-sub-1', 'sup1@test.com', 'Sup', 'One', 'member'),
+              ('sup-2', 'sup-sub-2', 'sup2@test.com', 'Sup', 'Two', 'member')
+        """)
+    )
+    await pg_session.commit()
+
+    async def notify(user_id, ntype, meta):
+        return await service.create_notification(
+            db=pg_session, user_id=user_id, notification_type=ntype,
+            title="t", message="m", metadata=meta,
+        )
+
+    target = await notify("sup-1", NotificationType.JOB_SHARED, {"definition_id": 7})
+    other_user = await notify("sup-2", NotificationType.JOB_SHARED, {"definition_id": 7})
+    other_def = await notify("sup-1", NotificationType.JOB_SHARED, {"definition_id": 8})
+    other_type = await notify("sup-1", NotificationType.JOB_PERMISSION_CHANGED, {"definition_id": 7})
+    already_read = await notify("sup-1", NotificationType.JOB_SHARED, {"definition_id": 7})
+    await pg_session.execute(
+        text("UPDATE user_notifications SET read_at = now() WHERE id = :id"), {"id": already_read}
+    )
+    await pg_session.commit()
+
+    removed = await service.supersede_notifications(
+        db=pg_session,
+        user_ids=["sup-1"],
+        notification_types=[NotificationType.JOB_SHARED],
+        metadata_match={"definition_id": 7},
+    )
+    await pg_session.commit()
+
+    assert removed == 1
+    result = await pg_session.execute(
+        text("SELECT id FROM user_notifications WHERE id = ANY(:ids)"),
+        {"ids": [target, other_user, other_def, other_type, already_read]},
+    )
+    survivors = {row[0] for row in result}
+    assert target not in survivors
+    assert survivors == {other_user, other_def, other_type, already_read}
+
+
+@pytest.mark.asyncio
+async def test_supersede_notifications_no_targets_is_a_noop(pg_session: AsyncSession):
+    """Empty inputs must not turn into a DELETE with no predicate."""
+    service = NotificationService()
+    assert await service.supersede_notifications(
+        db=pg_session, user_ids=[], notification_types=[NotificationType.JOB_SHARED],
+        metadata_match={"definition_id": 1},
+    ) == 0
+    assert await service.supersede_notifications(
+        db=pg_session, user_ids=["sup-1"], notification_types=[], metadata_match={"definition_id": 1},
+    ) == 0

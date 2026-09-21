@@ -107,6 +107,45 @@ class NotificationService:
         logger.info(f"Created {len(notification_ids)} notifications in bulk")
         return notification_ids
 
+    async def supersede_notifications(
+        self,
+        db: AsyncSession,
+        user_ids: list[str],
+        notification_types: list[NotificationType],
+        metadata_match: dict[str, object],
+    ) -> int:
+        """Drop UNREAD notifications that a newer one has just made untrue.
+
+        Only unread ones: a notice the person has already seen is part of what happened
+        to them, and removing it would rewrite their history. An unread one they will
+        read *after* the event that contradicts it, which is worse than not sending it.
+
+        Matching is by notification type plus a containment test on ``metadata``, so a
+        caller supersedes only the notices about the very thing it just changed.
+
+        Returns how many were removed.
+        """
+        if not user_ids or not notification_types:
+            return 0
+        result = await db.execute(
+            text("""
+                DELETE FROM user_notifications
+                WHERE user_id = ANY(:user_ids)
+                  AND type = ANY(:types)
+                  AND read_at IS NULL
+                  AND metadata @> CAST(:match AS jsonb)
+            """),
+            {
+                "user_ids": list(user_ids),
+                "types": [t.value for t in notification_types],
+                "match": json.dumps(metadata_match),
+            },
+        )
+        removed = result.rowcount or 0
+        if removed:
+            logger.info(f"Superseded {removed} unread notification(s) matching {metadata_match}")
+        return removed
+
     async def get_user_notifications(
         self,
         db: AsyncSession,

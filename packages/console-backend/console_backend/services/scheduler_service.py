@@ -1272,6 +1272,17 @@ class SchedulerService:
             db, actor, definition_id, activations, "group", group_id, revoked_reason=_ACCESS_REVOKED_REASON
         )
         if created and self._notification_service is not None:
+            # The console shares and sets the group default in one Save, so a member can
+            # be handed "…has been shared with your group. Subscribe to run it under your
+            # own account." moments before being subscribed for them. Activation answers
+            # that invitation, so drop it if they have not read it yet — otherwise they
+            # are told to do a thing that is already done.
+            await self._notification_service.supersede_notifications(
+                db,
+                user_ids=created,
+                notification_types=[NotificationType.JOB_SHARED],
+                metadata_match={"definition_id": definition_id},
+            )
             await self._notification_service.bulk_create_notifications(
                 db,
                 [
