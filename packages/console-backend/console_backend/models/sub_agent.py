@@ -192,8 +192,10 @@ class SkillDefinition(BaseModel):
     provenance: SkillProvenance | None = Field(
         default=None,
         description=(
-            "Write-only. Set by a sync that mirrors a skill it does not author (well-known); "
-            "the registry then updates the row it wrote last time instead of creating a new one."
+            "Server-set. A host sync that mirrors a skill it does not author (well-known) stamps "
+            "this so the registry updates the row it wrote last time instead of creating a new one. "
+            "Ignored on create/update request bodies — a client cannot declare its own skill "
+            "mirrored, which would make it permanently uneditable."
         ),
     )
 

@@ -2377,6 +2377,8 @@ class SubAgentService:
             thinking_level=target.config_version.thinking_level,
             enable_thinking=target.config_version.enable_thinking,
             skills=target.config_version.skills,
+            # Reverting replays a stored version, so its provenance is ours, not input.
+            trust_provenance=True,
             sandbox_enabled=target.config_version.sandbox_enabled,
         )
 
@@ -2691,6 +2693,8 @@ class SubAgentService:
         actor: User,
         sub_agent_id: int,
         skills: list[SkillDefinition],
+        *,
+        trust_provenance: bool = False,
     ) -> list[SkillRef]:
         """Persist all skills to the registry and return lightweight references.
 
@@ -2705,6 +2709,12 @@ class SubAgentService:
 
         Returns a list of SkillRef — the only thing stored in config version JSONB.
         Full content is resolved from skill_registry on read.
+
+        ``trust_provenance`` says the skills came from a host sync or from a stored
+        version, not from a request body. SkillDefinition is both the internal sync type
+        and the public SubAgentCreate/Update payload, so without this a client could
+        stamp ``source_type='well-known'`` on its own skill and permanently lock itself
+        out of editing it (update_skill 403s on any non-'nannos' source).
         """
 
         if self._skill_registry_service is None:
@@ -2757,7 +2767,7 @@ class SubAgentService:
                     files=registry_files,
                     registry_id=skill.registry_id,
                     visibility=skill.visibility,
-                    provenance=skill.provenance,
+                    provenance=skill.provenance if trust_provenance else None,
                 )
 
                 ref = SkillRef(
@@ -2765,6 +2775,21 @@ class SubAgentService:
                     content_hash=content_hash,
                 )
             result.append(ref)
+
+        # A sync declares the agent's complete mirrored skill set, so rows it did not
+        # write this time are withdrawn or renamed upstream and must not outlive it —
+        # a public one would otherwise stay world-readable with nothing pointing at it.
+        if trust_provenance:
+            source_types = {s.provenance.source_type for s in skills if s.provenance}
+            keep_ids = [r.registry_id for r in result if r.registry_id]
+            for source_type in sorted(source_types):
+                await registry_service.prune_mirrored_skills(
+                    db=db,
+                    actor=actor,
+                    sub_agent_id=sub_agent_id,
+                    source_type=source_type,
+                    keep_ids=keep_ids,
+                )
         return result
 
     async def resolve_imported_skills(self, db: AsyncSession, sub_agent: "SubAgent") -> None:
@@ -3133,6 +3158,8 @@ class SubAgentService:
             skills=skills,
             sandbox_enabled=bool(baseline.sandbox_enabled) if baseline else False,
             version_hash=version_hash,
+            # The host definition is the authority on provenance (ADR 0006).
+            trust_provenance=True,
         )
         await self.repo.update_current_version(db, actor, sub_agent_id, new_version)
         await self.repo.approve_version(
@@ -3167,6 +3194,7 @@ class SubAgentService:
         skills: list[SkillDefinition] | None = None,
         sandbox_enabled: bool = False,
         version_hash: str | None = None,
+        trust_provenance: bool = False,
     ) -> int:
         """Create a new configuration version entry. Returns the new version ID.
 
@@ -3180,7 +3208,9 @@ class SubAgentService:
 
         # Persist all skills (custom + imported) to the registry and return refs.
         # Full content lives in the skill_registry table and is resolved on read.
-        skill_refs = await self._persist_and_strip_skills(db, actor, sub_agent_id, skills_list)
+        skill_refs = await self._persist_and_strip_skills(
+            db, actor, sub_agent_id, skills_list, trust_provenance=trust_provenance
+        )
 
         if version_hash is None:
             version_hash = self._generate_version_hash(

@@ -358,6 +358,44 @@ class SkillRegistryService:
             changes={"before": {"name": entry.name, "slug": entry.slug, "visibility": entry.visibility}},
         )
 
+    async def prune_mirrored_skills(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        source_type: str,
+        keep_ids: list[str],
+    ) -> list[str]:
+        """Delete the sub-agent's mirrored rows that the latest sync did not write.
+
+        ``upsert_agent_skill`` matches a mirrored row by (sub-agent, source type, name),
+        so renaming a skill upstream writes a new row and withdrawing one writes nothing
+        — either way the previous row survives with no binding pointing at it. A public
+        one stays world-readable forever, which is the part that matters: the host has
+        stopped publishing the skill but the registry has not.
+
+        Activation copies content into the activating user's own docstore, so deleting
+        the registry row never breaks anyone who already activated it.
+
+        Returns the ids removed.
+        """
+        result = await db.execute(
+            text(
+                "SELECT id FROM skill_registry "
+                "WHERE sub_agent_id = :sub_agent_id AND scope = 'sub-agent' AND source_type = :source_type"
+            ),
+            {"sub_agent_id": sub_agent_id, "source_type": source_type},
+        )
+        keep = {str(k) for k in keep_ids}
+        stale = [str(row["id"]) for row in result.mappings().all() if str(row["id"]) not in keep]
+        for skill_id in stale:
+            await self.remove(db, actor, skill_id)
+        if stale:
+            logger.info(
+                "Pruned %d stale '%s' registry row(s) for sub-agent %s", len(stale), source_type, sub_agent_id
+            )
+        return stale
+
     async def find_by_content_hash(self, db: AsyncSession, content_hash: str) -> list[SkillRegistryEntry]:
         """Find registry entries with the same content hash (duplicate detection)."""
         result = await db.execute(

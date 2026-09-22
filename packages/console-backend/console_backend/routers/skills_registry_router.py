@@ -1067,6 +1067,34 @@ async def _check_registry_write_access(
         )
 
 
+async def _check_registry_read_access(
+    request: Request,
+    db: AsyncSession,
+    entry: SkillRegistryEntry,
+    user: User,
+) -> None:
+    """Verify the user may read a registry entry's contents.
+
+    Activation copies the entry's SKILL.md and bundled files into the caller's own
+    docstore, so it discloses the full body — it needs the same gate as a GET, not
+    merely an authenticated session.
+
+    Readable when: the entry is public, the caller owns it, or it is sub-agent scoped
+    and the caller can reach the parent agent. Anything else 404s, matching
+    ``_check_sub_agent_skill_access`` so a probe cannot distinguish "exists but is
+    private" from "does not exist".
+    """
+    if entry.visibility == "public" or entry.owner_id == user.id:
+        return
+    if entry.scope == "sub-agent" and entry.sub_agent_id:
+        await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+        return
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Skill '{entry.id}' not found in registry",
+    )
+
+
 def _validate_skill_name(name: str) -> None:
     """Validate skill name per the SKILL.md spec (agentskills.io/specification).
 
@@ -1283,6 +1311,8 @@ async def mcp_activate_skill(
         entry = await skill_registry_service.get_by_id(db, body.registry_id)
         if not entry:
             raise HTTPException(status_code=404, detail=f"Registry entry '{body.registry_id}' not found")
+        # get_by_slug filters to public; the by-id path has to gate for itself.
+        await _check_registry_read_access(request, db, entry, user)
     else:
         entry = await skill_registry_service.get_by_slug(db, body.skill_name)
         if not entry:
@@ -1302,12 +1332,14 @@ async def mcp_activate_skill(
             ),
         )
 
-    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id:
+    # A public sub-agent skill is explicitly activatable elsewhere (ADR 0006): that is
+    # what publishing it means. A private one stays bound to the agent that owns it.
+    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id and entry.visibility != "public":
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Skill '{entry.slug}' is scoped to a specific sub-agent and cannot be activated on a different agent. "
-                "Use 'console_create_skill' to create a new copy that can be activated on your agent, or use "
+                f"Skill '{entry.slug}' is private to a specific sub-agent and cannot be activated on a different "
+                "agent. Ask its owner to publish it, use 'console_create_skill' to create a new copy, or use "
                 "'console_update_skill' to change the scope to 'standalone' to make it agent-agnostic."
             ),
         )
@@ -1364,6 +1396,9 @@ async def activate_skill(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found in registry")
+
+    # Activation copies the body into the caller's docstore — gate it like a read.
+    await _check_registry_read_access(request, db, entry, user)
 
     playbook_service = get_playbook_service(request)
 
@@ -1436,6 +1471,12 @@ async def update_visibility(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
+
+    # Publishing is the one write that changes who can read the body, so it takes the
+    # same write gate as editing it. Without this any authenticated user could flip
+    # another team's private sub-agent skill to public and then read it.
+    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _check_registry_write_access(request, db, entry, user.id, entry.sub_agent_id or 0)
 
     try:
         await skill_registry_service.update_visibility(

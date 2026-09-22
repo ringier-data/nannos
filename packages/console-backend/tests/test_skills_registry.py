@@ -700,12 +700,13 @@ class TestUpdateVisibility:
     async def test_update_visibility_success(self):
         from console_backend.routers.skills_registry_router import VisibilityUpdate, update_visibility
 
-        entry = _make_mock_registry_entry()
+        entry = _make_mock_registry_entry(owner_id="user-id-1")
         mock_db = AsyncMock()
         mock_db.commit = AsyncMock()
         mock_srs = MagicMock()
         mock_srs.get_by_id = AsyncMock(return_value=entry)
         mock_srs.update_visibility = AsyncMock()
+        mock_srs.check_write_access = AsyncMock(return_value=True)
         mock_request = MagicMock()
         mock_request.app.state.skill_registry_service = mock_srs
 
@@ -966,3 +967,154 @@ class TestSkillsRegistryService:
         service = SkillsRegistryService.__new__(SkillsRegistryService)
         with pytest.raises(ValueError):
             service.resolve_registry_id("invalid")
+
+
+# --- Authorization regression tests (post-#255 review) ---
+
+
+class TestRegistryAuthorization:
+    """A public registry entry may be read by anyone; it may not be written by anyone.
+
+    Both endpoints below reached ``get_by_id`` with nothing but ``require_auth`` between
+    the caller and another team's private sub-agent skill.
+    """
+
+    def _request(self, srs, playbook_service=None):
+        request = MagicMock()
+        request.app.state.skill_registry_service = srs
+        request.app.state.playbook_service = playbook_service
+        return request
+
+    @pytest.mark.asyncio
+    async def test_visibility_denied_for_non_owner(self):
+        """A stranger cannot publish someone else's sub-agent skill to read it."""
+        from console_backend.routers.skills_registry_router import VisibilityUpdate, update_visibility
+
+        entry = _make_mock_registry_entry(
+            owner_id="someone-else", visibility="private", scope="sub-agent", sub_agent_id=7
+        )
+        srs = MagicMock()
+        srs.get_by_id = AsyncMock(return_value=entry)
+        srs.update_visibility = AsyncMock()
+        srs.check_write_access = AsyncMock(return_value=False)
+
+        mock_db = AsyncMock()
+        # _check_sub_agent_skill_access: the caller cannot reach the parent agent.
+        mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
+
+        with pytest.raises(Exception) as exc_info:
+            await update_visibility(
+                request=self._request(srs),
+                skill_id="11111111-2222-3333-4444-555555555555",
+                body=VisibilityUpdate(visibility="public"),
+                user=_make_user(),
+                db=mock_db,
+            )
+        assert exc_info.value.status_code == 404
+        srs.update_visibility.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_denied_for_private_entry_of_another_owner(self):
+        """Activation copies the body out, so a private standalone entry is not readable."""
+        from console_backend.routers.skills_registry_router import ActivateRequest, activate_skill
+
+        entry = _make_mock_registry_entry(owner_id="someone-else", visibility="private", scope="standalone")
+        srs = MagicMock()
+        srs.get_by_id = AsyncMock(return_value=entry)
+        playbook_service = MagicMock()
+        playbook_service.put_skill_with_files = AsyncMock()
+
+        with pytest.raises(Exception) as exc_info:
+            await activate_skill(
+                skill_id="11111111-2222-3333-4444-555555555555",
+                body=ActivateRequest(agent="my-agent", scope="personal"),
+                request=self._request(srs, playbook_service),
+                user=_make_user(),
+                db=AsyncMock(),
+            )
+        assert exc_info.value.status_code == 404
+        playbook_service.put_skill_with_files.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_allowed_for_own_private_entry(self):
+        """The owner still reaches their own private skill."""
+        from console_backend.routers.skills_registry_router import ActivateRequest, activate_skill
+
+        entry = _make_mock_registry_entry(owner_id="user-id-1", visibility="private", scope="standalone")
+        srs = MagicMock()
+        srs.get_by_id = AsyncMock(return_value=entry)
+        playbook_service = MagicMock()
+        playbook_service.is_available = True
+        playbook_service.get_skill = AsyncMock(return_value=None)
+        playbook_service.put_skill_with_files = AsyncMock(return_value=None)
+
+        result = await activate_skill(
+            skill_id="11111111-2222-3333-4444-555555555555",
+            body=ActivateRequest(agent="my-agent", scope="personal"),
+            request=self._request(srs, playbook_service),
+            user=_make_user(),
+            db=AsyncMock(),
+        )
+        assert result["activated"] is True
+
+
+class TestMcpActivateCrossAgent:
+    """ADR 0006: publishing a sub-agent skill is what makes it activatable elsewhere.
+
+    The guard refused every cross-agent activation regardless of visibility, so the
+    'every user can activate it on other agents' half of `nannos-visibility: public`
+    could not happen.
+    """
+
+    def _patches(self, entry, sub_agent_id):
+        """Stub the agent resolution, permission check and activation around the guard."""
+        import console_backend.routers.skills_registry_router as mod
+
+        srs = MagicMock()
+        srs.get_by_id = AsyncMock(return_value=entry)
+        activation = MagicMock()
+        activation.activate = AsyncMock(return_value=None)
+        sub_agents = MagicMock()
+        sub_agents.check_user_permission = AsyncMock(return_value=True)
+        request = MagicMock()
+        request.app.state.skill_registry_service = srs
+
+        return mod, activation, request, [
+            patch.object(mod, "_resolve_sub_agent_id", AsyncMock(return_value=(sub_agent_id, "other-agent"))),
+            patch.object(mod, "_get_sub_agent_service", MagicMock(return_value=sub_agents)),
+            patch.object(mod, "_check_registry_read_access", AsyncMock(return_value=None)),
+            patch.object(mod, "_get_skill_activation_service", MagicMock(return_value=activation)),
+        ]
+
+    async def _activate(self, entry, sub_agent_id):
+        from console_backend.routers.skills_registry_router import McpActivateSkillInput, mcp_activate_skill
+
+        mod, activation, request, patches = self._patches(entry, sub_agent_id)
+        for p in patches:
+            p.start()
+        try:
+            body = McpActivateSkillInput(
+                agent_name="other-agent",
+                registry_id="11111111-2222-3333-4444-555555555555",
+                scope="sub-agent",
+            )
+            result = await mcp_activate_skill(body=body, request=request, user=_make_user(), db=AsyncMock())
+            return result, activation
+        finally:
+            for p in patches:
+                p.stop()
+
+    @pytest.mark.asyncio
+    async def test_public_sub_agent_skill_activates_on_another_agent(self):
+        entry = _make_mock_registry_entry(scope="sub-agent", sub_agent_id=1, visibility="public")
+        result, activation = await self._activate(entry, sub_agent_id=2)
+        assert result.registry_id == entry.id
+        activation.activate.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_private_sub_agent_skill_still_refused(self):
+        entry = _make_mock_registry_entry(scope="sub-agent", sub_agent_id=1, visibility="private")
+        with pytest.raises(Exception) as exc_info:
+            await self._activate(entry, sub_agent_id=2)
+        assert exc_info.value.status_code == 400
+        assert "private to a specific sub-agent" in exc_info.value.detail

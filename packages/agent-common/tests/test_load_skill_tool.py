@@ -99,3 +99,49 @@ class TestWiring:
         )
         assert score == 0.0
         assert entry is not None and entry.base_score == 0.0
+
+
+# --- Size ceiling (post-#255 review) ---
+
+
+def _huge_skill(chars: int) -> dict[str, ResolvedSkill]:
+    return {
+        "huge": ResolvedSkill(
+            name="huge",
+            description="A knowledge base far past the limit",
+            body="x" * chars,
+            scope="default",
+            files=[],
+        )
+    }
+
+
+def test_oversize_skill_is_not_loaded_whole():
+    """The PTC exemption removes the runtime's only ceiling, so the tool keeps its own.
+
+    Without this a 256 KB registry skill — the largest the registry accepts — lands as
+    one ~64k-token ToolMessage that no cap ever trims.
+    """
+    from agent_common.core.load_skill_tool import LOAD_SKILL_MAX_CHARS
+
+    tool = create_load_skill_tool(_huge_skill(LOAD_SKILL_MAX_CHARS + 1))
+    out = asyncio.run(tool.ainvoke({"name": "huge"}))
+
+    assert len(out) < LOAD_SKILL_MAX_CHARS
+    assert "x" * 1000 not in out
+    # It must say what to do instead, not just refuse.
+    assert "read_file('/skills/huge/SKILL.md'" in out
+    assert "offset" in out
+    # The frontmatter still comes back, so the model can tell what it asked for.
+    assert "huge" in out and "knowledge base" in out
+
+
+def test_skill_at_the_limit_is_still_loaded_whole():
+    from agent_common.core.load_skill_tool import LOAD_SKILL_MAX_CHARS
+
+    body_chars = LOAD_SKILL_MAX_CHARS - 500  # leave room for the frontmatter
+    tool = create_load_skill_tool(_huge_skill(body_chars))
+    out = asyncio.run(tool.ainvoke({"name": "huge"}))
+
+    assert "x" * body_chars in out
+    assert "read_file(" not in out
