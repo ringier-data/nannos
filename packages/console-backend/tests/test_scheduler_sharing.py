@@ -1156,3 +1156,115 @@ class TestTheUnchangedEchoFilterJudgesAgainstTheTargetedTrigger:
         )
 
         assert (await svc.repo.get_definition(db, job.definition_id))["timezone"] is None
+
+
+class TestTheEveryoneBaselineMeetsTheConsolesFullFormEcho:
+    """The console never sends `schedule_kind`, and sends only the field belonging to the
+    EFFECTIVE kind. Review round 3 found two ways that meets the per-scope baseline badly,
+    one of them destructive.
+    """
+
+    async def _owner_with_cross_kind_override(self, svc, db, u, gid):
+        """Definition on an interval, the owner on a cron override — kinds differ, which
+        is what the console's partial echo cannot express."""
+        job = await svc.create_job(
+            db, _watch_create(schedule_kind=ScheduleKind.INTERVAL, cron_expr=None, interval_seconds=3600), u["owner"]
+        )
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        await svc.subscribe(db, job.definition_id, u["member"])
+        mine = await svc.update_job(
+            db,
+            job_id=job.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 8 * * *", scope="mine"),
+            actor=u["owner"],
+        )
+        assert mine.schedule_kind == ScheduleKind.CRON and mine.trigger_inherited is False
+        return job, mine
+
+    @pytest.mark.asyncio
+    async def test_a_cross_kind_promote_carries_the_sent_field_to_the_definition(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job, mine = await self._owner_with_cross_kind_override(svc, db, u, gid)
+
+        # Exactly what the console sends: the cron field, no schedule_kind.
+        after = await svc.update_job(
+            db, job_id=mine.id, data=ScheduledJobUpdate(cron_expr="0 8 * * *", scope="everyone"), actor=u["owner"]
+        )
+
+        definition = await svc.repo.get_definition(db, job.definition_id)
+        assert definition["schedule_kind"] == ScheduleKind.CRON.value, "the sent field must reach the default"
+        assert definition["cron_expr"] == "0 8 * * *"
+        assert definition["interval_seconds"] is None
+        # The editor's own schedule did not move: it became everyone's.
+        assert after.trigger_inherited is True
+        assert after.schedule_kind == ScheduleKind.CRON and after.cron_expr == "0 8 * * *"
+
+    @pytest.mark.asyncio
+    async def test_an_implicit_everyone_never_promotes_an_override(self, world):
+        """A lone subscriber's scope RESOLVES to everyone. That carries no intent to
+        promote, and the console does not offer the choice — so an unrelated save must not
+        rewrite the default from the editor's override and wipe it."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job, mine = await self._owner_with_cross_kind_override(svc, db, u, gid)
+        # The other subscriber leaves: the owner is alone, so scope resolves to everyone.
+        await svc.unsubscribe(db, job.definition_id, u["member"])
+        before = await svc.repo.get_definition(db, job.definition_id)
+
+        after = await svc.update_job(
+            db,
+            job_id=mine.id,
+            # The full-form echo of their effective trigger, plus the field they meant.
+            data=ScheduledJobUpdate(cron_expr="0 8 * * *", enabled=False),
+            actor=u["owner"],
+        )
+
+        now = await svc.repo.get_definition(db, job.definition_id)
+        assert now["schedule_kind"] == before["schedule_kind"], "an echo is not a promote"
+        assert now["interval_seconds"] == before["interval_seconds"]
+        assert now["revision"] == before["revision"]
+        assert after.trigger_inherited is False, "and their own schedule survives"
+        assert after.cron_expr == "0 8 * * *"
+        assert after.enabled is False, "the part they did change still lands"
+
+
+class TestRejoiningAGroupDoesNotFireACatchUpRun:
+    """A subscription stopped by access withdrawal keeps the `next_run_at` it had at that
+    moment. Re-enabling it on rejoin without recomputing means the claim fires one run
+    immediately, under the returning member's identity and spend, for a window they were
+    not subscribed (review round 3).
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_returning_member_is_rearmed_on_the_next_real_occurrence(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await svc.create_job(db, _watch_create(cron_expr="0 9 * * *"), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        await svc.set_group_default_jobs(db, gid, [job.definition_id], u["owner"])
+        await db.commit()
+
+        await db.execute(
+            text("DELETE FROM user_group_members WHERE user_group_id = :g AND user_id = :u"),
+            {"g": gid, "u": u["member"].id},
+        )
+        await svc.on_members_removed(db, u["owner"], gid, [u["member"].id])
+        # Time passes while they are out: the stored occurrence falls into the past.
+        await db.execute(
+            text("UPDATE scheduled_job_subscriptions SET next_run_at = :t WHERE id = :i"),
+            {"t": datetime.now(timezone.utc) - timedelta(days=3), "i": mine.id},
+        )
+        await db.execute(
+            text("INSERT INTO user_group_members (user_group_id, user_id, group_role) VALUES (:g, :u, 'read')"),
+            {"g": gid, "u": u["member"].id},
+        )
+        await svc.on_members_added(db, u["owner"], gid, [u["member"].id])
+        await db.commit()
+
+        back = await svc.get_job(db, mine.id, u["member"].id)
+        assert back.enabled is True
+        assert back.next_run_at > datetime.now(timezone.utc), "no immediate catch-up run on rejoin"
+        assert back.next_run_at.astimezone(ZoneInfo(TZ["member"])).hour == 9

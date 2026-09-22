@@ -95,7 +95,14 @@ whose credential is missing, not whoever authored the prompt.
   against the trigger it aims at. Judging both against the effective one (the
   first implementation) made "promote my own schedule to the default"
   inexpressible *and* let an echo of the default rewrite it, because an editor
-  with an override differs from both.
+  with an override differs from both. Only a scope the caller actually *sent*
+  gets the definition baseline: one that merely resolved to `everyone` — the
+  sole-subscriber default, where the console does not even offer the choice —
+  carries no intent to promote, and treating its echo as one would let a rename
+  rewrite the default. And because the form sends only the field matching the
+  *effective* kind and never `schedule_kind` itself, the merge takes its kind
+  from the effective trigger too: reading it off the definition dropped a sent
+  cron on the floor whenever the default was an interval.
 
 ## Consequences
 

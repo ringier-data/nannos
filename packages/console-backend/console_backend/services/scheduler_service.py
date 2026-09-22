@@ -213,9 +213,19 @@ class SchedulerService:
         return current == value
 
     @staticmethod
-    def _trigger_baseline(job: ScheduledJob, definition: dict[str, Any], scope: str) -> dict[str, Any]:
+    def _trigger_baseline(
+        job: ScheduledJob, definition: dict[str, Any], scope: str, *, explicit: bool
+    ) -> dict[str, Any]:
         """What an incoming trigger field is compared against: the trigger this request is
         AIMING at, not the one the caller happens to run on.
+
+        Only a DELIBERATE everyone-edit (`scope` actually sent) gets the definition as its
+        baseline. A scope that merely *resolved* to everyone — the sole-subscriber default —
+        carries no intent to promote anything, and the console does not even offer the
+        choice there; judging its full-form echo against the definition would let an
+        unrelated save (a rename, an enabled toggle) silently rewrite the default from the
+        editor's own override and clear it. That is the accidental-write class the echo
+        filter exists to prevent, so the implicit case keeps the effective baseline.
 
         The console resends every trigger field prefilled, so an unchanged echo must not
         count as an edit — but what it echoes is the EFFECTIVE trigger (override first),
@@ -235,7 +245,7 @@ class SchedulerService:
         "unchanged" whatever the scope. Comparing it against a definition that names none
         would read every save as a request to pin one.
         """
-        if scope == "everyone":
+        if scope == "everyone" and explicit:
             return {
                 "schedule_kind": definition["schedule_kind"],
                 "cron_expr": definition["cron_expr"],
@@ -710,7 +720,7 @@ class SchedulerService:
             # Alone, a writer's edit is the job's schedule; with others, the narrowest
             # effect. A reader alone (the owner unsubscribed) can only ever override.
             scope = "everyone" if (not others and self._can_write(perm)) else "mine"
-        baseline = self._trigger_baseline(job, definition, scope)
+        baseline = self._trigger_baseline(job, definition, scope, explicit=data.scope is not None)
         trigger_touched = any(
             getattr(data, f) is not None
             and not self._same_trigger_value(baseline[f], f, getattr(data, f), job.timezone)
@@ -732,7 +742,14 @@ class SchedulerService:
             if scope == "everyone":
                 merged = self._merge_trigger(
                     data,
-                    ScheduleKind(definition["schedule_kind"]),
+                    # The KIND falls back to the caller's EFFECTIVE one, not the
+                    # definition's: the form shows the effective trigger and sends only
+                    # the field belonging to its kind, never `schedule_kind` itself. With
+                    # the definition's kind here, promoting a cron override over an
+                    # interval default kept `new_kind = INTERVAL` and dropped the cron on
+                    # the floor — the definition unchanged, the override wiped below, and
+                    # the editor's schedule silently flipped to the default.
+                    ScheduleKind(data.schedule_kind or job.schedule_kind),
                     definition["cron_expr"],
                     definition["interval_seconds"],
                     definition["run_at"],
@@ -755,13 +772,17 @@ class SchedulerService:
                     sub_fields.update(
                         {"schedule_kind": None, "cron_expr": None, "interval_seconds": None, "run_at": None, "timezone": None}
                     )
-                    sub_fields["next_run_at"] = first_run_at(
-                        ScheduleKind(merged["schedule_kind"]),
-                        merged["cron_expr"],
-                        merged["interval_seconds"],
-                        merged["run_at"],
-                        tz=merged["timezone"] or (await self._user_timezone(db, actor.id)),
-                        after=now,
+                    # Through the same helper as every other subscription adopting this
+                    # trigger: the editor's row is one of them, and writing a raw
+                    # ``first_run_at`` here left it as the one path that could still arm
+                    # an elapsed one-shot for its own editor.
+                    sub_fields.update(
+                        self._adopted_trigger_fields(
+                            {**definition, **merged},
+                            self._effective_tz(merged["timezone"], await self._user_timezone(db, actor.id))
+                            or default_timezone_name(),
+                            now,
+                        )
                     )
             else:
                 merged = self._merge_trigger(
@@ -1363,6 +1384,24 @@ class SchedulerService:
             revoked_reason=_ACCESS_REVOKED_REASON,
             elapsed_once_reason=_ELAPSED_ONCE_ON_INHERIT,
         )
+        # A row this call brought back was frozen at revocation time, so on anything
+        # recurring its ``next_run_at`` is in the past and the claim fires one catch-up
+        # run the moment the member rejoins — under their identity and their spend, for a
+        # window they were not even subscribed. ``resume_job`` and ``unsuspend`` recompute
+        # for exactly this reason. A freshly inserted row recomputes to what it already
+        # holds, and ``compute_next_run`` returns None for a one-shot, leaving the elapsed
+        # handling above untouched.
+        for uid in created:
+            back = await self.repo.get_subscription_for(db, definition_id, uid)
+            if back is None or not back.enabled:
+                continue
+            nxt = compute_next_run(
+                back.schedule_kind, back.cron_expr, back.interval_seconds, back.run_at, tz=back.timezone
+            )
+            if nxt is not None and nxt != back.next_run_at:
+                await self.repo.update_subscription(
+                    db=db, actor=actor, subscription_id=back.id, fields={"next_run_at": nxt, "updated_at": now}
+                )
         if created and self._notification_service is not None:
             # The console shares and sets the group default in one Save, so a member can
             # be handed "…has been shared with your group. Subscribe to run it under your

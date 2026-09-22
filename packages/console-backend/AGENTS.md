@@ -777,9 +777,14 @@ picks the baseline the **unchanged-echo filter** judges against (`_trigger_basel
 resends every trigger field prefilled, so an echo must not read as an edit — but it echoes the
 *effective* trigger while `everyone` edits the *definition's default*, and for an editor who holds an
 override those are different values. Judging both against the effective one made "promote my own
-schedule to the default" a silent no-op and let an echo of the default rewrite it. `timezone` is
-deliberately excluded from the switch: the job's is the resolved zone and the form has no field for
-the definition's, so re-baselining it would read every save as a request to pin one. Setting the
+schedule to the default" a silent no-op and let an echo of the default rewrite it. Two carve-outs:
+only a scope the caller actually SENT gets the definition baseline (one that merely resolved to
+`everyone`, as it does for a sole subscriber, carries no intent to promote — otherwise a rename
+rewrites the default), and `timezone` keeps the effective baseline (the job's is the resolved zone
+and the form has no field for the definition's, so re-baselining would read every save as a request
+to pin one). The everyone-merge also takes its KIND from the effective trigger, not the definition:
+the form sends only the field matching the kind it displays and never `schedule_kind`, so reading
+the kind off the definition silently dropped a sent cron whenever the default was an interval. Setting the
 policy to `fixed` resets every override. **Suspend** (definition, `write`, holds every subscription
 out of `claim_due_jobs`, preserves each `enabled`) is distinct from **pause/disable** (subscription,
 mine). `DELETE /jobs/{id}` deletes the definition and every subscription when the caller owns it,
