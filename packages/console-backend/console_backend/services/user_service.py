@@ -529,35 +529,41 @@ class UserService:
         if self._keycloak_service is None:
             return
 
-        try:
-            result = await db.execute(
-                text("""
-                    SELECT ug.keycloak_group_id
-                    FROM user_groups ug
-                    JOIN user_group_members ugm ON ugm.user_group_id = ug.id
-                    WHERE ugm.user_id = :user_id
-                      AND ug.deleted_at IS NULL
-                      AND ug.keycloak_group_id IS NOT NULL
-                """),
-                {"user_id": user_id},
-            )
-            groups = result.mappings().all()
-        except Exception as e:
-            logger.error(f"Failed to read pending group memberships for user {user_id}: {e}")
+        # Deliberately unguarded: this runs inside the caller's transaction, so a database error
+        # here has already poisoned it and would resurface at the next statement anyway. Swallowing
+        # it would only misattribute the failure. What must not fail the login is the Keycloak call
+        # below, and that is what is caught.
+        result = await db.execute(
+            text("""
+                SELECT ug.keycloak_group_id
+                FROM user_groups ug
+                JOIN user_group_members ugm ON ugm.user_group_id = ug.id
+                WHERE ugm.user_id = :user_id
+                  AND ug.deleted_at IS NULL
+                  AND ug.keycloak_group_id IS NOT NULL
+            """),
+            {"user_id": user_id},
+        )
+        group_ids = [row["keycloak_group_id"] for row in result.mappings().all()]
+        if not group_ids:
             return
 
-        for group in groups:
-            try:
-                await self._keycloak_service.add_user_to_group(sub, group["keycloak_group_id"])
-                logger.info(
-                    f"Reconciled user {user_id} (sub={sub}) into Keycloak group "
-                    f"{group['keycloak_group_id']} on first login"
-                )
-            except Exception as e:
-                # Keep going: one unreachable group must not cost the user the others.
+        # Concurrently: these are HTTP round-trips held open across the login transaction, and a
+        # user in a dozen groups should not pay for them one at a time.
+        outcomes = await asyncio.gather(
+            *(self._keycloak_service.add_user_to_group(sub, group_id) for group_id in group_ids),
+            return_exceptions=True,
+        )
+        for group_id, outcome in zip(group_ids, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                # One unreachable group must not cost the user the others, nor their login.
                 logger.error(
-                    f"Failed to reconcile user {user_id} into Keycloak group "
-                    f"{group['keycloak_group_id']} on first login: {e}"
+                    f"Failed to reconcile user {user_id} into Keycloak group {group_id} "
+                    f"on first login: {outcome}"
+                )
+            else:
+                logger.info(
+                    f"Reconciled user {user_id} (sub={sub}) into Keycloak group {group_id} on first login"
                 )
 
     async def _upsert_user_internal(
@@ -579,7 +585,13 @@ class UserService:
         """
         email = email.lower().strip()
         # Check if user exists before upsert
-        check_query = text("SELECT id, sub, email, scim_user_name FROM users WHERE email = :email OR sub = :sub")
+        # LOWER(email), not `email = :email`: SCIM stores `userName`/`emails[].value` verbatim while
+        # this path lowercases, so a mixed-case SCIM address would never match its own row — the
+        # login would try to insert a second one and trip `idx_users_email_unique` (which is itself
+        # on LOWER(email)), and the placeholder subject would never be reconciled.
+        check_query = text(
+            "SELECT id, sub, email, scim_user_name FROM users WHERE LOWER(email) = :email OR sub = :sub"
+        )
         results = await db.execute(check_query, {"email": email, "sub": sub})
         rows = results.mappings().all()
         if len(rows) > 1:

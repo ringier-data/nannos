@@ -55,7 +55,10 @@ async def _create_group(pg_session, group_id: int = 1, keycloak_group_id: str | 
 
 
 async def _create_scim_user(pg_session, user_id: str, email: str):
-    """Insert a SCIM-provisioned user exactly as ScimUserService.create_user does."""
+    """Insert a SCIM-provisioned user exactly as ScimUserService.create_user does.
+
+    Note the email is stored verbatim — SCIM does not lowercase it.
+    """
     await pg_session.execute(
         text("""
             INSERT INTO users (id, sub, email, first_name, last_name, role, status,
@@ -194,6 +197,40 @@ class TestFirstLoginReconciliation:
 
         # Only the group that exists in Keycloak is pushed, and under the real subject.
         mock_keycloak_service.add_user_to_group.assert_called_once_with("keycloak-sub-5", "kc-group-1")
+
+    async def test_first_login_matches_a_mixed_case_scim_email(
+        self, pg_session, user_service, mock_keycloak_service
+    ):
+        """SCIM stores the address verbatim; the login path lowercases before matching.
+
+        A case-sensitive match would miss the placeholder row entirely — no reconciliation, and a
+        second user row that trips `idx_users_email_unique` (which is on LOWER(email)).
+        """
+        user_service.set_keycloak_service(mock_keycloak_service)
+        await _create_group(pg_session, group_id=1, keycloak_group_id="kc-group-1")
+        await _create_scim_user(pg_session, "scim-user-8", "Scim.Eight@Example.com")
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+                VALUES (1, 'scim-user-8', 'read', NOW())
+            """)
+        )
+        await pg_session.commit()
+
+        user = await user_service.upsert_user(
+            db=pg_session,
+            sub="keycloak-sub-8",
+            email="scim.eight@example.com",
+            first_name="Scim",
+            last_name="User",
+        )
+        await pg_session.commit()
+
+        assert user.id == "scim-user-8"  # the placeholder row was matched, not a second one
+        mock_keycloak_service.add_user_to_group.assert_called_once_with("keycloak-sub-8", "kc-group-1")
+
+        count = await pg_session.execute(text("SELECT COUNT(*) FROM users WHERE LOWER(email) = 'scim.eight@example.com'"))
+        assert count.scalar() == 1
 
     async def test_ordinary_login_pushes_nothing(self, pg_session, user_service, mock_keycloak_service):
         """A user who already had a real subject is not re-reconciled on every login."""
