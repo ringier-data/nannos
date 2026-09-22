@@ -52,14 +52,23 @@ def get_skill_registry_service(request: Request) -> SkillRegistryService:
 
 
 async def _check_sub_agent_skill_access(
-    entry: SkillRegistryEntry, user: User, db: AsyncSession, request: Request
+    entry: SkillRegistryEntry,
+    user: User,
+    db: AsyncSession,
+    request: Request,
+    *,
+    read_only: bool = False,
 ) -> None:
     """For sub-agent-scoped skills, verify the user can access the parent agent.
 
     Raises 404 if the parent agent doesn't exist or the user has no access.
     Standalone skills are not checked here (they use visibility scoping).
+    With `read_only`, a public sub-agent skill is readable by every user, like any
+    public registry entry; writes always go through the parent-agent check.
     """
     if entry.scope != "sub-agent" or not entry.sub_agent_id:
+        return
+    if read_only and entry.visibility == "public":
         return
 
     from sqlalchemy import text as sa_text
@@ -199,7 +208,7 @@ async def get_skill_detail(
             detail=f"Skill '{skill_id}' not found in registry",
         )
     # Sub-agent-scoped skills: verify user can access the parent agent
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
 
     return {
         "id": entry.id,
@@ -233,7 +242,7 @@ async def get_skill_versions(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
 
     versions = await skill_registry_service.get_version_history(db, skill_id)
     return {
@@ -264,7 +273,7 @@ async def get_skill_version_detail(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
 
     version = await skill_registry_service.get_version(db, skill_id, content_hash)
     if version is None:
@@ -775,10 +784,10 @@ async def check_skill_update(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    if entry.source_type == "nannos":
+    if entry.source_type != "github":
         raise HTTPException(
             status_code=400,
-            detail="Only imported skills can be checked for upstream updates.",
+            detail="Only skills imported from GitHub can be checked for upstream updates.",
         )
     if not entry.source_repo:
         raise HTTPException(
@@ -884,8 +893,8 @@ async def apply_skill_update(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    if entry.source_type == "nannos":
-        raise HTTPException(status_code=400, detail="Only imported skills can be updated from source.")
+    if entry.source_type != "github":
+        raise HTTPException(status_code=400, detail="Only skills imported from GitHub can be updated from source.")
     if not entry.source_repo:
         raise HTTPException(status_code=400, detail="Skill has no source repository configured.")
 

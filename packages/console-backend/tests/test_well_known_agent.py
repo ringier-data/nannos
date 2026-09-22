@@ -52,9 +52,14 @@ def digest(data: bytes) -> str:
 
 
 def skill_md(
-    name: str, body: str = "Do the thing.", description: str = "Use when booking."
+    name: str,
+    body: str = "Do the thing.",
+    description: str = "Use when booking.",
+    metadata: str | None = None,
 ) -> bytes:
-    return f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n".encode()
+    """`metadata` is a raw YAML block (already indented under `metadata:`), or None to omit it."""
+    meta = f"metadata:\n{metadata}\n" if metadata is not None else ""
+    return f"---\nname: {name}\ndescription: {description}\n{meta}---\n\n{body}\n".encode()
 
 
 def agent_md(body: str = "You help campaign managers.") -> bytes:
@@ -231,6 +236,70 @@ def _skill(name: str = "book-line-items", digest_char: str = "b", **over) -> wk.
     )
     fields.update(over)
     return wk.WellKnownSkill(**fields)
+
+
+@pytest.mark.asyncio
+async def test_skill_visibility_comes_from_frontmatter_metadata():
+    """`metadata.nannos-visibility: public` marks the skill public; absent means private."""
+    client = WellKnownAgentClient()
+    index_bytes, files = build_tree(
+        skills={
+            "book-line-items": skill_md(
+                "book-line-items", metadata="  nannos-visibility: public"
+            ),
+            "build-targeting": skill_md("build-targeting"),
+            "campaign-health-check": skill_md(
+                "campaign-health-check",
+                metadata="  nannos-visibility: private\n  someone-elses-key: ignored",
+            ),
+        }
+    )
+    with respx.mock(assert_all_called=True) as router:
+        mount(router, index_bytes, files)
+        definition = await client.fetch(BASE)
+    by_name = {s.name: s.visibility for s in definition.skills}
+    assert by_name == {
+        "book-line-items": "public",
+        "build-targeting": "private",
+        "campaign-health-check": "private",
+    }
+
+
+@pytest.mark.asyncio
+async def test_unknown_skill_visibility_is_refused():
+    client = WellKnownAgentClient()
+    err = await fetch_error(
+        client,
+        skills={
+            "book-line-items": skill_md(
+                "book-line-items", metadata="  nannos-visibility: everyone"
+            )
+        },
+    )
+    assert err.step == "skill:book-line-items"
+    assert "nannos-visibility" in err.detail and "'everyone'" in err.detail
+
+    err = await fetch_error(
+        client,
+        skills={"book-line-items": skill_md("book-line-items", metadata="  - a list")},
+    )
+    assert "'metadata' must be a mapping" in err.detail
+
+
+def test_skill_visibility_is_part_of_the_revision():
+    """Flipping a skill to public changes no served byte the index digests miss —
+    the SKILL.md digest changes too — but the metadata is what the sync acts on, so
+    it is hashed on its own as well."""
+    agent = wk.WellKnownAgent(
+        name="Alloy AI Assistant",
+        description="Helps with campaigns.",
+        prompt_body="Guidance.",
+        url=f"{BASE}{WK}/AGENT.md",
+        digest="sha256:" + "a" * 64,
+    )
+    private = compute_revision(agent, [_skill()])
+    public = compute_revision(agent, [_skill(visibility="public")])
+    assert private != public
 
 
 def test_framing_template_version_is_part_of_the_revision():

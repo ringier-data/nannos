@@ -38,6 +38,7 @@ from console_backend.models.embed_binding import (
     is_loopback_host,
     normalize_base_url,
 )
+from console_backend.models.skills_registry import SkillProvenance
 from console_backend.models.sub_agent import (
     ActivationSource,
     SkillDefinition,
@@ -421,6 +422,13 @@ class EmbedBindingService:
                 body=s.body,
                 files=[],
                 scope="sub-agent",
+                visibility=s.visibility,
+                provenance=SkillProvenance(
+                    source_type="well-known",
+                    source_repo=definition.base_url,
+                    source_ref=definition.revision,
+                    source_path=s.url,
+                ),
             )
             for s in definition.skills
         ]
@@ -518,7 +526,9 @@ def _definition_summary(definition: WellKnownDefinition) -> dict[str, Any]:
             thinking_level=agent.thinking_level,
         ).model_dump(),
         "skills": [
-            WellKnownSkillInfo(name=s.name, url=s.url, digest=s.digest).model_dump()
+            WellKnownSkillInfo(
+                name=s.name, url=s.url, digest=s.digest, visibility=s.visibility
+            ).model_dump()
             for s in definition.skills
         ],
     }

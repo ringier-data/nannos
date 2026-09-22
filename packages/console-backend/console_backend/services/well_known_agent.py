@@ -7,6 +7,11 @@ A first-party host publishes, on its own origin:
     /.well-known/agent-skills/AGENT.md        frontmatter + the system prompt body
     /.well-known/agent-skills/<name>/SKILL.md one agentskills.io skill per directory
 
+A SKILL.md may carry `metadata: {nannos-visibility: public}` in its frontmatter. Such a
+skill is written to the Nannos skill registry as a public entry, so every user can
+discover and activate it on other agents. Without it a synced skill stays private to the
+bound sub-agent, as every inline sub-agent skill does.
+
 Every file the index points at carries a `sha256:` digest over the exact bytes served.
 The `x-nannos-agent` block carries name, description and the prompt; `tools`, `model_tier`,
 `thinking_level` and `organization` are optional — whatever the host leaves out stays a
@@ -48,6 +53,7 @@ from pydantic import BaseModel, Field
 from console_backend.models.skills_registry import (
     MAX_SKILL_FILE_SIZE_BYTES,
     MAX_SKILL_FILES,
+    RegistryVisibility,
 )
 from console_backend.models.sub_agent import SUB_AGENT_NAME_RE, ModelTier, ThinkingLevel
 
@@ -59,6 +65,10 @@ SUPPORTED_INDEX_SCHEMAS = frozenset(
 )
 AGENT_EXTENSION_KEY = "x-nannos-agent"
 SKILL_TYPE = "skill-md"
+#: SKILL.md frontmatter `metadata` key that asks for a registry visibility.
+SKILL_VISIBILITY_METADATA_KEY = "nannos-visibility"
+DEFAULT_SKILL_VISIBILITY: RegistryVisibility = "private"
+_SKILL_VISIBILITIES: frozenset[str] = frozenset({"private", "public"})
 
 #: Bump when `render_embed_framing` changes wording, so bound sub-agents re-sync a new
 #: version even though the host published nothing new.
@@ -106,6 +116,13 @@ class WellKnownSkill(BaseModel):
     name: str
     description: str
     body: str = Field(description="SKILL.md body, frontmatter stripped")
+    visibility: RegistryVisibility = Field(
+        default=DEFAULT_SKILL_VISIBILITY,
+        description=(
+            "Registry visibility the host asked for via frontmatter "
+            "`metadata.nannos-visibility`; private when absent"
+        ),
+    )
     url: str
     digest: str
 
@@ -183,7 +200,7 @@ def compute_revision(
 
     Covers every served byte through the file digests AND the index.json metadata that
     is published nowhere else: agent name, description, organization, tools, model tier
-    and thinking level, plus each skill's name and description. Without the metadata a
+    and thinking level, plus each skill's name, description and visibility. Without the metadata a
     host could change its tool list or description and the sync would read "same
     revision" and skip. Skill order does not matter. The framing template version is
     part of it so a wording change in the Nannos-owned prefix re-syncs every bound agent.
@@ -201,7 +218,12 @@ def compute_revision(
         },
         "skills": sorted(
             (
-                {"name": s.name, "description": s.description, "digest": s.digest}
+                {
+                    "name": s.name,
+                    "description": s.description,
+                    "visibility": s.visibility,
+                    "digest": s.digest,
+                }
                 for s in skills
             ),
             key=lambda s: (s["name"], s["digest"]),
@@ -370,12 +392,15 @@ class WellKnownAgentClient:
                 base_url, skill_url, origin, MAX_SKILL_FILE_SIZE_BYTES, step
             )
             _verify_digest(base_url, step, skill_bytes, entry["digest"])
-            body = _parse_skill(base_url, step, skill_bytes, entry["name"], skill_url)
+            body, visibility = _parse_skill(
+                base_url, step, skill_bytes, entry["name"], skill_url
+            )
             skills.append(
                 WellKnownSkill(
                     name=entry["name"],
                     description=entry["description"],
                     body=body,
+                    visibility=visibility,
                     url=skill_url,
                     digest=entry["digest"],
                 )
@@ -688,7 +713,8 @@ def _parse_prompt(base_url: str, data: bytes) -> str:
 
 def _parse_skill(
     base_url: str, step: str, data: bytes, expected_name: str, url: str
-) -> str:
+) -> tuple[str, RegistryVisibility]:
+    """Validate one SKILL.md; return (body, registry visibility)."""
     try:
         frontmatter, body = split_frontmatter(_decode(base_url, step, data))
     except ValueError as e:
@@ -720,4 +746,32 @@ def _parse_skill(
         )
     if "{{" in body:
         raise WellKnownFetchError(base_url, step, "SKILL.md body must not contain '{{'")
-    return body
+    return body, _parse_skill_visibility(base_url, step, frontmatter)
+
+
+def _parse_skill_visibility(
+    base_url: str, step: str, frontmatter: dict[str, Any]
+) -> RegistryVisibility:
+    """`metadata.nannos-visibility` from a SKILL.md frontmatter; private when absent.
+
+    agentskills.io reserves `metadata` for a string-to-string map of extension keys.
+    Other keys in it are somebody else's and are ignored; ours must be a known value.
+    """
+    metadata = frontmatter.get("metadata")
+    if metadata is None:
+        return DEFAULT_SKILL_VISIBILITY
+    if not isinstance(metadata, dict):
+        raise WellKnownFetchError(
+            base_url, step, "SKILL.md frontmatter 'metadata' must be a mapping"
+        )
+    value = metadata.get(SKILL_VISIBILITY_METADATA_KEY)
+    if value is None:
+        return DEFAULT_SKILL_VISIBILITY
+    if not isinstance(value, str) or value not in _SKILL_VISIBILITIES:
+        raise WellKnownFetchError(
+            base_url,
+            step,
+            f"SKILL.md metadata '{SKILL_VISIBILITY_METADATA_KEY}' is {value!r}; "
+            f"it must be one of {sorted(_SKILL_VISIBILITIES)}",
+        )
+    return value  # type: ignore[return-value]

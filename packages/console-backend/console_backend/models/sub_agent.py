@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from console_backend.models.embed_binding import EmbedBinding
 
-from .skills_registry import RegistryScope, SkillFile
+from .skills_registry import RegistryScope, RegistryVisibility, SkillFile, SkillProvenance
 
 
 class ActivationSource(str, Enum):
@@ -181,6 +181,20 @@ class SkillDefinition(BaseModel):
     scope: RegistryScope | None = Field(
         default=None,
         description="Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.",
+    )
+    visibility: RegistryVisibility | None = Field(
+        default=None,
+        description=(
+            "Registry visibility of a sub-agent scoped skill: 'public' lets every user discover and "
+            "activate it elsewhere. None on write keeps the registry's value (private for a new entry)."
+        ),
+    )
+    provenance: SkillProvenance | None = Field(
+        default=None,
+        description=(
+            "Write-only. Set by a sync that mirrors a skill it does not author (well-known); "
+            "the registry then updates the row it wrote last time instead of creating a new one."
+        ),
     )
 
     @model_validator(mode="before")

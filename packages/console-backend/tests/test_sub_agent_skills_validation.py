@@ -375,11 +375,40 @@ class TestPersistAndStripSkills:
         call_kwargs = mock_registry_service.upsert_agent_skill.call_args[1]
         assert call_kwargs["sub_agent_id"] == 42
         assert call_kwargs["name"] == "my-custom-skill"
+        # No visibility asked for: the registry keeps its value (private for a new entry)
+        assert call_kwargs["visibility"] is None
         # Should have SKILL.md + helper.py
         assert len(call_kwargs["files"]) == 2
         file_paths = [f.path for f in call_kwargs["files"]]
         assert "SKILL.md" in file_paths
         assert "helper.py" in file_paths
+
+    @pytest.mark.asyncio
+    async def test_sub_agent_skill_visibility_reaches_the_registry(self, mock_db, mock_actor):
+        """A well-known sync marks a skill public; the upsert must carry that through."""
+        from console_backend.services.sub_agent_service import SubAgentService
+
+        service = SubAgentService.__new__(SubAgentService)
+        mock_registry_service = MagicMock()
+        mock_registry_service.upsert_agent_skill = AsyncMock(
+            return_value=("a1b2c3d4-e5f6-7890-abcd-ef1234567890", "hash")
+        )
+        service._skill_registry_service = mock_registry_service
+
+        skills = [
+            SkillDefinition(
+                name="book-line-items",
+                description="Use when booking.",
+                body="Steps.",
+                scope="sub-agent",
+                visibility="public",
+            ),
+        ]
+        await service._persist_and_strip_skills(mock_db, mock_actor, 42, skills)
+
+        call_kwargs = mock_registry_service.upsert_agent_skill.call_args[1]
+        assert call_kwargs["visibility"] == "public"
+        assert call_kwargs["provenance"] is None
 
     @pytest.mark.asyncio
     async def test_imported_skill_stripped_without_registry_call(self, mock_db, mock_actor):

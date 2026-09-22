@@ -66,6 +66,7 @@ def make_definition(
     thinking: str | None = "low",
     model_tier: str | None = "standard",
     tools: list[str] | None = ("list_campaigns", "get_campaign"),
+    skill_visibility: str = "private",
 ) -> WellKnownDefinition:
     agent = WellKnownAgent(
         name="Alloy AI Assistant",
@@ -83,6 +84,7 @@ def make_definition(
             name="book-line-items",
             description="Use when booking.",
             body="Steps.",
+            visibility=skill_visibility,
             url=f"{BASE}/.well-known/agent-skills/book-line-items/SKILL.md",
             digest="sha256:" + "b" * 64,
         )
@@ -163,12 +165,45 @@ async def test_sync_new_revision_publishes_one_approved_version():
         [],
         "sub-agent",
     )
+    assert skill.visibility == "private"
     assert REV in kwargs["change_summary"] and BASE in kwargs["change_summary"]
     # the actor is the admin who created the binding
     assert sas.publish_managed_version.await_args.args[1].id == "admin-1"
 
     assert any("revision = :revision" in sql for sql in executed_sql(db))
     assert out.revision == REV
+
+
+@pytest.mark.asyncio
+async def test_sync_carries_the_published_skill_visibility_into_the_version():
+    """A SKILL.md with `metadata.nannos-visibility: public` becomes a public registry entry."""
+    service, sas, _, _ = make_service(
+        fetch=AsyncMock(return_value=make_definition(skill_visibility="public"))
+    )
+    service.get_binding = AsyncMock(
+        side_effect=[make_binding(revision=None), make_binding(revision=REV)]
+    )
+    db = make_db()
+
+    await service.sync_binding(db, 20)
+
+    (skill,) = sas.publish_managed_version.await_args.kwargs["skills"]
+    assert (skill.scope, skill.visibility) == ("sub-agent", "public")
+    # provenance lets the registry update the row it wrote for the previous revision
+    assert skill.registry_id is None
+    assert skill.provenance.model_dump() == {
+        "source_type": "well-known",
+        "source_repo": BASE,
+        "source_ref": REV,
+        "source_path": f"{BASE}/.well-known/agent-skills/book-line-items/SKILL.md",
+    }
+    # the stored summary the admin view reads says so too
+    definition_json = next(
+        call.args[1]["definition"]
+        for call in db.execute.await_args_list
+        if "definition" in (call.args[1] if len(call.args) > 1 else {})
+    )
+    assert '"visibility": "public"' in definition_json
 
 
 def _binding_row(sub_agent_id: int) -> dict:

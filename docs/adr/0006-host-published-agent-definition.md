@@ -141,7 +141,21 @@ for byte, and the digest is SHA-256 over those bytes.
 |---|---|
 | `/.well-known/agent-skills/index.json` | RFC 0.2.0 index: `$schema`, `skills[]` of `{name, type: "skill-md", description, url, digest}`, plus the `x-nannos-agent` extension. |
 | `/.well-known/agent-skills/AGENT.md` | YAML frontmatter `name`, `description`, optional `organization`, `model-tier`, `thinking-level`; the body is the system prompt. |
-| `/.well-known/agent-skills/<name>/SKILL.md` | agentskills.io skill: frontmatter `name` (equals the directory), `description` (1-1024 chars, "what and when"); the body is the instructions. |
+| `/.well-known/agent-skills/<name>/SKILL.md` | agentskills.io skill: frontmatter `name` (equals the directory), `description` (1-1024 chars, "what and when"), optional `metadata: {nannos-visibility: public\|private}`; the body is the instructions. |
+
+`metadata.nannos-visibility` decides how the synced skill lands in the Nannos skill
+registry. `private` (the default) keeps it internal to the bound sub-agent, as every
+inline sub-agent skill is. `public` writes it as a public registry entry: it shows up in
+the registry search and every user can read and activate it on other agents, while it
+stays editable only through the host's sync. Any other value fails the fetch for that
+skill. The visibility is part of the revision, so flipping it re-syncs the binding.
+
+Synced skills are registry rows with `source_type = 'well-known'` (`source_repo` the
+authority, `source_ref` the revision, `source_path` the SKILL.md URL). The sync finds the
+row it wrote for the previous revision by (sub-agent, source type, skill name) and updates
+it in place, so a skill keeps one registry id and one slug across revisions. Like every
+imported row it is read-only in the registry UI apart from visibility and sandbox flag;
+the next revision re-applies the host's visibility.
 
 ```json
 {

@@ -13,6 +13,27 @@ from pydantic import BaseModel, Field, field_validator
 # Registry visibility: who can discover and activate the skill.
 RegistryVisibility = Literal["private", "public"]
 
+#: Where a skill came from when Nannos did not author it. 'github' rows are imported from
+#: a repository; 'well-known' rows are written by the embed-binding sync from a host's
+#: `/.well-known/agent-skills/` tree (ADR-0006); 'nannos' rows are authored in the console.
+SourceType = Literal["github", "nannos", "well-known"]
+
+
+class SkillProvenance(BaseModel):
+    """Provenance a caller attaches to a sub-agent scoped skill it does not author itself.
+
+    Write-only: `upsert_agent_skill` stores it in the `source_*` columns and uses
+    (sub_agent_id, source_type, name) to find the row it wrote last time, so a re-sync
+    updates that row instead of creating `slug-2`, `slug-3`, … A row with a non-'nannos'
+    source type is read-only in the registry UI except for its visibility and sandbox flag.
+    """
+
+    source_type: Literal["well-known"] = Field(description="Only 'well-known' is written this way today")
+    source_repo: str = Field(description="Where the tree is served from, e.g. the authority base URL")
+    source_ref: str = Field(description="The revision the row's content comes from")
+    source_path: str = Field(description="The SKILL.md URL inside the tree")
+
+
 # Registry scope: what the registry entry represents.
 #   - standalone: agent-agnostic skill (can be activated on any agent)
 #   - sub-agent: skill tied to a specific sub-agent's config
