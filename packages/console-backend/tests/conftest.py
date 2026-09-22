@@ -1,9 +1,11 @@
 """Shared test fixtures and utilities."""
 
+import asyncio
 import fcntl
 import json
 import logging
 import os
+import queue
 import random
 import threading
 import time
@@ -12,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import docker
 import pytest
 import pytest_asyncio
@@ -533,7 +536,11 @@ def mock_oauth(mock_config, monkeypatch):
             return mock_oidc_client
         return original_getattr(self, key)
 
-    monkeypatch.setattr(console_backend.controllers.auth_controller.oauth.__class__, "__getattr__", mock_getattr)
+    monkeypatch.setattr(
+        console_backend.controllers.auth_controller.oauth.__class__,
+        "__getattr__",
+        mock_getattr,
+    )
 
     yield mock_oidc_client
 
@@ -645,7 +652,10 @@ def _provision_postgres(client: docker.DockerClient, run_tag: str) -> dict[str, 
     package_root = os.path.abspath(os.path.join(tests_dir, ".."))
     migrations_dir = os.path.normpath(os.path.realpath(os.path.join(package_root, "sqlmigrations", "ddl")))
 
-    info: dict[str, Any] = {"network": network_name, "container_name": db_container_name}
+    info: dict[str, Any] = {
+        "network": network_name,
+        "container_name": db_container_name,
+    }
     try:
         client.networks.create(network_name, driver="bridge")
 
@@ -660,6 +670,20 @@ def _provision_postgres(client: docker.DockerClient, run_tag: str) -> dict[str, 
                 "POSTGRES_DB": _PG_DATABASE,
             },
             ports={f"{_PG_PORT}/tcp": None},  # None = Docker picks a free host port
+            # Throwaway server: durability off so CREATE/DROP DATABASE checkpoints
+            # hit the page cache, not the Docker VM disk. Every DROP DATABASE forces
+            # a checkpoint, and with fsync on eight workers serialised on them.
+            command=[
+                "postgres",
+                "-c",
+                "fsync=off",
+                "-c",
+                "synchronous_commit=off",
+                "-c",
+                "full_page_writes=off",
+                "-c",
+                "max_connections=400",
+            ],
         )
 
         # The published host port shows up in the container's attrs only once the
@@ -693,10 +717,18 @@ def _provision_postgres(client: docker.DockerClient, run_tag: str) -> dict[str, 
             if exit_code != 0:
                 raise RuntimeError(f"Failed to {what}: {output.decode()}")
 
-        psql(_PG_DATABASE, f"ALTER USER {_PG_USER} SET search_path TO {_PG_SCHEMA}", "set search path")
+        psql(
+            _PG_DATABASE,
+            f"ALTER USER {_PG_USER} SET search_path TO {_PG_SCHEMA}",
+            "set search path",
+        )
         psql(_PG_DATABASE, f"CREATE SCHEMA {_PG_SCHEMA}", "create schema")
         # pgvector extension (provisioning step - same as build-db-container.sh)
-        psql(_PG_DATABASE, "CREATE EXTENSION IF NOT EXISTS vector", "create vector extension")
+        psql(
+            _PG_DATABASE,
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            "create vector extension",
+        )
         time.sleep(0.5)
 
         # Run Rambler migrations
@@ -725,7 +757,11 @@ def _provision_postgres(client: docker.DockerClient, run_tag: str) -> dict[str, 
             f"psql -U {_PG_USER} -d postgres -c "
             f"\"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{_PG_DATABASE}' AND pid <> pg_backend_pid()\""
         )
-        psql("postgres", f"ALTER DATABASE {_PG_DATABASE} WITH is_template = true", "set database as template")
+        psql(
+            "postgres",
+            f"ALTER DATABASE {_PG_DATABASE} WITH is_template = true",
+            "set database as template",
+        )
         logger.info(f"Database {_PG_DATABASE} marked as template")
 
         info.update(
@@ -822,44 +858,119 @@ def _get_test_db_name():
     return f"test_db_{worker}_{_test_db_counter}"
 
 
-@pytest.fixture(scope="function")
-def postgres_with_migrations(postgres_template):
-    """Create a fresh database from template for each test.
+class _CloneFactory:
+    """Per-process background thread that keeps ready-to-use clones of the template database.
 
-    This is FAST because PostgreSQL's TEMPLATE feature copies at the filesystem level.
+    Cloning is off the test's critical path: the thread creates the next clones
+    while the current test runs, opens one connection to each so PostgreSQL has
+    built the relation cache (the first backend on a new database pays that), and
+    drops released clones asynchronously. It owns one admin connection on its own
+    event loop, so no per-test connect/disconnect to the maintenance database either.
     """
-    test_db_name = _get_test_db_name()
-    container = postgres_template["container"]
-    pg_user = postgres_template["user"]
-    template_db = postgres_template["template_database"]
-    schema = postgres_template["schema"]
 
-    # Create database from template
-    exit_code, output = container.exec_run(
-        f'psql -U {pg_user} -d postgres -c "CREATE DATABASE {test_db_name} TEMPLATE {template_db}"'
+    def __init__(self, template: dict[str, Any], depth: int = 2) -> None:
+        self._template = template
+        self._depth = depth
+        self._ready: queue.Queue[str | BaseException] = queue.Queue()
+        self._released: queue.Queue[str | None] = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="pg-clone-factory", daemon=True)
+        self._thread.start()
+
+    def acquire(self) -> str:
+        item = self._ready.get(timeout=300)
+        if isinstance(item, BaseException):
+            raise RuntimeError("Clone factory failed") from item
+        return item
+
+    def release(self, name: str) -> None:
+        self._released.put(name)
+
+    def close(self) -> None:
+        self._released.put(None)
+        self._thread.join(timeout=120)
+
+    def _run(self) -> None:
+        asyncio.run(self._serve())
+
+    async def _serve(self) -> None:
+        t = self._template
+        admin = await asyncpg.connect(
+            host=t["host"],
+            port=t["port"],
+            user=t["user"],
+            password=t["password"],
+            database="postgres",
+        )
+        try:
+            while True:
+                while self._ready.qsize() < self._depth:
+                    try:
+                        self._ready.put(await self._create_clone(admin))
+                    except Exception as e:  # noqa: BLE001 — surface it to the test instead of hanging acquire()
+                        self._ready.put(e)
+                        return
+                try:
+                    name = self._released.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if name is None:
+                    break
+                await admin.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+            # Session end: drop the clones nobody used.
+            while not self._ready.empty():
+                item = self._ready.get_nowait()
+                if isinstance(item, str):
+                    await admin.execute(f"DROP DATABASE IF EXISTS {item} WITH (FORCE)")
+        finally:
+            await admin.close()
+
+    async def _create_clone(self, admin: asyncpg.Connection) -> str:
+        t = self._template
+        name = _get_test_db_name()
+        await admin.execute(f"CREATE DATABASE {name} TEMPLATE {t['template_database']}")
+        warm = await asyncpg.connect(
+            host=t["host"],
+            port=t["port"],
+            user=t["user"],
+            password=t["password"],
+            database=name,
+        )
+        await warm.close()
+        return name
+
+
+@pytest.fixture(scope="session")
+def _clone_factory(postgres_template):
+    factory = _CloneFactory(postgres_template)
+    yield factory
+    factory.close()
+
+
+@pytest.fixture(scope="function")
+def postgres_with_migrations(postgres_template, _clone_factory):
+    """Hand each test its own database cloned from the migrated template.
+
+    The clone was created and warmed ahead of time by the session's clone factory,
+    and is dropped in the background once the test releases it.
+    """
+    test_db_name = _clone_factory.acquire()
+
+    dsn = (
+        f"postgresql+asyncpg://{postgres_template['user']}:{postgres_template['password']}"
+        f"@{postgres_template['host']}:{postgres_template['port']}/{test_db_name}"
     )
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to create test database: {output.decode()}")
-
-    dsn = f"postgresql+asyncpg://{postgres_template['user']}:{postgres_template['password']}@{postgres_template['host']}:{postgres_template['port']}/{test_db_name}"
 
     yield {
         "host": postgres_template["host"],
         "port": postgres_template["port"],
-        "user": pg_user,
+        "user": postgres_template["user"],
         "password": postgres_template["password"],
         "database": test_db_name,
-        "schema": schema,
+        "schema": postgres_template["schema"],
         "dsn": dsn,
     }
 
-    # Drop the test database after the test
-    # First terminate any connections
-    container.exec_run(
-        f"psql -U {pg_user} -d postgres -c "
-        f"\"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{test_db_name}'\""
-    )
-    container.exec_run(f'psql -U {pg_user} -d postgres -c "DROP DATABASE IF EXISTS {test_db_name}"')
+    _clone_factory.release(test_db_name)
 
 
 @pytest_asyncio.fixture
