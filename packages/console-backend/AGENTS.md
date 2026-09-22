@@ -760,7 +760,7 @@ means N runs; the owner is just another subscriber.
 
 The **job** the API serves (`ScheduledJob`) is the *job view*: a subscription with its definition
 folded in, keyed by the **subscription id** — what every client, link and notification has always
-called the job id (migration 101 gives every pre-existing job one definition and one subscription
+called the job id (migration 103 gives every pre-existing job one definition and one subscription
 carrying the old id). The trigger fields carry the trigger *in force*; `trigger_inherited` says
 whether that is the definition's defaults or the subscriber's own **override**, and
 `trigger_defaults` carries the defaults for a writer. A definition's fields are live for every
@@ -830,8 +830,8 @@ plus one read tool on groups — `console_list_my_groups` (`GET /api/v1/groups/s
 returns id, name, description and **member_count only**: a share is decided on "which group, and
 how many people does that mean", and the identities are not part of that question. `is_public` is
 admin-only and not exposed. The vocabulary itself is a DB seed, so it ships as prompt migration
-102 (targeted `replace()` calls in the style of 085, checked at the text level by
-`tests/test_migration_102_task_scheduler_sharing.py` — an unmatched search string is a silent
+104 (targeted `replace()` calls in the style of 085, checked at the text level by
+`tests/test_migration_104_task_scheduler_sharing.py` — an unmatched search string is a silent
 no-op in SQL).
 
 ### Scheduled Run Vocabulary and Interruption (services/scheduler_engine.py)

@@ -1,4 +1,4 @@
-"""102's replacements must match the prompt 075 seeded and 085 rewrote.
+"""104's replacements must match the prompt 075 seeded and 085 rewrote.
 
 Same hazard as 085: a `replace()` whose search text does not match is a silent no-op in
 SQL. The migration would report success and leave the task-scheduler holding the
@@ -17,7 +17,7 @@ from pathlib import Path
 DDL = Path(__file__).parent.parent / "sqlmigrations" / "ddl"
 SEED = DDL / "075_reseed_task_scheduler_as_local_subagent.sql"
 CEL = DDL / "085_reseed_task_scheduler_cel_conditions.sql"
-SHARING = DDL / "102_task_scheduler_shared_jobs.sql"
+SHARING = DDL / "104_task_scheduler_shared_jobs.sql"
 
 #: The vocabulary the rewritten prompt has to carry, one item per decision of ADR-0010
 #: that a conversation can actually hit.
@@ -45,9 +45,9 @@ def _replacement_pairs(path: Path, *, min_len: int = 40) -> list[tuple[str, str]
 
 
 def _set_clause(column: str) -> str:
-    """The text of one ``<column> = … replace(...)`` SET clause of 102.
+    """The text of one ``<column> = … replace(...)`` SET clause of 104.
 
-    Sliced rather than length-filtered: one of 102's search strings is the single
+    Sliced rather than length-filtered: one of 104's search strings is the single
     short line ``<best_practices>``, so a filter wide enough to drop the jsonb tool
     array would drop that too and offset every pair after it.
 
@@ -86,9 +86,9 @@ def _prompt_after_085() -> str:
 def test_every_replacement_finds_its_text():
     prompt = _prompt_after_085()
     pairs = _pairs_of("system_prompt")
-    assert pairs, "102 defines no prompt replacements"
+    assert pairs, "104 defines no prompt replacements"
     for old, _ in pairs:
-        assert old in prompt, f"102 searches for text the prompt never had: {old[:80]!r}"
+        assert old in prompt, f"104 searches for text the prompt never had: {old[:80]!r}"
 
 
 def test_the_result_teaches_sharing():
@@ -108,7 +108,7 @@ def test_the_card_description_replacement_matches():
     assert len(pairs) == 1
     description, replacement = pairs[0]
     seeded = [lit for lit in _sql_literals(SEED.read_text()) if description in lit]
-    assert seeded, f"102's description edit searches for text 075 never seeded: {description!r}"
+    assert seeded, f"104's description edit searches for text 075 never seeded: {description!r}"
     assert "Share jobs with groups" in replacement
 
 
