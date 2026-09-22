@@ -616,10 +616,10 @@ class UserGroupService:
         reach Keycloak.
         """
         rows = await db.execute(
-            text("SELECT id, sub, scim_user_name FROM users WHERE id = ANY(:user_ids)"),
+            text("SELECT id, sub FROM users WHERE id = ANY(:user_ids)"),
             {"user_ids": user_ids},
         )
-        user_id_to_row = {row[0]: (row[1], row[2]) for row in rows.fetchall()}
+        user_id_to_sub = {row[0]: row[1] for row in rows.fetchall()}
 
         verb, past = ("Added", "to") if operation == "add" else ("Removed", "from")
         call = (
@@ -629,18 +629,30 @@ class UserGroupService:
         )
 
         members: list[tuple[str, str]] = []
+        deferred: list[str] = []
         for user_id in user_ids:
-            user_sub, scim_user_name = user_id_to_row.get(user_id, (None, None))
+            user_sub = user_id_to_sub.get(user_id)
             if not user_sub:
                 logger.warning(f"User {user_id} not found, skipping Keycloak sync")
                 continue
-            if not has_idp_identity(user_id, user_sub, scim_user_name):
+            if not has_idp_identity(user_sub):
                 logger.info(
                     f"User {user_id} has no IdP identity yet; deferring Keycloak group "
                     f"{keycloak_group_id} membership {operation} until first login"
                 )
+                deferred.append(user_id)
                 continue
             members.append((user_id, user_sub))
+
+        if deferred and operation == "add":
+            # Keycloak is now behind for these users. The flag is what makes the push
+            # retryable at any later login, rather than depending on catching the single
+            # moment their real subject arrives. A removal needs no flag: nothing was ever
+            # mirrored, and the reconciliation pushes whatever the membership is by then.
+            await db.execute(
+                text("UPDATE users SET keycloak_mirror_pending = TRUE WHERE id = ANY(:user_ids)"),
+                {"user_ids": deferred},
+            )
 
         if not members:
             return

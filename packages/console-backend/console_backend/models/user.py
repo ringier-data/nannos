@@ -20,34 +20,37 @@ class OrchestratorThinkingLevel(str, Enum):
     XHIGH = "xhigh"
 
 
-def has_idp_identity(user_id: str, sub: str, scim_user_name: str | None) -> bool:
+#: Prefix of the subject a SCIM-provisioned user carries until their first OIDC login.
+#: A real IdP subject never looks like this, which is the entire point: the placeholder
+#: says what it is instead of having to be inferred from the shape of the row.
+SCIM_PLACEHOLDER_SUB_PREFIX = "scim-pending:"
+
+
+def placeholder_sub(user_id: str) -> str:
+    """The subject to store for a SCIM-provisioned user who has no IdP account yet.
+
+    Keyed on the row's own id so it stays unique under `users.sub`'s unique constraint.
+    """
+    return f"{SCIM_PLACEHOLDER_SUB_PREFIX}{user_id}"
+
+
+def has_idp_identity(sub: str) -> bool:
     """True when `sub` is a real IdP subject rather than the SCIM placeholder.
 
     A user provisioned over SCIM has no account at the identity provider until they log in
-    for the first time, so `ScimUserService.create_user` stores the row's own id in `sub` as
-    a placeholder and the real subject only arrives with the first OIDC login. Anything that
-    hands `users.sub` to the IdP — Keycloak group membership above all — must check this
-    first: the placeholder is not a Keycloak user id and using it as one gets
-    `404 User not found`.
+    for the first time, so `ScimUserService.create_user` stores `placeholder_sub(id)` and the
+    real subject only arrives with the first OIDC login. Anything that hands `users.sub` to
+    the IdP — Keycloak group membership above all — must check this first: the placeholder is
+    not a Keycloak user id, and using it as one gets `404 User not found`.
 
-    `sub == user_id` alone does not mean placeholder. Migration 001 keyed `users` by the OIDC
-    sub itself, so a row created before ids became UUIDs has `sub == id` while having a
-    perfectly real Keycloak account. `scim_user_name` is what separates the two: it is written
-    only by the SCIM provisioning path, and SCIM requires `userName`, so it is set for every
-    SCIM-provisioned user and NULL for every OIDC-created one.
-
-    Keep this the single definition of the convention — it is the only thing tying the
-    placeholder written in `scim_service` to the consumers that must skip it.
-
-    Args:
-        user_id: The `users.id` of the row.
-        sub: The row's `users.sub`.
-        scim_user_name: The row's `users.scim_user_name`; NULL for users not provisioned
-            over SCIM.
+    This used to be inferred (`sub == id`, narrowed by `scim_user_name`) rather than written
+    down. Inference could not be made sound: migration 001 keyed `users` by the OIDC sub
+    itself, so a row from that era legitimately has `sub == id`, and `scim_user_name` can be
+    written onto any row by a SCIM PUT/PATCH — including one of those, which silently stopped
+    mirroring a user who did have a Keycloak account. Migration 103 rewrote the existing
+    placeholders to this prefix so the question is answered by the value itself.
     """
-    if sub != user_id:
-        return True
-    return scim_user_name is None
+    return not sub.startswith(SCIM_PLACEHOLDER_SUB_PREFIX)
 
 
 class UserStatus(str, Enum):

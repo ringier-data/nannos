@@ -443,23 +443,39 @@ When sending a steering message via `_send_steering_message_to_agent()`, the cod
 
 ### A SCIM-Provisioned User Has No IdP Identity Until First Login (models/user.py, scim_service, user_service)
 
-`ScimUserService.create_user` writes the row's own id into `users.sub` as a placeholder, because
-provisioning creates nobody in Keycloak; the real subject only arrives with the first OIDC login,
-through the email-matched upsert in `UserService._upsert_user_internal`. Anything handing
-`users.sub` to Keycloak must therefore ask `has_idp_identity(id, sub, scim_user_name)` first —
-that predicate is the single definition of the convention, and `UserGroupService._add_members` /
-`_remove_members` use it to defer the mirror instead of raising `404 User not found` (which used to
-500 the admin request and roll the membership write back with it).
+`ScimUserService.create_user` writes `placeholder_sub(id)` — `scim-pending:<id>` — into
+`users.sub`, because provisioning creates nobody in Keycloak; the real subject arrives with the
+first OIDC login, through the email-matched upsert in `UserService._upsert_user_internal` (matched
+on `LOWER(email)`, since SCIM stores the address verbatim and that path lowercases). Anything
+handing `users.sub` to an IdP must ask `has_idp_identity(sub)` first;
+`UserGroupService._mirror_membership_to_keycloak` is the single enforcement site, and it defers
+rather than raising `404 User not found`.
 
-`sub == id` alone does **not** mean placeholder: migration 001 keyed `users` by the OIDC sub
-itself, so rows from back then legitimately have `sub == id` while owning a real Keycloak account.
-`scim_user_name` is the discriminator — written only by the SCIM path, and SCIM requires
-`userName`.
+**The placeholder is explicit because inference could not be made sound.** It used to be the row's
+own id, recognised by `sub == id` narrowed by `scim_user_name IS NOT NULL`. Both halves fail:
+migration 001 keyed `users` by the OIDC sub itself, so rows from that era legitimately have
+`sub == id`, and `scim_user_name` can be written onto *any* row by a SCIM PUT/PATCH — including one
+of those, which silently stopped mirroring a user who did have a Keycloak account. Migration 103
+rewrote the existing placeholders; that migration is the only place the old inference is applied,
+once, to the data as it stood.
+
+**`users.keycloak_mirror_pending` is what makes the push retryable.** A deferred *add* raises it;
+a successful reconciliation clears it. The trigger is that flag, not the placeholder-to-real
+subject transition — that transition happens exactly once, so a Keycloak outage during that one
+login used to leave the two sides diverged forever. Reconciliation pushes the *current* membership
+set rather than a recorded backlog, which is what makes the retry safe: the calls are idempotent,
+and a membership granted and withdrawn while the user was pending needs no replay. It stays inside
+the login transaction deliberately — a rollback after a successful push simply leaves the flag set
+and re-pushes next time, which is cheaper than restructuring the auth path around a post-commit
+hook.
 
 The database is the authority for membership (`/api/v1/auth/me` reads it from there); Keycloak
-backs only the groups claim other OIDC clients consume. So the mirror never fails an operation:
-memberships granted before first login are pushed by `UserService._sync_pending_group_memberships`
-when the placeholder is replaced, and a Keycloak error there is logged, not raised.
+backs only the groups claim other OIDC clients consume. So the mirror never fails an operation: a
+Keycloak error during reconciliation is logged, the flag stays set, and the login proceeds.
+
+One consequence worth knowing: a placeholder subject resolves to nobody, so
+`spend_attribution.resolve_user_sub` returns `None` for one and `billing_subject` falls back to the
+internal id, which the usage ingest does resolve.
 
 ### One Alias = One Deployment (admin_model_gateway_router)
 

@@ -516,17 +516,22 @@ class UserService:
         return results
 
     async def _sync_pending_group_memberships(self, db: AsyncSession, user_id: str, sub: str) -> None:
-        """Mirror a user's existing group memberships into Keycloak.
+        """Mirror a user's group memberships into Keycloak and clear the pending flag.
 
-        Called once, when a SCIM-provisioned user's placeholder subject is replaced by the real
-        one at first OIDC login. Memberships granted before that point were written to the
-        database but skipped in Keycloak, because there was no Keycloak user to add.
+        Runs at login for a user `users.keycloak_mirror_pending` marks as diverged: one
+        provisioned over SCIM whose membership changes were skipped while they had no IdP
+        account (`UserGroupService._mirror_membership_to_keycloak`).
 
         The database is the authority for membership (`/api/v1/auth/me` reads it from there);
         Keycloak only backs the groups claim other OIDC clients consume. A failure to mirror
-        must therefore not fail the login, so it is logged rather than raised.
+        must therefore not fail the login, so it is logged rather than raised — and the flag
+        stays set, so the next login tries again. Pushing the *current* membership set rather
+        than a recorded backlog is what makes that retry safe: the calls are idempotent, and a
+        membership granted and withdrawn while the user was pending needs no replay.
         """
         if self._keycloak_service is None:
+            # No Keycloak configured: leave the flag set. If group sync is switched on later,
+            # the divergence is still recorded and the next login pushes it.
             return
 
         # Deliberately unguarded: this runs inside the caller's transaction, so a database error
@@ -546,6 +551,9 @@ class UserService:
         )
         group_ids = [row["keycloak_group_id"] for row in result.mappings().all()]
         if not group_ids:
+            # Nothing to mirror — whatever the flag was raised for is gone (the membership was
+            # withdrawn, or the group left Keycloak). The user is not diverged any more.
+            await self._clear_mirror_pending(db, user_id)
             return
 
         # Concurrently: these are HTTP round-trips held open across the login transaction, and a
@@ -557,14 +565,26 @@ class UserService:
         for group_id, outcome in zip(group_ids, outcomes, strict=True):
             if isinstance(outcome, BaseException):
                 # One unreachable group must not cost the user the others, nor their login.
-                logger.error(
-                    f"Failed to reconcile user {user_id} into Keycloak group {group_id} "
-                    f"on first login: {outcome}"
-                )
+                logger.error(f"Failed to reconcile user {user_id} into Keycloak group {group_id}: {outcome}")
             else:
-                logger.info(
-                    f"Reconciled user {user_id} (sub={sub}) into Keycloak group {group_id} on first login"
-                )
+                logger.info(f"Reconciled user {user_id} (sub={sub}) into Keycloak group {group_id}")
+
+        if any(isinstance(outcome, BaseException) for outcome in outcomes):
+            # Leave the flag set: this user is still diverged, and the next login retries.
+            logger.warning(
+                f"Keycloak mirror for user {user_id} is still pending after {len(group_ids)} group(s); "
+                f"it will be retried at their next login"
+            )
+            return
+
+        await self._clear_mirror_pending(db, user_id)
+
+    async def _clear_mirror_pending(self, db: AsyncSession, user_id: str) -> None:
+        """Record that Keycloak is no longer behind for this user."""
+        await db.execute(
+            text("UPDATE users SET keycloak_mirror_pending = FALSE WHERE id = :user_id"),
+            {"user_id": user_id},
+        )
 
     async def _upsert_user_internal(
         self,
@@ -590,7 +610,8 @@ class UserService:
         # login would try to insert a second one and trip `idx_users_email_unique` (which is itself
         # on LOWER(email)), and the placeholder subject would never be reconciled.
         check_query = text(
-            "SELECT id, sub, email, scim_user_name FROM users WHERE LOWER(email) = :email OR sub = :sub"
+            "SELECT id, sub, email, keycloak_mirror_pending FROM users "
+            "WHERE LOWER(email) = :email OR sub = :sub"
         )
         results = await db.execute(check_query, {"email": email, "sub": sub})
         rows = results.mappings().all()
@@ -601,7 +622,7 @@ class UserService:
         user_id = row["id"] if row else None
         old_sub = row["sub"] if row else None
         old_email = row["email"] if row else None
-        old_scim_user_name = row["scim_user_name"] if row else None
+        mirror_pending = bool(row["keycloak_mirror_pending"]) if row else False
         try:
             now = datetime.now(tz=timezone.utc)
 
@@ -706,12 +727,6 @@ class UserService:
                         logger.info(f"First user {sub} auto-promoted to administrator (FIRST_USER_IS_ADMIN=true)")
             else:
                 if sub != old_sub:
-                    if old_sub is not None and not has_idp_identity(user_id, old_sub, old_scim_user_name):
-                        # The user was provisioned over SCIM and is logging in for the first time:
-                        # until now they had no Keycloak account, so every group membership granted
-                        # in the meantime was skipped by UserGroupService. Push them now.
-                        await self._sync_pending_group_memberships(db, user_id, sub)
-
                     # Audit sub change if it differs from previous
                     await self.audit_service.log_action(
                         db=db,
@@ -745,6 +760,14 @@ class UserService:
                             },
                         },
                     )
+
+            # Keycloak is behind for this user: memberships granted while they had no IdP
+            # account were skipped. Driven by the stored flag rather than by the
+            # placeholder-to-real subject transition, so a push that fails (Keycloak down,
+            # admin credentials absent at boot) is retried at their next login instead of
+            # being lost with the one moment that transition happened.
+            if mirror_pending and has_idp_identity(sub):
+                await self._sync_pending_group_memberships(db, user.id, sub)
 
             return user
         except IntegrityError as e:
