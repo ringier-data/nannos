@@ -20,6 +20,39 @@ class OrchestratorThinkingLevel(str, Enum):
     XHIGH = "xhigh"
 
 
+#: Prefix of the subject a SCIM-provisioned user carries until their first OIDC login.
+#: A real IdP subject never looks like this, which is the entire point: the placeholder
+#: says what it is instead of having to be inferred from the shape of the row.
+SCIM_PLACEHOLDER_SUB_PREFIX = "scim-pending:"
+
+
+def placeholder_sub(user_id: str) -> str:
+    """The subject to store for a SCIM-provisioned user who has no IdP account yet.
+
+    Keyed on the row's own id so it stays unique under `users.sub`'s unique constraint.
+    """
+    return f"{SCIM_PLACEHOLDER_SUB_PREFIX}{user_id}"
+
+
+def has_idp_identity(sub: str) -> bool:
+    """True when `sub` is a real IdP subject rather than the SCIM placeholder.
+
+    A user provisioned over SCIM has no account at the identity provider until they log in
+    for the first time, so `ScimUserService.create_user` stores `placeholder_sub(id)` and the
+    real subject only arrives with the first OIDC login. Anything that hands `users.sub` to
+    the IdP — Keycloak group membership above all — must check this first: the placeholder is
+    not a Keycloak user id, and using it as one gets `404 User not found`.
+
+    This used to be inferred (`sub == id`, narrowed by `scim_user_name`) rather than written
+    down. Inference could not be made sound: migration 001 keyed `users` by the OIDC sub
+    itself, so a row from that era legitimately has `sub == id`, and `scim_user_name` can be
+    written onto any row by a SCIM PUT/PATCH — including one of those, which silently stopped
+    mirroring a user who did have a Keycloak account. Migration 101 rewrote the existing
+    placeholders to this prefix so the question is answered by the value itself.
+    """
+    return not sub.startswith(SCIM_PLACEHOLDER_SUB_PREFIX)
+
+
 class UserStatus(str, Enum):
     """User status enum."""
 

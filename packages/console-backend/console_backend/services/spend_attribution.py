@@ -34,6 +34,8 @@ from typing import Any
 
 from sqlalchemy import text
 
+from ..models.user import has_idp_identity
+
 logger = logging.getLogger(__name__)
 
 #: console-backend's own utility calls — conversation titling, scheduled-job drafting,
@@ -88,4 +90,11 @@ async def resolve_user_sub(db: Any, user_id: str, *, context: str = "") -> str |
         return None
     if not sub:
         logger.warning("User %s has no subject on file%s; LLM spend goes unattributed", user_id, where)
+        return None
+    if not has_idp_identity(sub):
+        # A SCIM-provisioned user who has never logged in carries a placeholder subject, which
+        # resolves to nobody. The caller's fallback to the internal id does resolve (the usage
+        # ingest accepts either), so None is the useful answer here, not the placeholder.
+        logger.info("User %s has no IdP subject yet%s; billing falls back to their internal id", user_id, where)
+        return None
     return sub

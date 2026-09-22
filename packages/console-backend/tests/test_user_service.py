@@ -207,9 +207,17 @@ class TestUserServiceRetryLogic:
     async def test_upsert_user_email_unique_constraint_raises_value_error(
         self, user_service: UserService, pg_session: AsyncSession, test_user_db: User, test_admin_user_db: User
     ):
-        """Test that IntegrityError on idx_users_email_unique is caught and raises ValueError."""
+        """Test that IntegrityError on idx_users_email_unique is caught and raises ValueError.
 
-        with pytest.raises(ValueError, match="Multiple users found with email admin@example.com or sub test-user-sub"):
+        Which is what happens now that the lookup resolves by subject first: `test_user_db` is
+        identified by their own sub, and taking an address another live user holds is an email
+        collision, reported by `idx_users_email_unique` — the case this test is named for. It
+        used to be pre-empted by the lookup's "multiple users" guard, which conflated it with
+        genuine ambiguity; that guard now fires only when the subject identifies nothing and
+        two *live* rows share the address.
+        """
+
+        with pytest.raises(ValueError, match="Email admin@example.com is already registered to a different account"):
             await user_service.upsert_user(
                 db=pg_session,
                 sub=test_user_db.sub,

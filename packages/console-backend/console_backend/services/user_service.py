@@ -19,9 +19,11 @@ from ..models.user import (
     UserGroupMembership,
     UserStatus,
     UserWithGroups,
+    has_idp_identity,
 )
 from ..repositories.user_repository import UserRepository
 from ..services.audit_service import AuditService
+from ..services.keycloak_admin_service import KeycloakAdminService
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,12 @@ logger = logging.getLogger(__name__)
 class UserService:
     """Manages users in PostgreSQL."""
 
-    def __init__(self, user_repository: UserRepository | None = None, audit_service: AuditService | None = None):
+    def __init__(
+        self,
+        user_repository: UserRepository | None = None,
+        audit_service: AuditService | None = None,
+        keycloak_admin_service: KeycloakAdminService | None = None,
+    ):
         """Initialize user service.
 
         Args:
@@ -37,9 +44,13 @@ class UserService:
                 If None, must be set via set_repository() before use.
             audit_service: Optional audit service instance.
                 If None, must be set via set_audit_service() before use.
+            keycloak_admin_service: Optional Keycloak admin service, used to push the group
+                memberships a SCIM-provisioned user accumulated before their first login.
+                Left None when Keycloak group sync is disabled.
         """
         self._repo = user_repository
         self._audit_service = audit_service
+        self._keycloak_service = keycloak_admin_service
 
     def set_repository(self, user_repository: UserRepository):
         """Set the user repository (dependency injection)."""
@@ -48,6 +59,10 @@ class UserService:
     def set_audit_service(self, audit_service: AuditService):
         """Set the audit service (dependency injection)."""
         self._audit_service = audit_service
+
+    def set_keycloak_service(self, keycloak_admin_service: KeycloakAdminService):
+        """Set the Keycloak admin service (dependency injection)."""
+        self._keycloak_service = keycloak_admin_service
 
     @property
     def repo(self) -> UserRepository:
@@ -500,6 +515,113 @@ class UserService:
 
         return results
 
+    async def _sync_pending_group_memberships(self, db: AsyncSession, user_id: str, sub: str) -> None:
+        """Mirror a user's group memberships into Keycloak and clear the pending flag.
+
+        Runs at login for a user `users.keycloak_mirror_pending` marks as diverged: one
+        provisioned over SCIM whose membership changes were skipped while they had no IdP
+        account (`UserGroupService._mirror_membership_to_keycloak`).
+
+        The database is the authority for membership (`/api/v1/auth/me` reads it from there);
+        Keycloak only backs the groups claim other OIDC clients consume. A failure to mirror
+        must therefore not fail the login, so it is logged rather than raised — and the flag
+        stays set, so the next login tries again. Pushing the *current* membership set rather
+        than a recorded backlog is what makes that retry safe: the calls are idempotent, and a
+        membership granted and withdrawn while the user was pending needs no replay.
+        """
+        if self._keycloak_service is None:
+            # No Keycloak configured: leave the flag set. If group sync is switched on later,
+            # the divergence is still recorded and the next login pushes it.
+            return
+
+        # Deliberately unguarded: this runs inside the caller's transaction, so a database error
+        # here has already poisoned it and would resurface at the next statement anyway. Swallowing
+        # it would only misattribute the failure. What must not fail the login is the Keycloak call
+        # below, and that is what is caught.
+        result = await db.execute(
+            text("""
+                SELECT ug.keycloak_group_id
+                FROM user_groups ug
+                JOIN user_group_members ugm ON ugm.user_group_id = ug.id
+                WHERE ugm.user_id = :user_id
+                  AND ug.deleted_at IS NULL
+                  AND ug.keycloak_group_id IS NOT NULL
+            """),
+            {"user_id": user_id},
+        )
+        group_ids = [row["keycloak_group_id"] for row in result.mappings().all()]
+        if not group_ids:
+            # Nothing to mirror — whatever the flag was raised for is gone (the membership was
+            # withdrawn, or the group left Keycloak). The user is not diverged any more.
+            await self._clear_mirror_pending(db, user_id)
+            return
+
+        # Concurrently: these are HTTP round-trips held open across the login transaction, and a
+        # user in a dozen groups should not pay for them one at a time.
+        outcomes = await asyncio.gather(
+            *(self._keycloak_service.add_user_to_group(sub, group_id) for group_id in group_ids),
+            return_exceptions=True,
+        )
+        for group_id, outcome in zip(group_ids, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                # One unreachable group must not cost the user the others, nor their login.
+                logger.error(f"Failed to reconcile user {user_id} into Keycloak group {group_id}: {outcome}")
+            else:
+                logger.info(f"Reconciled user {user_id} (sub={sub}) into Keycloak group {group_id}")
+
+        if any(isinstance(outcome, BaseException) for outcome in outcomes):
+            # Leave the flag set: this user is still diverged, and the next login retries.
+            logger.warning(
+                f"Keycloak mirror for user {user_id} is still pending after {len(group_ids)} group(s); "
+                f"it will be retried at their next login"
+            )
+            return
+
+        await self._clear_mirror_pending(db, user_id)
+
+    async def _clear_mirror_pending(self, db: AsyncSession, user_id: str) -> None:
+        """Record that Keycloak is no longer behind for this user."""
+        await db.execute(
+            text("UPDATE users SET keycloak_mirror_pending = FALSE WHERE id = :user_id"),
+            {"user_id": user_id},
+        )
+
+    @staticmethod
+    def _pick_existing_row(rows: Any, *, sub: str, email: str) -> Any:
+        """Which existing row, if any, this login belongs to.
+
+        More than one row can match. Migration 051 made the email index partial
+        (`WHERE deleted_at IS NULL`) *deliberately*, so that soft-deleting a user frees their
+        address for re-provisioning — which means a soft-deleted row and a live row can share
+        an email, and the query's two arms can land on different people.
+
+        The subject settles it whenever it matches: `users.sub` is unique and is who the token
+        says this is. Only when no row matches by subject does the email arm decide anything,
+        and there the live row is the one being adopted — this is the SCIM-placeholder path,
+        and a soft-deleted namesake is not the account being logged into.
+
+        Preferring the live row *without* checking the subject first would be the dangerous
+        version of this: a soft-deleted user logging in would be resolved onto the live row
+        that inherited their address, handing them somebody else's account.
+        """
+        if not rows:
+            return None
+
+        by_sub = [row for row in rows if row["sub"] == sub]
+        if by_sub:
+            return by_sub[0]
+
+        live = [row for row in rows if row["deleted_at"] is None]
+        if len(live) > 1:
+            # The partial unique index should make this unreachable; it is a real ambiguity.
+            raise ValueError(f"Multiple live users found with email {email} or sub {sub}")
+        if live:
+            return live[0]
+
+        if len(rows) > 1:
+            raise ValueError(f"Multiple users found with email {email} or sub {sub}")
+        return rows[0]
+
     async def _upsert_user_internal(
         self,
         db: AsyncSession,
@@ -519,16 +641,21 @@ class UserService:
         """
         email = email.lower().strip()
         # Check if user exists before upsert
-        check_query = text("SELECT id, sub, email FROM users WHERE email = :email OR sub = :sub")
+        # LOWER(email), not `email = :email`: SCIM stores `userName`/`emails[].value` verbatim while
+        # this path lowercases, so a mixed-case SCIM address would never match its own row — the
+        # login would try to insert a second one and trip `idx_users_email_unique` (which is itself
+        # on LOWER(email)), and the placeholder subject would never be reconciled.
+        check_query = text(
+            "SELECT id, sub, email, keycloak_mirror_pending, deleted_at FROM users "
+            "WHERE LOWER(email) = :email OR sub = :sub"
+        )
         results = await db.execute(check_query, {"email": email, "sub": sub})
         rows = results.mappings().all()
-        if len(rows) > 1:
-            raise ValueError(f"Multiple users found with email {email} or sub {sub}")
-
-        row = rows[0] if rows else None
+        row = self._pick_existing_row(rows, sub=sub, email=email)
         user_id = row["id"] if row else None
         old_sub = row["sub"] if row else None
         old_email = row["email"] if row else None
+        mirror_pending = bool(row["keycloak_mirror_pending"]) if row else False
         try:
             now = datetime.now(tz=timezone.utc)
 
@@ -666,6 +793,14 @@ class UserService:
                             },
                         },
                     )
+
+            # Keycloak is behind for this user: memberships granted while they had no IdP
+            # account were skipped. Driven by the stored flag rather than by the
+            # placeholder-to-real subject transition, so a push that fails (Keycloak down,
+            # admin credentials absent at boot) is retried at their next login instead of
+            # being lost with the one moment that transition happened.
+            if mirror_pending and has_idp_identity(sub):
+                await self._sync_pending_group_memberships(db, user.id, sub)
 
             return user
         except IntegrityError as e:

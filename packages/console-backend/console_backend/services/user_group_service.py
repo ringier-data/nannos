@@ -14,7 +14,7 @@ from ..authorization import (
 )
 from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import ActivationSource
-from ..models.user import User, UserStatus
+from ..models.user import User, UserStatus, has_idp_identity
 from ..models.user_group import (
     BulkDeleteResult,
     MemberInfo,
@@ -597,6 +597,84 @@ class UserGroupService:
         if not_active:
             raise InactiveUserError(f"Cannot add users that are not active: {', '.join(not_active)}")
 
+    async def _mirror_membership_to_keycloak(
+        self,
+        db: AsyncSession,
+        user_ids: list[str],
+        keycloak_group_id: str,
+        operation: Literal["add", "remove"],
+    ) -> None:
+        """Mirror a membership change for `user_ids` into one Keycloak group.
+
+        The single place the placeholder-subject convention is enforced: a user whose `users.sub`
+        is still the SCIM placeholder has no Keycloak account, so the call is logged as deferred
+        and skipped rather than sent and failed (`404 User not found`). `UserService` pushes those
+        memberships when the real subject arrives at first login.
+
+        Raises the first Keycloak failure, so the caller's transaction still rolls back — but only
+        after every outcome has been logged, so a partial write leaves a record of which users did
+        reach Keycloak.
+        """
+        rows = await db.execute(
+            text("SELECT id, sub FROM users WHERE id = ANY(:user_ids)"),
+            {"user_ids": user_ids},
+        )
+        user_id_to_sub = {row[0]: row[1] for row in rows.fetchall()}
+
+        verb, past = ("Added", "to") if operation == "add" else ("Removed", "from")
+        call = (
+            self.keycloak_service.add_user_to_group
+            if operation == "add"
+            else self.keycloak_service.remove_user_from_group
+        )
+
+        members: list[tuple[str, str]] = []
+        deferred: list[str] = []
+        for user_id in user_ids:
+            user_sub = user_id_to_sub.get(user_id)
+            if not user_sub:
+                logger.warning(f"User {user_id} not found, skipping Keycloak sync")
+                continue
+            if not has_idp_identity(user_sub):
+                logger.info(
+                    f"User {user_id} has no IdP identity yet; deferring Keycloak group "
+                    f"{keycloak_group_id} membership {operation} until first login"
+                )
+                deferred.append(user_id)
+                continue
+            members.append((user_id, user_sub))
+
+        if deferred and operation == "add":
+            # Keycloak is now behind for these users. The flag is what makes the push
+            # retryable at any later login, rather than depending on catching the single
+            # moment their real subject arrives. A removal needs no flag: nothing was ever
+            # mirrored, and the reconciliation pushes whatever the membership is by then.
+            await db.execute(
+                text("UPDATE users SET keycloak_mirror_pending = TRUE WHERE id = ANY(:user_ids)"),
+                {"user_ids": deferred},
+            )
+
+        if not members:
+            return
+
+        outcomes = await asyncio.gather(
+            *(call(user_sub, keycloak_group_id) for _, user_sub in members),
+            return_exceptions=True,
+        )
+        failure: BaseException | None = None
+        for (user_id, user_sub), outcome in zip(members, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                logger.error(
+                    f"Failed to {operation} user {user_id} (sub={user_sub}) {past} Keycloak group "
+                    f"{keycloak_group_id}: {outcome}"
+                )
+                failure = failure or outcome
+            else:
+                logger.info(f"{verb} user {user_id} (sub={user_sub}) {past} Keycloak group {keycloak_group_id}")
+
+        if failure is not None:
+            raise failure
+
     async def _add_members(
         self,
         db: AsyncSession,
@@ -644,33 +722,13 @@ class UserGroupService:
             member_additions=member_additions,
         )
 
-        # Then sync to Keycloak sequentially
+        # Then sync to Keycloak
         # If this fails, exception will cause DB transaction to rollback
         if self.keycloak_service:
             if existing.keycloak_group_id:
-                # Fetch user subs for Keycloak operations
-                user_subs_query = text("SELECT id, sub FROM users WHERE id = ANY(:user_ids)")
-                subs_result = await db.execute(user_subs_query, {"user_ids": user_ids})
-                user_id_to_sub = {row[0]: row[1] for row in subs_result.fetchall()}
-
-                tasks = []
                 # TODO: this is not 100% transaction-safe if adding multiple users and one fails
                 #       we could end up with partial additions in Keycloak vs DB
-                try:
-                    for user_id in user_ids:
-                        user_sub = user_id_to_sub.get(user_id)
-                        if not user_sub:
-                            logger.warning(f"User {user_id} not found, skipping Keycloak sync")
-                            continue
-                        tasks.append(self.keycloak_service.add_user_to_group(user_sub, existing.keycloak_group_id))
-                        logger.info(
-                            f"Added user {user_id} (sub={user_sub}) to Keycloak group {existing.keycloak_group_id}"
-                        )
-                    await asyncio.gather(*tasks)
-                except Exception as e:
-                    logger.error(f"Failed to add users to Keycloak group: {e}")
-                    # Re-raise to trigger DB transaction rollback
-                    raise
+                await self._mirror_membership_to_keycloak(db, user_ids, existing.keycloak_group_id, "add")
             else:
                 logger.warning(f"Group {group_id} has no Keycloak ID; skipping Keycloak member additions")
 
@@ -1035,26 +1093,11 @@ class UserGroupService:
             user_ids=user_ids,
         )
 
-        # Then sync to Keycloak sequentially
+        # Then sync to Keycloak
         # If this fails, exception will cause DB transaction to rollback
         if self.keycloak_service:
             if existing.keycloak_group_id:
-                # Fetch user subs for Keycloak operations
-                user_subs_query = text("SELECT id, sub FROM users WHERE id = ANY(:user_ids)")
-                subs_result = await db.execute(user_subs_query, {"user_ids": removed})
-                user_id_to_sub = {row[0]: row[1] for row in subs_result.fetchall()}
-
-                tasks = []
-                for user_id in removed:
-                    user_sub = user_id_to_sub.get(user_id)
-                    if not user_sub:
-                        logger.warning(f"User {user_id} not found, skipping Keycloak sync")
-                        continue
-                    tasks.append(self.keycloak_service.remove_user_from_group(user_sub, existing.keycloak_group_id))
-                    logger.info(
-                        f"Removed user {user_id} (sub={user_sub}) from Keycloak group {existing.keycloak_group_id}"
-                    )
-                await asyncio.gather(*tasks)
+                await self._mirror_membership_to_keycloak(db, removed, existing.keycloak_group_id, "remove")
             else:
                 logger.warning(f"Group {group_id} has no Keycloak ID; skipping Keycloak member removals")
 
