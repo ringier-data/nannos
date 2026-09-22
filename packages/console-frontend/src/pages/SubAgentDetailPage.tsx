@@ -219,6 +219,10 @@ export function SubAgentDetailPage() {
   const [isSkillModalOpen, setIsSkillModalOpen] = useState(false);
   const [isSkillImportOpen, setIsSkillImportOpen] = useState(false);
   const [importingSkillId, setImportingSkillId] = useState<string | null>(null);
+  // ADR-0011: the picker may pre-select "follow"; the mode is set through the activations
+  // endpoint AFTER the draft is saved (mode never travels in the config-save payload).
+  const [importMode, setImportMode] = useState<'pinned' | 'following'>('pinned');
+  const pendingFollowRef = useRef<Set<string>>(new Set());
   const [updatingSkillName, setUpdatingSkillName] = useState<string | null>(null);
   const [skillsWithUpdates, setSkillsWithUpdates] = useState<Set<string>>(new Set());
 
@@ -339,6 +343,25 @@ export function SubAgentDetailPage() {
     },
   });
 
+  // ADR-0011: pinned <-> following on a referenced skill. Re-activating with the other
+  // mode IS the switch; the server creates the activation row if the reference arrived
+  // through a plain config save.
+  const setSkillModeMutation = useMutation({
+    ...activateSkillApiV1SkillsActivationsPostMutation(),
+    onSuccess: (data: any) => {
+      invalidateSubAgentQuery();
+      invalidateActivations();
+      toast.success(
+        data?.mode === 'following'
+          ? 'Now following the publisher: every change becomes a new approved version'
+          : 'Pinned: the skill keeps its content until you update it'
+      );
+    },
+    onError: (err) => {
+      toast.error('Failed to change skill mode', { description: getErrorMessage(err) });
+    },
+  });
+
   const deactivateSkillMutation = useMutation({
     ...deactivateSkillApiV1SkillsActivationsActivationIdDeleteMutation(),
     onSuccess: () => {
@@ -403,11 +426,23 @@ export function SubAgentDetailPage() {
   // Mutations
   const updateMutation = useMutation({
     ...consoleUpdateSubAgentMutation(),
-    onSuccess: () => {
+    onSuccess: async () => {
       invalidateSubAgentQuery();
       setIsEditing(false);
       setHasUnsavedChanges(false);
       toast.success('Configuration saved successfully');
+      // Skills imported with "follow" in the picker: the same call the badge makes.
+      const pending = Array.from(pendingFollowRef.current);
+      pendingFollowRef.current = new Set();
+      for (const registryId of pending) {
+        try {
+          await setSkillModeMutation.mutateAsync({
+            body: { registry_id: registryId, sub_agent_id: parseInt(id!, 10), scope: 'sub-agent', mode: 'following' },
+          });
+        } catch {
+          // The skill stays pinned; the badge toggle is the recovery.
+        }
+      }
     },
     onError: (err) => {
       toast.error('Failed to save configuration', { description: getErrorMessage(err) });
@@ -591,6 +626,9 @@ export function SubAgentDetailPage() {
   const displayedSkills = isViewingHistoricalVersion
     ? (viewedVersion?.skills ?? subAgent?.config_version?.skills ?? [])
     : (subAgent?.config_version?.skills ?? []);
+  // A skill whose registry row this agent does not own (ADR-0011). The server sets `mode`
+  // on every such skill on read; a skill just added from the picker carries it client-side.
+  const isReferenceSkill = (s: SkillDefinition) => !!s.mode || (!!s.scope && s.scope !== 'sub-agent');
   const displayedSandboxEnabled = isViewingHistoricalVersion
     ? (viewedVersion?.sandbox_enabled ?? subAgent?.config_version?.sandbox_enabled ?? false)
     : (subAgent?.config_version?.sandbox_enabled ?? false);
@@ -626,7 +664,7 @@ export function SubAgentDetailPage() {
     }
     // Fallback: check registry for imported skills without update_available flag
     const importedSkills = editSkills.filter(
-      (s) => s.registry_id && s.content_hash && !s.update_available && s.scope !== 'sub-agent'
+      (s) => s.registry_id && s.content_hash && !s.update_available && isReferenceSkill(s) && s.mode !== 'following'
     );
     if (importedSkills.length === 0) return;
 
@@ -878,7 +916,8 @@ export function SubAgentDetailPage() {
         files: undefined,
         registry_id: skill.id,
         content_hash: detail.content_hash ?? null,
-        scope: 'standalone' as const,
+        scope: (detail.scope as SkillDefinition['scope']) ?? ('standalone' as const),
+        mode: 'pinned' as const,
       };
       // Don't add duplicates
       if (editSkills.some((s) => s.name === newSkill.name)) {
@@ -886,8 +925,15 @@ export function SubAgentDetailPage() {
         return;
       }
       setEditSkills((prev) => [...prev, newSkill]);
+      if (importMode === 'following') {
+        pendingFollowRef.current.add(skill.id);
+      }
       handleFieldChange();
-      toast.success(`Imported "${newSkill.name}"`);
+      toast.success(
+        importMode === 'following'
+          ? `Imported "${newSkill.name}"; it will follow the publisher once this version is saved and approved`
+          : `Imported "${newSkill.name}"`
+      );
       setIsSkillImportOpen(false);
     } finally {
       setImportingSkillId(null);
@@ -2078,7 +2124,7 @@ export function SubAgentDetailPage() {
                                     <Plus className="h-2.5 w-2.5 mr-1" />
                                     Import
                                   </Button>
-                                  {editSkills.some((s) => s.scope === 'sub-agent' || !s.registry_id) ? (
+                                  {editSkills.some((s) => !isReferenceSkill(s)) ? (
                                     <Button
                                       type="button"
                                       variant="outline"
@@ -2113,7 +2159,7 @@ export function SubAgentDetailPage() {
                                       key={skill.name}
                                       className="flex items-center gap-2 py-1 px-2 rounded bg-muted/40 text-[11px] group/skill"
                                     >
-                                      {skill.scope && skill.scope !== 'sub-agent' ? (
+                                      {isReferenceSkill(skill) ? (
                                         <Tooltip>
                                           <TooltipTrigger asChild>
                                             <a
@@ -2131,14 +2177,62 @@ export function SubAgentDetailPage() {
                                           {skill.name || '(unnamed)'}
                                         </code>
                                       )}
-                                      {skill.scope && skill.scope !== 'sub-agent' && (
-                                        <span className="text-[10px] text-muted-foreground bg-muted px-1 rounded shrink-0">
-                                          imported
-                                        </span>
+                                      {isReferenceSkill(skill) &&
+                                        (() => {
+                                          const following = skill.mode === 'following';
+                                          const canToggle =
+                                            !isEditing && canEdit && !isEmbedBound && !!skill.registry_id;
+                                          const label = following ? 'following' : 'pinned';
+                                          const explain = following
+                                            ? 'Every change the publisher makes becomes a new approved version of this agent.'
+                                            : 'Keeps this content until someone updates it.';
+                                          const action = following ? 'Click to stop following.' : 'Click to follow the publisher.';
+                                          return (
+                                            <Tooltip>
+                                              <TooltipTrigger asChild>
+                                                <button
+                                                  type="button"
+                                                  disabled={!canToggle || setSkillModeMutation.isPending}
+                                                  className={`text-[10px] px-1 rounded shrink-0 ${
+                                                    following
+                                                      ? 'text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950'
+                                                      : 'text-muted-foreground bg-muted'
+                                                  } ${canToggle ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
+                                                  onClick={() =>
+                                                    canToggle &&
+                                                    setSkillModeMutation.mutate({
+                                                      body: {
+                                                        registry_id: skill.registry_id!,
+                                                        sub_agent_id: parseInt(id!, 10),
+                                                        scope: 'sub-agent',
+                                                        mode: following ? 'pinned' : 'following',
+                                                      },
+                                                    })
+                                                  }
+                                                >
+                                                  {label}
+                                                </button>
+                                              </TooltipTrigger>
+                                              <TooltipContent className="max-w-xs">
+                                                {explain} {canToggle ? action : ''}
+                                              </TooltipContent>
+                                            </Tooltip>
+                                          );
+                                        })()}
+                                      {skill.mode === 'following' && skill.bump_error && (
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0">
+                                              behind
+                                            </span>
+                                          </TooltipTrigger>
+                                          <TooltipContent className="max-w-sm">
+                                            The last automatic update was skipped: {skill.bump_error}
+                                          </TooltipContent>
+                                        </Tooltip>
                                       )}
                                       {!isEditing &&
-                                        skill.scope &&
-                                        skill.scope !== 'sub-agent' &&
+                                        isReferenceSkill(skill) &&
                                         skill.update_available &&
                                         skill.registry_id &&
                                         skill.content_hash && (
@@ -2165,8 +2259,7 @@ export function SubAgentDetailPage() {
                                         )}
                                       {isEditing &&
                                         !isEmbedBound &&
-                                        skill.scope &&
-                                        skill.scope !== 'sub-agent' &&
+                                        isReferenceSkill(skill) &&
                                         skill.name &&
                                         skillsWithUpdates.has(skill.name) &&
                                         skill.registry_id &&
@@ -2204,7 +2297,7 @@ export function SubAgentDetailPage() {
                                             : skill.description}
                                         </span>
                                       )}
-                                      {isEditing && !isEmbedBound && skill.scope && skill.scope !== 'sub-agent' && (
+                                      {isEditing && !isEmbedBound && isReferenceSkill(skill) && (
                                         <div className="flex items-center gap-1 opacity-0 group-hover/skill:opacity-100 transition-opacity ml-auto shrink-0">
                                           <button
                                             type="button"
@@ -2218,7 +2311,7 @@ export function SubAgentDetailPage() {
                                           </button>
                                         </div>
                                       )}
-                                      {isEditing && !isEmbedBound && (!skill.scope || skill.scope === 'sub-agent') && (
+                                      {isEditing && !isEmbedBound && !isReferenceSkill(skill) && (
                                         <button
                                           type="button"
                                           className="opacity-0 group-hover/skill:opacity-100 text-destructive hover:text-destructive/80 transition-opacity ml-auto shrink-0"
@@ -2249,6 +2342,40 @@ export function SubAgentDetailPage() {
                               actionLabel="Import"
                               onAction={(skill) => handleImportSkillFromRegistry(skill)}
                               actionPending={!!importingSkillId}
+                              headerContent={
+                                <div className="flex flex-col gap-1 text-xs">
+                                  <label className="flex items-start gap-2 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name="import-mode"
+                                      className="mt-0.5"
+                                      checked={importMode === 'pinned'}
+                                      onChange={() => setImportMode('pinned')}
+                                    />
+                                    <span>
+                                      <span className="font-medium">Pinned</span>
+                                      <span className="text-muted-foreground"> — updates when you click update.</span>
+                                    </span>
+                                  </label>
+                                  <label className="flex items-start gap-2 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name="import-mode"
+                                      className="mt-0.5"
+                                      checked={importMode === 'following'}
+                                      onChange={() => setImportMode('following')}
+                                    />
+                                    <span>
+                                      <span className="font-medium">Following</span>
+                                      <span className="text-muted-foreground">
+                                        {' '}
+                                        — every publisher change becomes a new approved version of this agent. Takes
+                                        effect once this version is saved and approved.
+                                      </span>
+                                    </span>
+                                  </label>
+                                </div>
+                              }
                             />
                           )}
 
@@ -2258,7 +2385,7 @@ export function SubAgentDetailPage() {
                               open={isSkillModalOpen}
                               onOpenChange={setIsSkillModalOpen}
                               skills={
-                                editSkills.filter((s) => s.scope === 'sub-agent' || !s.registry_id) as SkillDefinition[]
+                                editSkills.filter((s) => !isReferenceSkill(s)) as SkillDefinition[]
                               }
                               onChange={(updated) => {
                                 const importedSkills = editSkills.filter((s) => s.scope && s.scope !== 'sub-agent');
