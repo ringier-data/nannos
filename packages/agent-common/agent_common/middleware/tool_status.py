@@ -4,9 +4,16 @@ Intercepts every tool call via ``awrap_tool_call`` and emits a human-friendly
 status message via ``stream_writer`` **before** the tool executes.  Messages
 are path-aware for filesystem tools:
 
-* ``read_file /skills/{name}/…`` → ``"Loading skill {name}…"``
-* ``read_file /project/main.py`` → ``"Reading /project/main.py…"``
-* ``grep …``                     → ``"Using grep…"``
+* ``load_skill name={name}``                → ``"Loading skill {name}…"``
+* ``read_file /skills/{name}/…``            → ``"Loading skill {name}…"``
+* ``read_file /skills/{name}/… offset/limit`` → ``"Reading skill {name} (lines A–B)…"``
+* ``grep pattern path=/skills/{name}``      → ``'Searching skill {name} for "pattern"…'``
+* ``ls|glob path=/skills/{name}``           → ``"Looking for files in skill {name}…"``
+* ``read_file /project/main.py``            → ``"Reading /project/main.py…"``
+* ``grep …``                                → ``'Searching for "…"…'``
+
+The same labels apply when the call is routed through the PTC ``eval`` tool
+as ``tools.readFile({…})`` / ``tools.grep({…})`` / ``tools.ls({…})``.
 
 The custom event is picked up by the streaming loop in ``dynamic_agent.py``
 and forwarded as an activity-log ``TaskUpdate``.  This replaces the
@@ -30,6 +37,7 @@ from langgraph.types import Command
 from langgraph.typing import ContextT
 
 from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+from agent_common.core.load_skill_tool import LOAD_SKILL_TOOL_NAME
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
 logger = logging.getLogger(__name__)
@@ -45,14 +53,16 @@ _SUPPRESSED_TOOLS = frozenset({"FinalResponseSchema", "SubAgentResponseSchema", 
 # Matches ``tools.<camelCaseName>(`` calls inside a PTC ``eval`` snippet — the
 # dot-notation form the PTC prompt instructs the model to use.
 _PTC_TOOL_CALL_RE = re.compile(r"\btools\.([A-Za-z_$][\w$]*)\s*\(")
-# Extracts the ``file_path``/``path`` argument of a ``tools.readFile({…})`` call
-# in a PTC ``eval`` snippet, so a skill load routed through the code interpreter
-# is described like a native ``read_file`` would be. ``[^{}]*?`` keeps the match
-# inside a single (non-nested) argument object.
-_PTC_READ_FILE_RE = re.compile(
-    r"\btools\.readFile\s*\(\s*\{[^{}]*?\b(?:file_path|filePath|path)\s*:\s*"
-    r"(['\"`])(.*?)\1"
-)
+# Matches ``tools.<name>({ … })`` calls whose argument is a single, non-nested
+# object literal, capturing the name and the object body. Used to describe a
+# skill read/search routed through the code interpreter the way the native
+# tool call would be.
+_PTC_CALL_WITH_ARGS_RE = re.compile(r"\btools\.([A-Za-z_$][\w$]*)\s*\(\s*\{([^{}]*)\}")
+# One ``key: value`` pair inside that object body; value is a quoted string or a
+# bare integer. Other value types are ignored (they never carry a path/range).
+_PTC_ARG_RE = re.compile(r"\b(\w+)\s*:\s*(?:(['\"`])(.*?)\2|(-?\d+))")
+# PTC tools whose ``/skills/`` calls get a skill-specific label.
+_PTC_SKILL_TOOLS = frozenset({"read_file", "grep", "ls", "glob"})
 # camelCase word boundary, used to invert the PTC ``snake_case → camelCase`` map.
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # Max distinct tool names to list in an ``eval`` status before summarising.
@@ -80,16 +90,63 @@ class ToolStatusMiddleware(AgentMiddleware[AgentState, ContextT]):
         return await handler(request)
 
 
+def _skill_name(path: str) -> str | None:
+    """Return the skill name of a ``/skills/{name}/…`` path, or *None*."""
+    if not path.startswith("/skills/"):
+        return None
+    parts = PurePosixPath(path).parts  # ('/', 'skills', name, …)
+    return parts[2] if len(parts) >= 3 else None
+
+
 def _describe_skill_path(file_path: str) -> str:
     """Describe a read of a ``/skills/{name}/…`` path as a skill load."""
-    parts = PurePosixPath(file_path).parts  # ('/', 'skills', name, …)
-    if len(parts) >= 3:
-        return f"Loading skill {parts[2]}…"
-    return "Loading skill…"
+    name = _skill_name(file_path)
+    if name:
+        return f"Loading skill {name}\u2026"
+    return "Loading skill\u2026"
+
+
+def _as_int(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _describe_skill_read(file_path: str, args: dict) -> str:
+    """Describe a ``read_file`` on a skill path.
+
+    A full read is a skill *load*. A windowed read (``offset``/``limit``) is the
+    model paging through a large skill file after a search, so it is labelled as
+    a read of a line range instead of a repeated load.
+    """
+    name = _skill_name(file_path)
+    offset = _as_int(args.get("offset"))
+    limit = _as_int(args.get("limit"))
+    if name is None or (not offset and limit is None):
+        return _describe_skill_path(file_path)
+    start = (offset or 0) + 1  # offset is 0-based; the tool prints 1-based line numbers
+    if limit is None:
+        return f"Reading skill {name} (from line {start})\u2026"
+    return f"Reading skill {name} (lines {start}\u2013{start + limit - 1})\u2026"
+
+
+def _describe_skill_search(tool_name: str, name: str, args: dict) -> str:
+    """Describe a ``grep``/``ls``/``glob`` scoped to a skill folder."""
+    if tool_name == "grep":
+        pattern = args.get("pattern", "")
+        if pattern:
+            return f'Searching skill {name} for "{_truncate(pattern, 60)}"\u2026'
+        return f"Searching skill {name}\u2026"
+    return f"Looking for files in skill {name}\u2026"
 
 
 def _build_status(tool_name: str, args: dict) -> str | None:
     """Return a human-readable status string, or *None* to skip."""
+    if tool_name == LOAD_SKILL_TOOL_NAME:
+        name = args.get("name", "")
+        return f"Loading skill {name}\u2026" if name else "Loading skill\u2026"
+
     if tool_name == "read_file":
         file_path = args.get("file_path") or args.get("path", "")
         if not file_path:
@@ -97,9 +154,14 @@ def _build_status(tool_name: str, args: dict) -> str | None:
 
         # Skill path: /skills/{skill_name}/…
         if file_path.startswith("/skills/"):
-            return _describe_skill_path(file_path)
+            return _describe_skill_read(file_path, args)
 
         return f"Reading {file_path}\u2026"
+
+    if tool_name in ("grep", "ls", "glob"):
+        skill = _skill_name(args.get("path") or "")
+        if skill:
+            return _describe_skill_search(tool_name, skill, args)
 
     if tool_name == PTC_CODE_INTERPRETER_TOOL_NAME:
         # The code interpreter is an opaque REPL; surface what it will actually
@@ -108,12 +170,16 @@ def _build_status(tool_name: str, args: dict) -> str | None:
         code = args.get("code", "")
         if not code:
             return f"Using {tool_name}\u2026"
-        # A skill load reaches the embedded agent as a ``tools.readFile`` of a
-        # /skills/ path inside an eval snippet; describe it the same way a
-        # native read_file would, not the generic "Running read_file\u2026".
-        for path in _extract_ptc_read_paths(code):
+        # A skill load or search reaches the embedded agent as a
+        # ``tools.readFile``/``tools.grep``/``tools.ls`` of a /skills/ path inside
+        # an eval snippet; describe it the same way the native tool call would,
+        # not as the generic "Running read_file\u2026".
+        for name, call_args in _extract_ptc_calls_with_args(code):
+            if name not in _PTC_SKILL_TOOLS:
+                continue
+            path = call_args.get("file_path") or call_args.get("path") or ""
             if path.startswith("/skills/"):
-                return _describe_skill_path(path)
+                return _build_status(name, call_args)
         called = _extract_ptc_tool_calls(code)
         if called:
             shown = ", ".join(called[:_PTC_STATUS_MAX_TOOLS])
@@ -171,13 +237,21 @@ def _extract_ptc_tool_calls(code: str) -> list[str]:
     return list(seen)
 
 
-def _extract_ptc_read_paths(code: str) -> list[str]:
-    """Return the ``file_path`` argument of each ``tools.readFile`` call, in order.
+def _extract_ptc_calls_with_args(code: str) -> list[tuple[str, dict]]:
+    """Return ``(snake_case_name, args)`` for each ``tools.<name>({…})`` call, in order.
 
-    Lets the ``eval`` status distinguish a skill load (``/skills/…``) from a
-    plain file read, mirroring the native ``read_file`` branch of _build_status.
+    Only string and integer values are captured, and camelCase arg keys are
+    normalised to snake_case (``filePath`` → ``file_path``) so the result can be
+    fed to :func:`_build_status` as if it were a native tool call.
     """
-    return [match.group(2) for match in _PTC_READ_FILE_RE.finditer(code)]
+    calls: list[tuple[str, dict]] = []
+    for match in _PTC_CALL_WITH_ARGS_RE.finditer(code):
+        args: dict = {}
+        for arg in _PTC_ARG_RE.finditer(match.group(2)):
+            key = _camel_to_snake(arg.group(1))
+            args[key] = int(arg.group(4)) if arg.group(4) is not None else arg.group(3)
+        calls.append((_camel_to_snake(match.group(1)), args))
+    return calls
 
 
 def _truncate(text: str, max_len: int) -> str:

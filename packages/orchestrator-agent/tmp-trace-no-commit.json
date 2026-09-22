@@ -1,0 +1,208 @@
+{
+  "inputs": {
+    "messages": [
+      {
+        "additional_kwargs": {},
+        "content": "can you explain alloy Consent",
+        "id": "966f128a-99c7-4dd0-8ce9-63eba5b979cb",
+        "response_metadata": {},
+        "type": "human"
+      }
+    ]
+  },
+  "outputs": {
+    "_quickjs_snapshot_payload": "",
+    "files": {},
+    "messages": [
+      {
+        "additional_kwargs": {},
+        "content": "can you explain alloy Consent",
+        "id": "966f128a-99c7-4dd0-8ce9-63eba5b979cb",
+        "response_metadata": {},
+        "type": "human"
+      },
+      {
+        "additional_kwargs": {},
+        "content": "",
+        "id": "lc_run--01a0c8ce-6326-7732-9a86-466ef0089a57",
+        "invalid_tool_calls": [],
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "claude-sonnet-5",
+          "model_provider": "openai"
+        },
+        "tool_calls": [
+          {
+            "args": {
+              "code": "await tools.search({query: 'consent'})"
+            },
+            "id": "tooluse_mF6ZPYM05cs0X1oEsbbIwi",
+            "name": "eval",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": {
+          "input_token_details": {
+            "cache_read": 0
+          },
+          "input_tokens": 11631,
+          "output_token_details": {
+            "reasoning": 0
+          },
+          "output_tokens": 49,
+          "total_tokens": 11680
+        }
+      },
+      {
+        "additional_kwargs": {},
+        "content": "<result>{matches: [], total_matches: 0, offset: 0, shown: 0, truncated: false, next_offset: null, hint: \"No tool matched any of: consent. Try different or fewer words (e.g. the object name alone) — the catalog may use other terminology.\"}</result>",
+        "id": "f24364c4-8d4e-4e54-85a2-1d6ba0c356d4",
+        "name": "eval",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "tooluse_mF6ZPYM05cs0X1oEsbbIwi",
+        "type": "tool"
+      },
+      {
+        "additional_kwargs": {},
+        "content": "",
+        "id": "lc_run--01a0c8ce-6cf1-71b3-9fa9-c1ed49e2e1d2",
+        "invalid_tool_calls": [],
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "claude-sonnet-5",
+          "model_provider": "openai"
+        },
+        "tool_calls": [
+          {
+            "args": {
+              "code": "const r = await tools.search({query: 'consent management privacy'});\nconsole.log(JSON.stringify(r));\n"
+            },
+            "id": "tooluse_tK3jdlSqj61OAt7NuPCZgX",
+            "name": "eval",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": {
+          "input_token_details": {
+            "cache_read": 11526
+          },
+          "input_tokens": 11796,
+          "output_token_details": {
+            "reasoning": 0
+          },
+          "output_tokens": 72,
+          "total_tokens": 11868
+        }
+      },
+      {
+        "additional_kwargs": {},
+        "content": "<stdout>\n{\"matches\":[{\"name\":\"consoleListModels\",\"description\":\"List Available Models\"},{\"name\":\"gdriveGetFileMetadata\",\"description\":\"Call this tool to find general metadata about a user's Drive file.\"},{\"name\":\"gdriveListRecentFiles\",\"description\":\"Call this tool to find recent files for a user specified a sort order. Default sort order is `recency` if orderBy is not set or set to an unsupported value.\"},{\"name\":\"gdriveSearchFiles\",\"description\":\"Search for Drive files using a structured query (syntax: `query_term operator values`). Only terms in this list are supported.\"},{\"name\":\"logzioGetMetricsAccounts\",\"description\":\"List all metrics accounts and their details via /v1/account-management/metrics-accounts.\"}],\"total_matches\":5,\"offset\":0,\"shown\":5,\"truncated\":false,\"next_offset\":null,\"hint\":\"All 5 matching tools shown; no more results for this query.\"}\n</stdout>\n<result>null</result>",
+        "id": "35adfe7c-f306-4eef-bf8c-35def2303628",
+        "name": "eval",
+        "response_metadata": {},
+        "status": "success",
+        "tool_call_id": "tooluse_tK3jdlSqj61OAt7NuPCZgX",
+        "type": "tool"
+      },
+      {
+        "additional_kwargs": {},
+        "content": "",
+        "id": "lc_run--01a0c8ce-778a-79e0-a456-c8901a436dee",
+        "invalid_tool_calls": [],
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "claude-sonnet-5",
+          "model_provider": "openai"
+        },
+        "tool_calls": [
+          {
+            "args": {
+              "code": "const fs = await tools.ls({path: '/skills'});\nconsole.log(JSON.stringify(fs));\n"
+            },
+            "id": "tooluse_smOVfXInKW6yUzLTChTh3j",
+            "name": "eval",
+            "type": "tool_call"
+          }
+        ],
+        "type": "ai",
+        "usage_metadata": {
+          "input_token_details": {
+            "cache_read": 11682
+          },
+          "input_tokens": 12210,
+          "output_token_details": {
+            "reasoning": 0
+          },
+          "output_tokens": 71,
+          "total_tokens": 12281
+        }
+      }
+    ],
+    "tool_call_history": {
+      "eval": [
+        "ecd10f5be09d0c69",
+        "7ff33e87a9277b79",
+        "98581bcd5f04a848"
+      ]
+    }
+  },
+  "metadata": {
+    "LANGSMITH_ENDPOINT": "https://eu.api.smith.langchain.com",
+    "LANGSMITH_PROJECT": "dev-nannos-agent-framework",
+    "LANGSMITH_TRACING": "true",
+    "agent_name": "alloy-ai-assistant",
+    "assistant_id": "15dc2b42-d971-4a1a-b5ab-cf35709ba405",
+    "checkpoint_ns": "",
+    "conversation_id": "01a0c8ce-52f6-705f-be1f-29aad757e2fd",
+    "google_chat_thread_id": null,
+    "group_id": "dev-alloy-developers",
+    "group_ids": [
+      "dev-alloy-developers",
+      "dev-google-chat-notifications",
+      "nannos-admins",
+      "prod-Agent Factory",
+      "prod-alloy-apps",
+      "prod-alloy-apps-devs",
+      "prod-gmu-foundry-developers",
+      "prod-marketplaces-foundry-developers",
+      "prod-nannos-dev",
+      "prod-nannos-developers",
+      "prod-riad-alloy-campaign-managers",
+      "prod-riad-sales",
+      "prod-ringier-media-switzerland",
+      "prod-rms-brand-studio",
+      "stg-nannos-dev"
+    ],
+    "has_attachments": false,
+    "ls_integration": "langchain_create_agent",
+    "ls_run_depth": 0,
+    "model_type": null,
+    "page_context": {
+      "key": "/",
+      "title": "Home"
+    },
+    "scope": "personal",
+    "slack_thread_ts": null,
+    "thinking_level": null,
+    "thread_id": "01a0c8ce-52f6-705f-be1f-29aad757e2fd::dynamic-alloy-ai-assistant",
+    "user_id": "15dc2b42-d971-4a1a-b5ab-cf35709ba405",
+    "user_name": "Erik Jonsson"
+  },
+  "langsmith": {
+    "organization": {
+      "name": "nannos",
+      "id": "087d8fff-12b8-4bcf-9f81-b6060ddb2545"
+    },
+    "workspace": {
+      "name": "Orchestrator",
+      "id": "eacaca37-6472-40d5-80b4-9206d058caef"
+    },
+    "tracing_project": {
+      "id": "052ac0c2-787f-44e2-810a-34d8b7845a09",
+      "name": "dev-nannos-agent-framework"
+    }
+  }
+}
