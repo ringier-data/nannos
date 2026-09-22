@@ -81,14 +81,30 @@ async def test_sync_prunes_rows_it_did_not_write():
     skill = SkillDefinition(name="mirrored", description="d", body="b", scope="sub-agent", provenance=_WELL_KNOWN)
 
     await _service(registry)._persist_and_strip_skills(
-        AsyncMock(), _actor(), 42, [skill], trust_provenance=True
+        AsyncMock(), _actor(), 42, [skill], trust_provenance=True, prune_mirrored=True
     )
 
     registry.prune_mirrored_skills.assert_awaited_once()
     kwargs = registry.prune_mirrored_skills.await_args.kwargs
     assert kwargs["sub_agent_id"] == 42
-    assert kwargs["source_type"] == "well-known"
     assert kwargs["keep_ids"] == ["kept-id"]
+
+
+@pytest.mark.asyncio
+async def test_sync_that_withdraws_its_last_skill_still_prunes():
+    """The case the prune exists for: nothing left to derive a source type from.
+
+    Deriving the scope from the incoming payload made an empty sync a no-op, which is
+    precisely the stale-public-row situation being fixed.
+    """
+    registry = _registry()
+
+    await _service(registry)._persist_and_strip_skills(
+        AsyncMock(), _actor(), 42, [], trust_provenance=True, prune_mirrored=True
+    )
+
+    registry.prune_mirrored_skills.assert_awaited_once()
+    assert registry.prune_mirrored_skills.await_args.kwargs["keep_ids"] == []
 
 
 @pytest.mark.asyncio
@@ -99,4 +115,18 @@ async def test_user_edit_never_prunes():
 
     await _service(registry)._persist_and_strip_skills(AsyncMock(), _actor(), 1, [skill])
 
+    registry.prune_mirrored_skills.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revert_trusts_provenance_but_never_prunes():
+    """A revert replays one stored version; it does not own the upstream set."""
+    registry = _registry()
+    skill = SkillDefinition(name="mirrored", description="d", body="b", scope="sub-agent", provenance=_WELL_KNOWN)
+
+    await _service(registry)._persist_and_strip_skills(
+        AsyncMock(), _actor(), 1, [skill], trust_provenance=True
+    )
+
+    assert registry.upsert_agent_skill.await_args.kwargs["provenance"] == _WELL_KNOWN
     registry.prune_mirrored_skills.assert_not_awaited()

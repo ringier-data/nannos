@@ -1332,14 +1332,19 @@ async def mcp_activate_skill(
             ),
         )
 
-    # A public sub-agent skill is explicitly activatable elsewhere (ADR 0006): that is
-    # what publishing it means. A private one stays bound to the agent that owns it.
-    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id and entry.visibility != "public":
+    # ADR 0006 says a public sub-agent skill is activatable on other agents, and this
+    # guard refuses it — but lifting it here is not enough, and is left to its own
+    # change. Sub-agent scope stores a SkillRef, not a copy, so a cross-agent
+    # activation would point agent B's config at agent A's registry row: B's next
+    # config save would then upsert by that id and rewrite A's published skill, and a
+    # prune on A's side would cascade B's activation away. Activation has to copy the
+    # row before the guard can go.
+    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Skill '{entry.slug}' is private to a specific sub-agent and cannot be activated on a different "
-                "agent. Ask its owner to publish it, use 'console_create_skill' to create a new copy, or use "
+                f"Skill '{entry.slug}' is scoped to a specific sub-agent and cannot be activated on a different agent. "
+                "Use 'console_create_skill' to create a new copy that can be activated on your agent, or use "
                 "'console_update_skill' to change the scope to 'standalone' to make it agent-agnostic."
             ),
         )
@@ -1475,8 +1480,19 @@ async def update_visibility(
     # Publishing is the one write that changes who can read the body, so it takes the
     # same write gate as editing it. Without this any authenticated user could flip
     # another team's private sub-agent skill to public and then read it.
-    await _check_sub_agent_skill_access(entry, user, db, request)
-    await _check_registry_write_access(request, db, entry, user.id, entry.sub_agent_id or 0)
+    #
+    # check_write_access short-circuits on ownership, so it runs FIRST: an owner who
+    # has since lost access to the parent agent can still unpublish their own skill,
+    # and an admin can always pull a malicious public one back. Only when it denies do
+    # we fall through to the parent-agent check, which 404s rather than 403s so a
+    # refusal never confirms that an id exists.
+    registry_service = get_skill_registry_service(request)
+    if not await registry_service.check_write_access(db, entry, user.id) and not user.is_administrator:
+        await _check_sub_agent_skill_access(entry, user, db, request)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill '{entry.id}' not found in registry",
+        )
 
     try:
         await skill_registry_service.update_visibility(

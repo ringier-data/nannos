@@ -363,7 +363,6 @@ class SkillRegistryService:
         db: AsyncSession,
         actor: User,
         sub_agent_id: int,
-        source_type: str,
         keep_ids: list[str],
     ) -> list[str]:
         """Delete the sub-agent's mirrored rows that the latest sync did not write.
@@ -374,26 +373,48 @@ class SkillRegistryService:
         one stays world-readable forever, which is the part that matters: the host has
         stopped publishing the skill but the registry has not.
 
-        Activation copies content into the activating user's own docstore, so deleting
-        the registry row never breaks anyone who already activated it.
+        Scoped to rows that carry provenance (``source_type <> 'nannos'``), so a skill
+        somebody authored by hand on the same agent is never swept up by a sync.
+
+        A row an activation still references is left in place. ``skill_activations``
+        cascades on delete, and a sub-agent-scope activation holds only a SkillRef into
+        this table rather than a copy of the content, so deleting such a row would break
+        a live agent rather than merely tidy the registry. Those are logged instead:
+        the host has withdrawn something another agent is still using, which is a
+        decision for a human, not a side effect of a sync.
 
         Returns the ids removed.
         """
         result = await db.execute(
             text(
-                "SELECT id FROM skill_registry "
-                "WHERE sub_agent_id = :sub_agent_id AND scope = 'sub-agent' AND source_type = :source_type"
+                "SELECT sr.id, COUNT(sa.id) AS refs FROM skill_registry sr "
+                "LEFT JOIN skill_activations sa ON sa.registry_id = sr.id "
+                "WHERE sr.sub_agent_id = :sub_agent_id AND sr.scope = 'sub-agent' "
+                "AND COALESCE(sr.source_type, 'nannos') <> 'nannos' "
+                "GROUP BY sr.id"
             ),
-            {"sub_agent_id": sub_agent_id, "source_type": source_type},
+            {"sub_agent_id": sub_agent_id},
         )
         keep = {str(k) for k in keep_ids}
-        stale = [str(row["id"]) for row in result.mappings().all() if str(row["id"]) not in keep]
+        stale: list[str] = []
+        for row in result.mappings().all():
+            skill_id = str(row["id"])
+            if skill_id in keep:
+                continue
+            if row["refs"]:
+                logger.warning(
+                    "Sub-agent %s no longer mirrors registry skill %s, but %d activation(s) still "
+                    "reference it — keeping the row; it needs a human decision.",
+                    sub_agent_id,
+                    skill_id,
+                    row["refs"],
+                )
+                continue
+            stale.append(skill_id)
         for skill_id in stale:
             await self.remove(db, actor, skill_id)
         if stale:
-            logger.info(
-                "Pruned %d stale '%s' registry row(s) for sub-agent %s", len(stale), source_type, sub_agent_id
-            )
+            logger.info("Pruned %d stale mirrored registry row(s) for sub-agent %s", len(stale), sub_agent_id)
         return stale
 
     async def find_by_content_hash(self, db: AsyncSession, content_hash: str) -> list[SkillRegistryEntry]:

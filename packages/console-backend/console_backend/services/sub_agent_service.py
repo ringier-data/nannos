@@ -2695,6 +2695,7 @@ class SubAgentService:
         skills: list[SkillDefinition],
         *,
         trust_provenance: bool = False,
+        prune_mirrored: bool = False,
     ) -> list[SkillRef]:
         """Persist all skills to the registry and return lightweight references.
 
@@ -2715,6 +2716,12 @@ class SubAgentService:
         and the public SubAgentCreate/Update payload, so without this a client could
         stamp ``source_type='well-known'`` on its own skill and permanently lock itself
         out of editing it (update_skill 403s on any non-'nannos' source).
+
+        ``prune_mirrored`` is the separate, stronger claim that this call carries the
+        agent's COMPLETE mirrored set, so anything else may be deleted. Only a host sync
+        can say that. A revert trusts provenance but replays one stored version, which
+        is not a statement about the current upstream set — keeping these two flags
+        apart is what stops a revert from deleting rows.
         """
 
         if self._skill_registry_service is None:
@@ -2779,17 +2786,17 @@ class SubAgentService:
         # A sync declares the agent's complete mirrored skill set, so rows it did not
         # write this time are withdrawn or renamed upstream and must not outlive it —
         # a public one would otherwise stay world-readable with nothing pointing at it.
-        if trust_provenance:
-            source_types = {s.provenance.source_type for s in skills if s.provenance}
-            keep_ids = [r.registry_id for r in result if r.registry_id]
-            for source_type in sorted(source_types):
-                await registry_service.prune_mirrored_skills(
-                    db=db,
-                    actor=actor,
-                    sub_agent_id=sub_agent_id,
-                    source_type=source_type,
-                    keep_ids=keep_ids,
-                )
+        #
+        # The source types come from the rows already in the registry, not from the
+        # incoming payload: a sync that withdraws its LAST mirrored skill arrives with
+        # nothing to derive a type from, and that is exactly the case worth pruning.
+        if prune_mirrored:
+            await registry_service.prune_mirrored_skills(
+                db=db,
+                actor=actor,
+                sub_agent_id=sub_agent_id,
+                keep_ids=[r.registry_id for r in result if r.registry_id],
+            )
         return result
 
     async def resolve_imported_skills(self, db: AsyncSession, sub_agent: "SubAgent") -> None:
@@ -3158,8 +3165,10 @@ class SubAgentService:
             skills=skills,
             sandbox_enabled=bool(baseline.sandbox_enabled) if baseline else False,
             version_hash=version_hash,
-            # The host definition is the authority on provenance (ADR 0006).
+            # The host definition is the authority on provenance, and its skill list is
+            # the complete mirrored set for this agent (ADR 0006).
             trust_provenance=True,
+            prune_mirrored=True,
         )
         await self.repo.update_current_version(db, actor, sub_agent_id, new_version)
         await self.repo.approve_version(
@@ -3195,6 +3204,7 @@ class SubAgentService:
         sandbox_enabled: bool = False,
         version_hash: str | None = None,
         trust_provenance: bool = False,
+        prune_mirrored: bool = False,
     ) -> int:
         """Create a new configuration version entry. Returns the new version ID.
 
@@ -3209,7 +3219,7 @@ class SubAgentService:
         # Persist all skills (custom + imported) to the registry and return refs.
         # Full content lives in the skill_registry table and is resolved on read.
         skill_refs = await self._persist_and_strip_skills(
-            db, actor, sub_agent_id, skills_list, trust_provenance=trust_provenance
+            db, actor, sub_agent_id, skills_list, trust_provenance=trust_provenance, prune_mirrored=prune_mirrored
         )
 
         if version_hash is None:

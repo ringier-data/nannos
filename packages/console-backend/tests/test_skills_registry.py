@@ -1058,63 +1058,34 @@ class TestRegistryAuthorization:
         assert result["activated"] is True
 
 
-class TestMcpActivateCrossAgent:
-    """ADR 0006: publishing a sub-agent skill is what makes it activatable elsewhere.
+    @pytest.mark.asyncio
+    async def test_admin_can_unpublish_a_skill_they_do_not_own(self):
+        """Ordering matters: the owner/admin path must not sit behind the agent check.
 
-    The guard refused every cross-agent activation regardless of visibility, so the
-    'every user can activate it on other agents' half of `nannos-visibility: public`
-    could not happen.
-    """
+        Pulling back a malicious public skill is exactly the case where the actor has
+        no access to the parent agent.
+        """
+        from console_backend.routers.skills_registry_router import VisibilityUpdate, update_visibility
 
-    def _patches(self, entry, sub_agent_id):
-        """Stub the agent resolution, permission check and activation around the guard."""
-        import console_backend.routers.skills_registry_router as mod
-
+        entry = _make_mock_registry_entry(
+            owner_id="someone-else", visibility="public", scope="sub-agent", sub_agent_id=7
+        )
         srs = MagicMock()
         srs.get_by_id = AsyncMock(return_value=entry)
-        activation = MagicMock()
-        activation.activate = AsyncMock(return_value=None)
-        sub_agents = MagicMock()
-        sub_agents.check_user_permission = AsyncMock(return_value=True)
-        request = MagicMock()
-        request.app.state.skill_registry_service = srs
+        srs.update_visibility = AsyncMock()
+        srs.check_write_access = AsyncMock(return_value=False)
 
-        return mod, activation, request, [
-            patch.object(mod, "_resolve_sub_agent_id", AsyncMock(return_value=(sub_agent_id, "other-agent"))),
-            patch.object(mod, "_get_sub_agent_service", MagicMock(return_value=sub_agents)),
-            patch.object(mod, "_check_registry_read_access", AsyncMock(return_value=None)),
-            patch.object(mod, "_get_skill_activation_service", MagicMock(return_value=activation)),
-        ]
+        mock_db = AsyncMock()
+        mock_db.commit = AsyncMock()
+        # No access to the parent agent — irrelevant for an administrator.
+        mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
 
-    async def _activate(self, entry, sub_agent_id):
-        from console_backend.routers.skills_registry_router import McpActivateSkillInput, mcp_activate_skill
-
-        mod, activation, request, patches = self._patches(entry, sub_agent_id)
-        for p in patches:
-            p.start()
-        try:
-            body = McpActivateSkillInput(
-                agent_name="other-agent",
-                registry_id="11111111-2222-3333-4444-555555555555",
-                scope="sub-agent",
-            )
-            result = await mcp_activate_skill(body=body, request=request, user=_make_user(), db=AsyncMock())
-            return result, activation
-        finally:
-            for p in patches:
-                p.stop()
-
-    @pytest.mark.asyncio
-    async def test_public_sub_agent_skill_activates_on_another_agent(self):
-        entry = _make_mock_registry_entry(scope="sub-agent", sub_agent_id=1, visibility="public")
-        result, activation = await self._activate(entry, sub_agent_id=2)
-        assert result.registry_id == entry.id
-        activation.activate.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_private_sub_agent_skill_still_refused(self):
-        entry = _make_mock_registry_entry(scope="sub-agent", sub_agent_id=1, visibility="private")
-        with pytest.raises(Exception) as exc_info:
-            await self._activate(entry, sub_agent_id=2)
-        assert exc_info.value.status_code == 400
-        assert "private to a specific sub-agent" in exc_info.value.detail
+        result = await update_visibility(
+            request=self._request(srs),
+            skill_id="11111111-2222-3333-4444-555555555555",
+            body=VisibilityUpdate(visibility="private"),
+            user=_make_user(is_administrator=True),
+            db=mock_db,
+        )
+        assert result["visibility"] == "private"
+        srs.update_visibility.assert_awaited_once()
