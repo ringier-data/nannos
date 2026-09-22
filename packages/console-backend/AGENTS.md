@@ -735,12 +735,24 @@ The playbook router exposes MCP-callable endpoints for agent self-improvement. T
 ### Skill Activations (services/skill_activation_service.py)
 
 The activation service manages the lifecycle:
-- `activate()` — Pin skill to current hash, write snapshot to docstore
-- `deactivate()` — Remove activation + docstore entry
+- `activate()` — Pin skill to current hash, write snapshot to docstore (personal/group) or
+  add a REFERENCE to the sub-agent's config (sub-agent scope). Takes `mode` (ADR-0011):
+  `pinned` (default) or `following`; re-activating with the other mode switches it.
+- `deactivate()` — Remove activation + docstore entry / config reference
 - `update_activation()` — Pull latest hash from registry, refresh docstore
 - `self_update()` — Auto-called when author edits own skill
-- `upsert_locked()` — Called by config version approval workflow
-- `list_for_agent()` — All activations for a sub-agent (with update-available status)
+- `bump_following_referrers()` — Content-changed hook (registered in `service_instances.py`):
+  every `following` referrer of the changed row gets one auto-approved version with the new
+  hash, in the writer's transaction, one savepoint each; failures land in `last_bump_error`.
+- `list_for_agent()` — All activations for a sub-agent (with update-available status, mode)
+
+**References, not copies (ADR-0011)**: a sub-agent that activates a registry row it does not
+own — another agent's public sub-agent skill or a standalone import — holds `{registry_id,
+content_hash}` in its config and nothing else. `resolve_imported_skills` branches on OWNERSHIP
+(`skill_registry.sub_agent_id == agent`), not on the row's scope: the owner sees always-latest,
+a referrer is pinned by hash with `update_available`/`latest_hash` and `mode`/`bump_error` set.
+A row other agents reference cannot be deleted or made private: `SkillRegistryService` raises
+`SkillReferencedError`, which the routers map to 409 with the referrers listed.
 
 ### Shared Scheduled Jobs: Definitions and Subscriptions (ADR-0010)
 

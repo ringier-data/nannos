@@ -392,6 +392,12 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.skill_activation_service = SkillActivationService()
     app.state.skill_activation_service.set_playbook_service(app.state.playbook_service)
     app.state.skill_activation_service.set_sub_agent_service(app.state.sub_agent_service)
+    app.state.skill_activation_service.set_user_service(app.state.user_service)
+    # ADR-0011: a registry row's content change bumps every following referrer, in the
+    # writer's transaction.
+    app.state.skill_registry_service.set_content_changed_hook(
+        app.state.skill_activation_service.bump_following_referrers
+    )
 
     # Initialize orchestrator cookie cache
     app.state.orchestrator_cookie_cache = OrchestratorCookieCache(

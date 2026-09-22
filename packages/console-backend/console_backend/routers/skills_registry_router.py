@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from console_backend.db.session import DbSession, get_db_session
 from console_backend.dependencies import require_auth, require_auth_or_bearer_token
 from console_backend.models.skills_registry import (
+    ActivationMode,
     ActivationScope,
     McpSkillCreate,
     McpSkillDeleteFile,
@@ -35,7 +36,7 @@ from console_backend.models.skills_registry import (
     SkillSourceInfo,
 )
 from console_backend.models.user import User
-from console_backend.services.skill_registry_service import SkillRegistryService
+from console_backend.services.skill_registry_service import SkillReferencedError, SkillRegistryService
 from console_backend.services.skills_registry_service import skills_registry_service
 
 if TYPE_CHECKING:
@@ -49,6 +50,17 @@ router = APIRouter(prefix="/api/v1/skills/registry", tags=["skills-registry"])
 
 def get_skill_registry_service(request: Request) -> SkillRegistryService:
     return request.app.state.skill_registry_service
+
+
+def _referenced_conflict(exc: SkillReferencedError) -> HTTPException:
+    """ADR-0011: publishing is a commitment. A referenced row cannot be withdrawn; name the referrers."""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "message": str(exc),
+            "referrers": [{"sub_agent_id": sid, "name": name} for sid, name in exc.referrers],
+        },
+    )
 
 
 async def _check_sub_agent_skill_access(
@@ -485,7 +497,10 @@ async def remove_skill(
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
     await _require_registry_write(request, db, entry, user)
-    await skill_registry_service.remove(db, user, skill_id)
+    try:
+        await skill_registry_service.remove(db, user, skill_id)
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     await db.commit()
 
 
@@ -606,6 +621,8 @@ async def update_registry_skill(
             sandbox_required=body.sandbox_required,
             visibility=body.visibility,
         )
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1256,6 +1273,17 @@ class McpActivateSkillInput(BaseModel):
         ),
     )
     group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
+    mode: ActivationMode = Field(
+        default="pinned",
+        description=(
+            "Sub-agent scope only; how a skill this agent does not own is kept. "
+            "'pinned': the agent keeps the skill's current content until someone updates it. "
+            "'following': every change the publisher makes becomes a new approved version of this agent "
+            "automatically, so the publisher can change this agent's behaviour without review. "
+            "Use 'following' only when the user has asked for it. "
+            "Activating an already active skill with the other mode switches its mode."
+        ),
+    )
 
 
 class McpActivateSkillResponse(BaseModel):
@@ -1265,6 +1293,7 @@ class McpActivateSkillResponse(BaseModel):
     agent_name: str
     scope: str
     registry_id: str
+    mode: ActivationMode = "pinned"
     message: str
 
 
@@ -1287,6 +1316,10 @@ async def mcp_activate_skill(
     a previously deactivated skill. The skill must exist in the registry.
 
     Provide either registry_id (exact) or skill_name (searches by slug).
+
+    A skill this agent does not own is REFERENCED, never copied (ADR-0011). With
+    scope='sub-agent', `mode` says how the reference moves: 'pinned' (default) until
+    someone updates it, or 'following' every publisher change automatically.
     """
     agent_name = _require_agent_name(body.agent_name)
 
@@ -1297,6 +1330,11 @@ async def mcp_activate_skill(
                 f"Invalid scope '{body.scope}'. Must be 'personal', 'group', "
                 "or 'sub-agent' (bakes skill into sub-agent config for all users)."
             ),
+        )
+    if body.mode == "following" and body.scope != "sub-agent":
+        raise HTTPException(
+            status_code=400,
+            detail="mode='following' is only available with scope='sub-agent'; personal and group activations are pinned.",
         )
 
     if not body.registry_id and not body.skill_name:
@@ -1368,9 +1406,10 @@ async def mcp_activate_skill(
 
     # A public sub-agent skill is activatable on other agents (ADR 0006): that is what
     # publishing it means. The activation is a read-only REFERENCE to the publisher's
-    # registry row, not a copy — _persist_and_strip_skills refuses to upsert a row
-    # belonging to another sub-agent, so the borrowing agent can never write back to
-    # it, and prune_mirrored_skills leaves a row a live activation still points at.
+    # registry row, never a copy (ADR-0011) — _persist_and_strip_skills refuses to upsert
+    # a row belonging to another sub-agent, so the borrowing agent can never write back
+    # to it, resolve_imported_skills pins it by hash, and the publisher cannot withdraw
+    # the row while this agent refers to it.
     if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id and entry.visibility != "public":
         raise HTTPException(
             status_code=400,
@@ -1380,6 +1419,13 @@ async def mcp_activate_skill(
                 "'console_update_skill' to change the scope to 'standalone' to make it agent-agnostic."
             ),
         )
+
+    switched = False
+    if body.scope == "sub-agent":
+        existing = await activation_service.find_activation_by_registry_id(
+            db, registry_id=entry.id, sub_agent_id=sub_agent_id, scope="sub-agent"
+        )
+        switched = existing is not None and existing.mode != body.mode
 
     try:
         await activation_service.activate(
@@ -1392,16 +1438,33 @@ async def mcp_activate_skill(
             group_id=int(resolved_group_id) if resolved_group_id and body.scope == "group" else None,
             activated_by=user.id,
             actor=user,
+            mode=body.mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    if switched:
+        message = (
+            f"Skill '{entry.slug}' was already active on agent '{agent_name}'; its mode is now '{body.mode}'"
+            + (" and the agent has been caught up to the publisher's current version." if body.mode == "following" else ".")
+        )
+    elif body.scope == "sub-agent":
+        how = (
+            "following: every publisher change becomes a new approved version of this agent"
+            if body.mode == "following"
+            else "pinned: it keeps this content until someone updates it"
+        )
+        message = f"Skill '{entry.slug}' activated on agent '{agent_name}' (sub-agent scope, {how})."
+    else:
+        message = f"Skill '{entry.slug}' activated on agent '{agent_name}' ({body.scope} scope)."
 
     return McpActivateSkillResponse(
         skill_name=entry.slug,
         agent_name=agent_name,
         scope=body.scope,
         registry_id=entry.id,
-        message=f"Skill '{entry.slug}' activated on agent '{agent_name}' ({body.scope} scope).",
+        mode=body.mode if body.scope == "sub-agent" else "pinned",
+        message=message,
     )
 
 
@@ -1522,6 +1585,8 @@ async def update_visibility(
             skill_id=skill_id,
             visibility=body.visibility,
         )
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -2031,15 +2096,17 @@ async def mcp_update_skill(
 
     registry_files.insert(0, SkillFile(path="SKILL.md", content=skill_content))
 
-    # Update registry
+    # Update registry (bumps following referrers in the same transaction, ADR-0011)
     try:
-        updated_entry = await registry_service.update_skill(
+        await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
             files=registry_files,
             description=body.description,
         )
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

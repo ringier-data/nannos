@@ -1095,9 +1095,10 @@ class TestRegistryAuthorization:
 class TestMcpActivateCrossAgent:
     """ADR 0006: publishing a sub-agent skill is what makes it activatable elsewhere.
 
-    The activation is a read-only reference to the publisher's row — see
-    test_skill_provenance_trust.py for the guard that stops the borrowing agent
-    writing back through it.
+    The activation is a read-only reference to the publisher's row (ADR-0011, pinned or
+    following) — see test_skill_provenance_trust.py for the guard that stops the
+    borrowing agent writing back through it, and test_skill_reference_modes.py for the
+    reference semantics against a real database.
     """
 
     def _patches(self, entry, sub_agent_id):
@@ -1107,6 +1108,7 @@ class TestMcpActivateCrossAgent:
         srs.get_by_id = AsyncMock(return_value=entry)
         activation = MagicMock()
         activation.activate = AsyncMock(return_value=None)
+        activation.find_activation_by_registry_id = AsyncMock(return_value=None)
         sub_agents = MagicMock()
         sub_agents.check_user_permission = AsyncMock(return_value=True)
         request = MagicMock()
