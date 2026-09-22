@@ -1,11 +1,20 @@
 """Shared test fixtures and utilities."""
 
+import asyncio
+import fcntl
+import json
 import logging
+import os
+import queue
+import random
+import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import docker
 import pytest
 import pytest_asyncio
@@ -60,7 +69,16 @@ def cleanup_docker_networks():
 
     Only removes networks that match test patterns or are associated with test containers.
     """
+    # Under pytest-xdist every worker runs session fixtures. One sweeper is enough,
+    # and a sweep must not remove a network a sibling worker created moments ago
+    # and has not attached its container to yet.
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker not in (None, "gw0"):
+        yield
+        return
+
     docker_client = docker.from_env()
+    min_age = timedelta(minutes=2)
 
     def cleanup():
         """Remove unused Docker networks related to tests."""
@@ -98,9 +116,14 @@ def cleanup_docker_networks():
                 if not is_test_network:
                     continue
 
-                # Remove if unused
+                # Remove if unused and not freshly created by a sibling worker
                 try:
                     network.reload()  # Refresh network data
+                    created = network.attrs.get("Created", "")
+                    if created:
+                        created_at = datetime.fromisoformat(created[:26].rstrip("Z")).replace(tzinfo=timezone.utc)
+                        if datetime.now(timezone.utc) - created_at < min_age:
+                            continue
                     if not network.containers:
                         network.remove()
                         removed_count += 1
@@ -513,7 +536,11 @@ def mock_oauth(mock_config, monkeypatch):
             return mock_oidc_client
         return original_getattr(self, key)
 
-    monkeypatch.setattr(console_backend.controllers.auth_controller.oauth.__class__, "__getattr__", mock_getattr)
+    monkeypatch.setattr(
+        console_backend.controllers.auth_controller.oauth.__class__,
+        "__getattr__",
+        mock_getattr,
+    )
 
     yield mock_oidc_client
 
@@ -589,81 +616,93 @@ def create_mock_response():
 # This is much faster than recreating containers for each test:
 # 1. Session-scoped: Start container, run migrations, mark DB as template
 # 2. Function-scoped: Clone template DB for each test, drop after test
+#
+# Under pytest-xdist there is still exactly ONE container: the first worker to
+# reach the fixture provisions it behind a file lock and records its coordinates
+# in the xdist-shared temp dir, the other workers reuse it, and the controller
+# removes it at session end (see pytest_sessionfinish). Per-test isolation is
+# unchanged: every test clones its own database from the template, so workers
+# never share a database, only the server.
+
+_PG_IMAGE = "docker.rcplus.io/pgvector/pgvector:pg16"
+_RAMBLER_IMAGE = "docker.rcplus.io/zhaowde/rambler:latest"
+_PG_USER = "postgres"
+_PG_PASSWORD = "password"
+_PG_DATABASE = "console"
+_PG_SCHEMA = "console"
+_PG_PORT = 5432
+_PG_SHARED_STATE = "postgres_template.json"
+_PG_SHARED_LOCK = "postgres_template.lock"
 
 
-@pytest.fixture(scope="session")
-def postgres_template():
-    """Start PostgreSQL container and create template database with migrations.
+def _xdist_shared_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Directory shared by all xdist workers of one run (the controller's basetemp)."""
+    return tmp_path_factory.getbasetemp().parent
 
-    This runs once per test session. The 'console' database becomes a template
-    that is cloned for each test, providing fast isolation.
+
+def _provision_postgres(client: docker.DockerClient, run_tag: str) -> dict[str, Any]:
+    """Start a pgvector container, apply migrations, mark the database as a template.
+
+    Returns the connection coordinates plus the container/network names, all JSON-safe.
     """
-    import os
-    import random
+    network_name = f"test-network-{run_tag}"
+    db_container_name = f"test-postgres-{run_tag}"
 
-    client = docker.from_env()
-
-    # Configuration matching build-db-container.sh
-    pg_user = "postgres"
-    pg_password = "password"
-    pg_database = "console"
-    pg_schema = "console"
-    pg_port = 5432
-    host_port = 5433 + random.randint(0, 100)  # Random port to avoid conflicts
-
-    network_name = f"test-network-{random.randint(1000, 9999)}"
-    db_container_name = f"test-postgres-{random.randint(1000, 9999)}"
-
-    # Get migrations directory path
     tests_dir = os.path.dirname(os.path.abspath(__file__))
-    # Go up: tests -> console-backend, then into sqlmigrations/ddl
     package_root = os.path.abspath(os.path.join(tests_dir, ".."))
-    migrations_dir = os.path.join(package_root, "sqlmigrations", "ddl")
-    migrations_dir = os.path.normpath(os.path.realpath(migrations_dir))
+    migrations_dir = os.path.normpath(os.path.realpath(os.path.join(package_root, "sqlmigrations", "ddl")))
 
-    containers_to_cleanup = []
-
-    def cleanup():
-        for container in containers_to_cleanup:
-            try:
-                container.stop(timeout=1)
-            except Exception:
-                pass
-            try:
-                container.remove(force=True)
-            except Exception:
-                pass
-        try:
-            client.networks.get(network_name).remove()
-        except Exception:
-            pass
-
+    info: dict[str, Any] = {
+        "network": network_name,
+        "container_name": db_container_name,
+    }
     try:
-        # Create network
         client.networks.create(network_name, driver="bridge")
 
-        # Start PostgreSQL container with pgvector extension
         pg_container = client.containers.run(
-            "docker.rcplus.io/pgvector/pgvector:pg16",
+            _PG_IMAGE,
             detach=True,
             name=db_container_name,
             network=network_name,
             environment={
-                "POSTGRES_USER": pg_user,
-                "POSTGRES_PASSWORD": pg_password,
-                "POSTGRES_DB": pg_database,
+                "POSTGRES_USER": _PG_USER,
+                "POSTGRES_PASSWORD": _PG_PASSWORD,
+                "POSTGRES_DB": _PG_DATABASE,
             },
-            ports={f"{pg_port}/tcp": host_port},
+            ports={f"{_PG_PORT}/tcp": None},  # None = Docker picks a free host port
+            # Throwaway server: durability off so CREATE/DROP DATABASE checkpoints
+            # hit the page cache, not the Docker VM disk. Every DROP DATABASE forces
+            # a checkpoint, and with fsync on eight workers serialised on them.
+            command=[
+                "postgres",
+                "-c",
+                "fsync=off",
+                "-c",
+                "synchronous_commit=off",
+                "-c",
+                "full_page_writes=off",
+                "-c",
+                "max_connections=400",
+            ],
         )
-        containers_to_cleanup.append(pg_container)
+
+        # The published host port shows up in the container's attrs only once the
+        # container is actually running, which can lag the run() call under load.
+        host_port = None
+        for _ in range(120):
+            pg_container.reload()
+            mapping = pg_container.ports.get(f"{_PG_PORT}/tcp") or []
+            if mapping:
+                host_port = int(mapping[0]["HostPort"])
+                break
+            time.sleep(0.5)
+        if host_port is None:
+            raise RuntimeError("PostgreSQL container never published its port")
 
         # Wait for PostgreSQL to be ready
-        max_retries = 60
-        for i in range(max_retries):
+        for i in range(60):
             try:
-                exit_code, output = pg_container.exec_run(
-                    f'psql -U {pg_user} -d {pg_database} -c "SELECT 1"',
-                )
+                exit_code, _ = pg_container.exec_run(f'psql -U {_PG_USER} -d {_PG_DATABASE} -c "SELECT 1"')
                 if exit_code == 0:
                     logger.info(f"PostgreSQL ready after {i + 1} attempts")
                     break
@@ -673,29 +712,28 @@ def postgres_template():
         else:
             raise RuntimeError("PostgreSQL failed to start")
 
-        # Create schema and set search path
-        exit_code, output = pg_container.exec_run(
-            f'psql -U {pg_user} -d {pg_database} -c "ALTER USER {pg_user} SET search_path TO {pg_schema}"'
+        def psql(db: str, sql: str, what: str) -> None:
+            exit_code, output = pg_container.exec_run(f'psql -U {_PG_USER} -d {db} -c "{sql}"')
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to {what}: {output.decode()}")
+
+        psql(
+            _PG_DATABASE,
+            f"ALTER USER {_PG_USER} SET search_path TO {_PG_SCHEMA}",
+            "set search path",
         )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to set search path: {output.decode()}")
-
-        exit_code, output = pg_container.exec_run(f'psql -U {pg_user} -d {pg_database} -c "CREATE SCHEMA {pg_schema}"')
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to create schema: {output.decode()}")
-
-        # Install pgvector extension (provisioning step - same as build-db-container.sh)
-        exit_code, output = pg_container.exec_run(
-            f'psql -U {pg_user} -d {pg_database} -c "CREATE EXTENSION IF NOT EXISTS vector"'
+        psql(_PG_DATABASE, f"CREATE SCHEMA {_PG_SCHEMA}", "create schema")
+        # pgvector extension (provisioning step - same as build-db-container.sh)
+        psql(
+            _PG_DATABASE,
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            "create vector extension",
         )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to create vector extension: {output.decode()}")
-
         time.sleep(0.5)
 
         # Run Rambler migrations
         rambler_result = client.containers.run(
-            "docker.rcplus.io/zhaowde/rambler:latest",
+            _RAMBLER_IMAGE,
             remove=True,
             network=network_name,
             volumes={migrations_dir: {"bind": "/scripts", "mode": "ro"}},
@@ -703,100 +741,236 @@ def postgres_template():
                 "RAMBLER_DRIVER": "postgresql",
                 "RAMBLER_PROTOCOL": "tcp",
                 "RAMBLER_HOST": db_container_name,
-                "RAMBLER_PORT": str(pg_port),
-                "RAMBLER_USER": pg_user,
-                "RAMBLER_PASSWORD": pg_password,
-                "RAMBLER_DATABASE": pg_database,
+                "RAMBLER_PORT": str(_PG_PORT),
+                "RAMBLER_USER": _PG_USER,
+                "RAMBLER_PASSWORD": _PG_PASSWORD,
+                "RAMBLER_DATABASE": _PG_DATABASE,
                 "RAMBLER_DIRECTORY": "/scripts",
                 "RAMBLER_TABLE": "migrations",
-                "RAMBLER_SCHEMA": pg_schema,
+                "RAMBLER_SCHEMA": _PG_SCHEMA,
             },
         )
         logger.info(f"Rambler migrations applied: {rambler_result.decode()}")
 
-        # Mark the database as a template for fast cloning
-        # First disconnect any sessions (shouldn't be any but just in case)
+        # Mark the database as a template for fast cloning (no sessions may be open on it)
         pg_container.exec_run(
-            f"psql -U {pg_user} -d postgres -c "
-            f"\"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{pg_database}' AND pid <> pg_backend_pid()\""
+            f"psql -U {_PG_USER} -d postgres -c "
+            f"\"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{_PG_DATABASE}' AND pid <> pg_backend_pid()\""
         )
-        exit_code, output = pg_container.exec_run(
-            f'psql -U {pg_user} -d postgres -c "ALTER DATABASE {pg_database} WITH is_template = true"'
+        psql(
+            "postgres",
+            f"ALTER DATABASE {_PG_DATABASE} WITH is_template = true",
+            "set database as template",
         )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to set database as template: {output.decode()}")
-        logger.info(f"Database {pg_database} marked as template")
+        logger.info(f"Database {_PG_DATABASE} marked as template")
 
-        yield {
-            "host": "localhost",
-            "port": host_port,
-            "user": pg_user,
-            "password": pg_password,
-            "template_database": pg_database,
-            "schema": pg_schema,
-            "container": pg_container,
-        }
+        info.update(
+            {
+                "host": "localhost",
+                "port": host_port,
+                "user": _PG_USER,
+                "password": _PG_PASSWORD,
+                "template_database": _PG_DATABASE,
+                "schema": _PG_SCHEMA,
+            }
+        )
+        return info
+    except Exception:
+        _teardown_postgres(client, info)
+        raise
 
-    finally:
-        cleanup()
+
+def _teardown_postgres(client: docker.DockerClient, info: dict[str, Any]) -> None:
+    """Remove the container and network described by `info`, ignoring anything already gone."""
+    try:
+        container = client.containers.get(info["container_name"])
+        try:
+            container.stop(timeout=1)
+        except Exception:
+            pass
+        container.remove(force=True)
+    except Exception:
+        pass
+    try:
+        client.networks.get(info["network"]).remove()
+    except Exception:
+        pass
 
 
-# Counter for unique test database names
+@pytest.fixture(scope="session")
+def postgres_template(tmp_path_factory: pytest.TempPathFactory):
+    """PostgreSQL container with the migrated 'console' database marked as a template.
+
+    Runs once per test session and, under xdist, once per *run*: the coordinates
+    are shared through the controller's temp dir so every worker clones from the
+    same server.
+    """
+    client = docker.from_env()
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+
+    if worker is None:
+        info = _provision_postgres(client, f"{os.getpid()}-{random.randint(1000, 9999)}")
+        try:
+            yield {**info, "container": client.containers.get(info["container_name"])}
+        finally:
+            _teardown_postgres(client, info)
+        return
+
+    shared = _xdist_shared_dir(tmp_path_factory)
+    state_file = shared / _PG_SHARED_STATE
+    with open(shared / _PG_SHARED_LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            if state_file.exists():
+                info = json.loads(state_file.read_text())
+            else:
+                info = _provision_postgres(client, f"{worker}-{os.getpid()}")
+                state_file.write_text(json.dumps(info))
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+    # Teardown belongs to the controller: a worker cannot know it is the last one out.
+    yield {**info, "container": client.containers.get(info["container_name"])}
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """On the xdist controller, remove the shared PostgreSQL container once all workers are done."""
+    if os.environ.get("PYTEST_XDIST_WORKER") or not hasattr(session.config, "_tmp_path_factory"):
+        return
+    state_file = session.config._tmp_path_factory.getbasetemp() / _PG_SHARED_STATE
+    if not state_file.exists():
+        return
+    _teardown_postgres(docker.from_env(), json.loads(state_file.read_text()))
+
+
+# Counter for unique test database names (per process; the worker id keeps them
+# distinct across xdist workers that share one server)
 _test_db_counter = 0
-_test_db_lock = None
+_test_db_lock = threading.Lock()
 
 
 def _get_test_db_name():
     """Generate a unique test database name."""
     global _test_db_counter
-    import threading
-
-    global _test_db_lock
-    if _test_db_lock is None:
-        _test_db_lock = threading.Lock()
     with _test_db_lock:
         _test_db_counter += 1
-        return f"test_db_{_test_db_counter}"
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    return f"test_db_{worker}_{_test_db_counter}"
+
+
+class _CloneFactory:
+    """Per-process background thread that keeps ready-to-use clones of the template database.
+
+    Cloning is off the test's critical path: the thread creates the next clones
+    while the current test runs, opens one connection to each so PostgreSQL has
+    built the relation cache (the first backend on a new database pays that), and
+    drops released clones asynchronously. It owns one admin connection on its own
+    event loop, so no per-test connect/disconnect to the maintenance database either.
+    """
+
+    def __init__(self, template: dict[str, Any], depth: int = 2) -> None:
+        self._template = template
+        self._depth = depth
+        self._ready: queue.Queue[str | BaseException] = queue.Queue()
+        self._released: queue.Queue[str | None] = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="pg-clone-factory", daemon=True)
+        self._thread.start()
+
+    def acquire(self) -> str:
+        item = self._ready.get(timeout=300)
+        if isinstance(item, BaseException):
+            raise RuntimeError("Clone factory failed") from item
+        return item
+
+    def release(self, name: str) -> None:
+        self._released.put(name)
+
+    def close(self) -> None:
+        self._released.put(None)
+        self._thread.join(timeout=120)
+
+    def _run(self) -> None:
+        asyncio.run(self._serve())
+
+    async def _serve(self) -> None:
+        t = self._template
+        admin = await asyncpg.connect(
+            host=t["host"],
+            port=t["port"],
+            user=t["user"],
+            password=t["password"],
+            database="postgres",
+        )
+        try:
+            while True:
+                while self._ready.qsize() < self._depth:
+                    try:
+                        self._ready.put(await self._create_clone(admin))
+                    except Exception as e:  # noqa: BLE001 — surface it to the test instead of hanging acquire()
+                        self._ready.put(e)
+                        return
+                try:
+                    name = self._released.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if name is None:
+                    break
+                await admin.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+            # Session end: drop the clones nobody used.
+            while not self._ready.empty():
+                item = self._ready.get_nowait()
+                if isinstance(item, str):
+                    await admin.execute(f"DROP DATABASE IF EXISTS {item} WITH (FORCE)")
+        finally:
+            await admin.close()
+
+    async def _create_clone(self, admin: asyncpg.Connection) -> str:
+        t = self._template
+        name = _get_test_db_name()
+        await admin.execute(f"CREATE DATABASE {name} TEMPLATE {t['template_database']}")
+        warm = await asyncpg.connect(
+            host=t["host"],
+            port=t["port"],
+            user=t["user"],
+            password=t["password"],
+            database=name,
+        )
+        await warm.close()
+        return name
+
+
+@pytest.fixture(scope="session")
+def _clone_factory(postgres_template):
+    factory = _CloneFactory(postgres_template)
+    yield factory
+    factory.close()
 
 
 @pytest.fixture(scope="function")
-def postgres_with_migrations(postgres_template):
-    """Create a fresh database from template for each test.
+def postgres_with_migrations(postgres_template, _clone_factory):
+    """Hand each test its own database cloned from the migrated template.
 
-    This is FAST because PostgreSQL's TEMPLATE feature copies at the filesystem level.
+    The clone was created and warmed ahead of time by the session's clone factory,
+    and is dropped in the background once the test releases it.
     """
-    test_db_name = _get_test_db_name()
-    container = postgres_template["container"]
-    pg_user = postgres_template["user"]
-    template_db = postgres_template["template_database"]
-    schema = postgres_template["schema"]
+    test_db_name = _clone_factory.acquire()
 
-    # Create database from template
-    exit_code, output = container.exec_run(
-        f'psql -U {pg_user} -d postgres -c "CREATE DATABASE {test_db_name} TEMPLATE {template_db}"'
+    dsn = (
+        f"postgresql+asyncpg://{postgres_template['user']}:{postgres_template['password']}"
+        f"@{postgres_template['host']}:{postgres_template['port']}/{test_db_name}"
     )
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to create test database: {output.decode()}")
-
-    dsn = f"postgresql+asyncpg://{postgres_template['user']}:{postgres_template['password']}@{postgres_template['host']}:{postgres_template['port']}/{test_db_name}"
 
     yield {
         "host": postgres_template["host"],
         "port": postgres_template["port"],
-        "user": pg_user,
+        "user": postgres_template["user"],
         "password": postgres_template["password"],
         "database": test_db_name,
-        "schema": schema,
+        "schema": postgres_template["schema"],
         "dsn": dsn,
     }
 
-    # Drop the test database after the test
-    # First terminate any connections
-    container.exec_run(
-        f"psql -U {pg_user} -d postgres -c "
-        f"\"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{test_db_name}'\""
-    )
-    container.exec_run(f'psql -U {pg_user} -d postgres -c "DROP DATABASE IF EXISTS {test_db_name}"')
+    _clone_factory.release(test_db_name)
 
 
 @pytest_asyncio.fixture

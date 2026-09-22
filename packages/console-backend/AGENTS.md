@@ -46,6 +46,9 @@ uv run python script.py
 # Run tests (prefer runTests MCP tool when available)
 uv run pytest tests/ -v
 
+# Run tests in parallel (all workers share one Postgres container, each test still gets its own cloned database)
+uv run pytest tests/ -n auto
+
 # Run with coverage
 uv run pytest tests/ --cov=console_backend --cov-report=html
 ```
