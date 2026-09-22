@@ -1115,16 +1115,14 @@ async def _require_registry_write(
     straight through it. And it cannot run first, because it answers "can you reach the
     parent agent", which an owner may have lost while still owning the row.
 
-    So ownership decides first (``check_write_access`` covers the owner and, for
-    sub-agent entries, write permission on the parent agent), with an administrator
-    bypass for pulling back a skill nobody else can reach. Only when that denies do we
-    consult the parent agent, which raises 404 — a refusal must not confirm that an id
-    exists.
+    So ownership decides, and nothing else: ``check_write_access`` covers the owner
+    and, for sub-agent entries, write permission on the parent agent, plus an
+    administrator bypass for pulling back a skill nobody else can reach. A refusal is
+    404, not 403 — it must not confirm that an id exists.
     """
     registry_service = get_skill_registry_service(request)
     if await registry_service.check_write_access(db, entry, user.id) or user.is_administrator:
         return
-    await _check_sub_agent_skill_access(entry, user, db, request)
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Skill '{entry.id}' not found in registry",

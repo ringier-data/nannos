@@ -205,3 +205,26 @@ async def test_dangling_registry_reference_is_not_written_through():
     await _service(registry)._persist_and_strip_skills(db, _actor(), 2, [ghost])
 
     registry.upsert_agent_skill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_standalone_row_cannot_be_written_through_by_claiming_sub_agent_scope():
+    """The claimed scope is not evidence of anything — that is why ownership is looked up.
+
+    A config save naming a standalone row's UUID while claiming scope='sub-agent'
+    would otherwise reach upsert_agent_skill and rewrite that row.
+    """
+    registry = _registry()
+    crafted = SkillDefinition(
+        name="theirs",
+        description="d",
+        body="rewritten",
+        scope="sub-agent",
+        registry_id=_AGENT1_ROW,
+        content_hash="hash-1",
+    )
+    db = _db_with_registry_rows([{"id": _AGENT1_ROW, "sub_agent_id": None}])
+
+    await _service(registry)._persist_and_strip_skills(db, _actor(), 2, [crafted])
+
+    registry.upsert_agent_skill.assert_not_awaited()

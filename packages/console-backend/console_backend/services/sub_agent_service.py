@@ -2689,12 +2689,15 @@ class SubAgentService:
 
     @staticmethod
     async def _foreign_registry_ids(db: AsyncSession, sub_agent_id: int, registry_ids: list[str]) -> set[str]:
-        """Of ``registry_ids``, those whose registry row belongs to another sub-agent.
+        """Of ``registry_ids``, those this sub-agent may not write through.
 
-        A row with no ``sub_agent_id`` (standalone/imported) is not "foreign" in this
-        sense — the existing scope test already routes those to the reference branch.
-        An id with no row at all is treated as foreign: writing through a dangling
-        reference is never what the caller wanted.
+        Anything whose row is not owned by exactly this sub-agent is foreign: another
+        agent's row, a standalone/imported row (``sub_agent_id IS NULL``), and an id
+        with no row at all. Standalone rows have to be in here rather than left to the
+        caller's ``scope`` test — that test reads the CLIENT-supplied scope, so a
+        config save claiming ``scope='sub-agent'`` with a standalone row's UUID would
+        otherwise reach upsert and rewrite somebody's private standalone skill. The
+        whole point of this lookup is that the claimed scope is not evidence.
         """
         if not registry_ids:
             return set()
@@ -2703,12 +2706,7 @@ class SubAgentService:
             {"ids": list({str(r) for r in registry_ids})},
         )
         rows = {str(row["id"]): row["sub_agent_id"] for row in result.mappings().all()}
-        return {
-            str(rid)
-            for rid in registry_ids
-            if str(rid) not in rows
-            or (rows[str(rid)] is not None and rows[str(rid)] != sub_agent_id)
-        }
+        return {str(rid) for rid in registry_ids if rows.get(str(rid)) != sub_agent_id}
 
     async def _persist_and_strip_skills(
         self,
