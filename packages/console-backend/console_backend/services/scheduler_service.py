@@ -202,16 +202,48 @@ class SchedulerService:
         return current == value
 
     @staticmethod
-    def _same_trigger_value(job: ScheduledJob, key: str, value: Any) -> bool:
-        current = getattr(job, key)
+    def _same_trigger_value(current: Any, key: str, value: Any, display_tz: str | None) -> bool:
         if key == "schedule_kind":
-            return current == ScheduleKind(value)
+            return current is not None and ScheduleKind(current) == ScheduleKind(value)
         if key == "run_at" and value is not None and current is not None:
             if value.tzinfo is None:
                 # A naive echo of a stored instant: compare as the wall-clock the form shows.
-                return current.astimezone(resolve_timezone(job.timezone)).replace(tzinfo=None) == value
+                return current.astimezone(resolve_timezone(display_tz)).replace(tzinfo=None) == value
             return current == value
         return current == value
+
+    @staticmethod
+    def _trigger_baseline(job: ScheduledJob, definition: dict[str, Any], scope: str) -> dict[str, Any]:
+        """What an incoming trigger field is compared against: the trigger this request is
+        AIMING at, not the one the caller happens to run on.
+
+        The console resends every trigger field prefilled, so an unchanged echo must not
+        count as an edit — but what it echoes is the EFFECTIVE trigger (override first),
+        while ``scope='everyone'`` edits the definition's DEFAULT. Judging an
+        everyone-edit against the effective trigger is what made "promote my own schedule
+        to the default" inexpressible: an owner sends their override's values, they equal
+        their own effective trigger, and the whole branch no-ops. The baseline now follows
+        the target, so this test agrees with the ``_merge_trigger`` it feeds — which has
+        always merged an everyone-edit onto the definition.
+
+        This only ever differs for an editor who HAS an override: with an inherited
+        subscription the definition's values and the effective ones are the same.
+
+        ``timezone`` is deliberately NOT switched. The job's is the *resolved* zone
+        (override, else definition, else the subscriber's settings) and the form has no
+        separate field for the definition's, so an echo of the displayed zone means
+        "unchanged" whatever the scope. Comparing it against a definition that names none
+        would read every save as a request to pin one.
+        """
+        if scope == "everyone":
+            return {
+                "schedule_kind": definition["schedule_kind"],
+                "cron_expr": definition["cron_expr"],
+                "interval_seconds": definition["interval_seconds"],
+                "run_at": definition["run_at"],
+                "timezone": job.timezone,
+            }
+        return {f: getattr(job, f) for f in _TRIGGER_FIELDS}
 
     @staticmethod
     def _effective_tz(*candidates: str | None) -> str | None:
@@ -667,19 +699,25 @@ class SchedulerService:
         # --- trigger ---
         # Touched means CHANGED: the console resends every trigger field prefilled from
         # the job, and treating an unchanged echo as an edit would turn every save into a
-        # private override (or, alone, a revision bump).
+        # private override (or, alone, a revision bump). WHICH trigger it is judged
+        # against depends on which one the request aims at, so the scope is resolved
+        # first — see ``_trigger_baseline``. Resolving it here changes nothing else: the
+        # permission and policy checks below stay inside ``if trigger_touched``, so a
+        # request that does not touch the trigger still cannot be refused for its scope.
+        others = job.subscriber_count > 1
+        scope = data.scope
+        if scope is None:
+            # Alone, a writer's edit is the job's schedule; with others, the narrowest
+            # effect. A reader alone (the owner unsubscribed) can only ever override.
+            scope = "everyone" if (not others and self._can_write(perm)) else "mine"
+        baseline = self._trigger_baseline(job, definition, scope)
         trigger_touched = any(
-            getattr(data, f) is not None and not self._same_trigger_value(job, f, getattr(data, f))
+            getattr(data, f) is not None
+            and not self._same_trigger_value(baseline[f], f, getattr(data, f), job.timezone)
             for f in _TRIGGER_FIELDS
         )
         trigger_target: str | None = None
         if trigger_touched:
-            others = job.subscriber_count > 1
-            scope = data.scope
-            if scope is None:
-                # Alone, a writer's edit is the job's schedule; with others, the narrowest
-                # effect. A reader alone (the owner unsubscribed) can only ever override.
-                scope = "everyone" if (not others and self._can_write(perm)) else "mine"
             if scope == "everyone" and not self._can_write(perm):
                 raise SchedulerAccessError("Changing everyone's schedule needs write permission on this job")
             # FIXED is enforced whatever the subscriber count: a sole read-only subscriber

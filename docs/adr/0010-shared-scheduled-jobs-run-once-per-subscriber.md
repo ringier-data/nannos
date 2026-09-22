@@ -88,7 +88,14 @@ whose credential is missing, not whoever authored the prompt.
   sentence ("move the report to 8") does not carry. One update path routes each
   field server-side; only the trigger is ambiguous, only once a second
   subscriber exists, and only then does an optional `scope: mine | everyone`
-  mean anything.
+  mean anything. `scope` also decides what *unchanged* means: the console
+  resends every trigger field prefilled, so an echo must not count as an edit —
+  but the values it echoes are the subscriber's effective trigger, while
+  `everyone` edits the definition's default. Each scope is therefore judged
+  against the trigger it aims at. Judging both against the effective one (the
+  first implementation) made "promote my own schedule to the default"
+  inexpressible *and* let an echo of the default rewrite it, because an editor
+  with an override differs from both.
 
 ## Consequences
 

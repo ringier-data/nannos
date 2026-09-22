@@ -772,7 +772,14 @@ the job view resolves it (`COALESCE(subscription, definition, subscriber setting
 **One update path.** `PATCH /jobs/{id}` (`scheduler_update_job`) routes each field server-side:
 definition fields need `write`; `enabled` and `delivery_channel_id` are always the caller's own; the
 trigger takes an optional `scope: mine | everyone` that only matters once the definition has other
-subscribers (alone, a writer's edit lands on the defaults so a later share inherits it). Setting the
+subscribers (alone, a writer's edit lands on the defaults so a later share inherits it). `scope` also
+picks the baseline the **unchanged-echo filter** judges against (`_trigger_baseline`): the console
+resends every trigger field prefilled, so an echo must not read as an edit — but it echoes the
+*effective* trigger while `everyone` edits the *definition's default*, and for an editor who holds an
+override those are different values. Judging both against the effective one made "promote my own
+schedule to the default" a silent no-op and let an echo of the default rewrite it. `timezone` is
+deliberately excluded from the switch: the job's is the resolved zone and the form has no field for
+the definition's, so re-baselining it would read every save as a request to pin one. Setting the
 policy to `fixed` resets every override. **Suspend** (definition, `write`, holds every subscription
 out of `claim_due_jobs`, preserves each `enabled`) is distinct from **pause/disable** (subscription,
 mine). `DELETE /jobs/{id}` deletes the definition and every subscription when the caller owns it,

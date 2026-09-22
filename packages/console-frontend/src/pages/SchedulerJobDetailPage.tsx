@@ -957,7 +957,12 @@ function EditForm({ job }: { job: ScheduledJob }) {
                 <p className="text-xs text-muted-foreground">
                   {scope === 'mine'
                     ? 'Only your own runs move. The other subscribers keep theirs.'
-                    : `Changes the job's default, so every subscriber who has not set their own schedule follows it — including you.`}
+                    : job.trigger_inherited
+                      ? `Changes the job's default, so every subscriber who has not set their own schedule follows it — including you.`
+                      : // Saying "including you" is not enough for someone who has their
+                        // own schedule: what happens to them is that they LOSE it, and
+                        // that is the half they would not predict.
+                        `Changes the job's default, so every subscriber who has not set their own schedule follows it. Your own schedule is dropped and you follow the new default too.`}
                 </p>
               </div>
             )}

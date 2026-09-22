@@ -1047,3 +1047,112 @@ class TestTheAgentReachabilityGateHonoursPublicAgents:
             await svc.update_permissions(
                 db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
             )
+
+
+class TestTheUnchangedEchoFilterJudgesAgainstTheTargetedTrigger:
+    """The console resends every trigger field prefilled, so an unchanged echo must not
+    count as an edit — but *which* trigger it is unchanged against depends on what the
+    request aims at. `scope='everyone'` edits the definition's default, so judging it
+    against the editor's own effective trigger made "promote my own schedule to the
+    default" inexpressible (review round 2, design gap).
+    """
+
+    async def _shared_with_my_own_schedule(self, svc, db, u, gid):
+        """A shared job where the OWNER runs on their own override — the only shape in
+        which the two baselines differ."""
+        job = await svc.create_job(db, _watch_create(cron_expr="0 9 * * *"), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        await svc.subscribe(db, job.definition_id, u["member"])
+        mine = await svc.update_job(
+            db,
+            job_id=job.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 8 * * *", scope="mine"),
+            actor=u["owner"],
+        )
+        assert mine.trigger_inherited is False
+        assert (await svc.repo.get_definition(db, job.definition_id))["cron_expr"] == "0 9 * * *"
+        return job, mine
+
+    @pytest.mark.asyncio
+    async def test_promoting_my_own_schedule_to_the_default_now_lands(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job, mine = await self._shared_with_my_own_schedule(svc, db, u, gid)
+
+        # The owner sends exactly what they already run on — equal to their effective
+        # trigger, different from the definition's default.
+        after = await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 8 * * *", scope="everyone"),
+            actor=u["owner"],
+        )
+
+        assert (await svc.repo.get_definition(db, job.definition_id))["cron_expr"] == "0 8 * * *"
+        # "Everyone" includes the editor: their override is gone, the default is what runs.
+        assert after.trigger_inherited is True
+        assert after.cron_expr == "0 8 * * *"
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_no_op_on_the_default_is_still_a_no_op(self, world):
+        """The filter has to keep doing its job: echoing the DEFAULT back with
+        scope='everyone' changes nothing, and must not bump the revision."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job, mine = await self._shared_with_my_own_schedule(svc, db, u, gid)
+        before = await svc.repo.get_definition(db, job.definition_id)
+
+        after = await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(schedule_kind=ScheduleKind.CRON, cron_expr="0 9 * * *", scope="everyone"),
+            actor=u["owner"],
+        )
+
+        now = await svc.repo.get_definition(db, job.definition_id)
+        assert now["revision"] == before["revision"], "an echo of the default is not an edit"
+        assert after.trigger_inherited is False, "and the editor keeps their own schedule"
+        assert after.cron_expr == "0 8 * * *"
+
+    @pytest.mark.asyncio
+    async def test_an_echo_under_scope_mine_is_still_not_an_edit(self, world):
+        """The common path is unchanged: the console resending the whole form must not
+        turn every save into an override or a revision bump."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job = await svc.create_job(db, _watch_create(cron_expr="0 9 * * *"), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+        before = await svc.repo.get_definition(db, job.definition_id)
+
+        after = await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(
+                schedule_kind=ScheduleKind.CRON, cron_expr="0 9 * * *", enabled=False, scope="mine"
+            ),
+            actor=u["member"],
+        )
+
+        assert after.trigger_inherited is True, "echoing the inherited schedule is not an override"
+        assert after.enabled is False, "the part they did change still lands"
+        assert (await svc.repo.get_definition(db, job.definition_id))["revision"] == before["revision"]
+
+    @pytest.mark.asyncio
+    async def test_echoing_the_resolved_timezone_never_pins_it_on_the_definition(self, world):
+        """`timezone` is deliberately NOT re-baselined: the job's is the RESOLVED zone and
+        the form has no field for the definition's, so an echo of what is displayed must
+        not read as "pin this on the job"."""
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        job, mine = await self._shared_with_my_own_schedule(svc, db, u, gid)
+        assert (await svc.repo.get_definition(db, job.definition_id))["timezone"] is None
+
+        await svc.update_job(
+            db,
+            job_id=mine.id,
+            data=ScheduledJobUpdate(timezone=TZ["owner"], scope="everyone"),
+            actor=u["owner"],
+        )
+
+        assert (await svc.repo.get_definition(db, job.definition_id))["timezone"] is None
