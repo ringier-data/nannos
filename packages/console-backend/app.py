@@ -142,21 +142,29 @@ MAX_TEXT_MESSAGE_SIZE = 100_000
 # ==============================================================================
 # Graceful Shutdown
 # ==============================================================================
+def _has_connected_socket_clients() -> bool:
+    """True when at least one Socket.IO client is connected on the default namespace."""
+    rooms = getattr(sio.manager, "rooms", None) or {}
+    return bool(rooms.get("/", {}).get(None))
+
+
 async def shutdown_handler() -> None:
     """Handle graceful shutdown of the application."""
     logger.info("Initiating graceful shutdown...")
 
     try:
-        # Notify all connected clients
-        await sio.emit(
-            SocketEvents.SERVER_SHUTDOWN,
-            {
-                "message": "Server is shutting down. Please reconnect in a moment.",
-            },
-        )
-
-        # Give clients time to receive the message
-        await asyncio.sleep(1.0)
+        # Notify connected clients and give them a moment to receive the message.
+        # Skipped when nobody is connected: the grace period is only there for
+        # clients, and paying it unconditionally made every lifespan-backed test
+        # spend a fixed second in teardown.
+        if _has_connected_socket_clients():
+            await sio.emit(
+                SocketEvents.SERVER_SHUTDOWN,
+                {
+                    "message": "Server is shutting down. Please reconnect in a moment.",
+                },
+            )
+            await asyncio.sleep(1.0)
 
         # Clean up all connections
         await connection_pool.clear_all()
