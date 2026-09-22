@@ -31,7 +31,6 @@ from console_backend.services.playbook_service import PlaybookService
 
 if TYPE_CHECKING:
     from console_backend.models.user import User
-    from console_backend.services.skill_registry_service import SkillRegistryService
     from console_backend.services.sub_agent_service import SubAgentService
 
 logger = logging.getLogger(__name__)
@@ -43,21 +42,9 @@ class SkillActivationService:
     def __init__(self) -> None:
         self._playbook_service: PlaybookService | None = None
         self._sub_agent_service: "SubAgentService | None" = None
-        self._skill_registry_service: "SkillRegistryService | None" = None
 
     def set_playbook_service(self, service: PlaybookService) -> None:
         self._playbook_service = service
-
-    def set_skill_registry_service(self, service: "SkillRegistryService") -> None:
-        self._skill_registry_service = service
-
-    @property
-    def skill_registry_service(self) -> "SkillRegistryService":
-        if not self._skill_registry_service:
-            raise RuntimeError(
-                "SkillRegistryService not injected. Call set_skill_registry_service() during initialization."
-            )
-        return self._skill_registry_service
 
     def set_sub_agent_service(self, service: "SubAgentService") -> None:
         from console_backend.services.sub_agent_service import SubAgentService
@@ -140,43 +127,15 @@ class SkillActivationService:
             if existing_id:
                 return existing_id
 
-            # A skill published by ANOTHER agent is COPIED, not referenced (ADR 0006).
-            #
-            # resolve_imported_skills reads the registry row's own scope, and a
-            # 'sub-agent' row is resolved as always-latest with update_available forced
-            # off. Referencing the publisher's row would therefore let its edits change
-            # this agent's skill underneath an immutable config version, with no update
-            # signal and nothing for a revert to pin — the collision ADR 0006 avoids by
-            # copying. Snapshotting into a row this agent owns restores pinning, and
-            # incidentally removes any way to write back to the publisher.
-            config_registry_id = registry_id
-            config_hash = registry.content_hash
-            if registry.scope == "sub-agent" and registry.sub_agent_id != sub_agent_id:
-                config_registry_id, config_hash = await self.skill_registry_service.upsert_agent_skill(
-                    db=db,
-                    actor=actor,
-                    sub_agent_id=sub_agent_id,
-                    name=registry.slug,
-                    description=registry.description or "",
-                    files=list(registry.files),
-                )
-                logger.info(
-                    "Activation on sub-agent %s copied published skill %s (from sub-agent %s) to %s",
-                    sub_agent_id,
-                    registry_id,
-                    registry.sub_agent_id,
-                    config_registry_id,
-                )
-
             # Create a new config version with this skill appended (immutable versions).
             # add_skill_to_config is idempotent — skips if already present by source ref.
             await self.sub_agent_service.add_skill_to_config(
                 db=db,
                 sub_agent_id=sub_agent_id,
-                registry_id=config_registry_id,
+                registry_id=registry_id,
                 skill_name=registry.slug,
                 skill_description=registry.description or "",
-                content_hash=config_hash,
+                content_hash=registry.content_hash,
                 actor=actor,
             )
 
