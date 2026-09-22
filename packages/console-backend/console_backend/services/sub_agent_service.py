@@ -2687,6 +2687,29 @@ class SubAgentService:
             result.append(d)
         return result
 
+    @staticmethod
+    async def _foreign_registry_ids(db: AsyncSession, sub_agent_id: int, registry_ids: list[str]) -> set[str]:
+        """Of ``registry_ids``, those whose registry row belongs to another sub-agent.
+
+        A row with no ``sub_agent_id`` (standalone/imported) is not "foreign" in this
+        sense — the existing scope test already routes those to the reference branch.
+        An id with no row at all is treated as foreign: writing through a dangling
+        reference is never what the caller wanted.
+        """
+        if not registry_ids:
+            return set()
+        result = await db.execute(
+            text("SELECT id, sub_agent_id FROM skill_registry WHERE id = ANY(:ids)"),
+            {"ids": list({str(r) for r in registry_ids})},
+        )
+        rows = {str(row["id"]): row["sub_agent_id"] for row in result.mappings().all()}
+        return {
+            str(rid)
+            for rid in registry_ids
+            if str(rid) not in rows
+            or (rows[str(rid)] is not None and rows[str(rid)] != sub_agent_id)
+        }
+
     async def _persist_and_strip_skills(
         self,
         db: AsyncSession,
@@ -2730,10 +2753,21 @@ class SubAgentService:
             )
         registry_service = self._skill_registry_service
 
+        # Rows this agent does not own are read-only to it. A public sub-agent skill
+        # activated from another agent is a REFERENCE, and resolve_imported_skills
+        # stamps the publisher's scope ('sub-agent') onto the borrowing agent's config
+        # entry — which, on the next save, would otherwise land in the upsert branch
+        # below and rewrite the publisher's row by id. Ownership, not the claimed
+        # scope, decides whether this agent may write.
+        foreign_ids = await self._foreign_registry_ids(
+            db, sub_agent_id, [s.registry_id for s in skills if s.registry_id]
+        )
+
         result: list[SkillRef] = []
         for skill in skills:
-            if skill.registry_id and skill.scope != "sub-agent":
-                # Imported skill — registry entry already exists, just keep the reference
+            if skill.registry_id and (skill.scope != "sub-agent" or skill.registry_id in foreign_ids):
+                # Imported or borrowed skill — the registry entry exists and belongs to
+                # someone else; keep the reference and never write through it.
                 if not skill.content_hash:
                     raise ValueError(
                         f"Imported skill '{skill.name}' (registry_id={skill.registry_id}) "

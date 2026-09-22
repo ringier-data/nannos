@@ -130,3 +130,78 @@ async def test_revert_trusts_provenance_but_never_prunes():
 
     assert registry.upsert_agent_skill.await_args.kwargs["provenance"] == _WELL_KNOWN
     registry.prune_mirrored_skills.assert_not_awaited()
+
+
+# --- Borrowed skills are read-only references ---
+
+_AGENT1_ROW = "11111111-1111-1111-1111-111111111111"
+_AGENT2_ROW = "22222222-2222-2222-2222-222222222222"
+_MISSING_ROW = "33333333-3333-3333-3333-333333333333"
+
+
+def _db_with_registry_rows(rows: list[dict]) -> AsyncMock:
+    """A db whose single SELECT returns these skill_registry (id, sub_agent_id) rows."""
+    db = AsyncMock()
+    result = MagicMock()
+    result.mappings = MagicMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_skill_borrowed_from_another_agent_is_never_written_back():
+    """A public skill activated from agent 1 onto agent 2 stays agent 1's to edit.
+
+    resolve_imported_skills copies the publisher's scope ('sub-agent') onto the
+    borrowing agent's config entry, so the scope test alone would send the next save
+    into the upsert branch and rewrite the publisher's row by id.
+    """
+    registry = _registry()
+    borrowed = SkillDefinition(
+        name="published",
+        description="d",
+        body="b",
+        scope="sub-agent",
+        registry_id=_AGENT1_ROW,
+        content_hash="hash-1",
+    )
+    db = _db_with_registry_rows([{"id": _AGENT1_ROW, "sub_agent_id": 1}])
+
+    refs = await _service(registry)._persist_and_strip_skills(db, _actor(), 2, [borrowed])
+
+    registry.upsert_agent_skill.assert_not_awaited()
+    assert refs[0].registry_id == _AGENT1_ROW
+    assert refs[0].content_hash == "hash-1"
+
+
+@pytest.mark.asyncio
+async def test_agents_own_skill_is_still_written_back():
+    """The ownership test must not break the ordinary edit path."""
+    registry = _registry(skill_id=_AGENT2_ROW)
+    own = SkillDefinition(
+        name="mine",
+        description="d",
+        body="b",
+        scope="sub-agent",
+        registry_id=_AGENT2_ROW,
+        content_hash="hash-1",
+    )
+    db = _db_with_registry_rows([{"id": _AGENT2_ROW, "sub_agent_id": 2}])
+
+    await _service(registry)._persist_and_strip_skills(db, _actor(), 2, [own])
+
+    registry.upsert_agent_skill.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dangling_registry_reference_is_not_written_through():
+    """An id with no row is treated as foreign rather than recreated under this agent."""
+    registry = _registry()
+    ghost = SkillDefinition(
+        name="ghost", description="d", body="b", scope="sub-agent", registry_id=_MISSING_ROW, content_hash="h"
+    )
+    db = _db_with_registry_rows([])
+
+    await _service(registry)._persist_and_strip_skills(db, _actor(), 2, [ghost])
+
+    registry.upsert_agent_skill.assert_not_awaited()

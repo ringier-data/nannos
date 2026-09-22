@@ -207,8 +207,7 @@ async def get_skill_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Skill '{skill_id}' not found in registry",
         )
-    # Sub-agent-scoped skills: verify user can access the parent agent
-    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+    await _check_registry_read_access(request, db, entry, user)
 
     return {
         "id": entry.id,
@@ -242,7 +241,7 @@ async def get_skill_versions(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+    await _check_registry_read_access(request, db, entry, user)
 
     versions = await skill_registry_service.get_version_history(db, skill_id)
     return {
@@ -273,7 +272,7 @@ async def get_skill_version_detail(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+    await _check_registry_read_access(request, db, entry, user)
 
     version = await skill_registry_service.get_version(db, skill_id, content_hash)
     if version is None:
@@ -485,7 +484,7 @@ async def remove_skill(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _require_registry_write(request, db, entry, user)
     await skill_registry_service.remove(db, user, skill_id)
     await db.commit()
 
@@ -579,7 +578,7 @@ async def update_registry_skill(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "nannos":
         # Imported skills: only sandbox_required and visibility can be changed
         if body.name is not None or body.description is not None or body.files is not None:
@@ -637,7 +636,7 @@ async def write_registry_file(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "nannos":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -694,7 +693,7 @@ async def delete_registry_file(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "nannos":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -744,6 +743,10 @@ async def copy_skill(
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
 
+    # Copying hands the caller a permanent copy of every file, so it is a read of the
+    # whole body — the most direct disclosure of the endpoints on this router.
+    await _check_registry_read_access(request, db, entry, user)
+
     copy_name = body.name or f"{entry.name} (copy)"
 
     try:
@@ -784,6 +787,8 @@ async def check_skill_update(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
+    # The response carries file-level diffs of the entry's contents.
+    await _check_registry_read_access(request, db, entry, user)
     if entry.source_type != "github":
         raise HTTPException(
             status_code=400,
@@ -893,6 +898,8 @@ async def apply_skill_update(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
+    # Replaces the entry's files in place from upstream.
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "github":
         raise HTTPException(status_code=400, detail="Only skills imported from GitHub can be updated from source.")
     if not entry.source_repo:
@@ -1089,6 +1096,35 @@ async def _check_registry_read_access(
     if entry.scope == "sub-agent" and entry.sub_agent_id:
         await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
         return
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Skill '{entry.id}' not found in registry",
+    )
+
+
+async def _require_registry_write(
+    request: Request,
+    db: AsyncSession,
+    entry: SkillRegistryEntry,
+    user: User,
+) -> None:
+    """The write gate for a registry entry, for both scopes.
+
+    ``_check_sub_agent_skill_access`` alone is not a write gate: it returns early for
+    anything not sub-agent scoped, so a standalone entry owned by somebody else passed
+    straight through it. And it cannot run first, because it answers "can you reach the
+    parent agent", which an owner may have lost while still owning the row.
+
+    So ownership decides first (``check_write_access`` covers the owner and, for
+    sub-agent entries, write permission on the parent agent), with an administrator
+    bypass for pulling back a skill nobody else can reach. Only when that denies do we
+    consult the parent agent, which raises 404 — a refusal must not confirm that an id
+    exists.
+    """
+    registry_service = get_skill_registry_service(request)
+    if await registry_service.check_write_access(db, entry, user.id) or user.is_administrator:
+        return
+    await _check_sub_agent_skill_access(entry, user, db, request)
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Skill '{entry.id}' not found in registry",
@@ -1332,19 +1368,17 @@ async def mcp_activate_skill(
             ),
         )
 
-    # ADR 0006 says a public sub-agent skill is activatable on other agents, and this
-    # guard refuses it — but lifting it here is not enough, and is left to its own
-    # change. Sub-agent scope stores a SkillRef, not a copy, so a cross-agent
-    # activation would point agent B's config at agent A's registry row: B's next
-    # config save would then upsert by that id and rewrite A's published skill, and a
-    # prune on A's side would cascade B's activation away. Activation has to copy the
-    # row before the guard can go.
-    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id:
+    # A public sub-agent skill is activatable on other agents (ADR 0006): that is what
+    # publishing it means. The activation is a read-only REFERENCE to the publisher's
+    # registry row, not a copy — _persist_and_strip_skills refuses to upsert a row
+    # belonging to another sub-agent, so the borrowing agent can never write back to
+    # it, and prune_mirrored_skills leaves a row a live activation still points at.
+    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id and entry.visibility != "public":
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Skill '{entry.slug}' is scoped to a specific sub-agent and cannot be activated on a different agent. "
-                "Use 'console_create_skill' to create a new copy that can be activated on your agent, or use "
+                f"Skill '{entry.slug}' is private to a specific sub-agent and cannot be activated on a different "
+                "agent. Ask its owner to publish it, use 'console_create_skill' to create a new copy, or use "
                 "'console_update_skill' to change the scope to 'standalone' to make it agent-agnostic."
             ),
         )
@@ -1481,18 +1515,7 @@ async def update_visibility(
     # same write gate as editing it. Without this any authenticated user could flip
     # another team's private sub-agent skill to public and then read it.
     #
-    # check_write_access short-circuits on ownership, so it runs FIRST: an owner who
-    # has since lost access to the parent agent can still unpublish their own skill,
-    # and an admin can always pull a malicious public one back. Only when it denies do
-    # we fall through to the parent-agent check, which 404s rather than 403s so a
-    # refusal never confirms that an id exists.
-    registry_service = get_skill_registry_service(request)
-    if not await registry_service.check_write_access(db, entry, user.id) and not user.is_administrator:
-        await _check_sub_agent_skill_access(entry, user, db, request)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Skill '{entry.id}' not found in registry",
-        )
+    await _require_registry_write(request, db, entry, user)
 
     try:
         await skill_registry_service.update_visibility(

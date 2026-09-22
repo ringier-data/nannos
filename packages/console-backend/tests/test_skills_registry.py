@@ -662,12 +662,13 @@ class TestRemoveSkill:
     async def test_remove_success(self):
         from console_backend.routers.skills_registry_router import remove_skill
 
-        entry = _make_mock_registry_entry()
+        entry = _make_mock_registry_entry(owner_id="user-id-1")
         mock_db = AsyncMock()
         mock_db.commit = AsyncMock()
         mock_srs = MagicMock()
         mock_srs.get_by_id = AsyncMock(return_value=entry)
         mock_srs.remove = AsyncMock()
+        mock_srs.check_write_access = AsyncMock(return_value=True)
         mock_request = MagicMock()
         mock_request.app.state.skill_registry_service = mock_srs
 
@@ -1089,3 +1090,150 @@ class TestRegistryAuthorization:
         )
         assert result["visibility"] == "private"
         srs.update_visibility.assert_awaited_once()
+
+
+class TestMcpActivateCrossAgent:
+    """ADR 0006: publishing a sub-agent skill is what makes it activatable elsewhere.
+
+    The activation is a read-only reference to the publisher's row — see
+    test_skill_provenance_trust.py for the guard that stops the borrowing agent
+    writing back through it.
+    """
+
+    def _patches(self, entry, sub_agent_id):
+        import console_backend.routers.skills_registry_router as mod
+
+        srs = MagicMock()
+        srs.get_by_id = AsyncMock(return_value=entry)
+        activation = MagicMock()
+        activation.activate = AsyncMock(return_value=None)
+        sub_agents = MagicMock()
+        sub_agents.check_user_permission = AsyncMock(return_value=True)
+        request = MagicMock()
+        request.app.state.skill_registry_service = srs
+
+        return activation, request, [
+            patch.object(mod, "_resolve_sub_agent_id", AsyncMock(return_value=(sub_agent_id, "other-agent"))),
+            patch.object(mod, "_get_sub_agent_service", MagicMock(return_value=sub_agents)),
+            patch.object(mod, "_check_registry_read_access", AsyncMock(return_value=None)),
+            patch.object(mod, "_get_skill_activation_service", MagicMock(return_value=activation)),
+        ]
+
+    async def _activate(self, entry, sub_agent_id):
+        from console_backend.routers.skills_registry_router import McpActivateSkillInput, mcp_activate_skill
+
+        activation, request, patches = self._patches(entry, sub_agent_id)
+        for p in patches:
+            p.start()
+        try:
+            body = McpActivateSkillInput(
+                agent_name="other-agent",
+                registry_id="11111111-2222-3333-4444-555555555555",
+                scope="sub-agent",
+            )
+            result = await mcp_activate_skill(body=body, request=request, user=_make_user(), db=AsyncMock())
+            return result, activation
+        finally:
+            for p in patches:
+                p.stop()
+
+    @pytest.mark.asyncio
+    async def test_public_sub_agent_skill_activates_on_another_agent(self):
+        entry = _make_mock_registry_entry(scope="sub-agent", sub_agent_id=1, visibility="public")
+        result, activation = await self._activate(entry, sub_agent_id=2)
+        assert result.registry_id == entry.id
+        activation.activate.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_private_sub_agent_skill_still_refused(self):
+        entry = _make_mock_registry_entry(scope="sub-agent", sub_agent_id=1, visibility="private")
+        with pytest.raises(Exception) as exc_info:
+            await self._activate(entry, sub_agent_id=2)
+        assert exc_info.value.status_code == 400
+        assert "private to a specific sub-agent" in exc_info.value.detail
+
+
+class TestStandaloneEntryGates:
+    """A private standalone entry owned by someone else is neither readable nor writable.
+
+    `_check_sub_agent_skill_access` returns early for anything not sub-agent scoped, so
+    every endpoint that relied on it alone let a stranger through to another user's
+    private skill. Each case below is one of those endpoints.
+    """
+
+    def _srs(self, entry, **extra):
+        srs = MagicMock()
+        srs.get_by_id = AsyncMock(return_value=entry)
+        srs.get_by_id_or_slug = AsyncMock(return_value=entry)
+        srs.check_write_access = AsyncMock(return_value=False)
+        for k, v in extra.items():
+            setattr(srs, k, v)
+        return srs
+
+    def _request(self, srs):
+        request = MagicMock()
+        request.app.state.skill_registry_service = srs
+        return request
+
+    def _foreign_private(self):
+        return _make_mock_registry_entry(owner_id="someone-else", visibility="private", scope="standalone")
+
+    @pytest.mark.asyncio
+    async def test_detail_denied(self):
+        from console_backend.routers.skills_registry_router import get_skill_detail
+
+        srs = self._srs(self._foreign_private())
+        with pytest.raises(Exception) as exc:
+            await get_skill_detail(
+                skill_id="11111111-2222-3333-4444-555555555555",
+                request=self._request(srs),
+                user=_make_user(),
+                db=AsyncMock(),
+            )
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_copy_denied(self):
+        """Copying is the most direct disclosure: it hands over every file, permanently."""
+        from console_backend.routers.skills_registry_router import CopyRequest, copy_skill
+
+        srs = self._srs(self._foreign_private(), create_skill=AsyncMock())
+        with pytest.raises(Exception) as exc:
+            await copy_skill(
+                skill_id="11111111-2222-3333-4444-555555555555",
+                body=CopyRequest(),
+                request=self._request(srs),
+                user=_make_user(),
+                db=AsyncMock(),
+            )
+        assert exc.value.status_code == 404
+        srs.create_skill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_remove_denied(self):
+        from console_backend.routers.skills_registry_router import remove_skill
+
+        srs = self._srs(self._foreign_private(), remove=AsyncMock())
+        with pytest.raises(Exception) as exc:
+            await remove_skill(
+                request=self._request(srs),
+                skill_id="11111111-2222-3333-4444-555555555555",
+                user=_make_user(),
+                db=AsyncMock(),
+            )
+        assert exc.value.status_code == 404
+        srs.remove.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_public_entry_stays_readable(self):
+        """The gate must not break the case the registry exists for."""
+        from console_backend.routers.skills_registry_router import get_skill_detail
+
+        srs = self._srs(_make_mock_registry_entry(owner_id="someone-else", visibility="public", scope="standalone"))
+        result = await get_skill_detail(
+            skill_id="11111111-2222-3333-4444-555555555555",
+            request=self._request(srs),
+            user=_make_user(),
+            db=AsyncMock(),
+        )
+        assert result is not None
