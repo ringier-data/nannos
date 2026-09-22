@@ -1,4 +1,4 @@
-"""Migration 103's backfill must convert exactly the old-style placeholders, and no others.
+"""Migration 101's backfill must convert exactly the old-style placeholders, and no others.
 
 The old placeholder was the row's own id, so the backfill has to *infer* which rows were
 placeholders — the one and only time that inference is made, against the data as it stands.
@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import text
 
 MIGRATION = (
-    Path(__file__).parent.parent / "sqlmigrations" / "ddl" / "103_scim_placeholder_sub_and_keycloak_mirror.sql"
+    Path(__file__).parent.parent / "sqlmigrations" / "ddl" / "101_scim_placeholder_sub_and_keycloak_mirror.sql"
 )
 
 

@@ -455,7 +455,7 @@ rather than raising `404 User not found`.
 own id, recognised by `sub == id` narrowed by `scim_user_name IS NOT NULL`. Both halves fail:
 migration 001 keyed `users` by the OIDC sub itself, so rows from that era legitimately have
 `sub == id`, and `scim_user_name` can be written onto *any* row by a SCIM PUT/PATCH — including one
-of those, which silently stopped mirroring a user who did have a Keycloak account. Migration 103
+of those, which silently stopped mirroring a user who did have a Keycloak account. Migration 101
 rewrote the existing placeholders; that migration is the only place the old inference is applied,
 once, to the data as it stood.
 

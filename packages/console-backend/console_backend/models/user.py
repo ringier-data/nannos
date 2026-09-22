@@ -47,7 +47,7 @@ def has_idp_identity(sub: str) -> bool:
     down. Inference could not be made sound: migration 001 keyed `users` by the OIDC sub
     itself, so a row from that era legitimately has `sub == id`, and `scim_user_name` can be
     written onto any row by a SCIM PUT/PATCH — including one of those, which silently stopped
-    mirroring a user who did have a Keycloak account. Migration 103 rewrote the existing
+    mirroring a user who did have a Keycloak account. Migration 101 rewrote the existing
     placeholders to this prefix so the question is answered by the value itself.
     """
     return not sub.startswith(SCIM_PLACEHOLDER_SUB_PREFIX)
