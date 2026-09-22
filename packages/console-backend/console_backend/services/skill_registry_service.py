@@ -499,15 +499,17 @@ class SkillRegistryService:
                 )
                 continue
             stale.append(skill_id)
+        pruned: list[str] = []
         for skill_id in stale:
             try:
                 await self.remove(db, actor, skill_id)
+                pruned.append(skill_id)
             except SkillReferencedError as exc:
                 # Referenced between the check and the delete: same treatment, never a failed sync.
                 logger.warning("Kept mirrored registry skill %s: %s", skill_id, exc)
-        if stale:
-            logger.info("Pruned %d stale mirrored registry row(s) for sub-agent %s", len(stale), sub_agent_id)
-        return stale
+        if pruned:
+            logger.info("Pruned %d stale mirrored registry row(s) for sub-agent %s", len(pruned), sub_agent_id)
+        return pruned
 
     async def find_by_content_hash(self, db: AsyncSession, content_hash: str) -> list[SkillRegistryEntry]:
         """Find registry entries with the same content hash (duplicate detection)."""
