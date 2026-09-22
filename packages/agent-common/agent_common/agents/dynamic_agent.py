@@ -649,8 +649,10 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 "containing a SKILL.md file (and optionally scripts, references, assets).\n\n"
                 "To use a skill:\n"
                 "1. Match the user's request to a skill description below.\n"
-                "2. Read the full SKILL.md with read_file('/skills/<name>/SKILL.md').\n"
-                "3. Follow its instructions; read any referenced files as needed.\n\n"
+                "2. Call load_skill(name='<name>'). It returns the COMPLETE SKILL.md in one call — "
+                "do not read it through read_file, grep or eval, and never page it with offset/limit.\n"
+                "3. Follow its instructions. If they refer to a bundled file, read that file with "
+                "read_file('/skills/<name>/<file>').\n\n"
                 "Available skills:\n" + "\n".join(skill_lines)
             )
 
@@ -1503,6 +1505,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     default=effective_backend_factory,
                     routes={"/skills/": _SSB(self._resolved_skills)},
                 )
+
+        # Skills: bind the native load_skill tool so a skill's SKILL.md lands in
+        # context whole, in one call. Under PTC the filesystem read tools live only
+        # inside eval, whose results are capped — a long skill would be paged.
+        if self._resolved_skills:
+            from agent_common.core.load_skill_tool import create_load_skill_tool
+
+            tools = [*tools, create_load_skill_tool(self._resolved_skills)]
 
         # Embedded domain agent: add the on-screen client_action tool so it can
         # drive registered forms (apply/highlight/navigate). Gated so ordinary

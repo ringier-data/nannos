@@ -75,6 +75,7 @@ from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
 from agent_common.core.hitl_resume import HITL_DECISION_TYPES, decisions_from_resume
 from agent_common.core.model_factory import is_gemini_model
 from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+from agent_common.core.load_skill_tool import LOAD_SKILL_TOOL_NAME
 from agent_common.core.ptc_discovery import (
     PTC_DESCRIBE_TOOL_NAME,
     PTC_SEARCH_TOOL_NAME,
@@ -331,6 +332,9 @@ _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
         "SubAgentResponseSchema",
         CLIENT_ACTION_TOOL_NAME,
         NOTIFY_USER_TOOL_NAME,
+        # Must stay native: its whole point is returning a SKILL.md untruncated,
+        # which the eval result cap (PTC_MAX_RESULT_CHARS) would defeat.
+        LOAD_SKILL_TOOL_NAME,
     }
 )
 

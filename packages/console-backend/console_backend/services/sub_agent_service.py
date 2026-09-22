@@ -2743,6 +2743,8 @@ class SubAgentService:
                     description=skill.description,
                     files=registry_files,
                     registry_id=skill.registry_id,
+                    visibility=skill.visibility,
+                    provenance=skill.provenance,
                 )
 
                 ref = SkillRef(
@@ -2777,7 +2779,8 @@ class SubAgentService:
         # Batch-fetch from skill_registry
         result = await db.execute(
             text(
-                "SELECT id, slug, files, scope, sandbox_required, description, content_hash FROM skill_registry WHERE id = ANY(:ids)"
+                "SELECT id, slug, files, scope, sandbox_required, description, content_hash, visibility "
+                "FROM skill_registry WHERE id = ANY(:ids)"
             ),
             {"ids": registry_ids},
         )
@@ -2790,6 +2793,7 @@ class SubAgentService:
                 "sandbox_required": row.get("sandbox_required", False),
                 "description": row.get("description") or "",
                 "content_hash": row.get("content_hash") or "",
+                "visibility": row.get("visibility"),
             }
 
         # Identify skills that need pinned versions (content_hash differs from current)
@@ -2845,6 +2849,8 @@ class SubAgentService:
                     skill.content_hash = current_hash
                     skill.update_available = False
                     skill.latest_hash = None
+                    if entry["visibility"] in ("private", "public"):
+                        skill.visibility = entry["visibility"]
                 else:
                     # Determine if we should use pinned version or current
                     use_pinned = (
@@ -2901,7 +2907,8 @@ class SubAgentService:
         unique_ids = list(set(registry_ids))
         result = await db.execute(
             text(
-                "SELECT id, slug, files, scope, sandbox_required, description, content_hash FROM skill_registry WHERE id = ANY(:ids)"
+                "SELECT id, slug, files, scope, sandbox_required, description, content_hash, visibility "
+                "FROM skill_registry WHERE id = ANY(:ids)"
             ),
             {"ids": unique_ids},
         )
@@ -2914,6 +2921,7 @@ class SubAgentService:
                 "sandbox_required": row.get("sandbox_required", False),
                 "description": row.get("description") or "",
                 "content_hash": row.get("content_hash") or "",
+                "visibility": row.get("visibility"),
             }
 
         # Identify skills that need pinned versions
@@ -2972,6 +2980,8 @@ class SubAgentService:
                             skill.content_hash = current_hash
                             skill.update_available = False
                             skill.latest_hash = None
+                            if entry["visibility"] in ("private", "public"):
+                                skill.visibility = entry["visibility"]
                         else:
                             use_pinned = (
                                 skill.content_hash

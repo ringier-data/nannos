@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from console_backend.models.audit import AuditAction
 from console_backend.models.skills_registry import (
     RegistryVisibility,
+    SkillProvenance,
     SkillFile,
     SkillRegistryEntry,
     SkillVersionDetail,
@@ -183,8 +184,10 @@ class SkillRegistryService:
         if visibility_clauses:
             conditions.append(f"({' OR '.join(visibility_clauses)})")
 
-        # Exclude sub-agent scoped skills — they are internal to their owning sub-agent
-        conditions.append("COALESCE(sr.scope, 'standalone') != 'sub-agent'")
+        # Exclude sub-agent scoped skills — they are internal to their owning sub-agent —
+        # unless the agent published them as public (e.g. a host-published SKILL.md with
+        # `metadata.nannos-visibility: public`).
+        conditions.append("(COALESCE(sr.scope, 'standalone') != 'sub-agent' OR sr.visibility = 'public')")
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
@@ -515,12 +518,20 @@ class SkillRegistryService:
         description: str,
         files: list[SkillFile],
         registry_id: str | None = None,
+        visibility: RegistryVisibility | None = None,
+        provenance: SkillProvenance | None = None,
     ) -> tuple[str, str]:
         """Upsert a custom skill into the registry scoped to a sub-agent.
 
         If registry_id is provided, updates that entry directly (idempotent).
-        Otherwise falls back to slug-based lookup for backward compatibility.
-        If no existing entry is found, creates a new one.
+        Without one, a skill with `provenance` updates the row this sub-agent already
+        holds for the same (source_type, name) — the row a previous sync wrote. In every
+        other case a new entry is created.
+
+        `visibility` None keeps the entry's current value (private for a new entry);
+        'public' makes the sub-agent skill discoverable and activatable by every user.
+        `provenance` is stored in the `source_*` columns; without it the row is a
+        console-authored ('nannos') skill.
 
         Returns:
             Tuple of (registry_id, content_hash).
@@ -530,6 +541,7 @@ class SkillRegistryService:
         now = datetime.now(timezone.utc)
 
         skill_id = None
+        row = None
         # Prefer direct ID lookup when available (idempotent)
         if registry_id:
             result = await db.execute(
@@ -537,36 +549,64 @@ class SkillRegistryService:
                 {"id": registry_id},
             )
             row = result.mappings().first()
-            if row:
-                skill_id = str(row["id"])
-                slug = row["slug"]
-                db_name = row["name"]
-                if db_name != name:
-                    # update the slug if the name has changed
-                    slug = await _ensure_unique_slug(db, _slugify(name), exclude_id=skill_id)
-            else:
-                skill_id = None
-                slug = await _ensure_unique_slug(db, base_slug=_slugify(name))
+        elif provenance is not None:
+            # A mirrored skill: the sync does not know the id of the row it wrote last
+            # time, but the row is the one this sub-agent holds for the same source and
+            # name. Matching on the name, not the slug: the slug may carry a -2 suffix.
+            result = await db.execute(
+                text(
+                    "SELECT id, slug, name FROM skill_registry "
+                    "WHERE sub_agent_id = :sub_agent_id AND scope = 'sub-agent' "
+                    "AND source_type = :source_type AND name = :name "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                {
+                    "sub_agent_id": sub_agent_id,
+                    "source_type": provenance.source_type,
+                    "name": name,
+                },
+            )
+            row = result.mappings().first()
+        if row:
+            skill_id = str(row["id"])
+            slug = row["slug"]
+            if row["name"] != name:
+                # update the slug if the name has changed
+                slug = await _ensure_unique_slug(db, _slugify(name), exclude_id=skill_id)
         else:
-            skill_id = None
             slug = await _ensure_unique_slug(db, base_slug=_slugify(name))
+
+        provenance_fields: dict[str, Any] = (
+            {
+                "source_type": provenance.source_type,
+                "source_repo": provenance.source_repo,
+                "source_ref": provenance.source_ref,
+                "source_path": provenance.source_path,
+            }
+            if provenance is not None
+            else {}
+        )
 
         sandbox_required = _detect_sandbox_required(files)
 
         if skill_id:
+            update_fields: dict[str, Any] = {
+                "name": name,
+                "slug": slug,
+                "description": description,
+                "files": json.dumps(files_json),
+                "content_hash": content_hash,
+                "sandbox_required": sandbox_required,
+                "updated_at": now,
+            }
+            if visibility is not None:
+                update_fields["visibility"] = visibility
+            update_fields.update(provenance_fields)
             await self.repo.update(
                 db=db,
                 actor=actor,
                 entity_id=skill_id,
-                fields={
-                    "name": name,
-                    "slug": slug,
-                    "description": description,
-                    "files": json.dumps(files_json),
-                    "content_hash": content_hash,
-                    "sandbox_required": sandbox_required,
-                    "updated_at": now,
-                },
+                fields=update_fields,
             )
             # Save version snapshot on update
             await self._save_version_snapshot(
@@ -585,10 +625,11 @@ class SkillRegistryService:
             "slug": slug,
             "description": description,
             "source_type": "nannos",
+            **provenance_fields,
             "files": json.dumps(files_json),
             "content_hash": content_hash,
             "sandbox_required": sandbox_required,
-            "visibility": "private",
+            "visibility": visibility or "private",
             "scope": "sub-agent",
             "sub_agent_id": sub_agent_id,
             "owner_id": actor.id,

@@ -9,6 +9,9 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import text
+
+from console_backend.models.skills_registry import SkillProvenance
 from console_backend.models.sub_agent import (
     ModelTier,
     SkillDefinition,
@@ -125,6 +128,96 @@ async def test_publish_managed_version_writes_approved_default_and_carries_nanno
     assert cv.enable_thinking is True and cv.thinking_level == ThinkingLevel.HIGH
     assert cv.mcp_tools == ["list_campaigns", "get_campaign"]
     assert cv.skills == []
+
+
+def _well_known(revision: str) -> SkillProvenance:
+    return SkillProvenance(
+        source_type="well-known",
+        source_repo="https://riad.example",
+        source_ref=revision,
+        source_path="https://riad.example/.well-known/agent-skills/book-line-items/SKILL.md",
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_managed_version_updates_the_mirrored_skill_row_in_place(
+    managed_sub_agent_service: SubAgentService,
+    pg_session: AsyncSession,
+    test_user_db: User,
+):
+    """A well-known skill carries provenance; the second sync must update the registry row
+    the first one wrote — same id, same slug — not create `book-line-items-2`. The
+    visibility the host publishes travels with it."""
+    sub_agent_service = managed_sub_agent_service
+    sub_agent_id = await sub_agent_service.create_managed_sub_agent(
+        pg_session, test_user_db, name="Alloy AI Assistant"
+    )
+
+    async def publish(version_hash: str, revision: str, body: str, visibility: str) -> int:
+        return await sub_agent_service.publish_managed_version(
+            pg_session,
+            test_user_db,
+            sub_agent_id,
+            version_hash=version_hash,
+            change_summary=f"well-known revision {revision}",
+            description="Helps campaign managers.",
+            system_prompt="You are Nannos ...",
+            mcp_tools=None,
+            model_tier=None,
+            enable_thinking=None,
+            thinking_level=None,
+            skills=[
+                SkillDefinition(
+                    name="book-line-items",
+                    description="Use when booking.",
+                    body=body,
+                    scope="sub-agent",
+                    visibility=visibility,
+                    provenance=_well_known(revision),
+                )
+            ],
+        )
+
+    async def registry_rows() -> list[dict]:
+        result = await pg_session.execute(
+            text(
+                "SELECT id, slug, source_type, source_repo, source_ref, source_path, visibility, files "
+                "FROM skill_registry WHERE sub_agent_id = :id ORDER BY created_at"
+            ),
+            {"id": sub_agent_id},
+        )
+        return [dict(r) for r in result.mappings().all()]
+
+    assert await publish("wkaaaaaaaaaa", "a" * 16, "Steps.", "private") == 1
+    (first,) = await registry_rows()
+    assert (first["slug"], first["source_type"], first["visibility"]) == (
+        "book-line-items",
+        "well-known",
+        "private",
+    )
+    assert first["source_repo"] == "https://riad.example"
+    assert first["source_ref"] == "a" * 16
+    assert first["source_path"].endswith("/book-line-items/SKILL.md")
+
+    assert await publish("wkbbbbbbbbbb", "b" * 16, "New steps.", "public") == 2
+    (second,) = await registry_rows()  # still one row
+    assert second["id"] == first["id"] and second["slug"] == "book-line-items"
+    assert (second["source_ref"], second["visibility"]) == ("b" * 16, "public")
+    assert "New steps." in second["files"][0]["content"]
+
+    # both config versions point at that one row; the resolved skill shows the visibility
+    synced = await sub_agent_service.get_sub_agent_by_id(pg_session, sub_agent_id)
+    await sub_agent_service.resolve_imported_skills(pg_session, synced)
+    (skill,) = synced.config_version.skills
+    assert skill.registry_id == str(first["id"])
+    assert (skill.visibility, skill.body.strip()) == ("public", "New steps.")
+
+    # a second sync with the same content keeps the version history at two snapshots
+    snapshots = await pg_session.execute(
+        text("SELECT COUNT(*) FROM skill_registry_versions WHERE skill_id = :id"),
+        {"id": first["id"]},
+    )
+    assert snapshots.scalar_one() == 2
 
 
 @pytest.mark.asyncio

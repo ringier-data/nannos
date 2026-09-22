@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
 from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
+from agent_common.core.load_skill_tool import LOAD_SKILL_TOOL_NAME
 from agent_common.core.tool_risk_cache import ParamRiskProfile, ToolRiskCache, ToolRiskEntry
 
 logger = logging.getLogger(__name__)
@@ -178,7 +179,9 @@ async def score_tool_risk(
     # backend, returns no data to the model, and cannot be made risky by its args.
     # Score it deterministically at 0 so an approval card can never appear in front of
     # a progress note — and so the LLM scorer is never paid for it.
-    if tool_name == NOTIFY_USER_TOOL_NAME:
+    # load_skill is the same shape of exception: it only returns text the agent was
+    # already configured with (its own SKILL.md) and touches nothing.
+    if tool_name in (NOTIFY_USER_TOOL_NAME, LOAD_SKILL_TOOL_NAME):
         now = datetime.now(timezone.utc)
         return 0.0, ToolRiskEntry(
             base_score=0.0,

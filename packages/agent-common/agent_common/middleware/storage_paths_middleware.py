@@ -125,7 +125,7 @@ def _build_storage_tiers(context: str, has_attachments: bool = False) -> str:
     return f"""Durable memory (persists across conversations):
 - `/memories/` — Personal files, private to you.{channel_line}
 - `/group_memories/` — Shared with all members of your user group.
-- `/skills/` — Read-only. Agent skills (instructions and scripts); use read_file to load full content.
+- `/skills/` — Read-only. Agent skills (instructions and scripts). Load a skill's SKILL.md with load_skill(name=...); use read_file only for its bundled files.
 
 Ephemeral / working storage (this conversation only, then cleared):
 - Root `/` — scratch files written without a known prefix.

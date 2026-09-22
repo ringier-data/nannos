@@ -122,6 +122,97 @@ class TestBuildStatus:
         code = "await tools.grep({}); await tools.readFile({path: '/skills/weather/x.md'});"
         assert _build_status("eval", {"code": code}) == "Loading skill weather\u2026"
 
+    # --- skill reads with offset/limit (paging through a large SKILL.md) ---
+    def test_read_file_skill_with_offset_and_limit_shows_line_range(self):
+        """A windowed read is the model paging, not a repeated load. offset is 0-based."""
+        assert (
+            _build_status("read_file", {"file_path": "/skills/alloy/SKILL.md", "offset": 380, "limit": 120})
+            == "Reading skill alloy (lines 381\u2013500)\u2026"
+        )
+
+    def test_read_file_skill_with_offset_only(self):
+        assert (
+            _build_status("read_file", {"file_path": "/skills/alloy/SKILL.md", "offset": 230})
+            == "Reading skill alloy (from line 231)\u2026"
+        )
+
+    def test_read_file_skill_with_limit_only(self):
+        assert (
+            _build_status("read_file", {"file_path": "/skills/alloy/SKILL.md", "limit": 50})
+            == "Reading skill alloy (lines 1\u201350)\u2026"
+        )
+
+    def test_read_file_skill_offset_zero_is_a_full_load(self):
+        assert (
+            _build_status("read_file", {"file_path": "/skills/alloy/SKILL.md", "offset": 0})
+            == "Loading skill alloy\u2026"
+        )
+
+    def test_read_file_skill_non_numeric_offset_falls_back_to_load(self):
+        assert (
+            _build_status("read_file", {"file_path": "/skills/alloy/SKILL.md", "offset": "abc"})
+            == "Loading skill alloy\u2026"
+        )
+
+    # --- skill searches (grep / ls / glob inside a skill folder) ---
+    def test_grep_in_skill_folder_names_the_skill(self):
+        assert (
+            _build_status("grep", {"pattern": "Consent", "path": "/skills/alloy"})
+            == 'Searching skill alloy for "Consent"\u2026'
+        )
+
+    def test_grep_on_skill_file_names_the_skill(self):
+        assert (
+            _build_status("grep", {"pattern": "Consent", "path": "/skills/alloy/SKILL.md", "output_mode": "content"})
+            == 'Searching skill alloy for "Consent"\u2026'
+        )
+
+    def test_grep_in_skill_folder_without_pattern(self):
+        assert _build_status("grep", {"path": "/skills/alloy"}) == "Searching skill alloy\u2026"
+
+    def test_grep_outside_skills_keeps_generic_label(self):
+        assert _build_status("grep", {"pattern": "TODO", "path": "/project"}) == 'Searching for "TODO"\u2026'
+
+    def test_ls_in_skill_folder(self):
+        assert _build_status("ls", {"path": "/skills/alloy"}) == "Looking for files in skill alloy\u2026"
+
+    def test_glob_in_skill_folder(self):
+        assert (
+            _build_status("glob", {"pattern": "*.md", "path": "/skills/alloy/references"})
+            == "Looking for files in skill alloy\u2026"
+        )
+
+    def test_ls_outside_skills_keeps_generic_label(self):
+        assert _build_status("ls", {"path": "/project"}) == "Using ls\u2026"
+
+    # --- the same through the PTC code interpreter ---
+    def test_eval_skill_read_with_offset_and_limit(self):
+        code = (
+            'const r = await tools.readFile({file_path: "/skills/alloy/SKILL.md", offset: 380, limit: 120});\n'
+            "console.log(JSON.stringify(r));"
+        )
+        assert _build_status("eval", {"code": code}) == "Reading skill alloy (lines 381\u2013500)\u2026"
+
+    def test_eval_skill_grep_names_skill_and_pattern(self):
+        code = 'const r = await tools.grep({pattern: "Consent", path: "/skills/alloy", output_mode: "files_with_matches"});'
+        assert _build_status("eval", {"code": code}) == 'Searching skill alloy for "Consent"\u2026'
+
+    def test_eval_skill_ls(self):
+        code = "await tools.ls({path: '/skills/alloy'})"
+        assert _build_status("eval", {"code": code}) == "Looking for files in skill alloy\u2026"
+
+    def test_eval_grep_outside_skills_keeps_tool_listing(self):
+        code = "await tools.grep({pattern: 'TODO', path: '/project'})"
+        assert _build_status("eval", {"code": code}) == "Running grep\u2026"
+
+    def test_eval_first_skill_call_wins(self):
+        """Several skill calls in one snippet: the first one describes the snippet."""
+        code = (
+            "await tools.grep({pattern: 'x', path: '/skills/alloy'}); "
+            "await tools.readFile({file_path: '/skills/alloy/SKILL.md'});"
+        )
+        assert _build_status("eval", {"code": code}) == 'Searching skill alloy for "x"\u2026'
+
 
 # ---------------------------------------------------------------------------
 # Integration tests for awrap_tool_call

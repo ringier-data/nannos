@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
+from console_backend.models.skills_registry import RegistryVisibility
+
 #: Keycloak client ids: letters, digits, dot, underscore, colon, hyphen.
 AZP_MAX_LENGTH = 255
 
@@ -99,6 +101,10 @@ class WellKnownSkillInfo(BaseModel):
     name: str
     url: str
     digest: str
+    visibility: RegistryVisibility = Field(
+        default="private",
+        description="Registry visibility the host asked for in SKILL.md `metadata.nannos-visibility`",
+    )
 
 
 class WellKnownAgentInfo(BaseModel):
