@@ -586,6 +586,42 @@ class UserService:
             {"user_id": user_id},
         )
 
+    @staticmethod
+    def _pick_existing_row(rows: Any, *, sub: str, email: str) -> Any:
+        """Which existing row, if any, this login belongs to.
+
+        More than one row can match. Migration 051 made the email index partial
+        (`WHERE deleted_at IS NULL`) *deliberately*, so that soft-deleting a user frees their
+        address for re-provisioning — which means a soft-deleted row and a live row can share
+        an email, and the query's two arms can land on different people.
+
+        The subject settles it whenever it matches: `users.sub` is unique and is who the token
+        says this is. Only when no row matches by subject does the email arm decide anything,
+        and there the live row is the one being adopted — this is the SCIM-placeholder path,
+        and a soft-deleted namesake is not the account being logged into.
+
+        Preferring the live row *without* checking the subject first would be the dangerous
+        version of this: a soft-deleted user logging in would be resolved onto the live row
+        that inherited their address, handing them somebody else's account.
+        """
+        if not rows:
+            return None
+
+        by_sub = [row for row in rows if row["sub"] == sub]
+        if by_sub:
+            return by_sub[0]
+
+        live = [row for row in rows if row["deleted_at"] is None]
+        if len(live) > 1:
+            # The partial unique index should make this unreachable; it is a real ambiguity.
+            raise ValueError(f"Multiple live users found with email {email} or sub {sub}")
+        if live:
+            return live[0]
+
+        if len(rows) > 1:
+            raise ValueError(f"Multiple users found with email {email} or sub {sub}")
+        return rows[0]
+
     async def _upsert_user_internal(
         self,
         db: AsyncSession,
@@ -610,15 +646,12 @@ class UserService:
         # login would try to insert a second one and trip `idx_users_email_unique` (which is itself
         # on LOWER(email)), and the placeholder subject would never be reconciled.
         check_query = text(
-            "SELECT id, sub, email, keycloak_mirror_pending FROM users "
+            "SELECT id, sub, email, keycloak_mirror_pending, deleted_at FROM users "
             "WHERE LOWER(email) = :email OR sub = :sub"
         )
         results = await db.execute(check_query, {"email": email, "sub": sub})
         rows = results.mappings().all()
-        if len(rows) > 1:
-            raise ValueError(f"Multiple users found with email {email} or sub {sub}")
-
-        row = rows[0] if rows else None
+        row = self._pick_existing_row(rows, sub=sub, email=email)
         user_id = row["id"] if row else None
         old_sub = row["sub"] if row else None
         old_email = row["email"] if row else None

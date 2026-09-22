@@ -452,3 +452,68 @@ class TestSpendAttributionWithPlaceholder:
         await _create_oidc_user(pg_session, "uuid-15", "keycloak-sub-15", "oidc15@example.com")
 
         assert await billing_subject(pg_session, "uuid-15") == "keycloak-sub-15"
+
+
+async def _soft_delete(pg_session, user_id: str):
+    await pg_session.execute(
+        text("UPDATE users SET deleted_at = NOW(), status = 'deleted' WHERE id = :id"), {"id": user_id}
+    )
+    await pg_session.commit()
+
+
+@pytest.mark.asyncio
+class TestRecycledEmailAcrossSoftDelete:
+    """Migration 051 frees a soft-deleted user's address for re-provisioning on purpose.
+
+    So the login lookup's two arms — `LOWER(email)` and `sub` — can land on different people,
+    and which one wins is not a detail.
+    """
+
+    async def test_placeholder_reconciles_despite_a_soft_deleted_namesake(
+        self, pg_session, user_service, user_group_service_with_keycloak, mock_keycloak_service, test_user
+    ):
+        """The reported break: two rows matched, the guard raised, and the user could never log in."""
+        user_service.set_keycloak_service(mock_keycloak_service)
+        await _create_group(pg_session, group_id=1, keycloak_group_id="kc-group-1")
+        await _create_oidc_user(pg_session, "old-uuid-16", "keycloak-sub-16-old", "recycled@example.com")
+        await _soft_delete(pg_session, "old-uuid-16")
+        # SCIM re-provisions the same address, which 051 permits.
+        await _create_scim_user(pg_session, "scim-user-16", "recycled@example.com")
+        await _defer_membership(
+            pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user,
+            "scim-user-16", (1,),
+        )
+
+        user = await user_service.upsert_user(
+            db=pg_session, sub="keycloak-sub-16-new", email="recycled@example.com",
+            first_name="Scim", last_name="User",
+        )
+        await pg_session.commit()
+
+        assert user.id == "scim-user-16"  # the live row, not the soft-deleted namesake
+        mock_keycloak_service.add_user_to_group.assert_called_once_with("keycloak-sub-16-new", "kc-group-1")
+        assert await _mirror_pending(pg_session, "scim-user-16") is False
+
+    async def test_a_soft_deleted_user_logging_in_keeps_their_own_row(
+        self, pg_session, user_service, mock_keycloak_service
+    ):
+        """Preferring the live row on a *subject* match would hand them somebody else's account."""
+        user_service.set_keycloak_service(mock_keycloak_service)
+        await _create_oidc_user(pg_session, "old-uuid-17", "keycloak-sub-17", "recycled17@example.com")
+        await _soft_delete(pg_session, "old-uuid-17")
+        await _create_scim_user(pg_session, "scim-user-17", "recycled17@example.com")
+
+        # The deleted user still exists at the IdP and presents their own, unchanged subject.
+        user = await user_service.upsert_user(
+            db=pg_session, sub="keycloak-sub-17", email="recycled17@example.com",
+            first_name="Old", last_name="User",
+        )
+        await pg_session.commit()
+
+        assert user.id == "old-uuid-17"
+
+        # ...and the live user's row is untouched.
+        result = await pg_session.execute(
+            text("SELECT sub FROM users WHERE id = 'scim-user-17'")
+        )
+        assert result.scalar_one() == placeholder_sub("scim-user-17")
