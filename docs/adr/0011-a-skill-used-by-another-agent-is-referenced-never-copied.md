@@ -103,6 +103,10 @@ referrers until the last one detaches.
 - The referrer's owner gives up review of followed content. That is the feature.
 - Hash-only bumps accumulate in referrers' histories; the change summary names
   the publisher and the new hash so the history reads as "followed X".
+- A bump moves the referrer's `current_version` past any pending draft, exactly
+  as a well-known sync does (`publish_managed_version`). The draft survives as a
+  version and can still be reviewed; it is no longer "current". Following and
+  a long-lived draft on the same agent do not mix well, and that is accepted.
 - `upsert_locked` in `SkillActivationService` had no callers and would have wiped
   the mode column if revived; it is deleted.
 - A host sync that flips a referenced public skill to `private` keeps it public

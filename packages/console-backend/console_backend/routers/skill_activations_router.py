@@ -174,15 +174,21 @@ async def activate_skill(
     if not entry:
         raise HTTPException(status_code=404, detail="Registry skill not found")
 
+    # Activation discloses the body — into the caller's docstore, or to every reader of the
+    # agent through resolution — so it takes the registry's READ gate (public, owner, or a
+    # reachable parent agent; 404 otherwise), the same one the registry router's own
+    # activate endpoint uses. One encoding of the rule, not a second hand-rolled one.
+    from console_backend.routers.skills_registry_router import _check_registry_read_access
+
+    await _check_registry_read_access(request, db, entry, user)
+
     if body.scope == "sub-agent":
         sub_agent_service = _get_sub_agent_service(request)
         if not await sub_agent_service.check_user_permission(db, body.sub_agent_id, user.id, "write"):
             raise HTTPException(status_code=403, detail="You need write access on the sub-agent to activate skills on it")
+        # Another agent's sub-agent skill is referenceable only once published (ADR 0006/0011):
+        # reachability of the parent agent lets you READ it, publishing lets you USE it.
         if entry.scope == "sub-agent" and entry.sub_agent_id != body.sub_agent_id and entry.visibility != "public":
-            raise HTTPException(status_code=404, detail="Registry skill not found")
-    elif entry.visibility != "public" and entry.owner_id != user.id:
-        # A private row of somebody else: the docstore copy would disclose its body.
-        if not (entry.scope == "sub-agent" and entry.sub_agent_id is not None):
             raise HTTPException(status_code=404, detail="Registry skill not found")
 
     # Get agent name for docstore key

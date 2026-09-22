@@ -411,9 +411,11 @@ class SkillRegistryService:
         skill_id: str,
         visibility: RegistryVisibility,
     ) -> None:
-        """Change a skill's visibility. Making a referenced row private is refused (ADR-0011)."""
+        """Change a skill's visibility. Making a referenced PUBLIC row private is refused (ADR-0011)."""
         if visibility == "private":
-            await self._refuse_withdrawal_if_referenced(db, skill_id)
+            entry = await self.get_by_id(db, skill_id)
+            if entry is not None and entry.visibility == "public":
+                await self._refuse_withdrawal_if_referenced(db, skill_id)
         fields: dict[str, Any] = {
             "visibility": visibility,
             "updated_at": datetime.now(timezone.utc),
@@ -483,18 +485,26 @@ class SkillRegistryService:
             skill_id = str(row["id"])
             if skill_id in keep:
                 continue
-            if row["refs"]:
+            # Activation rows are only half the referrers (ADR-0011): a reference that arrived
+            # through a plain config save has no row. referrers() sees both, and remove()
+            # refuses on the same test — so a sync never dies on a third party's reference.
+            referrers = await self.referrers(db, skill_id) if not row["refs"] else None
+            if row["refs"] or referrers:
                 logger.warning(
-                    "Sub-agent %s no longer mirrors registry skill %s, but %d activation(s) still "
-                    "reference it — keeping the row; it needs a human decision.",
+                    "Sub-agent %s no longer mirrors registry skill %s, but other agent(s) still "
+                    "reference it (%s) — keeping the row; it needs a human decision.",
                     sub_agent_id,
                     skill_id,
-                    row["refs"],
+                    ", ".join(name for _, name in referrers) if referrers else f"{row['refs']} activation(s)",
                 )
                 continue
             stale.append(skill_id)
         for skill_id in stale:
-            await self.remove(db, actor, skill_id)
+            try:
+                await self.remove(db, actor, skill_id)
+            except SkillReferencedError as exc:
+                # Referenced between the check and the delete: same treatment, never a failed sync.
+                logger.warning("Kept mirrored registry skill %s: %s", skill_id, exc)
         if stale:
             logger.info("Pruned %d stale mirrored registry row(s) for sub-agent %s", len(stale), sub_agent_id)
         return stale

@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from console_backend.models.skills_registry import SkillFile
 from console_backend.models.sub_agent import (
     SkillDefinition,
     SubAgentCreate,
@@ -291,3 +292,54 @@ async def test_following_is_sub_agent_scope_only_and_never_your_own_skill(wired,
         await activation.activate(
             pg_session, registry_id, publisher, "kb-publisher", "sub-agent", test_user_db.id, actor=test_user_db, mode="following"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawing_sync_keeps_a_row_referenced_only_through_a_config_save(wired, pg_session, test_user_db):
+    """The FE picker's pinned import writes a reference with NO activation row. A host sync
+    that later withdraws that skill must keep the row and warn, not fail on remove()."""
+    from console_backend.models.skills_registry import SkillProvenance
+
+    svc, registry, _ = wired
+    host_agent = await _agent(svc, pg_session, test_user_db, "kb-host")
+    referrer = await _agent(svc, pg_session, test_user_db, "kb-referrer")
+    provenance = SkillProvenance(
+        source_type="well-known",
+        source_repo="https://host.example",
+        source_ref="rev-1",
+        source_path="https://host.example/.well-known/agent-skills/kb/SKILL.md",
+    )
+    mirrored_id, mirrored_hash = await registry.upsert_agent_skill(
+        pg_session,
+        test_user_db,
+        host_agent,
+        name="kb",
+        description="mirrored",
+        files=[SkillFile(path="SKILL.md", content="# kb")],
+        visibility="public",
+        provenance=provenance,
+    )
+    # Plain config save on the referrer: a reference, no activation row.
+    await svc.update_sub_agent(
+        pg_session,
+        referrer,
+        SubAgentUpdate(
+            skills=[
+                SkillDefinition(
+                    name="kb", description="mirrored", registry_id=mirrored_id, content_hash=mirrored_hash, scope="standalone"
+                )
+            ]
+        ),
+        test_user_db,
+    )
+    assert await registry.referrers(pg_session, mirrored_id) == [(referrer, "kb-referrer")]
+
+    # The host withdraws every mirrored skill: nothing to keep.
+    pruned = await registry.prune_mirrored_skills(pg_session, test_user_db, host_agent, keep_ids=[])
+
+    assert pruned == []
+    still_there = (
+        await pg_session.execute(text("SELECT count(*) FROM skill_registry WHERE id = CAST(:id AS uuid)"), {"id": mirrored_id})
+    ).scalar_one()
+    assert still_there == 1
+    assert (await _resolved_skill(svc, pg_session, referrer)).body == "# kb"
