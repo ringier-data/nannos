@@ -392,6 +392,7 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.skill_activation_service = SkillActivationService()
     app.state.skill_activation_service.set_playbook_service(app.state.playbook_service)
     app.state.skill_activation_service.set_sub_agent_service(app.state.sub_agent_service)
+    app.state.skill_activation_service.set_skill_registry_service(app.state.skill_registry_service)
 
     # Initialize orchestrator cookie cache
     app.state.orchestrator_cookie_cache = OrchestratorCookieCache(

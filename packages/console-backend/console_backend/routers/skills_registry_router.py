@@ -1367,10 +1367,10 @@ async def mcp_activate_skill(
         )
 
     # A public sub-agent skill is activatable on other agents (ADR 0006): that is what
-    # publishing it means. The activation is a read-only REFERENCE to the publisher's
-    # registry row, not a copy — _persist_and_strip_skills refuses to upsert a row
-    # belonging to another sub-agent, so the borrowing agent can never write back to
-    # it, and prune_mirrored_skills leaves a row a live activation still points at.
+    # publishing it means. The activation COPIES the skill into a row the activating
+    # agent owns (see SkillActivationService.activate) rather than referencing the
+    # publisher's, so the borrowed skill is pinned to this agent's config versions and
+    # is updated explicitly, not silently when the publisher edits theirs.
     if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id and entry.visibility != "public":
         raise HTTPException(
             status_code=400,
