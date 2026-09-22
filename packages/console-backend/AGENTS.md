@@ -742,14 +742,109 @@ The activation service manages the lifecycle:
 - `upsert_locked()` — Called by config version approval workflow
 - `list_for_agent()` — All activations for a sub-agent (with update-available status)
 
+### Shared Scheduled Jobs: Definitions and Subscriptions (ADR-0010)
+
+The reasoning lives in `docs/adr/0010-shared-scheduled-jobs-run-once-per-subscriber.md`; this
+section is the vocabulary and the contract the code implements (migrations 100/101,
+`scheduled_job_repository.py`, `scheduler_service.py`, `scheduler_router.py`).
+
+A scheduled job is two rows. The **definition** (`scheduled_job_definitions`) is what the job *is* —
+name, kind, prompt/sub-agent or check tool and condition, `max_failures`, the **trigger defaults**
+(schedule plus an optional timezone) and the **trigger policy** (`overridable | fixed`; watches
+default to fixed). It is owned by one user and shared to groups with `read`/`write` through
+`scheduled_job_definition_permissions`, exactly like a sub-agent (`read` = may subscribe and copy,
+`write` = may edit, suspend, share on; delete stays with the owner or an admin). A definition never
+runs. A **subscription** (`scheduled_job_subscriptions`) is one user's activation of it — `enabled`,
+the trigger in force, delivery target, run bookkeeping, `last_check_result` — and every run
+(`scheduled_job_runs.subscription_id`) is a subscription's run under that **subscriber's** identity:
+their offline token, their bypass rules, their spend (`usage_logs.scheduled_job_id` is a
+subscription id), their delivery DM, their auth asks (ADR-0009 is per subscription). N subscribers
+means N runs; the owner is just another subscriber.
+
+The **job** the API serves (`ScheduledJob`) is the *job view*: a subscription with its definition
+folded in, keyed by the **subscription id** — what every client, link and notification has always
+called the job id (migration 103 gives every pre-existing job one definition and one subscription
+carrying the old id). The trigger fields carry the trigger *in force*; `trigger_inherited` says
+whether that is the definition's defaults or the subscriber's own **override**, and
+`trigger_defaults` carries the defaults for a writer. A definition's fields are live for every
+subscription on its next run; **triggers propagate by inheritance** (an inherited subscription
+follows later edits to the defaults) and `enabled` never propagates. A NULL default timezone means
+*each subscriber's own* (`user_settings.timezone`), so `0 9 * * 1-5` is 09:00 local for everyone;
+the job view resolves it (`COALESCE(subscription, definition, subscriber settings)`).
+
+**One update path.** `PATCH /jobs/{id}` (`scheduler_update_job`) routes each field server-side:
+definition fields need `write`; `enabled` and `delivery_channel_id` are always the caller's own; the
+trigger takes an optional `scope: mine | everyone` that only matters once the definition has other
+subscribers (alone, a writer's edit lands on the defaults so a later share inherits it). `scope` also
+picks the baseline the **unchanged-echo filter** judges against (`_trigger_baseline`): the console
+resends every trigger field prefilled, so an echo must not read as an edit — but it echoes the
+*effective* trigger while `everyone` edits the *definition's default*, and for an editor who holds an
+override those are different values. Judging both against the effective one made "promote my own
+schedule to the default" a silent no-op and let an echo of the default rewrite it. Two carve-outs:
+only a scope the caller actually SENT gets the definition baseline (one that merely resolved to
+`everyone`, as it does for a sole subscriber, carries no intent to promote — otherwise a rename
+rewrites the default), and `timezone` keeps the effective baseline (the job's is the resolved zone
+and the form has no field for the definition's, so re-baselining would read every save as a request
+to pin one). The everyone-merge also takes its KIND from the effective trigger, not the definition:
+the form sends only the field matching the kind it displays and never `schedule_kind`, so reading
+the kind off the definition silently dropped a sent cron whenever the default was an interval. Setting the
+policy to `fixed` resets every override. **Suspend** (definition, `write`, holds every subscription
+out of `claim_due_jobs`, preserves each `enabled`) is distinct from **pause/disable** (subscription,
+mine). `DELETE /jobs/{id}` deletes the definition and every subscription when the caller owns it,
+and merely unsubscribes otherwise. **Copy** (`read`) makes an independent definition; an inline
+`automated` agent is copied with it, a referenced agent is referenced.
+
+**Access is checked per subscriber at every dispatch** (`SchedulerEngine._agent_access_check`):
+a subscriber who can no longer reach the definition's sub-agent has that one subscription paused
+("Agent not accessible", no failure count, nobody else's touched). A definition may not be shared to
+a group whose members cannot reach its regular sub-agent; sharing never grants agent access. The
+one exception is an inline `automated` agent, which travels with the definition:
+`SubAgentService.get_accessible_sub_agents` has a subscription arm for exactly that case.
+
+**Group defaults** (`user_group_default_jobs`) mirror default agents: only a definition already
+shared to the group qualifies; every current member is subscribed (enabled, inherited,
+`activated_by = 'group'`) and every future member on join (`UserGroupService` calls
+`SchedulerService.on_members_added/removed`). On leave, group-default subscriptions from that group
+are removed; self-made ones on a grant the member no longer holds are disabled with "access
+revoked" so re-adding restores their customisation. Durable console notifications cover what
+changes what runs under *your* identity or what you own (`job_shared`, `job_access_revoked`,
+`job_permission_changed`, `job_subscription_activated`, `job_subscription_reset`, `job_suspended`,
+`job_resumed`, `job_deleted`); a writer editing a shared prompt is deliberately not one of them.
+
+**Two things reach a subscriber outside the console.** A member the group default just
+auto-subscribed gets an **activation notice** on their own delivery channel as well as the console
+notification — `SchedulerService._dm_activations`, sent *after* the caller's commit (a DM saying a
+job now runs under your identity must not arrive for a row a rollback removed) through
+`SchedulerEngine.send_plain_notice`, which is the scheduler's one way of posting a line under a
+subscriber's identity while running no agent. And every delivered run of a job whose subscriber is
+not its owner carries a **provenance line** — `SchedulerEngine._provenance_line` puts it in the
+dispatch metadata as `scheduled_job_provenance`, and agent-runner appends it to `agent_message`,
+where every run's output is already composed. One seam, rather than the same footer in three
+delivery clients; `None` for a job nobody else runs, which is most of them.
+
+**What the model may do with all this** is the same set of routes with `tags=["MCP"]`:
+`scheduler_list_shared_jobs`, `scheduler_subscribe_job` / `_unsubscribe_job`, `scheduler_copy_job`,
+`scheduler_share_job`, `scheduler_suspend_job` / `_unsuspend_job`,
+`scheduler_reset_job_schedules` / `scheduler_follow_default_schedule` (every subscriber, needing
+write, versus the caller's own, needing nothing — inheritance is a door that opens both ways, and
+a `null` trigger on `scheduler_update_job` is REFUSED rather than silently ignored, so "clear my
+schedule" cannot look like it worked), `scheduler_add_group_default_job` / `_remove_group_default_job`,
+plus one read tool on groups — `console_list_my_groups` (`GET /api/v1/groups/summaries`), which
+returns id, name, description and **member_count only**: a share is decided on "which group, and
+how many people does that mean", and the identities are not part of that question. `is_public` is
+admin-only and not exposed. The vocabulary itself is a DB seed, so it ships as prompt migration
+104 (targeted `replace()` calls in the style of 085, checked at the text level by
+`tests/test_migration_104_task_scheduler_sharing.py` — an unmatched search string is a silent
+no-op in SQL).
+
 ### Scheduled Run Vocabulary and Interruption (services/scheduler_engine.py)
 
 The reasoning lives in `docs/adr/0007-interrupted-runs-get-one-fresh-attempt.md`; this section is
 the vocabulary and the contract the code implements (migrations 091/092, `scheduler_engine.py`,
 `scheduled_job_repository.py`, `utils/a2a_dispatch.py`).
 
-A **job** is the user's standing instruction (`scheduled_jobs`) — a schedule plus a prompt. A
-**run** is one recorded execution of it (`scheduled_job_runs`), created at dispatch and closed by
+A **job** here is a subscription (see the previous section) — a schedule plus a prompt, run under
+its subscriber. A **run** is one recorded execution of it (`scheduled_job_runs`), created at dispatch and closed by
 `_finalize`. Runs of the same job are independent **attempts**: nothing is carried between them, and
 they never overlap — `claim_due_jobs` skips a job while any of its runs is still `running`.
 

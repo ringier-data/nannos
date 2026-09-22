@@ -14,6 +14,8 @@ import {
   Sparkles,
   Loader2,
   Undo2,
+  Copy,
+  Ban,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -66,7 +68,13 @@ import {
   consoleListSubAgentsOptions,
   consoleListMcpToolsOptions,
   getCurrentUserSettingsApiV1AuthMeSettingsGetOptions,
+  schedulerListSharedJobsOptions,
+  schedulerSubscribeJobMutation,
+  schedulerCopyJobMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
+import type { SharedJobDefinition } from '@/api/generated/types.gen';
+import { SharingBadge } from '@/components/scheduler/sharing';
+import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
 import { CronField } from '@/components/CronField';
 import { AgentActionFields } from '@/components/AgentActionFields';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
@@ -74,6 +82,7 @@ import { argsModeFor, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
 import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
+import { toast } from 'sonner';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -109,6 +118,21 @@ function scheduleLabel(job: ScheduledJob): string {
 // ---------------------------------------------------------------------------
 
 function StatusBadge({ job }: { job: ScheduledJob }) {
+  // Suspension outranks the viewer's own on/off state: it stops every subscriber, and
+  // their own choice is remembered for when it is lifted.
+  if (job.suspended_at)
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="secondary" className="gap-1">
+            <Ban className="h-3 w-3" /> Suspended
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>
+          Stopped for everyone{job.suspended_reason ? `: ${job.suspended_reason}` : ''}
+        </TooltipContent>
+      </Tooltip>
+    );
   if (!job.enabled)
     return (
       <Badge variant="secondary" className="gap-1">
@@ -858,6 +882,153 @@ function CreateJobDialog({
 }
 
 // ---------------------------------------------------------------------------
+// Jobs shared with the viewer that they have not activated
+// ---------------------------------------------------------------------------
+
+function sharedScheduleLabel(def: SharedJobDefinition): string {
+  const t = def.trigger_defaults;
+  if (t.schedule_kind === 'cron') return t.cron_expr ?? '—';
+  if (t.schedule_kind === 'interval')
+    return t.interval_seconds ? `every ${t.interval_seconds}s` : '—';
+  if (t.schedule_kind === 'once' && t.run_at) return new Date(t.run_at).toLocaleString();
+  return '—';
+}
+
+/**
+ * Jobs the viewer can reach but does not run: shared with one of their groups, or
+ * published as an org-wide template.
+ *
+ * Rendered only when there is something in it, so the page is unchanged for everyone
+ * who has never been shared a job — which is the whole shape of ADR-0010's "the split
+ * is invisible until it matters".
+ *
+ * Two verbs, and the difference is the point: *activate* keeps following the author's
+ * version, so their later fixes arrive; *copy* makes an independent job with no link
+ * back. Both run under the viewer's own account.
+ */
+function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
+  const qc = useQueryClient();
+  const { data: definitions = [] } = useQuery(schedulerListSharedJobsOptions());
+
+  // Both can fail on a definition that was reachable when the list loaded and is not
+  // any more — access revoked, or the job's agent no longer shared with the viewer. With
+  // no onError the spinner just stops and the row sits there, which reads as "nothing
+  // happened" rather than "that is no longer yours to activate".
+  const onActivateError = (err: unknown) => {
+    toast.error('That did not work', { description: formatApiError(err) });
+    qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+  };
+  const subscribe = useMutation({
+    ...schedulerSubscribeJobMutation(),
+    onSuccess: (job) => {
+      qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+      qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+      onOpen(job.id);
+    },
+    onError: onActivateError,
+  });
+  const copy = useMutation({
+    ...schedulerCopyJobMutation(),
+    onSuccess: (job) => {
+      qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+      qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+      onOpen(job.id);
+    },
+    onError: onActivateError,
+  });
+
+  // Anything already activated is in the viewer's own table above; showing it twice
+  // would make one job look like two.
+  const available = definitions.filter((def) => def.subscription_id == null);
+  if (available.length === 0) return null;
+
+  const pending = subscribe.isPending || copy.isPending;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <h2 className="text-lg font-semibold tracking-tight">Shared with you</h2>
+        <p className="text-muted-foreground text-sm">
+          Jobs other people have shared with your groups. Activating one runs it under your
+          account, on your own schedule.
+        </p>
+      </div>
+      <div className="rounded-lg border">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b bg-muted/50">
+              <th className="px-4 py-3 text-left font-medium">Name</th>
+              <th className="px-4 py-3 text-left font-medium">Type</th>
+              <th className="px-4 py-3 text-left font-medium">Default schedule</th>
+              <th className="px-4 py-3 text-left font-medium">Shared by</th>
+              <th className="px-4 py-3 text-left font-medium">Subscribers</th>
+              <th className="px-4 py-3 text-right font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {available.map((def) => (
+              <tr key={def.id} className="border-b last:border-0">
+                <td className="px-4 py-3 font-medium">
+                  <div className="flex items-center gap-2">
+                    {def.name}
+                    {def.is_public && <Badge variant="outline">Template</Badge>}
+                    {def.suspended_at && (
+                      <Badge variant="secondary" className="gap-1">
+                        <Ban className="h-3 w-3" /> Suspended
+                      </Badge>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-3">
+                  <Badge variant="outline" className="capitalize">
+                    {def.job_type}
+                  </Badge>
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                  {sharedScheduleLabel(def)}
+                </td>
+                <td className="px-4 py-3 text-muted-foreground">
+                  {def.owner_email ?? def.owner_user_id}
+                </td>
+                <td className="px-4 py-3 text-muted-foreground">{def.subscriber_count}</td>
+                <td className="px-4 py-3">
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      disabled={pending}
+                      onClick={() => subscribe.mutate({ path: { definition_id: def.id } })}
+                    >
+                      <Play className="mr-1.5 h-4 w-4" />
+                      Activate
+                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={pending}
+                          onClick={() => copy.mutate({ path: { definition_id: def.id } })}
+                        >
+                          <Copy className="h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        Make an independent copy you own — later changes by{' '}
+                        {def.owner_email ?? 'the author'} will not reach it
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
@@ -885,7 +1056,14 @@ export function SchedulerPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (jobId: number) => deleteJob(jobId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['scheduler-jobs'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+      // On a job the viewer does not own this was an UNSUBSCRIBE, so the definition
+      // belongs back in "Shared with you" — which filters on a cached
+      // `subscription_id == null`. Without this the job leaves both tables and looks
+      // deleted, flatly contradicting the dialog's "you can activate it again later".
+      qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+    },
   });
 
   return (
@@ -941,6 +1119,7 @@ export function SchedulerPage() {
                   <td className="px-4 py-3 font-medium">
                     <div className="flex items-center gap-2">
                       {job.name}
+                      <SharingBadge job={job} />
                       <ChevronRight className="h-3 w-3 text-muted-foreground" />
                     </div>
                   </td>
@@ -975,6 +1154,7 @@ export function SchedulerPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              aria-label={`Pause ${job.name}`}
                               disabled={pauseMutation.isPending}
                               onClick={() => pauseMutation.mutate(job.id)}
                             >
@@ -989,6 +1169,7 @@ export function SchedulerPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              aria-label={`Resume ${job.name}`}
                               disabled={resumeMutation.isPending}
                               onClick={() => resumeMutation.mutate(job.id)}
                             >
@@ -1004,13 +1185,18 @@ export function SchedulerPage() {
                             variant="ghost"
                             size="sm"
                             className="text-destructive hover:text-destructive"
+                            aria-label={`${
+                              isOwnJob(job) ? 'Delete' : 'Remove from my jobs'
+                            }: ${job.name}`}
                             disabled={deleteMutation.isPending}
                             onClick={() => setDeleteTarget(job)}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
                         </TooltipTrigger>
-                        <TooltipContent>Delete</TooltipContent>
+                        <TooltipContent>
+                          {isOwnJob(job) ? 'Delete' : 'Remove from my jobs'}
+                        </TooltipContent>
                       </Tooltip>
                     </div>
                   </td>
@@ -1020,6 +1206,8 @@ export function SchedulerPage() {
           </table>
         </div>
       )}
+
+      <SharedWithYou onOpen={(jobId) => navigate(`/app/scheduler/${jobId}`)} />
 
       {/* Dialogs */}
       <CreateJobDialog
@@ -1038,10 +1226,32 @@ export function SchedulerPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete scheduled job?</AlertDialogTitle>
+            {/* Deleting somebody else's shared job only removes the viewer's own
+                activation of it — the server decides that from who owns it, and the
+                dialog must not promise otherwise. An owner's delete takes every
+                subscriber's with it, which is the number worth stating. */}
+            <AlertDialogTitle>
+              {deleteTarget && deleteTarget.owner_user_id !== deleteTarget.user_id
+                ? 'Stop running this job?'
+                : 'Delete scheduled job?'}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              The job <strong>{deleteTarget?.name}</strong> will be permanently deleted.
-              This action cannot be undone.
+              {deleteTarget && deleteTarget.owner_user_id !== deleteTarget.user_id ? (
+                <>
+                  <strong>{deleteTarget.name}</strong> will no longer run for you. The job itself
+                  and its other subscribers are untouched, and you can activate it again later.
+                </>
+              ) : (
+                <>
+                  The job <strong>{deleteTarget?.name}</strong> will be permanently deleted
+                  {deleteTarget && subscriberCount(deleteTarget) > 1
+                    ? `, for you and ${subscriberCount(deleteTarget) - 1} other subscriber${
+                        subscriberCount(deleteTarget) > 2 ? 's' : ''
+                      }`
+                    : ''}
+                  . This action cannot be undone.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -125,6 +125,17 @@ def _scheduled_run_frame_text(text: str) -> str:
     return re.sub(r"(?i)</(scheduled_run)", r"<\\/\1", text)
 
 
+def _escape_attr(value: str) -> str:
+    """Make a server-resolved string safe as an XML-ish frame attribute.
+
+    Server-resolved, but an email or a display name is still user-controlled text: a
+    quote in it would end the attribute and the rest would read as more frame syntax.
+    Quotes go, angle brackets go, and the result is length-capped — the frame is a hint,
+    not a place to smuggle a paragraph.
+    """
+    return re.sub(r'["\'<>]', "", value)[:120]
+
+
 def _origin_int(value: Any) -> int | None:
     """Coerce an origin id field to int (MessageToDict renders protobuf numbers
     as floats). Single helper for every reading of the same DataPart, so
@@ -139,7 +150,10 @@ def _origin_int(value: Any) -> int | None:
 
 
 def _build_scheduled_run_history(
-    run: dict[str, Any], *, delegation_label: str | None = None
+    run: dict[str, Any],
+    *,
+    delegation_label: str | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> list[Any] | None:
     """Origin builder for kind ``scheduled_run`` (CONVERSATION_ORIGIN_EXTENSION).
 
@@ -205,6 +219,14 @@ def _build_scheduled_run_history(
     job_id = _fmt_id(run.get("scheduled_job_id"))
     run_id = _fmt_id(run.get("scheduled_job_run_id"))
     frame_attrs = f'source="scheduler" job_id="{job_id}" run_id="{run_id}"'
+    # Server-resolved, and only present on a job this user did not author: it lets the
+    # model answer "why do I get this" from the frame instead of from a guess. Rendered
+    # as frame attributes rather than prose so it costs a shared job a few tokens and an
+    # unshared one nothing.
+    for key in ("shared_by", "activated_by"):
+        value = (provenance or {}).get(key)
+        if value:
+            frame_attrs += f' {key}="{_escape_attr(value)}"'
     if failed:
         frame_attrs += ' status="failed"'
     elif task_state:
@@ -330,7 +352,10 @@ _ORIGIN_HISTORY_BUILDERS: dict[str, Any] = {
 
 
 def _build_origin_history(
-    origin: dict[str, Any], *, delegation_label: str | None = None
+    origin: dict[str, Any],
+    *,
+    delegation_label: str | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> list[Any] | None:
     """Dispatch an origin descriptor to its kind's history builder.
 
@@ -349,7 +374,7 @@ def _build_origin_history(
         logger.info(f"Ignoring conversation origin of unknown kind {kind!r}")
         return None
     try:
-        return builder(origin, delegation_label=delegation_label)
+        return builder(origin, delegation_label=delegation_label, provenance=provenance)
     except Exception:
         # A malformed descriptor must degrade like an unknown kind — the
         # origin is optional enrichment; never fail the turn over it.
@@ -419,7 +444,8 @@ async def _validate_scheduled_run_origin(
                 f"(HTTP {job_resp.status_code})"
             )
             return None
-        if _origin_int(job_resp.json().get("sub_agent_id")) != sub_agent_id:
+        job = job_resp.json()
+        if _origin_int(job.get("sub_agent_id")) != sub_agent_id:
             logger.warning(
                 f"Conversation adoption skipped: origin sub_agent_id {sub_agent_id} does not match "
                 f"job {job_id}'s server-side sub-agent binding"
@@ -446,7 +472,30 @@ async def _validate_scheduled_run_origin(
         "conversation_id": conversation_id,
         "job_id": job_id,
         "run_id": run_id,
+        # Why this user receives this job at all (ADR-0010), taken from the SERVER's job
+        # view under their own token — never from the DataPart, which is client-supplied.
+        # None for a job the user owns, which is the answer for most of them.
+        "provenance": _shared_job_provenance(job),
     }
+
+
+def _shared_job_provenance(job: dict[str, Any]) -> dict[str, str] | None:
+    """The "why do I get this" facts of a shared scheduled job, or None if it is the
+    user's own (ADR-0010).
+
+    ``shared_by`` is the definition's owner; ``activated_by`` is how the subscription
+    came to exist — ``user`` (they subscribed), ``group`` (a group default did it for
+    them) or ``admin``. Rendered onto the origin frame so the model can answer "why am I
+    getting this report" without guessing.
+    """
+    owner = job.get("owner_user_id")
+    if not owner or owner == job.get("user_id"):
+        return None
+    provenance = {"shared_by": str(job.get("owner_email") or owner)}
+    activated_by = job.get("activated_by")
+    if activated_by in ("user", "group", "admin"):
+        provenance["activated_by"] = activated_by
+    return provenance
 
 
 def _build_adoption_seed(
@@ -935,7 +984,13 @@ class OrchestratorDeepAgent:
                     else None
                 )
                 synthetic_msgs = _build_origin_history(
-                    origin, delegation_label=seed[0] if seed else None
+                    origin,
+                    delegation_label=seed[0] if seed else None,
+                    # Only a server-validated origin carries provenance: it is resolved
+                    # from console-backend, and a client's own claim about who shared a
+                    # job with whom is not evidence. A watch with no sub-agent validates
+                    # no origin and so carries none, as it carries no adoption either.
+                    provenance=(validated_origin or {}).get("provenance"),
                 )
                 if synthetic_msgs:
                     input_data = {"messages": [*synthetic_msgs, current_msg]}

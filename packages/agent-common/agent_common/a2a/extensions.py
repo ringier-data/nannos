@@ -184,6 +184,12 @@ Reconstructed as a synthetic delegation turn (job prompt -> ``task`` tool
 call -> run output). ``context_id`` is provenance data about the sub-agent's
 own conversation — it must never be sent as the request's contextId.
 
+Who shared the job and how the user came to be subscribed (``shared_by`` /
+``activated_by``, ADR-0010) are deliberately NOT fields of this DataPart. The
+orchestrator resolves them from console-backend under the authenticated user's
+token, alongside the ownership check below, and renders them onto the frame —
+a client's claim about who shared what with whom is not evidence.
+
 The orchestrator additionally attempts conversation adoption: it resolves
 the job and run via console-backend under the authenticated user's token
 (ownership check + server-stored ``conversation_id``, ignoring the

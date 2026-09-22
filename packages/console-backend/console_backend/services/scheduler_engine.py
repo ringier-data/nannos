@@ -11,6 +11,7 @@ It owns:
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
 import logging
 from dataclasses import dataclass
@@ -139,8 +140,16 @@ class SchedulerEngine:
         socket_notification_manager: SocketNotificationManager | None = None,
         tick_interval_seconds: int = 30,
         claim_limit: int = 10,
+        *,
+        agent_access_check: Callable[[Any, str, int], Awaitable[bool]],
     ) -> None:
         self._repo = repo
+        # (db, subscriber user id, sub_agent_id) -> may this subscriber run that agent
+        # right now (ADR-0010). Required, not defaulted: a construction site that forgot
+        # it would silently run revoked agents, so it fails with a TypeError instead.
+        # Injected rather than imported so the engine keeps no dependency on the
+        # sub-agent service; tests pass an explicit allow-all.
+        self._agent_access_check = agent_access_check
         self._delivery_channel_repo = delivery_channel_repo
         self._token_service = token_service
         self._agent_runner_url = agent_runner_url.rstrip("/")
@@ -227,8 +236,33 @@ class SchedulerEngine:
         carries the truth, and a notifier that retries during an incident is how one
         unhealthy process becomes a stampede.
         """
+        # Plain text, like every other notification the scheduler writes itself: it
+        # goes out verbatim on whichever channel the job notifies, and Slack renders
+        # Markdown literally.
+        delivered = await self.send_plain_notice(
+            job,
+            f"'{job.name}' could not run. The process handling it stopped before it finished, "
+            f"twice in a row, so there is no result for this run. The schedule is unchanged and "
+            f"the next run will go ahead as normal.",
+            what="recovery notice",
+        )
+        if delivered:
+            logger.info("Job %d: told the user the run was lost", job.id)
+        return delivered
+
+    async def send_plain_notice(
+        self, job: ScheduledJob, text_body: str, *, what: str = "notice", with_provenance: bool = True
+    ) -> bool:
+        """Post one line of plain text to a job's own delivery channel, under the
+        SUBSCRIBER's identity, running no agent.
+
+        The scheduler's only way of reaching a person where their job's results land. A
+        console notification says a thing happened; this says it where they are. Returns
+        whether the message is settled — delivered, or owed to nobody because the job
+        notifies no channel. False means the attempt failed.
+        """
         if job.delivery_channel_id is None:
-            logger.info("Job %d has no delivery channel; recovery notice not sent", job.id)
+            logger.info("Job %d has no delivery channel; %s not sent", job.id, what)
             return True
 
         try:
@@ -239,19 +273,14 @@ class SchedulerEngine:
                     return True
                 access_token = await self._token_service.get_access_token(db, job.user_id)
 
-            # Plain text, like every other notification the scheduler writes itself: it
-            # goes out verbatim on whichever channel the job notifies, and Slack renders
-            # Markdown literally.
-            text_body = (
-                f"'{job.name}' could not run. The process handling it stopped before it finished, "
-                f"twice in a row, so there is no result for this run. The schedule is unchanged and "
-                f"the next run will go ahead as normal."
-            )
-
             # No sub_agent_id: the runner delivers and runs nothing. No
             # scheduled_job_run_id either — this notice is not a run.
             metadata = self._base_metadata(job)
             metadata["messageFormatting"] = self._message_formatting(channel)
+            if not with_provenance:
+                # A notice that already explains itself — the activation DM says in
+                # so many words why this job now runs for this person.
+                metadata["scheduled_job_provenance"] = None
             await dispatch_streaming(
                 agent_url=self._agent_runner_url,
                 access_token=access_token,
@@ -262,10 +291,9 @@ class SchedulerEngine:
                 # working agent would only make a dead runner take five minutes to admit it.
                 timeout_read=NOTIFY_TIMEOUT_SECONDS,
             )
-            logger.info("Job %d: told the user the run was lost", job.id)
             return True
         except Exception:
-            logger.warning("Job %d: could not deliver the recovery notice", job.id, exc_info=True)
+            logger.warning("Job %d: could not deliver the %s", job.id, what, exc_info=True)
             return False
 
     async def _notify_job_paused(self, job: ScheduledJob, reason: str | None, run_id: int) -> None:
@@ -463,6 +491,11 @@ class SchedulerEngine:
                     )
                     return run_id
 
+                # A parked run can wait for days; the subscriber's access to the agent is
+                # judged when the answer arrives, as on any other dispatch.
+                if not await self._subscriber_may_run(db, job, run_id, RunTrigger.RESUMED):
+                    return run_id
+
                 owner_sub = await billing_subject(db, job.user_id, context=f"job {job.id}")
                 with attribution_scope(user_sub=owner_sub, scheduled_job_id=job.id, service=SERVICE_SCHEDULER):
                     # THIS run's id, not the parked one's: the payload correlates to the
@@ -611,6 +644,14 @@ class SchedulerEngine:
                     )
                     return
 
+                # The SUBSCRIBER's access to the definition's agent, checked at every
+                # dispatch because it can be revoked after the definition was shared
+                # (ADR-0010). Missing access pauses this one subscription — a durable
+                # notice, no failure count, nobody else's subscription touched. Under the
+                # old single-owner row this could not happen: the owner chose the agent.
+                if not await self._subscriber_may_run(db, job, run_id, trigger):
+                    return
+
                 # Who this run bills to, for every gateway call under it. The two LLM calls
                 # below (the watch judge, the notification writer) used to run inside the
                 # agent, where these same ContextVars carried the owner and the job id for
@@ -737,6 +778,26 @@ class SchedulerEngine:
                 pass
             self._in_flight.discard(run_id)
 
+    async def _subscriber_may_run(self, db: Any, job: ScheduledJob, run_id: int, trigger: RunTrigger) -> bool:
+        """The per-dispatch access check (ADR-0010), shared by every path that dispatches.
+
+        False means the run has been finalised as a pause of this one subscription: a
+        durable notice, no failure count, nobody else's subscription touched.
+        """
+        if job.sub_agent_id is None or await self._agent_access_check(db, job.user_id, job.sub_agent_id):
+            return True
+        await self._finalize(
+            run_id=run_id,
+            job=job,
+            status=JobRunStatus.FAILED,
+            error_message="You no longer have access to the sub-agent this job runs.",
+            delivered=False,
+            paused_reason="Agent not accessible: you no longer have access to the sub-agent this job runs.",
+            trigger=trigger,
+            counts_as_failure=False,
+        )
+        return False
+
     async def _build_message_args(
         self,
         job: ScheduledJob,
@@ -860,10 +921,30 @@ class SchedulerEngine:
         return parts, metadata, push_config
 
     @staticmethod
+    def _provenance_line(job: ScheduledJob) -> str | None:
+        """Why this person is receiving this, for a job they did not author (ADR-0010).
+
+        None for an unshared job — which is every job until somebody shares one, and the
+        reason this is a line appended to a result rather than a field every client had
+        to learn to render. A subscriber of a shared job gets one sentence naming the
+        owner and, when a group default put it there, that it was not their own doing.
+        """
+        if job.owner_user_id == job.user_id:
+            return None
+        owner = job.owner_email or "another user"
+        if job.activated_by == "group":
+            return f"(You receive this because '{job.name}', shared by {owner}, is a default job of one of your groups.)"
+        return f"(You receive this because you subscribed to '{job.name}', shared by {owner}.)"
+
+    @staticmethod
     def _base_metadata(job: ScheduledJob) -> dict[str, Any]:
         """The A2A message metadata every dispatch on behalf of *job* carries."""
         return {
             "scheduled_job_id": job.id,
+            # Appended to the delivered result by agent-runner, where every dispatch's
+            # output is composed — one seam instead of the same footer in three clients.
+            # Absent (None) on the jobs that are nobody else's, which is most of them.
+            "scheduled_job_provenance": SchedulerEngine._provenance_line(job),
             # Carried so a notification can name the job in words. An ask especially:
             # "Nannos needs permission" says nothing about which of a user's jobs has
             # stopped, and the id is not something anyone recognises.
@@ -1057,8 +1138,13 @@ class SchedulerEngine:
         trigger: RunTrigger = RunTrigger.SCHEDULED,
         parked_task_id: str | None = None,
         parked_payload: dict[str, Any] | None = None,
+        counts_as_failure: bool = True,
     ) -> None:
         """Persist run outcome and advance job state.
+
+        *counts_as_failure* False records a FAILED run without moving
+        ``consecutive_failures``: the stop is about the subscriber's standing (an agent
+        they can no longer reach), not about the job, and the pause reason says so.
 
         An interrupted SCHEDULED or RESUMED run earns the job one fresh attempt. The
         marker goes in the database rather than being retried here: the process that
@@ -1159,22 +1245,21 @@ class SchedulerEngine:
                     "Job %d: Disabling watch job after successful trigger (destroy_after_trigger=True)",
                     job.id,
                 )
-                # Disable the job via direct SQL (system action, no user actor)
-                await db.execute(
-                    text("""
-                        UPDATE scheduled_jobs
-                        SET enabled = FALSE,
-                            paused_reason = 'Watch condition met (one-time trigger)',
-                            updated_at = :now
-                        WHERE id = :job_id
-                    """),
-                    {"job_id": job.id, "now": datetime.now(timezone.utc)},
-                )
+                # A system action, no user actor. Per SUBSCRIPTION: the watch fired for
+                # this subscriber, so this subscriber's job is done; nobody else's is.
+                await self._repo.disable_subscription(db, job.id, "Watch condition met (one-time trigger)")
+
+            # A stop that is about the subscriber's standing, not the job: written as a
+            # real pause (enabled = FALSE + reason) so the claim loop leaves it alone —
+            # complete_job only flips enabled on the failure threshold, which this must
+            # never contribute to.
+            if not counts_as_failure and paused_reason:
+                await self._repo.disable_subscription(db, job.id, paused_reason)
 
             enabled_after, reason_after = await self._repo.complete_job(
                 db=db,
-                job_id=job.id,
-                status=status,
+                subscription_id=job.id,
+                status=status if counts_as_failure else JobRunStatus.INTERRUPTED,
                 next_run_at=next_run_at,
                 retry_at=retry_at,
                 last_check_result=last_check_result,

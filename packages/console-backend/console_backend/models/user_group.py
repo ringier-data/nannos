@@ -54,6 +54,20 @@ class UserGroupWithMembers(UserGroup):
     members: list[MemberInfo] = Field(default_factory=list)
 
 
+class GroupSummary(BaseModel):
+    """A group as the model is allowed to see it: what it is and how big it is.
+
+    Deliberately narrower than ``UserGroupWithMembers``: a share or a group default is
+    decided on "which group, and how many people does that mean", and the member
+    identities are not part of that question. See ADR-0010.
+    """
+
+    id: int
+    name: str
+    description: str | None = None
+    member_count: int = 0
+
+
 # Request models
 
 

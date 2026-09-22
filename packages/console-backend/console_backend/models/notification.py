@@ -30,6 +30,20 @@ class NotificationType(str, Enum):
     #: console-side on purpose: a job's delivery channel is optional, and a job with no
     #: channel is the one whose silence is hardest to notice.
     SCHEDULED_JOB_PAUSED = "scheduled_job_paused"
+    #: Shared scheduled jobs (ADR-0010). Anything that changes what runs under YOUR
+    #: identity or what you own. Mirrors the agent trio for sharing; the rest are the
+    #: split's own verbs. A writer editing a shared definition's prompt is deliberately
+    #: not one of them, as for a shared agent.
+    JOB_SHARED = "job_shared"
+    JOB_ACCESS_REVOKED = "job_access_revoked"
+    JOB_PERMISSION_CHANGED = "job_permission_changed"
+    #: The consent moment: a group default activated a subscription under your identity.
+    JOB_SUBSCRIPTION_ACTIVATED = "job_subscription_activated"
+    #: A writer reset your trigger override to the definition's defaults.
+    JOB_SUBSCRIPTION_RESET = "job_subscription_reset"
+    JOB_SUSPENDED = "job_suspended"
+    JOB_RESUMED = "job_resumed"
+    JOB_DELETED = "job_deleted"
 
 
 class ActivationSource(str, Enum):

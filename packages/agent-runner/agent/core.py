@@ -453,6 +453,19 @@ async def _collect_sub_agent_run(
     return SubAgentRun(message=text, task_state=task_state, auth_payload=_client_auth_payload(last_data))
 
 
+def _with_provenance(message: str | None, provenance: Any) -> str | None:
+    """Append the scheduler's "why you receive this" line to a delivered result.
+
+    Every scheduled dispatch's output is composed here, so a shared job's provenance
+    (ADR-0010) is added once rather than in each delivery channel. Only for a job whose
+    subscriber is not its owner — the scheduler sends nothing otherwise — and only when
+    there is a message to append to: a run with no output has nothing to explain.
+    """
+    if not message or not isinstance(provenance, str) or not provenance.strip():
+        return message
+    return f"{message}\n\n{provenance.strip()}"
+
+
 def _client_auth_payload(data: TaskResponseData) -> dict[str, Any] | None:
     """The half of an ``auth_required`` task's ask that may cross to an end user.
 
@@ -1043,7 +1056,9 @@ class AgentRunner(BaseAgent):
             # to deliver and echoing it back is what the delivery channel picks up. That
             # is a watch whose outcome is a notification — the scheduler decided the
             # condition was met and wrote what to say before dispatching.
-            "agent_message": agent_message or message_text or None,
+            "agent_message": _with_provenance(
+                agent_message or message_text or None, message_meta.get("scheduled_job_provenance")
+            ),
             # The sub-agent's terminal A2A task state — notably
             # "input_required" (the run asked the user a question and is
             # waiting). Delivery channels persist it with the run's provenance

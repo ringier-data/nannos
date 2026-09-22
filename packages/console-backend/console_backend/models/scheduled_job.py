@@ -35,6 +35,31 @@ class ScheduleKind(str, Enum):
     INTERVAL = "interval"  # Run every N seconds
 
 
+class TriggerPolicy(str, Enum):
+    """Whether a subscriber may change their own trigger after activation.
+
+    A property of the DEFINITION. ``fixed`` means every subscription's trigger mirrors
+    the definition's defaults and the subscriber's only knobs are ``enabled`` and the
+    delivery target; ``overridable`` lets each subscriber keep their own schedule.
+    Watches default to fixed — the tick is part of what a watch means — and tasks to
+    overridable; an author can pin a task or relax a watch. See ADR-0010.
+    """
+
+    OVERRIDABLE = "overridable"
+    FIXED = "fixed"
+
+
+#: What the viewing user may do with a job's DEFINITION. ``owner`` and ``write`` may
+#: edit it; ``read`` may only subscribe, copy and manage their own subscription.
+EffectivePermission = Literal["owner", "write", "read"]
+
+#: Which side of the split a trigger edit lands on once a definition has more than
+#: one subscriber: ``mine`` writes the caller's subscription override, ``everyone``
+#: writes the definition's defaults (and needs ``write``). With a single subscriber
+#: both produce the same result, which is why the field is optional.
+TriggerScope = Literal["mine", "everyone"]
+
+
 class JobRunStatus(str, Enum):
     """Terminal status of a single job execution attempt."""
 
@@ -176,21 +201,66 @@ class RunNowResponse(BaseModel):
     status: str = "triggered"
 
 
+class TriggerDefaults(BaseModel):
+    """A definition's trigger defaults — what an inherited subscription follows.
+
+    Surfaced alongside the effective trigger so a writer can edit "everyone's default"
+    while seeing what their own subscription actually uses. A None timezone means
+    "each subscriber's own".
+    """
+
+    schedule_kind: ScheduleKind
+    cron_expr: str | None = None
+    interval_seconds: int | None = None
+    run_at: datetime | None = None
+    timezone: str | None = None
+
+
 class ScheduledJob(BaseModel):
-    """Full scheduled job representation returned by the API."""
+    """A scheduled job as one user sees it: their SUBSCRIPTION with the DEFINITION folded in.
+
+    ``id`` is the subscription id — what every client, link and notification has always
+    called the job id — and ``user_id`` is the subscriber. The definition's fields are
+    flattened onto it rather than nested because the split is a storage fact, not a
+    UI concept (ADR-0010): an unshared job is still one form, and a plain subscriber
+    sees the same page with the definition fields read-only. The trigger fields carry
+    the trigger IN FORCE for this subscription (its override, else the defaults);
+    ``trigger_inherited`` says which, and ``trigger_defaults`` carries the defaults
+    themselves for a writer editing the group's schedule.
+    """
 
     id: int
+    #: The subscriber — whose identity every run of this job uses.
     user_id: str
+    definition_id: int
+    #: Who owns the definition. Equal to ``user_id`` for an unshared job.
+    owner_user_id: str
+    #: The owner's email, for naming them on a shared job ("shared with you by …").
+    #: None when the owner's account is gone, which leaves the job runnable regardless.
+    owner_email: str | None = None
+    #: What ``user_id`` may do with the definition.
+    effective_permission: EffectivePermission = "owner"
     sub_agent_id: int | None = None
     name: str
     job_type: JobType
+    # --- trigger in force for this subscription ---
     schedule_kind: ScheduleKind
     cron_expr: str | None = None
-    # None on rows migrated without a user-settings timezone — resolved to the
-    # deployment default (DEFAULT_TIMEZONE env var) at evaluation time.
+    #: The effective IANA timezone: the subscription's override, else the definition's,
+    #: else the subscriber's settings timezone. None only when none of the three is set,
+    #: which resolves to the deployment default (DEFAULT_TIMEZONE) at evaluation time.
     timezone: str | None = None
     interval_seconds: int | None = None
     run_at: datetime | None = None
+    #: True when this subscription follows the definition's trigger defaults (including
+    #: later edits to them); False when it carries its own override.
+    trigger_inherited: bool = True
+    #: The zone this subscription's override names, if any. ``timezone`` above is the
+    #: resolved one; this is the raw column, so an edit to the override can tell "I set
+    #: it" from "I inherit it".
+    timezone_override: str | None = None
+    trigger_defaults: TriggerDefaults | None = None
+    trigger_policy: TriggerPolicy = TriggerPolicy.OVERRIDABLE
     next_run_at: datetime
     last_run_at: datetime | None = None
     #: When a fresh attempt is owed after an interrupted run. A second wake-up
@@ -216,9 +286,47 @@ class ScheduledJob(BaseModel):
     max_failures: int
     consecutive_failures: int
     paused_reason: str | None = None
+    # --- sharing state of the definition ---
+    #: Bumped on every definition-field edit; stamped on each run.
+    revision: int = 1
+    is_public: bool = False
+    #: Set while the definition is suspended: nobody's subscription dispatches, each
+    #: member's own ``enabled`` is preserved.
+    suspended_at: datetime | None = None
+    suspended_by_user_id: str | None = None
+    suspended_reason: str | None = None
+    #: How this subscription came to exist: the user subscribed, a group default
+    #: activated them, or an admin did.
+    activated_by: str = "user"
+    activated_by_groups: list[int] | None = None
+    #: How many live subscriptions the definition has, this one included. The UI keeps
+    #: the split invisible while this is 1.
+    subscriber_count: int = 1
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_split_fields(cls, data: Any) -> Any:
+        """A job built without its split fields is the pre-split shape: one row, one
+        user. The definition carries the subscription's id (as every migrated job does),
+        the subscriber owns it, and the defaults are the trigger in force."""
+        if isinstance(data, dict):
+            data = dict(data)
+            if data.get("definition_id") is None and data.get("id") is not None:
+                data["definition_id"] = data["id"]
+            if data.get("owner_user_id") is None and data.get("user_id") is not None:
+                data["owner_user_id"] = data["user_id"]
+            if data.get("trigger_defaults") is None and data.get("schedule_kind") is not None:
+                data["trigger_defaults"] = {
+                    "schedule_kind": data["schedule_kind"],
+                    "cron_expr": data.get("cron_expr"),
+                    "interval_seconds": data.get("interval_seconds"),
+                    "run_at": data.get("run_at"),
+                    "timezone": data.get("timezone"),
+                }
+        return data
 
 
 class AutomatedSubAgentConfig(BaseModel):
@@ -321,13 +429,22 @@ class ScheduledJobCreate(BaseModel):
         default=None,
         description=(
             "IANA timezone (e.g. 'Europe/Zurich') in which cron_expr and timezone-naive run_at "
-            "values are interpreted. Defaults to the timezone from the user's settings."
+            "values are interpreted. Leave unset unless the user named a zone: unset means "
+            "EACH SUBSCRIBER's own settings timezone, so '0 9 * * 1-5' reads as 09:00 local "
+            "for everyone the job is later shared with. An explicit zone pins it for all."
         ),
     )
     interval_seconds: int | None = Field(
         default=None, ge=60, description="Required when schedule_kind='interval'. Min 60s."
     )
     run_at: datetime | None = Field(default=None, description="Required when schedule_kind='once'")
+    trigger_policy: TriggerPolicy | None = Field(
+        default=None,
+        description=(
+            "Whether subscribers of this job (once shared) may change their own schedule: "
+            "'overridable' or 'fixed'. Defaults to 'fixed' for watches and 'overridable' for tasks."
+        ),
+    )
 
     prompt: str = Field(
         default="",
@@ -655,7 +772,14 @@ class ValidateConditionResponse(BaseModel):
 
 
 class ScheduledJobUpdate(BaseModel):
-    """Request body for updating an existing scheduled job. All fields optional."""
+    """Request body for updating an existing scheduled job. All fields optional.
+
+    One update path: each field is routed server-side to where it lives. Definition
+    fields (name, prompt, agent, check, condition, max_failures, ...) need ``write``
+    on the definition; subscription fields (enabled, delivery_channel_id) are always
+    the caller's own. Only the trigger is ambiguous, and only once the definition has
+    other subscribers — ``scope`` decides it then.
+    """
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     schedule_kind: ScheduleKind | None = None
@@ -666,6 +790,24 @@ class ScheduledJobUpdate(BaseModel):
     )
     interval_seconds: int | None = Field(default=None, ge=60)
     run_at: datetime | None = None
+    scope: TriggerScope | None = Field(
+        default=None,
+        description=(
+            "Where a schedule change lands when the job has OTHER subscribers: 'mine' changes "
+            "only your own schedule (an override), 'everyone' changes the job's default "
+            "schedule for every subscriber who has not customised theirs (needs write "
+            "permission). Meaningless while you are the only subscriber — both do the same. "
+            "With other subscribers and no scope, 'mine' is assumed; ask the user which they "
+            "meant before changing everyone's."
+        ),
+    )
+    trigger_policy: TriggerPolicy | None = Field(
+        default=None,
+        description=(
+            "Definition field: whether subscribers may keep their own schedule ('overridable') "
+            "or must follow the default ('fixed'). Setting 'fixed' resets every override."
+        ),
+    )
     prompt: str | None = Field(default=None, max_length=4000)
     notification_message: str | None = Field(default=None, max_length=4000)
     sub_agent_id: int | None = None
@@ -717,3 +859,85 @@ class ScheduledJobUpdate(BaseModel):
             except CelSyntaxError as exc:
                 raise ValueError(f"argument {key!r}: {exc}. {CEL_SYNTAX_HINT}") from exc
         return v
+
+
+# ---------------------------------------------------------------------------
+# Sharing (ADR-0010)
+# ---------------------------------------------------------------------------
+
+
+class JobGroupPermission(BaseModel):
+    """Permission assignment for a group on a job definition."""
+
+    user_group_id: int
+    permissions: list[Literal["read", "write"]]
+
+
+class JobPermissionsUpdate(BaseModel):
+    """Replace the group permissions of a job definition (read = may subscribe, write = may edit)."""
+
+    group_permissions: list[JobGroupPermission]
+
+
+class JobGroupPermissionResponse(BaseModel):
+    """One group's permissions on a job definition."""
+
+    user_group_id: int
+    user_group_name: str
+    permissions: list[Literal["read", "write"]]
+
+
+class SharedJobDefinition(BaseModel):
+    """A job definition the viewer can reach but need not be subscribed to.
+
+    What the "available jobs" listing shows: enough to decide whether to subscribe or
+    copy, plus the viewer's own subscription id when they already have one.
+    """
+
+    id: int
+    name: str
+    job_type: JobType
+    owner_user_id: str
+    owner_email: str | None = None
+    sub_agent_id: int | None = None
+    prompt: str | None = None
+    check_tool: str | None = None
+    trigger_defaults: TriggerDefaults
+    trigger_policy: TriggerPolicy
+    is_public: bool
+    suspended_at: datetime | None = None
+    revision: int
+    subscriber_count: int
+    effective_permission: EffectivePermission
+    #: The viewer's live subscription to it, if any — the "job id" they would open.
+    subscription_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SuspendJobRequest(BaseModel):
+    """Why a definition is being suspended; shown to every subscriber."""
+
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class JobDefinitionRef(BaseModel):
+    """Basic reference to a job definition, for group pages."""
+
+    id: int
+    name: str
+    job_type: JobType
+
+
+class JobDefinitionRefWithStatus(JobDefinitionRef):
+    """A definition a group can reach, with its group-default flag."""
+
+    owner_user_id: str
+    is_default: bool = False
+    suspended: bool = False
+
+
+class GroupDefaultJobsSet(BaseModel):
+    """Request to set (replace) a group's default job definitions."""
+
+    definition_ids: list[int]
