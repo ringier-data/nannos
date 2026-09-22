@@ -172,7 +172,9 @@ class ScimUserService:
             """),
             {
                 "id": user_id,
-                "sub": user_id,  # Use ID as sub placeholder until OIDC login
+                # Placeholder subject until first OIDC login replaces it with the real one.
+                # `has_idp_identity` is the predicate that recognises it — see its docstring.
+                "sub": user_id,
                 "email": email,
                 "first_name": first_name or "",
                 "last_name": last_name or "",

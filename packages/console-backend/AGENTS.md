@@ -441,6 +441,26 @@ has_access = await user_group_service.check_resource_permission(
 
 When sending a steering message via `_send_steering_message_to_agent()`, the code uses `break` after the first event from `a2a_client.send_message()` — NOT `pass` to drain. The agent-console shares the same A2A SDK `Client` instance between the primary stream (`_send_message_to_agent`) and steering. The A2A SDK's `EventQueue.tap()` creates a child queue that receives all parent events. If leaked parent events containing raw `Task` objects were consumed through the shared `Client`, its `ClientTaskManager` would raise "Task is already set" errors. The `break` takes only the ack event and lets SSE teardown close the child queue. Note: consuming from the child never removes events from the parent queue (they're independent `asyncio.Queue` instances). See the root copilot instructions "Continuous Interaction Turns" section for the full mechanism.
 
+### A SCIM-Provisioned User Has No IdP Identity Until First Login (models/user.py, scim_service, user_service)
+
+`ScimUserService.create_user` writes the row's own id into `users.sub` as a placeholder, because
+provisioning creates nobody in Keycloak; the real subject only arrives with the first OIDC login,
+through the email-matched upsert in `UserService._upsert_user_internal`. Anything handing
+`users.sub` to Keycloak must therefore ask `has_idp_identity(id, sub, scim_user_name)` first —
+that predicate is the single definition of the convention, and `UserGroupService._add_members` /
+`_remove_members` use it to defer the mirror instead of raising `404 User not found` (which used to
+500 the admin request and roll the membership write back with it).
+
+`sub == id` alone does **not** mean placeholder: migration 001 keyed `users` by the OIDC sub
+itself, so rows from back then legitimately have `sub == id` while owning a real Keycloak account.
+`scim_user_name` is the discriminator — written only by the SCIM path, and SCIM requires
+`userName`.
+
+The database is the authority for membership (`/api/v1/auth/me` reads it from there); Keycloak
+backs only the groups claim other OIDC clients consume. So the mirror never fails an operation:
+memberships granted before first login are pushed by `UserService._sync_pending_group_memberships`
+when the placeholder is replaced, and a Keycloak error there is logged, not raised.
+
 ### One Alias = One Deployment (admin_model_gateway_router)
 
 `register_model` 409s when the alias is already registered on the gateway (checked BEFORE the

@@ -19,9 +19,11 @@ from ..models.user import (
     UserGroupMembership,
     UserStatus,
     UserWithGroups,
+    has_idp_identity,
 )
 from ..repositories.user_repository import UserRepository
 from ..services.audit_service import AuditService
+from ..services.keycloak_admin_service import KeycloakAdminService
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,12 @@ logger = logging.getLogger(__name__)
 class UserService:
     """Manages users in PostgreSQL."""
 
-    def __init__(self, user_repository: UserRepository | None = None, audit_service: AuditService | None = None):
+    def __init__(
+        self,
+        user_repository: UserRepository | None = None,
+        audit_service: AuditService | None = None,
+        keycloak_admin_service: KeycloakAdminService | None = None,
+    ):
         """Initialize user service.
 
         Args:
@@ -37,9 +44,13 @@ class UserService:
                 If None, must be set via set_repository() before use.
             audit_service: Optional audit service instance.
                 If None, must be set via set_audit_service() before use.
+            keycloak_admin_service: Optional Keycloak admin service, used to push the group
+                memberships a SCIM-provisioned user accumulated before their first login.
+                Left None when Keycloak group sync is disabled.
         """
         self._repo = user_repository
         self._audit_service = audit_service
+        self._keycloak_service = keycloak_admin_service
 
     def set_repository(self, user_repository: UserRepository):
         """Set the user repository (dependency injection)."""
@@ -48,6 +59,10 @@ class UserService:
     def set_audit_service(self, audit_service: AuditService):
         """Set the audit service (dependency injection)."""
         self._audit_service = audit_service
+
+    def set_keycloak_service(self, keycloak_admin_service: KeycloakAdminService):
+        """Set the Keycloak admin service (dependency injection)."""
+        self._keycloak_service = keycloak_admin_service
 
     @property
     def repo(self) -> UserRepository:
@@ -500,6 +515,51 @@ class UserService:
 
         return results
 
+    async def _sync_pending_group_memberships(self, db: AsyncSession, user_id: str, sub: str) -> None:
+        """Mirror a user's existing group memberships into Keycloak.
+
+        Called once, when a SCIM-provisioned user's placeholder subject is replaced by the real
+        one at first OIDC login. Memberships granted before that point were written to the
+        database but skipped in Keycloak, because there was no Keycloak user to add.
+
+        The database is the authority for membership (`/api/v1/auth/me` reads it from there);
+        Keycloak only backs the groups claim other OIDC clients consume. A failure to mirror
+        must therefore not fail the login, so it is logged rather than raised.
+        """
+        if self._keycloak_service is None:
+            return
+
+        try:
+            result = await db.execute(
+                text("""
+                    SELECT ug.keycloak_group_id
+                    FROM user_groups ug
+                    JOIN user_group_members ugm ON ugm.user_group_id = ug.id
+                    WHERE ugm.user_id = :user_id
+                      AND ug.deleted_at IS NULL
+                      AND ug.keycloak_group_id IS NOT NULL
+                """),
+                {"user_id": user_id},
+            )
+            groups = result.mappings().all()
+        except Exception as e:
+            logger.error(f"Failed to read pending group memberships for user {user_id}: {e}")
+            return
+
+        for group in groups:
+            try:
+                await self._keycloak_service.add_user_to_group(sub, group["keycloak_group_id"])
+                logger.info(
+                    f"Reconciled user {user_id} (sub={sub}) into Keycloak group "
+                    f"{group['keycloak_group_id']} on first login"
+                )
+            except Exception as e:
+                # Keep going: one unreachable group must not cost the user the others.
+                logger.error(
+                    f"Failed to reconcile user {user_id} into Keycloak group "
+                    f"{group['keycloak_group_id']} on first login: {e}"
+                )
+
     async def _upsert_user_internal(
         self,
         db: AsyncSession,
@@ -519,7 +579,7 @@ class UserService:
         """
         email = email.lower().strip()
         # Check if user exists before upsert
-        check_query = text("SELECT id, sub, email FROM users WHERE email = :email OR sub = :sub")
+        check_query = text("SELECT id, sub, email, scim_user_name FROM users WHERE email = :email OR sub = :sub")
         results = await db.execute(check_query, {"email": email, "sub": sub})
         rows = results.mappings().all()
         if len(rows) > 1:
@@ -529,6 +589,7 @@ class UserService:
         user_id = row["id"] if row else None
         old_sub = row["sub"] if row else None
         old_email = row["email"] if row else None
+        old_scim_user_name = row["scim_user_name"] if row else None
         try:
             now = datetime.now(tz=timezone.utc)
 
@@ -633,6 +694,12 @@ class UserService:
                         logger.info(f"First user {sub} auto-promoted to administrator (FIRST_USER_IS_ADMIN=true)")
             else:
                 if sub != old_sub:
+                    if old_sub is not None and not has_idp_identity(user_id, old_sub, old_scim_user_name):
+                        # The user was provisioned over SCIM and is logging in for the first time:
+                        # until now they had no Keycloak account, so every group membership granted
+                        # in the meantime was skipped by UserGroupService. Push them now.
+                        await self._sync_pending_group_memberships(db, user_id, sub)
+
                     # Audit sub change if it differs from previous
                     await self.audit_service.log_action(
                         db=db,

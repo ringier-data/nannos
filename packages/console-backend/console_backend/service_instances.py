@@ -194,6 +194,9 @@ async def initialize_services(app: "FastAPI") -> None:
         )
         await app.state.keycloak_admin_service.ensure_group_mapper_configured()
         app.state.user_group_service.set_keycloak_service(app.state.keycloak_admin_service)
+        # First login of a SCIM-provisioned user replaces their placeholder subject with the
+        # real one; UserService then pushes the memberships granted before they had an account.
+        app.state.user_service.set_keycloak_service(app.state.keycloak_admin_service)
     else:
         logger.warning("Keycloak Admin credentials not set — group sync disabled")
         app.state.keycloak_admin_service = None
