@@ -988,6 +988,20 @@ class AgentRunner(BaseAgent):
                 )
                 return
 
+        # A watch whose CHECK tool needs the owner's credential (ADR-0009 decision 8). The
+        # scheduler evaluated the check itself, before any dispatch, so no agent ran and
+        # nothing in this process parked: it hands the ask over on ``auth_ask`` so the run
+        # is PUBLISHED as a park through this task's push sender — the one path every
+        # delivery client already reads a park from and renders as a card. From here on
+        # the run is indistinguishable from an agent's park: same payload shape, same
+        # reply target, same non-terminal task. Only the answer differs, and that is
+        # console-backend's business (it re-runs the check; nothing is addressed here).
+        # Meaningful only without a sub-agent — with one, the agent's own outcome decides.
+        check_ask = message_meta.get("auth_ask")
+        if not sub_agent_id and isinstance(check_ask, dict) and isinstance(check_ask.get("auth_requirement"), dict):
+            sub_agent_task_state = "auth_required"
+            auth_payload = check_ask
+
         # A run blocked on the owner's credential is neither a success nor a failure,
         # and it is the one outcome that leaves work to come back to. The ask travels
         # INSIDE this payload rather than replacing the status message: every delivery

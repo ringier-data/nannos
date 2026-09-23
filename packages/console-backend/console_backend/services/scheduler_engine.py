@@ -476,7 +476,7 @@ class SchedulerEngine:
             return run_id or parked_run.id
 
         if is_check_park(parked_run.parked_task_id):
-            return await self._resume_check_park(job, parked_run, decision, run_id)
+            return await self._resume_check_park(job, parked_run, decision, run_id, reply_to)
 
         heartbeat: asyncio.Task[None] | None = None
         try:
@@ -604,6 +604,7 @@ class SchedulerEngine:
         parked_run: ScheduledJobRun,
         decision: str,
         run_id: int | None,
+        reply_to: dict[str, str] | None = None,
     ) -> int:
         """Answer a run parked by its watch check (see ``CHECK_PARK_PREFIX``).
 
@@ -616,9 +617,11 @@ class SchedulerEngine:
         ``consecutive_failures`` (a refused credential is not evidence about the job),
         and the next occurrence asks again — the same shape as a declined agent park.
 
-        Takes no ``reply_to``: the notice a check park sends is prose, not a card, so no
-        chat client has coordinates to thread a continuation under. When one does, the
-        agent branch shows where they go (``reply_to_message`` in the dispatch metadata).
+        *reply_to* is where the card that asked sits in the owner's chat client, when the
+        answer came from there. It rides into the re-run's dispatch metadata exactly as
+        the agent branch carries it, so whatever the re-run produces — a result, or a
+        second ask when the credential is still missing — lands under the ask that
+        unblocked it (ADR-0009 decision 5).
         """
         if run_id is None:
             async with self._db_session_factory() as db:
@@ -633,7 +636,7 @@ class SchedulerEngine:
             run_id,
         )
         if decision == "approved":
-            await self._dispatch_job(job, run_id=run_id, trigger=RunTrigger.RESUMED)
+            await self._dispatch_job(job, run_id=run_id, trigger=RunTrigger.RESUMED, reply_to=reply_to)
             return run_id
 
         # Logged rather than raised, like the agent branch: this runs as a Starlette
@@ -689,12 +692,16 @@ class SchedulerEngine:
         job: ScheduledJob,
         run_id: int | None = None,
         trigger: RunTrigger = RunTrigger.SCHEDULED,
+        reply_to: dict[str, str] | None = None,
     ) -> None:
         """Resolve user token, build A2A payload, call agent-runner, record result.
 
         *trigger* is why this run exists, and decides what its interruption is worth:
         a SCHEDULED run earns one RETRY, a RETRY earns the user a notice, a MANUAL run
         earns neither.
+
+        *reply_to* is set on a RESUMED run only: the chat coordinates of the ask this run
+        answers, threaded under by whatever the run delivers.
         """
         if run_id is None:
             async with self._db_session_factory() as db:
@@ -798,11 +805,11 @@ class SchedulerEngine:
                     if check_ask is None:
                         # Build the A2A message args for agent-runner
                         parts, metadata, push_config = await self._build_message_args(
-                            job, run_id, access_token, db, watch_outcome=watch_outcome
+                            job, run_id, access_token, db, watch_outcome=watch_outcome, reply_to=reply_to
                         )
 
             if check_ask is not None:
-                await self._park_on_check_ask(job, run_id, check_ask, trigger)
+                await self._park_on_check_ask(job, run_id, check_ask, trigger, reply_to)
                 return
 
             # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client. SSE keeps
@@ -883,6 +890,7 @@ class SchedulerEngine:
         run_id: int,
         ask: dict[str, Any],
         trigger: RunTrigger,
+        reply_to: dict[str, str] | None = None,
     ) -> None:
         """Park a watch whose check tool answered ``need-credentials``.
 
@@ -893,31 +901,25 @@ class SchedulerEngine:
         the id the answer is addressed to — the check, not an agent-runner task (see
         ``CHECK_PARK_PREFIX``).
 
-        A job with a delivery channel is also told there, so the owner who lives in a chat
-        client learns that the job has stopped and gets the link (decision 5). It goes as
-        a plain notice — not a run: it carries no run id, so the chat client has nothing
-        to adopt as this run's result, which keeps the ask un-adoptable as the ADR
-        requires — and the outer task it completes is NOT the parked one: the clients
-        render prose with a working link rather than a card, and the answer comes back
-        through the console. A delivery that fails is logged and the run still parks; the
-        ask is recorded on the run either way, and a park nobody was told about is still
-        a stopped job the console shows, which beats a failed run counted against the job.
+        A job with a delivery channel is told there as a PARK, not as prose: the ask is
+        handed to agent-runner on ``auth_ask`` and published through the push sender the
+        way an agent's own park is, so the chat clients render the authorization card
+        they already have — with the button whose answer comes back through the resume
+        endpoint. The first cut sent a sentence with the link and "confirm in the
+        console", and the owner who lives in Slack read it, authorized, and waited for a
+        watch that nothing had told to continue. The task that publication opens stays
+        non-terminal like any unanswered park; nothing is ever addressed to it, since the
+        answer goes to the run. A delivery that fails is logged and the run still parks;
+        the ask is recorded on the run either way, and a park nobody was told about is
+        still a stopped job the console shows, which beats a failed run counted against
+        the job.
         """
-        # Built two calls upstream by need_credentials_ask, which always emits one method;
-        # only the URL is optional, since the gateway's payload may lack it.
         tool_name = job.check_tool or "its check tool"
-        authorize_url = ask["auth_requirement"]["auth_methods"][0].get("auth_url")
         summary = f"Stopped: '{tool_name}' needs your authorization before this watch can check anything."
 
         delivered = False
         if job.delivery_channel_id is not None:
-            notice = (
-                f"The scheduled watch '{job.name}' has stopped: '{tool_name}' needs your authorization "
-                "before it can check anything. "
-                + (f"Authorize here: {authorize_url} — then " if authorize_url else "Once authorized, ")
-                + "confirm in the console and the watch will pick up where it stopped."
-            )
-            delivered = await self.send_plain_notice(job, notice, what="authorization notice")
+            delivered = await self._publish_check_ask(job, run_id, ask, reply_to)
 
         await self._finalize(
             run_id=run_id,
@@ -929,6 +931,95 @@ class SchedulerEngine:
             parked_task_id=f"{CHECK_PARK_PREFIX}{run_id}",
             parked_payload=ask,
         )
+
+    async def _publish_check_ask(
+        self,
+        job: ScheduledJob,
+        run_id: int,
+        ask: dict[str, Any],
+        reply_to: dict[str, str] | None,
+    ) -> bool:
+        """Deliver a check park's ask to the job's channel as an authorization card.
+
+        Dispatched through agent-runner with no sub-agent and the ask on ``auth_ask``:
+        the runner publishes its task as ``auth_required`` with the ask, the job's name
+        and the resume target in the scheduler payload, and the push sender carries that
+        to the channel — the same bytes an agent's park arrives as, so every client
+        renders the same card. The text part is the prose fallback ADR-0009 decision 5
+        requires: a client that never learned the card, or a notification digest, still
+        shows a sentence with a working link.
+
+        The run id IS on this dispatch, unlike a plain notice: the card's button answers
+        ``reply_to.scheduled_job_run_id``, and without it there is nothing to press. That
+        does not make the ask adoptable — every client skips provenance for a park, which
+        is how the agent path keeps the same invariant.
+
+        Returns whether the ask reached the channel. A runner that predates ``auth_ask``
+        completes the task and the clients post the prose: told, without a button, and
+        logged as such rather than counted as a failure.
+        """
+        # Built two calls upstream by need_credentials_ask, which always emits one method;
+        # only the URL is optional, since the gateway's payload may lack it.
+        tool_name = job.check_tool or "its check tool"
+        authorize_url = ask["auth_requirement"]["auth_methods"][0].get("auth_url")
+        prose = (
+            f"The scheduled watch '{job.name}' has stopped: '{tool_name}' needs your authorization "
+            "before it can check anything. "
+            + (f"Authorize here: {authorize_url} — then " if authorize_url else "Once authorized, ")
+            + "confirm and the watch will pick up where it stopped."
+        )
+        try:
+            async with self._db_session_factory() as db:
+                channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
+                if not channel:
+                    logger.warning("Job %d: delivery channel %d is gone", job.id, job.delivery_channel_id)
+                    return False
+                access_token = await self._token_service.get_access_token(db, job.user_id)
+
+            # No sub_agent_id: nothing runs. The run id and the ask are what make this a
+            # park in the runner's eyes rather than text to deliver.
+            metadata = self._base_metadata(job)
+            metadata["scheduled_job_run_id"] = run_id
+            metadata["messageFormatting"] = self._message_formatting(channel)
+            metadata["auth_ask"] = ask
+            if reply_to:
+                metadata["reply_to_message"] = reply_to
+            result_data = await dispatch_streaming(
+                agent_url=self._agent_runner_url,
+                access_token=access_token,
+                parts=[{"kind": "text", "text": prose}],
+                metadata=metadata,
+                push_config=self._push_config(channel),
+                # Nothing is being computed, so the long inter-event timeout that covers a
+                # working agent would only make a dead runner take five minutes to admit it.
+                timeout_read=NOTIFY_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("Job %d: could not deliver the authorization card", job.id, exc_info=True)
+            return False
+
+        outcome = self._parse_result(result_data)
+        if outcome.status == JobRunStatus.AUTH_REQUIRED:
+            return True
+        if outcome.status == JobRunStatus.SUCCESS:
+            # An agent-runner that does not read ``auth_ask`` yet: it echoed the prose as a
+            # completed run, and the clients posted a sentence with the link. Told, but
+            # with nothing to press — the console is the way to answer until it is rolled.
+            logger.warning(
+                "Job %d run %d: agent-runner delivered the check-park ask as prose, not as a park "
+                "(image skew?); the owner has the link but no button",
+                job.id,
+                run_id,
+            )
+            return True
+        logger.warning(
+            "Job %d run %d: agent-runner did not publish the check-park ask (%s: %s)",
+            job.id,
+            run_id,
+            outcome.status.value,
+            outcome.error_message,
+        )
+        return False
 
     async def _subscriber_may_run(self, db: Any, job: ScheduledJob, run_id: int, trigger: RunTrigger) -> bool:
         """The per-dispatch access check (ADR-0010), shared by every path that dispatches.
@@ -957,15 +1048,22 @@ class SchedulerEngine:
         access_token: str,
         db: Any,
         watch_outcome: WatchOutcome | None = None,
+        reply_to: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str] | None]:
         """Build the (message parts, metadata, push_config) for the A2A SDK dispatch.
 
         `watch_outcome` is set when the condition was already evaluated here, which is the
         normal path for a watch job. It is passed on so agent-runner does not call the
         tool a second time or reach a different verdict than the one that got us here.
+
+        `reply_to` is the chat coordinates of the ask a RESUMED run answers; agent-runner
+        echoes it untouched so the client that rendered the card threads the result under
+        it. Absent on every other run.
         """
         metadata = self._base_metadata(job)
         metadata["scheduled_job_run_id"] = run_id
+        if reply_to:
+            metadata["reply_to_message"] = reply_to
 
         # The channel this job notifies, needed twice below: for how it renders text, and
         # as the push target. Fetched once.

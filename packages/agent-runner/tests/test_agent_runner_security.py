@@ -669,6 +669,61 @@ class TestParkedOnAuthorization:
         assert parked["scheduled_job_id"] == 10
 
     @pytest.mark.asyncio
+    async def test_a_check_tool_ask_is_published_as_a_park_without_an_agent(self, agent_runner):
+        """ADR-0009 decision 8: the scheduler's own check hit `need-credentials`.
+
+        No agent ran here — the scheduler hands the ask over on `auth_ask` so this task
+        publishes it the way an agent's park is published, and every delivery client
+        renders the card it already has. Without this the scheduler could only post
+        prose, and an owner in Slack authorized and then waited for nothing.
+        """
+        ask = {
+            "requires_auth": True,
+            "auth_requirement": {
+                "service": "",
+                "resource": "naonous_get_campaign",
+                "auth_methods": [{"method": "oauth2", "auth_url": "https://gw.example/begin"}],
+            },
+        }
+        task = self._task("notice-task-1")
+        task.history = [
+            MagicMock(
+                metadata={
+                    "scheduled_job_id": 10,
+                    "scheduled_job_run_id": 78,
+                    "scheduled_job_name": "Cockpit monitor",
+                    "auth_ask": ask,
+                }
+            )
+        ]
+        agent_runner._execute_sub_agent = AsyncMock(side_effect=AssertionError("nothing should run"))
+
+        items, responses = await self._run(
+            agent_runner, task, [Part(text="The watch has stopped: authorize at https://gw.example/begin")]
+        )
+
+        parked = next(i for i in items if i.get("scheduler_status") == "auth_required")
+        assert parked["auth_payload"] == ask
+        assert parked["parked_task_id"] == "notice-task-1"
+        assert parked["reply_to"]["scheduled_job_run_id"] == 78
+        assert parked["scheduled_job_name"] == "Cockpit monitor"
+        # The prose fallback for a client without the card, link included.
+        assert "https://gw.example/begin" in parked["agent_message"]
+        assert responses[-1].state == TaskState.TASK_STATE_AUTH_REQUIRED
+
+    @pytest.mark.asyncio
+    async def test_an_agent_run_ignores_a_stray_check_ask(self, agent_runner):
+        # With a sub-agent the agent's own outcome decides; metadata cannot park it.
+        task = self._task()
+        task.history[0].metadata["auth_ask"] = self.AUTH_PAYLOAD
+        agent_runner._execute_sub_agent = AsyncMock(
+            return_value=core.SubAgentRun(message="Done.", task_state="completed", auth_payload=None)
+        )
+        items, responses = await self._run(agent_runner, task, [Part(text="Do the thing.")])
+        assert items[-1]["scheduler_status"] == "success"
+        assert responses[-1].state == TaskState.TASK_STATE_COMPLETED
+
+    @pytest.mark.asyncio
     async def test_only_a_scheduled_run_may_park(self, agent_runner):
         """agent-runner serves more than the scheduler, and a park with no job is an orphan.
 
