@@ -256,6 +256,18 @@ _NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
 # change the policy here and change it there.
 REASONING_OFF = "none"
 
+# What `REASONING_OFF` has to carry alongside it. LiteLLM maps `reasoning_effort: "none"` to
+# "send no thinking parameter" (and pops any `thinking` key it finds). That switches thinking
+# off only on models where it is opt-in; on the Claude 5 family (Sonnet 5, Opus 5, Fable 5.1)
+# thinking is ON by default and an omitted parameter means the provider default, so a
+# 1024-token utility call spends its whole budget thinking and returns an empty reply cut off
+# at `finish_reason=length` (prod, 2026-09-23, `chat` = claude-sonnet-5). Anthropic's only off
+# switch there is an explicit `thinking: {"type": "disabled"}`, so `create_model` sends both
+# whenever the effort is `REASONING_OFF`. Portable: Anthropic and Bedrock pass it through,
+# Gemini reads a non-enabled type as thoughts off, and the gateway's `drop_params` discards
+# it for models with no thinking control. Mirrored in console-backend's `llm_gateway`.
+THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
+
 
 def get_reasoning_effort(thinking_level: ThinkingLevel | None, model_type: ModelType | None = None) -> str | None:
     """Map the app `thinking_level` to LiteLLM's `reasoning_effort`.
@@ -372,6 +384,8 @@ def create_model(
     effort = reasoning_effort if reasoning_effort is not None else get_reasoning_effort(thinking_level, model_type)
     if effort:
         model_kwargs["reasoning_effort"] = effort
+        if effort == REASONING_OFF:
+            model_kwargs["thinking"] = dict(THINKING_DISABLED)
 
     # Reasoning shares the output budget — give it headroom so thinking doesn't consume the
     # whole (low) gateway-default max_tokens and truncate the answer. Unset for reasoning-off
