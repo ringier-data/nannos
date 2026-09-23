@@ -13960,6 +13960,12 @@ export type SchedulerListSharedJobsData = {
          */
         search?: string | null;
         /**
+         * Subscribed
+         *
+         * Only definitions the caller has (or has not) already activated
+         */
+        subscribed?: boolean | null;
+        /**
          * Page
          *
          * Page number

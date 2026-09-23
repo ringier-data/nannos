@@ -948,6 +948,7 @@ class ScheduledJobRepository(AuditedRepository):
         db: AsyncSession,
         user_id: str,
         search: str | None = None,
+        subscribed: bool | None = None,
         page: int = 1,
         limit: int | None = None,
     ) -> tuple[list[SharedJobDefinition], int]:
@@ -962,6 +963,21 @@ class ScheduledJobRepository(AuditedRepository):
         if search:
             search_filter = "AND (d.name ILIKE :search OR d.prompt ILIKE :search)"
             params["search"] = f"%{search}%"
+
+        # The console's "Shared with you" section lists only definitions the
+        # viewer has not activated — anything activated already appears in their
+        # own jobs table. Deciding that in the browser would filter whichever
+        # page arrived, so the section could empty out with matches left behind.
+        subscription_filter = ""
+        if subscribed is not None:
+            exists = """
+                EXISTS (
+                    SELECT 1 FROM scheduled_job_subscriptions sub
+                    WHERE sub.definition_id = d.id AND sub.user_id = :user_id
+                      AND sub.deleted_at IS NULL
+                )
+            """
+            subscription_filter = f"AND {exists}" if subscribed else f"AND NOT {exists}"
 
         pagination = ""
         if limit is not None:
@@ -1004,7 +1020,7 @@ class ScheduledJobRepository(AuditedRepository):
                        END AS effective_permission
                 FROM scheduled_job_definitions d
                 JOIN users u ON u.id = d.owner_user_id
-            """ + access_predicate + search_filter + """
+            """ + access_predicate + search_filter + subscription_filter + """
                 ORDER BY d.updated_at DESC
             """ + pagination),
             params,
@@ -1020,7 +1036,7 @@ class ScheduledJobRepository(AuditedRepository):
                 SELECT COUNT(*)
                 FROM scheduled_job_definitions d
                 JOIN users u ON u.id = d.owner_user_id
-            """ + access_predicate + search_filter),
+            """ + access_predicate + search_filter + subscription_filter),
             count_params,
         )
         return definitions, count.scalar() or 0

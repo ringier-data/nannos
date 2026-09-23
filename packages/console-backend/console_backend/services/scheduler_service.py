@@ -609,12 +609,13 @@ class SchedulerService:
         db: AsyncSession,
         user_id: str,
         search: str | None = None,
+        subscribed: bool | None = None,
         page: int = 1,
         limit: int | None = None,
     ) -> tuple[list[SharedJobDefinition], int]:
         """Definitions the user may subscribe to or copy, with their subscription id if any."""
         return await self.repo.list_available_definitions(
-            db, user_id, search=search, page=page, limit=limit
+            db, user_id, search=search, subscribed=subscribed, page=page, limit=limit
         )
 
     # ------------------------------------------------------------------

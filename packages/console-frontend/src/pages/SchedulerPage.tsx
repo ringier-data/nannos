@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import {
   Plus,
   Calendar,
@@ -16,6 +18,7 @@ import {
   Undo2,
   Copy,
   Ban,
+  Search,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -950,7 +953,17 @@ function sharedScheduleLabel(def: SharedJobDefinition): string {
  */
 function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
   const qc = useQueryClient();
-  const { data: definitions = [] } = useQuery(schedulerListSharedJobsOptions());
+  const [sharedPage, setSharedPage] = useState(1);
+
+  // subscribed:false is a server filter — anything already activated appears in
+  // the viewer's own jobs table above, and dropping those rows here in the
+  // browser would thin out whichever page arrived.
+  const { data: definitions = [] } = useQuery({
+    ...schedulerListSharedJobsOptions({
+      query: { subscribed: false, page: sharedPage, limit: SHARED_PAGE_SIZE },
+    }),
+    placeholderData: keepPreviousData,
+  });
 
   // Both can fail on a definition that was reachable when the list loaded and is not
   // any more — access revoked, or the job's agent no longer shared with the viewer. With
@@ -979,10 +992,9 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
     onError: onActivateError,
   });
 
-  // Anything already activated is in the viewer's own table above; showing it twice
-  // would make one job look like two.
-  const available = definitions.filter((def) => def.subscription_id == null);
-  if (available.length === 0) return null;
+  // Already filtered server-side to what the viewer has not activated.
+  const available = definitions;
+  if (available.length === 0 && sharedPage === 1) return null;
 
   const pending = subscribe.isPending || copy.isPending;
 
@@ -1066,6 +1078,32 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
           </tbody>
         </table>
       </div>
+
+      {/* Prev/next rather than a page count: this endpoint is an MCP tool whose
+          body is a bare array, and the generated SDK does not surface the
+          X-Total-Count header the console reads elsewhere. A full page means
+          there is probably another. */}
+      {(sharedPage > 1 || available.length === SHARED_PAGE_SIZE) && (
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={sharedPage === 1}
+            onClick={() => setSharedPage((p) => Math.max(1, p - 1))}
+          >
+            Previous
+          </Button>
+          <span className="text-muted-foreground text-sm">Page {sharedPage}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={available.length < SHARED_PAGE_SIZE}
+            onClick={() => setSharedPage((p) => p + 1)}
+          >
+            Next
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1074,6 +1112,9 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
 // Main page
 // ---------------------------------------------------------------------------
 
+const JOBS_PAGE_SIZE = 20;
+const SHARED_PAGE_SIZE = 20;
+
 export function SchedulerPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -1081,10 +1122,23 @@ export function SchedulerPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ScheduledJob | null>(null);
 
-  const { data: jobs = [], isLoading } = useQuery({
-    queryKey: ['scheduler-jobs'],
-    queryFn: listJobs,
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(search);
+
+  const { data: jobPage, isLoading, isFetching } = useQuery({
+    queryKey: ['scheduler-jobs', { page, search: debouncedSearch }],
+    queryFn: () => listJobs({ page, limit: JOBS_PAGE_SIZE, search: debouncedSearch }),
+    placeholderData: keepPreviousData,
   });
+
+  const jobs = jobPage?.jobs ?? [];
+  const total = jobPage?.total ?? 0;
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setPage(1);
+  };
 
   const pauseMutation = useMutation({
     mutationFn: (jobId: number) => pauseJob(jobId),
@@ -1124,6 +1178,18 @@ export function SchedulerPage() {
         </Button>
       </div>
 
+      {/* Search — stays mounted on an empty result, or a term that matches
+          nothing would leave no way to clear it. */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          placeholder="Search jobs by name or prompt..."
+          value={search}
+          onChange={(e) => handleSearchChange(e.target.value)}
+          className="pl-9"
+        />
+      </div>
+
       {/* Job table */}
       {isLoading ? (
         <TableSkeleton columns={7} />
@@ -1131,14 +1197,25 @@ export function SchedulerPage() {
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-12 text-center">
           <Calendar className="h-8 w-8 text-muted-foreground" />
           <div>
-            <p className="font-medium">No scheduled jobs yet</p>
-            <p className="text-muted-foreground text-sm">
-              Click "New Job" to create your first scheduled job
-            </p>
+            {debouncedSearch ? (
+              <>
+                <p className="font-medium">No jobs match your search</p>
+                <p className="text-muted-foreground text-sm">Try a different name or prompt.</p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium">No scheduled jobs yet</p>
+                <p className="text-muted-foreground text-sm">
+                  Click "New Job" to create your first scheduled job
+                </p>
+              </>
+            )}
           </div>
         </div>
       ) : (
-        <div className="rounded-lg border">
+        <div
+          className={`rounded-lg border transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}
+        >
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/50">
@@ -1248,6 +1325,10 @@ export function SchedulerPage() {
           </table>
         </div>
       )}
+
+      {/* The 11 invalidateQueries(['scheduler-jobs']) call sites still match:
+          react-query matches query keys by prefix unless told to be exact. */}
+      <Pagination page={page} limit={JOBS_PAGE_SIZE} total={total} onPageChange={setPage} />
 
       <SharedWithYou onOpen={(jobId) => navigate(`/app/scheduler/${jobId}`)} />
 

@@ -136,3 +136,53 @@ async def test_available_definitions_page_and_search(repo, pg_session: AsyncSess
     found, total = await repo.list_available_definitions(pg_session, user_id, search="quarterly")
     assert [d.name for d in found] == ["Quarterly digest"]
     assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_available_definitions_subscribed_filter(repo, pg_session: AsyncSession):
+    """"Shared with you" hides what the viewer already activated, in SQL.
+
+    Filtering that in the browser would drop rows from whichever page arrived, so
+    the section could look empty while unactivated definitions remained.
+    """
+    owner = await _seed_user(pg_session, "sub-filter-owner")
+    viewer = await _seed_user(pg_session, "sub-filter-viewer")
+
+    # Public definitions are readable by anyone, which is enough to list them.
+    ids = []
+    for i in range(3):
+        job_id = await _seed_job(pg_session, owner, f"Public {i}")
+        definition_id = (
+            await pg_session.execute(
+                text(
+                    "UPDATE scheduled_job_definitions SET is_public = TRUE "
+                    "WHERE id = (SELECT definition_id FROM scheduled_job_subscriptions WHERE id = :j) "
+                    "RETURNING id"
+                ),
+                {"j": job_id},
+            )
+        ).scalar_one()
+        ids.append(definition_id)
+
+    # The viewer activates one of them.
+    await pg_session.execute(
+        text("""
+            INSERT INTO scheduled_job_subscriptions
+                (definition_id, user_id, next_run_at, enabled, consecutive_failures)
+            VALUES (:definition_id, :uid, NOW() + INTERVAL '1 hour', true, 0)
+        """),
+        {"definition_id": ids[0], "uid": viewer},
+    )
+
+    everything, total = await repo.list_available_definitions(pg_session, viewer)
+    assert total == 3
+
+    unactivated, total = await repo.list_available_definitions(
+        pg_session, viewer, subscribed=False
+    )
+    assert total == 2
+    assert ids[0] not in {d.id for d in unactivated}
+
+    activated, total = await repo.list_available_definitions(pg_session, viewer, subscribed=True)
+    assert total == 1
+    assert [d.id for d in activated] == [ids[0]]

@@ -102,10 +102,6 @@ export interface DeliveryChannel {
   updated_at: string;
 }
 
-/**
- * Fetch delivery channels. Console users receive all channels; machine clients
- * receive only their own.
- */
 export interface DeliveryChannelPage {
   channels: DeliveryChannel[];
   total: number;
@@ -114,6 +110,7 @@ export interface DeliveryChannelPage {
 /**
  * Delivery channels, optionally one page at a time.
  *
+ * Console users receive all channels; machine clients receive only their own.
  * Passing no options keeps the old behaviour — every channel — which the job
  * editor's channel picker relies on.
  */
@@ -446,13 +443,42 @@ export async function resumeParkedRun(
 // Additional CRUD operations for scheduler pages
 // ---------------------------------------------------------------------------
 
-export async function listJobs(): Promise<ScheduledJob[]> {
+export interface ScheduledJobPage {
+  jobs: ScheduledJob[];
+  total: number;
+}
+
+/**
+ * Scheduled jobs, optionally one page at a time.
+ *
+ * The endpoint is an MCP tool, so its body stays a bare array for the agents
+ * that call it; the count the console needs for pagination comes back in the
+ * `X-Total-Count` header. Passing no options returns every job.
+ */
+export async function listJobs(opts?: {
+  search?: string;
+  page?: number;
+  limit?: number;
+}): Promise<ScheduledJobPage> {
+  const query: Record<string, string | number> = {};
+  if (opts?.search) query.search = opts.search;
+  if (opts?.limit !== undefined) {
+    query.limit = opts.limit;
+    query.page = opts.page ?? 1;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({
+  const { data, error, response } = await (client as any).get({
     url: '/api/v1/scheduler/jobs',
+    query,
   });
   if (error) throw new Error(formatApiError(error));
-  return data as ScheduledJob[];
+  const jobs = data as ScheduledJob[];
+  // Absent when the caller asked for everything, and on any proxy that drops it;
+  // the page length is then the honest count.
+  const header = response?.headers?.get?.('X-Total-Count');
+  const total = header != null && header !== '' ? Number(header) : jobs.length;
+  return { jobs, total: Number.isFinite(total) ? total : jobs.length };
 }
 
 export async function getJob(jobId: number): Promise<ScheduledJob> {

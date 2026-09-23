@@ -1574,12 +1574,15 @@ async def list_shared_definitions(
     response: Response,
     current_user: User = Depends(require_auth_or_bearer_token),
     search: str | None = Query(None, description="Search by job name or prompt"),
+    subscribed: bool | None = Query(
+        None, description="Only definitions the caller has (or has not) already activated"
+    ),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SharedJobDefinition]:
     service = _get_scheduler_service(request)
     definitions, total = await service.list_available_definitions(
-        db, current_user.id, search=search, page=page, limit=limit
+        db, current_user.id, search=search, subscribed=subscribed, page=page, limit=limit
     )
     # Bare array for the same reason as scheduler_list_jobs above.
     response.headers["X-Total-Count"] = str(total)
