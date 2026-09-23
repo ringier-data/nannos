@@ -774,7 +774,7 @@ class SkillActivationService:
                 text(
                     "SELECT * FROM skill_activations "
                     "WHERE registry_id = :registry_id AND sub_agent_id = :sub_agent_id "
-                    "AND scope = :scope AND user_id = :user_id AND deleted_at IS NULL LIMIT 1"
+                    "AND scope = :scope AND user_id = :user_id LIMIT 1"
                 ),
                 {
                     "registry_id": registry_id,
@@ -788,7 +788,7 @@ class SkillActivationService:
                 text(
                     "SELECT * FROM skill_activations "
                     "WHERE registry_id = :registry_id AND sub_agent_id = :sub_agent_id "
-                    "AND scope = 'sub-agent' AND deleted_at IS NULL LIMIT 1"
+                    "AND scope = 'sub-agent' LIMIT 1"
                 ),
                 {"registry_id": registry_id, "sub_agent_id": sub_agent_id},
             )
@@ -797,7 +797,7 @@ class SkillActivationService:
                 text(
                     "SELECT * FROM skill_activations "
                     "WHERE registry_id = :registry_id AND sub_agent_id = :sub_agent_id "
-                    "AND scope = :scope AND deleted_at IS NULL LIMIT 1"
+                    "AND scope = :scope LIMIT 1"
                 ),
                 {"registry_id": registry_id, "sub_agent_id": sub_agent_id, "scope": scope},
             )
