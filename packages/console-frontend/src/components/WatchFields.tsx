@@ -107,6 +107,10 @@ export function WatchFields({
   const argsExprsKey = JSON.stringify(value.check_args_exprs);
   const hasArgExprs = Object.keys(value.check_args_exprs).length > 0;
   const staticArgsKey = JSON.stringify(value.check_args);
+  // prev is bound as on the run, to the stored last result — a cursor-style argument
+  // (`prev.next_page`) otherwise previews as if the job had never run.
+  // Memoised: a stored result can be tens of kilobytes, and this runs in the render body.
+  const prevKey = useMemo(() => JSON.stringify(storedResult ?? null), [storedResult]);
   useEffect(() => {
     if (!hasArgExprs) {
       setArgsPreview({});
@@ -114,7 +118,11 @@ export function WatchFields({
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      validateArgsExpr({ check_args_exprs: value.check_args_exprs, check_args: value.check_args })
+      validateArgsExpr({
+        check_args_exprs: value.check_args_exprs,
+        check_args: value.check_args,
+        prev: storedResult ?? null,
+      })
         .then((res) => {
           if (cancelled) return;
           setArgsPreview(
@@ -133,7 +141,7 @@ export function WatchFields({
     };
     // The keys stand in for their objects.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [argsExprsKey, hasArgExprs, staticArgsKey]);
+  }, [argsExprsKey, hasArgExprs, staticArgsKey, prevKey]);
 
   const selectedTool = mcpTools.find((t) => t.name === value.check_tool);
   const toolSchema = useMemo(() => parseToolSchema(selectedTool), [selectedTool]);
@@ -195,6 +203,7 @@ export function WatchFields({
         const dyn = await validateArgsExpr({
           check_args_exprs: value.check_args_exprs,
           check_args: callArgs,
+          prev: storedResult ?? null,
         });
         if (!dyn.valid) {
           setCheck({ loading: false, error: `Dynamic arguments failed: ${dyn.error ?? 'unresolvable'}` });
@@ -431,7 +440,9 @@ export function WatchFields({
                     Over <code>result</code> (the response), <code>now</code> (current time,
                     job timezone) and <code>prev</code> (the previous result). A boolean
                     gates directly; anything else triggers when non-empty — return the
-                    matching items, they become the evidence the run records.
+                    matching items: they are what the run records, what the notification
+                    is written from and what an agent is handed, instead of the whole
+                    response.
                   </p>
                 )}
               </div>
@@ -467,6 +478,7 @@ export function WatchFields({
 
               <ConditionTester
                 liveResult={testable}
+                prev={storedResult ?? null}
                 celExpr={value.cel_expr}
                 llmCondition={value.llm_condition}
               />
@@ -518,7 +530,7 @@ export function WatchFields({
                     id="notification_message"
                     rows={3}
                     value={value.notification_message}
-                    placeholder="Leave empty and a message is written from the check result."
+                    placeholder="Leave empty and a message is written from what the condition matched."
                     onChange={(e) => {
                       patch({ notification_message: e.target.value });
                     }}
@@ -532,7 +544,7 @@ export function WatchFields({
                   mcpTools={mcpTools}
                   instructionLabel="Instruction"
                   instructionPlaceholder="e.g. Summarize the failure and email it to the account owner…"
-                  instructionHint="Invoked with the check result as its input, plus this instruction. If empty, the agent is asked to take appropriate action based on the result."
+                  instructionHint="Invoked with what the condition matched (the whole check result when it returned a boolean or a single value), plus this instruction. If empty, the agent is asked to take appropriate action on it."
                   onLimitExceeded={onError}
                   fieldErrors={errors}
                 />
@@ -639,7 +651,7 @@ function WatchFieldsRead({
       ) : (
         <>
           <ReadValue label="Outcome">Sends a notification</ReadValue>
-          <ReadValue label="Message" empty="Written from the check result when it triggers">
+          <ReadValue label="Message" empty="Written from what the condition matched when it triggers">
             {value.notification_message || undefined}
           </ReadValue>
         </>
