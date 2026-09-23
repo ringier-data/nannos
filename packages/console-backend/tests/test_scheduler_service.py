@@ -535,6 +535,28 @@ class TestUpdateJobUnsetSentinel:
         assert fields["prompt"] is None
 
     @pytest.mark.asyncio
+    async def test_a_legacy_row_is_not_normalised_by_an_untouched_patch(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        # A pre-rule row (verbatim message and a stale prompt) is left alone by a request
+        # that touches none of the outcome fields: a subscriber's enabled toggle must stay
+        # a subscription-side edit, not become a definition write refused for a reader.
+        db = AsyncMock()
+        existing_job = make_job(
+            user_id=actor.id,
+            job_type=JobType.WATCH,
+            sub_agent_id=None,
+            prompt="Email the account owner",
+            notification_message="Sync failed",
+            effective_permission="read",
+        )
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+
+        await service.update_job(db=db, job_id=1, data=ScheduledJobUpdate(enabled=False), actor=actor)
+
+        mock_repo.update_definition.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_a_brief_stays_on_a_notify_only_watch_without_a_message(
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):

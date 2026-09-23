@@ -495,7 +495,7 @@ async def generate_job_draft(
         "timestamp(e.start.dateTime) > now && timestamp(e.start.dateTime) - now < duration('1h'))\", "
         '"llm_condition": "an attendee looks external to the company", "sub_agent_id": 3, '
         '"prompt": "Research the attendees and write a short report", '
-        '"delivery_channel_id": 2, "notification_message": "Upcoming meeting has external attendees"}'
+        '"delivery_channel_id": 2}'
     )
 
     # Resolve the model from the admin-managed fleet defaults rather than an env-pinned alias:

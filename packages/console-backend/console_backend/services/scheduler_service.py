@@ -709,12 +709,13 @@ class SchedulerService:
         # The notify-only rule (see `effective_prompt`), applied to what the definition
         # will hold after this edit — so a patch that only clears `sub_agent_id`, or only
         # sets a verbatim message, drops an instruction that would otherwise become the
-        # writer's brief on the next trigger.
-        if job.job_type == JobType.WATCH:
-            after = {
-                k: def_fields[k] if k in def_fields else getattr(job, k)
-                for k in ("sub_agent_id", "notification_message", "prompt")
-            }
+        # writer's brief on the next trigger. Only when the request touched one of the
+        # three: a legacy row that violates the rule is normalised by a genuine edit to
+        # it, not injected into a subscriber's enabled/delivery toggle — which would turn
+        # a subscription-side request into a definition write, refused for a reader.
+        outcome_keys = ("sub_agent_id", "notification_message", "prompt")
+        if job.job_type == JobType.WATCH and any(k in def_fields for k in outcome_keys):
+            after = {k: def_fields[k] if k in def_fields else getattr(job, k) for k in outcome_keys}
             wanted = effective_prompt(JobType.WATCH, **after)
             if wanted != after["prompt"]:
                 def_fields["prompt"] = wanted
