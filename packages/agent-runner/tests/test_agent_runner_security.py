@@ -682,7 +682,9 @@ class TestParkedOnAuthorization:
             "auth_requirement": {
                 "service": "",
                 "resource": "naonous_get_campaign",
-                "auth_methods": [{"method": "oauth2", "auth_url": "https://gw.example/begin"}],
+                "auth_methods": [
+                    {"method": "oauth2", "description": "Sign in", "auth_url": "https://gw.example/begin"}
+                ],
             },
         }
         task = self._task("notice-task-1")
@@ -703,13 +705,29 @@ class TestParkedOnAuthorization:
         )
 
         parked = next(i for i in items if i.get("scheduler_status") == "auth_required")
-        assert parked["auth_payload"] == ask
+        # Rebuilt through AuthPayload.client_payload, not forwarded: the same serializer
+        # that cannot leak a secret guards an agent's park.
+        assert parked["auth_payload"]["auth_requirement"]["resource"] == "naonous_get_campaign"
+        assert parked["auth_payload"]["auth_requirement"]["auth_methods"][0]["auth_url"] == "https://gw.example/begin"
         assert parked["parked_task_id"] == "notice-task-1"
         assert parked["reply_to"]["scheduled_job_run_id"] == 78
         assert parked["scheduled_job_name"] == "Cockpit monitor"
         # The prose fallback for a client without the card, link included.
         assert "https://gw.example/begin" in parked["agent_message"]
         assert responses[-1].state == TaskState.TASK_STATE_AUTH_REQUIRED
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_check_ask_is_a_failure_not_a_quiet_success(self, agent_runner):
+        # A reshaped ask must not fall through to "completed": the scheduler would read
+        # that as an older runner echoing prose and record the owner as told.
+        task = self._task("notice-task-2")
+        task.history = [
+            MagicMock(metadata={"scheduled_job_id": 10, "scheduled_job_run_id": 79, "auth_ask": {"auth_requirement": "x"}})
+        ]
+        items, responses = await self._run(agent_runner, task, [Part(text="prose")])
+        assert items[-1]["scheduler_status"] == "failed"
+        assert "no ask" in items[-1]["error_message"]
+        assert responses[-1].state == TaskState.TASK_STATE_FAILED
 
     @pytest.mark.asyncio
     async def test_an_agent_run_ignores_a_stray_check_ask(self, agent_runner):

@@ -1276,17 +1276,56 @@ class TestACheckNeedingAuthorizationParksTheRun:
         assert call["metadata"]["scheduled_job_name"] == "Test Job", "the card names the job that stopped"
         assert call["metadata"]["messageFormatting"] == "slack"
         assert "reply_to_message" not in call["metadata"], "a first ask threads under nothing"
-        # The prose fallback still carries a working link for a client without the card.
+        # The prose fallback still carries a working link for a client without the card,
+        # and says where to confirm — that surface has no button.
         assert "https://gw.example/begin" in call["parts"][0]["text"]
         assert "Test Job" in call["parts"][0]["text"]
+        assert "in the console" in call["parts"][0]["text"]
         assert call["push_config"] == {"url": "https://hooks.example/x", "token": "s"}
         assert call["timeout_read"] == NOTIFY_TIMEOUT_SECONDS, "a dead runner must not hold the park for minutes"
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
-        assert run["delivered"] is True
         # Still addressed to the CHECK: the notice task is never answered, the run is.
         assert run["parked_task_id"] == "watch-check:22"
         assert run["parked_payload"] == self.ASK
+        # Parked BEFORE the card went out, delivered raised after: a press the moment the
+        # card lands must find an AUTH_REQUIRED row, not a running one that 409s.
+        assert run["delivered"] is False
+        repo.mark_run_delivered.assert_awaited_once()
+        assert repo.mark_run_delivered.await_args[0][1] == 22
+
+    @pytest.mark.asyncio
+    async def test_the_park_is_written_before_the_card_is_sent(self):
+        repo, engine, evaluate = self._parked_engine(run_id=26)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        order: list[str] = []
+        repo.complete_run.side_effect = lambda *a, **k: order.append("park") or True
+
+        async def dispatch(**kwargs):
+            order.append("card")
+            return self._published_park(26)
+
+        with evaluate, patch("console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(side_effect=dispatch)):
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        assert order == ["park", "card"]
+
+    @pytest.mark.asyncio
+    async def test_the_card_reuses_the_token_the_dispatch_already_holds(self):
+        # One Keycloak round trip per park, not two — and a refresh blip cannot fail a
+        # delivery for a token that was already in hand.
+        repo, engine, evaluate = self._parked_engine(run_id=27)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        engine._token_service.get_access_token.return_value = "token-in-hand"
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value=self._published_park(27)),
+        ) as dispatch:
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        engine._token_service.get_access_token.assert_awaited_once()
+        assert dispatch.await_args[1]["access_token"] == "token-in-hand"
 
     @pytest.mark.asyncio
     async def test_an_older_runner_that_posts_prose_still_counts_as_told(self):
@@ -1305,7 +1344,7 @@ class TestACheckNeedingAuthorizationParksTheRun:
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["parked_task_id"] == "watch-check:24"
-        assert run["delivered"] is True
+        repo.mark_run_delivered.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_a_runner_that_fails_the_notice_leaves_the_run_parked_but_undelivered(self):
@@ -1322,6 +1361,7 @@ class TestACheckNeedingAuthorizationParksTheRun:
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["delivered"] is False
+        repo.mark_run_delivered.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_failed_notice_still_parks_the_run(self):
@@ -1340,6 +1380,7 @@ class TestACheckNeedingAuthorizationParksTheRun:
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["parked_task_id"] == "watch-check:23"
         assert run["delivered"] is False
+        repo.mark_run_delivered.assert_not_awaited()
 
     @staticmethod
     def _parked_run(run_id: int) -> ScheduledJobRun:

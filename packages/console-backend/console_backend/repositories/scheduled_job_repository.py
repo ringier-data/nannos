@@ -1587,6 +1587,26 @@ class ScheduledJobRepository(AuditedRepository):
         )
         return result.rowcount > 0
 
+    async def mark_run_delivered(self, db: AsyncSession, run_id: int) -> bool:
+        """Record that a PARKED run's ask reached the job's channel. Returns whether a row changed.
+
+        A check-tool park is written before its card is sent (``_park_on_check_ask``): the
+        card is answerable the moment it lands, so the run it answers must already exist as
+        parked. ``delivered`` is the one column that cannot be known until afterwards, and
+        it is the only one this touches. Scoped to ``auth_required`` so a late delivery
+        result can never flip the flag on a run that has since been answered and closed.
+        """
+        result = await db.execute(
+            text("""
+                UPDATE scheduled_job_runs
+                SET delivered = true
+                WHERE id = :run_id
+                  AND status = 'auth_required'
+            """),
+            {"run_id": run_id},
+        )
+        return result.rowcount > 0
+
     async def close_run_minimally(
         self,
         db: AsyncSession,
