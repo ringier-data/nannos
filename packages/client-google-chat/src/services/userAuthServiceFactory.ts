@@ -36,8 +36,11 @@ export function createUserAuthService(
       if (!config.consoleBackend) {
         throw new Error('USER_AUTH_MODE=broker requires CONSOLE_BACKEND_URL');
       }
+      // Sign-in links go to the browser, so they need the public URL.
+      logger.info(`Broker sign-in links point at ${config.consoleBackend.publicUrl}`);
       const broker = new BrokerClient({
         baseUrl: config.consoleBackend.url,
+        publicBaseUrl: config.consoleBackend.publicUrl,
         clientId: config.oidc.clientId,
         serviceAudience: config.consoleBackend.audience,
         getServiceCredentials: (audience) => oidcClient.getServiceCredentials(audience),

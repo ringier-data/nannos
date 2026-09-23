@@ -121,7 +121,9 @@ async def delete_broker_client(
     admin: User = Depends(require_admin),
 ) -> None:
     """Remove a broker client. Its pending sign-ins and user links go with it; the users'
-    vaulted offline tokens stay."""
+    vaulted offline tokens stay. Without its links the client can mint for nobody, so
+    every user who signed in through it must sign in again, also after it is registered
+    again. Switching it off (``enabled``) stops it and keeps the links."""
     deleted = await _get_repository(request).delete_client(db, admin, client_pk)
     if not deleted:
         raise HTTPException(

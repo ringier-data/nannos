@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, jest } from '@jest/globals';
 import { BrokerUserAuthService } from '../../src/services/brokerUserAuthService.js';
 import { CompositeUserAuthService } from '../../src/services/compositeUserAuthService.js';
-import { BrokerClient, BrokerSignInRequiredError } from '../../src/services/brokerClient.js';
+import { BrokerClient, BrokerError, BrokerSignInRequiredError } from '../../src/services/brokerClient.js';
 import type { IUserAuthService } from '../../src/services/userAuthService.js';
 import { Config } from '../../src/config/config.js';
 import type { Storage, UserAuthToken } from '../../src/storage/storage.js';
@@ -87,6 +87,22 @@ describe('BrokerUserAuthService (email)', () => {
     expect(await service.isUserAuthorized('ada@example.com')).toBe(false);
     expect(await service.getOrchestratorToken('ada@example.com')).toBeNull();
   });
+
+  test.each([
+    ['an audience this client may not have', new BrokerError('HTTP 403', 403)],
+    ['Keycloak down', new BrokerError('HTTP 502', 502)],
+    ['the broker unreachable', new TypeError('fetch failed')],
+  ])('%s is thrown, not answered with "sign in again", and keeps the sign-in', async (_case, failure) => {
+    await signIn();
+    broker.mint.mockImplementationOnce(async () => {
+      throw failure;
+    });
+
+    // null would make the caller ask for a sign-in, which cannot fix any of these.
+    await expect(service.getOrchestratorToken('ada@example.com')).rejects.toBe(failure);
+    expect(storage.rows.has('ada@example.com')).toBe(true);
+    expect(await service.isUserAuthorized('ada@example.com')).toBe(true);
+  });
 });
 
 describe('CompositeUserAuthService (email drain)', () => {
@@ -120,5 +136,19 @@ describe('CompositeUserAuthService (email drain)', () => {
     await service.completeOAuthFlow('old@example.com', 'https://x/cb?code=c', 'v', 's');
     expect(broker.completeOAuthFlow).toHaveBeenCalled();
     expect(local.completeOAuthFlow).not.toHaveBeenCalled();
+    // Signed in through the broker now, although the (fake) local row is still there.
+    expect(await service.getOrchestratorToken('old@example.com')).toBe('broker-orchestrator-token');
+  });
+
+  test('a sender the broker serves is not looked up again on every call', async () => {
+    const storage = new MemoryStorage();
+    const service = new CompositeUserAuthService(storage as unknown as Storage, fake('local'), fake('broker'));
+    storage.rows.set('ada@example.com', { email: 'ada@example.com', oidcSub: 's', authMode: 'broker', createdAt: 0, updatedAt: 0 });
+    const getToken = jest.spyOn(storage, 'getToken');
+
+    await service.isUserAuthorized('ada@example.com');
+    await service.getOrchestratorToken('ada@example.com');
+
+    expect(getToken).toHaveBeenCalledTimes(1);
   });
 });

@@ -160,7 +160,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'scheduled_job_subscription' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting' | 'voice_session';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'scheduled_job_subscription' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting' | 'voice_session' | 'broker_client';
 
 /**
  * AuditLog
@@ -378,6 +378,236 @@ export type BodyUploadFilesApiV1FilesUploadPost = {
      * Conversation Id
      */
     conversation_id?: string | null;
+};
+
+/**
+ * BrokerClient
+ *
+ * A registered broker client as the API returns it.
+ */
+export type BrokerClient = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Client Id
+     */
+    client_id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Redirect Uris
+     */
+    redirect_uris: Array<string>;
+    /**
+     * Audiences
+     */
+    audiences: Array<string>;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Created By
+     */
+    created_by: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * BrokerClientCreate
+ *
+ * Admin request body for registering a broker client.
+ */
+export type BrokerClientCreate = {
+    /**
+     * Client Id
+     *
+     * Keycloak client id; the `azp` of the client's own client-credentials token.
+     */
+    client_id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Redirect Uris
+     *
+     * Where the broker may send the browser back to. Exact match; the first host label may contain '*' for per-PR preview environments.
+     */
+    redirect_uris: Array<string>;
+    /**
+     * Audiences
+     *
+     * Audiences the client may have tokens minted for.
+     */
+    audiences: Array<string>;
+    /**
+     * Enabled
+     */
+    enabled?: boolean;
+};
+
+/**
+ * BrokerClientListResponse
+ */
+export type BrokerClientListResponse = {
+    /**
+     * Clients
+     */
+    clients: Array<BrokerClient>;
+};
+
+/**
+ * BrokerClientUpdate
+ *
+ * Admin request body for changing a broker client. Omitted fields are unchanged;
+ * ``description`` is the one field a null clears.
+ */
+export type BrokerClientUpdate = {
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Redirect Uris
+     */
+    redirect_uris?: Array<string> | null;
+    /**
+     * Audiences
+     */
+    audiences?: Array<string> | null;
+    /**
+     * Enabled
+     */
+    enabled?: boolean | null;
+};
+
+/**
+ * BrokerIdentity
+ *
+ * Who signed in, as ``/redeem`` returns it.
+ *
+ * The union of the claims any broker client reads today, captured from the ID token
+ * (or userinfo) at sign-in. A client that needs fresh values signs the user in again.
+ */
+export type BrokerIdentity = {
+    /**
+     * User Id
+     *
+     * The console user id.
+     */
+    user_id: string;
+    /**
+     * Sub
+     */
+    sub: string;
+    /**
+     * Email
+     */
+    email?: string | null;
+    /**
+     * Email Verified
+     */
+    email_verified?: boolean | null;
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Preferred Username
+     */
+    preferred_username?: string | null;
+    /**
+     * Given Name
+     */
+    given_name?: string | null;
+    /**
+     * Family Name
+     */
+    family_name?: string | null;
+    /**
+     * Groups
+     */
+    groups?: Array<string>;
+    /**
+     * Phone Number
+     */
+    phone_number?: string | null;
+    /**
+     * Phone Number Idp
+     */
+    phone_number_idp?: string | null;
+    /**
+     * Company Name
+     */
+    company_name?: string | null;
+};
+
+/**
+ * BrokerRedeemRequest
+ */
+export type BrokerRedeemRequest = {
+    /**
+     * Code
+     */
+    code: string;
+};
+
+/**
+ * BrokerTokenRequest
+ */
+export type BrokerTokenRequest = {
+    /**
+     * Sub
+     *
+     * The user's OIDC subject, from /redeem.
+     */
+    sub: string;
+    /**
+     * Audience
+     */
+    audience: string;
+};
+
+/**
+ * BrokerTokenResponse
+ */
+export type BrokerTokenResponse = {
+    /**
+     * Access Token
+     */
+    access_token: string;
+    /**
+     * Expires In
+     */
+    expires_in: number;
+    /**
+     * Token Type
+     */
+    token_type?: string;
 };
 
 /**
@@ -5626,6 +5856,16 @@ export type SkillDefinition = {
      * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
     scope?: _0Enum3 | null;
+    /**
+     * Visibility
+     *
+     * Registry visibility of a sub-agent scoped skill: 'public' lets every user discover and activate it elsewhere. None on write keeps the registry's value (private for a new entry).
+     */
+    visibility?: VisibilityEnum | null;
+    /**
+     * Write-only. Set by a sync that mirrors a skill it does not author (well-known); the registry then updates the row it wrote last time instead of creating a new one.
+     */
+    provenance?: SkillProvenance | null;
 };
 
 /**
@@ -5848,6 +6088,43 @@ export type SkillListResponse = {
      * Items
      */
     items?: Array<ConsoleBackendModelsSkillsRegistrySkillSummary>;
+};
+
+/**
+ * SkillProvenance
+ *
+ * Provenance a caller attaches to a sub-agent scoped skill it does not author itself.
+ *
+ * Write-only: `upsert_agent_skill` stores it in the `source_*` columns and uses
+ * (sub_agent_id, source_type, name) to find the row it wrote last time, so a re-sync
+ * updates that row instead of creating `slug-2`, `slug-3`, … A row with a non-'nannos'
+ * source type is read-only in the registry UI except for its visibility and sandbox flag.
+ */
+export type SkillProvenance = {
+    /**
+     * Source Type
+     *
+     * Only 'well-known' is written this way today
+     */
+    source_type: 'well-known';
+    /**
+     * Source Repo
+     *
+     * Where the tree is served from, e.g. the authority base URL
+     */
+    source_repo: string;
+    /**
+     * Source Ref
+     *
+     * The revision the row's content comes from
+     */
+    source_ref: string;
+    /**
+     * Source Path
+     *
+     * The SKILL.md URL inside the tree
+     */
+    source_path: string;
 };
 
 /**
@@ -8445,6 +8722,7 @@ export type WellKnownSkillInfo = {
      * Digest
      */
     digest: string;
+    visibility?: VisibilityEnum;
 };
 
 /**
@@ -8947,6 +9225,237 @@ export type StopImpersonationApiV1AuthImpersonateStopPostResponses = {
 };
 
 export type StopImpersonationApiV1AuthImpersonateStopPostResponse = StopImpersonationApiV1AuthImpersonateStopPostResponses[keyof StopImpersonationApiV1AuthImpersonateStopPostResponses];
+
+export type AuthorizeApiV1AuthBrokerAuthorizeGetData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Client Id
+         */
+        client_id: string;
+        /**
+         * Redirect Uri
+         */
+        redirect_uri: string;
+        /**
+         * State
+         */
+        state?: string | null;
+    };
+    url: '/api/v1/auth/broker/authorize';
+};
+
+export type AuthorizeApiV1AuthBrokerAuthorizeGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type AuthorizeApiV1AuthBrokerAuthorizeGetError = AuthorizeApiV1AuthBrokerAuthorizeGetErrors[keyof AuthorizeApiV1AuthBrokerAuthorizeGetErrors];
+
+export type AuthorizeApiV1AuthBrokerAuthorizeGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type BrokerCallbackApiV1AuthBrokerCallbackGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/broker/callback';
+};
+
+export type BrokerCallbackApiV1AuthBrokerCallbackGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type RedeemApiV1AuthBrokerRedeemPostData = {
+    body: BrokerRedeemRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/broker/redeem';
+};
+
+export type RedeemApiV1AuthBrokerRedeemPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RedeemApiV1AuthBrokerRedeemPostError = RedeemApiV1AuthBrokerRedeemPostErrors[keyof RedeemApiV1AuthBrokerRedeemPostErrors];
+
+export type RedeemApiV1AuthBrokerRedeemPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: BrokerIdentity;
+};
+
+export type RedeemApiV1AuthBrokerRedeemPostResponse = RedeemApiV1AuthBrokerRedeemPostResponses[keyof RedeemApiV1AuthBrokerRedeemPostResponses];
+
+export type MintTokenApiV1AuthBrokerTokenPostData = {
+    body: BrokerTokenRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/broker/token';
+};
+
+export type MintTokenApiV1AuthBrokerTokenPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type MintTokenApiV1AuthBrokerTokenPostError = MintTokenApiV1AuthBrokerTokenPostErrors[keyof MintTokenApiV1AuthBrokerTokenPostErrors];
+
+export type MintTokenApiV1AuthBrokerTokenPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: BrokerTokenResponse;
+};
+
+export type MintTokenApiV1AuthBrokerTokenPostResponse = MintTokenApiV1AuthBrokerTokenPostResponses[keyof MintTokenApiV1AuthBrokerTokenPostResponses];
+
+export type ListBrokerClientsApiV1AdminBrokerClientsGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/broker-clients';
+};
+
+export type ListBrokerClientsApiV1AdminBrokerClientsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: BrokerClientListResponse;
+};
+
+export type ListBrokerClientsApiV1AdminBrokerClientsGetResponse = ListBrokerClientsApiV1AdminBrokerClientsGetResponses[keyof ListBrokerClientsApiV1AdminBrokerClientsGetResponses];
+
+export type CreateBrokerClientApiV1AdminBrokerClientsPostData = {
+    body: BrokerClientCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/broker-clients';
+};
+
+export type CreateBrokerClientApiV1AdminBrokerClientsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateBrokerClientApiV1AdminBrokerClientsPostError = CreateBrokerClientApiV1AdminBrokerClientsPostErrors[keyof CreateBrokerClientApiV1AdminBrokerClientsPostErrors];
+
+export type CreateBrokerClientApiV1AdminBrokerClientsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: BrokerClient;
+};
+
+export type CreateBrokerClientApiV1AdminBrokerClientsPostResponse = CreateBrokerClientApiV1AdminBrokerClientsPostResponses[keyof CreateBrokerClientApiV1AdminBrokerClientsPostResponses];
+
+export type DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Client Pk
+         */
+        client_pk: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/broker-clients/{client_pk}';
+};
+
+export type DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteError = DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteErrors[keyof DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteErrors];
+
+export type DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteResponse = DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteResponses[keyof DeleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteResponses];
+
+export type GetBrokerClientApiV1AdminBrokerClientsClientPkGetData = {
+    body?: never;
+    path: {
+        /**
+         * Client Pk
+         */
+        client_pk: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/broker-clients/{client_pk}';
+};
+
+export type GetBrokerClientApiV1AdminBrokerClientsClientPkGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetBrokerClientApiV1AdminBrokerClientsClientPkGetError = GetBrokerClientApiV1AdminBrokerClientsClientPkGetErrors[keyof GetBrokerClientApiV1AdminBrokerClientsClientPkGetErrors];
+
+export type GetBrokerClientApiV1AdminBrokerClientsClientPkGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: BrokerClient;
+};
+
+export type GetBrokerClientApiV1AdminBrokerClientsClientPkGetResponse = GetBrokerClientApiV1AdminBrokerClientsClientPkGetResponses[keyof GetBrokerClientApiV1AdminBrokerClientsClientPkGetResponses];
+
+export type UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchData = {
+    body: BrokerClientUpdate;
+    path: {
+        /**
+         * Client Pk
+         */
+        client_pk: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/broker-clients/{client_pk}';
+};
+
+export type UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchError = UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchErrors[keyof UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchErrors];
+
+export type UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: BrokerClient;
+};
+
+export type UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchResponse = UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchResponses[keyof UpdateBrokerClientApiV1AdminBrokerClientsClientPkPatchResponses];
 
 export type GetConversationsByUserApiV1ConversationsGetData = {
     body?: never;

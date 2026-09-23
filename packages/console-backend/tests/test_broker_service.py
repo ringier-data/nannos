@@ -280,6 +280,16 @@ class TestClientCache:
         broker.invalidate_cache()
         assert not (await broker.resolve_client(pg_session, "slack-client")).enabled
 
+    @pytest.mark.asyncio
+    async def test_unknown_ids_are_not_cached(self, broker, pg_session):
+        # /authorize takes client ids unauthenticated: caching misses would let random
+        # ids grow the cache without bound.
+        for n in range(3):
+            assert await broker.resolve_client(pg_session, f"no-such-client-{n}") is None
+        assert set(broker._client_cache) == set()
+        await broker.resolve_client(pg_session, "slack-client")
+        assert set(broker._client_cache) == {"slack-client"}
+
 
 class TestClientRepository:
     @pytest.mark.asyncio

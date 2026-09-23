@@ -428,7 +428,9 @@ class Config(BaseModel):
     session_ttl_seconds: int = Field(default=2592000)  # 30 days
     cookie_name: str = Field(default="a2a-chatui")
     # Public URL of the console. Its /api is this backend (the ingress in deployments, the
-    # Vite proxy locally), so links to the console's own login are built from it.
+    # Vite proxy locally), so links to the console's own login are built from it. The
+    # default suits local development only; the API server refuses to start without
+    # FRONTEND_URL anywhere else (app.lifespan).
     frontend_url: str = Field(
         default_factory=lambda: os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
     )

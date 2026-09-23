@@ -30,7 +30,8 @@ from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
 
 from console_backend.services.watch_evaluator import WatchOutcome
 from console_backend.services.scheduler_engine import SchedulerEngine
-from console_backend.services.scheduler_token_service import SchedulerTokenService
+from console_backend.services.scheduler_service import _AWAITING_SIGN_IN_REASON
+from console_backend.services.scheduler_token_service import NoOfflineTokenError, SchedulerTokenService
 from console_backend.utils.a2a_dispatch import AgentUnreachable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -514,6 +515,30 @@ class TestDispatchJobNoToken:
         assert "offline token" in (call_kwargs["paused_reason"] or "").lower() or "No offline token" in (
             call_kwargs["paused_reason"] or ""
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("trigger", [RunTrigger.SCHEDULED, RunTrigger.RETRY])
+    async def test_a_subscriber_with_no_vaulted_token_is_held_until_sign_in(self, trigger):
+        """No retry or failure count produces a token. The subscription is held with the
+        group default's reason, so the subscriber's next sign-in switches it on."""
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 1
+        repo.complete_job = AsyncMock(return_value=(False, _AWAITING_SIGN_IN_REASON))
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.side_effect = NoOfflineTokenError("No offline token stored for user u")
+        engine = _make_engine(repo=repo, token_service=token_service)
+        job = make_job()
+
+        await engine._dispatch_job(job, trigger=trigger)
+
+        repo.disable_subscription.assert_awaited_once()
+        assert repo.disable_subscription.await_args.args[1:] == (job.id, _AWAITING_SIGN_IN_REASON)
+        job_kwargs = repo.complete_job.await_args.kwargs
+        assert job_kwargs["paused_reason"] == _AWAITING_SIGN_IN_REASON
+        # Not a failure of the job: consecutive_failures must not move.
+        assert job_kwargs["status"] == JobRunStatus.INTERRUPTED
+        assert job_kwargs["retry_at"] is None
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.FAILED
 
 
 class TestFinalizeJobState:

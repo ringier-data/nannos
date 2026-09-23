@@ -40,6 +40,23 @@ describe('BrokerClient', () => {
     expect(url.searchParams.get('state')).toBe('gchat-auth-1-U1');
   });
 
+  test('the authorize URL is built from the public URL when there is one', async () => {
+    const publicBroker = new BrokerClient({
+      baseUrl: 'http://console:8080',
+      publicBaseUrl: 'https://console.example/',
+      clientId: 'google-chat-client',
+      serviceAudience: 'agent-console',
+      getServiceCredentials: credentials,
+    });
+    const url = new URL(publicBroker.authorizeUrl('https://gchat.example/api/v1/oauth/callback', 's1'));
+    expect(url.origin + url.pathname).toBe('https://console.example/api/v1/auth/broker/authorize');
+
+    // The client's own calls stay on the in-cluster URL.
+    fetchMock.mockImplementation(async () => response(200, { user_id: 'u1', sub: 'sub-1', groups: [] }));
+    await publicBroker.redeem('code-1');
+    expect(calls()[0].url).toBe('http://console:8080/api/v1/auth/broker/redeem');
+  });
+
   test('redeems a code as the client itself', async () => {
     fetchMock.mockImplementation(async () => response(200, { user_id: 'u1', sub: 'sub-1', groups: [] }));
 

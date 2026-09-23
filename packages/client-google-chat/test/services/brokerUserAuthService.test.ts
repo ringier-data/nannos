@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, jest } from '@jest/globals';
 import { BrokerUserAuthService } from '../../src/services/brokerUserAuthService.js';
-import { BrokerClient, BrokerSignInRequiredError } from '../../src/services/brokerClient.js';
+import { BrokerClient, BrokerError, BrokerSignInRequiredError } from '../../src/services/brokerClient.js';
 import { Config } from '../../src/config/config.js';
 import type { IOAuthStateStore, IUserAuthStorage, UserAuthToken } from '../../src/storage/types.js';
 
@@ -121,13 +121,18 @@ describe('BrokerUserAuthService', () => {
     expect(await service.isUserAuthorized('U1', 'P1')).toBe(false);
   });
 
-  test('any other broker failure keeps the sign-in', async () => {
+  test.each([
+    ['an audience this client may not have', new BrokerError('HTTP 403', 403)],
+    ['Keycloak down', new BrokerError('HTTP 502', 502)],
+    ['the broker unreachable', new TypeError('fetch failed')],
+  ])('%s is thrown, not answered with "sign in again", and keeps the sign-in', async (_case, failure) => {
     await signIn();
     broker.mint.mockImplementationOnce(async () => {
-      throw new Error('network down');
+      throw failure;
     });
 
-    expect(await service.getOrchestratorToken('U1', 'P1')).toBeNull();
+    // null would make the caller ask for a sign-in, which cannot fix any of these.
+    await expect(service.getOrchestratorToken('U1', 'P1')).rejects.toBe(failure);
     expect(storage.deleteToken).not.toHaveBeenCalled();
     expect(await service.isUserAuthorized('U1', 'P1')).toBe(true);
   });
@@ -140,5 +145,28 @@ describe('BrokerUserAuthService', () => {
 
     expect(await service.getOrchestratorToken('U1', 'P1')).toBeNull();
     expect(broker.mint).toHaveBeenCalledTimes(1);
+  });
+
+  test('the sign-in state is stored before the link is handed out', async () => {
+    let persist!: () => void;
+    const set = jest.fn(() => new Promise<void>((resolve) => (persist = resolve)));
+    const withSlowStore = new BrokerUserAuthService(
+      storage as unknown as IUserAuthStorage,
+      broker as unknown as BrokerClient,
+      config,
+      { set } as unknown as IOAuthStateStore
+    );
+
+    let stored = false;
+    const storing = withSlowStore.storeAuthState('s1', 'U1', 'P1').then(() => (stored = true));
+    await Promise.resolve();
+    expect(stored).toBe(false);
+    persist();
+    await storing;
+    expect(stored).toBe(true);
+
+    // A failed write fails the call instead of becoming an unhandled rejection.
+    set.mockImplementationOnce(() => Promise.reject(new Error('db down')));
+    await expect(withSlowStore.storeAuthState('s2', 'U1', 'P1')).rejects.toThrow('db down');
   });
 });

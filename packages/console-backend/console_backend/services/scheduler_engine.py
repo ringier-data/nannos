@@ -40,7 +40,8 @@ from ..models.scheduled_job import (
 )
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
-from ..services.scheduler_token_service import SchedulerTokenService
+from ..services.scheduler_service import _AWAITING_SIGN_IN_REASON
+from ..services.scheduler_token_service import NoOfflineTokenError, SchedulerTokenService
 from ..services.socket_notification_manager import SocketNotificationManager
 from ..utils.a2a_dispatch import AgentUnreachable, dispatch_streaming
 
@@ -479,6 +480,9 @@ class SchedulerEngine:
             async with self._db_session_factory() as db:
                 try:
                     access_token = await self._token_service.get_access_token(db, job.user_id)
+                except NoOfflineTokenError as e:
+                    await self._hold_until_sign_in(run_id, job, e, RunTrigger.RESUMED)
+                    return run_id
                 except ValueError as e:
                     await self._finalize(
                         run_id=run_id,
@@ -632,6 +636,9 @@ class SchedulerEngine:
             async with self._db_session_factory() as db:
                 try:
                     access_token = await self._token_service.get_access_token(db, job.user_id)
+                except NoOfflineTokenError as e:
+                    await self._hold_until_sign_in(run_id, job, e, trigger)
+                    return
                 except ValueError as e:
                     # No stored offline token — auto-pause the job
                     await self._finalize(
@@ -797,6 +804,26 @@ class SchedulerEngine:
             counts_as_failure=False,
         )
         return False
+
+    async def _hold_until_sign_in(self, run_id: int, job: ScheduledJob, error: Exception, trigger: RunTrigger) -> None:
+        """Finalise a run that found no vaulted offline token for its subscriber.
+
+        No retry and no failure count can produce a token; only a sign-in stores one. So
+        the subscription is switched off with the reason a group default uses for a
+        member who has not signed in (ADR-0011), and the subscriber's next sign-in
+        switches it on (``release_sign_in_holds``). As for an agent the subscriber can no
+        longer reach: a durable notice, no failure count.
+        """
+        await self._finalize(
+            run_id=run_id,
+            job=job,
+            status=JobRunStatus.FAILED,
+            error_message=str(error),
+            delivered=False,
+            paused_reason=_AWAITING_SIGN_IN_REASON,
+            trigger=trigger,
+            counts_as_failure=False,
+        )
 
     async def _build_message_args(
         self,

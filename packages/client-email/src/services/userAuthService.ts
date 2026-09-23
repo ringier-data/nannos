@@ -14,7 +14,11 @@ import { Storage } from '../storage/storage.js';
 export interface IUserAuthService {
   /** Whether the user can be served without signing in again. */
   isUserAuthorized(email: string): Promise<boolean>;
-  /** An access token for *audience*, or null when the user must sign in again. */
+  /**
+   * An access token for *audience*, or null when the user must sign in again. Throws
+   * when the token cannot be had for a reason a new sign-in does not fix (e.g. the
+   * broker is down); callers then answer "try again later", not "please sign in".
+   */
   getTokenForAudience(email: string, audience: string): Promise<string | null>;
   /** `getTokenForAudience` for the configured orchestrator audience. */
   getOrchestratorToken(email: string): Promise<string | null>;

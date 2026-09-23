@@ -10,6 +10,13 @@ import type { IUserAuthService } from './userAuthService.js';
  * refresh token any more, the factory can return the broker implementation alone.
  */
 export class CompositeUserAuthService implements IUserAuthService {
+  /**
+   * Users the broker serves (key: `${userId}:${projectId}`). A user never goes back to the
+   * local login, because every sign-in here is the broker's. So their row is not read
+   * again just to pick the implementation, which then reads it once more.
+   */
+  private readonly brokerUsers = new Set<string>();
+
   constructor(
     private readonly storage: IUserAuthStorage,
     private readonly local: IUserAuthService,
@@ -17,8 +24,16 @@ export class CompositeUserAuthService implements IUserAuthService {
   ) {}
 
   private async forUser(userId: string, projectId: string): Promise<IUserAuthService> {
+    const key = `${userId}:${projectId}`;
+    if (this.brokerUsers.has(key)) {
+      return this.broker;
+    }
     const row = await this.storage.getToken(userId, projectId);
-    return row && row.authMode !== 'broker' && row.refreshToken ? this.local : this.broker;
+    if (row && row.authMode !== 'broker' && row.refreshToken) {
+      return this.local;
+    }
+    this.brokerUsers.add(key);
+    return this.broker;
   }
 
   async isUserAuthorized(userId: string, projectId: string): Promise<boolean> {
@@ -39,14 +54,16 @@ export class CompositeUserAuthService implements IUserAuthService {
 
   // Signing in is always the broker's.
 
-  completeOAuthFlow(
+  async completeOAuthFlow(
     userId: string,
     projectId: string,
     callbackUrl: string,
     codeVerifier: string,
     state: string
   ): Promise<UserAuthToken> {
-    return this.broker.completeOAuthFlow(userId, projectId, callbackUrl, codeVerifier, state);
+    const row = await this.broker.completeOAuthFlow(userId, projectId, callbackUrl, codeVerifier, state);
+    this.brokerUsers.add(`${userId}:${projectId}`);
+    return row;
   }
 
   getAuthorizationUrl(state: string, projectId: string, codeVerifier: string): Promise<string> {

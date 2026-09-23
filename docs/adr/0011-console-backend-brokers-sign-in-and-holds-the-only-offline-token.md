@@ -1,7 +1,7 @@
 ---
 status: proposed (2026-09-23); implemented in console-backend, the three chat clients, the
-  cockpit BFF, the Keycloak provisioning and gitops, pending review. Every client defaults
-  to its old sign-in until its flag is flipped.
+  cockpit BFF, the Keycloak provisioning and gitops, pending review. Every chat client
+  defaults to its old sign-in until its flag is flipped; the cockpit BFF uses only the broker.
 ---
 
 # console-backend brokers sign-in and holds the only offline token
@@ -24,32 +24,36 @@ one standing consent.
 ## Decision
 
 1. **console-backend is a token broker.** A registered client sends the user's browser to
-   `GET /api/v1/auth/broker/authorize`. console-backend runs the ordinary console sign-in
-   as `agent-console` (same claims, same user upsert, same vaulting), then sends the browser
-   back to the client's registered callback with a one-time code and the client's own
-   `state`. The client redeems the code (`POST /redeem`) for who signed in, and from then on
-   asks `POST /token` for an access token for a given audience; the broker refreshes the
-   vaulted token and exchanges it (RFC 8693). Signing in anywhere now makes a user
-   scheduler-ready, and there is one offline token per user.
+   `GET /api/v1/auth/broker/authorize` on the console's public URL (the browser opens it;
+   the client's own calls may use an in-cluster URL). console-backend runs the ordinary
+   console sign-in as `agent-console` (same claims, same user upsert, same vaulting), then
+   sends the browser back to the client's registered callback with a one-time code and the
+   client's own `state`. The client redeems the code (`POST /redeem`) for who signed in, and
+   from then on asks `POST /token` for an access token for a given audience; the broker
+   refreshes the vaulted token and exchanges it (RFC 8693). Signing in anywhere now makes a
+   user scheduler-ready, and there is one offline token per user.
 
 2. **A client reaches only its own users, calling as itself.** `/redeem` and `/token`
    accept only the client's own client-credentials token (a service account, addressed to
-   `agent-console`); a user token issued to the same client is refused. Redeeming records
+   `agent-console`); a user token issued to the same client is refused. What tells them
+   apart is structural, not a name: Keycloak opens no user session for client credentials,
+   so that token has no `sid`, and every user token has one. Redeeming records
    the user as signed in through that client (`broker_client_users`), and `/token` mints
    only for those users and only for the audiences the client is registered for. A leaked
    client secret therefore reaches the people who signed in through that client, not
    everyone with a vaulted token. Every "cannot serve this user" answer is a 409, whose one
-   remedy is to sign the user in again.
+   remedy is to sign the user in again. Any other failure (a 403 audience, a 502 Keycloak)
+   is not a reason to sign in: the client answers "try again later" and keeps the sign-in.
 
 3. **Clients are admin data.** `broker_clients` (client id, exact redirect URIs with an
    optional `*` in the first host label for preview hosts, audiences, enabled) is managed
    through `/api/v1/admin/broker-clients` and audited like delivery channels.
 
-4. **Old sign-ins drain.** Each client selects its mode with a flag (`USER_AUTH_MODE`,
-   `NANNOS_AUTH_MODE` for the cockpit). In broker mode, new sign-ins go through the broker,
-   and a row signed in the old way keeps being served from its refresh token until it lapses
-   or the user signs in again. Nobody is forced to sign in again; a drained user becomes
-   scheduler-ready at their next sign-in.
+4. **Old sign-ins drain.** Each chat client selects its mode with `USER_AUTH_MODE`. In
+   broker mode, new sign-ins go through the broker, and a row signed in the old way keeps
+   being served from its refresh token until it lapses or the user signs in again. Nobody is
+   forced to sign in again; a drained user becomes scheduler-ready at their next sign-in.
+   The cockpit BFF has no old mode: its users sign in once more, through the broker.
 
 5. **An embedded host is bound by `azp` or, for a broker-minted token, `aud`.** The broker
    mints the cockpit's tokens with audience `cockpit-embed` and its own `azp`
@@ -65,8 +69,10 @@ one standing consent.
    create, subscribe, copy, resume, switch on — is refused with a 400 carrying the console
    sign-in link when they have no vaulted token; the task-scheduler agent relays it. A group
    default creates such a member's subscription switched off, with a fixed reason and a
-   console notification carrying the link; their first sign-in switches it on. The chat
-   activation notice is skipped for them: it is sent under the subscriber's own token.
+   console notification carrying the link; their first sign-in switches it on. A run that
+   finds no vaulted token holds its subscription the same way, instead of counting failures
+   until it pauses. The chat activation notice is skipped for them: it is sent under the
+   subscriber's own token.
 
 ## Considered options
 
@@ -82,8 +88,10 @@ one standing consent.
 
 ## Consequences
 
-- The cockpit BFF no longer holds a refresh token in broker mode (supersedes that part of
-  ADR-0002 Amendment 5); it keeps the user's Nannos subject and has tokens minted.
+- The cockpit BFF no longer holds a refresh token (supersedes that part of ADR-0002
+  Amendment 5); it keeps the user's Nannos subject and has tokens minted.
+- Deleting a broker client removes its user links, so all its users must sign in again,
+  also if it is registered again. Switching it off keeps them.
 - Keycloak: the broker callback is a redirect URI of `agent-console`; `email-client` gains
   the `agent-console` audience; `cockpit-embed` is a new service-only client whose audience
   `agent-console` maps, provisioned once its secret exists.

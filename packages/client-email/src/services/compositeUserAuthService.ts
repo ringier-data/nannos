@@ -10,6 +10,13 @@ import type { IUserAuthService } from './userAuthService.js';
  * refresh token any more, the factory can return the broker implementation alone.
  */
 export class CompositeUserAuthService implements IUserAuthService {
+  /**
+   * Senders the broker serves. A sender never goes back to the local login, because every
+   * sign-in here is the broker's. So their row is not read again just to pick the
+   * implementation, which then reads it once more.
+   */
+  private readonly brokerUsers = new Set<string>();
+
   constructor(
     private readonly storage: Pick<Storage, 'getToken'>,
     private readonly local: IUserAuthService,
@@ -17,8 +24,15 @@ export class CompositeUserAuthService implements IUserAuthService {
   ) {}
 
   private async forUser(email: string): Promise<IUserAuthService> {
+    if (this.brokerUsers.has(email)) {
+      return this.broker;
+    }
     const row = await this.storage.getToken(email);
-    return row && row.authMode !== 'broker' && row.refreshToken ? this.local : this.broker;
+    if (row && row.authMode !== 'broker' && row.refreshToken) {
+      return this.local;
+    }
+    this.brokerUsers.add(email);
+    return this.broker;
   }
 
   async isUserAuthorized(email: string): Promise<boolean> {
@@ -35,8 +49,9 @@ export class CompositeUserAuthService implements IUserAuthService {
 
   // Signing in is always the broker's.
 
-  completeOAuthFlow(email: string, callbackUrl: string, codeVerifier: string, state: string): Promise<void> {
-    return this.broker.completeOAuthFlow(email, callbackUrl, codeVerifier, state);
+  async completeOAuthFlow(email: string, callbackUrl: string, codeVerifier: string, state: string): Promise<void> {
+    await this.broker.completeOAuthFlow(email, callbackUrl, codeVerifier, state);
+    this.brokerUsers.add(email);
   }
 
   getAuthorizationUrl(state: string, codeVerifier: string): Promise<string> {

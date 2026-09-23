@@ -63,6 +63,11 @@ export interface Config {
   readonly consoleBackend?: {
     url: string;
     audience: string;
+    /**
+     * The console's public URL (CONSOLE_FRONTEND_URL), for links a browser opens, such as
+     * the broker sign-in. `url` may be in-cluster only. Unset: the same as `url`.
+     */
+    publicUrl: string;
   };
   readonly userAuthMode: UserAuthMode;
   readonly localSqs: {
@@ -211,6 +216,7 @@ export async function getConfigFromEnv(): Promise<Config> {
       ? {
           url: process.env.CONSOLE_BACKEND_URL,
           audience: process.env.OIDC_CONSOLE_BACKEND_AUDIENCE || 'agent-console',
+          publicUrl: process.env.CONSOLE_FRONTEND_URL || process.env.CONSOLE_BACKEND_URL,
         }
       : undefined,
     userAuthMode,

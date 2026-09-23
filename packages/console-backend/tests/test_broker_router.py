@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from ringier_a2a_sdk.auth import JWTValidationError
 from sqlalchemy import text
 
+import console_backend.dependencies as dependencies
 import console_backend.routers.broker_router as router
 from console_backend.config import config
 from console_backend.controllers.broker_controller import BrokerController
@@ -68,7 +69,9 @@ class TestRequireBrokerClient:
     def _validator(self, monkeypatch, claims=None, error=None) -> None:
         validator = MagicMock()
         validator.validate = AsyncMock(return_value=claims, side_effect=error)
-        monkeypatch.setattr(router, "get_jwt_validator", MagicMock(return_value=validator))
+        # The router validates through get_token_claims_from_request, which looks the
+        # validator up in dependencies.
+        monkeypatch.setattr(dependencies, "get_jwt_validator", MagicMock(return_value=validator))
 
     @pytest.mark.asyncio
     async def test_the_client_calling_as_itself_is_accepted(self, monkeypatch):
@@ -95,7 +98,11 @@ class TestRequireBrokerClient:
         "claims",
         [
             # A user's access token issued to the same client: it must not mint for others.
-            _service_account_claims(preferred_username="some.person"),
+            _service_account_claims(preferred_username="some.person", sid="user-session"),
+            # The same, from a user whose IdP username copies the service account's.
+            _service_account_claims(sid="user-session"),
+            # Another client's service account presenting this client's azp.
+            _service_account_claims(preferred_username="service-account-email-client"),
             # A service token meant for another audience.
             _service_account_claims(aud=["orchestrator"]),
             _service_account_claims(aud=None),

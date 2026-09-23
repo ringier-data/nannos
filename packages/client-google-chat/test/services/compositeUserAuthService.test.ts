@@ -20,13 +20,14 @@ describe('CompositeUserAuthService (drain)', () => {
   let local: ReturnType<typeof fakeService>;
   let broker: ReturnType<typeof fakeService>;
   let service: CompositeUserAuthService;
+  let getToken: jest.Mock<() => Promise<UserAuthToken | null>>;
 
   beforeEach(() => {
     row = null;
     local = fakeService('local');
     broker = fakeService('broker');
-    const storage = { getToken: jest.fn(async () => row) } as unknown as IUserAuthStorage;
-    service = new CompositeUserAuthService(storage, local, broker);
+    getToken = jest.fn(async () => row);
+    service = new CompositeUserAuthService({ getToken } as unknown as IUserAuthStorage, local, broker);
   });
 
   test('a user who signed in the old way keeps being served locally', async () => {
@@ -60,5 +61,26 @@ describe('CompositeUserAuthService (drain)', () => {
     expect(broker.storeAuthState).toHaveBeenCalled();
     expect(broker.completeOAuthFlow).toHaveBeenCalled();
     expect(local.completeOAuthFlow).not.toHaveBeenCalled();
+  });
+
+  test('a user the broker serves is not looked up again on every call', async () => {
+    row = { userId: 'U1', projectId: 'P1', oidcSub: 's', authMode: 'broker', createdAt: 0, updatedAt: 0 };
+
+    await service.isUserAuthorized('U1', 'P1');
+    await service.getOrchestratorToken('U1', 'P1');
+    await service.getTokenForAudience('U1', 'P1', 'agent-console');
+
+    expect(getToken).toHaveBeenCalledTimes(1);
+    expect(broker.getOrchestratorToken).toHaveBeenCalledTimes(1);
+  });
+
+  test('a local user who signs in again is served by the broker from then on', async () => {
+    row = { userId: 'U1', projectId: 'P1', refreshToken: 'rt', authMode: 'local', createdAt: 0, updatedAt: 0 };
+    expect(await service.getOrchestratorToken('U1', 'P1')).toBe('local-orchestrator-token');
+
+    await service.completeOAuthFlow('U1', 'P1', 'https://x/cb?code=c', 'v', 's');
+
+    expect(await service.getOrchestratorToken('U1', 'P1')).toBe('broker-orchestrator-token');
+    expect(getToken).toHaveBeenCalledTimes(1);
   });
 });

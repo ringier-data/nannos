@@ -78,10 +78,12 @@ _ACCESS_REVOKED_REASON = "Access to this shared job was revoked"
 #: different stories for the person reading the pause reason.
 _ELAPSED_ONCE_ON_SUBSCRIBE = "This one-time job already ran before you subscribed"
 _ELAPSED_ONCE_ON_INHERIT = "This one-time job had already run when this schedule took effect"
-#: Why a group default's subscription is off for a member who has never signed in to
-#: Nannos: every run uses the subscriber's vaulted offline token, which only a sign-in
-#: stores. ``release_sign_in_holds`` switches these on at that sign-in and finds them by
-#: this exact text, so the wording is load-bearing.
+#: Why a subscription is off until its subscriber signs in to Nannos: every run uses the
+#: subscriber's vaulted offline token, which only a sign-in stores. A group default holds
+#: a member's new subscription with it, and the engine holds a subscription whose run
+#: found no token. ``release_sign_in_holds`` switches these on at that sign-in and finds
+#: them by this exact text, as ``_ACCESS_REVOKED_REASON`` is found. The wording is
+#: load-bearing: rows already held keep the old text if it changes.
 _AWAITING_SIGN_IN_REASON = "Waiting for your first sign-in to Nannos, so it can run under your account"
 
 
@@ -1134,7 +1136,7 @@ class SchedulerService:
         return True
 
     async def release_sign_in_holds(self, db: AsyncSession, user: User) -> int:
-        """Switch on the subscriptions held back until *user*'s first sign-in.
+        """Switch on the subscriptions held back until *user*'s sign-in.
 
         Called by the sign-in right after it vaulted the user's offline token (console
         login and token broker alike). Each is resumed as ``resume_job`` would, computing
@@ -1142,9 +1144,7 @@ class SchedulerService:
         off with the reason that says so. Returns how many were switched on.
         """
         released = 0
-        for job in await self.repo.list_jobs(db, user.id):
-            if job.enabled or job.paused_reason != _AWAITING_SIGN_IN_REASON:
-                continue
+        for job in await self.repo.list_paused_jobs(db, user.id, _AWAITING_SIGN_IN_REASON):
             now = datetime.now(timezone.utc)
             if job.schedule_kind == ScheduleKind.ONCE:
                 moment = job.run_at or job.next_run_at

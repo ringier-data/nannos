@@ -68,17 +68,20 @@ export class BrokerUserAuthService implements IUserAuthService {
       this.tokenCache.set(key, { ...minted, renewAt: minted.expiresAt - margin });
       return minted.accessToken;
     } catch (error) {
-      if (error instanceof BrokerSignInRequiredError) {
-        // Nothing this client holds can fix it: forget the sign-in, so the caller's
-        // "please authorize" path asks the user to sign in again.
-        this.logger.info(`User ${userId} must sign in again (${error.message}); removing the sign-in`);
-        this.clearCache(userId, teamId);
-        await this.storage
-          .deleteToken(userId, teamId)
-          .catch((e) => this.logger.warn(`Failed to remove the sign-in of user ${userId}: ${e}`));
-      } else {
+      if (!(error instanceof BrokerSignInRequiredError)) {
+        // The broker or Keycloak is down, or this client is not set up for the audience.
+        // Signing in again fixes neither, so the caller must not ask for it: it answers
+        // "try again later" instead.
         this.logger.error(error, `Failed to mint a ${audience} token for user ${userId}: ${error}`);
+        throw error;
       }
+      // Nothing this client holds can fix it: forget the sign-in, so the caller's
+      // "please authorize" path asks the user to sign in again.
+      this.logger.info(`User ${userId} must sign in again (${error.message}); removing the sign-in`);
+      this.clearCache(userId, teamId);
+      await this.storage
+        .deleteToken(userId, teamId)
+        .catch((e) => this.logger.warn(`Failed to remove the sign-in of user ${userId}: ${e}`));
       return null;
     }
   }
@@ -127,6 +130,6 @@ export class BrokerUserAuthService implements IUserAuthService {
   async storeAuthState(state: string, userId: string, teamId: string): Promise<void> {
     // The broker runs PKCE with Keycloak itself; the state store requires a verifier,
     // so it gets a random value that is never used.
-    this.oauthStateStore.set(state, userId, teamId, randomUUID(), 604800); // 7 day TTL
+    await this.oauthStateStore.set(state, userId, teamId, randomUUID(), 604800); // 7 day TTL
   }
 }

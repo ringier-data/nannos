@@ -69,6 +69,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   model_default: 'Model Default',
   budget_setting: 'Budget Setting',
   voice_session: 'Voice Session',
+  broker_client: 'Broker Client',
 };
 
 export function AuditPage() {

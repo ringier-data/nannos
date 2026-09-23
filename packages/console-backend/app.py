@@ -222,6 +222,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     logger.info("Application starting up...")
 
+    # Sign-in links (scheduler refusals, held-subscription notices) and the catalog
+    # connect callback are built from FRONTEND_URL. Its default is the local console, a
+    # dead link anywhere else, so a deployment must say where its console is.
+    if not config.is_local() and not os.getenv("FRONTEND_URL"):
+        raise RuntimeError("FRONTEND_URL must be set to the console's public URL outside local development")
+
     # Keep per-ASGI-message and transaction-bookkeeping spans out of the trace
     # export. Runs here, not at import: the injected auto-instrumentation must
     # already have built the tracer provider we wrap.

@@ -11,13 +11,10 @@ alter table user_auth
     add column auth_mode text not null default 'local'
         constraint user_auth_auth_mode_check check (auth_mode in ('local', 'broker'));
 
-create index idx_user_auth_oidc_sub on user_auth(oidc_sub);
-
 comment on column user_auth.auth_mode is
     'local: Keycloak tokens held here; broker: identity only (oidc_sub), tokens minted by the console-backend token broker';
 
 -- rambler down
-drop index if exists idx_user_auth_oidc_sub;
 delete from user_auth where auth_mode = 'broker';
 alter table user_auth
     drop column if exists auth_mode,

@@ -2,8 +2,15 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Pencil, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { client } from '@/api/generated/client.gen';
-import { getErrorMessage } from '@/lib/utils';
+import {
+  createBrokerClientApiV1AdminBrokerClientsPostMutation,
+  deleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteMutation,
+  listBrokerClientsApiV1AdminBrokerClientsGetOptions,
+  listBrokerClientsApiV1AdminBrokerClientsGetQueryKey,
+  updateBrokerClientApiV1AdminBrokerClientsClientPkPatchMutation,
+} from '@/api/generated/@tanstack/react-query.gen';
+import type { BrokerClient, BrokerClientUpdate } from '@/api/generated';
+import { formatApiError } from '@/api/scheduler';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -29,46 +36,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
-
-const API_BASE = '/api/v1/admin/broker-clients';
-
-interface BrokerClient {
-  id: number;
-  client_id: string;
-  name: string;
-  description: string | null;
-  redirect_uris: string[];
-  audiences: string[];
-  enabled: boolean;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface BrokerClientListResponse {
-  clients: BrokerClient[];
-}
-
-interface BrokerClientBody {
-  client_id?: string;
-  name: string;
-  description: string | null;
-  redirect_uris: string[];
-  audiences: string[];
-  enabled: boolean;
-}
-
-/** FastAPI sends a string for 409/422 raised by the router, and a list for validation errors. */
-function apiErrorMessage(error: unknown): string {
-  const detail = (error as { detail?: unknown } | null)?.detail;
-  if (Array.isArray(detail)) {
-    return detail
-      .map((item) => (item as { msg?: string }).msg)
-      .filter(Boolean)
-      .join('; ');
-  }
-  return getErrorMessage(error);
-}
 
 /** One entry per line; blank lines are dropped. */
 function splitLines(value: string): string[] {
@@ -99,54 +66,48 @@ export function BrokerClientsPage() {
 
   const editing = formDialog.brokerClient;
 
-  const { data, isLoading } = useQuery<BrokerClientListResponse>({
-    queryKey: ['brokerClients'],
-    queryFn: async () => {
-      const res = await client.get({ url: API_BASE, throwOnError: true });
-      return res.data as BrokerClientListResponse;
-    },
-  });
+  const { data, isLoading } = useQuery(listBrokerClientsApiV1AdminBrokerClientsGetOptions());
+  const refreshList = () =>
+    queryClient.invalidateQueries({ queryKey: listBrokerClientsApiV1AdminBrokerClientsGetQueryKey() });
 
-  const saveMutation = useMutation({
-    mutationFn: async (body: BrokerClientBody) => {
-      const res = editing
-        ? await client.patch({ url: `${API_BASE}/${editing.id}`, body, throwOnError: true })
-        : await client.post({ url: API_BASE, body, throwOnError: true });
-      return res.data as BrokerClient;
-    },
-    onSuccess: () => {
-      toast.success(editing ? 'Broker client updated' : 'Broker client registered');
-      closeForm();
-      queryClient.invalidateQueries({ queryKey: ['brokerClients'] });
-    },
+  const saved = (message: string) => () => {
+    toast.success(message);
+    closeForm();
+    refreshList();
+  };
+  const createMutation = useMutation({
+    ...createBrokerClientApiV1AdminBrokerClientsPostMutation(),
+    onSuccess: saved('Broker client registered'),
     onError: (error) => {
-      toast.error(`Failed to save broker client: ${apiErrorMessage(error)}`);
+      toast.error(`Failed to save broker client: ${formatApiError(error)}`);
     },
   });
+  const updateMutation = useMutation({
+    ...updateBrokerClientApiV1AdminBrokerClientsClientPkPatchMutation(),
+    onSuccess: saved('Broker client updated'),
+    onError: (error) => {
+      toast.error(`Failed to save broker client: ${formatApiError(error)}`);
+    },
+  });
+  const isSaving = createMutation.isPending || updateMutation.isPending;
 
   const toggleMutation = useMutation({
-    mutationFn: async ({ id, enabled }: { id: number; enabled: boolean }) => {
-      await client.patch({ url: `${API_BASE}/${id}`, body: { enabled }, throwOnError: true });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['brokerClients'] });
-    },
+    ...updateBrokerClientApiV1AdminBrokerClientsClientPkPatchMutation(),
+    onSuccess: refreshList,
     onError: (error) => {
-      toast.error(`Failed to update broker client: ${apiErrorMessage(error)}`);
+      toast.error(`Failed to update broker client: ${formatApiError(error)}`);
     },
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await client.delete({ url: `${API_BASE}/${id}`, throwOnError: true });
-    },
+    ...deleteBrokerClientApiV1AdminBrokerClientsClientPkDeleteMutation(),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['brokerClients'] });
+      refreshList();
       toast.success('Broker client removed');
       setDeleteDialog({ open: false, brokerClient: null });
     },
     onError: (error) => {
-      toast.error(`Failed to remove broker client: ${apiErrorMessage(error)}`);
+      toast.error(`Failed to remove broker client: ${formatApiError(error)}`);
     },
   });
 
@@ -163,15 +124,18 @@ export function BrokerClientsPage() {
   const closeForm = () => setFormDialog({ open: false, brokerClient: null });
 
   const handleSave = () => {
-    const body: BrokerClientBody = {
+    const body = {
       name: name.trim(),
       description: description.trim() || null,
       redirect_uris: splitLines(redirectUris),
       audiences: splitLines(audiences),
       enabled,
-    };
-    if (!editing) body.client_id = clientId.trim();
-    saveMutation.mutate(body);
+    } satisfies BrokerClientUpdate;
+    if (editing) {
+      updateMutation.mutate({ path: { client_pk: editing.id }, body });
+    } else {
+      createMutation.mutate({ body: { ...body, client_id: clientId.trim() } });
+    }
   };
 
   const canSave =
@@ -251,7 +215,7 @@ export function BrokerClientsPage() {
                       checked={brokerClient.enabled}
                       disabled={toggleMutation.isPending}
                       onCheckedChange={(checked) =>
-                        toggleMutation.mutate({ id: brokerClient.id, enabled: checked })
+                        toggleMutation.mutate({ path: { client_pk: brokerClient.id }, body: { enabled: checked } })
                       }
                     />
                   </TableCell>
@@ -346,17 +310,23 @@ export function BrokerClientsPage() {
                 onChange={(e) => setAudiences(e.target.value)}
               />
             </div>
-            <div className="flex items-center gap-2">
-              <Switch id="broker-client-enabled" checked={enabled} onCheckedChange={setEnabled} />
-              <Label htmlFor="broker-client-enabled">Enabled</Label>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Switch id="broker-client-enabled" checked={enabled} onCheckedChange={setEnabled} />
+                <Label htmlFor="broker-client-enabled">Enabled</Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Turning a client off stops its sign-ins and tokens, but keeps its users signed in
+                for when it is on again. A change can take up to a minute to reach every server.
+              </p>
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={closeForm}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={!canSave || saveMutation.isPending}>
-              {saveMutation.isPending ? 'Saving...' : editing ? 'Save' : 'Register'}
+            <Button onClick={handleSave} disabled={!canSave || isSaving}>
+              {isSaving ? 'Saving...' : editing ? 'Save' : 'Register'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -368,10 +338,10 @@ export function BrokerClientsPage() {
           open={deleteDialog.open}
           onOpenChange={(open) => !open && setDeleteDialog({ open: false, brokerClient: null })}
           title="Remove Broker Client"
-          description={`Remove "${deleteDialog.brokerClient.name}"? Its users must sign in again after it is registered again. Their console sign-in is not affected.`}
+          description={`Remove "${deleteDialog.brokerClient.name}"? Every user who signed in through it is signed out of it, and must sign in again, also if you register it again. Their console sign-in is not affected. To stop the client only for a time, turn it off instead: that keeps its users signed in.`}
           confirmLabel="Remove"
           variant="destructive"
-          onConfirm={() => deleteMutation.mutate(deleteDialog.brokerClient!.id)}
+          onConfirm={() => deleteMutation.mutate({ path: { client_pk: deleteDialog.brokerClient!.id } })}
           isLoading={deleteMutation.isPending}
         />
       )}

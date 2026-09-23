@@ -335,8 +335,21 @@ export class EmailInboundService {
       return;
     }
 
-    // Get orchestrator access token
-    const accessToken = await this.userAuthService.getOrchestratorToken(senderEmail);
+    // Get orchestrator access token. A throw is a failure that signing in again does not
+    // fix (e.g. the token broker is down), so the sender is asked to try again later.
+    let accessToken: string | null;
+    try {
+      accessToken = await this.userAuthService.getOrchestratorToken(senderEmail);
+    } catch (error) {
+      logger.error(error, `Could not get an orchestrator token for ${senderEmail}: ${error}`);
+      await this.emailOutboundService.sendErrorNotification({
+        to: senderEmail,
+        subject,
+        errorMessage: 'Nannos cannot process your email right now. Please send it again later.',
+        originalMessageId: messageId,
+      });
+      return;
+    }
     if (!accessToken) {
       logger.error(`Failed to get orchestrator token for ${senderEmail}`);
       await this.emailOutboundService.sendErrorNotification({

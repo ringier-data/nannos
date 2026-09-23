@@ -92,20 +92,29 @@ class BrokerService:
         self._requests = login_request_repo
         self._users = user_service
         self._tokens = scheduler_token_service
-        # client_id -> (monotonic expiry, client or None)
-        self._client_cache: dict[str, tuple[float, BrokerClient | None]] = {}
+        # client_id -> (monotonic expiry, client). Registered clients only: the ids come
+        # from callers, and ``/authorize`` takes them unauthenticated.
+        self._client_cache: dict[str, tuple[float, BrokerClient]] = {}
 
     # ---------------------------------------------------------------- clients
 
     async def resolve_client(self, db: AsyncSession, client_id: str | None) -> BrokerClient | None:
-        """The registered client with this id, or None. Cached for a minute."""
+        """The registered client with this id, or None. A found client is cached for a
+        minute; an unknown id is looked up every time, so random ids cannot fill the cache.
+
+        Every replica has its own cache, and an admin write clears only the cache of the
+        replica that served it. A change can therefore take up to a minute to reach all.
+        """
         if not client_id:
             return None
         cached = self._client_cache.get(client_id)
         if cached and time.monotonic() < cached[0]:
             return cached[1]
         client = await self._clients.get_by_client_id(db, client_id)
-        self._client_cache[client_id] = (time.monotonic() + _CLIENT_CACHE_TTL_SECONDS, client)
+        if client is None:
+            self._client_cache.pop(client_id, None)
+        else:
+            self._client_cache[client_id] = (time.monotonic() + _CLIENT_CACHE_TTL_SECONDS, client)
         return client
 
     def invalidate_cache(self) -> None:

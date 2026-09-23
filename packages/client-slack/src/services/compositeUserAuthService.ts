@@ -10,6 +10,13 @@ import type { IUserAuthService } from './userAuthService.js';
  * refresh token any more, the factory can return the broker implementation alone.
  */
 export class CompositeUserAuthService implements IUserAuthService {
+  /**
+   * Users the broker serves (key: `${userId}:${teamId}`). A user never goes back to the
+   * local login, because every sign-in here is the broker's. So their row is not read
+   * again just to pick the implementation, which then reads it once more.
+   */
+  private readonly brokerUsers = new Set<string>();
+
   constructor(
     private readonly storage: IUserAuthStorage,
     private readonly local: IUserAuthService,
@@ -17,8 +24,16 @@ export class CompositeUserAuthService implements IUserAuthService {
   ) {}
 
   private async forUser(userId: string, teamId: string): Promise<IUserAuthService> {
+    const key = `${userId}:${teamId}`;
+    if (this.brokerUsers.has(key)) {
+      return this.broker;
+    }
     const row = await this.storage.getToken(userId, teamId);
-    return row && row.authMode !== 'broker' && row.refreshToken ? this.local : this.broker;
+    if (row && row.authMode !== 'broker' && row.refreshToken) {
+      return this.local;
+    }
+    this.brokerUsers.add(key);
+    return this.broker;
   }
 
   async isUserAuthorized(userId: string, teamId: string): Promise<boolean> {
@@ -39,14 +54,16 @@ export class CompositeUserAuthService implements IUserAuthService {
 
   // Signing in is always the broker's.
 
-  completeOAuthFlow(
+  async completeOAuthFlow(
     userId: string,
     teamId: string,
     callbackUrl: string,
     codeVerifier: string,
     state: string
   ): Promise<UserAuthToken> {
-    return this.broker.completeOAuthFlow(userId, teamId, callbackUrl, codeVerifier, state);
+    const row = await this.broker.completeOAuthFlow(userId, teamId, callbackUrl, codeVerifier, state);
+    this.brokerUsers.add(`${userId}:${teamId}`);
+    return row;
   }
 
   getAuthorizationUrl(state: string, teamId: string, codeVerifier: string): Promise<string> {

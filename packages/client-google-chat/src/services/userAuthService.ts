@@ -14,7 +14,11 @@ import { Config } from '../config/config.js';
 export interface IUserAuthService {
   /** Whether the user can be served without signing in again. */
   isUserAuthorized(userId: string, projectId: string): Promise<boolean>;
-  /** An access token for *audience*, or null when the user must sign in again. */
+  /**
+   * An access token for *audience*, or null when the user must sign in again. Throws
+   * when the token cannot be had for a reason a new sign-in does not fix (e.g. the
+   * broker is down); callers then answer "try again later", not "please sign in".
+   */
   getTokenForAudience(userId: string, projectId: string, audience: string): Promise<string | null>;
   /** `getTokenForAudience` for the configured orchestrator audience. */
   getOrchestratorToken(userId: string, projectId: string): Promise<string | null>;
@@ -265,6 +269,6 @@ export class LocalUserAuthService implements IUserAuthService {
     const oidc = await import('openid-client');
     const codeVerifier = oidc.randomPKCECodeVerifier();
 
-    this.oauthStateStore.set(state, userId, projectId, codeVerifier, 604800); // 7 day TTL
+    await this.oauthStateStore.set(state, userId, projectId, codeVerifier, 604800); // 7 day TTL
   }
 }

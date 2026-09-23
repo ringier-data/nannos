@@ -13,12 +13,11 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
-from ringier_a2a_sdk.auth import JWTValidationError
 
 from ..config import config
 from ..controllers.broker_controller import BrokerController
 from ..db.session import DbSession
-from ..dependencies import token_is_service_account
+from ..dependencies import _SERVICE_ACCOUNT_USERNAME_PREFIX, get_token_claims_from_request
 from ..models.broker import (
     BrokerClient,
     BrokerIdentity,
@@ -27,7 +26,6 @@ from ..models.broker import (
     BrokerTokenResponse,
 )
 from ..services.broker_service import BrokerRefusal, BrokerService
-from ..utils.jwt_validators import get_jwt_validator
 
 logger = logging.getLogger(__name__)
 
@@ -57,36 +55,43 @@ def _refused(e: BrokerRefusal) -> HTTPException:
     return HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+def _is_own_client_credentials(claims: dict, client_id: str | None) -> bool:
+    """Whether *claims* are a client-credentials token that *client_id* got for itself.
+
+    Keycloak opens no user session for the client-credentials grant, so its tokens carry
+    no ``sid``, while every token of a signed-in user does. The issuer writes that claim
+    and nothing a user controls changes it, so it is the gate. The subject must also be
+    that client's own service account (``service-account-<client id>``). The username
+    alone is not enough: usernames come from the identity provider.
+    """
+    if not client_id or "sid" in claims:
+        return False
+    username = str(claims.get("preferred_username") or "").lower()
+    return username == f"{_SERVICE_ACCOUNT_USERNAME_PREFIX}{client_id}".lower()
+
+
 async def require_broker_client(request: Request, db: DbSession) -> BrokerClient:
     """Accept only a registered, enabled broker client calling as itself.
 
-    The bearer must be the client's own client-credentials token: a service-account
-    token whose ``azp`` is the registered client id and whose audience includes this
-    backend. A user's access token issued to the same client is refused — ``/token``
-    mints for any user linked to the client, which only the client itself may ask for.
+    The bearer must be the client's own client-credentials token
+    (``_is_own_client_credentials``) whose audience includes this backend. A user's access
+    token issued to the same client is refused — ``/token`` mints for any user linked to
+    the client, which only the client itself may ask for.
     """
     service = _get_broker_service(request)
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    claims = await get_token_claims_from_request(request)
+    if claims is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    try:
-        claims = await get_jwt_validator(issuer=config.oidc.issuer).validate(auth_header.split(" ", 1)[1])
-    except JWTValidationError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from None
 
     client_id = claims.get("azp") or claims.get("client_id")
     audiences = claims.get("aud") or []
     if isinstance(audiences, str):
         audiences = [audiences]
-    if not token_is_service_account(claims) or config.oidc.client_id not in audiences:
+    if not _is_own_client_credentials(claims, client_id) or config.oidc.client_id not in audiences:
         logger.warning("Broker call refused: not a service-account token for this backend (azp=%s)", client_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

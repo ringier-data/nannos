@@ -58,8 +58,14 @@ export class BrokerError extends Error {
 }
 
 export interface BrokerClientOptions {
-  /** console-backend's base URL, e.g. `http://console:8080`. */
+  /** console-backend's base URL for this client's own calls, e.g. `http://console:8080`. */
   baseUrl: string;
+  /**
+   * Where a browser reaches console-backend: the console's public URL, whose `/api` is
+   * console-backend. The sign-in link is built from it. Defaults to *baseUrl*, which
+   * works only when that is public too.
+   */
+  publicBaseUrl?: string;
   /** This client's Keycloak client id; the broker knows it as a registered client. */
   clientId: string;
   /** The audience of this client's client-credentials token (console-backend's client). */
@@ -79,7 +85,8 @@ export class BrokerClient {
 
   /** Where to send the browser to sign in. The broker sends it back to *redirectUri*. */
   authorizeUrl(redirectUri: string, state: string): string {
-    const url = new URL(this.endpoint('/api/v1/auth/broker/authorize'));
+    const base = this.options.publicBaseUrl || this.options.baseUrl;
+    const url = new URL(`${base.replace(/\/+$/, '')}/api/v1/auth/broker/authorize`);
     url.searchParams.set('client_id', this.options.clientId);
     url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('state', state);

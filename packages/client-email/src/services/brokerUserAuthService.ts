@@ -66,17 +66,20 @@ export class BrokerUserAuthService implements IUserAuthService {
       this.tokenCache.set(key, { ...minted, renewAt: minted.expiresAt - margin });
       return minted.accessToken;
     } catch (error) {
-      if (error instanceof BrokerSignInRequiredError) {
-        // Nothing this client holds can fix it: forget the sign-in, so the next email
-        // gets the "please sign in" reply.
-        this.logger.info(`${email} must sign in again (${error.message}); removing the sign-in`);
-        this.clearCache(email);
-        await this.storage
-          .deleteToken(email)
-          .catch((e) => this.logger.warn(`Failed to remove the sign-in of ${email}: ${e}`));
-      } else {
+      if (!(error instanceof BrokerSignInRequiredError)) {
+        // The broker or Keycloak is down, or this client is not set up for the audience.
+        // Signing in again fixes neither, so the caller must not ask for it: it answers
+        // "try again later" instead.
         this.logger.error(error, `Failed to mint a ${audience} token for ${email}: ${error}`);
+        throw error;
       }
+      // Nothing this client holds can fix it: forget the sign-in, so the next email
+      // gets the "please sign in" reply.
+      this.logger.info(`${email} must sign in again (${error.message}); removing the sign-in`);
+      this.clearCache(email);
+      await this.storage
+        .deleteToken(email)
+        .catch((e) => this.logger.warn(`Failed to remove the sign-in of ${email}: ${e}`));
       return null;
     }
   }
