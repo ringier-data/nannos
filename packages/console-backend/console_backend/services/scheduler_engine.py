@@ -115,6 +115,24 @@ class DispatchOutcome:
     parked_payload: dict[str, Any] | None = None
 
 
+#: How a run parked by the watch CHECK, not by an agent, is marked answerable.
+#:
+#: ``parked_task_id`` is what makes a parked run answerable everywhere — the schedule
+#: hold in ``claim_due_jobs``, ``answerable_parked_run``, the console's badge, the
+#: run-now refusal — and for an agent's park it is the agent-runner task the answer is
+#: addressed to. A watch whose check tool answered ``need-credentials`` never reached
+#: agent-runner, so there is no task; what a resume addresses is the check itself, which
+#: is simply run again. Rather than teach five places a second column, the id names
+#: what the answer goes to, and ``resume_parked_run`` reads the prefix to tell the two
+#: apart. The suffix is the parked run's id, so two parks can never share one.
+CHECK_PARK_PREFIX = "watch-check:"
+
+
+def is_check_park(parked_task_id: str | None) -> bool:
+    """Whether *parked_task_id* addresses the watch check rather than an agent-runner task."""
+    return bool(parked_task_id) and str(parked_task_id).startswith(CHECK_PARK_PREFIX)
+
+
 #: What the agent is told when the owner answers. Agent-facing, and deliberately blunt
 #: about the DECISION: on the fallback path where a server never routed the DataPart,
 #: these words are graded approve/reject/unclear by a classifier before the agent sees
@@ -457,6 +475,9 @@ class SchedulerEngine:
                 )
             return run_id or parked_run.id
 
+        if is_check_park(parked_run.parked_task_id):
+            return await self._resume_check_park(job, parked_run, decision, run_id)
+
         heartbeat: asyncio.Task[None] | None = None
         try:
             if run_id is None:
@@ -577,6 +598,54 @@ class SchedulerEngine:
             if run_id is not None:
                 self._in_flight.discard(run_id)
 
+    async def _resume_check_park(
+        self,
+        job: ScheduledJob,
+        parked_run: ScheduledJobRun,
+        decision: str,
+        run_id: int | None,
+    ) -> int:
+        """Answer a run parked by its watch check (see ``CHECK_PARK_PREFIX``).
+
+        There is no agent-runner task to continue: the check never got past the tool.
+        An approval runs the poll again right now, as a RESUMED run — the check is
+        re-evaluated with the credential the owner just stored, and the job carries on
+        (dispatching if the condition holds) or parks again if the tool still refuses,
+        which consumed the previous ask first and so leaves exactly one. A decline
+        releases the schedule: the resumed run closes without touching
+        ``consecutive_failures`` (a refused credential is not evidence about the job),
+        and the next occurrence asks again — the same shape as a declined agent park.
+        """
+        if run_id is None:
+            async with self._db_session_factory() as db:
+                run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
+                await db.commit()
+
+        logger.info(
+            "Resuming job %d run %d (%s) as run %d by re-running its check",
+            job.id,
+            parked_run.id,
+            decision,
+            run_id,
+        )
+        if decision == "approved":
+            await self._dispatch_job(job, run_id=run_id, trigger=RunTrigger.RESUMED)
+            return run_id
+
+        await self._finalize(
+            run_id=run_id,
+            job=job,
+            status=JobRunStatus.FAILED,
+            error_message=(
+                "You declined the authorization, so this check was not run. The watch will ask "
+                "again on its next occurrence."
+            ),
+            delivered=False,
+            trigger=RunTrigger.RESUMED,
+            counts_as_failure=False,
+        )
+        return run_id
+
     async def _loop(self) -> None:
         while self._running:
             try:
@@ -678,6 +747,16 @@ class SchedulerEngine:
                     if self._watch_evaluator.can_evaluate(job):
                         watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token)
 
+                        if watch_outcome.auth_ask is not None:
+                            # The check tool needs the owner's credential. ADR-0009 parks
+                            # the run on that rather than failing it; the agent path does
+                            # so through agent-runner's task, this path has no task and
+                            # parks here.
+                            await self._park_on_check_ask(
+                                db, job, run_id, access_token, watch_outcome.auth_ask, trigger
+                            )
+                            return
+
                         if watch_outcome.error:
                             await self._finalize(
                                 run_id=run_id,
@@ -777,6 +856,81 @@ class SchedulerEngine:
             except asyncio.CancelledError:
                 pass
             self._in_flight.discard(run_id)
+
+    async def _park_on_check_ask(
+        self,
+        db: Any,
+        job: ScheduledJob,
+        run_id: int,
+        access_token: str,
+        ask: dict[str, Any],
+        trigger: RunTrigger,
+    ) -> None:
+        """Park a watch whose check tool answered ``need-credentials``.
+
+        The run ends ``AUTH_REQUIRED`` carrying the ask, exactly as an agent's park does
+        (ADR-0009 decision 4): the schedule is held until the owner answers, nothing is
+        counted against ``max_failures``, and the console renders the ask from
+        ``parked_payload`` and answers it through the resume endpoint. What differs is
+        the id the answer is addressed to — the check, not an agent-runner task (see
+        ``CHECK_PARK_PREFIX``).
+
+        A job with a delivery channel is also told there, so the owner who lives in a chat
+        client learns that the job has stopped and gets the link (decision 5). Delivery is
+        the push sender's job, so the notice is dispatched to agent-runner as a
+        notification — no sub-agent, plain text with the authorize URL in it literally —
+        and the outer task it completes is NOT the parked one: the clients render prose
+        with a working link rather than a card, and the answer comes back through the
+        console. A delivery that fails is logged and the run still parks; the ask is
+        recorded on the run either way, and a park nobody was told about is still a
+        stopped job the console shows, which beats a failed run counted against the job.
+        """
+        requirement = ask.get("auth_requirement") if isinstance(ask.get("auth_requirement"), dict) else {}
+        tool_name = requirement.get("resource") or job.check_tool or "its check tool"
+        authorize_url = next(
+            (m.get("auth_url") for m in requirement.get("auth_methods") or [] if isinstance(m, dict) and m.get("auth_url")),
+            None,
+        )
+        summary = f"Stopped: '{tool_name}' needs your authorization before this watch can check anything."
+
+        delivered = False
+        channel = (
+            await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
+            if job.delivery_channel_id is not None
+            else None
+        )
+        if channel:
+            metadata = self._base_metadata(job)
+            metadata["scheduled_job_run_id"] = run_id
+            metadata["messageFormatting"] = self._message_formatting(channel)
+            notice = (
+                f"The scheduled watch '{job.name}' has stopped: '{tool_name}' needs your authorization "
+                "before it can check anything. "
+                + (f"Authorize here: {authorize_url} — then " if authorize_url else "Once authorized, ")
+                + "confirm in the console and the watch will pick up where it stopped."
+            )
+            try:
+                await dispatch_streaming(
+                    agent_url=self._agent_runner_url,
+                    access_token=access_token,
+                    parts=[{"kind": "text", "text": notice}],
+                    metadata=metadata,
+                    push_config=self._push_config(channel),
+                )
+                delivered = True
+            except Exception:
+                logger.exception("Job %d run %d: could not deliver the authorization notice", job.id, run_id)
+
+        await self._finalize(
+            run_id=run_id,
+            job=job,
+            status=JobRunStatus.AUTH_REQUIRED,
+            result_summary=summary,
+            delivered=delivered,
+            trigger=trigger,
+            parked_task_id=f"{CHECK_PARK_PREFIX}{run_id}",
+            parked_payload=ask,
+        )
 
     async def _subscriber_may_run(self, db: Any, job: ScheduledJob, run_id: int, trigger: RunTrigger) -> bool:
         """The per-dispatch access check (ADR-0010), shared by every path that dispatches.

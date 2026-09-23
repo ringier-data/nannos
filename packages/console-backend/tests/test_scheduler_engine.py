@@ -1184,6 +1184,178 @@ class TestWatchEvaluatedBeforeDispatch:
         assert any(part.get("kind") == "data" for part in call["parts"])
 
 
+class TestACheckNeedingAuthorizationParksTheRun:
+    """ADR-0009 on the path the ADR did not name: the watch check itself.
+
+    The check runs here, before any dispatch, so a ``need-credentials`` from it never
+    reached agent-runner's park. It failed the run with the raw payload as the message,
+    delivered nothing, and counted toward ``max_failures``.
+    """
+
+    ASK = {
+        "requires_auth": True,
+        "auth_requirement": {
+            "service": "",
+            "resource": "naonous_get_campaign",
+            "auth_methods": [{"method": "oauth2", "description": "x", "auth_url": "https://gw.example/begin"}],
+            "required_scopes": [],
+            "token_type": "Bearer",
+        },
+    }
+
+    @staticmethod
+    def _watch_job(**overrides) -> ScheduledJob:
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None, **overrides)
+        return job.model_copy(update={"check_tool": "naonous_get_campaign", "cel_expr": "result.status == 'FAILED'"})
+
+    def _parked_engine(self, run_id: int):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = run_id
+        engine = _make_engine(repo=repo)
+        evaluate = patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, auth_ask=dict(self.ASK))),
+        )
+        return repo, engine, evaluate
+
+    @pytest.mark.asyncio
+    async def test_the_run_parks_with_the_ask_and_holds_the_schedule(self):
+        repo, engine, evaluate = self._parked_engine(run_id=21)
+
+        with evaluate, patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+            await engine._dispatch_job(self._watch_job())
+
+        dispatch.assert_not_called()  # no channel: nothing to tell, nowhere to tell it
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["parked_task_id"] == "watch-check:21", "answerable, and addressed to the check itself"
+        assert run["parked_payload"] == self.ASK
+        assert run["error_message"] is None
+        assert "https://" not in (run["result_summary"] or ""), "the URL lives in the ask, not the row"
+        # Neutral about the job: complete_job sees AUTH_REQUIRED, which leaves
+        # consecutive_failures alone and never auto-pauses.
+        assert repo.complete_job.call_args[1]["status"] == JobRunStatus.AUTH_REQUIRED
+
+    @pytest.mark.asyncio
+    async def test_a_job_with_a_channel_is_told_there_with_the_link(self):
+        repo, engine, evaluate = self._parked_engine(run_id=22)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {
+            "webhook_url": "https://hooks.example/x",
+            "secret": "s",
+            "message_formatting": "slack",
+        }
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+        ) as dispatch:
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        call = dispatch.await_args[1]
+        assert "https://gw.example/begin" in call["parts"][0]["text"]
+        assert "Test Job" in call["parts"][0]["text"]
+        assert "sub_agent_id" not in call["metadata"], "a notice, not an agent run"
+        assert call["metadata"]["messageFormatting"] == "slack"
+        assert call["push_config"] == {"url": "https://hooks.example/x", "token": "s"}
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["delivered"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_failed_notice_still_parks_the_run(self):
+        # The ask is on the run for the console either way; a stopped job it shows beats
+        # a failed run counted against the job.
+        repo, engine, evaluate = self._parked_engine(run_id=23)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {"webhook_url": "u", "secret": "s"}
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(side_effect=RuntimeError("runner down")),
+        ):
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["parked_task_id"] == "watch-check:23"
+        assert run["delivered"] is False
+
+    @staticmethod
+    def _parked_run(run_id: int) -> ScheduledJobRun:
+        return ScheduledJobRun(
+            id=run_id,
+            job_id=1,
+            started_at=datetime.now(timezone.utc),
+            status=JobRunStatus.AUTH_REQUIRED,
+            delivered=False,
+            parked_task_id=f"watch-check:{run_id}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_approving_reruns_the_check_at_once(self):
+        # The credential is at the gateway now: the check succeeds and the watch carries
+        # on — here the condition holds, so the trigger dispatches like any other poll.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=True, check_result={"status": "FAILED"})),
+        ) as evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+        ) as dispatch:
+            returned = await engine.resume_parked_run(self._watch_job(), self._parked_run(30), "approved", run_id=31)
+
+        assert returned == 31
+        evaluate.assert_awaited_once()
+        dispatch.assert_awaited_once()
+        assert dispatch.await_args[1].get("task_id") is None, "there is no agent-runner task to continue"
+        run = repo.complete_run.call_args[1]
+        assert run["run_id"] == 31
+        assert run["status"] == JobRunStatus.SUCCESS
+        # A resumed run does not own the schedule: the parked run already advanced it.
+        assert repo.complete_job.call_args[1]["leave_schedule"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_still_missing_credential_parks_again_on_the_new_run(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, auth_ask=dict(self.ASK))),
+        ):
+            await engine.resume_parked_run(self._watch_job(), self._parked_run(40), "approved", run_id=41)
+
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["parked_task_id"] == "watch-check:41"
+
+    @pytest.mark.asyncio
+    async def test_declining_releases_the_schedule_without_counting_a_failure(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        engine = _make_engine(repo=repo)
+
+        with patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+            await engine.resume_parked_run(self._watch_job(), self._parked_run(50), "declined", run_id=51)
+
+        dispatch.assert_not_called()
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.FAILED
+        assert "declined" in run["error_message"]
+        # counts_as_failure=False: the job sees a neutral status, not a failure.
+        assert repo.complete_job.call_args[1]["status"] == JobRunStatus.INTERRUPTED
+        assert repo.complete_job.call_args[1]["leave_schedule"] is True
+        repo.disable_subscription.assert_not_called()
+
+
 class TestVoiceCallDispatch:
     """A voice call is a delivery choice, not a job-type capability.
 

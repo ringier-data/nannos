@@ -104,6 +104,57 @@ class WatchOutcome:
     #: against check_result later; a model's reasoning cannot be reconstructed at all, so
     #: it is captured here or lost.
     evaluation: ConditionEvaluation | None = None
+    #: Set when the check tool answered ``need-credentials``: the owner has not authorized
+    #: the tool, and nothing in the runtime can. Neither an error nor a verdict — the
+    #: engine parks the run on it (ADR-0009), which is why it is not folded into ``error``:
+    #: an error is evidence about the job and counts toward ``max_failures``; a missing
+    #: credential is evidence about what the owner has authorized, fixable in one click.
+    #: The value is the ask in the shape the console and the chat clients already render
+    #: (``AuthPayload.client_payload()``), built here because console-backend does not
+    #: depend on agent-common.
+    auth_ask: dict[str, Any] | None = None
+
+
+#: The gateway's structured refusal when a tool needs the caller's own credential. The
+#: same payload ``AuthErrorDetectionMiddleware`` detects on the agent path; only the
+#: field check is mirrored here, since the tool client has already parsed the JSON.
+_NEED_CREDENTIALS = "need-credentials"
+
+
+def need_credentials_ask(tool_name: str, check_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The ask a ``need-credentials`` tool result amounts to, or None for any other result.
+
+    Matched on the actual ``errorCode`` field, never on the words appearing somewhere in
+    a payload: a tool's business data may legitimately mention credentials.
+
+    Shaped as the in-task-auth ``client_payload`` so ``parked_payload`` on the run reads
+    the same whether the ask came from an agent's interrupt or from this check: the
+    console's ``readParkedAsk`` and the chat clients' cards look for
+    ``auth_requirement.auth_methods[].auth_url`` and ``auth_requirement.resource``. The
+    resource is the tool, which is the one thing that tells the owner WHAT they are
+    authorizing. The service is left empty exactly as the agent path leaves it (the
+    gateway's payload names no service), so a card built from either ask names the tool.
+    """
+    if not isinstance(check_result, dict) or check_result.get("errorCode") != _NEED_CREDENTIALS:
+        return None
+    authorize_url = check_result.get("authorizeUrl")
+    message = check_result.get("message")
+    return {
+        "requires_auth": True,
+        "auth_requirement": {
+            "service": "",
+            "resource": tool_name,
+            "auth_methods": [
+                {
+                    "method": "oauth2",
+                    "description": message if isinstance(message, str) and message else f"Authorization required for {tool_name}",
+                    **({"auth_url": authorize_url} if isinstance(authorize_url, str) and authorize_url else {}),
+                }
+            ],
+            "required_scopes": [],
+            "token_type": "Bearer",
+        },
+    }
 
 
 class WatchEvaluator:
@@ -161,6 +212,15 @@ class WatchEvaluator:
             return WatchOutcome(condition_met=False, error=str(exc))
 
         check_result = call.result
+        ask = need_credentials_ask(tool_name, check_result)
+        if ask is not None:
+            # Not a failure of the check: the owner has not authorized this tool. The
+            # engine parks the run on the ask rather than recording a failed poll — and
+            # the raw payload stays off the run, where its authorize URL would otherwise
+            # sit in an error banner (the same reason the chat cards render the ask
+            # instead of the tool's words).
+            return WatchOutcome(condition_met=False, auth_ask=ask)
+
         if call.is_error:
             # The tool ran and reported its own failure. The payload usually says why, so
             # keep it on the run for whoever debugs the job.
