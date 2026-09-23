@@ -747,7 +747,7 @@ export const updateSecretPermissionsApiV1SecretsSecretIdPermissionsPut = <ThrowO
  * - Admins (with admin mode enabled) see all sub-agents
  * - When impersonating, shows only what the impersonated user can see (not admin view)
  * - Use `status` to filter by status (e.g., pending_approval for admin queue)
- * - Use `owned_only=true` to see only owned sub-agents
+ * - Use `ownership=owned` (or `shared`) to see only one side of that split
  * - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
  */
 export const consoleListSubAgents = <ThrowOnError extends boolean = false>(options?: Options<ConsoleListSubAgentsData, ThrowOnError>) => (options?.client ?? client).get<ConsoleListSubAgentsResponses, ConsoleListSubAgentsErrors, ThrowOnError>({ url: '/api/v1/sub-agents', ...options });

@@ -106,13 +106,37 @@ export interface DeliveryChannel {
  * Fetch delivery channels. Console users receive all channels; machine clients
  * receive only their own.
  */
-export async function getDeliveryChannels(): Promise<DeliveryChannel[]> {
+export interface DeliveryChannelPage {
+  channels: DeliveryChannel[];
+  total: number;
+}
+
+/**
+ * Delivery channels, optionally one page at a time.
+ *
+ * Passing no options keeps the old behaviour — every channel — which the job
+ * editor's channel picker relies on.
+ */
+export async function getDeliveryChannels(opts?: {
+  search?: string;
+  page?: number;
+  limit?: number;
+}): Promise<DeliveryChannelPage> {
+  const query: Record<string, string | number> = {};
+  if (opts?.search) query.search = opts.search;
+  if (opts?.limit !== undefined) {
+    query.limit = opts.limit;
+    query.page = opts.page ?? 1;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = await (client as any).get({
     url: '/api/v1/delivery-channels',
+    query,
   });
   if (error) throw error;
-  return (data as { channels: DeliveryChannel[] }).channels;
+  const body = data as { channels: DeliveryChannel[]; total?: number };
+  return { channels: body.channels, total: body.total ?? body.channels.length };
 }
 
 export interface DeliveryChannelUpdate {

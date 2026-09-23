@@ -704,11 +704,13 @@ function EditForm({
   const { data: mcpToolsData } = useQuery(consoleListMcpToolsOptions());
   const mcpTools = mcpToolsData?.tools ?? [];
 
-  const { data: channels = [] } = useQuery<DeliveryChannel[]>({
+  // A picker: it must offer every channel, so no page size is passed.
+  const { data: channelPage } = useQuery({
     queryKey: ['delivery-channels'],
-    queryFn: getDeliveryChannels,
+    queryFn: () => getDeliveryChannels(),
     staleTime: 60_000,
   });
+  const channels: DeliveryChannel[] = channelPage?.channels ?? [];
 
   // No pre-selection here, unlike the create dialog: on a saved job an empty
   // delivery channel is a real, chosen value ("in-app only"), not a missing

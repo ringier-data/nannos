@@ -1,8 +1,10 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Key, Lock, Loader2, Users } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { Plus, Trash2, Key, Lock, Loader2, Users, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -32,6 +34,8 @@ import type { Secret, SecretType } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
 import { SecretPermissionsDialog } from './SecretPermissionsDialog';
 
+const PAGE_SIZE = 20;
+
 export function SecretsVaultList() {
   const queryClient = useQueryClient();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -46,12 +50,25 @@ export function SecretsVaultList() {
   const [secretType, setSecretType] = useState<SecretType>('foundry_client_secret');
   const [secretValue, setSecretValue] = useState('');
 
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(search);
+
   // Fetch secrets
-  const { data: secretsData, isLoading } = useQuery({
-    ...listSecretsApiV1SecretsGetOptions(),
+  const { data: secretsData, isLoading, isFetching } = useQuery({
+    ...listSecretsApiV1SecretsGetOptions({
+      query: { page, limit: PAGE_SIZE, search: debouncedSearch || undefined },
+    }),
+    placeholderData: keepPreviousData,
   });
 
   const secrets = secretsData?.items || [];
+  const total = secretsData?.total ?? 0;
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setPage(1);
+  };
 
   // Create mutation
   const createMutation = useMutation({
@@ -138,7 +155,27 @@ export function SecretsVaultList() {
         </Button>
       </div>
 
-      {secrets.length === 0 ? (
+      {/* Shown whenever a search is active too, so an empty result still has a
+          way back — the "no secrets yet" call to action would strand the term. */}
+      {(secrets.length > 0 || debouncedSearch) && (
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search secrets by name or description..."
+            value={search}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+      )}
+
+      {secrets.length === 0 && debouncedSearch ? (
+        <div className="text-center py-12 border rounded-lg bg-muted/50">
+          <Key className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+          <h3 className="text-lg font-medium mb-2">No secrets match your search</h3>
+          <p className="text-sm text-muted-foreground">Try a different name or description.</p>
+        </div>
+      ) : secrets.length === 0 ? (
         <div className="text-center py-12 border rounded-lg bg-muted/50">
           <Key className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
           <h3 className="text-lg font-medium mb-2">No secrets yet</h3>
@@ -151,7 +188,7 @@ export function SecretsVaultList() {
           </Button>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className={`space-y-2 transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}>
           {secrets.map((secret: Secret) => (
             <div
               key={secret.id}
@@ -210,6 +247,8 @@ export function SecretsVaultList() {
           ))}
         </div>
       )}
+
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
 
       {/* Create Dialog */}
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>

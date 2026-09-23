@@ -313,11 +313,13 @@ function CreateJobDialog({
   const { data: userSettings } = useQuery(getCurrentUserSettingsApiV1AuthMeSettingsGetOptions());
   const userTimezone = userSettings?.data.timezone;
 
-  const { data: channels = [] } = useQuery<DeliveryChannel[]>({
+  // A picker: it must offer every channel, so no page size is passed.
+  const { data: channelPage } = useQuery({
     queryKey: ['delivery-channels'],
-    queryFn: getDeliveryChannels,
+    queryFn: () => getDeliveryChannels(),
     staleTime: 60_000,
   });
+  const channels: DeliveryChannel[] = channelPage?.channels ?? [];
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function update<K extends keyof CreateJobForm>(key: K, value: CreateJobForm[K]) {

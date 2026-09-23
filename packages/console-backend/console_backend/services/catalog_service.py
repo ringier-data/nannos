@@ -67,12 +67,19 @@ class CatalogService:
         user: User,
         is_admin: bool = False,
         search: str | None = None,
+        ownership: str | None = None,
         page: int = 1,
         limit: int | None = None,
     ) -> tuple[list[Catalog], int]:
         """Get catalogs accessible to user."""
         return await self.repo.get_accessible_catalogs(
-            db, user.id, is_admin=is_admin, search=search, page=page, limit=limit
+            db,
+            user.id,
+            is_admin=is_admin,
+            search=search,
+            ownership=ownership,
+            page=page,
+            limit=limit,
         )
 
     async def get_catalog(

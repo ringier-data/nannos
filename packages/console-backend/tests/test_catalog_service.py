@@ -401,6 +401,46 @@ class TestCatalogAccessibleList:
         assert total == 0
 
 
+    @pytest.mark.asyncio
+    async def test_ownership_filter_splits_owned_from_shared(
+        self,
+        pg_session: AsyncSession,
+        catalog_service: CatalogService,
+        test_user_db: User,
+        test_admin_user_db: User,
+    ):
+        """The console's owned/shared tabs are a SQL filter, not a slice of a page.
+
+        Splitting in the browser would divide whichever page arrived, so each tab
+        would show an arbitrary fraction of its true contents.
+        """
+        for i in range(3):
+            await _create_catalog(pg_session, catalog_service, test_user_db, name=f"Mine {i}")
+        for i in range(2):
+            await _create_catalog(
+                pg_session, catalog_service, test_admin_user_db, name=f"Theirs {i}"
+            )
+
+        owned, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_admin_user_db, is_admin=True, ownership="owned"
+        )
+        assert total == 2
+        assert all(c.owner_user_id == test_admin_user_db.id for c in owned)
+
+        shared, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_admin_user_db, is_admin=True, ownership="shared"
+        )
+        assert total == 3
+        assert all(c.owner_user_id != test_admin_user_db.id for c in shared)
+
+        # And it composes with paging: a full page, with the true total beside it.
+        page, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_admin_user_db, is_admin=True, ownership="shared", page=1, limit=2
+        )
+        assert len(page) == 2
+        assert total == 3
+
+
 class TestCatalogSync:
     """Test sync triggering and guards."""
 

@@ -1,14 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { Plus, LibraryBig, Users, AlertTriangle } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
+import { Plus, LibraryBig, Users, AlertTriangle, Search } from 'lucide-react';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { useEmbeddingConfigured } from '@/config/models';
 import { CatalogList } from '@/components/catalogs/CatalogList';
 import { CreateCatalogDialog } from '@/components/catalogs/CreateCatalogDialog';
 import { listCatalogsOptions } from '@/api/generated/@tanstack/react-query.gen';
 import type { Catalog } from '@/api/generated/types.gen';
-import { useAuth } from '@/contexts/AuthContext';
+
+const PAGE_SIZE = 20;
 
 type TabId = 'my' | 'accessible';
 
@@ -34,13 +38,21 @@ export function CatalogsPage() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabId>(getTabFromHash);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const { user } = useAuth();
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(search);
   const { embeddingConfigured } = useEmbeddingConfigured();
 
   const handleTabChange = useCallback((tab: TabId) => {
     setActiveTab(tab);
+    setPage(1);
     window.location.hash = tab;
   }, []);
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setPage(1);
+  };
 
   useEffect(() => {
     const onHashChange = () => setActiveTab(getTabFromHash());
@@ -48,24 +60,25 @@ export function CatalogsPage() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const { data: catalogsData } = useQuery({
-    ...listCatalogsOptions(),
+  // The owned / shared split and the search both happen server-side: dividing a
+  // page in the browser would show each tab an arbitrary slice of its contents.
+  const { data: catalogsData, isFetching } = useQuery({
+    ...listCatalogsOptions({
+      query: {
+        page,
+        limit: PAGE_SIZE,
+        search: debouncedSearch || undefined,
+        ownership: activeTab === 'my' ? 'owned' : 'shared',
+      },
+    }),
+    placeholderData: keepPreviousData,
   });
 
   const catalogs = catalogsData?.items ?? [];
-
-  const getCatalogsForTab = (): Catalog[] => {
-    switch (activeTab) {
-      case 'my':
-        return catalogs.filter((c) => c.owner_user_id === user?.id);
-      case 'accessible':
-        return catalogs.filter((c) => c.owner_user_id !== user?.id);
-      default:
-        return [];
-    }
-  };
+  const total = catalogsData?.total ?? 0;
 
   const getEmptyMessage = (): string => {
+    if (debouncedSearch) return 'No catalogs match your search';
     switch (activeTab) {
       case 'my':
         return "You haven't created any catalogs yet";
@@ -126,12 +139,27 @@ export function CatalogsPage() {
         ))}
       </div>
 
+      {/* Search */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          placeholder="Search catalogs by name or description..."
+          value={search}
+          onChange={(e) => handleSearchChange(e.target.value)}
+          className="pl-9"
+        />
+      </div>
+
       {/* Content */}
-      <CatalogList
-        catalogs={getCatalogsForTab()}
-        onSelect={handleSelectCatalog}
-        emptyMessage={getEmptyMessage()}
-      />
+      <div className={isFetching ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+        <CatalogList
+          catalogs={catalogs}
+          onSelect={handleSelectCatalog}
+          emptyMessage={getEmptyMessage()}
+        />
+      </div>
+
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
 
       {/* Create Dialog */}
       <CreateCatalogDialog

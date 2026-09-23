@@ -32,6 +32,7 @@ from ..models.catalog import (
     UpdateFileIndexing,
     UpdateSourceRequest,
 )
+from ..models.listing import OwnershipFilter
 from ..models.user import User
 from ..services.catalog_service import CatalogService
 from ..services.feature_status import is_embedding_ready
@@ -85,11 +86,20 @@ async def list_catalogs(
     # Unbounded by default so agent callers still see every catalog.
     limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
     search: str | None = Query(None, description="Search by name or description"),
+    ownership: OwnershipFilter | None = Query(
+        None, description="Restrict to catalogs the caller owns, or ones shared with them"
+    ),
 ) -> CatalogListResponse:
     """List catalogs accessible to the current user."""
     service = get_catalog_service(request)
     catalogs, total = await service.get_accessible_catalogs(
-        db, user, is_admin=is_admin_mode(request, user), search=search, page=page, limit=limit
+        db,
+        user,
+        is_admin=is_admin_mode(request, user),
+        search=search,
+        ownership=ownership,
+        page=page,
+        limit=limit,
     )
     return CatalogListResponse(items=catalogs, total=total)
 

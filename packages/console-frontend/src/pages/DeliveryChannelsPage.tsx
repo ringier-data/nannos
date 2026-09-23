@@ -1,8 +1,10 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Pencil, Trash2, Webhook, Plus, X, Check } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { Pencil, Trash2, Webhook, Plus, X, Check, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { TableSkeleton } from '@/components/skeletons';
+import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -171,17 +173,34 @@ function EditDialog({ channel, onClose }: EditDialogProps) {
 // Main page
 // ---------------------------------------------------------------------------
 
+const PAGE_SIZE = 20;
+
 export function DeliveryChannelsPage() {
   const qc = useQueryClient();
   const [editChannel, setEditChannel] = useState<DeliveryChannel | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeliveryChannel | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const { data: channels = [], isLoading, error } = useQuery<DeliveryChannel[]>({
-    queryKey: ['delivery-channels'],
-    queryFn: getDeliveryChannels,
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(search);
+
+  const { data: channelPage, isLoading, error, isFetching } = useQuery({
+    // The page and term are part of the key, so the cached picker query
+    // (['delivery-channels'] with no page) stays separate from this one.
+    queryKey: ['delivery-channels', { page, search: debouncedSearch }],
+    queryFn: () => getDeliveryChannels({ page, limit: PAGE_SIZE, search: debouncedSearch }),
     staleTime: 30_000,
+    placeholderData: keepPreviousData,
   });
+
+  const channels = channelPage?.channels ?? [];
+  const total = channelPage?.total ?? 0;
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setPage(1);
+  };
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => deleteDeliveryChannel(id),
@@ -223,6 +242,18 @@ export function DeliveryChannelsPage() {
         </p>
       </div>
 
+      {/* Search — kept mounted even when a search returns nothing, or there
+          would be no way to clear the term. */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          placeholder="Search channels by name..."
+          value={search}
+          onChange={(e) => handleSearchChange(e.target.value)}
+          className="pl-9"
+        />
+      </div>
+
       {/* Table */}
       {isLoading ? (
         <TableSkeleton columns={4} />
@@ -231,10 +262,16 @@ export function DeliveryChannelsPage() {
       ) : channels.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-16 text-muted-foreground">
           <Webhook className="h-10 w-10 opacity-30" />
-          <p className="text-sm">No delivery channels registered yet.</p>
+          <p className="text-sm">
+            {debouncedSearch
+              ? 'No delivery channels match your search.'
+              : 'No delivery channels registered yet.'}
+          </p>
         </div>
       ) : (
-        <div className="rounded-lg border">
+        <div
+          className={`rounded-lg border transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}
+        >
           <Table>
             <TableHeader>
               <TableRow>
@@ -303,6 +340,8 @@ export function DeliveryChannelsPage() {
           </Table>
         </div>
       )}
+
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
 
       {/* Edit dialog */}
       {editChannel && (

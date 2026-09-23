@@ -14,6 +14,7 @@ from ..dependencies import (
     require_auth,
     require_auth_or_bearer_token,
 )
+from ..models.listing import OwnershipFilter
 from ..models.sub_agent import (
     SubAgent,
     SubAgentApproval,
@@ -27,6 +28,7 @@ from ..models.sub_agent import (
     SubAgentSetDefaultVersion,
     SubAgentStatus,
     SubAgentSubmitRequest,
+    SubAgentType,
     SubAgentUpdate,
     SubAgentVersionApproval,
 )
@@ -128,8 +130,14 @@ async def list_sub_agents(
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
     status: SubAgentStatus | None = Query(None, description="Filter by status"),
-    owned_only: bool = Query(False, description="Only show owned sub-agents"),
+    ownership: OwnershipFilter | None = Query(
+        None, description="Restrict to sub-agents the caller owns, or ones shared with them"
+    ),
     activated_only: bool = Query(False, description="Only show activated sub-agents"),
+    deactivated_only: bool = Query(False, description="Only show sub-agents NOT activated for the caller"),
+    type_filter: SubAgentType | None = Query(
+        None, alias="type", description="Filter by sub-agent type"
+    ),
     search: str | None = Query(None, description="Search by name or description"),
     page: int = Query(1, ge=1, description="Page number"),
     # Unbounded by default: the orchestrator builds a user's whole registry from
@@ -146,7 +154,7 @@ async def list_sub_agents(
     - Admins (with admin mode enabled) see all sub-agents
     - When impersonating, shows only what the impersonated user can see (not admin view)
     - Use `status` to filter by status (e.g., pending_approval for admin queue)
-    - Use `owned_only=true` to see only owned sub-agents
+    - Use `ownership=owned` (or `shared`) to see only one side of that split
     - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
     """
     sub_agent_service = get_sub_agent_service(request)
@@ -156,16 +164,18 @@ async def list_sub_agents(
         is_impersonating = hasattr(request.state, "original_user") and request.state.original_user
         effective_admin = is_admin_mode(request, user) and not is_impersonating
 
-        # owned_only is a SQL filter now, not a post-filter: trimming the rows
-        # after the query would short-change a page and make `total` a lie.
         sub_agents, total = await sub_agent_service.get_accessible_sub_agents(
             db,
             user.id,
-            is_admin=False if owned_only else effective_admin,
+            # An ownership split is a question about this user's own relation to
+            # each agent, so it is answered from their view, not the admin one.
+            is_admin=False if ownership else effective_admin,
             status_filter=status,
             include_owned=True,
             activated_only=activated_only,
-            owned_only=owned_only,
+            deactivated_only=deactivated_only,
+            ownership=ownership,
+            type_filter=type_filter,
             search=search,
             page=page,
             limit=limit,

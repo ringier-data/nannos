@@ -71,6 +71,7 @@ class CatalogRepository(AuditedRepository):
         user_id: str,
         is_admin: bool = False,
         search: str | None = None,
+        ownership: str | None = None,
         page: int = 1,
         limit: int | None = None,
     ) -> tuple[list[Catalog], int]:
@@ -108,6 +109,16 @@ class CatalogRepository(AuditedRepository):
         if search:
             search_filter = "AND (c.name ILIKE :search OR c.description ILIKE :search)"
             params["search"] = f"%{search}%"
+
+        # The console splits owned from shared-with-me. Doing that in the browser
+        # would slice whichever page happened to arrive, so it is a SQL filter.
+        ownership_value = getattr(ownership, "value", ownership)
+        if ownership_value == "owned":
+            search_filter += " AND c.owner_user_id = :ownership_user_id"
+            params["ownership_user_id"] = user_id
+        elif ownership_value == "shared":
+            search_filter += " AND c.owner_user_id <> :ownership_user_id"
+            params["ownership_user_id"] = user_id
 
         if is_admin:
             inner = f"""

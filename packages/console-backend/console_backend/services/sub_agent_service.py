@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
 from ..config import config
 from ..models.notification import NotificationData, NotificationType
+from ..models.listing import OwnershipFilter
 from ..models.sub_agent import (
     ActivationSource,
     SkillDefinition,
@@ -244,7 +245,9 @@ class SubAgentService:
         status_filter: SubAgentStatus | None = None,
         include_owned: bool = True,
         activated_only: bool = False,
-        owned_only: bool = False,
+        deactivated_only: bool = False,
+        ownership: OwnershipFilter | None = None,
+        type_filter: SubAgentType | None = None,
         search: str | None = None,
         page: int = 1,
         limit: int | None = None,
@@ -309,11 +312,21 @@ class SubAgentService:
                 ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
         """
 
-        activation_filter = (
-            "AND (usa.sub_agent_id IS NOT NULL OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)) "
-            if activated_only
-            else ""
-        )
+        # activated_only keeps its historic meaning for the orchestrator; the
+        # console's third state (explicitly NOT activated) is a separate flag so
+        # its "Disabled" facet is decided in SQL rather than over a page.
+        if activated_only:
+            activation_filter = (
+                "AND (usa.sub_agent_id IS NOT NULL "
+                "OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)) "
+            )
+        elif deactivated_only:
+            activation_filter = (
+                "AND usa.sub_agent_id IS NULL "
+                "AND NOT (sa.owner_user_id = 'system' AND sa.is_public = TRUE) "
+            )
+        else:
+            activation_filter = ""
 
         params: dict[str, Any] = {"user_id": user_id}
 
@@ -324,9 +337,20 @@ class SubAgentService:
             search_filter = "AND (sa.name ILIKE :search OR cv.description ILIKE :search) "
             params["search"] = f"%{search}%"
 
+        # Owned vs shared-with-me is decided in SQL, before the page is cut:
+        # trimming rows afterwards silently short-changes a page and leaves
+        # `total` counting the untrimmed set.
+        type_clause = ""
+        if type_filter is not None:
+            type_clause = "AND sa.type = :type_filter "
+            params["type_filter"] = getattr(type_filter, "value", type_filter)
+
         owned_filter = ""
-        if owned_only:
+        ownership_value = getattr(ownership, "value", ownership)
+        if ownership_value == "owned":
             owned_filter = "AND sa.owner_user_id = :user_id "
+        elif ownership_value == "shared":
+            owned_filter = "AND sa.owner_user_id <> :user_id "
 
         if is_admin and status_filter is None:
             # Admins see all sub-agents
@@ -334,6 +358,7 @@ class SubAgentService:
                 {base_select}
                 WHERE sa.deleted_at IS NULL {activation_filter}
                 {owned_filter}
+                {type_clause}
                 {search_filter}
             """
         elif is_admin and status_filter:
@@ -342,6 +367,7 @@ class SubAgentService:
                 {base_select}
                 WHERE cv.status = :status AND sa.deleted_at IS NULL {activation_filter}
                 {owned_filter}
+                {type_clause}
                 {search_filter}
             """
         else:
@@ -412,6 +438,7 @@ class SubAgentService:
                     ))
                 ) {activation_filter}
                 {owned_filter}
+                {type_clause}
                 {search_filter}
             """
             if status_filter:

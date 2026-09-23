@@ -3908,6 +3908,17 @@ export type OutboundScimTestResult = {
 export type OwnerStatus = 'active' | 'suspended' | 'deleted';
 
 /**
+ * OwnershipFilter
+ *
+ * Which side of the console's owned / shared-with-me split to list.
+ *
+ * The console shows these as tabs. Splitting a page in the browser would give
+ * each tab an arbitrary fraction of its real contents, so the choice is a
+ * server-side filter applied before the page is cut.
+ */
+export type OwnershipFilter = 'owned' | 'shared';
+
+/**
  * PaginatedRiskScoresResponse
  *
  * Paginated response for risk scores.
@@ -10138,17 +10149,29 @@ export type ConsoleListSubAgentsData = {
          */
         status?: SubAgentStatus | null;
         /**
-         * Owned Only
+         * Ownership
          *
-         * Only show owned sub-agents
+         * Restrict to sub-agents the caller owns, or ones shared with them
          */
-        owned_only?: boolean;
+        ownership?: OwnershipFilter | null;
         /**
          * Activated Only
          *
          * Only show activated sub-agents
          */
         activated_only?: boolean;
+        /**
+         * Deactivated Only
+         *
+         * Only show sub-agents NOT activated for the caller
+         */
+        deactivated_only?: boolean;
+        /**
+         * Type
+         *
+         * Filter by sub-agent type
+         */
+        type?: SubAgentType | null;
         /**
          * Search
          *
@@ -14453,6 +14476,12 @@ export type ListCatalogsData = {
          * Search by name or description
          */
         search?: string | null;
+        /**
+         * Ownership
+         *
+         * Restrict to catalogs the caller owns, or ones shared with them
+         */
+        ownership?: OwnershipFilter | null;
     };
     url: '/api/v1/catalogs';
 };

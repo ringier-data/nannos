@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Search, Filter } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -10,19 +9,31 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { SubAgentCard } from './SubAgentCard';
-import type { SubAgentListItem, SubAgentStatus, SubAgentType } from './types';
+import {
+  EMPTY_SUB_AGENT_FILTERS,
+  type ScopeFilter,
+  type SubAgentFilters,
+  type SubAgentListItem,
+  type SubAgentStatus,
+  type SubAgentType,
+} from './types';
 
-export type ScopeFilter = 'all' | 'mine' | 'shared' | 'pending';
+export type { ScopeFilter, SubAgentFilters };
 
 interface SubAgentListProps {
   subAgents: SubAgentListItem[];
   onSelect: (subAgent: SubAgentListItem) => void;
   emptyMessage?: string;
   showManageAccess?: boolean;
-  currentUserId?: string;
   scope?: ScopeFilter;
   onScopeChange?: (scope: ScopeFilter) => void;
   showPendingScope?: boolean;
+  /** Every facet is a server query parameter, so the page owns the state. */
+  filters: SubAgentFilters;
+  onFiltersChange: (filters: SubAgentFilters) => void;
+  /** Matches on the server, which exceeds the rows on this page. */
+  total: number;
+  isFetching?: boolean;
 }
 
 export function SubAgentList({
@@ -30,51 +41,34 @@ export function SubAgentList({
   onSelect,
   emptyMessage = 'No sub-agents found',
   showManageAccess = false,
-  currentUserId,
   scope = 'all',
   onScopeChange,
   showPendingScope = false,
+  filters,
+  onFiltersChange,
+  total,
+  isFetching = false,
 }: SubAgentListProps) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<SubAgentStatus | 'all'>('all');
-  const [typeFilter, setTypeFilter] = useState<SubAgentType | 'all'>('all');
-  const [activationFilter, setActivationFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+  // The server already applied every facet; these rows are the page as-is.
+  const filteredSubAgents = subAgents;
 
-  const filteredSubAgents = subAgents.filter((sa) => {
-    const matchesSearch =
-      searchQuery === '' ||
-      sa.name.toLowerCase().includes(searchQuery.toLowerCase());
+  const { search: searchQuery, status: statusFilter, type: typeFilter, activation: activationFilter } =
+    filters;
 
-    // Owner facet (skipped for 'all' and the admin 'pending' approval queue)
-    const matchesScope =
-      scope === 'mine'
-        ? sa.owner_user_id === currentUserId
-        : scope === 'shared'
-          ? sa.owner_user_id !== currentUserId
-          : true;
-
-    const matchesStatus =
-      statusFilter === 'all' || (sa.config_version?.status ?? 'draft') === statusFilter;
-    const matchesType = typeFilter === 'all' || sa.type === typeFilter;
-    const matchesActivation =
-      activationFilter === 'all' ||
-      (activationFilter === 'enabled' ? !!sa.is_activated : !sa.is_activated);
-
-    return matchesSearch && matchesScope && matchesStatus && matchesType && matchesActivation;
-  });
+  const setSearchQuery = (search: string) => onFiltersChange({ ...filters, search });
+  const setStatusFilter = (status: SubAgentStatus | 'all') =>
+    onFiltersChange({ ...filters, status });
+  const setTypeFilter = (type: SubAgentType | 'all') => onFiltersChange({ ...filters, type });
+  const setActivationFilter = (activation: 'all' | 'enabled' | 'disabled') =>
+    onFiltersChange({ ...filters, activation });
 
   const hasFilters =
     searchQuery !== '' || statusFilter !== 'all' || typeFilter !== 'all' || activationFilter !== 'all';
 
-  const clearFilters = () => {
-    setSearchQuery('');
-    setStatusFilter('all');
-    setTypeFilter('all');
-    setActivationFilter('all');
-  };
+  const clearFilters = () => onFiltersChange(EMPTY_SUB_AGENT_FILTERS);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className={`flex flex-col gap-4 transition-opacity ${isFetching ? 'opacity-60' : ''}`}>
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
         {onScopeChange && (
@@ -139,10 +133,12 @@ export function SubAgentList({
         )}
       </div>
 
-      {/* Results count */}
+      {/* Results count — `total` is what the filters match on the server, which
+          is more than this page holds. */}
       <div className="text-sm text-muted-foreground">
-        {filteredSubAgents.length} sub-agent{filteredSubAgents.length !== 1 ? 's' : ''}
-        {hasFilters && ` (filtered from ${subAgents.length})`}
+        {total} sub-agent{total !== 1 ? 's' : ''}
+        {hasFilters && ' matching'}
+        {total > filteredSubAgents.length && ` — showing ${filteredSubAgents.length}`}
       </div>
 
       {/* List */}

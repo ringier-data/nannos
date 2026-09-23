@@ -1306,7 +1306,7 @@ export const consoleListSubAgentsQueryKey = (options?: Options<ConsoleListSubAge
  * - Admins (with admin mode enabled) see all sub-agents
  * - When impersonating, shows only what the impersonated user can see (not admin view)
  * - Use `status` to filter by status (e.g., pending_approval for admin queue)
- * - Use `owned_only=true` to see only owned sub-agents
+ * - Use `ownership=owned` (or `shared`) to see only one side of that split
  * - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
  */
 export const consoleListSubAgentsOptions = (options?: Options<ConsoleListSubAgentsData>) => queryOptions<ConsoleListSubAgentsResponse, ConsoleListSubAgentsError, ConsoleListSubAgentsResponse, ReturnType<typeof consoleListSubAgentsQueryKey>>({
@@ -1337,7 +1337,7 @@ export const consoleListSubAgentsInfiniteQueryKey = (options?: Options<ConsoleLi
  * - Admins (with admin mode enabled) see all sub-agents
  * - When impersonating, shows only what the impersonated user can see (not admin view)
  * - Use `status` to filter by status (e.g., pending_approval for admin queue)
- * - Use `owned_only=true` to see only owned sub-agents
+ * - Use `ownership=owned` (or `shared`) to see only one side of that split
  * - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
  */
 export const consoleListSubAgentsInfiniteOptions = (options?: Options<ConsoleListSubAgentsData>) => infiniteQueryOptions<ConsoleListSubAgentsResponse, ConsoleListSubAgentsError, InfiniteData<ConsoleListSubAgentsResponse>, QueryKey<Options<ConsoleListSubAgentsData>>, number | Pick<QueryKey<Options<ConsoleListSubAgentsData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
