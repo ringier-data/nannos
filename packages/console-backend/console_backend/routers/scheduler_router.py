@@ -993,6 +993,9 @@ async def update_job(
             check_args_exprs=data.check_args_exprs if "check_args_exprs" in data.model_fields_set else _UNSET,
             cel_expr=data.cel_expr if "cel_expr" in data.model_fields_set else _UNSET,
             llm_condition=data.llm_condition if "llm_condition" in data.model_fields_set else _UNSET,
+            destroy_after_trigger=(
+                data.destroy_after_trigger if "destroy_after_trigger" in data.model_fields_set else _UNSET
+            ),
             check_args=data.check_args if "check_args" in data.model_fields_set else _UNSET,
             delivery_channel_id=(
                 data.delivery_channel_id if "delivery_channel_id" in data.model_fields_set else _UNSET
