@@ -827,8 +827,10 @@ changes what runs under *your* identity or what you own (`job_shared`, `job_acce
 auto-subscribed gets an **activation notice** on their own delivery channel as well as the console
 notification — `SchedulerService._dm_activations`, sent *after* the caller's commit (a DM saying a
 job now runs under your identity must not arrive for a row a rollback removed) through
-`SchedulerEngine.send_plain_notice`, which is the scheduler's one way of posting a line under a
-subscriber's identity while running no agent. And every delivered run of a job whose subscriber is
+`SchedulerEngine.send_plain_notice`, a line posted under a subscriber's identity while running no
+agent. It and `_publish_check_ask` (a watch's check-tool park, delivered as the authorization card
+with the run id and the ask on `auth_ask`) are the two callers of `_dispatch_notice`, the one
+agent-less dispatch seam. And every delivered run of a job whose subscriber is
 not its owner carries a **provenance line** — `SchedulerEngine._provenance_line` puts it in the
 dispatch metadata as `scheduled_job_provenance`, and agent-runner appends it to `agent_message`,
 where every run's output is already composed. One seam, rather than the same footer in three
@@ -900,7 +902,8 @@ healer already called interrupted stays interrupted if its dispatcher turns out 
 **The user is told only when recovery is exhausted**, via `_notify_recovery_exhausted`: an
 ephemeral notification-only A2A dispatch (text plus the job's push config, no `sub_agent_id`, no
 run row) that agent-runner delivers while running no agent. Result delivery otherwise stays with
-the executing agent — do not add a fourth deliverer. Notices are owed, not sent, where the loss is
+the executing agent — anything else the scheduler has to say goes through `_dispatch_notice`; do
+not add another deliverer beside it. Notices are owed, not sent, where the loss is
 detected; `_deliver_due_notices` claims them on a later tick, retries a failed delivery, and abandons
 one that is older than `NOTICE_GIVE_UP_AFTER_SECONDS` or superseded by a later completed run.
 

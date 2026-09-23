@@ -631,3 +631,29 @@ class TestAResumedRunDoesNotOwnTheSchedule:
 
         row = await pg_session.execute(text("SELECT enabled FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id})
         assert row.scalar_one() is False
+
+
+class TestMarkRunDelivered:
+    """A check-tool park is written before its card is sent; only ``delivered`` follows."""
+
+    @pytest.mark.asyncio
+    async def test_raises_the_flag_on_a_parked_run_only(self, pg_session: AsyncSession):
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "mark-delivered")
+        parked = await seed_run(pg_session, job_id, status="auth_required", completed_at="NOW()")
+        answered = await seed_run(pg_session, job_id, status="success", completed_at="NOW()")
+        await pg_session.commit()
+
+        assert await repo.mark_run_delivered(pg_session, parked) is True
+        # A late delivery result never flips a run that has since been answered and closed.
+        assert await repo.mark_run_delivered(pg_session, answered) is False
+        await pg_session.commit()
+
+        rows = (
+            await pg_session.execute(
+                text("SELECT id, delivered FROM scheduled_job_runs WHERE id IN (:a, :b)"), {"a": parked, "b": answered}
+            )
+        ).mappings()
+        by_id = {r["id"]: r["delivered"] for r in rows}
+        assert by_id[parked] is True
+        assert by_id[answered] is False

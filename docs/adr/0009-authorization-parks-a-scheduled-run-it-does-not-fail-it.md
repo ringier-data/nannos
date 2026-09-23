@@ -318,6 +318,15 @@ side". This decision is that caller.
    a cancel pushes a `canceled` status that the email client reports as a closed task.
    An answer from the card carries the card's coordinates into the re-run's dispatch, so
    the re-run's result, or its second ask, threads under the ask (decision 5).
+   The park is written before the card is sent: the card is answerable the moment it
+   lands, so the run it answers must already be parked, and only `delivered` is raised
+   afterwards. Two things are accepted knowingly. A runner older than `auth_ask` delivers
+   the prose as a *completed* run carrying the run id, which a chat client stores as the
+   run's adoptable result while the run is parked — the un-adoptability invariant of
+   decision 5 is traded away for the window between the two images rolling, and only
+   there. And the notice task is left open rather than cancelled on resume: a cancel
+   pushes a `canceled` status, which the email client reports to the owner as a closed
+   task.
 
 ## Constraints
 
