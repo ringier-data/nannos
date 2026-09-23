@@ -41,7 +41,8 @@ export function ConditionTester({
   /**
    * What the run would see as `prev`: the job's stored last result, or null when it
    * has none (a job that has not run yet). Undefined means the caller has no notion of
-   * one, which is the same thing to the expression.
+   * one, which is the same thing to the expression. Compared to the payload by value,
+   * so a caller may pass the same object as liveResult or a fresh copy alike.
    */
   prev?: Record<string, unknown> | null;
 }) {
@@ -53,9 +54,16 @@ export function ConditionTester({
 
   const cel = celExpr?.trim() || '';
   const judge = llmCondition?.trim() || '';
-  const previous = prev ?? null;
-  // Only worth a note when the expression reads it: the binding is invisible otherwise.
-  const readsPrev = /\bprev\b/.test(cel);
+  // Whether the expression reads the `prev` binding — not a string literal or a response
+  // field of that name. Decides whether prev is sent at all (a stored result can be large,
+  // and the backend size-checks it whether or not the expression looks at it) and whether
+  // the binding is worth a note.
+  const readsPrev = /(^|[^.\w])prev\b/.test(cel.replace(/'[^']*'|"[^"]*"/g, ''));
+  // Serialised for the same reason as payloadKey below: a prop that changes identity
+  // per render must not re-fire the debounced validate. Parsed back to a stable object
+  // keyed on content, so the effect depends on the key alone.
+  const prevKey = useMemo(() => (readsPrev ? JSON.stringify(prev ?? null) : ''), [readsPrev, prev]);
+  const previous = useMemo<unknown>(() => (prevKey ? JSON.parse(prevKey) : null), [prevKey]);
 
   // Memoised rather than parsed inline: a fresh parse on every render gives `payload`
   // (and so `subject`, which the validate effect depends on) a new identity each time, so
@@ -121,6 +129,9 @@ export function ConditionTester({
     };
     // payloadKey stands in for payload; the rest are the condition's inputs.
   }, [payloadKey, hasPayload, parseCheckOnly, subject, previous, cel, judge]);
+  // The verdict when nothing changed: what the run compares as prev is exactly what it
+  // was given as result. By value, so a re-run that returns identical data counts too.
+  const unchanged = prevKey !== '' && prevKey === payloadKey;
 
   // Derived rather than cleared in the effect: with no payload there is nothing to
   // report, and a stale outcome from a previous payload would be misleading.
@@ -244,12 +255,12 @@ export function ConditionTester({
 
       {/* Which prev the verdict was decided against. A change-detection condition reads
           the opposite way depending on it, and the binding is otherwise invisible. */}
-      {shown?.valid && hasPayload && readsPrev && (
+      {shown?.valid && !shown.error && hasPayload && readsPrev && (
         <span className="text-muted-foreground flex items-start gap-1.5 text-xs">
           <Info className="mt-0.5 size-3.5 shrink-0" />
           {previous === null
             ? 'prev is null here: this job has no stored result yet, so the condition is tested as a first run.'
-            : source === 'live' && liveResult === previous
+            : unchanged
               ? 'prev is the stored last result, the same payload as result: this is the verdict when nothing changed.'
               : 'prev is the stored last result, as on the next scheduled run.'}
         </span>

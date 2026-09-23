@@ -151,8 +151,9 @@ def _what_triggered(outcome: WatchOutcome | None) -> Any:
 
     A CEL condition is gate and filter in one — its author wrote it to pick out the items
     that matter — so when it returned some, those are what the agent acts on and what the
-    notification is written from. A boolean gate and a judged watch narrow nothing, and
-    the whole response is all there is.
+    notification is written from. A boolean gate, a scalar extraction and a judge-only
+    watch narrow nothing worth acting on (see ``WatchOutcome.evidence``), and the whole
+    response is all there is.
     """
     if outcome is None:
         return None
@@ -1143,7 +1144,7 @@ class SchedulerEngine:
             else:
                 call_config["system_prompt"] = (
                     f"You are calling the user because their scheduled watch '{job.name}' "
-                    "triggered. Tell them what happened, using the check result below, "
+                    "triggered. Tell them what happened, using the information below, "
                     "then answer any questions they have about it."
                 )
 
@@ -1156,17 +1157,15 @@ class SchedulerEngine:
             ]
             if message_text and message_text != "Execute the task you are designed for.":
                 parts.append({"kind": "text", "text": message_text})
-            if watch_outcome is not None and _what_triggered(watch_outcome):
+            triggered = _what_triggered(watch_outcome)
+            if triggered:
                 # Without this a notification-only watch would call with nothing to
                 # report: the message may be empty, and the agent-runner path that
                 # writes one is not taken when the target is the voice agent.
                 parts.append(
                     {
                         "kind": "text",
-                        "text": (
-                            f"{_triggered_label(watch_outcome)}: "
-                            f"{json.dumps(_what_triggered(watch_outcome), default=str)[:4000]}"
-                        ),
+                        "text": f"{_triggered_label(watch_outcome)}: {json.dumps(triggered, default=str)[:4000]}",
                     }
                 )
         else:
@@ -1256,16 +1255,18 @@ class SchedulerEngine:
         # The expression's evidence when there is some, so the sentence is written from the
         # items that matched rather than from a response that also holds everything that
         # did not (the read notifications next to the unread one, say).
-        check_result = _what_triggered(outcome)
-        if not check_result:
+        triggered = _what_triggered(outcome)
+        if not triggered:
             return f"The watch '{job.name}' triggered."
+        label = _triggered_label(outcome)
+        fallback = f"The watch '{job.name}' triggered. {label}: {json.dumps(triggered, default=str)[:300]}"
 
         async with self._db_session_factory() as db:
             defaults = await ModelDefaultsRepository().get_all(db)
         model = defaults.get("chat:low") or defaults.get("chat")
         if not model:
             logger.warning("Job %d: no chat model configured, reporting the raw result", job.id)
-            return f"The watch '{job.name}' triggered. Result: {json.dumps(check_result, default=str)[:300]}"
+            return fallback
 
         # No markup, deliberately: this text goes out verbatim on whichever channel the job
         # notifies (Slack renders Markdown literally), and one or two sentences lose nothing
@@ -1277,7 +1278,7 @@ class SchedulerEngine:
             "no markdown, no bold, no headings, no bullet points. Reply with the "
             "message text only, no preamble.\n\n"
             f"Watch: {job.name}\n"
-            f"{_triggered_label(outcome)}:\n{json.dumps(check_result, indent=2, default=str)[:6000]}"
+            f"{label}:\n{json.dumps(triggered, indent=2, default=str)[:6000]}"
         )
         try:
             # Thinking off: two sentences of plain text need no reasoning, and on the low
@@ -1292,7 +1293,7 @@ class SchedulerEngine:
                 return written
         except Exception:
             logger.warning("Job %d: writing the notification failed", job.id, exc_info=True)
-        return f"The watch '{job.name}' triggered. Result: {json.dumps(check_result, default=str)[:300]}"
+        return fallback
 
     async def _resolve_voice_agent_id(self, db: Any) -> int | None:
         """Look up the voice-agent sub_agent_id from the DB (system-owned)."""
