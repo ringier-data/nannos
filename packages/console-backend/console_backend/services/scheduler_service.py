@@ -587,8 +587,15 @@ class SchedulerService:
     # Read
     # ------------------------------------------------------------------
 
-    async def list_jobs(self, db: AsyncSession, user_id: str) -> list[ScheduledJob]:
-        return await self.repo.list_jobs(db, user_id)
+    async def list_jobs(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[ScheduledJob], int]:
+        return await self.repo.list_jobs(db, user_id, search=search, page=page, limit=limit)
 
     async def get_job(self, db: AsyncSession, job_id: int, user_id: str) -> ScheduledJob | None:
         """The caller's own subscription *job_id*; another user's is a None (→ 404)."""
@@ -597,9 +604,18 @@ class SchedulerService:
             return None
         return job
 
-    async def list_available_definitions(self, db: AsyncSession, user_id: str) -> list[SharedJobDefinition]:
+    async def list_available_definitions(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SharedJobDefinition], int]:
         """Definitions the user may subscribe to or copy, with their subscription id if any."""
-        return await self.repo.list_available_definitions(db, user_id)
+        return await self.repo.list_available_definitions(
+            db, user_id, search=search, page=page, limit=limit
+        )
 
     # ------------------------------------------------------------------
     # Update: one path, server-side routing

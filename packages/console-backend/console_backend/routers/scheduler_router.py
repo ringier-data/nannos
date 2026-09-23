@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
@@ -1117,10 +1117,22 @@ async def create_job(
 async def list_jobs(
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth_or_bearer_token),
+    search: str | None = Query(None, description="Search by job name or prompt"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default so the MCP callers keep listing a user's whole schedule.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[ScheduledJob]:
     service = _get_scheduler_service(request)
-    return await service.list_jobs(db=db, user_id=current_user.id)
+    jobs, total = await service.list_jobs(
+        db=db, user_id=current_user.id, search=search, page=page, limit=limit
+    )
+    # The body stays a bare array: this is an MCP tool, and wrapping it in an
+    # envelope would change what every agent calling it receives. The console
+    # reads the count it needs for pagination off the header instead.
+    response.headers["X-Total-Count"] = str(total)
+    return jobs
 
 
 @router.get(
@@ -1559,10 +1571,19 @@ def _translate(e: Exception) -> HTTPException:
 async def list_shared_definitions(
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth_or_bearer_token),
+    search: str | None = Query(None, description="Search by job name or prompt"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SharedJobDefinition]:
     service = _get_scheduler_service(request)
-    return await service.list_available_definitions(db, current_user.id)
+    definitions, total = await service.list_available_definitions(
+        db, current_user.id, search=search, page=page, limit=limit
+    )
+    # Bare array for the same reason as scheduler_list_jobs above.
+    response.headers["X-Total-Count"] = str(total)
+    return definitions
 
 
 @router.post(

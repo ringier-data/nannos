@@ -168,7 +168,7 @@ class TestSharingAndSubscribing:
         svc, db, u = world["service"], world["db"], world["users"]
         job = await svc.create_job(db, _watch_create(), u["owner"])
 
-        assert await svc.list_available_definitions(db, u["outsider"].id) == []
+        assert (await svc.list_available_definitions(db, u["outsider"].id))[0] == []
         with pytest.raises(LookupError):
             await svc.subscribe(db, job.definition_id, u["outsider"])
 
@@ -180,7 +180,7 @@ class TestSharingAndSubscribing:
             db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"]
         )
 
-        available = await svc.list_available_definitions(db, u["member"].id)
+        available, _ = await svc.list_available_definitions(db, u["member"].id)
         assert [d.id for d in available] == [job.definition_id]
         assert available[0].subscription_id is None
         assert available[0].effective_permission == "read"
@@ -211,7 +211,7 @@ class TestSharingAndSubscribing:
         )
         perms = await svc.get_permissions(db, job.definition_id, u["owner"])
         assert perms[0]["permissions"] == ["read", "write"]
-        listed = await svc.list_available_definitions(db, u["member"].id)
+        listed, _ = await svc.list_available_definitions(db, u["member"].id)
         assert [d.id for d in listed] == [job.definition_id]
         assert (await svc.subscribe(db, job.definition_id, u["member"])).effective_permission == "read"
 
@@ -419,7 +419,7 @@ class TestDeleteAndCopy:
         assert await svc.delete_job(db, job.id, u["owner"]) is True
         assert await svc.get_job(db, theirs.id, u["writer"].id) is None
         assert NotificationType.JOB_DELETED.value in await _notifications(db, u["writer"].id)
-        assert await svc.list_available_definitions(db, u["member"].id) == []
+        assert (await svc.list_available_definitions(db, u["member"].id))[0] == []
 
     @pytest.mark.asyncio
     async def test_copy_is_independent_and_owned_by_the_copier(self, world):
@@ -541,7 +541,7 @@ class TestGroupDefaultsFollowMembership:
 
         assert {j.user_id for j in await svc.repo.list_subscriptions(db, job.definition_id)} == {u["owner"].id}
         assert await svc.repo.get_group_default_definition_ids(db, gid) == []
-        assert await svc.list_available_definitions(db, u["member"].id) == []
+        assert (await svc.list_available_definitions(db, u["member"].id))[0] == []
         assert await svc.repo.user_permission(db, job.definition_id, u["member"].id) is None
 
     @pytest.mark.asyncio
@@ -562,7 +562,7 @@ class TestGroupDefaultsFollowMembership:
         assert await svc.repo.claim_due_jobs(db) == []
         await db.rollback()
         # And they can no longer see or re-subscribe.
-        assert await svc.list_available_definitions(db, u["member"].id) == []
+        assert (await svc.list_available_definitions(db, u["member"].id))[0] == []
 
 
 class TestActivationIsAnnouncedWhereTheResultsLand:
