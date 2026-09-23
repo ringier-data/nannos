@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -119,6 +120,9 @@ class WatchOutcome:
 #: same payload ``AuthErrorDetectionMiddleware`` detects on the agent path; only the
 #: field check is mirrored here, since the tool client has already parsed the JSON.
 _NEED_CREDENTIALS = "need-credentials"
+_NEED_CREDENTIALS_FIELD_RE = re.compile(r'"errorCode"\s*:\s*"need-credentials"')
+_AUTHORIZE_URL_RE = re.compile(r'"authorizeUrl"\s*:\s*"([^"]+)"')
+_AUTH_MESSAGE_RE = re.compile(r'"message"\s*:\s*"([^"]+)"')
 
 
 def need_credentials_ask(tool_name: str, check_result: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -135,10 +139,22 @@ def need_credentials_ask(tool_name: str, check_result: dict[str, Any] | None) ->
     authorizing. The service is left empty exactly as the agent path leaves it (the
     gateway's payload names no service), so a card built from either ask names the tool.
     """
-    if not isinstance(check_result, dict) or check_result.get("errorCode") != _NEED_CREDENTIALS:
+    if not isinstance(check_result, dict):
         return None
-    authorize_url = check_result.get("authorizeUrl")
-    message = check_result.get("message")
+    if check_result.get("errorCode") == _NEED_CREDENTIALS:
+        authorize_url = check_result.get("authorizeUrl")
+        message = check_result.get("message")
+    else:
+        # The refusal wrapped in prose, or one of several content blocks: the tool client
+        # folds anything that is not a single JSON object under ``output``, so the field
+        # is looked for in that text — the field, still, not the words.
+        output = check_result.get("output")
+        if not isinstance(output, str) or not _NEED_CREDENTIALS_FIELD_RE.search(output):
+            return None
+        url_match = _AUTHORIZE_URL_RE.search(output)
+        msg_match = _AUTH_MESSAGE_RE.search(output)
+        authorize_url = url_match.group(1) if url_match else None
+        message = msg_match.group(1) if msg_match else None
     return {
         "requires_auth": True,
         "auth_requirement": {

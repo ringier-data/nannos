@@ -615,6 +615,10 @@ class SchedulerEngine:
         releases the schedule: the resumed run closes without touching
         ``consecutive_failures`` (a refused credential is not evidence about the job),
         and the next occurrence asks again — the same shape as a declined agent park.
+
+        Takes no ``reply_to``: the notice a check park sends is prose, not a card, so no
+        chat client has coordinates to thread a continuation under. When one does, the
+        agent branch shows where they go (``reply_to_message`` in the dispatch metadata).
         """
         if run_id is None:
             async with self._db_session_factory() as db:
@@ -632,18 +636,25 @@ class SchedulerEngine:
             await self._dispatch_job(job, run_id=run_id, trigger=RunTrigger.RESUMED)
             return run_id
 
-        await self._finalize(
-            run_id=run_id,
-            job=job,
-            status=JobRunStatus.FAILED,
-            error_message=(
-                "You declined the authorization, so this check was not run. The watch will ask "
-                "again on its next occurrence."
-            ),
-            delivered=False,
-            trigger=RunTrigger.RESUMED,
-            counts_as_failure=False,
-        )
+        # Logged rather than raised, like the agent branch: this runs as a Starlette
+        # background task, where an exception escapes into nothing and the run row would
+        # be left running — and the healer would then retry a check the owner just
+        # declined, parking it on a fresh ask.
+        try:
+            await self._finalize(
+                run_id=run_id,
+                job=job,
+                status=JobRunStatus.FAILED,
+                error_message=(
+                    "You declined the authorization, so this check was not run. The watch will ask "
+                    "again on its next occurrence."
+                ),
+                delivered=False,
+                trigger=RunTrigger.RESUMED,
+                counts_as_failure=False,
+            )
+        except Exception:
+            logger.exception("Failed to record the declined authorization as run %s of job %d", run_id, job.id)
         return run_id
 
     async def _loop(self) -> None:
@@ -710,6 +721,7 @@ class SchedulerEngine:
                         error_message=str(e),
                         delivered=False,
                         paused_reason="No offline token stored. User must re-grant scheduler consent.",
+                        trigger=trigger,
                     )
                     return
 
@@ -744,6 +756,10 @@ class SchedulerEngine:
                     # before dispatch is what lets the trigger choose its target (an agent,
                     # or a phone call).
                     watch_outcome: WatchOutcome | None = None
+                    # The ask a check tool answered with, when it did. Parked AFTER this
+                    # session closes, like the dispatch below: the park sends a notice over
+                    # the network, and a pooled connection must not sit open across it.
+                    check_ask: dict[str, Any] | None = None
                     if self._watch_evaluator.can_evaluate(job):
                         watch_outcome = await self._watch_evaluator.evaluate(db, job, access_token)
 
@@ -752,12 +768,9 @@ class SchedulerEngine:
                             # the run on that rather than failing it; the agent path does
                             # so through agent-runner's task, this path has no task and
                             # parks here.
-                            await self._park_on_check_ask(
-                                db, job, run_id, access_token, watch_outcome.auth_ask, trigger
-                            )
-                            return
+                            check_ask = watch_outcome.auth_ask
 
-                        if watch_outcome.error:
+                        elif watch_outcome.error:
                             await self._finalize(
                                 run_id=run_id,
                                 job=job,
@@ -766,10 +779,11 @@ class SchedulerEngine:
                                 delivered=False,
                                 last_check_result=watch_outcome.check_result,
                                 condition_evaluation=watch_outcome.evaluation,
+                                trigger=trigger,
                             )
                             return
 
-                        if not watch_outcome.condition_met:
+                        elif not watch_outcome.condition_met:
                             await self._finalize(
                                 run_id=run_id,
                                 job=job,
@@ -777,13 +791,19 @@ class SchedulerEngine:
                                 delivered=False,
                                 last_check_result=watch_outcome.check_result,
                                 condition_evaluation=watch_outcome.evaluation,
+                                trigger=trigger,
                             )
                             return
 
-                    # Build the A2A message args for agent-runner
-                    parts, metadata, push_config = await self._build_message_args(
-                        job, run_id, access_token, db, watch_outcome=watch_outcome
-                    )
+                    if check_ask is None:
+                        # Build the A2A message args for agent-runner
+                        parts, metadata, push_config = await self._build_message_args(
+                            job, run_id, access_token, db, watch_outcome=watch_outcome
+                        )
+
+            if check_ask is not None:
+                await self._park_on_check_ask(job, run_id, check_ask, trigger)
+                return
 
             # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client. SSE keeps
             # bytes flowing so CloudFront/ALB idle-timeout never fires for long-running jobs.
@@ -859,10 +879,8 @@ class SchedulerEngine:
 
     async def _park_on_check_ask(
         self,
-        db: Any,
         job: ScheduledJob,
         run_id: int,
-        access_token: str,
         ask: dict[str, Any],
         trigger: RunTrigger,
     ) -> None:
@@ -876,50 +894,30 @@ class SchedulerEngine:
         ``CHECK_PARK_PREFIX``).
 
         A job with a delivery channel is also told there, so the owner who lives in a chat
-        client learns that the job has stopped and gets the link (decision 5). Delivery is
-        the push sender's job, so the notice is dispatched to agent-runner as a
-        notification — no sub-agent, plain text with the authorize URL in it literally —
-        and the outer task it completes is NOT the parked one: the clients render prose
-        with a working link rather than a card, and the answer comes back through the
-        console. A delivery that fails is logged and the run still parks; the ask is
-        recorded on the run either way, and a park nobody was told about is still a
-        stopped job the console shows, which beats a failed run counted against the job.
+        client learns that the job has stopped and gets the link (decision 5). It goes as
+        a plain notice — not a run: it carries no run id, so the chat client has nothing
+        to adopt as this run's result, which keeps the ask un-adoptable as the ADR
+        requires — and the outer task it completes is NOT the parked one: the clients
+        render prose with a working link rather than a card, and the answer comes back
+        through the console. A delivery that fails is logged and the run still parks; the
+        ask is recorded on the run either way, and a park nobody was told about is still
+        a stopped job the console shows, which beats a failed run counted against the job.
         """
-        requirement = ask.get("auth_requirement") if isinstance(ask.get("auth_requirement"), dict) else {}
-        tool_name = requirement.get("resource") or job.check_tool or "its check tool"
-        authorize_url = next(
-            (m.get("auth_url") for m in requirement.get("auth_methods") or [] if isinstance(m, dict) and m.get("auth_url")),
-            None,
-        )
+        # Built two calls upstream by need_credentials_ask, which always emits one method;
+        # only the URL is optional, since the gateway's payload may lack it.
+        tool_name = job.check_tool or "its check tool"
+        authorize_url = ask["auth_requirement"]["auth_methods"][0].get("auth_url")
         summary = f"Stopped: '{tool_name}' needs your authorization before this watch can check anything."
 
         delivered = False
-        channel = (
-            await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
-            if job.delivery_channel_id is not None
-            else None
-        )
-        if channel:
-            metadata = self._base_metadata(job)
-            metadata["scheduled_job_run_id"] = run_id
-            metadata["messageFormatting"] = self._message_formatting(channel)
+        if job.delivery_channel_id is not None:
             notice = (
                 f"The scheduled watch '{job.name}' has stopped: '{tool_name}' needs your authorization "
                 "before it can check anything. "
                 + (f"Authorize here: {authorize_url} — then " if authorize_url else "Once authorized, ")
                 + "confirm in the console and the watch will pick up where it stopped."
             )
-            try:
-                await dispatch_streaming(
-                    agent_url=self._agent_runner_url,
-                    access_token=access_token,
-                    parts=[{"kind": "text", "text": notice}],
-                    metadata=metadata,
-                    push_config=self._push_config(channel),
-                )
-                delivered = True
-            except Exception:
-                logger.exception("Job %d run %d: could not deliver the authorization notice", job.id, run_id)
+            delivered = await self.send_plain_notice(job, notice, what="authorization notice")
 
         await self._finalize(
             run_id=run_id,

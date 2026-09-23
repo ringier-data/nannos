@@ -5,6 +5,7 @@ a model judgement over the response, or both stacked: the gate runs first and th
 model judges only what the expression returned.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -112,6 +113,16 @@ class TestAMissingCredentialIsAnAskNotAFailure:
         outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(cel_expr="result.status == 'FAILED'"), "token")
         assert outcome.auth_ask is None
         assert outcome.error is None
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_wrapped_in_prose_is_still_an_ask(self, monkeypatch):
+        # Several content blocks, or JSON inside a sentence, fold under "output".
+        wrapped = "Tool call failed: " + json.dumps(self.PAYLOAD) + ". Please try again."
+        _gateway(monkeypatch, {"output": wrapped}, is_error=True)
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "token")
+        method = outcome.auth_ask["auth_requirement"]["auth_methods"][0]
+        assert method["auth_url"] == self.PAYLOAD["authorizeUrl"]
+        assert method["description"] == self.PAYLOAD["message"]
 
     @pytest.mark.asyncio
     async def test_a_payload_without_a_url_is_still_an_ask(self, monkeypatch):

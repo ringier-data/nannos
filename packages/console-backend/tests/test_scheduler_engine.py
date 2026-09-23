@@ -29,7 +29,7 @@ from console_backend.repositories.scheduled_job_repository import ScheduledJobRe
 from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
 
 from console_backend.services.watch_evaluator import WatchOutcome
-from console_backend.services.scheduler_engine import SchedulerEngine
+from console_backend.services.scheduler_engine import NOTIFY_TIMEOUT_SECONDS, SchedulerEngine
 from console_backend.services.scheduler_token_service import SchedulerTokenService
 from console_backend.utils.a2a_dispatch import AgentUnreachable
 from sqlalchemy import text
@@ -1256,8 +1256,12 @@ class TestACheckNeedingAuthorizationParksTheRun:
         assert "https://gw.example/begin" in call["parts"][0]["text"]
         assert "Test Job" in call["parts"][0]["text"]
         assert "sub_agent_id" not in call["metadata"], "a notice, not an agent run"
+        # Not a run either: with a run id on it the chat client would adopt the notice as
+        # this run's successful result, and ADR-0009 says the ask is not adoptable.
+        assert "scheduled_job_run_id" not in call["metadata"]
         assert call["metadata"]["messageFormatting"] == "slack"
         assert call["push_config"] == {"url": "https://hooks.example/x", "token": "s"}
+        assert call["timeout_read"] == NOTIFY_TIMEOUT_SECONDS, "a dead runner must not hold the park for minutes"
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["delivered"] is True
@@ -1319,6 +1323,28 @@ class TestACheckNeedingAuthorizationParksTheRun:
         assert run["status"] == JobRunStatus.SUCCESS
         # A resumed run does not own the schedule: the parked run already advanced it.
         assert repo.complete_job.call_args[1]["leave_schedule"] is True
+
+    @pytest.mark.asyncio
+    async def test_approving_a_quiet_check_leaves_the_schedule_alone(self):
+        # The mainline approval outcome: the credential is stored, the check runs, and
+        # nothing is happening. The parked run already advanced next_run_at; recomputing
+        # it here would skip the catch-up occurrence and overwrite a concurrent edit.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, check_result={"status": "OK"})),
+        ), patch("console_backend.services.scheduler_engine.dispatch_streaming") as dispatch:
+            await engine.resume_parked_run(self._watch_job(), self._parked_run(60), "approved", run_id=61)
+
+        dispatch.assert_not_called()
+        assert repo.complete_run.call_args[1]["status"] == JobRunStatus.CONDITION_NOT_MET
+        assert repo.complete_job.call_args[1]["leave_schedule"] is True
+        assert repo.complete_job.call_args[1]["next_run_at"] is None
 
     @pytest.mark.asyncio
     async def test_a_still_missing_credential_parks_again_on_the_new_run(self):
