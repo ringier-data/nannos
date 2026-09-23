@@ -1237,34 +1237,91 @@ class TestACheckNeedingAuthorizationParksTheRun:
         # consecutive_failures alone and never auto-pauses.
         assert repo.complete_job.call_args[1]["status"] == JobRunStatus.AUTH_REQUIRED
 
-    @pytest.mark.asyncio
-    async def test_a_job_with_a_channel_is_told_there_with_the_link(self):
-        repo, engine, evaluate = self._parked_engine(run_id=22)
-        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {
-            "webhook_url": "https://hooks.example/x",
-            "secret": "s",
-            "message_formatting": "slack",
+    @staticmethod
+    def _channel(**overrides) -> dict:
+        return {"webhook_url": "https://hooks.example/x", "secret": "s", "message_formatting": "slack", **overrides}
+
+    @staticmethod
+    def _published_park(run_id: int) -> dict:
+        """What agent-runner answers when it published the ask as a park."""
+        meta = {
+            "scheduler_status": "auth_required",
+            "agent_message": "prose with the link",
+            "parked_task_id": "notice-task-1",
+            "reply_to": {"service": "console-backend", "endpoint": "scheduled_run_resume", "scheduled_job_run_id": run_id},
         }
+        return {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+    @pytest.mark.asyncio
+    async def test_a_job_with_a_channel_gets_the_card_through_agent_runner(self):
+        # Published as a PARK, not posted as prose: the ask rides on ``auth_ask`` and the
+        # runner publishes its task as auth_required, so the clients render the card
+        # whose button answers this run. The first cut sent a sentence with the link and
+        # "confirm in the console"; the owner authorized and waited for nothing.
+        repo, engine, evaluate = self._parked_engine(run_id=22)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
 
         with evaluate, patch(
             "console_backend.services.scheduler_engine.dispatch_streaming",
-            AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+            AsyncMock(return_value=self._published_park(22)),
         ) as dispatch:
             await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
 
         call = dispatch.await_args[1]
+        assert call["metadata"]["auth_ask"] == self.ASK
+        assert "sub_agent_id" not in call["metadata"], "nothing runs"
+        # The run id IS on it: the card's button answers reply_to.scheduled_job_run_id.
+        # Not adoptable for that — every client skips provenance for a park.
+        assert call["metadata"]["scheduled_job_run_id"] == 22
+        assert call["metadata"]["scheduled_job_name"] == "Test Job", "the card names the job that stopped"
+        assert call["metadata"]["messageFormatting"] == "slack"
+        assert "reply_to_message" not in call["metadata"], "a first ask threads under nothing"
+        # The prose fallback still carries a working link for a client without the card.
         assert "https://gw.example/begin" in call["parts"][0]["text"]
         assert "Test Job" in call["parts"][0]["text"]
-        assert "sub_agent_id" not in call["metadata"], "a notice, not an agent run"
-        # Not a run either: with a run id on it the chat client would adopt the notice as
-        # this run's successful result, and ADR-0009 says the ask is not adoptable.
-        assert "scheduled_job_run_id" not in call["metadata"]
-        assert call["metadata"]["messageFormatting"] == "slack"
         assert call["push_config"] == {"url": "https://hooks.example/x", "token": "s"}
         assert call["timeout_read"] == NOTIFY_TIMEOUT_SECONDS, "a dead runner must not hold the park for minutes"
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["delivered"] is True
+        # Still addressed to the CHECK: the notice task is never answered, the run is.
+        assert run["parked_task_id"] == "watch-check:22"
+        assert run["parked_payload"] == self.ASK
+
+    @pytest.mark.asyncio
+    async def test_an_older_runner_that_posts_prose_still_counts_as_told(self):
+        # Image skew: a runner without ``auth_ask`` completes the task and the clients
+        # post the sentence. The owner has the link and the console; not a failure.
+        repo, engine, evaluate = self._parked_engine(run_id=24)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        meta = {"scheduler_status": "success", "agent_message": "prose with the link"}
+        completed = {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(return_value=completed)
+        ):
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["parked_task_id"] == "watch-check:24"
+        assert run["delivered"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_runner_that_fails_the_notice_leaves_the_run_parked_but_undelivered(self):
+        repo, engine, evaluate = self._parked_engine(run_id=25)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        meta = {"scheduler_status": "failed", "error_message": "boom"}
+        failed = {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(return_value=failed)
+        ):
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["delivered"] is False
 
     @pytest.mark.asyncio
     async def test_a_failed_notice_still_parks_the_run(self):
@@ -1363,6 +1420,59 @@ class TestACheckNeedingAuthorizationParksTheRun:
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["parked_task_id"] == "watch-check:41"
+
+    @pytest.mark.asyncio
+    async def test_an_answer_from_a_card_threads_the_rerun_under_it(self):
+        # The card's coordinates ride into the re-run's dispatch, as the agent branch
+        # carries them, so the result — or a second ask — lands under the ask (ADR-0009
+        # decision 5). Here the credential is still missing: the re-park's card threads.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        card = {"channel": "D1", "ts": "1700000000.1"}
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, auth_ask=dict(self.ASK))),
+        ), patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value=self._published_park(43)),
+        ) as dispatch:
+            await engine.resume_parked_run(
+                self._watch_job(delivery_channel_id=5), self._parked_run(42), "approved", reply_to=card, run_id=43
+            )
+
+        assert dispatch.await_args[1]["metadata"]["reply_to_message"] == card
+        assert dispatch.await_args[1]["metadata"]["auth_ask"] == self.ASK
+        assert repo.complete_run.call_args[1]["parked_task_id"] == "watch-check:43"
+
+    @pytest.mark.asyncio
+    async def test_an_answer_from_a_card_threads_the_triggered_result_under_it(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        card = {"channel": "D1", "ts": "1700000000.1"}
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=True, check_result={"status": "FAILED"})),
+        ), patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+        ) as dispatch:
+            await engine.resume_parked_run(
+                self._watch_job(delivery_channel_id=5), self._parked_run(44), "approved", reply_to=card, run_id=45
+            )
+
+        assert dispatch.await_args[1]["metadata"]["reply_to_message"] == card
+        assert "auth_ask" not in dispatch.await_args[1]["metadata"]
+        assert repo.complete_run.call_args[1]["status"] == JobRunStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_declining_releases_the_schedule_without_counting_a_failure(self):
