@@ -18,8 +18,9 @@ The flow, per login:
 3. The browser lands on the client's callback with ``code`` and the client's ``state``.
    The client ``redeem``\\s the code, authenticated with its own client-credentials token.
    Redeeming also links the user to that client.
-4. From then on the client asks ``mint`` for tokens for the audiences it is allowed, for
-   users linked to it.
+4. From then on the client asks ``mint`` for tokens for the audiences it is allowed
+   (``config.broker.always_granted_audiences`` and its own client id), for users linked
+   to it.
 """
 
 from __future__ import annotations
@@ -230,7 +231,7 @@ class BrokerService:
         Every "this user cannot be served" answer is a 409, because the remedy is always
         the same: the client signs the user in again through the broker.
         """
-        if audience not in client.audiences:
+        if not client.may_mint_for(audience, config.broker.always_granted_audiences):
             raise BrokerRefusal(403, f"This broker client may not mint tokens for audience {audience!r}")
         user = await self._users.get_user_by_sub(db, sub)
         # A client reaches only the users who signed in through it. An unknown subject

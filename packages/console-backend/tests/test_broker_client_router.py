@@ -29,7 +29,6 @@ def _body(**overrides) -> BrokerClientCreate:
         "client_id": "email-client",
         "name": "Email",
         "redirect_uris": ["https://email.nannos.ringier.ch/api/v1/oauth/callback"],
-        "audiences": ["orchestrator"],
     }
     return BrokerClientCreate(**(fields | overrides))
 
@@ -42,11 +41,12 @@ async def test_create_list_update_delete(request_, pg_session, test_admin_user_d
 
     listed = await router.list_broker_clients(request_, pg_session, test_admin_user_db)
     assert [c.client_id for c in listed.clients] == ["email-client"]
+    assert listed.always_granted_audiences == config.broker.always_granted_audiences
 
     updated = await router.update_broker_client(
-        created.id, BrokerClientUpdate(audiences=["orchestrator", "agent-console"]), request_, pg_session, test_admin_user_db
+        created.id, BrokerClientUpdate(name="Email bot"), request_, pg_session, test_admin_user_db
     )
-    assert updated.audiences == ["orchestrator", "agent-console"]
+    assert updated.name == "Email bot"
     assert updated.redirect_uris == created.redirect_uris  # untouched
 
     # Description is the one nullable field: an omitted field keeps it, a null clears it.

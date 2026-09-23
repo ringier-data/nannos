@@ -121,10 +121,13 @@ async function main() {
       res
         .status(result.success ? 200 : 400)
         .type('html')
-        .send(generateCallbackHTML(result.success, result.message));
+        .send(generateCallbackHTML(result.success, result.message, { acceptLanguage: req.headers['accept-language'] }));
     } catch (err) {
       logger.error(err, 'Unhandled error in OAuth callback');
-      res.status(500).type('html').send(generateCallbackHTML(false, 'An unexpected error occurred.'));
+      res
+        .status(500)
+        .type('html')
+        .send(generateCallbackHTML(false, 'An unexpected error occurred.', { acceptLanguage: req.headers['accept-language'] }));
     }
   });
 

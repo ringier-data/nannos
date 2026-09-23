@@ -407,10 +407,6 @@ export type BrokerClient = {
      */
     redirect_uris: Array<string>;
     /**
-     * Audiences
-     */
-    audiences: Array<string>;
-    /**
      * Enabled
      */
     enabled: boolean;
@@ -455,12 +451,6 @@ export type BrokerClientCreate = {
      */
     redirect_uris: Array<string>;
     /**
-     * Audiences
-     *
-     * Audiences the client may have tokens minted for.
-     */
-    audiences: Array<string>;
-    /**
      * Enabled
      */
     enabled?: boolean;
@@ -474,6 +464,12 @@ export type BrokerClientListResponse = {
      * Clients
      */
     clients: Array<BrokerClient>;
+    /**
+     * Always Granted Audiences
+     *
+     * Audiences every client may have tokens minted for, in addition to its own client id.
+     */
+    always_granted_audiences: Array<string>;
 };
 
 /**
@@ -495,10 +491,6 @@ export type BrokerClientUpdate = {
      * Redirect Uris
      */
     redirect_uris?: Array<string> | null;
-    /**
-     * Audiences
-     */
-    audiences?: Array<string> | null;
     /**
      * Enabled
      */

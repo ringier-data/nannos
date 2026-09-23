@@ -61,7 +61,6 @@ export function BrokerClientsPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [redirectUris, setRedirectUris] = useState('');
-  const [audiences, setAudiences] = useState('');
   const [enabled, setEnabled] = useState(true);
 
   const editing = formDialog.brokerClient;
@@ -116,7 +115,6 @@ export function BrokerClientsPage() {
     setName(brokerClient?.name ?? '');
     setDescription(brokerClient?.description ?? '');
     setRedirectUris(brokerClient?.redirect_uris.join('\n') ?? '');
-    setAudiences(brokerClient?.audiences.join('\n') ?? '');
     setEnabled(brokerClient?.enabled ?? true);
     setFormDialog({ open: true, brokerClient });
   };
@@ -128,7 +126,6 @@ export function BrokerClientsPage() {
       name: name.trim(),
       description: description.trim() || null,
       redirect_uris: splitLines(redirectUris),
-      audiences: splitLines(audiences),
       enabled,
     } satisfies BrokerClientUpdate;
     if (editing) {
@@ -138,13 +135,10 @@ export function BrokerClientsPage() {
     }
   };
 
-  const canSave =
-    (editing || clientId.trim()) &&
-    name.trim() &&
-    splitLines(redirectUris).length > 0 &&
-    splitLines(audiences).length > 0;
+  const canSave = (editing || clientId.trim()) && name.trim() && splitLines(redirectUris).length > 0;
 
   const brokerClients = data?.clients ?? [];
+  const alwaysGrantedAudiences = data?.always_granted_audiences ?? [];
 
   return (
     <div className="space-y-6 p-4">
@@ -203,11 +197,16 @@ export function BrokerClientsPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
-                      {brokerClient.audiences.map((audience) => (
-                        <Badge key={audience} variant="secondary">
-                          {audience}
-                        </Badge>
-                      ))}
+                      <Badge variant="secondary" title="Its own client ID">
+                        {brokerClient.client_id}
+                      </Badge>
+                      {alwaysGrantedAudiences
+                        .filter((audience) => audience !== brokerClient.client_id)
+                        .map((audience) => (
+                          <Badge key={audience} variant="outline" title="Every client gets this audience">
+                            {audience}
+                          </Badge>
+                        ))}
                     </div>
                   </TableCell>
                   <TableCell>
@@ -266,6 +265,15 @@ export function BrokerClientsPage() {
                 disabled={!!editing}
                 onChange={(e) => setClientId(e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">
+                The broker gives this client tokens for its own client ID
+                {alwaysGrantedAudiences.map((audience) => (
+                  <span key={audience}>
+                    , <code>{audience}</code>
+                  </span>
+                ))}
+                , and nothing else.
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="broker-client-name">Name</Label>
@@ -299,16 +307,6 @@ export function BrokerClientsPage() {
                 Exact match. Only the first host label may contain <code>*</code>, for preview
                 environments.
               </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="broker-client-audiences">Audiences (one per line)</Label>
-              <Textarea
-                id="broker-client-audiences"
-                className="font-mono text-xs"
-                placeholder="e.g. cockpit-embed"
-                value={audiences}
-                onChange={(e) => setAudiences(e.target.value)}
-              />
             </div>
             <div className="space-y-2">
               <div className="flex items-center gap-2">

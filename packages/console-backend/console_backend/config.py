@@ -404,6 +404,16 @@ class BrokerConfig(BaseModel):
     login_request_ttl_seconds: int = Field(
         default_factory=lambda: int(os.getenv("BROKER_LOGIN_REQUEST_TTL_SECONDS", "600"))
     )
+    #: Audiences every client may have tokens minted for, in addition to its own client
+    #: id: what each chat client needs (the orchestrator for chat and task recovery,
+    #: console-backend for feedback and scheduled-run resumes). Comma-separated env.
+    always_granted_audiences: list[str] = Field(
+        default_factory=lambda: [
+            a.strip()
+            for a in os.getenv("BROKER_ALWAYS_GRANTED_AUDIENCES", "orchestrator,agent-console").split(",")
+            if a.strip()
+        ]
+    )
 
 
 class Config(BaseModel):

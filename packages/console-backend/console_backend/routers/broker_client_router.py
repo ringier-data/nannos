@@ -1,8 +1,8 @@
 """Admin router for token-broker client registrations (``/api/v1/admin/broker-clients``).
 
-A registration says which Keycloak client may send its users through the broker, where
-the browser may be sent back to, and which audiences may be minted for it. Every write is
-audited, and clears the broker's client cache so it applies at once.
+A registration says which Keycloak client may send its users through the broker and
+where the browser may be sent back to. Every write is audited, and clears the broker's
+client cache so it applies at once.
 """
 
 import logging
@@ -75,7 +75,10 @@ async def list_broker_clients(
     _: User = Depends(require_admin),
 ) -> BrokerClientListResponse:
     """List every registered broker client."""
-    return BrokerClientListResponse(clients=await _get_repository(request).list_all(db))
+    return BrokerClientListResponse(
+        clients=await _get_repository(request).list_all(db),
+        always_granted_audiences=config.broker.always_granted_audiences,
+    )
 
 
 @router.get("/{client_pk}", response_model=BrokerClient)

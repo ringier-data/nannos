@@ -2,8 +2,9 @@
 
 A broker client is a Keycloak client (a chat client such as ``slack-client``, or the
 cockpit BFF's ``cockpit-embed``) that sends its users through console-backend's login
-instead of running its own. The registration says where the browser may be sent back to
-and which audiences the client may have tokens minted for.
+instead of running its own. The registration says where the browser may be sent back to.
+Which audiences a client may have tokens minted for is not registered: see
+``BrokerService.mint``.
 """
 
 from __future__ import annotations
@@ -121,19 +122,6 @@ def _clean_redirect_uris(values: list[str]) -> list[str]:
     return seen
 
 
-def _clean_audiences(values: list[str]) -> list[str]:
-    seen: list[str] = []
-    for raw in values:
-        audience = (raw or "").strip()
-        if not audience:
-            raise ValueError("audiences must not contain blank entries")
-        if audience in _REFUSED_AUDIENCES:
-            raise ValueError(f"audience {audience!r} cannot be brokered")
-        if audience not in seen:
-            seen.append(audience)
-    return seen
-
-
 class BrokerClientCreate(BaseModel):
     """Admin request body for registering a broker client."""
 
@@ -151,9 +139,6 @@ class BrokerClientCreate(BaseModel):
             "contain '*' for per-PR preview environments."
         ),
     )
-    audiences: list[str] = Field(
-        min_length=1, description="Audiences the client may have tokens minted for."
-    )
     enabled: bool = True
 
     @field_validator("client_id")
@@ -169,11 +154,6 @@ class BrokerClientCreate(BaseModel):
     def _check_redirect_uris(cls, value: list[str]) -> list[str]:
         return _clean_redirect_uris(value)
 
-    @field_validator("audiences")
-    @classmethod
-    def _check_audiences(cls, value: list[str]) -> list[str]:
-        return _clean_audiences(value)
-
 
 class BrokerClientUpdate(BaseModel):
     """Admin request body for changing a broker client. Omitted fields are unchanged;
@@ -182,18 +162,12 @@ class BrokerClientUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
     redirect_uris: list[str] | None = Field(default=None, min_length=1)
-    audiences: list[str] | None = Field(default=None, min_length=1)
     enabled: bool | None = None
 
     @field_validator("redirect_uris")
     @classmethod
     def _check_redirect_uris(cls, value: list[str] | None) -> list[str] | None:
         return None if value is None else _clean_redirect_uris(value)
-
-    @field_validator("audiences")
-    @classmethod
-    def _check_audiences(cls, value: list[str] | None) -> list[str] | None:
-        return None if value is None else _clean_audiences(value)
 
 
 class BrokerClient(BaseModel):
@@ -204,7 +178,6 @@ class BrokerClient(BaseModel):
     name: str
     description: str | None = None
     redirect_uris: list[str]
-    audiences: list[str]
     enabled: bool
     created_by: str
     created_at: datetime
@@ -216,9 +189,21 @@ class BrokerClient(BaseModel):
             for registered in self.redirect_uris
         )
 
+    def may_mint_for(self, audience: str, always_granted: list[str]) -> bool:
+        """Whether tokens for *audience* may be minted for this client: the audiences every
+        client may, and its own client id, the audience an embedded host is bound by
+        (ADR-0011 point 5). Never another client's id, which would let this client act as
+        that host."""
+        if audience in _REFUSED_AUDIENCES:
+            return False
+        return audience == self.client_id or audience in always_granted
+
 
 class BrokerClientListResponse(BaseModel):
     clients: list[BrokerClient]
+    always_granted_audiences: list[str] = Field(
+        description="Audiences every client may have tokens minted for, in addition to its own client id."
+    )
 
 
 class BrokerIdentity(BaseModel):

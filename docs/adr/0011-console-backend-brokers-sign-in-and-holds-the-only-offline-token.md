@@ -39,14 +39,18 @@ one standing consent.
    apart is structural, not a name: Keycloak opens no user session for client credentials,
    so that token has no `sid`, and every user token has one. Redeeming records
    the user as signed in through that client (`broker_client_users`), and `/token` mints
-   only for those users and only for the audiences the client is registered for. A leaked
-   client secret therefore reaches the people who signed in through that client, not
-   everyone with a vaulted token. Every "cannot serve this user" answer is a 409, whose one
-   remedy is to sign the user in again. Any other failure (a 403 audience, a 502 Keycloak)
+   only for those users. The audiences are not registered: every client may have
+   `orchestrator` and `agent-console` minted (`BROKER_ALWAYS_GRANTED_AUDIENCES`: what each
+   chat client needs, for chat and for feedback and scheduled-run resumes), and its own
+   client id, which is the audience an embedded host is bound by (point 5). Never another
+   client's id: that token would act as the other host. A leaked client secret therefore
+   reaches the people who signed in through that client, not everyone with a vaulted
+   token. Every "cannot serve this user" answer is a 409, whose one remedy is to sign the
+   user in again. Any other failure (a 403 audience, a 502 Keycloak)
    is not a reason to sign in: the client answers "try again later" and keeps the sign-in.
 
 3. **Clients are admin data.** `broker_clients` (client id, exact redirect URIs with an
-   optional `*` in the first host label for preview hosts, audiences, enabled) is managed
+   optional `*` in the first host label for preview hosts, enabled) is managed
    through `/api/v1/admin/broker-clients` and audited like delivery channels.
 
 4. **Old sign-ins drain.** Each chat client selects its mode with `USER_AUTH_MODE`. In
@@ -90,6 +94,14 @@ one standing consent.
 
 - The cockpit BFF no longer holds a refresh token (supersedes that part of ADR-0002
   Amendment 5); it keeps the user's Nannos subject and has tokens minted.
+- The always-granted audiences apply to `cockpit-embed` too: the cockpit BFF can have
+  `orchestrator` and `agent-console` tokens minted for its users, not only
+  `cockpit-embed` ones. A minted `agent-console` token binds to no embedded agent
+  (point 5), so it acts as a full console session of that user. Accepted: the cockpit
+  BFF is a trusted server, and it reaches only the users who signed in through it.
+- A client that needs an audience other than the shared ones and its own id needs a
+  change to the broker. A client's own id is mintable only while Keycloak maps it into
+  `agent-console` tokens, because the exchange can only narrow `aud`.
 - Deleting a broker client removes its user links, so all its users must sign in again,
   also if it is registered again. Switching it off keeps them.
 - Keycloak: the broker callback is a redirect URI of `agent-console`; `email-client` gains

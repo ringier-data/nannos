@@ -420,8 +420,8 @@ function setupServerTimeouts(server: Server, config: Config) {
           .type('text/html')
           .send(
             generateCallbackHTML(result.success, result.message, {
-              url: 'https://chat.google.com',
-              label: 'Back to Google Chat',
+              acceptLanguage: req.headers['accept-language'],
+              returnUrl: 'https://chat.google.com',
             })
           );
 
@@ -456,7 +456,10 @@ function setupServerTimeouts(server: Server, config: Config) {
         }
       } catch (error) {
         logger.error(error, `OAuth callback error: ${error}`);
-        res.status(500).type('text/html').send(generateCallbackHTML(false, 'An unexpected error occurred.'));
+        res
+          .status(500)
+          .type('text/html')
+          .send(generateCallbackHTML(false, 'An unexpected error occurred.', { acceptLanguage: req.headers['accept-language'] }));
       }
     });
 

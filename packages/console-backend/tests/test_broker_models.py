@@ -2,10 +2,13 @@
 they allow. The broker sends a one-time code to whatever redirect URI it accepts, so
 these rules are what keeps it from being an open redirect."""
 
+from datetime import datetime, timezone
+
 import pytest
 from pydantic import ValidationError
 
 from console_backend.models.broker import (
+    BrokerClient,
     BrokerClientCreate,
     BrokerClientUpdate,
     redirect_uri_matches,
@@ -19,7 +22,6 @@ def _create(**overrides) -> BrokerClientCreate:
         "client_id": "slack-client",
         "name": "Slack",
         "redirect_uris": ["https://slack.nannos.ringier.ch/api/v1/oauth/callback"],
-        "audiences": ["orchestrator", "agent-console"],
     }
     return BrokerClientCreate(**(fields | overrides))
 
@@ -115,28 +117,51 @@ class TestBrokerClientCreate:
                 " https://slack.nannos.ringier.ch/cb ",
                 "https://slack.nannos.ringier.ch/cb",
             ],
-            audiences=["orchestrator", " orchestrator", "agent-console"],
         )
         assert body.client_id == "slack-client"
         assert body.redirect_uris == ["https://slack.nannos.ringier.ch/cb"]
-        assert body.audiences == ["orchestrator", "agent-console"]
 
-    def test_refuses_the_account_audience_and_blank_entries(self):
-        with pytest.raises(ValidationError):
-            _create(audiences=["account"])
-        with pytest.raises(ValidationError):
-            _create(audiences=["orchestrator", "  "])
-
-    def test_needs_at_least_one_redirect_uri_and_audience(self):
+    def test_needs_at_least_one_redirect_uri(self):
         with pytest.raises(ValidationError):
             _create(redirect_uris=[])
-        with pytest.raises(ValidationError):
-            _create(audiences=[])
 
     def test_update_validates_what_it_is_given(self):
         assert BrokerClientUpdate(enabled=False).redirect_uris is None
         with pytest.raises(ValidationError):
             BrokerClientUpdate(redirect_uris=["https://x.example/cb?q=1"])
+
+
+class TestMayMintFor:
+    ALWAYS = ["orchestrator", "agent-console"]
+
+    @staticmethod
+    def _client(client_id: str) -> BrokerClient:
+        now = datetime.now(timezone.utc)
+        return BrokerClient(
+            id=1,
+            client_id=client_id,
+            name=client_id,
+            redirect_uris=["https://x.example/cb"],
+            enabled=True,
+            created_by="admin",
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_the_always_granted_audiences_and_its_own_client_id(self):
+        cockpit = self._client("cockpit-embed")
+        assert cockpit.may_mint_for("orchestrator", self.ALWAYS)
+        assert cockpit.may_mint_for("agent-console", self.ALWAYS)
+        assert cockpit.may_mint_for("cockpit-embed", self.ALWAYS)
+
+    def test_never_another_clients_id(self):
+        # That audience would bind the token to the other client's embedded agent.
+        assert not self._client("slack-client").may_mint_for("cockpit-embed", self.ALWAYS)
+        assert not self._client("slack-client").may_mint_for("gatana", self.ALWAYS)
+
+    def test_never_the_account_console(self):
+        assert not self._client("account").may_mint_for("account", self.ALWAYS)
+        assert not self._client("slack-client").may_mint_for("account", ["account"])
 
 
 def test_plain_http_only_in_local_development():

@@ -37,7 +37,6 @@ def _client(**overrides) -> BrokerClient:
         "client_id": "slack-client",
         "name": "Slack",
         "redirect_uris": [SLACK_CALLBACK],
-        "audiences": ["orchestrator"],
         "enabled": True,
         "created_by": "admin-user-id",
         "created_at": NOW,
@@ -137,7 +136,7 @@ async def broker(pg_session, test_admin_user_db, user_service) -> BrokerService:
     await repo.create_client(
         pg_session,
         test_admin_user_db,
-        BrokerClientCreate(client_id="slack-client", name="Slack", redirect_uris=[SLACK_CALLBACK], audiences=["orchestrator"]),
+        BrokerClientCreate(client_id="slack-client", name="Slack", redirect_uris=[SLACK_CALLBACK]),
     )
     await pg_session.commit()
     return BrokerService(

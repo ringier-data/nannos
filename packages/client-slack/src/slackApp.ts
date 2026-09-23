@@ -169,13 +169,10 @@ export async function startSlackApp(config: Config) {
 
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(
-              generateCallbackHTML(
-                result.success,
-                result.message,
-                result.teamId
-                  ? { url: `slack://open?team=${encodeURIComponent(result.teamId)}`, label: 'Back to Slack' }
-                  : undefined
-              )
+              generateCallbackHTML(result.success, result.message, {
+                acceptLanguage: req.headers['accept-language'],
+                returnUrl: result.teamId ? `slack://open?team=${encodeURIComponent(result.teamId)}` : undefined,
+              })
             );
 
             if (result.success && result.userId && result.teamId) {
@@ -230,7 +227,11 @@ export async function startSlackApp(config: Config) {
           } catch (error) {
             logger.error(error, `OAuth callback error: ${error}`);
             res.writeHead(500, { 'Content-Type': 'text/html' });
-            res.end(generateCallbackHTML(false, 'An unexpected error occurred.'));
+            res.end(
+              generateCallbackHTML(false, 'An unexpected error occurred.', {
+                acceptLanguage: req.headers['accept-language'],
+              })
+            );
           }
         },
       },

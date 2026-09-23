@@ -19,8 +19,6 @@ CREATE TABLE broker_clients (
     -- Where /authorize may send the browser back to. Exact match, except that the first
     -- host label may be a `*` pattern (cockpit PR previews).
     redirect_uris  TEXT[] NOT NULL DEFAULT '{}',
-    -- Which audiences /token may mint for this client.
-    audiences      TEXT[] NOT NULL DEFAULT '{}',
     enabled        BOOLEAN NOT NULL DEFAULT TRUE,
     created_by     TEXT NOT NULL REFERENCES users(id),
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),

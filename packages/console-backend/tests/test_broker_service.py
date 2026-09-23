@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
+from console_backend.config import config
 from console_backend.models.broker import BrokerClientCreate, BrokerClientUpdate
 from console_backend.repositories.broker_client_repository import BrokerClientRepository
 from console_backend.repositories.broker_login_request_repository import BrokerLoginRequestRepository
@@ -52,7 +53,6 @@ async def client_repo(pg_session, test_admin_user_db) -> BrokerClientRepository:
             client_id="slack-client",
             name="Slack",
             redirect_uris=[SLACK_CALLBACK],
-            audiences=["orchestrator", "agent-console"],
         ),
     )
     await repo.create_client(
@@ -62,7 +62,6 @@ async def client_repo(pg_session, test_admin_user_db) -> BrokerClientRepository:
             client_id="cockpit-embed",
             name="Cockpit",
             redirect_uris=["https://pr-*-riad.d.alloy.ch/nannos-auth-callback.html"],
-            audiences=["cockpit-embed"],
         ),
     )
     await pg_session.commit()
@@ -232,6 +231,24 @@ class TestMint:
         assert exc.value.status_code == 403
 
     @pytest.mark.asyncio
+    async def test_a_client_may_mint_the_always_granted_audiences_and_its_own_id(
+        self, broker, tokens, pg_session, test_user_db, monkeypatch
+    ):
+        monkeypatch.setattr(config.broker, "always_granted_audiences", ["orchestrator", "agent-console"])
+        _, code = await _signed_in(
+            broker, pg_session, test_user_db, "cockpit-embed", "https://pr-7-riad.d.alloy.ch/nannos-auth-callback.html"
+        )
+        cockpit = await broker.resolve_client(pg_session, "cockpit-embed")
+        await broker.redeem(pg_session, cockpit, code)
+
+        for audience in ("orchestrator", "agent-console", "cockpit-embed"):
+            minted = await broker.mint(pg_session, cockpit, "test-user-sub", audience)
+            assert minted.access_token == "minted"
+        with pytest.raises(BrokerRefusal) as exc:
+            await broker.mint(pg_session, cockpit, "test-user-sub", "gatana")
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
     async def test_a_client_reaches_only_users_who_signed_in_through_it(
         self, broker, tokens, pg_session, test_user_db
     ):
@@ -302,7 +319,7 @@ class TestClientRepository:
             await client_repo.create_client(
                 pg_session,
                 test_admin_user_db,
-                BrokerClientCreate(client_id="slack-client", name="Again", redirect_uris=[SLACK_CALLBACK], audiences=["x"]),
+                BrokerClientCreate(client_id="slack-client", name="Again", redirect_uris=[SLACK_CALLBACK]),
             )
         # The savepoint kept the transaction usable.
         assert len(await client_repo.list_all(pg_session)) == 2
