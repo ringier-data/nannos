@@ -17,6 +17,7 @@ from console_backend.models.broker import BrokerClientCreate, BrokerClientUpdate
 from console_backend.repositories.broker_client_repository import BrokerClientRepository
 from console_backend.repositories.broker_login_request_repository import BrokerLoginRequestRepository
 from console_backend.services.audit_service import AuditService
+from console_backend.services.scheduler_token_service import NoOfflineTokenError
 from console_backend.services.broker_service import BrokerRefusal, BrokerService
 
 SLACK_CALLBACK = "https://slack.nannos.ringier.ch/api/v1/oauth/callback"
@@ -250,7 +251,8 @@ class TestMint:
     @pytest.mark.parametrize(
         ("error", "status"),
         [
-            (ValueError("No offline token stored"), 409),  # never vaulted
+            (NoOfflineTokenError("No offline token stored"), 409),  # never vaulted
+            (ValueError("Expecting value"), 502),  # e.g. a non-JSON Keycloak reply: our fault, not a sign-in cue
             (_keycloak_error(400, "invalid_grant"), 409),  # vaulted token is dead
             (_keycloak_error(403, "access_denied"), 502),  # exchange not permitted: config
             (httpx.ConnectError("down"), 502),

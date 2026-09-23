@@ -697,23 +697,31 @@ async def test_delete_binding_is_audited_and_reports_whether_anything_was_bound(
 
 class TestCandidateClientIds:
     """A token is bound by its azp; a token the broker minted for a host (azp is
-    console-backend's own client, one audience) is bound by that audience instead."""
+    console-backend's own client, and console-backend's own audience downscoped away) is
+    bound by its audience instead."""
 
     def test_an_ordinary_token_is_bound_by_its_azp_only(self):
         claims = {"azp": "nannos-embedded", "aud": ["orchestrator", "cockpit-embed"]}
         assert ebs.candidate_client_ids(claims) == ["nannos-embedded"]
 
-    def test_a_broker_minted_token_is_bound_by_its_one_audience(self):
+    def test_a_broker_minted_token_is_bound_by_its_audience(self):
         broker = ebs.config.oidc.client_id
         assert ebs.candidate_client_ids({"azp": broker, "aud": "cockpit-embed"}) == ["cockpit-embed"]
-        # Its own id and Keycloak's account audience are no host.
-        assert ebs.candidate_client_ids({"azp": broker, "aud": ["cockpit-embed", broker, "account"]}) == [
-            "cockpit-embed"
+        # Keycloak's account audience is no host.
+        assert ebs.candidate_client_ids({"azp": broker, "aud": ["cockpit-embed", "account"]}) == ["cockpit-embed"]
+        # An exchange for more than one audience: every one is a candidate, in order.
+        assert ebs.candidate_client_ids({"azp": broker, "aud": ["cockpit-embed", "other-host"]}) == [
+            "cockpit-embed",
+            "other-host",
         ]
 
-    def test_an_ordinary_login_token_of_the_broker_client_binds_to_nothing(self):
-        """It carries every audience the client maps, the host's among them."""
+    def test_a_token_carrying_the_brokers_own_audience_binds_to_nothing(self):
+        """A login or refresh token of console-backend's client always names console-backend
+        in aud; the exchange never does. The count of other audiences does not matter."""
         broker = ebs.config.oidc.client_id
+        assert ebs.candidate_client_ids({"azp": broker, "aud": [broker, "cockpit-embed"]}) == []
+        assert ebs.candidate_client_ids({"azp": broker, "aud": [broker, "orchestrator"]}) == []
+        assert ebs.candidate_client_ids({"azp": broker, "aud": [broker]}) == []
         claims = {"azp": broker, "aud": ["gatana", broker, "orchestrator", "agent-runner", "cockpit-embed"]}
         assert ebs.candidate_client_ids(claims) == []
 

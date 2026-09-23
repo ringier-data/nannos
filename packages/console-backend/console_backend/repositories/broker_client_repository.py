@@ -89,10 +89,13 @@ class BrokerClientRepository(AuditedRepository):
         if await self._get_row(db, client_pk) is None:
             return None
         fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
-        for attr in ("name", "description", "redirect_uris", "audiences", "enabled"):
+        for attr in ("name", "redirect_uris", "audiences", "enabled"):
             value = getattr(data, attr)
             if value is not None:
                 fields[attr] = value
+        # The one nullable field: an explicit null clears it, an omitted field keeps it.
+        if "description" in data.model_fields_set:
+            fields["description"] = data.description
         if len(fields) > 1:  # more than just updated_at
             await self.update(db=db, actor=actor, entity_id=client_pk, fields=fields)
         row = await self._get_row(db, client_pk)

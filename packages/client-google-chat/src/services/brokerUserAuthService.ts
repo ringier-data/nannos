@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { IOAuthStateStore, IUserAuthStorage, UserAuthToken } from '../storage/types.js';
 import type { Config } from '../config/config.js';
 import type { IUserAuthService } from './userAuthService.js';
@@ -124,9 +125,8 @@ export class BrokerUserAuthService implements IUserAuthService {
   }
 
   async storeAuthState(state: string, userId: string, projectId: string): Promise<void> {
-    // The broker runs PKCE with Keycloak itself; the verifier is stored only because
-    // the state store requires one.
-    const oidc = await import('openid-client');
-    this.oauthStateStore.set(state, userId, projectId, oidc.randomPKCECodeVerifier(), 604800); // 7 day TTL
+    // The broker runs PKCE with Keycloak itself; the state store requires a verifier,
+    // so it gets a random value that is never used.
+    this.oauthStateStore.set(state, userId, projectId, randomUUID(), 604800); // 7 day TTL
   }
 }

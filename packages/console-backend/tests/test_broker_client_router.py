@@ -49,11 +49,25 @@ async def test_create_list_update_delete(request_, pg_session, test_admin_user_d
     assert updated.audiences == ["orchestrator", "agent-console"]
     assert updated.redirect_uris == created.redirect_uris  # untouched
 
+    # Description is the one nullable field: an omitted field keeps it, a null clears it.
+    described = await router.update_broker_client(
+        created.id, BrokerClientUpdate(description="Mail bot"), request_, pg_session, test_admin_user_db
+    )
+    assert described.description == "Mail bot"
+    kept = await router.update_broker_client(
+        created.id, BrokerClientUpdate(enabled=False), request_, pg_session, test_admin_user_db
+    )
+    assert kept.description == "Mail bot" and kept.enabled is False
+    cleared = await router.update_broker_client(
+        created.id, BrokerClientUpdate(description=None), request_, pg_session, test_admin_user_db
+    )
+    assert cleared.description is None
+
     await router.delete_broker_client(created.id, request_, pg_session, test_admin_user_db)
     with pytest.raises(HTTPException) as exc:
         await router.get_broker_client(created.id, request_, pg_session, test_admin_user_db)
     assert exc.value.status_code == 404
-    assert request_.app.state.broker_service.invalidate_cache.call_count == 3
+    assert request_.app.state.broker_service.invalidate_cache.call_count == 6
 
 
 @pytest.mark.asyncio

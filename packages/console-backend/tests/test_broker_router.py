@@ -243,6 +243,44 @@ class TestBrowserLeg:
         assert params == {"error": ["access_denied"], "error_description": ["User cancelled"], "state": ["their-state"]}
 
     @pytest.mark.asyncio
+    async def test_a_fault_after_keycloak_goes_back_to_the_client_too(
+        self, controller, broker, mock_oauth, pg_session, user_service, monkeypatch
+    ):
+        """The user authenticated; a failure of ours must not leave them on a JSON error page."""
+        state = await _authorize(controller, mock_oauth, pg_session)
+        mock_oauth.authorize_access_token.return_value = {
+            "refresh_token": "rt",
+            "userinfo": {"sub": "s4", "email": "s4@example.com"},
+        }
+        monkeypatch.setattr(user_service, "upsert_user", AsyncMock(side_effect=RuntimeError("database is down")))
+
+        response = await controller.callback(_browser({"state": state}), pg_session)
+
+        target = urlsplit(response.headers["location"])
+        assert f"{target.scheme}://{target.netloc}{target.path}" == SLACK_CALLBACK
+        params = parse_qs(target.query)
+        assert params["error"] == ["server_error"] and params["state"] == ["their-state"]
+        assert "code" not in params
+        # Nothing was committed: the login is still open, so the user can try again.
+        assert await broker.open_login(pg_session, state) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_login_completed_meanwhile_goes_back_to_the_client_as_an_error(
+        self, controller, broker, mock_oauth, pg_session, monkeypatch
+    ):
+        state = await _authorize(controller, mock_oauth, pg_session)
+        mock_oauth.authorize_access_token.return_value = {
+            "refresh_token": "rt",
+            "userinfo": {"sub": "s5", "email": "s5@example.com"},
+        }
+        monkeypatch.setattr(broker, "issue_code", AsyncMock(side_effect=BrokerRefusal(400, "already completed")))
+
+        response = await controller.callback(_browser({"state": state}), pg_session)
+
+        params = parse_qs(urlsplit(response.headers["location"]).query)
+        assert params["error"] == ["invalid_request"] and params["state"] == ["their-state"]
+
+    @pytest.mark.asyncio
     async def test_a_callback_that_belongs_to_no_pending_login_is_refused_here(self, controller, pg_session):
         with pytest.raises(BrokerRefusal) as exc:
             await controller.callback(_browser({"state": "forged"}), pg_session)

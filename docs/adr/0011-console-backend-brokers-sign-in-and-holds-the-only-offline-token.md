@@ -54,8 +54,11 @@ one standing consent.
 5. **An embedded host is bound by `azp` or, for a broker-minted token, `aud`.** The broker
    mints the cockpit's tokens with audience `cockpit-embed` and its own `azp`
    (`agent-console`), so ADR-0006's binding also matches on `aud` when `azp` is
-   console-backend's own client and exactly one other audience remains. An ordinary token of
-   `agent-console` carries every audience the client maps and binds to nothing. Old host
+   console-backend's own client. What tells a minted token from a console session token is
+   console-backend's own audience: every login or refresh token of `agent-console` carries
+   `agent-console` in `aud` (its audience mapper), and Keycloak's exchange downscopes `aud`
+   to the requested audience and adds nothing. A token of `agent-console` that names
+   `agent-console` in `aud` therefore binds to nothing, whatever else it carries. Old host
    tokens (`azp=nannos-embedded`) still match; the binding table is unchanged.
 
 6. **A subscription that could not run is not created on.** What a user starts themselves —

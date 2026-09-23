@@ -12,8 +12,9 @@ Three jobs:
 * **Connect**: when a socket authenticates with a token whose `azp` is bound, activate the
   user for the sub-agent (`activated_by = embed`) and hand back the id to stamp on the
   socket session. handle_send_message reads the stamp, never the client payload. A token
-  the token broker minted for a host carries the host's client id in `aud` instead
-  (`candidate_client_ids`); the binding table is the same.
+  the token broker minted for a host carries console-backend's own `azp` and the host's
+  client id in `aud`, and, unlike a console session token, not console-backend's own
+  audience (`candidate_client_ids`); the binding table is the same.
 
 The entity stays a normal sub-agent. Its content is derived, which is why bound sub-agents
 are read-only in the console except for the binding itself.
@@ -95,15 +96,18 @@ def candidate_client_ids(claims: dict[str, Any] | None) -> list[str]:
     A token is normally bound by its ``azp``: the client it was issued to. A token the
     token broker minted for a host is different. It comes out of console-backend's own
     RFC 8693 exchange, so its ``azp`` is console-backend's client and the host's client id
-    is in ``aud``. For those tokens, and only those, the ``aud`` entry is the candidate.
+    is in ``aud``. For those tokens, and only those, the ``aud`` entries are the candidates.
     Only console-backend can mint a token with its own ``azp`` and a chosen audience, so
     this is as strong as the ``azp`` match it extends.
 
-    The exchange downscopes the token to the one audience asked for. An ordinary login
-    token of console-backend's client instead carries every audience its client maps
-    (the host's among them, since the exchange needs that mapper), so a token of that
-    client with more than one candidate audience was not minted for a host and binds
-    to nothing.
+    What tells a minted token from an ordinary token of console-backend's client is the
+    client's own audience. Every token Keycloak issues to ``agent-console`` by login or
+    refresh carries ``agent-console`` in ``aud`` (the client's audience mapper). The
+    exchange downscopes ``aud`` to the audience the broker asked for and adds nothing
+    (Keycloak, "Standard token exchange": the ``audience`` parameter only filters), so a
+    minted token never carries it. A token of console-backend's client that names
+    console-backend in ``aud`` is therefore a user's own session token and binds to
+    nothing, whatever else its ``aud`` says.
     """
     if not claims:
         return []
@@ -115,17 +119,13 @@ def candidate_client_ids(claims: dict[str, Any] | None) -> list[str]:
         return [azp]
     aud = claims.get("aud")
     entries = [aud] if isinstance(aud, str) else list(aud or [])
+    if broker_client_id in entries:
+        return []
     candidates: list[str] = []
     for entry in entries:
-        if (
-            isinstance(entry, str)
-            and entry
-            and entry != broker_client_id
-            and entry not in _NON_HOST_AUDIENCES
-            and entry not in candidates
-        ):
+        if isinstance(entry, str) and entry and entry not in _NON_HOST_AUDIENCES and entry not in candidates:
             candidates.append(entry)
-    return candidates if len(candidates) == 1 else []
+    return candidates
 
 
 class EmbedBindingService:

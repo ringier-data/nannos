@@ -176,7 +176,8 @@ class BrokerClientCreate(BaseModel):
 
 
 class BrokerClientUpdate(BaseModel):
-    """Admin request body for changing a broker client. Omitted fields are unchanged."""
+    """Admin request body for changing a broker client. Omitted fields are unchanged;
+    ``description`` is the one field a null clears."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)

@@ -66,10 +66,11 @@ class BrokerController:
     async def callback(self, request: Request, db: AsyncSession) -> RedirectResponse:
         """Finish the sign-in and send the browser back to the client with a one-time code.
 
-        A failure Keycloak reports (the user cancelled, the session state is gone) goes
-        back to the client as ``?error=`` so it can tell its user. Only a callback that
-        belongs to no pending login is answered here, because there is nowhere safe to
-        send it.
+        Every failure after the pending login is known goes back to the client as
+        ``?error=`` so it can tell its user: what Keycloak reports (the user cancelled, the
+        session state is gone), a login completed by a concurrent callback, and a fault of
+        ours while onboarding the user. Only a callback that belongs to no pending login is
+        answered here, because there is nowhere safe to send it.
         """
         login = await self.broker.open_login(db, request.query_params.get("state"))
         if login is None:
@@ -91,17 +92,30 @@ class BrokerController:
                 login, error="server_error", error_description="The sign-in returned no user information"
             )
 
-        user = await onboard_user_from_userinfo(
-            db,
-            userinfo,
-            token.get("refresh_token"),
-            user_service=self.user_service,
-            scheduler_token_service=self.scheduler_token_service,
-            keycloak_admin_service=self.keycloak_admin_service,
-            scheduler_service=self.scheduler_service,
-        )
-        code = await self.broker.issue_code(db, login, user, BrokerService.identity_from_userinfo(userinfo, user.id))
-        await db.commit()
+        try:
+            user = await onboard_user_from_userinfo(
+                db,
+                userinfo,
+                token.get("refresh_token"),
+                user_service=self.user_service,
+                scheduler_token_service=self.scheduler_token_service,
+                keycloak_admin_service=self.keycloak_admin_service,
+                scheduler_service=self.scheduler_service,
+            )
+            code = await self.broker.issue_code(db, login, user, BrokerService.identity_from_userinfo(userinfo, user.id))
+            await db.commit()
+        except BrokerRefusal as e:
+            # The login was completed under our feet (a concurrent callback): the user is
+            # signed in, but this browser has no code to bring back.
+            await db.rollback()
+            logger.info("Broker sign-in for client %s could not issue a code: %s", login.client_id, e.detail)
+            return self._back_to_client(login, error="invalid_request", error_description=e.detail)
+        except Exception:  # noqa: BLE001 — the user authenticated; leave them with a way back
+            await db.rollback()
+            logger.exception("Broker sign-in for client %s failed after Keycloak", login.client_id)
+            return self._back_to_client(
+                login, error="server_error", error_description="Signing you in failed. Please try again."
+            )
         # Outbound SCIM push, as the console login does; fire-and-forget after the commit.
         if self.outbound_scim_push_service is not None:
             self.outbound_scim_push_service.push_user(user.id, "update")

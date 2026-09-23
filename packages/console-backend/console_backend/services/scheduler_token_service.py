@@ -55,6 +55,11 @@ def _decrypt_token(plaintext_dek: bytes, nonce_and_ciphertext: bytes) -> str:
     return aesgcm.decrypt(nonce, ciphertext, None).decode()
 
 
+class NoOfflineTokenError(ValueError):
+    """The user has no offline token in the vault: they never signed in through a flow
+    that stores one. A ``ValueError`` so existing callers keep working."""
+
+
 class SchedulerTokenService:
     """Manages Keycloak offline refresh tokens encrypted via AWS KMS envelope encryption."""
 
@@ -147,12 +152,12 @@ class SchedulerTokenService:
     async def _refresh_access_token(self, db: AsyncSession, user_id: str) -> str:
         """Refresh the user's stored offline token into a fresh Keycloak access token.
 
-        Raises ValueError if no token is stored for the user.
+        Raises NoOfflineTokenError if no token is stored for the user.
         Raises httpx.HTTPStatusError on Keycloak errors.
         """
         blob = await self._load_encrypted_blob(db, user_id)
         if blob is None:
-            raise ValueError(f"No offline token stored for user {user_id}. User must grant consent first.")
+            raise NoOfflineTokenError(f"No offline token stored for user {user_id}. User must grant consent first.")
 
         refresh_token = await self._decrypt_blob(blob)
 
@@ -179,7 +184,7 @@ class SchedulerTokenService:
         (ADR-0002 Amendment 2). Un-exchanged on purpose: the embedded widget presents
         it on the socket, and OrchestratorAuth performs the audience exchange itself.
 
-        Raises ValueError if the user has no stored offline token (not enrolled).
+        Raises NoOfflineTokenError if the user has no stored offline token (not enrolled).
         """
         return await self._refresh_access_token(db, user_id)
 
@@ -196,7 +201,7 @@ class SchedulerTokenService:
 
         The token broker needs ``expires_in`` so its clients can cache what they are given.
 
-        Raises ValueError if no token is stored for the user.
+        Raises NoOfflineTokenError if no token is stored for the user.
         Raises httpx.HTTPStatusError on Keycloak errors.
         """
         access_token = await self._refresh_access_token(db, user_id)

@@ -39,6 +39,7 @@ from ..models.broker import BrokerClient, BrokerIdentity, BrokerTokenResponse, v
 from ..models.user import User
 from ..repositories.broker_client_repository import BrokerClientRepository
 from ..repositories.broker_login_request_repository import BrokerLoginRequest, BrokerLoginRequestRepository
+from .scheduler_token_service import NoOfflineTokenError
 
 if TYPE_CHECKING:
     from .scheduler_token_service import SchedulerTokenService
@@ -229,8 +230,10 @@ class BrokerService:
             raise BrokerRefusal(409, "The user has not signed in through this client")
         try:
             data = await self._tokens.get_exchanged_token_response(db, user.id, audience)
-        except ValueError:
+        except NoOfflineTokenError:
             # Signed in somewhere, but never through a flow that vaults the offline token.
+            # Only this case: any other ValueError (a non-JSON Keycloak reply, a bad vault
+            # blob) is a fault of ours and must not make the client drop the sign-in.
             raise BrokerRefusal(409, "User has not signed in to Nannos (no offline token)") from None
         except httpx.HTTPStatusError as exc:
             if _is_invalid_grant(exc):
