@@ -149,20 +149,47 @@ async def activate_skill(
 ):
     """Activate a registry skill on an agent.
 
-    Creates an activation record and writes the skill snapshot to docstore.
-    The activation is pinned to the current content hash.
+    Personal/group: creates an activation record and writes the skill snapshot to the
+    docstore, pinned to the current content hash.
+
+    Sub-agent (write access on the agent required): the agent's config gains a REFERENCE
+    to the registry row (ADR-0011) in the requested ``mode`` — 'pinned' (default) or
+    'following'. Re-activating an already active skill with the other mode switches it.
     """
-    if body.scope not in ("personal", "group"):
-        raise HTTPException(status_code=400, detail="scope must be 'personal' or 'group'")
+    if body.scope not in ("personal", "group", "sub-agent"):
+        raise HTTPException(status_code=400, detail="scope must be 'personal', 'group' or 'sub-agent'")
 
     if body.scope == "group" and not body.group_id:
         raise HTTPException(status_code=400, detail="group_id is required for group scope")
+
+    if body.mode == "following" and body.scope != "sub-agent":
+        raise HTTPException(
+            status_code=400,
+            detail="mode 'following' is only available with scope 'sub-agent'; personal and group activations are pinned",
+        )
 
     # Verify registry entry exists
     registry_service = _get_registry_service(request)
     entry = await registry_service.get_by_id(db, body.registry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Registry skill not found")
+
+    # Activation discloses the body — into the caller's docstore, or to every reader of the
+    # agent through resolution — so it takes the registry's READ gate (public, owner, or a
+    # reachable parent agent; 404 otherwise), the same one the registry router's own
+    # activate endpoint uses. One encoding of the rule, not a second hand-rolled one.
+    from console_backend.routers.skills_registry_router import _check_registry_read_access
+
+    await _check_registry_read_access(request, db, entry, user)
+
+    if body.scope == "sub-agent":
+        sub_agent_service = _get_sub_agent_service(request)
+        if not await sub_agent_service.check_user_permission(db, body.sub_agent_id, user.id, "write"):
+            raise HTTPException(status_code=403, detail="You need write access on the sub-agent to activate skills on it")
+        # Another agent's sub-agent skill is referenceable only once published (ADR 0006/0011):
+        # reachability of the parent agent lets you READ it, publishing lets you USE it.
+        if entry.scope == "sub-agent" and entry.sub_agent_id != body.sub_agent_id and entry.visibility != "public":
+            raise HTTPException(status_code=404, detail="Registry skill not found")
 
     # Get agent name for docstore key
     from sqlalchemy import text as sa_text
@@ -177,6 +204,12 @@ async def activate_skill(
 
     # Activate
     activation_service = _get_activation_service(request)
+    switched = False
+    if body.scope == "sub-agent":
+        existing = await activation_service.find_activation_by_registry_id(
+            db, registry_id=body.registry_id, sub_agent_id=body.sub_agent_id, scope="sub-agent"
+        )
+        switched = existing is not None and existing.mode != body.mode
     try:
         activation_id = await activation_service.activate(
             db=db,
@@ -187,13 +220,22 @@ async def activate_skill(
             user_id=user.id,
             group_id=body.group_id,
             activated_by=user.id,
+            actor=user if body.scope == "sub-agent" else None,
+            mode=body.mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
     await db.commit()
 
-    return {"id": activation_id, "skill": entry.slug, "scope": body.scope, "activated": True}
+    return {
+        "id": activation_id,
+        "skill": entry.slug,
+        "scope": body.scope,
+        "mode": body.mode,
+        "switched": switched,
+        "activated": True,
+    }
 
 
 @router.delete("/{activation_id}", status_code=status.HTTP_204_NO_CONTENT)

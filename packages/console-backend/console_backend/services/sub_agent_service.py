@@ -2377,6 +2377,8 @@ class SubAgentService:
             thinking_level=target.config_version.thinking_level,
             enable_thinking=target.config_version.enable_thinking,
             skills=target.config_version.skills,
+            # Reverting replays a stored version, so its provenance is ours, not input.
+            trust_provenance=True,
             sandbox_enabled=target.config_version.sandbox_enabled,
         )
 
@@ -2685,12 +2687,36 @@ class SubAgentService:
             result.append(d)
         return result
 
+    @staticmethod
+    async def _foreign_registry_ids(db: AsyncSession, sub_agent_id: int, registry_ids: list[str]) -> set[str]:
+        """Of ``registry_ids``, those this sub-agent may not write through.
+
+        Anything whose row is not owned by exactly this sub-agent is foreign: another
+        agent's row, a standalone/imported row (``sub_agent_id IS NULL``), and an id
+        with no row at all. Standalone rows have to be in here rather than left to the
+        caller's ``scope`` test — that test reads the CLIENT-supplied scope, so a
+        config save claiming ``scope='sub-agent'`` with a standalone row's UUID would
+        otherwise reach upsert and rewrite somebody's private standalone skill. The
+        whole point of this lookup is that the claimed scope is not evidence.
+        """
+        if not registry_ids:
+            return set()
+        result = await db.execute(
+            text("SELECT id, sub_agent_id FROM skill_registry WHERE id = ANY(:ids)"),
+            {"ids": list({str(r) for r in registry_ids})},
+        )
+        rows = {str(row["id"]): row["sub_agent_id"] for row in result.mappings().all()}
+        return {str(rid) for rid in registry_ids if rows.get(str(rid)) != sub_agent_id}
+
     async def _persist_and_strip_skills(
         self,
         db: AsyncSession,
         actor: User,
         sub_agent_id: int,
         skills: list[SkillDefinition],
+        *,
+        trust_provenance: bool = False,
+        prune_mirrored: bool = False,
     ) -> list[SkillRef]:
         """Persist all skills to the registry and return lightweight references.
 
@@ -2705,6 +2731,18 @@ class SubAgentService:
 
         Returns a list of SkillRef — the only thing stored in config version JSONB.
         Full content is resolved from skill_registry on read.
+
+        ``trust_provenance`` says the skills came from a host sync or from a stored
+        version, not from a request body. SkillDefinition is both the internal sync type
+        and the public SubAgentCreate/Update payload, so without this a client could
+        stamp ``source_type='well-known'`` on its own skill and permanently lock itself
+        out of editing it (update_skill 403s on any non-'nannos' source).
+
+        ``prune_mirrored`` is the separate, stronger claim that this call carries the
+        agent's COMPLETE mirrored set, so anything else may be deleted. Only a host sync
+        can say that. A revert trusts provenance but replays one stored version, which
+        is not a statement about the current upstream set — keeping these two flags
+        apart is what stops a revert from deleting rows.
         """
 
         if self._skill_registry_service is None:
@@ -2713,10 +2751,21 @@ class SubAgentService:
             )
         registry_service = self._skill_registry_service
 
+        # Rows this agent does not own are read-only to it. A public sub-agent skill
+        # activated from another agent is a REFERENCE, and resolve_imported_skills
+        # stamps the publisher's scope ('sub-agent') onto the borrowing agent's config
+        # entry — which, on the next save, would otherwise land in the upsert branch
+        # below and rewrite the publisher's row by id. Ownership, not the claimed
+        # scope, decides whether this agent may write.
+        foreign_ids = await self._foreign_registry_ids(
+            db, sub_agent_id, [s.registry_id for s in skills if s.registry_id]
+        )
+
         result: list[SkillRef] = []
         for skill in skills:
-            if skill.registry_id and skill.scope != "sub-agent":
-                # Imported skill — registry entry already exists, just keep the reference
+            if skill.registry_id and (skill.scope != "sub-agent" or skill.registry_id in foreign_ids):
+                # Imported or borrowed skill — the registry entry exists and belongs to
+                # someone else; keep the reference and never write through it.
                 if not skill.content_hash:
                     raise ValueError(
                         f"Imported skill '{skill.name}' (registry_id={skill.registry_id}) "
@@ -2757,7 +2806,7 @@ class SubAgentService:
                     files=registry_files,
                     registry_id=skill.registry_id,
                     visibility=skill.visibility,
-                    provenance=skill.provenance,
+                    provenance=skill.provenance if trust_provenance else None,
                 )
 
                 ref = SkillRef(
@@ -2765,139 +2814,38 @@ class SubAgentService:
                     content_hash=content_hash,
                 )
             result.append(ref)
+
+        # A sync declares the agent's complete mirrored skill set, so rows it did not
+        # write this time are withdrawn or renamed upstream and must not outlive it —
+        # a public one would otherwise stay world-readable with nothing pointing at it.
+        #
+        # The source types come from the rows already in the registry, not from the
+        # incoming payload: a sync that withdraws its LAST mirrored skill arrives with
+        # nothing to derive a type from, and that is exactly the case worth pruning.
+        if prune_mirrored:
+            await registry_service.prune_mirrored_skills(
+                db=db,
+                actor=actor,
+                sub_agent_id=sub_agent_id,
+                keep_ids=[r.registry_id for r in result if r.registry_id],
+            )
         return result
 
     async def resolve_imported_skills(self, db: AsyncSession, sub_agent: "SubAgent") -> None:
         """Resolve skill references in-place by fetching content from the skill registry.
 
-        All skills are stored as lightweight references (name, description, registry_id, content_hash)
-        without body/files content. This method populates body and files from the registry table.
+        All skills are stored as lightweight references (registry_id, content_hash) without
+        body/files content. This populates body and files from the registry.
 
-        For agent-scoped skills (custom), the registry_id is cleared after resolution so
-        the frontend treats them as editable custom skills.
-
-        Skills are pinned to their content_hash version. If the registry has a newer version,
-        update_available is set to True and latest_hash is populated.
+        A skill whose registry row THIS agent owns resolves as always-latest: the row is the
+        agent's own editable content. A row it does not own — another agent's published
+        skill or a standalone import — is a REFERENCE (ADR-0011): pinned to its content_hash,
+        with update_available/latest_hash set when the publisher has moved on, and ``mode``
+        telling whether the referrer is pinned or following.
 
         Mutates sub_agent.config_version.skills in-place.
         """
-        if not sub_agent or not sub_agent.config_version or not sub_agent.config_version.skills:
-            return
-
-        # Collect registry_ids that need resolution
-        registry_ids = [s.registry_id for s in sub_agent.config_version.skills if s.registry_id and not s.body]
-        if not registry_ids:
-            return
-
-        # Batch-fetch from skill_registry
-        result = await db.execute(
-            text(
-                "SELECT id, slug, files, scope, sandbox_required, description, content_hash, visibility "
-                "FROM skill_registry WHERE id = ANY(:ids)"
-            ),
-            {"ids": registry_ids},
-        )
-        registry_map: dict[str, dict] = {}
-        for row in result.mappings().all():
-            registry_map[str(row["id"])] = {
-                "slug": row.get("slug") or "",
-                "files": row["files"] or [],
-                "scope": row.get("scope") or "standalone",
-                "sandbox_required": row.get("sandbox_required", False),
-                "description": row.get("description") or "",
-                "content_hash": row.get("content_hash") or "",
-                "visibility": row.get("visibility"),
-            }
-
-        # Identify skills that need pinned versions (content_hash differs from current)
-        pinned_lookups: list[tuple[str, str]] = []  # (registry_id, content_hash)
-        for skill in sub_agent.config_version.skills:
-            if (
-                skill.registry_id
-                and not skill.body
-                and skill.registry_id in registry_map
-                and skill.content_hash
-                and skill.content_hash != registry_map[skill.registry_id]["content_hash"]
-            ):
-                pinned_lookups.append((skill.registry_id, skill.content_hash))
-
-        # Batch-fetch pinned versions from skill_registry_versions
-        pinned_map: dict[tuple[str, str], dict] = {}
-        if pinned_lookups:
-            # Build condition for batch lookup
-            conditions = []
-            params: dict = {}
-            for i, (sid, shash) in enumerate(pinned_lookups):
-                conditions.append(f"(skill_id = :sid_{i} AND content_hash = :hash_{i})")
-                params[f"sid_{i}"] = sid
-                params[f"hash_{i}"] = shash
-            where_clause = " OR ".join(conditions)
-            ver_result = await db.execute(
-                text(
-                    f"SELECT skill_id, content_hash, files, description FROM skill_registry_versions WHERE {where_clause}"
-                ),
-                params,
-            )
-            for row in ver_result.mappings().all():
-                pinned_map[(str(row["skill_id"]), row["content_hash"])] = {
-                    "files": row["files"] or [],
-                    "description": row.get("description") or "",
-                }
-
-        # Populate skills in-place
-        for skill in sub_agent.config_version.skills:
-            if skill.registry_id and not skill.body and skill.registry_id in registry_map:
-                entry = registry_map[skill.registry_id]
-                current_hash = entry["content_hash"]
-
-                # Populate name from registry slug if not already set
-                if not skill.name and entry["slug"]:
-                    skill.name = entry["slug"]
-
-                # Sub-agent scoped skills always use latest (no version pinning)
-                if entry["scope"] == "sub-agent":
-                    files = entry["files"]
-                    if not skill.description and entry["description"]:
-                        skill.description = entry["description"]
-                    skill.content_hash = current_hash
-                    skill.update_available = False
-                    skill.latest_hash = None
-                    if entry["visibility"] in ("private", "public"):
-                        skill.visibility = entry["visibility"]
-                else:
-                    # Determine if we should use pinned version or current
-                    use_pinned = (
-                        skill.content_hash
-                        and skill.content_hash != current_hash
-                        and (skill.registry_id, skill.content_hash) in pinned_map
-                    )
-
-                    if use_pinned:
-                        assert skill.content_hash is not None
-                        pinned = pinned_map[(skill.registry_id, skill.content_hash)]
-                        files = pinned["files"]
-                        if not skill.description and pinned["description"]:
-                            skill.description = pinned["description"]
-                        skill.update_available = True
-                        skill.latest_hash = current_hash
-                    else:
-                        files = entry["files"]
-                        if not skill.description and entry["description"]:
-                            skill.description = entry["description"]
-                        # If content_hash differs but pinned version not found (legacy), use latest
-                        if skill.content_hash and skill.content_hash != current_hash:
-                            skill.update_available = True
-                            skill.latest_hash = current_hash
-                            skill.content_hash = current_hash  # Auto-update hash for legacy
-
-                # Extract SKILL.md body and other files
-                for f in files:
-                    if f.get("path") == "SKILL.md":
-                        skill.body = _strip_skill_frontmatter(f.get("content", ""))
-                    else:
-                        skill.files.append(SkillFile(path=f["path"], content=f.get("content", "")))
-                skill.sandbox_required = entry["sandbox_required"]
-                skill.scope = entry["scope"]
+        await self.resolve_imported_skills_bulk(db, [sub_agent])
 
     async def resolve_imported_skills_bulk(self, db: AsyncSession, sub_agents: list["SubAgent"]) -> None:
         """Resolve skill references for multiple sub-agents in a single batch query.
@@ -2920,8 +2868,8 @@ class SubAgentService:
         unique_ids = list(set(registry_ids))
         result = await db.execute(
             text(
-                "SELECT id, slug, files, scope, sandbox_required, description, content_hash, visibility "
-                "FROM skill_registry WHERE id = ANY(:ids)"
+                "SELECT id, slug, files, scope, sandbox_required, description, content_hash, visibility, "
+                "sub_agent_id FROM skill_registry WHERE id = ANY(:ids)"
             ),
             {"ids": unique_ids},
         )
@@ -2935,7 +2883,27 @@ class SubAgentService:
                 "description": row.get("description") or "",
                 "content_hash": row.get("content_hash") or "",
                 "visibility": row.get("visibility"),
+                "owner_sub_agent_id": row.get("sub_agent_id"),
             }
+
+        # Activation modes for referenced rows (ADR-0011): a referrer with no activation row
+        # is pinned by construction, so only 'following' and bump errors need looking up.
+        agent_ids = [sa.id for sa in sub_agents if sa.id is not None]
+        mode_map: dict[tuple[int, str], dict] = {}
+        if agent_ids:
+            mode_result = await db.execute(
+                text(
+                    "SELECT sub_agent_id, registry_id::text AS registry_id, mode, last_bump_error "
+                    "FROM skill_activations WHERE scope = 'sub-agent' "
+                    "AND sub_agent_id = ANY(:agent_ids) AND registry_id = ANY(:ids)"
+                ),
+                {"agent_ids": agent_ids, "ids": unique_ids},
+            )
+            for row in mode_result.mappings().all():
+                mode_map[(row["sub_agent_id"], row["registry_id"])] = {
+                    "mode": row["mode"],
+                    "last_bump_error": row["last_bump_error"],
+                }
 
         # Identify skills that need pinned versions
         pinned_lookups: set[tuple[str, str]] = set()
@@ -2985,17 +2953,24 @@ class SubAgentService:
                         if not skill.name and entry["slug"]:
                             skill.name = entry["slug"]
 
-                        # Sub-agent scoped skills always use latest (no version pinning)
-                        if entry["scope"] == "sub-agent":
+                        # The agent's OWN row is always-latest: it is the editable content
+                        # itself. Any other row is a reference pinned by hash (ADR-0011) —
+                        # including another agent's sub-agent-scoped published skill.
+                        owns_row = entry["owner_sub_agent_id"] is not None and entry["owner_sub_agent_id"] == sa.id
+                        if owns_row:
                             files = entry["files"]
                             if not skill.description and entry["description"]:
                                 skill.description = entry["description"]
                             skill.content_hash = current_hash
                             skill.update_available = False
                             skill.latest_hash = None
+                            skill.mode = None
                             if entry["visibility"] in ("private", "public"):
                                 skill.visibility = entry["visibility"]
                         else:
+                            activation = mode_map.get((sa.id, skill.registry_id)) if sa.id is not None else None
+                            skill.mode = activation["mode"] if activation else "pinned"
+                            skill.bump_error = activation["last_bump_error"] if activation else None
                             use_pinned = (
                                 skill.content_hash
                                 and skill.content_hash != current_hash
@@ -3026,6 +3001,104 @@ class SubAgentService:
                                 skill.files.append(SkillFile(path=f["path"], content=f.get("content", "")))
                         skill.sandbox_required = entry["sandbox_required"]
                         skill.scope = entry["scope"]
+
+    async def is_embed_bound(self, db: AsyncSession, sub_agent_id: int) -> bool:
+        """True when a host publishes this agent's definition (ADR-0006); its skill list is the host's."""
+        result = await db.execute(
+            text("SELECT 1 FROM sub_agent_embed_bindings WHERE sub_agent_id = :id"),
+            {"id": sub_agent_id},
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def bump_followed_skill(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        *,
+        registry_id: str,
+        new_hash: str,
+        change_summary: str,
+    ) -> int | None:
+        """Write one auto-approved version of a FOLLOWING referrer carrying a new skill hash (ADR-0011).
+
+        Built from the referrer's APPROVED DEFAULT version — never a pending draft, which
+        would otherwise be promoted unreviewed — with the one skill's ``content_hash``
+        replaced and nothing else changed. Approved on the spot, like
+        :meth:`publish_managed_version`: the referrer's writer chose to follow, so there is
+        no review step here. Returns the new version number, or None when the default
+        does not hold the skill or already carries ``new_hash``.
+
+        Raises ``ValueError`` when the agent has no approved default or is embed-bound (its
+        skill list belongs to the host and the sync would prune the followed skill).
+        """
+        await self.repo.lock_for_update(db, sub_agent_id)
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if existing is None or existing.deleted_at is not None:
+            raise ValueError(f"Sub-agent {sub_agent_id} not found")
+        if existing.default_version is None:
+            raise ValueError(f"Sub-agent {sub_agent_id} has no approved default version")
+        if await self.is_embed_bound(db, sub_agent_id):
+            raise ValueError(f"Sub-agent {sub_agent_id} is embed-bound; its skills are published by the host")
+
+        baseline = existing.config_version
+        if baseline is None or baseline.version != existing.default_version:
+            approved = await self.get_sub_agent_by_id(db, sub_agent_id, version=existing.default_version)
+            baseline = approved.config_version if approved and approved.config_version else None
+        if baseline is None:
+            raise ValueError(f"Sub-agent {sub_agent_id} default version {existing.default_version} is unreadable")
+
+        updated = False
+        skills: list[SkillDefinition] = []
+        for skill in baseline.skills or []:
+            if skill.registry_id == registry_id:
+                if skill.content_hash == new_hash:
+                    return None
+                skills.append(skill.model_copy(update={"content_hash": new_hash}))
+                updated = True
+            else:
+                skills.append(skill)
+        if not updated:
+            return None
+
+        max_version_result = await db.execute(
+            text(
+                "SELECT COALESCE(MAX(version), 0) FROM sub_agent_config_versions WHERE sub_agent_id = :sub_agent_id"
+            ),
+            {"sub_agent_id": sub_agent_id},
+        )
+        new_version = max_version_result.scalar_one() + 1
+        await self._create_config_version(
+            db,
+            actor,
+            sub_agent_id,
+            new_version,
+            change_summary,
+            status=SubAgentStatus.DRAFT,
+            description=baseline.description,
+            model=baseline.model,
+            model_tier=baseline.model_tier.value if baseline.model_tier else None,
+            system_prompt=baseline.system_prompt,
+            agent_url=baseline.agent_url,
+            mcp_tools=list(baseline.mcp_tools) if baseline.mcp_tools else [],
+            foundry_hostname=baseline.foundry_hostname,
+            foundry_client_id=baseline.foundry_client_id,
+            foundry_client_secret_ref=baseline.foundry_client_secret_ref,
+            foundry_ontology_rid=baseline.foundry_ontology_rid,
+            foundry_query_api_name=baseline.foundry_query_api_name,
+            foundry_scopes=baseline.foundry_scopes,
+            foundry_version=baseline.foundry_version,
+            pricing_config=baseline.pricing_config,
+            enable_thinking=baseline.enable_thinking,
+            thinking_level=baseline.thinking_level,
+            skills=skills,
+            sandbox_enabled=bool(baseline.sandbox_enabled),
+        )
+        await self.repo.update_current_version(db, actor, sub_agent_id, new_version)
+        await self.repo.approve_version(
+            db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
+        )
+        return new_version
 
     async def create_managed_sub_agent(
         self, db: AsyncSession, actor: User, *, name: str, is_public: bool = False
@@ -3133,6 +3206,10 @@ class SubAgentService:
             skills=skills,
             sandbox_enabled=bool(baseline.sandbox_enabled) if baseline else False,
             version_hash=version_hash,
+            # The host definition is the authority on provenance, and its skill list is
+            # the complete mirrored set for this agent (ADR 0006).
+            trust_provenance=True,
+            prune_mirrored=True,
         )
         await self.repo.update_current_version(db, actor, sub_agent_id, new_version)
         await self.repo.approve_version(
@@ -3167,6 +3244,8 @@ class SubAgentService:
         skills: list[SkillDefinition] | None = None,
         sandbox_enabled: bool = False,
         version_hash: str | None = None,
+        trust_provenance: bool = False,
+        prune_mirrored: bool = False,
     ) -> int:
         """Create a new configuration version entry. Returns the new version ID.
 
@@ -3180,7 +3259,9 @@ class SubAgentService:
 
         # Persist all skills (custom + imported) to the registry and return refs.
         # Full content lives in the skill_registry table and is resolved on read.
-        skill_refs = await self._persist_and_strip_skills(db, actor, sub_agent_id, skills_list)
+        skill_refs = await self._persist_and_strip_skills(
+            db, actor, sub_agent_id, skills_list, trust_provenance=trust_provenance, prune_mirrored=prune_mirrored
+        )
 
         if version_hash is None:
             version_hash = self._generate_version_hash(

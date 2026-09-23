@@ -5,7 +5,8 @@ Responsibilities:
 - Deactivate (remove activation + docstore snapshot)
 - Self-update: refresh own activation after registry edit (author's fast path)
 - List activations for an agent with update-available detection
-- Upsert sub-agent activations during config set-default
+- Following referrers (ADR-0011): bump every following activation when a registry row's
+  content changes, in the writer's transaction, one savepoint per referrer
 
 Does NOT own:
 - Registry CRUD (that's SkillRegistryService)
@@ -20,8 +21,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from console_backend.models.skills_registry import (
+    ActivationMode,
     ActivationScope,
-    RegistryRef,
     SkillActivation,
     SkillActivationWithStatus,
     SkillFile,
@@ -32,8 +33,15 @@ from console_backend.services.playbook_service import PlaybookService
 if TYPE_CHECKING:
     from console_backend.models.user import User
     from console_backend.services.sub_agent_service import SubAgentService
+    from console_backend.services.user_service import UserService
 
 logger = logging.getLogger(__name__)
+
+#: Signs the versions a following bump writes (ADR-0011). Neither the skill's author (who may
+#: have no access to the referrer) nor the user who once chose following (who consented, but
+#: did not act now) performed this change; the platform did, because a follow relationship
+#: exists. Provenance travels in the change summary.
+_SYSTEM_USER_ID = "system"
 
 
 class SkillActivationService:
@@ -42,9 +50,13 @@ class SkillActivationService:
     def __init__(self) -> None:
         self._playbook_service: PlaybookService | None = None
         self._sub_agent_service: "SubAgentService | None" = None
+        self._user_service: "UserService | None" = None
 
     def set_playbook_service(self, service: PlaybookService) -> None:
         self._playbook_service = service
+
+    def set_user_service(self, service: "UserService") -> None:
+        self._user_service = service
 
     def set_sub_agent_service(self, service: "SubAgentService") -> None:
         from console_backend.services.sub_agent_service import SubAgentService
@@ -76,11 +88,17 @@ class SkillActivationService:
         activated_by: str | None = None,
         *,
         actor: "User | None" = None,
+        mode: ActivationMode = "pinned",
     ) -> int:
         """Activate a registry skill on an agent.
 
         For personal/group scope: creates activation record + writes docstore snapshot.
         For sub-agent scope: creates config version with the skill + activation record.
+
+        ``mode`` (ADR-0011) is a sub-agent-scope concept: 'pinned' keeps the config's hash
+        until a writer updates it, 'following' bumps the agent on every publisher write.
+        Re-activating an already active sub-agent skill with the other mode SWITCHES it;
+        a switch to following bumps at once when the agent is behind the publisher.
 
         Args:
             db: Database session (console DB)
@@ -104,6 +122,12 @@ class SkillActivationService:
             raise ValueError("group_id is required for group scope")
         if scope == "sub-agent" and not actor:
             raise ValueError("actor is required for sub-agent scope")
+        if mode not in ("pinned", "following"):
+            raise ValueError(f"Invalid mode '{mode}'. Must be 'pinned' or 'following'.")
+        if mode == "following" and scope != "sub-agent":
+            raise ValueError(
+                "Following is a sub-agent scope concept: personal and group activations are always pinned."
+            )
 
         activated_by = activated_by or (actor.id if actor else user_id)
 
@@ -113,22 +137,63 @@ class SkillActivationService:
             raise ValueError(f"Registry entry not found: {registry_id}")
 
         if scope == "sub-agent":
-            # Check for existing sub-agent activation — idempotent
+            assert actor is not None
+            is_reference = registry.sub_agent_id != sub_agent_id
+            if mode == "following":
+                if not is_reference:
+                    raise ValueError("An agent cannot follow its own skill; following is for skills it does not own.")
+                if await self.sub_agent_service.is_embed_bound(db, sub_agent_id):
+                    raise ValueError(
+                        "An embed-bound agent cannot follow a skill: its skill list is published by the host."
+                    )
+
+            # Existing sub-agent activation: idempotent, or a mode switch (ADR-0011).
             result = await db.execute(
                 text("""
-                    SELECT id FROM skill_activations
+                    SELECT id, mode FROM skill_activations
                     WHERE sub_agent_id = :sub_agent_id
                       AND registry_id = :registry_id
                       AND scope = 'sub-agent'
                 """),
                 {"sub_agent_id": sub_agent_id, "registry_id": registry_id},
             )
-            existing_id = result.scalar_one_or_none()
-            if existing_id:
-                return existing_id
+            existing = result.mappings().first()
+            if existing:
+                if existing["mode"] != mode:
+                    await db.execute(
+                        text("UPDATE skill_activations SET mode = :mode, last_bump_error = NULL WHERE id = :id"),
+                        {"mode": mode, "id": existing["id"]},
+                    )
+                    logger.info(
+                        "Activation %d of skill %s on sub-agent %s switched to %s",
+                        existing["id"],
+                        registry_id,
+                        sub_agent_id,
+                        mode,
+                    )
+                    if mode == "following":
+                        # Following means current: catch up now, signed by the user switching.
+                        await self.sub_agent_service.bump_followed_skill(
+                            db,
+                            actor,
+                            sub_agent_id,
+                            registry_id=registry_id,
+                            new_hash=registry.content_hash,
+                            change_summary=(
+                                f"Now following skill '{registry.slug}'; caught up to {registry.content_hash[:12]}"
+                            ),
+                        )
+                        await db.execute(
+                            text(
+                                "UPDATE skill_activations SET content_hash = :hash, last_bump_at = NOW() WHERE id = :id"
+                            ),
+                            {"hash": registry.content_hash, "id": existing["id"]},
+                        )
+                return existing["id"]
 
             # Create a new config version with this skill appended (immutable versions).
             # add_skill_to_config is idempotent — skips if already present by source ref.
+            # The config holds a REFERENCE to the publisher's row (ADR-0011), never a copy.
             await self.sub_agent_service.add_skill_to_config(
                 db=db,
                 sub_agent_id=sub_agent_id,
@@ -139,15 +204,15 @@ class SkillActivationService:
                 actor=actor,
             )
 
-            # Create sub-agent activation record (for tracking/listing/update-detection)
+            # Create sub-agent activation record (mode, tracking, update-detection)
             result = await db.execute(
                 text("""
                     INSERT INTO skill_activations
                         (sub_agent_id, registry_id, scope, user_id, group_id, content_hash,
-                         activated_by)
+                         activated_by, mode)
                     VALUES
                         (:sub_agent_id, :registry_id, 'sub-agent', NULL, NULL, :content_hash,
-                         :activated_by)
+                         :activated_by, :mode)
                     RETURNING id
                 """),
                 {
@@ -155,6 +220,7 @@ class SkillActivationService:
                     "registry_id": registry_id,
                     "content_hash": registry.content_hash,
                     "activated_by": activated_by,
+                    "mode": mode,
                 },
             )
             activation_id = result.scalar_one()
@@ -197,10 +263,11 @@ class SkillActivationService:
             )
 
         logger.info(
-            "Activated skill %s on agent %s (scope=%s, hash=%s)",
+            "Activated skill %s on agent %s (scope=%s, mode=%s, hash=%s)",
             registry.name,
             agent_name,
             scope,
+            mode,
             registry.content_hash[:12],
         )
         return activation_id
@@ -443,6 +510,9 @@ class SkillActivationService:
                     sa.content_hash,
                     sa.activated_at,
                     sa.activated_by,
+                    sa.mode,
+                    sa.last_bump_error,
+                    sa.last_bump_at,
                     sr.slug as skill_slug,
                     sr.name as skill_name,
                     sr.description as skill_description,
@@ -475,65 +545,97 @@ class SkillActivationService:
                 skill_description=row["skill_description"],
                 update_available=row["content_hash"] != row["latest_hash"],
                 latest_hash=row["latest_hash"] if row["content_hash"] != row["latest_hash"] else None,
+                mode=row["mode"],
+                last_bump_error=row["last_bump_error"],
+                last_bump_at=row["last_bump_at"],
             )
             for row in rows
         ]
 
-    async def upsert_locked(
+    async def bump_following_referrers(
         self,
         db: AsyncSession,
-        sub_agent_id: int,
-        agent_name: str,
-        registry_refs: list[RegistryRef],
-        config_version_id: int,
-        activated_by: str,
+        actor: "User | None",
+        skill_id: str,
+        previous_hash: str,
+        new_hash: str,
     ) -> None:
-        """Create/update sub-agent activations during config set-default.
+        """Content-changed hook (ADR-0011): bump every FOLLOWING referrer of ``skill_id``.
 
-        Args:
-            sub_agent_id: Target agent
-            agent_name: Agent name for docstore keys
-            registry_refs: List of registry references from config version
-            config_version_id: The config version creating these activations
-            activated_by: User who approved the config version
+        Runs inside the publisher's transaction so publisher and followers commit together.
+        Each referrer gets its own savepoint: a failing bump is recorded on that activation
+        and skipped, the publisher's write still commits, and the referrer stays on its
+        previous hash — where it shows "update available" and the manual update is the
+        recovery. The row's own agent is never a referrer, and soft-deleted agents are
+        skipped silently.
         """
-        # Remove existing sub-agent activations for this agent
-        await db.execute(
-            text("DELETE FROM skill_activations WHERE sub_agent_id = :sub_agent_id AND scope = 'sub-agent'"),
-            {"sub_agent_id": sub_agent_id},
+        result = await db.execute(
+            text("""
+                SELECT act.id, act.sub_agent_id, ag.name AS agent_name,
+                       sr.slug, pub.name AS publisher_name
+                FROM skill_activations act
+                JOIN sub_agents ag ON ag.id = act.sub_agent_id AND ag.deleted_at IS NULL
+                JOIN skill_registry sr ON sr.id = act.registry_id
+                LEFT JOIN sub_agents pub ON pub.id = sr.sub_agent_id
+                WHERE act.registry_id = CAST(:skill_id AS uuid)
+                  AND act.scope = 'sub-agent'
+                  AND act.mode = 'following'
+                  AND (sr.sub_agent_id IS NULL OR sr.sub_agent_id <> act.sub_agent_id)
+                ORDER BY act.sub_agent_id
+            """),
+            {"skill_id": skill_id},
         )
+        followers = result.mappings().all()
+        if not followers:
+            return
 
-        for ref in registry_refs:
-            registry = await self._get_registry_entry(db, ref.registry_id)
-            if not registry:
-                logger.warning("Registry entry %s not found during sub-agent activation upsert", ref.registry_id)
-                continue
-
-            # Create sub-agent activation (belongs to the agent config)
-            await db.execute(
-                text("""
-                    INSERT INTO skill_activations
-                        (sub_agent_id, registry_id, scope, user_id, group_id, content_hash,
-                         config_version_id, activated_by)
-                    VALUES
-                        (:sub_agent_id, :registry_id, 'sub-agent', NULL, NULL, :content_hash,
-                         :config_version_id, :activated_by)
-                """),
-                {
-                    "sub_agent_id": sub_agent_id,
-                    "registry_id": ref.registry_id,
-                    "content_hash": registry.content_hash,
-                    "config_version_id": config_version_id,
-                    "activated_by": activated_by,
-                },
+        signer = await self._bump_signer(db)
+        changed_by = actor.email if actor else "an unknown user"
+        for row in followers:
+            publisher = f"agent '{row['publisher_name']}'" if row["publisher_name"] else "the registry"
+            summary = (
+                f"Followed skill '{row['slug']}' moved {previous_hash[:12]} -> {new_hash[:12]} "
+                f"(changed by {changed_by} on {publisher})"
             )
+            try:
+                if signer is None:
+                    raise LookupError("no system user to sign the bump")
+                async with db.begin_nested():
+                    await self.sub_agent_service.bump_followed_skill(
+                        db,
+                        signer,
+                        row["sub_agent_id"],
+                        registry_id=skill_id,
+                        new_hash=new_hash,
+                        change_summary=summary,
+                    )
+                    await db.execute(
+                        text(
+                            "UPDATE skill_activations SET content_hash = :hash, last_bump_error = NULL, "
+                            "last_bump_at = NOW() WHERE id = :id"
+                        ),
+                        {"hash": new_hash, "id": row["id"]},
+                    )
+                logger.info("Bumped following sub-agent %s (%s): %s", row["sub_agent_id"], row["agent_name"], summary)
+            except Exception as exc:  # noqa: BLE001 — every failure is recorded and skipped by design
+                reason = f"{type(exc).__name__}: {exc}"[:1000]
+                await db.execute(
+                    text("UPDATE skill_activations SET last_bump_error = :err, last_bump_at = NOW() WHERE id = :id"),
+                    {"err": reason, "id": row["id"]},
+                )
+                logger.warning(
+                    "Skipped following bump of sub-agent %s (%s) for skill %s: %s",
+                    row["sub_agent_id"],
+                    row["agent_name"],
+                    skill_id,
+                    reason,
+                )
 
-        logger.info(
-            "Upserted %d sub-agent activations for agent %s (config_version=%d)",
-            len(registry_refs),
-            agent_name,
-            config_version_id,
-        )
+    async def _bump_signer(self, db: AsyncSession) -> "User | None":
+        """The seeded system user signs bumps; None when it is missing (recorded per referrer)."""
+        if self._user_service is None:
+            return None
+        return await self._user_service.get_user(db, _SYSTEM_USER_ID)
 
     # --- Internal helpers ---
 
@@ -672,7 +774,7 @@ class SkillActivationService:
                 text(
                     "SELECT * FROM skill_activations "
                     "WHERE registry_id = :registry_id AND sub_agent_id = :sub_agent_id "
-                    "AND scope = :scope AND user_id = :user_id AND deleted_at IS NULL LIMIT 1"
+                    "AND scope = :scope AND user_id = :user_id LIMIT 1"
                 ),
                 {
                     "registry_id": registry_id,
@@ -686,7 +788,7 @@ class SkillActivationService:
                 text(
                     "SELECT * FROM skill_activations "
                     "WHERE registry_id = :registry_id AND sub_agent_id = :sub_agent_id "
-                    "AND scope = 'sub-agent' AND deleted_at IS NULL LIMIT 1"
+                    "AND scope = 'sub-agent' LIMIT 1"
                 ),
                 {"registry_id": registry_id, "sub_agent_id": sub_agent_id},
             )
@@ -695,7 +797,7 @@ class SkillActivationService:
                 text(
                     "SELECT * FROM skill_activations "
                     "WHERE registry_id = :registry_id AND sub_agent_id = :sub_agent_id "
-                    "AND scope = :scope AND deleted_at IS NULL LIMIT 1"
+                    "AND scope = :scope LIMIT 1"
                 ),
                 {"registry_id": registry_id, "sub_agent_id": sub_agent_id, "scope": scope},
             )

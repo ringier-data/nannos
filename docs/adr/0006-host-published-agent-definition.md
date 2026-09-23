@@ -149,6 +149,8 @@ inline sub-agent skill is. `public` writes it as a public registry entry: it sho
 the registry search and every user can read and activate it on other agents, while it
 stays editable only through the host's sync. Any other value fails the fetch for that
 skill. The visibility is part of the revision, so flipping it re-syncs the binding.
+What an activating agent holds — a pinned or following *reference*, never a copy —
+and why a referenced skill cannot be withdrawn is ADR-0011.
 
 Synced skills are registry rows with `source_type = 'well-known'` (`source_repo` the
 authority, `source_ref` the revision, `source_path` the SKILL.md URL). The sync finds the

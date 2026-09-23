@@ -277,8 +277,40 @@ side". This decision is that caller.
    new risk class. When the retry is granted the parked task it supersedes is
    cancelled, since nothing will answer it and answering it would duplicate work.
 
+8. **A watch's check tool parks the run the same way, without an agent-runner task.**
+   A watch's condition is evaluated by the scheduler *before* any dispatch
+   (`WatchEvaluator`), so a `need-credentials` from the check tool never reaches
+   agent-runner and decisions 1–3 never see it. The first cut of this decision did not
+   name that path, and it kept the old behaviour in full: a failed run with the gateway's
+   raw payload — authorize URL included — as its message, nothing delivered, and a
+   failure counted toward `max_failures`.
+
+   The evaluator now recognises the payload on the same field the middleware matches
+   (`errorCode: need-credentials`, never the words) and hands the engine an *ask* rather
+   than an error. The run ends `AUTH_REQUIRED` with the ask on `parked_payload` in the
+   `client_payload` shape, so the console's card and the schedule hold of decision 4
+   apply unchanged. What differs is what the answer is addressed to. There is no task,
+   so `parked_task_id` carries `watch-check:<run id>` instead: the column is what makes
+   a park answerable in every place that checks (the claim, run-now's refusal, the
+   console's badge), and one prefix read by the resume is cheaper than teaching each of
+   them a second column. An approval re-runs the poll at once as the RESUMED run — with
+   the credential stored, the check proceeds and the watch carries on; without it, the
+   run parks again, having consumed the previous ask first, so there is still one. A
+   decline releases the schedule without counting a failure, and the next occurrence
+   asks again.
+
+   A job with a delivery channel is told there too, with the link, as a plain
+   notification dispatched through agent-runner's push sender — decision 5's
+   un-upgraded-client path, deliberately: the outer task that notice completes is not
+   parked, so a card posted against it would have nothing to answer. The answer comes
+   back through the console.
+
 ## Constraints
 
+- **Both parks are answered through the one resume endpoint, and the prefix is the
+  only thing that tells them apart.** `is_check_park` reads `parked_task_id`; nothing
+  else may branch on the status or on the job type, because a watch with an agent can
+  park either way — on its check, or later on a tool the agent calls.
 - **Only one run of a job is ever parked, on every dispatch path.** Decision 4's
   schedule hold makes that true for scheduled occurrences, and several things depend on
   it: no second answerable card, no accumulation of non-terminal tasks and checkpoints,

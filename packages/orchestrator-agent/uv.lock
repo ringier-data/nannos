@@ -1750,7 +1750,7 @@ wheels = [
 
 [[package]]
 name = "orchestrator-agent-a2a-server"
-version = "1.11.1"
+version = "1.12.0"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -2593,7 +2593,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "1.5.0"
+version = "1.5.1"
 source = { editable = "../ringier-a2a-sdk" }
 dependencies = [
     { name = "a2a-sdk" },

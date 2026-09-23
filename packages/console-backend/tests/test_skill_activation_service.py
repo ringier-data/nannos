@@ -21,7 +21,6 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from console_backend.models.skills_registry import RegistryRef
 from console_backend.services.skill_activation_service import SkillActivationService
 
 # --- Helpers ---
@@ -526,46 +525,3 @@ class TestUpdateActivation:
         assert result_hash == new_hash
 
 
-class TestUpsertLocked:
-    """Test locked activation creation during config set-default."""
-
-    @pytest.mark.asyncio
-    async def test_upsert_locked_creates_activations(self, pg_session: AsyncSession, activation_service):
-        """Upsert locked creates locked activation records."""
-        user_id = await _create_test_user(pg_session)
-        agent_id = await _create_test_agent(pg_session, user_id=user_id)
-        registry_id = await _create_registry_entry(pg_session, slug="locked-skill", user_id=user_id)
-        await pg_session.commit()
-
-        # Create a config version for reference
-        result = await pg_session.execute(
-            text("""
-                INSERT INTO sub_agent_config_versions (sub_agent_id, version, version_hash, description, system_prompt, status, created_at)
-                VALUES (:agent_id, 1, 'abc123456789', 'Test version', 'You are a test agent', 'approved', NOW())
-                RETURNING id
-            """),
-            {"agent_id": agent_id},
-        )
-        config_version_id = result.scalar_one()
-        await pg_session.commit()
-
-        await activation_service.upsert_locked(
-            db=pg_session,
-            sub_agent_id=agent_id,
-            agent_name="test-agent",
-            registry_refs=[RegistryRef(registry_id=registry_id, name="locked-skill")],
-            config_version_id=config_version_id,
-            activated_by=user_id,
-        )
-        await pg_session.commit()
-
-        # Verify sub-agent-scoped activation exists
-        check = await pg_session.execute(
-            text("SELECT * FROM skill_activations WHERE sub_agent_id = :id AND scope = 'sub-agent'"),
-            {"id": agent_id},
-        )
-        rows = check.mappings().all()
-        assert len(rows) == 1
-        assert rows[0]["scope"] == "sub-agent"
-        assert rows[0]["config_version_id"] == config_version_id
-        assert str(rows[0]["registry_id"]) == registry_id

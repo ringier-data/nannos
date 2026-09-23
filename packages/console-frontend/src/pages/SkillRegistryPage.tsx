@@ -73,6 +73,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { getErrorMessage } from '@/lib/utils';
+import { describeSkillReferencedConflict } from '@/lib/skillConflict';
 import { SkillImportPanel } from '@/components/skills/SkillImportPanel';
 
 // --- Helpers for SKILL.md structured editing ---
@@ -304,7 +306,16 @@ export function SkillRegistryPage() {
       if (deletingSkill?.id === selectedSkillId || deletingSkill?.slug === selectedSkillId) setSelectedSkillId(null);
       setDeletingSkill(null);
     },
-    onError: () => toast.error('Failed to delete skill'),
+    onError: (err) => {
+      // ADR-0011: a referenced row cannot be withdrawn — name the agents holding it.
+      const referenced = describeSkillReferencedConflict(err, 'deleted');
+      if (referenced) {
+        toast.error('This skill is published and in use', { description: referenced });
+        setDeletingSkill(null);
+        return;
+      }
+      toast.error('Failed to delete skill', { description: getErrorMessage(err) });
+    },
   });
 
   const handleStartCreate = () => {
@@ -461,8 +472,17 @@ export function SkillRegistryPage() {
         invalidateSearch();
         if (newId) setSelectedSkillId(newId);
       }
-    } catch {
-      toast.error('Failed to save skill');
+    } catch (err) {
+      // ADR-0011: visibility -> private on a referenced row is refused. Say who holds it, and
+      // put the badge back to what the server actually stores — a staged value that survived
+      // the refusal reads as "it worked".
+      const referenced = describeSkillReferencedConflict(err, 'made private');
+      if (referenced) {
+        toast.error('This skill is published and in use', { description: referenced });
+        setDraftSkill({ ...flushed, visibility: detail?.visibility ?? 'public' });
+      } else {
+        toast.error('Failed to save skill', { description: getErrorMessage(err) });
+      }
     } finally {
       setSaving(false);
     }
@@ -1531,8 +1551,10 @@ export function SkillRegistryPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete skill from registry?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently remove <strong>{deletingSkill?.name}</strong> from the registry.
-              Existing activations will stop receiving updates.
+              This permanently removes <strong>{deletingSkill?.name}</strong> from the registry, for
+              everyone. If another sub-agent references it, the delete is refused until every one of
+              them stops using it; personal and group activations keep the copy they already have but
+              stop receiving updates.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

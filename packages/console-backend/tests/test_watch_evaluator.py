@@ -5,6 +5,7 @@ a model judgement over the response, or both stacked: the gate runs first and th
 model judges only what the expression returned.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -63,6 +64,73 @@ class TestCanEvaluate:
 
     def test_a_watch_without_a_tool_is_declined(self):
         assert WatchEvaluator.can_evaluate(_job(check_tool=None)) is False
+
+
+class TestAMissingCredentialIsAnAskNotAFailure:
+    """The check tool answering ``need-credentials`` parks the run (ADR-0009).
+
+    Only the agent path used to detect this: a check made here fell into the generic
+    tool-error branch, the run failed with the gateway's raw payload as its message, and
+    a few polls later the job auto-paused on a condition no retry can fix.
+    """
+
+    PAYLOAD = {
+        "errorCode": "need-credentials",
+        "authorizeUrl": "https://gateway.example/oauth/gt_abc/begin",
+        "message": "This tool requires secondary authorization.",
+    }
+
+    @pytest.mark.asyncio
+    async def test_need_credentials_is_returned_as_an_ask(self, monkeypatch):
+        _gateway(monkeypatch, dict(self.PAYLOAD), is_error=True)
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "token")
+
+        assert outcome.error is None, "a missing credential must not count toward max_failures"
+        assert outcome.condition_met is False
+        assert outcome.evaluation is None
+        requirement = outcome.auth_ask["auth_requirement"]
+        assert requirement["resource"] == "naonous_get_campaign"
+        assert requirement["auth_methods"][0]["auth_url"] == self.PAYLOAD["authorizeUrl"]
+        assert requirement["auth_methods"][0]["description"] == self.PAYLOAD["message"]
+
+    @pytest.mark.asyncio
+    async def test_the_raw_payload_stays_off_the_run(self, monkeypatch):
+        # The authorize URL belongs in the ask the console renders, not in an error banner.
+        _gateway(monkeypatch, dict(self.PAYLOAD), is_error=True)
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "token")
+        assert outcome.check_result is None
+
+    @pytest.mark.asyncio
+    async def test_detected_even_when_the_tool_did_not_flag_an_error(self, monkeypatch):
+        # Some servers return the refusal as an ordinary result; the field is the truth.
+        _gateway(monkeypatch, dict(self.PAYLOAD), is_error=False)
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "token")
+        assert outcome.auth_ask is not None
+
+    @pytest.mark.asyncio
+    async def test_business_data_mentioning_credentials_is_not_an_ask(self, monkeypatch):
+        _gateway(monkeypatch, {"status": "OK", "note": "errorCode need-credentials appears in prose"})
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(cel_expr="result.status == 'FAILED'"), "token")
+        assert outcome.auth_ask is None
+        assert outcome.error is None
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_wrapped_in_prose_is_still_an_ask(self, monkeypatch):
+        # Several content blocks, or JSON inside a sentence, fold under "output".
+        wrapped = "Tool call failed: " + json.dumps(self.PAYLOAD) + ". Please try again."
+        _gateway(monkeypatch, {"output": wrapped}, is_error=True)
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "token")
+        method = outcome.auth_ask["auth_requirement"]["auth_methods"][0]
+        assert method["auth_url"] == self.PAYLOAD["authorizeUrl"]
+        assert method["description"] == self.PAYLOAD["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_payload_without_a_url_is_still_an_ask(self, monkeypatch):
+        _gateway(monkeypatch, {"errorCode": "need-credentials"}, is_error=True)
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "token")
+        method = outcome.auth_ask["auth_requirement"]["auth_methods"][0]
+        assert "auth_url" not in method
+        assert "naonous_get_campaign" in method["description"]
 
 
 class TestFailuresAreNotQuietOutcomes:
