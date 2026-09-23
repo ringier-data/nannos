@@ -1199,10 +1199,12 @@ async def follow_default_schedule(
     status_code=202,
     summary="Answer a run parked on the owner's authorization.",
     description=(
-        "Continues a run that stopped because a tool needed the owner's credential. The "
-        "answer is delivered to the parked agent-runner task, the agent retries what was "
-        "blocked (or is told to stop, on a decline), and the result is delivered to the "
-        "job's channel like any other run. Returns 202 with the id of the new RESUMED run "
+        "Continues a run that stopped because a tool needed the owner's credential. For a "
+        "run parked by its agent, the answer is delivered to the parked agent-runner task, "
+        "the agent retries what was blocked (or is told to stop, on a decline), and the "
+        "result is delivered to the job's channel like any other run. For a watch parked by "
+        "its own check tool, an approval runs the check again at once and a decline releases "
+        "the schedule. Returns 202 with the id of the new RESUMED run "
         "that carries the continued work — it is created before this responds, so the id "
         "is real and pollable; the parked run keeps its own record and stays "
         "`auth_required` for good.\n\n"
