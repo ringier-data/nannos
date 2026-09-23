@@ -1286,7 +1286,10 @@ class SchedulerEngine:
         # items that matched rather than from a response that also holds everything that
         # did not (the read notifications next to the unread one, say).
         triggered = _what_triggered(outcome)
+        brief = (job.prompt or "").strip()
         if not triggered:
+            if brief:
+                logger.info("Job %d: nothing matched to write from, the brief is not applied", job.id)
             return f"The watch '{job.name}' triggered."
         label = _triggered_label(outcome)
         fallback = f"The watch '{job.name}' triggered. {label}: {json.dumps(triggered, default=str)[:300]}"
@@ -1307,12 +1310,12 @@ class SchedulerEngine:
         # field has no agent to instruct, so it steers this sentence instead — which fields
         # to name, how to build a link from them, what to lead with. It shapes the message,
         # it does not replace the facts: the matched items stay the only source.
-        brief = (job.prompt or "").strip()
         prompt = (
             "Write the notification a user receives when a scheduled watch triggers. "
             + (
                 "Follow the author's brief below for what to include and how to shape it; "
-                "otherwise one or two sentences, factual, highlighting what changed. "
+                "otherwise one or two sentences, factual, highlighting what changed. If "
+                "there are more than 15 items, cover the first 15 and say how many more. "
                 if brief
                 else "One or two sentences, factual, highlighting what changed. "
             )
@@ -1329,12 +1332,15 @@ class SchedulerEngine:
             # — which would then be sent to the person verbatim.
             # Cost attribution comes from the scope `_dispatch_job` opened, not from an
             # argument here — the header is stamped by `_gateway_headers`.
-            # A brief may ask for a line per item with a link each, which two sentences'
-            # worth of tokens would cut mid-URL.
-            message = await gateway_chat(
-                prompt, model=model, max_tokens=768 if brief else 256, reasoning_effort="none"
-            )
+            # A ceiling, not spend: the un-briefed sentence is bounded by its instruction,
+            # and a brief may ask for a line per item with a link each.
+            message = await gateway_chat(prompt, model=model, max_tokens=768, reasoning_effort="none")
             written = message.strip().strip('"')
+            if getattr(message, "finish_reason", None) == "length" and "\n" in written:
+                # Cut off mid-line: a half URL delivered verbatim is worse than one line
+                # fewer. (No newline means one long sentence; nothing to trim to.)
+                written = written.rsplit("\n", 1)[0].rstrip()
+                logger.warning("Job %d: notification was cut off, delivering up to its last full line", job.id)
             if written:
                 logger.info("Job %d: wrote notification %r", job.id, written[:100])
                 return written

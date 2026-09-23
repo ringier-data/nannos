@@ -423,10 +423,16 @@ function CreateJobDialog({
             next.prompt = result.prompt;
             filled.add('prompt');
           }
-        } else if (result.notification_message) {
-          next.notification_message = result.notification_message;
+        } else if (result.notification_message || result.prompt) {
           next.outcome = 'notify';
-          filled.add('notification_message');
+          if (result.notification_message) {
+            next.notification_message = result.notification_message;
+            filled.add('notification_message');
+          } else if (result.prompt) {
+            // With no agent the instruction is a brief for how the message is written.
+            next.prompt = result.prompt;
+            filled.add('prompt');
+          }
         }
         if (result.delivery_channel_id) {
           next.delivery_channel = String(result.delivery_channel_id);
@@ -571,8 +577,9 @@ function CreateJobDialog({
         body.prompt = form.prompt.trim() || undefined;
       } else {
         body.notification_message = form.notification_message.trim();
-        // With no verbatim message, the instruction is the brief the written one follows.
-        body.prompt = body.notification_message ? undefined : form.prompt.trim() || undefined;
+        // The brief the written message follows; the backend drops it when a verbatim
+        // message is set (the rule lives there, for every writer of the job).
+        body.prompt = form.prompt.trim() || undefined;
       }
     }
 

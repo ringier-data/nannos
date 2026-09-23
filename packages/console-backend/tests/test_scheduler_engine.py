@@ -1843,8 +1843,26 @@ class TestWriteNotification:
         assert "Author's brief" in prompt
         assert "example.invalid/campaigns/{campaignId}" in prompt
         assert '"campaignId": 12' in prompt  # the facts still come from the evidence
-        # Room for a line per item with a URL each; two sentences' worth would cut mid-link.
-        assert chat.await_args.kwargs["max_tokens"] > 256
+
+    @pytest.mark.asyncio
+    async def test_a_cut_off_message_is_trimmed_to_its_last_full_line(self):
+        # A brief asking for a line per item can outrun the budget; a half URL delivered
+        # verbatim is worse than one line fewer.
+        from console_backend.services.llm_gateway import GatewayText
+
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.prompt = "One line per item with its link."
+        cut = GatewayText("Item 1: https://example.invalid/1\nItem 2: https://example.invalid/2\nItem 3: https://exa", "length")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", AsyncMock(return_value=cut)):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "m"}),
+            ):
+                written = await engine._write_notification(
+                    job, WatchOutcome(condition_met=True, check_result={"items": [1, 2, 3]}, evidence=[1, 2, 3])
+                )
+        assert written == "Item 1: https://example.invalid/1\nItem 2: https://example.invalid/2"
 
     @pytest.mark.asyncio
     async def test_without_a_brief_the_prompt_carries_none(self):
@@ -1861,7 +1879,6 @@ class TestWriteNotification:
                     job, WatchOutcome(condition_met=True, check_result={"status": "FAILED"})
                 )
         assert "Author's brief" not in chat.await_args.args[0]
-        assert chat.await_args.kwargs["max_tokens"] == 256
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_still_says_something(self):

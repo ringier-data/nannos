@@ -33,6 +33,8 @@ def make_job(
     name: str = "Test Job",
     owner_email: str | None = None,
     activated_by: str = "user",
+    prompt: str | None = "Do something",
+    notification_message: str | None = None,
 ) -> ScheduledJob:
     """An enabled interval task job due in an hour, unless told otherwise.
 
@@ -60,7 +62,8 @@ def make_job(
         cel_expr=cel_expr,
         llm_condition=llm_condition,
         next_run_at=now + timedelta(hours=1),
-        prompt="Do something",
+        prompt=prompt,
+        notification_message=notification_message,
         destroy_after_trigger=destroy_after_trigger,
         enabled=True,
         max_failures=max_failures,

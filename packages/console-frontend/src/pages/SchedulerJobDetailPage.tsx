@@ -842,8 +842,9 @@ function EditForm({ job }: { job: ScheduledJob }) {
           ? { prompt: watch.prompt.trim() || null, notification_message: null }
           : {
               notification_message: watch.notification_message.trim() || null,
-              // With no verbatim message, the instruction is the brief the written one follows.
-              prompt: watch.notification_message.trim() ? null : watch.prompt.trim() || null,
+              // The brief the written message follows; the backend drops it when a
+              // verbatim message is set (the rule lives there, for every writer of the job).
+              prompt: watch.prompt.trim() || null,
             }),
       }),
       // Sent unconditionally, null included: omitting it on an emptied value would

@@ -494,6 +494,60 @@ class TestUpdateJobUnsetSentinel:
         assert fields["sub_agent_id"] is None
 
     @pytest.mark.asyncio
+    async def test_clearing_the_agent_drops_its_instruction_from_a_message_watch(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        # The natural API downgrade to notify-only: only sub_agent_id is patched. The
+        # old agent instruction must not survive as the brief the written notification
+        # follows — on a watch with a verbatim message it is inert now and would come
+        # back the moment the message is emptied.
+        db = AsyncMock()
+        existing_job = make_job(
+            user_id=actor.id,
+            job_type=JobType.WATCH,
+            prompt="Email the account owner and escalate to #ops",
+            notification_message="Sync failed",
+        )
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+
+        await service.update_job(db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=None)
+
+        fields = mock_repo.update_definition.call_args[1]["fields"]
+        assert fields["sub_agent_id"] is None
+        assert fields["prompt"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_verbatim_message_clears_the_brief_on_a_notify_only_watch(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        existing_job = make_job(
+            user_id=actor.id, job_type=JobType.WATCH, sub_agent_id=None, prompt="Link each item", notification_message=None
+        )
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+
+        await service.update_job(
+            db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, notification_message="Maintenance: say only DOWN"
+        )
+
+        fields = mock_repo.update_definition.call_args[1]["fields"]
+        assert fields["notification_message"] == "Maintenance: say only DOWN"
+        assert fields["prompt"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_brief_stays_on_a_notify_only_watch_without_a_message(
+        self, service: SchedulerService, mock_repo: AsyncMock, actor: User
+    ):
+        db = AsyncMock()
+        existing_job = make_job(user_id=actor.id, job_type=JobType.WATCH, sub_agent_id=None, notification_message=None)
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+
+        await service.update_job(db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, prompt="Link each item")
+
+        fields = mock_repo.update_definition.call_args[1]["fields"]
+        assert fields["prompt"] == "Link each item"
+
+    @pytest.mark.asyncio
     async def test_update_clearing_sub_agent_on_task_is_rejected(
         self, service: SchedulerService, mock_repo: AsyncMock, actor: User
     ):
