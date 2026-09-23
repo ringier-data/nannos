@@ -109,7 +109,8 @@ export function WatchFields({
   const staticArgsKey = JSON.stringify(value.check_args);
   // prev is bound as on the run, to the stored last result — a cursor-style argument
   // (`prev.next_page`) otherwise previews as if the job had never run.
-  const prevKey = JSON.stringify(storedResult ?? null);
+  // Memoised: a stored result can be tens of kilobytes, and this runs in the render body.
+  const prevKey = useMemo(() => JSON.stringify(storedResult ?? null), [storedResult]);
   useEffect(() => {
     if (!hasArgExprs) {
       setArgsPreview({});
