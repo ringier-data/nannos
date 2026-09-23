@@ -145,6 +145,29 @@ _AUTH_RESUME_TEXT = {
 }
 
 
+
+def _what_triggered(outcome: WatchOutcome | None) -> Any:
+    """What a triggered watch hands on: the condition's evidence, else the whole response.
+
+    A CEL condition is gate and filter in one — its author wrote it to pick out the items
+    that matter — so when it returned some, those are what the agent acts on and what the
+    notification is written from. A boolean gate and a judged watch narrow nothing, and
+    the whole response is all there is.
+    """
+    if outcome is None:
+        return None
+    if outcome.evidence is not None:
+        return outcome.evidence
+    return outcome.check_result
+
+
+def _triggered_label(outcome: WatchOutcome | None) -> str:
+    """How the payload is introduced, so the reader knows whether it was filtered."""
+    if outcome is not None and outcome.evidence is not None:
+        return "What the watch condition matched (filtered from the check result)"
+    return "Check result"
+
+
 class SchedulerEngine:
     """Background tick loop that dispatches scheduled jobs to agent-runner."""
 
@@ -1083,8 +1106,10 @@ class SchedulerEngine:
             # A triggered watch with an agent: the instruction plus what triggered it,
             # since the agent is expected to act on the result.
             instruction = job.prompt or "Take appropriate action based on the check result."
-            result_json = json.dumps((watch_outcome.check_result if watch_outcome else None), default=str)
-            message_text = f"Watch condition triggered. {instruction}\n\nCheck result: {result_json}"
+            result_json = json.dumps(_what_triggered(watch_outcome), default=str)
+            message_text = (
+                f"Watch condition triggered. {instruction}\n\n{_triggered_label(watch_outcome)}: {result_json}"
+            )
         else:
             # A triggered watch that only notifies: the text is the notification, written
             # here when the author left it empty. It used to be written inside the agent
@@ -1131,14 +1156,17 @@ class SchedulerEngine:
             ]
             if message_text and message_text != "Execute the task you are designed for.":
                 parts.append({"kind": "text", "text": message_text})
-            if watch_outcome is not None and watch_outcome.check_result:
+            if watch_outcome is not None and _what_triggered(watch_outcome):
                 # Without this a notification-only watch would call with nothing to
                 # report: the message may be empty, and the agent-runner path that
                 # writes one is not taken when the target is the voice agent.
                 parts.append(
                     {
                         "kind": "text",
-                        "text": f"Check result: {json.dumps(watch_outcome.check_result, default=str)[:4000]}",
+                        "text": (
+                            f"{_triggered_label(watch_outcome)}: "
+                            f"{json.dumps(_what_triggered(watch_outcome), default=str)[:4000]}"
+                        ),
                     }
                 )
         else:
@@ -1225,7 +1253,10 @@ class SchedulerEngine:
         Falls back to reporting the raw result. A watch that triggered has something to
         say, so an unreachable model must not turn that into silence.
         """
-        check_result = outcome.check_result if outcome else None
+        # The expression's evidence when there is some, so the sentence is written from the
+        # items that matched rather than from a response that also holds everything that
+        # did not (the read notifications next to the unread one, say).
+        check_result = _what_triggered(outcome)
         if not check_result:
             return f"The watch '{job.name}' triggered."
 
@@ -1246,7 +1277,7 @@ class SchedulerEngine:
             "no markdown, no bold, no headings, no bullet points. Reply with the "
             "message text only, no preamble.\n\n"
             f"Watch: {job.name}\n"
-            f"Result:\n{json.dumps(check_result, indent=2, default=str)[:6000]}"
+            f"{_triggered_label(outcome)}:\n{json.dumps(check_result, indent=2, default=str)[:6000]}"
         )
         try:
             # Thinking off: two sentences of plain text need no reasoning, and on the low

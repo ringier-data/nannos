@@ -431,7 +431,9 @@ export function WatchFields({
                     Over <code>result</code> (the response), <code>now</code> (current time,
                     job timezone) and <code>prev</code> (the previous result). A boolean
                     gates directly; anything else triggers when non-empty — return the
-                    matching items, they become the evidence the run records.
+                    matching items: they are what the run records, what the notification
+                    is written from and what an agent is handed, instead of the whole
+                    response.
                   </p>
                 )}
               </div>
@@ -467,6 +469,7 @@ export function WatchFields({
 
               <ConditionTester
                 liveResult={testable}
+                prev={storedResult ?? null}
                 celExpr={value.cel_expr}
                 llmCondition={value.llm_condition}
               />

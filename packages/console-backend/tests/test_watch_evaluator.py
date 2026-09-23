@@ -208,6 +208,22 @@ class TestCelConditions:
         assert outcome.evaluation.extracted == [{"status": "FAILED", "id": 7}]
 
     @pytest.mark.asyncio
+    async def test_the_extraction_is_the_evidence_a_triggered_watch_hands_on(self, monkeypatch):
+        # The expression is gate and filter in one: what it matched is what the agent
+        # acts on and what the notification is written from, not the whole response.
+        _gateway(monkeypatch, {"items": [{"status": "FAILED", "id": 7}, {"status": "OK", "id": 8}]})
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "tok")
+        assert outcome.evidence == [{"status": "FAILED", "id": 7}]
+
+    @pytest.mark.asyncio
+    async def test_a_boolean_gate_narrows_nothing(self, monkeypatch):
+        _gateway(monkeypatch, {"items": [1, 2, 3]})
+        outcome = await WatchEvaluator().evaluate(
+            AsyncMock(), _job(cel_expr="size(result.items) > 2"), "tok"
+        )
+        assert outcome.evidence is None
+
+    @pytest.mark.asyncio
     async def test_an_empty_extraction_is_a_quiet_poll(self, monkeypatch):
         _gateway(monkeypatch, {"items": [{"status": "OK"}]})
         outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "tok")

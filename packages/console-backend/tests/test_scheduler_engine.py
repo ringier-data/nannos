@@ -881,6 +881,30 @@ class TestBuildMessageArgs:
         assert push_config is None
 
     @pytest.mark.asyncio
+    async def test_an_agent_is_handed_what_the_condition_matched_not_the_whole_response(self):
+        # The expression filtered the response down to what matters; sending the whole
+        # response as well would hand the agent the items the author excluded.
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH)
+        job.check_tool = "ping_tool"
+        job.cel_expr = "result.items.filter(i, i.status == 'FAILED')"
+        parts, _, _ = await engine._build_message_args(
+            job,
+            run_id=7,
+            access_token="tok",
+            db=AsyncMock(),
+            watch_outcome=WatchOutcome(
+                condition_met=True,
+                check_result={"items": [{"status": "FAILED", "id": 7}, {"status": "OK", "id": 8}]},
+                evidence=[{"status": "FAILED", "id": 7}],
+            ),
+        )
+        text = parts[0]["text"]
+        assert '"id": 7' in text
+        assert '"id": 8' not in text
+        assert "matched" in text  # told it is the filtered part, not the response
+
+    @pytest.mark.asyncio
     async def test_an_agent_without_an_instruction_gets_a_default(self):
         engine = _make_engine()
         job = make_job(job_type=JobType.WATCH)
@@ -1726,6 +1750,30 @@ class TestWriteNotification:
         # Thinking off: a reasoning model on the low tier would otherwise spend the
         # 256-token budget thinking and send a cut-off sentence to the person.
         assert chat.await_args.kwargs["reasoning_effort"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_it_is_written_from_what_the_condition_matched(self):
+        # Five notifications came back and the expression picked the unread one: the
+        # sentence is about that one, so the model is given only that one.
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        chat = AsyncMock(return_value="One unread issue.")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                await engine._write_notification(
+                    job,
+                    WatchOutcome(
+                        condition_met=True,
+                        check_result={"items": [{"id": 1, "isRead": False}, {"id": 2, "isRead": True}]},
+                        evidence=[{"id": 1, "isRead": False}],
+                    ),
+                )
+        prompt = chat.await_args.args[0]
+        assert '"id": 1' in prompt
+        assert '"id": 2' not in prompt
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_still_says_something(self):
