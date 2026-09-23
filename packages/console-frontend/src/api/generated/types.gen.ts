@@ -2600,6 +2600,7 @@ export type McpActivateSkillInput = {
      * Group ID (required when scope='group')
      */
     group_id?: string | null;
+    mode?: ModeEnum2;
 };
 
 /**
@@ -2624,6 +2625,7 @@ export type McpActivateSkillResponse = {
      * Registry Id
      */
     registry_id: string;
+    mode?: ModeEnum2;
     /**
      * Message
      */
@@ -5364,6 +5366,7 @@ export type SkillActivationRequest = {
      * Group ID (required when scope='group')
      */
     group_id?: number | null;
+    mode?: ModeEnum2;
 };
 
 /**
@@ -5435,6 +5438,19 @@ export type SkillActivationWithStatus = {
      * Current registry content_hash (if different)
      */
     latest_hash?: string | null;
+    mode?: ModeEnum2;
+    /**
+     * Last Bump Error
+     *
+     * Set when the last following bump was skipped; the agent is behind the publisher until updated
+     */
+    last_bump_error?: string | null;
+    /**
+     * Last Bump At
+     *
+     * When the last following bump ran
+     */
+    last_bump_at?: string | null;
 };
 
 /**
@@ -5626,6 +5642,28 @@ export type SkillDefinition = {
      * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
     scope?: _0Enum3 | null;
+    /**
+     * Visibility
+     *
+     * Registry visibility of a sub-agent scoped skill: 'public' lets every user discover and activate it elsewhere. None on write keeps the registry's value (private for a new entry).
+     */
+    visibility?: VisibilityEnum | null;
+    /**
+     * Mode
+     *
+     * Set on read, for a skill whose registry row this agent does NOT own (ADR-0011): 'pinned' when the hash moves only on explicit update, 'following' when every publisher write bumps this agent. None for the agent's own skills. Ignored on write.
+     */
+    mode?: ModeEnum2 | null;
+    /**
+     * Bump Error
+     *
+     * Set on read for a following skill whose last bump was skipped; says why it is behind.
+     */
+    bump_error?: string | null;
+    /**
+     * Server-set. A host sync that mirrors a skill it does not author (well-known) stamps this so the registry updates the row it wrote last time instead of creating a new one. Ignored on create/update request bodies — a client cannot declare its own skill mirrored, which would make it permanently uneditable.
+     */
+    provenance?: SkillProvenance | null;
 };
 
 /**
@@ -5848,6 +5886,43 @@ export type SkillListResponse = {
      * Items
      */
     items?: Array<ConsoleBackendModelsSkillsRegistrySkillSummary>;
+};
+
+/**
+ * SkillProvenance
+ *
+ * Provenance a caller attaches to a sub-agent scoped skill it does not author itself.
+ *
+ * Write-only: `upsert_agent_skill` stores it in the `source_*` columns and uses
+ * (sub_agent_id, source_type, name) to find the row it wrote last time, so a re-sync
+ * updates that row instead of creating `slug-2`, `slug-3`, … A row with a non-'nannos'
+ * source type is read-only in the registry UI except for its visibility and sandbox flag.
+ */
+export type SkillProvenance = {
+    /**
+     * Source Type
+     *
+     * Only 'well-known' is written this way today
+     */
+    source_type: 'well-known';
+    /**
+     * Source Repo
+     *
+     * Where the tree is served from, e.g. the authority base URL
+     */
+    source_repo: string;
+    /**
+     * Source Ref
+     *
+     * The revision the row's content comes from
+     */
+    source_ref: string;
+    /**
+     * Source Path
+     *
+     * The SKILL.md URL inside the tree
+     */
+    source_path: string;
 };
 
 /**
@@ -8445,6 +8520,7 @@ export type WellKnownSkillInfo = {
      * Digest
      */
     digest: string;
+    visibility?: VisibilityEnum;
 };
 
 /**
@@ -8567,6 +8643,13 @@ export type _0Enum = 'markdown' | 'slack' | 'google-chat' | 'plain';
 export type RoleEnum = 'read' | 'write' | 'manager';
 
 export type ItemsEnum = 'read' | 'write';
+
+/**
+ * Mode
+ *
+ * Sub-agent scope only; how a skill this agent does not own is kept. 'pinned': the agent keeps the skill's current content until someone updates it. 'following': every change the publisher makes becomes a new approved version of this agent automatically, so the publisher can change this agent's behaviour without review. Use 'following' only when the user has asked for it. Activating an already active skill with the other mode switches its mode.
+ */
+export type ModeEnum2 = 'pinned' | 'following';
 
 /**
  * Role

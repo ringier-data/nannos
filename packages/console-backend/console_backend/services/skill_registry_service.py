@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -37,15 +38,82 @@ from console_backend.services.skill_sources.base import SkillSourceDetail
 
 logger = logging.getLogger(__name__)
 
+#: Called once per content change of an EXISTING registry row, inside the writer's
+#: transaction: ``(db, actor, skill_id, previous_hash, new_hash)``. ADR-0011 hangs the
+#: following-referrer bump on it.
+ContentChangedHook = Callable[[AsyncSession, "User | None", str, str, str], Awaitable[None]]
+
+
+class SkillReferencedError(ValueError):
+    """A registry row other sub-agents reference cannot be deleted or made private (ADR-0011).
+
+    Referrers hold no copy — only a reference by id and hash — so withdrawing the row
+    would break their agents. Publishing is a commitment: the referrers must deactivate
+    the skill first. ``referrers`` is ``[(sub_agent_id, name), ...]``.
+    """
+
+    def __init__(self, skill_id: str, referrers: list[tuple[int, str]]) -> None:
+        self.skill_id = skill_id
+        self.referrers = referrers
+        names = ", ".join(f"'{name}'" for _, name in referrers)
+        super().__init__(
+            f"Skill is referenced by {len(referrers)} other agent(s): {names}. "
+            "They must deactivate it before it can be deleted or made private."
+        )
+
 
 class SkillRegistryService:
     """Service for skill registry CRUD operations."""
 
     def __init__(self) -> None:
         self.repo = SkillRegistryRepository()
+        self._content_changed_hook: ContentChangedHook | None = None
 
     def set_repository(self, repo: SkillRegistryRepository) -> None:
         self.repo = repo
+
+    def set_content_changed_hook(self, hook: ContentChangedHook | None) -> None:
+        """Register the one listener for "an existing row's content changed" (ADR-0011)."""
+        self._content_changed_hook = hook
+
+    async def referrers(self, db: AsyncSession, skill_id: str) -> list[tuple[int, str]]:
+        """Sub-agents that REFERENCE this row without owning it (ADR-0011).
+
+        A referrer is any live sub-agent other than the row's owner whose approved default
+        version names the row, or that holds a sub-agent-scope activation on it. Both are
+        checked: a reference that arrived through a plain config save has no activation
+        row, and an activation whose version is still a pending draft has no default yet.
+        """
+        result = await db.execute(
+            text(
+                """
+                SELECT DISTINCT sa.id, sa.name
+                FROM sub_agents sa
+                JOIN skill_registry sr ON sr.id = CAST(:skill_id AS uuid)
+                LEFT JOIN sub_agent_config_versions cv
+                       ON cv.sub_agent_id = sa.id AND cv.version = sa.default_version AND cv.deleted_at IS NULL
+                LEFT JOIN skill_activations act
+                       ON act.sub_agent_id = sa.id AND act.scope = 'sub-agent' AND act.registry_id = sr.id
+                WHERE sa.deleted_at IS NULL
+                  AND (sr.sub_agent_id IS NULL OR sr.sub_agent_id <> sa.id)
+                  AND (
+                        act.id IS NOT NULL
+                     OR EXISTS (
+                            SELECT 1 FROM jsonb_array_elements(COALESCE(cv.skills, '[]'::jsonb)) s
+                            WHERE s->>'registry_id' = :skill_id_text
+                        )
+                  )
+                ORDER BY sa.name
+                """
+            ),
+            {"skill_id": skill_id, "skill_id_text": str(skill_id)},
+        )
+        return [(row["id"], row["name"]) for row in result.mappings().all()]
+
+    async def _refuse_withdrawal_if_referenced(self, db: AsyncSession, skill_id: str) -> None:
+        referrers = await self.referrers(db, skill_id)
+        if referrers:
+            raise SkillReferencedError(skill_id, referrers)
 
     async def check_write_access(
         self,
@@ -95,8 +163,17 @@ class SkillRegistryService:
         content_hash: str,
         description: str | None,
         created_by: str,
+        *,
+        previous_hash: str | None = None,
+        actor: User | None = None,
     ) -> None:
-        """Save a version snapshot keyed by content_hash (idempotent — skips duplicates)."""
+        """Save a version snapshot keyed by content_hash (idempotent — skips duplicates).
+
+        This is the one point where "an existing row's content changed" is known: every
+        writer that changes a row's files ends here. When ``previous_hash`` is given and
+        differs from ``content_hash``, the registered content-changed hook runs in the
+        same transaction so following referrers are bumped with the write (ADR-0011).
+        """
         await db.execute(
             text("""
                 INSERT INTO skill_registry_versions (skill_id, content_hash, files, description, created_by)
@@ -111,6 +188,8 @@ class SkillRegistryService:
                 "created_by": created_by,
             },
         )
+        if self._content_changed_hook and previous_hash and previous_hash != content_hash:
+            await self._content_changed_hook(db, actor, skill_id, previous_hash, content_hash)
 
     async def get_version_history(
         self,
@@ -332,7 +411,11 @@ class SkillRegistryService:
         skill_id: str,
         visibility: RegistryVisibility,
     ) -> None:
-        """Change a skill's visibility."""
+        """Change a skill's visibility. Making a referenced PUBLIC row private is refused (ADR-0011)."""
+        if visibility == "private":
+            entry = await self.get_by_id(db, skill_id)
+            if entry is not None and entry.visibility == "public":
+                await self._refuse_withdrawal_if_referenced(db, skill_id)
         fields: dict[str, Any] = {
             "visibility": visibility,
             "updated_at": datetime.now(timezone.utc),
@@ -340,12 +423,13 @@ class SkillRegistryService:
         await self.repo.update(db=db, actor=actor, entity_id=skill_id, fields=fields)
 
     async def remove(self, db: AsyncSession, actor: User, skill_id: str) -> None:
-        """Remove a skill from the registry."""
+        """Remove a skill from the registry. Refused while other agents reference it (ADR-0011)."""
         # Fetch state for audit
         entry = await self.get_by_id(db, skill_id)
         if not entry:
             return
 
+        await self._refuse_withdrawal_if_referenced(db, skill_id)
         await db.execute(text("DELETE FROM skill_registry WHERE id = :id"), {"id": skill_id})
 
         # Log deletion audit manually since we're not using repo.delete()
@@ -357,6 +441,75 @@ class SkillRegistryService:
             action=AuditAction.DELETE,
             changes={"before": {"name": entry.name, "slug": entry.slug, "visibility": entry.visibility}},
         )
+
+    async def prune_mirrored_skills(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        keep_ids: list[str],
+    ) -> list[str]:
+        """Delete the sub-agent's mirrored rows that the latest sync did not write.
+
+        ``upsert_agent_skill`` matches a mirrored row by (sub-agent, source type, name),
+        so renaming a skill upstream writes a new row and withdrawing one writes nothing
+        — either way the previous row survives with no binding pointing at it. A public
+        one stays world-readable forever, which is the part that matters: the host has
+        stopped publishing the skill but the registry has not.
+
+        Scoped to rows that carry provenance (``source_type <> 'nannos'``), so a skill
+        somebody authored by hand on the same agent is never swept up by a sync.
+
+        A row an activation still references is left in place. ``skill_activations``
+        cascades on delete, and a sub-agent-scope activation holds only a SkillRef into
+        this table rather than a copy of the content, so deleting such a row would break
+        a live agent rather than merely tidy the registry. Those are logged instead:
+        the host has withdrawn something another agent is still using, which is a
+        decision for a human, not a side effect of a sync.
+
+        Returns the ids removed.
+        """
+        result = await db.execute(
+            text(
+                "SELECT sr.id, COUNT(sa.id) AS refs FROM skill_registry sr "
+                "LEFT JOIN skill_activations sa ON sa.registry_id = sr.id "
+                "WHERE sr.sub_agent_id = :sub_agent_id AND sr.scope = 'sub-agent' "
+                "AND COALESCE(sr.source_type, 'nannos') <> 'nannos' "
+                "GROUP BY sr.id"
+            ),
+            {"sub_agent_id": sub_agent_id},
+        )
+        keep = {str(k) for k in keep_ids}
+        stale: list[str] = []
+        for row in result.mappings().all():
+            skill_id = str(row["id"])
+            if skill_id in keep:
+                continue
+            # Activation rows are only half the referrers (ADR-0011): a reference that arrived
+            # through a plain config save has no row. referrers() sees both, and remove()
+            # refuses on the same test — so a sync never dies on a third party's reference.
+            referrers = await self.referrers(db, skill_id) if not row["refs"] else None
+            if row["refs"] or referrers:
+                logger.warning(
+                    "Sub-agent %s no longer mirrors registry skill %s, but other agent(s) still "
+                    "reference it (%s) — keeping the row; it needs a human decision.",
+                    sub_agent_id,
+                    skill_id,
+                    ", ".join(name for _, name in referrers) if referrers else f"{row['refs']} activation(s)",
+                )
+                continue
+            stale.append(skill_id)
+        pruned: list[str] = []
+        for skill_id in stale:
+            try:
+                await self.remove(db, actor, skill_id)
+                pruned.append(skill_id)
+            except SkillReferencedError as exc:
+                # Referenced between the check and the delete: same treatment, never a failed sync.
+                logger.warning("Kept mirrored registry skill %s: %s", skill_id, exc)
+        if pruned:
+            logger.info("Pruned %d stale mirrored registry row(s) for sub-agent %s", len(pruned), sub_agent_id)
+        return pruned
 
     async def find_by_content_hash(self, db: AsyncSession, content_hash: str) -> list[SkillRegistryEntry]:
         """Find registry entries with the same content hash (duplicate detection)."""
@@ -474,6 +627,8 @@ class SkillRegistryService:
             fields["sandbox_required"] = sandbox_required
 
         if visibility is not None:
+            if visibility == "private" and entry.visibility == "public":
+                await self._refuse_withdrawal_if_referenced(db, skill_id)
             fields["visibility"] = visibility
 
         if files is not None:
@@ -502,6 +657,8 @@ class SkillRegistryService:
                 content_hash=content_hash,  # type: ignore[possibly-unbound]
                 description=description if description is not None else entry.description,
                 created_by=actor.id,
+                previous_hash=entry.content_hash,
+                actor=actor,
             )
 
         updated = await self.get_by_id(db, skill_id)
@@ -545,7 +702,9 @@ class SkillRegistryService:
         # Prefer direct ID lookup when available (idempotent)
         if registry_id:
             result = await db.execute(
-                text("SELECT id, slug, name FROM skill_registry WHERE id = CAST(:id AS uuid)"),
+                text(
+                    "SELECT id, slug, name, content_hash, visibility FROM skill_registry WHERE id = CAST(:id AS uuid)"
+                ),
                 {"id": registry_id},
             )
             row = result.mappings().first()
@@ -555,7 +714,7 @@ class SkillRegistryService:
             # name. Matching on the name, not the slug: the slug may carry a -2 suffix.
             result = await db.execute(
                 text(
-                    "SELECT id, slug, name FROM skill_registry "
+                    "SELECT id, slug, name, content_hash, visibility FROM skill_registry "
                     "WHERE sub_agent_id = :sub_agent_id AND scope = 'sub-agent' "
                     "AND source_type = :source_type AND name = :name "
                     "ORDER BY created_at DESC LIMIT 1"
@@ -600,7 +759,24 @@ class SkillRegistryService:
                 "updated_at": now,
             }
             if visibility is not None:
-                update_fields["visibility"] = visibility
+                if visibility == "private" and row["visibility"] == "public":
+                    # A host sync (or a config save) withdrawing a skill other agents
+                    # reference: keep it public and say so, rather than break the
+                    # referrers or fail the whole sync. Like prune_mirrored_skills, this
+                    # is a decision for a human, not a side effect of a sync (ADR-0011).
+                    referrers = await self.referrers(db, skill_id)
+                    if referrers:
+                        logger.warning(
+                            "Skill %s (%s) stays public: %d other agent(s) reference it (%s)",
+                            skill_id,
+                            slug,
+                            len(referrers),
+                            ", ".join(name for _, name in referrers),
+                        )
+                    else:
+                        update_fields["visibility"] = visibility
+                else:
+                    update_fields["visibility"] = visibility
             update_fields.update(provenance_fields)
             await self.repo.update(
                 db=db,
@@ -608,7 +784,7 @@ class SkillRegistryService:
                 entity_id=skill_id,
                 fields=update_fields,
             )
-            # Save version snapshot on update
+            # Save version snapshot on update; bumps following referrers if the hash moved
             await self._save_version_snapshot(
                 db=db,
                 skill_id=skill_id,
@@ -616,6 +792,8 @@ class SkillRegistryService:
                 content_hash=content_hash,
                 description=description,
                 created_by=actor.id,
+                previous_hash=row["content_hash"],
+                actor=actor,
             )
             return skill_id, content_hash
 

@@ -189,11 +189,25 @@ class SkillDefinition(BaseModel):
             "activate it elsewhere. None on write keeps the registry's value (private for a new entry)."
         ),
     )
+    mode: Literal["pinned", "following"] | None = Field(
+        default=None,
+        description=(
+            "Set on read, for a skill whose registry row this agent does NOT own (ADR-0011): 'pinned' "
+            "when the hash moves only on explicit update, 'following' when every publisher write bumps "
+            "this agent. None for the agent's own skills. Ignored on write."
+        ),
+    )
+    bump_error: str | None = Field(
+        default=None,
+        description="Set on read for a following skill whose last bump was skipped; says why it is behind.",
+    )
     provenance: SkillProvenance | None = Field(
         default=None,
         description=(
-            "Write-only. Set by a sync that mirrors a skill it does not author (well-known); "
-            "the registry then updates the row it wrote last time instead of creating a new one."
+            "Server-set. A host sync that mirrors a skill it does not author (well-known) stamps "
+            "this so the registry updates the row it wrote last time instead of creating a new one. "
+            "Ignored on create/update request bodies — a client cannot declare its own skill "
+            "mirrored, which would make it permanently uneditable."
         ),
     )
 

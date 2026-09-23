@@ -2989,6 +2989,10 @@ export const applySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePost = <ThrowO
  * a previously deactivated skill. The skill must exist in the registry.
  *
  * Provide either registry_id (exact) or skill_name (searches by slug).
+ *
+ * A skill this agent does not own is REFERENCED, never copied (ADR-0011). With
+ * scope='sub-agent', `mode` says how the reference moves: 'pinned' (default) until
+ * someone updates it, or 'following' every publisher change automatically.
  */
 export const consoleActivateSkill = <ThrowOnError extends boolean = false>(options: Options<ConsoleActivateSkillData, ThrowOnError>) => (options.client ?? client).post<ConsoleActivateSkillResponses, ConsoleActivateSkillErrors, ThrowOnError>({
     url: '/api/v1/skills/registry/mcp/activate',
@@ -3196,8 +3200,12 @@ export const listActivationsApiV1SkillsActivationsSubAgentIdGet = <ThrowOnError 
  *
  * Activate a registry skill on an agent.
  *
- * Creates an activation record and writes the skill snapshot to docstore.
- * The activation is pinned to the current content hash.
+ * Personal/group: creates an activation record and writes the skill snapshot to the
+ * docstore, pinned to the current content hash.
+ *
+ * Sub-agent (write access on the agent required): the agent's config gains a REFERENCE
+ * to the registry row (ADR-0011) in the requested ``mode`` — 'pinned' (default) or
+ * 'following'. Re-activating an already active skill with the other mode switches it.
  */
 export const activateSkillApiV1SkillsActivationsPost = <ThrowOnError extends boolean = false>(options: Options<ActivateSkillApiV1SkillsActivationsPostData, ThrowOnError>) => (options.client ?? client).post<ActivateSkillApiV1SkillsActivationsPostResponses, ActivateSkillApiV1SkillsActivationsPostErrors, ThrowOnError>({
     url: '/api/v1/skills/activations',

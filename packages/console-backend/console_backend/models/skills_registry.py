@@ -142,6 +142,13 @@ class SkillAuditResponse(BaseModel):
 #   sub-agent — part of the sub-agent's own config (visible to all users)
 ActivationScope = Literal["personal", "group", "sub-agent"]
 
+# Activation mode (ADR-0011): how a REFERRER's content hash moves for a registry row the
+# activating sub-agent does not own. Meaningful for sub-agent scope only; personal and
+# group activations are always pinned.
+#   pinned    — moves only when a writer of the referrer explicitly updates it (default)
+#   following — moves on every publisher write, through an auto-approved "bump" version
+ActivationMode = Literal["pinned", "following"]
+
 
 # --- Import models ---
 
@@ -252,6 +259,9 @@ class SkillActivation(BaseModel):
     config_version_id: int | None = None
     activated_at: datetime
     activated_by: str
+    mode: ActivationMode = Field(default="pinned", description="'pinned' or 'following' (ADR-0011)")
+    last_bump_error: str | None = Field(default=None, description="Why the last following bump was skipped")
+    last_bump_at: datetime | None = None
 
     @field_validator("registry_id", mode="before")
     @classmethod
@@ -281,6 +291,15 @@ class SkillActivationWithStatus(BaseModel):
         default=False, description="True when registry content_hash differs from activation content_hash"
     )
     latest_hash: str | None = Field(default=None, description="Current registry content_hash (if different)")
+    mode: ActivationMode = Field(
+        default="pinned",
+        description="'pinned' (hash moves on explicit update) or 'following' (every publisher write bumps the agent)",
+    )
+    last_bump_error: str | None = Field(
+        default=None,
+        description="Set when the last following bump was skipped; the agent is behind the publisher until updated",
+    )
+    last_bump_at: datetime | None = Field(default=None, description="When the last following bump ran")
 
 
 class SkillActivationRequest(BaseModel):
@@ -290,6 +309,14 @@ class SkillActivationRequest(BaseModel):
     sub_agent_id: int = Field(description="Target sub-agent ID")
     scope: ActivationScope
     group_id: int | None = Field(default=None, description="Group ID (required when scope='group')")
+    mode: ActivationMode = Field(
+        default="pinned",
+        description=(
+            "Sub-agent scope only. 'pinned': the agent keeps the skill's current content until someone "
+            "updates it. 'following': every change the publisher makes becomes a new approved version of "
+            "this agent automatically. Re-activating an already active skill with the other mode switches it."
+        ),
+    )
 
 
 class SkillActivationListResponse(BaseModel):

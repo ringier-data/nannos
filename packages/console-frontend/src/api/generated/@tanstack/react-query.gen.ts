@@ -5945,6 +5945,10 @@ export const applySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostMutation =
  * a previously deactivated skill. The skill must exist in the registry.
  *
  * Provide either registry_id (exact) or skill_name (searches by slug).
+ *
+ * A skill this agent does not own is REFERENCED, never copied (ADR-0011). With
+ * scope='sub-agent', `mode` says how the reference moves: 'pinned' (default) until
+ * someone updates it, or 'following' every publisher change automatically.
  */
 export const consoleActivateSkillMutation = (options?: Partial<Options<ConsoleActivateSkillData>>): UseMutationOptions<ConsoleActivateSkillResponse, ConsoleActivateSkillError, Options<ConsoleActivateSkillData>> => {
     const mutationOptions: UseMutationOptions<ConsoleActivateSkillResponse, ConsoleActivateSkillError, Options<ConsoleActivateSkillData>> = {
@@ -6215,8 +6219,12 @@ export const listActivationsApiV1SkillsActivationsSubAgentIdGetOptions = (option
  *
  * Activate a registry skill on an agent.
  *
- * Creates an activation record and writes the skill snapshot to docstore.
- * The activation is pinned to the current content hash.
+ * Personal/group: creates an activation record and writes the skill snapshot to the
+ * docstore, pinned to the current content hash.
+ *
+ * Sub-agent (write access on the agent required): the agent's config gains a REFERENCE
+ * to the registry row (ADR-0011) in the requested ``mode`` — 'pinned' (default) or
+ * 'following'. Re-activating an already active skill with the other mode switches it.
  */
 export const activateSkillApiV1SkillsActivationsPostMutation = (options?: Partial<Options<ActivateSkillApiV1SkillsActivationsPostData>>): UseMutationOptions<unknown, ActivateSkillApiV1SkillsActivationsPostError, Options<ActivateSkillApiV1SkillsActivationsPostData>> => {
     const mutationOptions: UseMutationOptions<unknown, ActivateSkillApiV1SkillsActivationsPostError, Options<ActivateSkillApiV1SkillsActivationsPostData>> = {

@@ -442,3 +442,71 @@ A host integrates Nannos through two surfaces sharing one scope vocabulary:
   philosophy: always-available cheap index, detail pulled when engaging.
 
 _No open forks remaining — core abstraction resolved (grilling 2026-06-09)._
+
+## Skill sharing between sub-agents (grilling 2026-09-22)
+
+Terms for one sub-agent using a skill another sub-agent authors. Resolved
+against ADR-0006, which made the embedded agent the authority for its
+host-published skills.
+
+**Published skill**:
+A sub-agent-scoped registry skill whose visibility is `public`, so every user can
+discover it and activate it on other agents.
+_Avoid_: shared skill, exported skill, well-known skill (that is one *source* of a published skill, not the concept)
+
+**Publisher**:
+The owner of a registry row another agent refers to: a sub-agent for a
+sub-agent-scoped skill, a user for a standalone (imported) one. Only the
+publisher's writers, or its host sync, change the content.
+
+**Referrer**:
+A sub-agent whose approved config version references a registry row it does not
+own, published sub-agent skill or standalone import alike. There is exactly one
+registry row; a referrer never holds a copy.
+_Avoid_: copy, snapshot, clone
+
+**Pinned activation**:
+A referrer's activation whose content hash moves only when someone with write
+access to the referrer explicitly updates it. The default, and the only mode
+for personal and group activations.
+_Avoid_: copy mode
+
+**Following activation**:
+A referrer's activation whose content hash moves on every publisher write, through a bump.
+_Avoid_: live mode, reference mode, tracking
+
+**Bump**:
+A server-written, auto-approved config version on a following referrer that
+carries the publisher's new content hash and nothing else. Built from the
+referrer's approved default, never from a pending draft, like a well-known sync.
+Signed by the `system` user; the change summary names skill, hashes, editor and
+publisher.
+
+**Withdrawal**:
+Deleting a published skill or making it private. Refused with a conflict that
+names the referrers while any referrer exists.
+
+### Relationships
+
+- A **Publisher** owns many **Published skills**; each has one registry row.
+- A **Published skill** has zero or more **Referrers**; each referrer's sub-agent-scope activation is either **Pinned** or **Following**. The mode is a property of the activation, not of the config version: reverting the referrer never changes it.
+- Re-activating with the other mode *is* the switch; pinned to following bumps at once if behind. Deactivating detaches.
+- Following is chosen by the referrer's writer alone; no publisher consent, no restriction by provenance.
+- A publisher write produces one **Bump** per following referrer, in the publisher's transaction, each in its own savepoint. A failed bump is recorded on that activation and skipped; the referrer stays on its previous hash and shows "update available".
+- An embed-bound sub-agent cannot be a **Referrer** (its skill list belongs to the host and the sync prunes anything else).
+
+### Example dialogue
+
+> **Dev:** "The cockpit agent is the authority for the knowledge-base skill. If I activate it on the KB-only agent, does the KB agent get the cockpit's edits?"
+> **Domain expert:** "Only if you activate it as *following*. Then every host revision bumps the KB agent's version. Pinned would show 'update available' and wait for a click."
+> **Dev:** "And if the cockpit team makes the skill private?"
+> **Domain expert:** "They can't while the KB agent refers to it. Publishing is a commitment; the KB agent has to detach first."
+
+### Flagged ambiguities
+
+- "live" / "reference mode" vs "copy mode" (session of 2026-09-22): resolved as
+  a false split. Both modes *reference* the publisher's row; they differ only in
+  who moves the hash. The copy introduced by `fa676b38` is retired.
+- "sub-agent scoped skill" was read by the code as "always latest, no update
+  signal". That is true only for the *owner*. For a referrer the same row is
+  pinned by hash like any imported skill.

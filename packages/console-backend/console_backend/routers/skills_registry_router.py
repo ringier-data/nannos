@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from console_backend.db.session import DbSession, get_db_session
 from console_backend.dependencies import require_auth, require_auth_or_bearer_token
 from console_backend.models.skills_registry import (
+    ActivationMode,
     ActivationScope,
     McpSkillCreate,
     McpSkillDeleteFile,
@@ -35,7 +36,7 @@ from console_backend.models.skills_registry import (
     SkillSourceInfo,
 )
 from console_backend.models.user import User
-from console_backend.services.skill_registry_service import SkillRegistryService
+from console_backend.services.skill_registry_service import SkillReferencedError, SkillRegistryService
 from console_backend.services.skills_registry_service import skills_registry_service
 
 if TYPE_CHECKING:
@@ -49,6 +50,17 @@ router = APIRouter(prefix="/api/v1/skills/registry", tags=["skills-registry"])
 
 def get_skill_registry_service(request: Request) -> SkillRegistryService:
     return request.app.state.skill_registry_service
+
+
+def _referenced_conflict(exc: SkillReferencedError) -> HTTPException:
+    """ADR-0011: publishing is a commitment. A referenced row cannot be withdrawn; name the referrers."""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "message": str(exc),
+            "referrers": [{"sub_agent_id": sid, "name": name} for sid, name in exc.referrers],
+        },
+    )
 
 
 async def _check_sub_agent_skill_access(
@@ -207,8 +219,7 @@ async def get_skill_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Skill '{skill_id}' not found in registry",
         )
-    # Sub-agent-scoped skills: verify user can access the parent agent
-    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+    await _check_registry_read_access(request, db, entry, user)
 
     return {
         "id": entry.id,
@@ -242,7 +253,7 @@ async def get_skill_versions(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+    await _check_registry_read_access(request, db, entry, user)
 
     versions = await skill_registry_service.get_version_history(db, skill_id)
     return {
@@ -273,7 +284,7 @@ async def get_skill_version_detail(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+    await _check_registry_read_access(request, db, entry, user)
 
     version = await skill_registry_service.get_version(db, skill_id, content_hash)
     if version is None:
@@ -485,8 +496,11 @@ async def remove_skill(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
-    await skill_registry_service.remove(db, user, skill_id)
+    await _require_registry_write(request, db, entry, user)
+    try:
+        await skill_registry_service.remove(db, user, skill_id)
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     await db.commit()
 
 
@@ -579,7 +593,7 @@ async def update_registry_skill(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "nannos":
         # Imported skills: only sandbox_required and visibility can be changed
         if body.name is not None or body.description is not None or body.files is not None:
@@ -607,6 +621,8 @@ async def update_registry_skill(
             sandbox_required=body.sandbox_required,
             visibility=body.visibility,
         )
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -637,7 +653,7 @@ async def write_registry_file(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "nannos":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -694,7 +710,7 @@ async def delete_registry_file(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
-    await _check_sub_agent_skill_access(entry, user, db, request)
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "nannos":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -744,6 +760,10 @@ async def copy_skill(
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
 
+    # Copying hands the caller a permanent copy of every file, so it is a read of the
+    # whole body — the most direct disclosure of the endpoints on this router.
+    await _check_registry_read_access(request, db, entry, user)
+
     copy_name = body.name or f"{entry.name} (copy)"
 
     try:
@@ -784,6 +804,8 @@ async def check_skill_update(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
+    # The response carries file-level diffs of the entry's contents.
+    await _check_registry_read_access(request, db, entry, user)
     if entry.source_type != "github":
         raise HTTPException(
             status_code=400,
@@ -893,6 +915,8 @@ async def apply_skill_update(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
+    # Replaces the entry's files in place from upstream.
+    await _require_registry_write(request, db, entry, user)
     if entry.source_type != "github":
         raise HTTPException(status_code=400, detail="Only skills imported from GitHub can be updated from source.")
     if not entry.source_repo:
@@ -1067,6 +1091,61 @@ async def _check_registry_write_access(
         )
 
 
+async def _check_registry_read_access(
+    request: Request,
+    db: AsyncSession,
+    entry: SkillRegistryEntry,
+    user: User,
+) -> None:
+    """Verify the user may read a registry entry's contents.
+
+    Activation copies the entry's SKILL.md and bundled files into the caller's own
+    docstore, so it discloses the full body — it needs the same gate as a GET, not
+    merely an authenticated session.
+
+    Readable when: the entry is public, the caller owns it, or it is sub-agent scoped
+    and the caller can reach the parent agent. Anything else 404s, matching
+    ``_check_sub_agent_skill_access`` so a probe cannot distinguish "exists but is
+    private" from "does not exist".
+    """
+    if entry.visibility == "public" or entry.owner_id == user.id:
+        return
+    if entry.scope == "sub-agent" and entry.sub_agent_id:
+        await _check_sub_agent_skill_access(entry, user, db, request, read_only=True)
+        return
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Skill '{entry.id}' not found in registry",
+    )
+
+
+async def _require_registry_write(
+    request: Request,
+    db: AsyncSession,
+    entry: SkillRegistryEntry,
+    user: User,
+) -> None:
+    """The write gate for a registry entry, for both scopes.
+
+    ``_check_sub_agent_skill_access`` alone is not a write gate: it returns early for
+    anything not sub-agent scoped, so a standalone entry owned by somebody else passed
+    straight through it. And it cannot run first, because it answers "can you reach the
+    parent agent", which an owner may have lost while still owning the row.
+
+    So ownership decides, and nothing else: ``check_write_access`` covers the owner
+    and, for sub-agent entries, write permission on the parent agent, plus an
+    administrator bypass for pulling back a skill nobody else can reach. A refusal is
+    404, not 403 — it must not confirm that an id exists.
+    """
+    registry_service = get_skill_registry_service(request)
+    if await registry_service.check_write_access(db, entry, user.id) or user.is_administrator:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Skill '{entry.id}' not found in registry",
+    )
+
+
 def _validate_skill_name(name: str) -> None:
     """Validate skill name per the SKILL.md spec (agentskills.io/specification).
 
@@ -1194,6 +1273,17 @@ class McpActivateSkillInput(BaseModel):
         ),
     )
     group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
+    mode: ActivationMode = Field(
+        default="pinned",
+        description=(
+            "Sub-agent scope only; how a skill this agent does not own is kept. "
+            "'pinned': the agent keeps the skill's current content until someone updates it. "
+            "'following': every change the publisher makes becomes a new approved version of this agent "
+            "automatically, so the publisher can change this agent's behaviour without review. "
+            "Use 'following' only when the user has asked for it. "
+            "Activating an already active skill with the other mode switches its mode."
+        ),
+    )
 
 
 class McpActivateSkillResponse(BaseModel):
@@ -1203,6 +1293,7 @@ class McpActivateSkillResponse(BaseModel):
     agent_name: str
     scope: str
     registry_id: str
+    mode: ActivationMode = "pinned"
     message: str
 
 
@@ -1225,6 +1316,10 @@ async def mcp_activate_skill(
     a previously deactivated skill. The skill must exist in the registry.
 
     Provide either registry_id (exact) or skill_name (searches by slug).
+
+    A skill this agent does not own is REFERENCED, never copied (ADR-0011). With
+    scope='sub-agent', `mode` says how the reference moves: 'pinned' (default) until
+    someone updates it, or 'following' every publisher change automatically.
     """
     agent_name = _require_agent_name(body.agent_name)
 
@@ -1235,6 +1330,11 @@ async def mcp_activate_skill(
                 f"Invalid scope '{body.scope}'. Must be 'personal', 'group', "
                 "or 'sub-agent' (bakes skill into sub-agent config for all users)."
             ),
+        )
+    if body.mode == "following" and body.scope != "sub-agent":
+        raise HTTPException(
+            status_code=400,
+            detail="mode='following' is only available with scope='sub-agent'; personal and group activations are pinned.",
         )
 
     if not body.registry_id and not body.skill_name:
@@ -1283,6 +1383,8 @@ async def mcp_activate_skill(
         entry = await skill_registry_service.get_by_id(db, body.registry_id)
         if not entry:
             raise HTTPException(status_code=404, detail=f"Registry entry '{body.registry_id}' not found")
+        # get_by_slug filters to public; the by-id path has to gate for itself.
+        await _check_registry_read_access(request, db, entry, user)
     else:
         entry = await skill_registry_service.get_by_slug(db, body.skill_name)
         if not entry:
@@ -1302,15 +1404,28 @@ async def mcp_activate_skill(
             ),
         )
 
-    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id:
+    # A public sub-agent skill is activatable on other agents (ADR 0006): that is what
+    # publishing it means. The activation is a read-only REFERENCE to the publisher's
+    # registry row, never a copy (ADR-0011) — _persist_and_strip_skills refuses to upsert
+    # a row belonging to another sub-agent, so the borrowing agent can never write back
+    # to it, resolve_imported_skills pins it by hash, and the publisher cannot withdraw
+    # the row while this agent refers to it.
+    if entry.scope == "sub-agent" and sub_agent_id != entry.sub_agent_id and entry.visibility != "public":
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Skill '{entry.slug}' is scoped to a specific sub-agent and cannot be activated on a different agent. "
-                "Use 'console_create_skill' to create a new copy that can be activated on your agent, or use "
+                f"Skill '{entry.slug}' is private to a specific sub-agent and cannot be activated on a different "
+                "agent. Ask its owner to publish it, use 'console_create_skill' to create a new copy, or use "
                 "'console_update_skill' to change the scope to 'standalone' to make it agent-agnostic."
             ),
         )
+
+    switched = False
+    if body.scope == "sub-agent":
+        existing = await activation_service.find_activation_by_registry_id(
+            db, registry_id=entry.id, sub_agent_id=sub_agent_id, scope="sub-agent"
+        )
+        switched = existing is not None and existing.mode != body.mode
 
     try:
         await activation_service.activate(
@@ -1323,16 +1438,33 @@ async def mcp_activate_skill(
             group_id=int(resolved_group_id) if resolved_group_id and body.scope == "group" else None,
             activated_by=user.id,
             actor=user,
+            mode=body.mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    if switched:
+        message = (
+            f"Skill '{entry.slug}' was already active on agent '{agent_name}'; its mode is now '{body.mode}'"
+            + (" and the agent has been caught up to the publisher's current version." if body.mode == "following" else ".")
+        )
+    elif body.scope == "sub-agent":
+        how = (
+            "following: every publisher change becomes a new approved version of this agent"
+            if body.mode == "following"
+            else "pinned: it keeps this content until someone updates it"
+        )
+        message = f"Skill '{entry.slug}' activated on agent '{agent_name}' (sub-agent scope, {how})."
+    else:
+        message = f"Skill '{entry.slug}' activated on agent '{agent_name}' ({body.scope} scope)."
 
     return McpActivateSkillResponse(
         skill_name=entry.slug,
         agent_name=agent_name,
         scope=body.scope,
         registry_id=entry.id,
-        message=f"Skill '{entry.slug}' activated on agent '{agent_name}' ({body.scope} scope).",
+        mode=body.mode if body.scope == "sub-agent" else "pinned",
+        message=message,
     )
 
 
@@ -1364,6 +1496,9 @@ async def activate_skill(
     entry = await skill_registry_service.get_by_id(db, skill_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found in registry")
+
+    # Activation copies the body into the caller's docstore — gate it like a read.
+    await _check_registry_read_access(request, db, entry, user)
 
     playbook_service = get_playbook_service(request)
 
@@ -1437,6 +1572,12 @@ async def update_visibility(
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
 
+    # Publishing is the one write that changes who can read the body, so it takes the
+    # same write gate as editing it. Without this any authenticated user could flip
+    # another team's private sub-agent skill to public and then read it.
+    #
+    await _require_registry_write(request, db, entry, user)
+
     try:
         await skill_registry_service.update_visibility(
             db=db,
@@ -1444,6 +1585,8 @@ async def update_visibility(
             skill_id=skill_id,
             visibility=body.visibility,
         )
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -1953,15 +2096,17 @@ async def mcp_update_skill(
 
     registry_files.insert(0, SkillFile(path="SKILL.md", content=skill_content))
 
-    # Update registry
+    # Update registry (bumps following referrers in the same transaction, ADR-0011)
     try:
-        updated_entry = await registry_service.update_skill(
+        await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
             files=registry_files,
             description=body.description,
         )
+    except SkillReferencedError as e:
+        raise _referenced_conflict(e)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
