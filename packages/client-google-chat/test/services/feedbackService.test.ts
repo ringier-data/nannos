@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { ResponseMappingCache, FeedbackService, ResponseMapping } from '../../src/services/feedbackService.js';
-import { UserAuthService } from '../../src/services/userAuthService.js';
+import type { IUserAuthService } from '../../src/services/userAuthService.js';
 import { Config } from '../../src/config/config.js';
 
 // ---------------------------------------------------------------------------
@@ -10,7 +10,7 @@ import { Config } from '../../src/config/config.js';
 function mockUserAuthService(token: string | null = 'mock-token') {
   return {
     getTokenForAudience: jest.fn<(u: string, t: string, a: string) => Promise<string | null>>().mockResolvedValue(token),
-  } as unknown as UserAuthService;
+  } as unknown as IUserAuthService;
 }
 
 function minimalConfig(url = 'https://console.example.com'): Config {
@@ -86,7 +86,7 @@ describe('FeedbackService', () => {
 
 describe('FeedbackService.submitFeedback', () => {
   let fetchSpy: jest.Spied<typeof global.fetch>;
-  let authService: UserAuthService;
+  let authService: IUserAuthService;
   let svc: FeedbackService;
 
   beforeEach(() => {

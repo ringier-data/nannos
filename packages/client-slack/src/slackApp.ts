@@ -4,7 +4,8 @@ import { Config } from './config/config.js';
 import { Logger, SlackBoltLogger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
 import { OIDCClient } from './services/oidcClient.js';
-import { UserAuthService } from './services/userAuthService.js';
+import type { IUserAuthService } from './services/userAuthService.js';
+import { createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { FeedbackService } from './services/feedbackService.js';
@@ -20,7 +21,7 @@ import { createInstallationSecretService } from './services/installationSecretSe
 import { parseA2APushEvent } from './utils/a2aPushPayload.js';
 import { ParamsIncomingMessage } from '@slack/bolt/dist/receivers/ParamsIncomingMessage.js';
 import { ServerResponse } from 'node:http';
-let userAuthService: UserAuthService;
+let userAuthService: IUserAuthService;
 let a2aClientService: A2AClientService;
 let fileStorageService: FileStorageService;
 let feedbackService: FeedbackService | undefined;
@@ -167,7 +168,15 @@ export async function startSlackApp(config: Config) {
             const result = await handleOAuthCallback(queryParams, userAuthService, baseUrl, storage.oauthState);
 
             res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end(generateCallbackHTML(result.success, result.message));
+            res.end(
+              generateCallbackHTML(
+                result.success,
+                result.message,
+                result.teamId
+                  ? { url: `slack://open?team=${encodeURIComponent(result.teamId)}`, label: 'Back to Slack' }
+                  : undefined
+              )
+            );
 
             if (result.success && result.userId && result.teamId) {
               const pendingRequest = await storage.pendingRequest.consume(result.teamId, result.userId);
@@ -369,8 +378,9 @@ export async function startSlackApp(config: Config) {
     // OIDC client
     const oidcClient = new OIDCClient(config);
 
-    // User auth service (assign to module-level variable for OAuth callback)
-    userAuthService = new UserAuthService(storage.userAuth, oidcClient, config, storage.oauthState);
+    // User auth service (assign to module-level variable for OAuth callback).
+    // USER_AUTH_MODE picks the client's own login or console-backend's token broker.
+    userAuthService = createUserAuthService(config, storage, oidcClient);
 
     // A2A client service (assign to module-level variable for pending request processing)
     a2aClientService = new A2AClientService(config.a2aServer.url, config.a2aServer.timeout);
@@ -441,6 +451,7 @@ export async function startSlackApp(config: Config) {
     }
     logger.info(`A2A Server: ${config.a2aServer.url}`);
     logger.info(`OIDC Issuer: ${config.oidc.issuerUrl}`);
+    logger.info(`User sign-in: ${config.userAuthMode === 'broker' ? 'console-backend token broker' : 'local'}`);
 
     // Self-register each Slack workspace as a delivery channel with console-backend.
     // Failures are isolated and never block startup.

@@ -1,6 +1,7 @@
 """Authentication controller for OIDC flow using Authlib."""
 
 import logging
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 
 from authlib.integrations.starlette_client import OAuth, OAuthError, StarletteOAuth2App
@@ -10,11 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import URL
 
 from ..config import config
+from ..models.user import User
 from ..services.keycloak_admin_service import KeycloakAdminService, KeycloakSyncError
 from ..services.scheduler_token_service import SchedulerTokenService
 from ..services.session_service import SessionService
 from ..services.user_service import UserService
 from ..utils.cookie_signer import sign_cookie
+
+if TYPE_CHECKING:
+    from ..services.scheduler_service import SchedulerService
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,13 @@ def register_oauth_provider() -> None:
     """Register OIDC as OAuth provider with Authlib.
 
     This should be called once during application startup.
+
+    Two registrations of the same Keycloak client: ``oidc`` for the console's own login
+    and ``broker`` for logins run on behalf of broker clients. Authlib keeps a flow's
+    state and PKCE verifier in the session under ``_state_<name>_<state>`` and, when a new
+    flow starts, drops every key with that prefix. One shared name would let a console
+    login in the same browser wipe an in-flight broker login (and the reverse). The name
+    must not start with ``oidc``, or its keys would still fall under ``_state_oidc_``.
     """
     oidc_config = config.oidc
 
@@ -34,17 +46,117 @@ def register_oauth_provider() -> None:
     issuer = oidc_config.issuer
     server_metadata_url = f"{issuer}/.well-known/openid-configuration"
 
-    oauth.register(
-        name="oidc",
-        client_id=oidc_config.client_id,
-        client_secret=oidc_config.client_secret.get_secret_value(),
-        server_metadata_url=server_metadata_url,
-        client_kwargs={
-            "scope": oidc_config.scope,
-            "code_challenge_method": "S256",  # Enable PKCE
-        },
-    )
-    logger.info("Registered OIDC OAuth provider with Authlib")
+    for name in ("oidc", "broker"):
+        oauth.register(
+            name=name,
+            client_id=oidc_config.client_id,
+            client_secret=oidc_config.client_secret.get_secret_value(),
+            server_metadata_url=server_metadata_url,
+            client_kwargs={
+                "scope": oidc_config.scope,
+                "code_challenge_method": "S256",  # Enable PKCE
+            },
+        )
+    logger.info("Registered OIDC OAuth providers with Authlib (console login and token broker)")
+
+
+async def onboard_user_from_userinfo(
+    db: AsyncSession,
+    userinfo: dict,
+    refresh_token: str | None,
+    *,
+    user_service: UserService,
+    scheduler_token_service: SchedulerTokenService | None = None,
+    keycloak_admin_service: KeycloakAdminService | None = None,
+    scheduler_service: "SchedulerService | None" = None,
+) -> User:
+    """Everything a sign-in does to the user, shared by the console login and the broker.
+
+    Upserts the user from the ID-token claims, seeds Keycloak's phoneNumberOverride, and
+    vaults the offline token the scheduler (and the broker) mint from. Once the token is
+    vaulted, subscriptions that were held back until this user's first sign-in are
+    switched on. Vaulting and releasing are best effort: a sign-in must not fail on them.
+
+    Raises HTTPException 400 when the claims lack a subject or an email.
+    """
+    # Extract user data
+    sub = userinfo.get("sub")
+    email = userinfo.get("email", "")
+    given_name = userinfo.get("given_name", "")
+    family_name = userinfo.get("family_name", "")
+    company_name = userinfo.get("company_name")
+    # NOTE: we have access to phone_number_idp (phoneNumber) and phone_number (phoneNumberOverride) in
+    # Keycloak (IdP broker).The former is the phone number from Okta (IdP), while the latter is an optional override
+    # field that can be used to correct or update a user's phone number without changing the IdP data (changing just
+    # the IdP broker). In the users table we store the phone_number_idp, and we sync it on every login
+    # to ensure it's up to date, while in the user_settings table we store the phone_number override.
+    phone_number_idp = userinfo.get("phone_number_idp")
+    phone_number_override = userinfo.get("phone_number")
+
+    if not sub or not email:
+        logger.error("Missing required user info")
+        raise HTTPException(status_code=400, detail="Missing user information")
+
+    # Upsert user with database session
+    try:
+        user = await user_service.upsert_user(
+            db=db,
+            sub=sub,
+            email=email,
+            first_name=given_name,
+            last_name=family_name,
+            phone_number_idp=phone_number_idp,
+            company_name=company_name,
+        )
+    except Exception as e:
+        logger.error(f"Failed to upsert user: {e}")
+        raise
+
+    # Seed Keycloak phoneNumberOverride with IdP phone when it's empty.
+    # The direct attribute mapper for phoneNumberOverride requires the attribute to be populated;
+    # without the script mapper we can no longer fall back to phoneNumber dynamically.
+    if not phone_number_override and phone_number_idp and keycloak_admin_service:
+        try:
+            await keycloak_admin_service.sync_phone_number_override(sub, phone_number_idp)
+            logger.info("Seeded Keycloak phoneNumberOverride with IdP phone for user %s", user.id)
+        except KeycloakSyncError as exc:
+            logger.warning(
+                "Failed to seed Keycloak phoneNumberOverride for user %s: %s",
+                user.id,
+                exc,
+            )
+
+    # Auto-store the refresh token as scheduler offline token.
+    # The scope already includes offline_access so this token survives user logout.
+    # Failures are non-fatal — scheduler consent is a best-effort convenience.
+    if refresh_token and scheduler_token_service:
+        try:
+            await scheduler_token_service.store_offline_token(
+                db=db,
+                user_id=user.id,
+                refresh_token=refresh_token,
+            )
+            logger.info("Auto-stored scheduler offline token for user %s", user.id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to auto-store scheduler offline token for user %s: %s",
+                user.id,
+                exc,
+            )
+        else:
+            if scheduler_service is not None:
+                try:
+                    released = await scheduler_service.release_sign_in_holds(db, user)
+                    if released:
+                        logger.info("Switched on %d held subscription(s) for user %s", released, user.id)
+                except Exception as exc:  # noqa: BLE001 — the sign-in itself has succeeded
+                    # store_offline_token committed the user and the token, so a rollback
+                    # here discards only the release's own unfinished work and keeps the
+                    # session usable for the rest of the callback.
+                    await db.rollback()
+                    logger.warning("Failed to release held subscriptions for user %s: %s", user.id, exc)
+
+    return user
 
 
 class AuthController:
@@ -56,12 +168,14 @@ class AuthController:
         user_service: UserService,
         scheduler_token_service: SchedulerTokenService | None = None,
         keycloak_admin_service: KeycloakAdminService | None = None,
+        scheduler_service: "SchedulerService | None" = None,
     ) -> None:
         """Initialize the auth controller."""
         self.session_service = session_service
         self.user_service = user_service
         self.scheduler_token_service = scheduler_token_service
         self.keycloak_admin_service = keycloak_admin_service
+        self.scheduler_service = scheduler_service
         self.oidc_config = config.oidc
         self.base_domain = config.base_domain
         self.is_dev = config.is_local() or config.is_dev()
@@ -86,6 +200,7 @@ class AuthController:
                 "/api/v1/auth/login-callback",
                 "/api/v1/auth/logout",
                 "/api/v1/auth/logout-callback",
+                "/api/v1/auth/broker/",
             ]
             for auth_path in auth_paths:
                 if auth_path in url:
@@ -199,75 +314,21 @@ class AuthController:
             logger.error("No userinfo in token response")
             raise HTTPException(status_code=400, detail="Missing user information")
 
-        # Extract user data
-        sub = userinfo.get("sub")
-        email = userinfo.get("email", "")
-        given_name = userinfo.get("given_name", "")
-        family_name = userinfo.get("family_name", "")
-        company_name = userinfo.get("company_name")
-        # NOTE: we have access to phone_number_idp (phoneNumber) and phone_number (phoneNumberOverride) in
-        # Keycloak (IdP broker).The former is the phone number from Okta (IdP), while the latter is an optional override
-        # field that can be used to correct or update a user's phone number without changing the IdP data (changing just
-        # the IdP broker). In the users table we store the phone_number_idp, and we sync it on every login
-        # to ensure it's up to date, while in the user_settings table we store the phone_number override.
-        phone_number_idp = userinfo.get("phone_number_idp")
-        phone_number_override = userinfo.get("phone_number")
-
-        if not sub or not email:
-            logger.error("Missing required user info")
-            raise HTTPException(status_code=400, detail="Missing user information")
-
-        # Upsert user with database session
-        try:
-            user = await self.user_service.upsert_user(
-                db=db,
-                sub=sub,
-                email=email,
-                first_name=given_name,
-                last_name=family_name,
-                phone_number_idp=phone_number_idp,
-                company_name=company_name,
-            )
-        except Exception as e:
-            logger.error(f"Failed to upsert user: {e}")
-            raise
-
-        # Seed Keycloak phoneNumberOverride with IdP phone when it's empty.
-        # The direct attribute mapper for phoneNumberOverride requires the attribute to be populated;
-        # without the script mapper we can no longer fall back to phoneNumber dynamically.
-        if not phone_number_override and phone_number_idp and self.keycloak_admin_service:
-            try:
-                await self.keycloak_admin_service.sync_phone_number_override(sub, phone_number_idp)
-                logger.info("Seeded Keycloak phoneNumberOverride with IdP phone for user %s", user.id)
-            except KeycloakSyncError as exc:
-                logger.warning(
-                    "Failed to seed Keycloak phoneNumberOverride for user %s: %s",
-                    user.id,
-                    exc,
-                )
-
-        logger.info(f"User {user.id} logged in successfully")
         # Get tokens for session
         access_token = token.get("access_token", "")
         refresh_token = token.get("refresh_token", "")
 
-        # Auto-store the refresh token as scheduler offline token.
-        # The scope already includes offline_access so this token survives user logout.
-        # Failures are non-fatal — scheduler consent is a best-effort convenience.
-        if refresh_token and self.scheduler_token_service:
-            try:
-                await self.scheduler_token_service.store_offline_token(
-                    db=db,
-                    user_id=user.id,
-                    refresh_token=refresh_token,
-                )
-                logger.info("Auto-stored scheduler offline token for user %s", user.id)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to auto-store scheduler offline token for user %s: %s",
-                    user.id,
-                    exc,
-                )
+        user = await onboard_user_from_userinfo(
+            db,
+            userinfo,
+            refresh_token,
+            user_service=self.user_service,
+            scheduler_token_service=self.scheduler_token_service,
+            keycloak_admin_service=self.keycloak_admin_service,
+            scheduler_service=self.scheduler_service,
+        )
+        logger.info(f"User {user.id} logged in successfully")
+
         id_token = token.get("id_token", "")
         logger.debug(f"Expires in: {token.get('expires_in')}")
         expires_in = token.get("expires_in", 3600)  # Default to 1 hour if not provided

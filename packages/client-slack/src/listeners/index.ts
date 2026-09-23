@@ -1,5 +1,5 @@
 import { App } from '@slack/bolt';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import { A2AClientService } from '../services/a2aClientService.js';
 import { FileStorageService } from '../services/fileStorageService.js';
 import { FeedbackService } from '../services/feedbackService.js';
@@ -34,7 +34,7 @@ const logger = Logger.getLogger('registerListeners');
  */
 export async function registerListeners(
   app: App,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   a2aClientService: A2AClientService,
   contextStore: IContextStore,
   pendingRequestStore: IPendingRequestStore,

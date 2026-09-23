@@ -3,7 +3,7 @@ import { getConfigFromEnv } from './config/config.js';
 import { Logger } from './utils/logger.js';
 import { Storage } from './storage/storage.js';
 import { OIDCClient } from './services/oidcClient.js';
-import { UserAuthService } from './services/userAuthService.js';
+import { createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { EmailOutboundService } from './services/emailOutboundService.js';
@@ -24,7 +24,8 @@ async function main() {
 
   // Initialize services
   const oidcClient = new OIDCClient(config);
-  const userAuthService = new UserAuthService(storage, oidcClient, config);
+  // USER_AUTH_MODE picks the client's own login or console-backend's token broker.
+  const userAuthService = createUserAuthService(config, storage, oidcClient);
   const a2aClientService = new A2AClientService(config.a2aServer.url, config.a2aServer.timeout);
   const fileStorageService = new FileStorageService(config);
   const emailOutboundService = new EmailOutboundService(config);
@@ -130,6 +131,7 @@ async function main() {
   // Start server
   const server = app.listen(config.appPort, () => {
     logger.info(`Email A2A client listening on port ${config.appPort}`);
+    logger.info(`User sign-in: ${config.userAuthMode === 'broker' ? 'console-backend token broker' : 'local'}`);
   });
 
   // Ensure SNS subscription is active (idempotent)

@@ -1,7 +1,7 @@
 import { Logger } from './logger.js';
 import type { IInFlightTaskStore, InFlightTask, IContextStore } from '../storage/types.js';
 import { A2AClientService } from '../services/a2aClientService.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import { handleTask } from './taskResponseHandler.js';
 
@@ -14,7 +14,7 @@ async function recoverTask(
   task: InFlightTask,
   chatService: GoogleChatService,
   a2aClientService: A2AClientService,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore
 ): Promise<boolean> {
@@ -86,7 +86,7 @@ async function recoverTask(
 export async function recoverOrphanedTasks(
   inFlightTaskStore: IInFlightTaskStore,
   a2aClientService: A2AClientService,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   chatService: GoogleChatService,
   contextStore: IContextStore,
   minAgeMs: number = 2 * 60 * 1000 // Default: 10 minutes

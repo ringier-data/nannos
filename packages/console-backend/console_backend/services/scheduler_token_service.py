@@ -113,6 +113,16 @@ class SchedulerTokenService:
         blob = await self._load_encrypted_blob(db, user_id)
         return blob is not None
 
+    async def users_with_consent(self, db: AsyncSession, user_ids: list[str]) -> set[str]:
+        """The subset of *user_ids* that have an offline token stored. One query for a list."""
+        if not user_ids:
+            return set()
+        result = await db.execute(
+            text("SELECT user_id FROM user_offline_tokens WHERE user_id = ANY(:ids)"),
+            {"ids": list(user_ids)},
+        )
+        return {row[0] for row in result.all()}
+
     async def _load_encrypted_blob(self, db: AsyncSession, user_id: str) -> bytes | None:
         result = await db.execute(
             text("SELECT encrypted_token FROM user_offline_tokens WHERE user_id = :user_id"),
@@ -179,8 +189,18 @@ class SchedulerTokenService:
         Lets a service act on behalf of the user against a specific audience (e.g.
         the MCP gateway) using only the user_id — no live user session required.
         """
+        return (await self.get_exchanged_token_response(db, user_id, audience))["access_token"]
+
+    async def get_exchanged_token_response(self, db: AsyncSession, user_id: str, audience: str) -> dict:
+        """Like ``get_exchanged_token``, but the whole Keycloak token response.
+
+        The token broker needs ``expires_in`` so its clients can cache what they are given.
+
+        Raises ValueError if no token is stored for the user.
+        Raises httpx.HTTPStatusError on Keycloak errors.
+        """
         access_token = await self._refresh_access_token(db, user_id)
-        return await self.exchange_token(access_token, audience=audience)
+        return await self.exchange_token_response(access_token, audience=audience)
 
     async def get_access_token(self, db: AsyncSession, user_id: str) -> str:
         """Return a fresh access token exchanged for the agent-runner audience.
@@ -195,6 +215,10 @@ class SchedulerTokenService:
 
         Used so agent-runner can call MCP tools on behalf of the scheduled job owner.
         """
+        return (await self.exchange_token_response(access_token, audience))["access_token"]
+
+    async def exchange_token_response(self, access_token: str, audience: str) -> dict:
+        """RFC 8693 token exchange, returning the whole Keycloak token response."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 self._token_endpoint,
@@ -209,6 +233,4 @@ class SchedulerTokenService:
                 },
             )
             resp.raise_for_status()
-            data = resp.json()
-
-        return data["access_token"]
+            return resp.json()

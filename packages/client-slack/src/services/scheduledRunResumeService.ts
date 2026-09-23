@@ -24,7 +24,7 @@
 
 import { Logger } from '../utils/logger.js';
 import type { Config } from '../config/config.js';
-import type { UserAuthService } from './userAuthService.js';
+import type { IUserAuthService } from './userAuthService.js';
 
 const logger = Logger.getLogger('scheduledRunResumeService');
 
@@ -63,11 +63,11 @@ export function isResumeTarget(replyTo: ReplyTo | undefined): replyTo is ReplyTo
 }
 
 export class ScheduledRunResumeService {
-  private readonly userAuthService: UserAuthService;
+  private readonly userAuthService: IUserAuthService;
   private readonly consoleBackendUrl: string;
   private readonly audience: string;
 
-  constructor(userAuthService: UserAuthService, config: Config) {
+  constructor(userAuthService: IUserAuthService, config: Config) {
     if (!config.consoleBackend) {
       throw new Error('CONSOLE_BACKEND_URL is required for ScheduledRunResumeService');
     }

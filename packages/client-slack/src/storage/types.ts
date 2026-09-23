@@ -1,13 +1,22 @@
+/**
+ * How a user_auth row was signed in.
+ *   'local'  — this client ran the Keycloak login and holds the user's tokens.
+ *   'broker' — console-backend's token broker ran it; the row holds only the identity
+ *              (oidcSub), and tokens are minted by the broker on demand.
+ */
+export type UserAuthMode = 'local' | 'broker';
+
 export interface UserAuthToken {
   userId: string; // Slack user ID
   teamId: string; // Slack team/workspace ID
-  accessToken: string; // OIDC access token
-  refreshToken?: string; // OIDC refresh token
-  expiresAt: number; // Unix timestamp when token expires
-  tokenType: string; // Usually "Bearer"
+  accessToken?: string; // OIDC access token (local rows only)
+  refreshToken?: string; // OIDC refresh token (local rows only)
+  expiresAt?: number; // Unix timestamp when the access token expires (local rows only)
+  tokenType?: string; // Usually "Bearer" (local rows only)
   scope?: string; // Granted scopes
   idToken?: string; // OIDC ID token
   oidcSub?: string; // OIDC subject identifier
+  authMode?: UserAuthMode; // Read back as 'local' when unset
   createdAt: number; // Unix timestamp when token was created
   updatedAt: number; // Unix timestamp when token was last updated
 }

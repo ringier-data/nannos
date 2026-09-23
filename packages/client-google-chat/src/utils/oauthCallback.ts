@@ -1,5 +1,5 @@
 import { Logger } from '../utils/logger.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import type { IOAuthStateStore } from '../storage/types.js';
 
 function escapeHtml(value: string): string {
@@ -11,12 +11,18 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/** Where the success page sends the user back to, e.g. Google Chat. */
+export interface CallbackReturnLink {
+  url: string;
+  label: string;
+}
+
 /**
  * Handle OAuth callback
  */
 export async function handleOAuthCallback(
   queryParams: URLSearchParams,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   baseUrl: string,
   oauthStateStore: IOAuthStateStore
 ): Promise<{ success: boolean; message: string; userId?: string; projectId?: string }> {
@@ -84,10 +90,21 @@ export async function handleOAuthCallback(
 
 /**
  * Generate HTML response for OAuth callback
+ *
+ * With *returnLink*, the success page links back to the chat app and opens it after a
+ * moment: a tab the chat app opened cannot close itself, so the link is what returns
+ * the user.
  */
-export function generateCallbackHTML(success: boolean, message: string): string {
+export function generateCallbackHTML(success: boolean, message: string, returnLink?: CallbackReturnLink): string {
   const safeMessage = escapeHtml(message);
   if (success) {
+    const back = returnLink
+      ? `
+  <p><a href="${escapeHtml(returnLink.url)}">${escapeHtml(returnLink.label)}</a></p>
+  <script>
+    setTimeout(() => { window.location.href = ${JSON.stringify(returnLink.url).replace(/</g, '\\u003c')}; }, 1500);
+  </script>`
+      : '';
     return `
 <!DOCTYPE html>
 <html>
@@ -96,7 +113,7 @@ export function generateCallbackHTML(success: boolean, message: string): string 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
-<body>
+<body>${back}
   <pre>
 ✅ Authorization Successful!
 

@@ -1,5 +1,5 @@
 import { App } from '@slack/bolt';
-import { UserAuthService } from '../../services/userAuthService.js';
+import type { IUserAuthService } from '../../services/userAuthService.js';
 import { A2AClientService } from '../../services/a2aClientService.js';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, IOAuthStateStore } from '../../storage/types.js';
@@ -18,7 +18,7 @@ import { FeedbackService } from '../../services/feedbackService.js';
  */
 export function registerAppMentionListener(
   app: App,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   a2aClientService: A2AClientService,
   contextStore: IContextStore,
   pendingRequestStore: IPendingRequestStore,

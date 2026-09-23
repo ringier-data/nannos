@@ -1,13 +1,28 @@
 import { Logger } from '../utils/logger.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import type { IOAuthStateStore } from '../storage/types.js';
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Where the success page sends the user back to, e.g. `slack://open?team=T123`. */
+export interface CallbackReturnLink {
+  url: string;
+  label: string;
+}
 
 /**
  * Handle OAuth callback
  */
 export async function handleOAuthCallback(
   queryParams: URLSearchParams,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   baseUrl: string,
   oauthStateStore: IOAuthStateStore
 ): Promise<{ success: boolean; message: string; userId?: string; teamId?: string }> {
@@ -75,9 +90,21 @@ export async function handleOAuthCallback(
 
 /**
  * Generate HTML response for OAuth callback
+ *
+ * With *returnLink*, the success page links back to the chat app and opens it after a
+ * moment: a tab the chat app opened cannot close itself, so the link is what returns
+ * the user.
  */
-export function generateCallbackHTML(success: boolean, message: string): string {
+export function generateCallbackHTML(success: boolean, message: string, returnLink?: CallbackReturnLink): string {
+  const safeMessage = escapeHtml(message);
   if (success) {
+    const back = returnLink
+      ? `
+  <p><a href="${escapeHtml(returnLink.url)}">${escapeHtml(returnLink.label)}</a></p>
+  <script>
+    setTimeout(() => { window.location.href = ${JSON.stringify(returnLink.url).replace(/</g, '\\u003c')}; }, 1500);
+  </script>`
+      : '';
     return `
 <!DOCTYPE html>
 <html>
@@ -86,11 +113,11 @@ export function generateCallbackHTML(success: boolean, message: string): string 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
-<body>
+<body>${back}
   <pre>
 ✅ Authorization Successful!
 
-${message}
+${safeMessage}
 
 You can close this window now. It will close automatically in 5 seconds.
 
@@ -136,33 +163,33 @@ Puoi chiudere questa finestra ora. Si chiuderà automaticamente tra 5 secondi.
   <pre>
 ❌ Authorization Failed
 
-${message}
+${safeMessage}
 
-Please try again by sending another email.
+Please try again by sending another message.
 
 ---
 
 ❌ Autorisierung fehlgeschlagen
 
-${message}
+${safeMessage}
 
-Bitte versuchen Sie es erneut, indem Sie eine neue E-Mail senden.
+Bitte versuchen Sie es erneut, indem Sie eine neue Nachricht senden.
 
 ---
 
 ❌ Échec de l'autorisation
 
-${message}
+${safeMessage}
 
-Veuillez réessayer en envoyant un autre e-mail.
+Veuillez réessayer en envoyant un autre message.
 
 ---
 
 ❌ Autorizzazione fallita
 
-${message}
+${safeMessage}
 
-Riprova inviando un'altra e-mail.
+Riprova inviando un altro messaggio.
   </pre>
 </body>
 </html>`;

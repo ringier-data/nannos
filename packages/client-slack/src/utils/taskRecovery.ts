@@ -2,7 +2,7 @@ import { WebClient } from '@slack/web-api';
 import { Logger } from './logger.js';
 import type { IInFlightTaskStore, InFlightTask, IContextStore, IBotInstallationStore } from '../storage/types.js';
 import { A2AClientService } from '../services/a2aClientService.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import { handleTask, postMessage } from './taskResponseHandler.js';
 
 const logger = Logger.getLogger('taskRecovery');
@@ -29,7 +29,7 @@ async function recoverTask(
   botInstallationStore: IBotInstallationStore,
   fallbackBotToken: string | undefined,
   a2aClientService: A2AClientService,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore
 ): Promise<boolean> {
@@ -160,7 +160,7 @@ async function recoverTask(
 export async function recoverOrphanedTasks(
   inFlightTaskStore: IInFlightTaskStore,
   a2aClientService: A2AClientService,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   botInstallationStore: IBotInstallationStore,
   contextStore: IContextStore,
   fallbackBotToken?: string,

@@ -8,6 +8,15 @@ export type StorageProviderType = 'postgres';
  *   'aws-ssm' — AWS SSM Parameter Store (opt-in; requires AWS credentials).
  */
 export type InstallationSecretProvider = 'db' | 'aws-ssm';
+/**
+ * Who runs the per-user sign-in.
+ *   'local'  — this client runs its own Keycloak login and holds the user's tokens.
+ *   'broker' — console-backend's token broker runs it, keeps the one offline token, and
+ *              mints tokens on demand. Rows signed in locally keep working until they
+ *              drain. Requires CONSOLE_BACKEND_URL.
+ */
+export type UserAuthMode = 'local' | 'broker';
+const USER_AUTH_MODES: readonly UserAuthMode[] = ['local', 'broker'];
 
 export interface Config {
   isLocal(): boolean;
@@ -47,6 +56,7 @@ export interface Config {
     url: string;
     audience: string;
   };
+  readonly userAuthMode: UserAuthMode;
   readonly installationSecret: {
     provider: InstallationSecretProvider;
     ssmPrefix: string; // Only used when provider is 'aws-ssm'.
@@ -87,6 +97,14 @@ export async function getConfigFromEnv(): Promise<Config> {
   // Validate A2A server configuration
   if (!process.env.A2A_SERVER_URL) {
     throw new Error('Please provide A2A_SERVER_URL');
+  }
+
+  const userAuthMode = (process.env.USER_AUTH_MODE || 'local') as UserAuthMode;
+  if (!USER_AUTH_MODES.includes(userAuthMode)) {
+    throw new Error(`Unknown USER_AUTH_MODE: ${userAuthMode} (expected one of ${USER_AUTH_MODES.join(', ')})`);
+  }
+  if (userAuthMode === 'broker' && !process.env.CONSOLE_BACKEND_URL) {
+    throw new Error('USER_AUTH_MODE=broker requires CONSOLE_BACKEND_URL');
   }
 
   const googleChatConfigs: Config['googleChatConfigs'] = [];
@@ -173,6 +191,7 @@ export async function getConfigFromEnv(): Promise<Config> {
           audience: process.env.OIDC_CONSOLE_BACKEND_AUDIENCE || 'agent-console',
         }
       : undefined,
+    userAuthMode,
     installationSecret: {
       provider: (process.env.INSTALLATION_SECRET_PROVIDER as InstallationSecretProvider) || 'db',
       ssmPrefix:

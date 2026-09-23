@@ -30,6 +30,7 @@ import { BudgetGuardPage } from './pages/admin/BudgetGuardPage';
 import { SystemStatusPage } from './pages/admin/SystemStatusPage';
 import { BugReportsPage } from './pages/admin/BugReportsPage';
 import { ScimTokensPage } from './pages/admin/ScimTokensPage';
+import { BrokerClientsPage } from './pages/admin/BrokerClientsPage';
 import { OutboundScimPage } from './pages/admin/OutboundScimPage';
 import { ToolRiskScoresPage } from './pages/admin/ToolRiskScoresPage';
 
@@ -188,6 +189,14 @@ function App() {
           element={
             <AdminRoute>
               <ScimTokensPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/broker-clients"
+          element={
+            <AdminRoute>
+              <BrokerClientsPage />
             </AdminRoute>
           }
         />

@@ -5,7 +5,7 @@ import { Task, TaskStatusUpdateEvent, TaskArtifactUpdateEvent, TextPart, DataPar
 import { Logger } from '../utils/logger.js';
 import { Config } from '../config/config.js';
 import { Storage } from '../storage/storage.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import { A2AClientService, A2ARequest, A2AArtifact, A2APart } from '../services/a2aClientService.js';
 import { FileStorageService } from '../services/fileStorageService.js';
 import { EmailOutboundService, REPLY_MARKER } from '../services/emailOutboundService.js';
@@ -100,7 +100,7 @@ export class EmailInboundService {
   private readonly snsClient: SNSClient;
   private readonly config: Config;
   private readonly storage: Storage;
-  private readonly userAuthService: UserAuthService;
+  private readonly userAuthService: IUserAuthService;
   private readonly a2aClientService: A2AClientService;
   private readonly fileStorageService: FileStorageService;
   private readonly emailOutboundService: EmailOutboundService;
@@ -108,7 +108,7 @@ export class EmailInboundService {
   constructor(
     config: Config,
     storage: Storage,
-    userAuthService: UserAuthService,
+    userAuthService: IUserAuthService,
     a2aClientService: A2AClientService,
     fileStorageService: FileStorageService,
     emailOutboundService: EmailOutboundService

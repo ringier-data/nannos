@@ -176,6 +176,23 @@ def token_is_service_account(payload: dict) -> bool:
     return username.startswith(_SERVICE_ACCOUNT_USERNAME_PREFIX)
 
 
+async def get_token_claims_from_request(request: Request) -> dict | None:
+    """The validated claims of the request's Bearer JWT, or None.
+
+    None when there is no Bearer token or it does not validate against the nannos issuer.
+    Does not raise — use ``require_auth_or_bearer_token`` to require a token.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.split(" ", 1)[1]
+    try:
+        validator = get_jwt_validator(issuer=config.oidc.issuer)
+        return await validator.validate(token)
+    except JWTValidationError:
+        return None
+
+
 async def get_client_id_from_request(request: Request) -> str | None:
     """Extract the Keycloak client_id from a client-credentials Bearer JWT.
 
@@ -186,16 +203,10 @@ async def get_client_id_from_request(request: Request) -> str | None:
     Returns None if no Bearer token is present or the token has no azp/client_id claim.
     Does not raise on missing token — use ``require_auth_or_bearer_token`` for that.
     """
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
+    payload = await get_token_claims_from_request(request)
+    if payload is None:
         return None
-    token = auth_header.split(" ", 1)[1]
-    try:
-        validator = get_jwt_validator(issuer=config.oidc.issuer)
-        payload = await validator.validate(token)
-        return payload.get("azp") or payload.get("client_id") or None
-    except JWTValidationError:
-        return None
+    return payload.get("azp") or payload.get("client_id") or None
 
 
 def require_active_user(request: Request) -> User:

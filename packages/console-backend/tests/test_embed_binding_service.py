@@ -690,3 +690,51 @@ async def test_delete_binding_is_audited_and_reports_whether_anything_was_bound(
     assert await service.delete_binding(unbound_db, make_user(), 20) is False
     assert not any("DELETE FROM sub_agent_embed_bindings" in s for s in executed_sql(unbound_db))
     audit.log_action.assert_not_awaited()
+
+
+# ------------------------------------------------ binding by the broker's aud
+
+
+class TestCandidateClientIds:
+    """A token is bound by its azp; a token the broker minted for a host (azp is
+    console-backend's own client, one audience) is bound by that audience instead."""
+
+    def test_an_ordinary_token_is_bound_by_its_azp_only(self):
+        claims = {"azp": "nannos-embedded", "aud": ["orchestrator", "cockpit-embed"]}
+        assert ebs.candidate_client_ids(claims) == ["nannos-embedded"]
+
+    def test_a_broker_minted_token_is_bound_by_its_one_audience(self):
+        broker = ebs.config.oidc.client_id
+        assert ebs.candidate_client_ids({"azp": broker, "aud": "cockpit-embed"}) == ["cockpit-embed"]
+        # Its own id and Keycloak's account audience are no host.
+        assert ebs.candidate_client_ids({"azp": broker, "aud": ["cockpit-embed", broker, "account"]}) == [
+            "cockpit-embed"
+        ]
+
+    def test_an_ordinary_login_token_of_the_broker_client_binds_to_nothing(self):
+        """It carries every audience the client maps, the host's among them."""
+        broker = ebs.config.oidc.client_id
+        claims = {"azp": broker, "aud": ["gatana", broker, "orchestrator", "agent-runner", "cockpit-embed"]}
+        assert ebs.candidate_client_ids(claims) == []
+
+    def test_no_azp_means_no_candidates(self):
+        assert ebs.candidate_client_ids({"aud": ["cockpit-embed"]}) == []
+        assert ebs.candidate_client_ids({}) == []
+        assert ebs.candidate_client_ids(None) == []
+
+
+@pytest.mark.asyncio
+async def test_bound_sub_agent_for_claims_looks_the_candidate_up():
+    svc = EmbedBindingService(
+        sub_agent_service=MagicMock(),
+        user_service=MagicMock(),
+        session_factory=MagicMock(),
+        client=MagicMock(),
+        repository=MagicMock(),
+    )
+    svc.sub_agent_id_for_azp = AsyncMock(side_effect=lambda azp, db=None: {"cockpit-embed": 7}.get(azp))
+    claims = {"azp": ebs.config.oidc.client_id, "aud": ["cockpit-embed", "account"]}
+
+    assert await svc.bound_sub_agent_for_claims(claims) == ("cockpit-embed", 7)
+    assert await svc.sub_agent_id_for_token_claims(claims) == 7
+    assert await svc.sub_agent_id_for_token_claims({"azp": "slack-client"}) is None

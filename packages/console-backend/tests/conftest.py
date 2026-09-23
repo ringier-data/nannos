@@ -528,11 +528,12 @@ def mock_oauth(mock_config, monkeypatch):
     mock_oidc_client.load_server_metadata = AsyncMock(return_value=mock_server_metadata)
     mock_oidc_client.server_metadata = mock_server_metadata
 
-    # Patch __getattr__ to return our mock when 'oidc' is accessed
+    # Patch __getattr__ to return our mock when 'oidc' (console login) or 'broker' (token
+    # broker login, same Keycloak client) is accessed
     original_getattr = console_backend.controllers.auth_controller.oauth.__class__.__getattr__
 
     def mock_getattr(self, key):
-        if key == "oidc":
+        if key in ("oidc", "broker"):
             return mock_oidc_client
         return original_getattr(self, key)
 

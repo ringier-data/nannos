@@ -1,7 +1,7 @@
 import { Logger } from './logger.js';
 import { Storage } from '../storage/storage.js';
 import { A2AClientService } from '../services/a2aClientService.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import { EmailOutboundService } from '../services/emailOutboundService.js';
 import { EmailInboundService } from '../services/emailInboundService.js';
 import { isFinalState, isInterruptedState, getStateMessage } from './a2aWebhookHandler.js';
@@ -22,7 +22,7 @@ async function recoverTask(
   task: { taskId: string; senderEmail: string; subject?: string; originalMessageId?: string; contextKey: string },
   storage: Storage,
   a2aClientService: A2AClientService,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   emailOutboundService: EmailOutboundService
 ): Promise<boolean> {
   const { taskId, senderEmail } = task;
@@ -134,7 +134,7 @@ async function recoverTask(
 export async function recoverOrphanedTasks(
   storage: Storage,
   a2aClientService: A2AClientService,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   emailOutboundService: EmailOutboundService,
   minAgeMs: number = 2 * 60 * 1000
 ): Promise<{ recovered: number; failed: number; inProgress: number }> {

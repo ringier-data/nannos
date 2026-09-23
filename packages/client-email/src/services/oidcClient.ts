@@ -2,6 +2,18 @@ import * as client from 'openid-client';
 import { Logger } from '../utils/logger.js';
 import { Config } from '../config/config.js';
 
+/** What a Keycloak token response maps to, for a local sign-in. */
+export interface LocalTokenSet {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+  tokenType: string;
+  scope?: string;
+  idToken?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /**
  * OIDC client for token exchange and refresh using openid-client
  */
@@ -44,7 +56,7 @@ export class OIDCClient {
     callbackUrl: string,
     codeVerifier: string,
     expectedState: string
-  ) {
+  ): Promise<LocalTokenSet> {
     try {
       const config = await this.getConfiguration();
 
@@ -59,7 +71,7 @@ export class OIDCClient {
       return this.mapTokenSet(tokens);
     } catch (error) {
       this.logger.error(error, `Failed to exchange code for tokens: ${error}`);
-      throw new Error(`OIDC token exchange failed: ${error}`);
+      throw new Error(`OIDC token exchange failed: ${error}`, { cause: error });
     }
   }
 
@@ -67,7 +79,7 @@ export class OIDCClient {
    * Refresh an access token using refresh token
    * Note: userId and teamId must be added by the caller
    */
-  async refreshAccessToken(refreshToken: string) {
+  async refreshAccessToken(refreshToken: string): Promise<LocalTokenSet> {
     try {
       const config = await this.getConfiguration();
 
@@ -76,7 +88,7 @@ export class OIDCClient {
       return this.mapTokenSet(tokens);
     } catch (error) {
       this.logger.error(error, `Failed to refresh access token: ${error}`);
-      throw new Error(`OIDC token refresh failed: ${error}`);
+      throw new Error(`OIDC token refresh failed: ${error}`, { cause: error });
     }
   }
 
@@ -140,14 +152,35 @@ export class OIDCClient {
       };
     } catch (error) {
       this.logger.error(error, `Failed to exchange token for audience ${targetAudience}: ${error}`);
-      throw new Error(`Token exchange failed (original token=${subjectToken}): ${error}`);
+      // Never put the subject token into the error: it ends up in logs.
+      throw new Error(`Token exchange failed for audience ${targetAudience}: ${error}`, { cause: error });
     }
+  }
+
+  /**
+   * Acquire a server-to-server access token via the OAuth2 client_credentials grant,
+   * with its expiry so a caller can cache it. Authenticates this client to the token
+   * broker.
+   */
+  async getServiceCredentials(audience: string): Promise<{ accessToken: string; expiresAt: number }> {
+    const config = await this.getConfiguration();
+    this.logger.info(`Requesting client_credentials token for audience=${audience}`);
+
+    const response = await client.clientCredentialsGrant(config, {
+      audience,
+      scope: 'openid',
+    });
+
+    return {
+      accessToken: response.access_token,
+      expiresAt: Date.now() + (response.expires_in ?? 300) * 1000,
+    };
   }
 
   /**
    * Map openid-client token set to UserAuthToken
    */
-  private mapTokenSet(tokens: client.TokenEndpointResponse) {
+  private mapTokenSet(tokens: client.TokenEndpointResponse): LocalTokenSet {
     const now = Date.now();
     const expiresIn = tokens.expires_in ?? 3600; // Default to 1 hour if not provided
     const expiresAt = now + expiresIn * 1000;

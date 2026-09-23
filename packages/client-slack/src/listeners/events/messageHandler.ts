@@ -7,7 +7,7 @@ import {
   getFileProcessingWarnings,
   hasProcessableFiles,
 } from '../../utils/fileUtils.js';
-import { UserAuthService } from '../../services/userAuthService.js';
+import type { IUserAuthService } from '../../services/userAuthService.js';
 import { A2AClientService, A2ASlackBasedRequest } from '../../services/a2aClientService.js';
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
@@ -53,7 +53,7 @@ export interface NormalizedMessage {
  * All shared dependencies the handler needs.
  */
 export interface HandlerDependencies {
-  userAuthService: UserAuthService;
+  userAuthService: IUserAuthService;
   a2aClientService: A2AClientService;
   contextStore: IContextStore;
   pendingRequestStore: IPendingRequestStore;
@@ -128,7 +128,7 @@ async function handleDebugCommand(
   _messageTs: string,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   botName: string
 ): Promise<void> {
   const logger = Logger.getLogger('handleDebugCommand');
@@ -203,7 +203,7 @@ async function handleDebugLogoutCommand(
   userId: string,
   teamId: string,
   threadTs: string,
-  userAuthService: UserAuthService
+  userAuthService: IUserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('handleDebugLogoutCommand');
   logger.info(`debug logout from user ${userId} in thread ${threadTs}`);
@@ -423,7 +423,7 @@ async function sendAuthorizationRequired(
   teamId: string,
   threadTs: string,
   messageTs: string,
-  userAuthService: UserAuthService
+  userAuthService: IUserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('sendAuthorizationRequired');
   logger.info(`Sending authorization required message to user ${userId} in channel ${channelId}, thread ${threadTs}`);

@@ -6,7 +6,7 @@ import { createStorageProvider, type StorageProvider } from './storage/index.js'
 import { OIDCClient } from './services/oidcClient.js';
 import { registerInstallations } from './services/installationRegistrar.js';
 import { createInstallationSecretService } from './services/installationSecretServiceFactory.js';
-import { UserAuthService } from './services/userAuthService.js';
+import { createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { GoogleChatService } from './services/googleChatService.js';
@@ -160,8 +160,10 @@ function setupServerTimeouts(server: Server, config: Config) {
     // (storage provider by default, AWS SSM when opted in).
     const installationSecretService = await createInstallationSecretService(config, storage);
 
-    // User auth service
-    const userAuthService = new UserAuthService(storage.userAuth, oidcClient, config, storage.oauthState);
+    // User auth service. USER_AUTH_MODE picks the client's own login or console-backend's
+    // token broker.
+    const userAuthService = createUserAuthService(config, storage, oidcClient);
+    logger.info(`User sign-in: ${config.userAuthMode === 'broker' ? 'console-backend token broker' : 'local'}`);
 
     // A2A client service
     const a2aClientService = new A2AClientService(config.a2aServer.url, config.a2aServer.timeout);
@@ -413,7 +415,15 @@ function setupServerTimeouts(server: Server, config: Config) {
         const result = await handleOAuthCallback(queryParams, userAuthService, baseUrl, storage.oauthState);
 
         // Return HTML response immediately
-        res.status(200).type('text/html').send(generateCallbackHTML(result.success, result.message));
+        res
+          .status(200)
+          .type('text/html')
+          .send(
+            generateCallbackHTML(result.success, result.message, {
+              url: 'https://chat.google.com',
+              label: 'Back to Google Chat',
+            })
+          );
 
         // Process pending request asynchronously
         if (result.success && result.userId && result.projectId) {

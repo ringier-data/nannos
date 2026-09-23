@@ -65,6 +65,8 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 The one deliberate exemption is cache bookkeeping that carries no business meaning: `users.entitlements_touched_at` (`services/entitlement_version.py`), bumped so the orchestrator's per-user entitlement version moves for gateway-held state. The admin action that triggers it is audited on its own.
 
+Sign-in state is the other: `sessions`, `user_offline_tokens`, and the token broker's `broker_login_requests` and `broker_client_users` (`repositories/broker_login_request_repository.py`). They are written directly because they record a sign-in, whose business effect (the user upsert) is audited where it happens. The broker's client registry (`broker_clients`) is admin data and goes through `BrokerClientRepository` like any other.
+
 #### How to Add New Data Operations
 
 1. **Extend or create a repository** in `console_backend/repositories/`:

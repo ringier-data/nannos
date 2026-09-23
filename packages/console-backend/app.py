@@ -66,6 +66,8 @@ from console_backend.routers.admin_system_status_router import router as admin_s
 from console_backend.routers.admin_user_router import router as admin_user_router
 from console_backend.routers.analytics_router import router as analytics_router
 from console_backend.routers.auth_router import router as auth_router
+from console_backend.routers.broker_client_router import router as broker_client_router
+from console_backend.routers.broker_router import router as broker_router
 from console_backend.routers.bug_report_mcp_tools import router as bug_report_mcp_router
 from console_backend.routers.bug_report_router import router as bug_report_router
 from console_backend.routers.catalog_router import router as catalog_router
@@ -95,6 +97,7 @@ from console_backend.routers.web_search_mcp_tools import router as web_search_mc
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
 from console_backend.services.conversation_summary import maybe_summarize_conversation
+from console_backend.services.embed_binding_service import candidate_client_ids
 from console_backend.services.messages_service import MessagesService, _parse_task_state
 from console_backend.services.socket_notification_manager import SocketNotificationManager
 from console_backend.utils.connection_pool import connection_pool
@@ -431,6 +434,8 @@ app.add_middleware(
 app.add_middleware(CustomSessionMiddleware)
 
 app.include_router(auth_router)
+app.include_router(broker_router)
+app.include_router(broker_client_router)
 app.include_router(conversation_router)
 app.include_router(message_router)
 app.include_router(file_router)
@@ -1679,27 +1684,31 @@ async def _resolve_socket_user_via_token(token: str) -> _SocketTokenAuth | None:
             # from get_db_session).
             await db.commit()
 
-        # Embed binding (ADR-0006): azp → sub-agent. Activates the user on the spot so the
-        # orchestrator's /activated list contains the agent on their very first turn.
+        # Embed binding (ADR-0006): azp → sub-agent, or aud → sub-agent for a token the
+        # token broker minted for a host (candidate_client_ids). Activates the user on the
+        # spot so the orchestrator's /activated list contains the agent on their very
+        # first turn.
         embedded_sub_agent_id: int | None = None
         embed_service = getattr(sio.app_instance.state, "embed_binding_service", None)  # type: ignore[attr-defined]
-        azp = claims.get("azp")
-        if embed_service is not None and isinstance(azp, str) and azp:
+        candidates = candidate_client_ids(claims)
+        if embed_service is not None and candidates:
             try:
-                embedded_sub_agent_id = await embed_service.bind_connection(db, user=user, azp=azp)
-                if embedded_sub_agent_id is not None:
-                    await db.commit()
+                match = await embed_service.bound_sub_agent_for_claims(claims, db)
+                if match is not None:
+                    embedded_sub_agent_id = await embed_service.bind_connection(db, user=user, azp=match[0])
+                    if embedded_sub_agent_id is not None:
+                        await db.commit()
                 else:
                     # Fails open by design: the user is authenticated whic is the gate.
                     # But an unbound host page runs the full
                     # orchestrator — make the misconfiguration (an azp
                     # typo, a binding not yet created) visible here.
                     logger.warning(
-                        f"Embedded socket connect: azp={azp!r} has no embed binding; "
+                        f"Embedded socket connect: none of {candidates!r} has an embed binding; "
                         "connecting unbound (full orchestrator, unscoped conversation list)"
                     )
             except Exception:  # noqa: BLE001 — a binding hiccup must not reject the login
-                logger.exception(f"Embed binding lookup failed for azp={azp!r}; connecting unbound")
+                logger.exception(f"Embed binding lookup failed for {candidates!r}; connecting unbound")
                 embedded_sub_agent_id = None
 
     # Cache expiry from the token's own exp so OrchestratorAuth's refresh window is
