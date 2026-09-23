@@ -244,7 +244,11 @@ class SubAgentService:
         status_filter: SubAgentStatus | None = None,
         include_owned: bool = True,
         activated_only: bool = False,
-    ) -> list[SubAgent]:
+        owned_only: bool = False,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SubAgent], int]:
         """Get sub-agents accessible to the user.
 
         Returns sub-agents that are:
@@ -258,6 +262,10 @@ class SubAgentService:
         Always joins with current_version to show the latest state.
         Includes is_activated field showing if user has activated the sub-agent.
         If activated_only=True, only returns activated sub-agents.
+
+        `limit=None` returns every accessible sub-agent — the orchestrator builds
+        a user's whole registry from this — and the console asks for a page.
+        Returns (sub_agents, total matching).
         """
         base_select = """
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
@@ -307,23 +315,39 @@ class SubAgentService:
             else ""
         )
 
+        params: dict[str, Any] = {"user_id": user_id}
+
+        # Search and ownership are SQL filters, not post-filters: a page has to be
+        # cut from the filtered set, and `total` has to count it.
+        search_filter = ""
+        if search:
+            search_filter = "AND (sa.name ILIKE :search OR cv.description ILIKE :search) "
+            params["search"] = f"%{search}%"
+
+        owned_filter = ""
+        if owned_only:
+            owned_filter = "AND sa.owner_user_id = :user_id "
+
         if is_admin and status_filter is None:
             # Admins see all sub-agents
-            query = text(f"""
+            query_str = f"""
                 {base_select}
                 WHERE sa.deleted_at IS NULL {activation_filter}
-                ORDER BY sa.updated_at DESC
-            """)
-            result = await db.execute(query, {"user_id": user_id})
+                {owned_filter}
+                {search_filter}
+            """
         elif is_admin and status_filter:
-            query = text(f"""
+            params["status"] = status_filter.value
+            query_str = f"""
                 {base_select}
                 WHERE cv.status = :status AND sa.deleted_at IS NULL {activation_filter}
-                ORDER BY sa.updated_at DESC
-            """)
-            result = await db.execute(query, {"status": status_filter.value, "user_id": user_id})
+                {owned_filter}
+                {search_filter}
+            """
         else:
             # Non-admins see owned + public + group-assigned sub-agents
+            params["include_owned"] = include_owned
+            params["embed_source"] = ActivationSource.EMBED.value
             query_str = f"""
                 SELECT DISTINCT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
                        sa.system_role,
@@ -347,8 +371,6 @@ class SubAgentService:
                        cv.foundry_scopes as cv_foundry_scopes,
                        cv.foundry_version as cv_foundry_version,
                        cv.pricing_config as cv_pricing_config,
-                       cv.enable_thinking as cv_enable_thinking,
-                       cv.thinking_level as cv_thinking_level,
                        cv.skills as cv_skills,
                        cv.sandbox_enabled as cv_sandbox_enabled,
                        cv.change_summary as cv_change_summary, cv.status as cv_status,
@@ -361,12 +383,12 @@ class SubAgentService:
                        usa.activated_by_groups as activated_by_groups
                 FROM sub_agents sa
                 JOIN users u ON sa.owner_user_id = u.id
-                LEFT JOIN sub_agent_config_versions cv 
+                LEFT JOIN sub_agent_config_versions cv
                     ON sa.id = cv.sub_agent_id AND sa.default_version = cv.version
                 LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
                 LEFT JOIN sub_agent_permissions sap ON sa.id = sap.sub_agent_id
                 LEFT JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
-                LEFT JOIN user_sub_agent_activations usa 
+                LEFT JOIN user_sub_agent_activations usa
                     ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
                 WHERE sa.deleted_at IS NULL AND (
                     (:include_owned AND sa.owner_user_id = :user_id)
@@ -389,39 +411,36 @@ class SubAgentService:
                           AND sjd.deleted_at IS NULL
                     ))
                 ) {activation_filter}
+                {owned_filter}
+                {search_filter}
             """
             if status_filter:
+                params["status"] = status_filter.value
                 query_str += "AND cv.status = :status "
-                query_str += "ORDER BY sa.updated_at DESC"
-                query = text(query_str)
-                result = await db.execute(
-                    query,
-                    {
-                        "user_id": user_id,
-                        "include_owned": include_owned,
-                        "status": status_filter.value,
-                        "embed_source": ActivationSource.EMBED.value,
-                    },
-                )
-            else:
-                query_str += "ORDER BY sa.updated_at DESC"
-                query = text(query_str)
-                result = await db.execute(
-                    query,
-                    {
-                        "user_id": user_id,
-                        "include_owned": include_owned,
-                        "embed_source": ActivationSource.EMBED.value,
-                    },
-                )
 
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        result = await db.execute(
+            text(f"{query_str} ORDER BY sa.updated_at DESC {pagination}"), params
+        )
         rows = result.mappings().all()
         sub_agents = [self._row_to_sub_agent_with_version(row) for row in rows]
 
         # Compute effective_permission for each sub-agent
         await self._populate_effective_permissions(db, sub_agents, user_id)
 
-        return sub_agents
+        if limit is None:
+            return sub_agents, len(sub_agents)
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count_result = await db.execute(
+            text(f"SELECT COUNT(*) FROM ({query_str}) AS matches"), count_params
+        )
+        return sub_agents, count_result.scalar() or 0
 
     async def get_accessible_sub_agents_for_voice_call(
         self,
@@ -512,9 +531,30 @@ class SubAgentService:
             updated_at=row["updated_at"],
         )
 
-    async def get_pending_approvals(self, db: AsyncSession) -> list[SubAgent]:
-        """Get all sub-agents with versions pending approval (admin only)."""
-        query = text("""
+    async def get_pending_approvals(
+        self,
+        db: AsyncSession,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SubAgent], int]:
+        """Get all sub-agents with versions pending approval (admin only).
+
+        Returns (sub_agents, total matching). `limit=None` returns the whole queue.
+        """
+        params: dict[str, Any] = {}
+        search_filter = ""
+        if search:
+            search_filter = "AND (sa.name ILIKE :search OR cv.description ILIKE :search)"
+            params["search"] = f"%{search}%"
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        query = text(f"""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
                    sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
@@ -548,11 +588,31 @@ class SubAgentService:
             JOIN sub_agent_config_versions cv 
                 ON sa.id = cv.sub_agent_id AND sa.current_version = cv.version
             WHERE cv.status = 'pending_approval' AND sa.deleted_at IS NULL
+            {search_filter}
             ORDER BY cv.created_at ASC
+            {pagination}
         """)
-        result = await db.execute(query)
+        result = await db.execute(query, params)
         rows = result.mappings().all()
-        return [self._row_to_sub_agent_with_version(row) for row in rows]
+        pending = [self._row_to_sub_agent_with_version(row) for row in rows]
+
+        if limit is None:
+            return pending, len(pending)
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count_result = await db.execute(
+            text(f"""
+                SELECT COUNT(*)
+                FROM sub_agents sa
+                JOIN users u ON sa.owner_user_id = u.id
+                JOIN sub_agent_config_versions cv
+                    ON sa.id = cv.sub_agent_id AND sa.current_version = cv.version
+                WHERE cv.status = 'pending_approval' AND sa.deleted_at IS NULL
+                {search_filter}
+            """),
+            count_params,
+        )
+        return pending, count_result.scalar() or 0
 
     async def get_sub_agent_by_id(
         self,

@@ -2251,3 +2251,94 @@ class TestConcurrentVersionCreation:
         ).scalar_one()
         stored_ids = {ref["registry_id"] for ref in skills}
         assert stored_ids == set(registry_ids)
+
+
+class TestSubAgentListPagingAndSearch:
+    """Opt-in paging and server-side search on the accessible-sub-agents list.
+
+    The migrated schema seeds public system agents (general-purpose, task-scheduler,
+    …), which are genuinely accessible to everyone. Assertions here are therefore
+    scoped with a search prefix or taken as a delta, never as absolute counts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """No limit returns everything — the orchestrator's registry depends on it."""
+        _, baseline = await sub_agent_service.get_accessible_sub_agents(pg_session, test_user_db.id)
+        for i in range(5):
+            await _create_sub_agent(pg_session, test_user_db, f"Paging-{i}", sub_agent_service)
+
+        agents, total = await sub_agent_service.get_accessible_sub_agents(pg_session, test_user_db.id)
+        assert len(agents) == baseline + 5
+        assert total == baseline + 5
+
+    @pytest.mark.asyncio
+    async def test_paging_caps_rows_but_not_total(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """A page is capped; total still counts every match of the same filter."""
+        for i in range(5):
+            await _create_sub_agent(pg_session, test_user_db, f"Paging-{i}", sub_agent_service)
+
+        page1, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Paging-", page=1, limit=2
+        )
+        assert len(page1) == 2
+        assert total == 5
+
+        page3, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Paging-", page=3, limit=2
+        )
+        assert len(page3) == 1
+        assert total == 5
+        assert {a.id for a in page1}.isdisjoint({a.id for a in page3})
+
+    @pytest.mark.asyncio
+    async def test_search_narrows_rows_and_total(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        await _create_sub_agent(pg_session, test_user_db, "Invoice-Reconciler", sub_agent_service)
+        await _create_sub_agent(pg_session, test_user_db, "Meeting-Notes", sub_agent_service)
+
+        found, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="invoice"
+        )
+        assert [a.name for a in found] == ["Invoice-Reconciler"]
+        assert total == 1
+
+        missing, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="no-such-agent"
+        )
+        assert missing == []
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_owned_only_is_applied_before_the_page(
+        self,
+        pg_session: AsyncSession,
+        sub_agent_service: SubAgentService,
+        test_user_db: User,
+        test_admin_user_db: User,
+    ):
+        """owned_only must filter in SQL, or a page gets silently short-changed.
+
+        With the old post-filter, asking for 2 rows returned the first 2 accessible
+        agents and *then* dropped the ones the user did not own — so a page could
+        come back short, or empty, while later pages still held owned agents. The
+        seeded public system agents make that failure mode reachable here.
+        """
+        for i in range(3):
+            await _create_sub_agent(pg_session, test_user_db, f"Owned-{i}", sub_agent_service)
+        for i in range(3):
+            await _create_sub_agent(
+                pg_session, test_admin_user_db, f"Owned-other-{i}", sub_agent_service
+            )
+
+        owned, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, owned_only=True, search="Owned-", page=1, limit=2
+        )
+        assert len(owned) == 2, "a full page of owned agents, not a post-filtered remnant"
+        assert total == 3
+        assert all(a.owner_user_id == test_user_db.id for a in owned)

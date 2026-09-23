@@ -130,6 +130,11 @@ async def list_sub_agents(
     status: SubAgentStatus | None = Query(None, description="Filter by status"),
     owned_only: bool = Query(False, description="Only show owned sub-agents"),
     activated_only: bool = Query(False, description="Only show activated sub-agents"),
+    search: str | None = Query(None, description="Search by name or description"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default: the orchestrator builds a user's whole registry from
+    # this endpoint, so a page size must never be assumed on its behalf.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> SubAgentListResponse:
     """List sub-agents accessible to the current user.
 
@@ -151,23 +156,26 @@ async def list_sub_agents(
         is_impersonating = hasattr(request.state, "original_user") and request.state.original_user
         effective_admin = is_admin_mode(request, user) and not is_impersonating
 
-        if owned_only:
-            # Only show owned sub-agents
-            sub_agents = await sub_agent_service.get_accessible_sub_agents(
-                db, user.id, is_admin=False, status_filter=status, include_owned=True, activated_only=activated_only
-            )
-            # Filter to owned only
-            sub_agents = [sa for sa in sub_agents if sa.owner_user_id == user.id]
-        else:
-            sub_agents = await sub_agent_service.get_accessible_sub_agents(
-                db, user.id, is_admin=effective_admin, status_filter=status, activated_only=activated_only
-            )
+        # owned_only is a SQL filter now, not a post-filter: trimming the rows
+        # after the query would short-change a page and make `total` a lie.
+        sub_agents, total = await sub_agent_service.get_accessible_sub_agents(
+            db,
+            user.id,
+            is_admin=False if owned_only else effective_admin,
+            status_filter=status,
+            include_owned=True,
+            activated_only=activated_only,
+            owned_only=owned_only,
+            search=search,
+            page=page,
+            limit=limit,
+        )
 
         # Resolve skill references so names/descriptions are populated (needed by orchestrator)
         await sub_agent_service.resolve_imported_skills_bulk(db, sub_agents)
 
         items = [SubAgentListItem.from_sub_agent(sa) for sa in sub_agents]
-        return SubAgentListResponse(items=items, total=len(items))
+        return SubAgentListResponse(items=items, total=total)
     except Exception as e:
         logger.error(f"Failed to list sub-agents: {e}")
         raise HTTPException(status_code=500, detail="Failed to list sub-agents")
@@ -186,7 +194,9 @@ async def list_activated_sub_agents(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agents = await sub_agent_service.get_accessible_sub_agents(
+        # Deliberately unpaged: the orchestrator builds the user's whole registry
+        # from this response.
+        sub_agents, _ = await sub_agent_service.get_accessible_sub_agents(
             db, user.id, is_admin=False, status_filter=SubAgentStatus.APPROVED, activated_only=True
         )
 
@@ -213,13 +223,18 @@ async def list_pending_approvals(
     request: Request,
     db: DbSession,
     user: User = Depends(require_admin),
+    search: str | None = Query(None, description="Search by name or description"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> SubAgentListResponse:
     """List sub-agents pending approval (admin only)."""
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agents = await sub_agent_service.get_pending_approvals(db)
+        sub_agents, total = await sub_agent_service.get_pending_approvals(
+            db, search=search, page=page, limit=limit
+        )
         items = [SubAgentListItem.from_sub_agent(sa) for sa in sub_agents]
-        return SubAgentListResponse(items=items, total=len(items))
+        return SubAgentListResponse(items=items, total=total)
     except Exception as e:
         logger.error(f"Failed to list pending approvals: {e}")
         raise HTTPException(status_code=500, detail="Failed to list pending approvals")
@@ -246,7 +261,7 @@ async def get_sub_agent_by_config_hash(
             raise HTTPException(status_code=404, detail="Config version not found")
 
         # Check access
-        accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+        accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
         if not any(sa.id == sub_agent.id for sa in accessible):
             raise HTTPException(status_code=403, detail="Access denied")
 
@@ -285,7 +300,7 @@ async def get_sub_agent_by_config_version(
             raise HTTPException(status_code=404, detail="Config version not found")
 
         # Check access
-        accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+        accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
         if not any(sa.id == sub_agent.id for sa in accessible):
             raise HTTPException(status_code=403, detail="Access denied")
 
@@ -454,7 +469,7 @@ async def get_sub_agent(
         # Check access
         if not effective_admin and sub_agent.owner_user_id != user.id:
             # Check group access
-            accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+            accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
             if not any(sa.id == sub_agent_id for sa in accessible):
                 raise HTTPException(status_code=403, detail="Access denied")
 
@@ -717,7 +732,7 @@ async def get_sub_agent_versions(
 
         # Check access
         if not effective_admin and sub_agent.owner_user_id != user.id:
-            accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+            accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
             if not any(sa.id == sub_agent_id for sa in accessible):
                 raise HTTPException(status_code=403, detail="Access denied")
 

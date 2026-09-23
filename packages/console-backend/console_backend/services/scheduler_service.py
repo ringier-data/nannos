@@ -320,7 +320,9 @@ class SchedulerService:
         Note it is deliberately not admin-aware: a scheduled job runs as its owner, so
         being an administrator does not widen what a job of theirs may invoke.
         """
-        return await self.sub_agents.get_accessible_sub_agents(db, user_id)
+        # Every agent the user could schedule, never a page.
+        sub_agents, _ = await self.sub_agents.get_accessible_sub_agents(db, user_id)
+        return sub_agents
 
     async def _require_scheduler_ready(self, db: AsyncSession, user: User) -> None:
         """Refuse to create or switch on a subscription of *user* that could not run.
