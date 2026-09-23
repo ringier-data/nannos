@@ -571,6 +571,8 @@ function CreateJobDialog({
         body.prompt = form.prompt.trim() || undefined;
       } else {
         body.notification_message = form.notification_message.trim();
+        // With no verbatim message, the instruction is the brief the written one follows.
+        body.prompt = body.notification_message ? undefined : form.prompt.trim() || undefined;
       }
     }
 

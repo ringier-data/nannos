@@ -840,7 +840,11 @@ function EditForm({ job }: { job: ScheduledJob }) {
         // would leave one of them dead.
         ...(watch.outcome === 'agent'
           ? { prompt: watch.prompt.trim() || null, notification_message: null }
-          : { notification_message: watch.notification_message.trim() || null, prompt: null }),
+          : {
+              notification_message: watch.notification_message.trim() || null,
+              // With no verbatim message, the instruction is the brief the written one follows.
+              prompt: watch.notification_message.trim() ? null : watch.prompt.trim() || null,
+            }),
       }),
       // Sent unconditionally, null included: omitting it on an emptied value would
       // make "in-app only" unreachable, since the backend only clears a field that

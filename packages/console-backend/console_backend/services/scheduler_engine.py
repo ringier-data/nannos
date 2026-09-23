@@ -1302,13 +1302,26 @@ class SchedulerEngine:
         # notifies (Slack renders Markdown literally), and one or two sentences lose nothing
         # by being plain. The channel's own rules are applied where a full reply is composed
         # — the sub-agent run, which is told them via the dispatch metadata.
+        #
+        # The author's brief, when there is one: for a notify-only watch the instruction
+        # field has no agent to instruct, so it steers this sentence instead — which fields
+        # to name, how to build a link from them, what to lead with. It shapes the message,
+        # it does not replace the facts: the matched items stay the only source.
+        brief = (job.prompt or "").strip()
         prompt = (
             "Write the notification a user receives when a scheduled watch triggers. "
-            "One or two sentences, factual, highlighting what changed. Plain text only — "
-            "no markdown, no bold, no headings, no bullet points. Reply with the "
-            "message text only, no preamble.\n\n"
+            + (
+                "Follow the author's brief below for what to include and how to shape it; "
+                "otherwise one or two sentences, factual, highlighting what changed. "
+                if brief
+                else "One or two sentences, factual, highlighting what changed. "
+            )
+            + "Plain text only — no markdown, no bold, no headings, no bullet points; a link "
+            "is a bare URL. Use only the data given, never invent fields or ids. Reply with "
+            "the message text only, no preamble.\n\n"
             f"Watch: {job.name}\n"
-            f"{label}:\n{json.dumps(triggered, indent=2, default=str)[:6000]}"
+            + (f"Author's brief:\n{brief}\n\n" if brief else "")
+            + f"{label}:\n{json.dumps(triggered, indent=2, default=str)[:6000]}"
         )
         try:
             # Thinking off: two sentences of plain text need no reasoning, and on the low
@@ -1316,7 +1329,11 @@ class SchedulerEngine:
             # — which would then be sent to the person verbatim.
             # Cost attribution comes from the scope `_dispatch_job` opened, not from an
             # argument here — the header is stamped by `_gateway_headers`.
-            message = await gateway_chat(prompt, model=model, max_tokens=256, reasoning_effort="none")
+            # A brief may ask for a line per item with a link each, which two sentences'
+            # worth of tokens would cut mid-URL.
+            message = await gateway_chat(
+                prompt, model=model, max_tokens=768 if brief else 256, reasoning_effort="none"
+            )
             written = message.strip().strip('"')
             if written:
                 logger.info("Job %d: wrote notification %r", job.id, written[:100])

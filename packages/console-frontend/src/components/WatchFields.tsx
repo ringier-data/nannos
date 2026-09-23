@@ -535,6 +535,32 @@ export function WatchFields({
                       patch({ notification_message: e.target.value });
                     }}
                   />
+                  {/* The brief only matters when the message is written, so it hides
+                      behind a verbatim message rather than sitting inert next to it. */}
+                  {!value.notification_message.trim() && (
+                    <div className="grid gap-1.5 pt-1">
+                      <Label htmlFor="notification_brief">
+                        How to write it
+                        <span className="text-muted-foreground text-xs font-normal">optional</span>
+                      </Label>
+                      <Textarea
+                        id="notification_brief"
+                        rows={3}
+                        value={value.prompt}
+                        placeholder={
+                          'e.g. One line per item, linking to its campaign: https://example.com/campaigns/{campaignId}. Mention the execution date.'
+                        }
+                        onChange={(e) => {
+                          patch({ prompt: e.target.value });
+                        }}
+                      />
+                      <p className="text-muted-foreground text-xs">
+                        A brief for the model that writes the message from the matched items:
+                        what to include, how to build a link from their fields. Plain text goes
+                        out, so links are bare URLs.
+                      </p>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <AgentActionFields
@@ -654,6 +680,11 @@ function WatchFieldsRead({
           <ReadValue label="Message" empty="Written from what the condition matched when it triggers">
             {value.notification_message || undefined}
           </ReadValue>
+          {!value.notification_message.trim() && (
+            <ReadValue label="How to write it" empty="No brief: one or two sentences on what changed">
+              {value.prompt || undefined}
+            </ReadValue>
+          )}
         </>
       )}
     </>

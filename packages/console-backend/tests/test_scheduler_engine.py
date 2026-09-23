@@ -1817,6 +1817,53 @@ class TestWriteNotification:
         assert '"id": 2' not in prompt
 
     @pytest.mark.asyncio
+    async def test_the_authors_brief_steers_the_writer(self):
+        # A notify-only watch has no agent for its instruction to instruct, so the
+        # instruction is the brief the sentence follows — a link per item, say.
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.notification_message = ""
+        job.prompt = "Link each item: https://example.invalid/campaigns/{campaignId}. One line per item."
+        chat = AsyncMock(return_value="New issue: https://example.invalid/campaigns/12")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                written = await engine._write_notification(
+                    job,
+                    WatchOutcome(
+                        condition_met=True,
+                        check_result={"items": [{"campaignId": 12}]},
+                        evidence=[{"campaignId": 12}],
+                    ),
+                )
+        assert written == "New issue: https://example.invalid/campaigns/12"
+        prompt = chat.await_args.args[0]
+        assert "Author's brief" in prompt
+        assert "example.invalid/campaigns/{campaignId}" in prompt
+        assert '"campaignId": 12' in prompt  # the facts still come from the evidence
+        # Room for a line per item with a URL each; two sentences' worth would cut mid-link.
+        assert chat.await_args.kwargs["max_tokens"] > 256
+
+    @pytest.mark.asyncio
+    async def test_without_a_brief_the_prompt_carries_none(self):
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.prompt = None
+        chat = AsyncMock(return_value="Something changed.")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                await engine._write_notification(
+                    job, WatchOutcome(condition_met=True, check_result={"status": "FAILED"})
+                )
+        assert "Author's brief" not in chat.await_args.args[0]
+        assert chat.await_args.kwargs["max_tokens"] == 256
+
+    @pytest.mark.asyncio
     async def test_an_unreachable_model_still_says_something(self):
         # A watch that triggered has something to report; silence would be the worst
         # possible outcome, so the raw result is reported instead.
