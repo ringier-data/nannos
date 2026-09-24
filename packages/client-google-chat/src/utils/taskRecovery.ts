@@ -3,9 +3,31 @@ import type { IInFlightTaskStore, InFlightTask, IContextStore } from '../storage
 import { A2AClientService } from '../services/a2aClientService.js';
 import type { IUserAuthService } from '../services/userAuthService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
-import { handleTask } from './taskResponseHandler.js';
+import { handleTask, isInterruptedOrTerminated, postOrUpdateMessage } from './taskResponseHandler.js';
 
 const logger = Logger.getLogger('taskRecovery');
+
+/**
+ * How long a task may stay non-terminal before recovery stops waiting for it.
+ *
+ * A task that never ends is not always still running: when the orchestrator is
+ * killed mid-run (e.g. OOM), nothing restarts the run, and the task stays
+ * "working" forever. Must stay below the in-flight record TTL (1h), or the
+ * record expires first and the user never hears anything.
+ */
+const MAX_RECOVERY_AGE_MS = 30 * 60 * 1000;
+
+const GIVE_UP_TEXT = '⚠️ I could not get the answer to this request. Please send it again if you still need it.';
+
+/**
+ * Stop recovering a task. The status message told the user that the answer
+ * will appear there, so replace it with a notice instead of leaving it.
+ */
+async function giveUp(task: InFlightTask, chatService: GoogleChatService, inFlightTaskStore: IInFlightTaskStore) {
+  const { taskId, projectId, spaceId, threadId, statusMessageId } = task;
+  await postOrUpdateMessage(chatService, projectId, spaceId, threadId, GIVE_UP_TEXT, statusMessageId);
+  await inFlightTaskStore.delete(taskId);
+}
 
 /**
  * Recover a single orphaned task by polling A2A for its status
@@ -28,8 +50,8 @@ async function recoverTask(
 
     if (!accessToken) {
       logger.info(`Cannot recover task ${taskId}: user ${userId} not authorized`);
-      // Delete the task - we can't recover without auth
-      await inFlightTaskStore.delete(taskId);
+      // We can't recover without auth
+      await giveUp(task, chatService, inFlightTaskStore);
       return false;
     }
 
@@ -38,8 +60,29 @@ async function recoverTask(
 
     if ('error' in response) {
       logger.warn({ taskId, error: response.error }, `Failed to get status for task ${taskId}: ${response.error}`);
-      // Task may have expired on A2A side - clean up
-      await inFlightTaskStore.delete(taskId);
+      // Task may have expired on A2A side
+      await giveUp(task, chatService, inFlightTaskStore);
+      return false;
+    }
+
+    // `handleTask` posts nothing while the task is still running. Deleting the
+    // record then would throw away the only handle on the turn: keep it for a
+    // later sweep, up to MAX_RECOVERY_AGE_MS.
+    const state = response.result.status?.state;
+    if (!isInterruptedOrTerminated(state)) {
+      const ageMs = Date.now() - task.createdAt;
+      if (ageMs < MAX_RECOVERY_AGE_MS) {
+        logger.info(
+          { taskId, state },
+          `Task ${taskId} is still ${state} after ${Math.round(ageMs / 1000)}s; keeping the in-flight record for a later sweep`
+        );
+        return false;
+      }
+      logger.warn(
+        { taskId, state },
+        `Task ${taskId} is still ${state} after ${Math.round(ageMs / 60000)}min; giving up and telling the user`
+      );
+      await giveUp(task, chatService, inFlightTaskStore);
       return false;
     }
 
