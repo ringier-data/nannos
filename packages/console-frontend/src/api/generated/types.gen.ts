@@ -4687,13 +4687,13 @@ export type ScheduledJobCreate = {
     /**
      * Prompt
      *
-     * Instruction/prompt for the agent to execute. For watch jobs it applies only when a sub_agent_id is set and instructs the sub-agent triggered by the condition. Example: 'Analyze the sales data and create a summary'.
+     * Instruction/prompt for the agent to execute. For a watch with a sub_agent_id it instructs the sub-agent triggered by the condition. For a notify-only watch with an empty notification_message it is the brief the written notification follows: what to include, how to build links from the matched items' fields. Example: 'Analyze the sales data and create a summary'.
      */
     prompt?: string;
     /**
      * Notification Message
      *
-     * Notification text delivered when watch condition triggers (watch jobs only). If empty, an LLM will generate a message based on the check result.
+     * Notification text delivered verbatim when the watch condition triggers (watch jobs only). If empty, a model writes the message from what the condition matched, following `prompt` as its brief when one is set.
      */
     notification_message?: string;
     /**
@@ -4807,13 +4807,13 @@ export type ScheduledJobDraft = {
     /**
      * Prompt
      *
-     * Instruction/prompt for the agent to execute. For watch jobs it applies only when a sub_agent_id is set and instructs the sub-agent triggered by the condition. Example: 'Analyze the sales data and create a summary'.
+     * Instruction/prompt for the agent to execute. For a watch with a sub_agent_id it instructs the sub-agent triggered by the condition. For a notify-only watch with an empty notification_message it is the brief the written notification follows: what to include, how to build links from the matched items' fields. Example: 'Analyze the sales data and create a summary'.
      */
     prompt?: string | null;
     /**
      * Notification Message
      *
-     * Notification text delivered when watch condition triggers (watch jobs only). If empty, an LLM will generate a message based on the check result.
+     * Notification text delivered verbatim when the watch condition triggers (watch jobs only). If empty, a model writes the message from what the condition matched, following `prompt` as its brief when one is set.
      */
     notification_message?: string | null;
     /**

@@ -97,6 +97,27 @@ class SchedulerNotReadyError(ValueError):
     including the sign-in link — the task-scheduler agent relays to the user."""
 
 
+def effective_prompt(
+    job_type: JobType | str,
+    sub_agent_id: int | None,
+    notification_message: str | None,
+    prompt: str | None,
+) -> str | None:
+    """What `prompt` means on this job, enforced where the row is written.
+
+    On a watch with a sub-agent it is the agent's instruction. On a notify-only watch it
+    is the brief the written notification follows — which a verbatim `notification_message`
+    leaves nothing for, so there it is cleared rather than kept inert. Kept inert it would
+    come back to life the moment the message is emptied (an old agent instruction read as
+    a brief, narrating actions nobody took), and the two console forms are not the only
+    writers: the API, the MCP tools and the draft generator all reach this path.
+    """
+    kind = job_type.value if isinstance(job_type, JobType) else job_type
+    if kind == JobType.WATCH.value and sub_agent_id is None and (notification_message or "").strip():
+        return None
+    return prompt
+
+
 class SchedulerService:
     """Service for scheduled job definitions, subscriptions and sharing."""
 
@@ -535,7 +556,8 @@ class SchedulerService:
             "interval_seconds": data.interval_seconds,
             "run_at": run_at,
             "trigger_policy": policy.value,
-            "prompt": data.prompt,
+            # `data.sub_agent_id` is final here: an inline definition was created above.
+            "prompt": effective_prompt(data.job_type, data.sub_agent_id, data.notification_message, data.prompt),
             "notification_message": data.notification_message,
             "check_tool": data.check_tool,
             "check_args": json.dumps(data.check_args) if data.check_args is not None else None,
@@ -722,6 +744,20 @@ class SchedulerService:
                 def_fields[attr] = val
         if data.trigger_policy is not None:
             def_fields["trigger_policy"] = data.trigger_policy.value
+
+        # The notify-only rule (see `effective_prompt`), applied to what the definition
+        # will hold after this edit — so a patch that only clears `sub_agent_id`, or only
+        # sets a verbatim message, drops an instruction that would otherwise become the
+        # writer's brief on the next trigger. Only when the request touched one of the
+        # three: a legacy row that violates the rule is normalised by a genuine edit to
+        # it, not injected into a subscriber's enabled/delivery toggle — which would turn
+        # a subscription-side request into a definition write, refused for a reader.
+        outcome_keys = ("sub_agent_id", "notification_message", "prompt")
+        if job.job_type == JobType.WATCH and any(k in def_fields for k in outcome_keys):
+            after = {k: def_fields[k] if k in def_fields else getattr(job, k) for k in outcome_keys}
+            wanted = effective_prompt(JobType.WATCH, **after)
+            if wanted != after["prompt"]:
+                def_fields["prompt"] = wanted
 
         # A value equal to what the definition already holds is not an edit. The console
         # resends the whole form, so without this a plain subscriber could never save

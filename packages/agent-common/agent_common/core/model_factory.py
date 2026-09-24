@@ -254,6 +254,12 @@ _NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
 # console-backend stays dependency-light and imports neither agent-common nor langchain, the
 # way it also duplicates the gateway Bearer-key default — but the two are one decision:
 # change the policy here and change it there.
+#
+# "none" is all a client sends. On the Claude 5 family thinking is on by default and LiteLLM
+# turns "none" into "no thinking parameter", so the provider's explicit off switch is needed
+# too — but it is a 400 on Gemini 3, and which one a request needs depends on the deployment
+# the router picks. The gateway adds it per deployment (litellm-proxy `_apply_thinking_off`);
+# never add `thinking` here.
 REASONING_OFF = "none"
 
 

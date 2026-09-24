@@ -46,6 +46,16 @@ class TestGatewayChatPayload:
         assert body["messages"] == [{"role": "user", "content": "hello"}]
 
     @pytest.mark.asyncio
+    async def test_off_is_the_effort_value_alone(self):
+        """The gateway adds a provider's own off switch per deployment; a `thinking` field
+        from here is a 400 on Gemini 3 ("Cannot specify both")."""
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            await llm_gateway.gateway_chat("hello", model="chat-low")
+
+        assert "thinking" not in fake_client.post.call_args.kwargs["json"]
+
+    @pytest.mark.asyncio
     async def test_an_explicit_none_leaves_the_model_to_itself(self):
         """The escape hatch from the default: send no value at all and let the model
         reason however it normally would."""

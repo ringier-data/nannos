@@ -449,12 +449,22 @@ class ScheduledJobCreate(BaseModel):
     prompt: str = Field(
         default="",
         max_length=4000,
-        description="Instruction/prompt for the agent to execute. For watch jobs it applies only when a sub_agent_id is set and instructs the sub-agent triggered by the condition. Example: 'Analyze the sales data and create a summary'.",
+        description=(
+            "Instruction/prompt for the agent to execute. For a watch with a sub_agent_id it "
+            "instructs the sub-agent triggered by the condition. For a notify-only watch with "
+            "an empty notification_message it is the brief the written notification follows: "
+            "what to include, how to build links from the matched items' fields. Example: "
+            "'Analyze the sales data and create a summary'."
+        ),
     )
     notification_message: str = Field(
         default="",
         max_length=4000,
-        description="Notification text delivered when watch condition triggers (watch jobs only). If empty, an LLM will generate a message based on the check result.",
+        description=(
+            "Notification text delivered verbatim when the watch condition triggers (watch "
+            "jobs only). If empty, a model writes the message from what the condition "
+            "matched, following `prompt` as its brief when one is set."
+        ),
     )
 
     # Watch fields — required when job_type='watch'

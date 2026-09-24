@@ -105,6 +105,18 @@ class WatchOutcome:
     #: against check_result later; a model's reasoning cannot be reconstructed at all, so
     #: it is captured here or lost.
     evaluation: ConditionEvaluation | None = None
+    #: The items the condition's expression matched — a list or a map, untruncated. A CEL
+    #: condition is both the gate and the filter — the author wrote it to pick out what
+    #: matters from the response — so this is what a triggered watch hands on (to the
+    #: agent, to the notification writer) in place of the whole response. None when there
+    #: is nothing narrower than ``check_result`` worth acting on: a boolean gate, a
+    #: judge-only watch, and a scalar extraction (a bare ``"FAILED"`` or a count carries
+    #: none of the ids or names a reader needs, so the whole response goes instead). With
+    #: a judge stacked on the expression the judge is shown both, but what the run hands
+    #: on is still what the expression matched: the judge decides, it does not widen.
+    #: Kept apart from ``evaluation.extracted``, which is the same value shrunk for
+    #: storage on the run.
+    evidence: Any = None
     #: Set when the check tool answered ``need-credentials``: the owner has not authorized
     #: the tool, and nothing in the runtime can. Neither an error nor a verdict — the
     #: engine parks the run on it (ADR-0009), which is why it is not folded into ``error``:
@@ -304,6 +316,7 @@ class WatchEvaluator:
             )
 
         extracted = _for_display(cel.value)
+        evidence = cel.value if isinstance(cel.value, (list, dict)) else None
 
         if not cel.gate or not job.llm_condition:
             evaluation = ConditionEvaluation(
@@ -313,7 +326,9 @@ class WatchEvaluator:
                 extracted=extracted,
             )
             logger.info("Job %d: CEL gate met=%s (judged=no)", job.id, cel.gate)
-            return WatchOutcome(condition_met=cel.gate, check_result=check_result, evaluation=evaluation)
+            return WatchOutcome(
+                condition_met=cel.gate, check_result=check_result, evaluation=evaluation, evidence=evidence
+            )
 
         met, reasoning = await self._judge(db, job, cel.value, check_result)
         evaluation = ConditionEvaluation(
@@ -324,7 +339,7 @@ class WatchEvaluator:
             extracted=extracted,
         )
         logger.info("Job %d: CEL gate passed, model judged met=%s", job.id, met)
-        return WatchOutcome(condition_met=met, check_result=check_result, evaluation=evaluation)
+        return WatchOutcome(condition_met=met, check_result=check_result, evaluation=evaluation, evidence=evidence)
 
     async def _judge(
         self,

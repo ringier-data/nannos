@@ -13,8 +13,12 @@
 # the `eu`/`us` multi-regions (only the inference path used the correct
 # `aiplatform.{geo}.rep.googleapis.com` REP host — hence completions worked but any cache_control
 # on a Vertex Gemini model 404'd). The fix was NOT backported to the 1.89.x stable line (still
-# broken in v1.89.4), so the rc carried it first; now pinned to the v1.90.0 final tag.
-FROM ghcr.io/berriai/litellm:v1.90.0@sha256:a50b02a6056095da29308310bb608f0509e08ddcd1d105bae9c21007d82b0e95
+# broken in v1.89.4), so the rc carried it first; then pinned to the v1.90.0 final tag.
+#
+# v1.90.0 -> v1.90.7, same stable line: the backport of GHSA-3cv6-jpf6-8222 (authenticated SSRF
+# and provider-credential exfiltration through unvalidated request-body routing fields). No
+# database migrations between the two. Moving to a newer line is tracked separately.
+FROM ghcr.io/berriai/litellm:v1.90.7@sha256:917d480b7e4a7e61822e54f70be5c7cf753fb0b7328cbf6467612652ca748075
 
 WORKDIR /app
 

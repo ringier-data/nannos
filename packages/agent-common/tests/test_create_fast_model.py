@@ -7,6 +7,7 @@ HITL approval card to write one sentence. These tests pin the three properties t
 thinking off, no streaming, and a short output cap.
 """
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -26,6 +27,19 @@ def test_thinking_is_off():
     # The whole point: an explicit "none" instead of silence, so the provider default
     # (dynamic thinking) never applies to a one-sentence utility call.
     assert _captured_kwargs()["reasoning_effort"] == REASONING_OFF
+
+
+def test_off_is_the_effort_value_alone():
+    # The gateway adds a provider's own off switch per deployment. A `thinking` field from
+    # here is a 400 on Gemini 3, and in model_kwargs the OpenAI SDK rejects it before sending.
+    with (
+        patch.dict(os.environ, {"LLM_GATEWAY_URL": "http://litellm-proxy.test", "LLM_GATEWAY_API_KEY": "sk-test"}),
+        patch("agent_common.core.model_factory._gateway_chat_openai_cls") as cls,
+    ):
+        create_model("alias", reasoning_effort=REASONING_OFF, pre_resolved=True)
+    sent = cls.return_value.call_args.kwargs
+    assert sent["model_kwargs"] == {"reasoning_effort": REASONING_OFF}
+    assert "extra_body" not in sent
 
 
 def test_streaming_is_off():

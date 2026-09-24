@@ -173,6 +173,11 @@ async def gateway_chat(
     would. The proxy runs `drop_params: true`, so a model that takes no such param is
     unaffected either way.
 
+    ``"none"`` is sent alone, never with a `thinking` field: the provider-level off switch
+    some models need (the Claude 5 family) is a 400 on others (Gemini 3), and only the
+    gateway knows which deployment a request lands on, so it adds that switch itself — see
+    litellm-proxy's `_apply_thinking_off`.
+
     """
     payload: dict = {
         "model": model,

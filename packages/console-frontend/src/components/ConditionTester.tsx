@@ -10,6 +10,10 @@
  * The payload is either the response from "Run check now" or one pasted in, because
  * the interesting case is usually not what today's data happens to contain: you want
  * to check "an external attendee is invited" on a day when nobody external is.
+ *
+ * `prev` is bound the way the run binds it: to the job's stored last result. Without
+ * that a change-detection condition previews as "would trigger" every time (anything
+ * differs from nothing), which is the opposite of what it does on the next real run.
  */
 import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Check, Info, Loader2, X } from 'lucide-react';
@@ -26,6 +30,7 @@ export function ConditionTester({
   liveResult,
   celExpr,
   llmCondition,
+  prev,
 }: {
   /** Payload from the last real tool call, when there has been one. */
   liveResult?: Record<string, unknown>;
@@ -33,6 +38,13 @@ export function ConditionTester({
   celExpr?: string;
   /** The judged condition, when the condition has one. */
   llmCondition?: string;
+  /**
+   * What the run would see as `prev`: the job's stored last result, or null when it
+   * has none (a job that has not run yet). Undefined means the caller has no notion of
+   * one, which is the same thing to the expression. Compared to the payload by value,
+   * so a caller may pass the same object as liveResult or a fresh copy alike.
+   */
+  prev?: Record<string, unknown> | null;
 }) {
   const [source, setSource] = useState<'live' | 'mock'>('live');
   const [mockText, setMockText] = useState('');
@@ -42,6 +54,16 @@ export function ConditionTester({
 
   const cel = celExpr?.trim() || '';
   const judge = llmCondition?.trim() || '';
+  // Whether the expression reads the `prev` binding — not a string literal or a response
+  // field of that name. Decides whether prev is sent at all (a stored result can be large,
+  // and the backend size-checks it whether or not the expression looks at it) and whether
+  // the binding is worth a note.
+  const readsPrev = /(^|[^.\w])prev\b/.test(cel.replace(/'[^']*'|"[^"]*"/g, ''));
+  // Serialised for the same reason as payloadKey below: a prop that changes identity
+  // per render must not re-fire the debounced validate. Parsed back to a stable object
+  // keyed on content, so the effect depends on the key alone.
+  const prevKey = useMemo(() => (readsPrev ? JSON.stringify(prev ?? null) : ''), [readsPrev, prev]);
+  const previous = useMemo<unknown>(() => (prevKey ? JSON.parse(prevKey) : null), [prevKey]);
 
   // Memoised rather than parsed inline: a fresh parse on every render gives `payload`
   // (and so `subject`, which the validate effect depends on) a new identity each time, so
@@ -83,6 +105,7 @@ export function ConditionTester({
       setPending(true);
       validateCondition({
         result: subject,
+        prev: previous,
         cel_expr: cel || null,
         llm_condition: judge || null,
       })
@@ -105,7 +128,10 @@ export function ConditionTester({
       clearTimeout(timer);
     };
     // payloadKey stands in for payload; the rest are the condition's inputs.
-  }, [payloadKey, hasPayload, parseCheckOnly, subject, cel, judge]);
+  }, [payloadKey, hasPayload, parseCheckOnly, subject, previous, cel, judge]);
+  // The verdict when nothing changed: what the run compares as prev is exactly what it
+  // was given as result. By value, so a re-run that returns identical data counts too.
+  const unchanged = prevKey !== '' && prevKey === payloadKey;
 
   // Derived rather than cleared in the effect: with no payload there is nothing to
   // report, and a stale outcome from a previous payload would be misleading.
@@ -225,6 +251,19 @@ export function ConditionTester({
             {JSON.stringify(shown.extracted, null, 2) ?? 'null'}
           </pre>
         </div>
+      )}
+
+      {/* Which prev the verdict was decided against. A change-detection condition reads
+          the opposite way depending on it, and the binding is otherwise invisible. */}
+      {shown?.valid && !shown.error && hasPayload && readsPrev && (
+        <span className="text-muted-foreground flex items-start gap-1.5 text-xs">
+          <Info className="mt-0.5 size-3.5 shrink-0" />
+          {previous === null
+            ? 'prev is null here: this job has no stored result yet, so the condition is tested as a first run.'
+            : unchanged
+              ? 'prev is the stored last result, the same payload as result: this is the verdict when nothing changed.'
+              : 'prev is the stored last result, as on the next scheduled run.'}
+        </span>
       )}
 
       {/* The notes belong to the outcome, not to whichever branch above rendered it. */}

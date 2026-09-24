@@ -92,7 +92,12 @@ describe('handleA2ANotification scheduled-run provenance', () => {
   test('persists provenance keyed by the delivered message ts', async () => {
     await handleA2ANotification(makeTask(schedulerPayload, 'run-ctx-123'), botInstallation, deps());
 
-    expect(slackClient.chat.postMessage).toHaveBeenCalledWith({ channel: 'D1', text: 'Sales were up 4%.' });
+    // `markdown_text`, as an interactive reply is posted: Slack converts it; `text` would be
+    // read as mrkdwn and cannot be combined with it.
+    expect(slackClient.chat.postMessage).toHaveBeenCalledWith({
+      channel: 'D1',
+      markdown_text: 'Sales were up 4%.',
+    });
     expect(scheduledRunStore.set).toHaveBeenCalledWith({
       contextKey: 'D1:111.222',
       contextId: 'run-ctx-123',
