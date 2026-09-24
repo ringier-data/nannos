@@ -12,16 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_common.core.model_factory import (
-    FAST_MODEL_MAX_TOKENS,
-    REASONING_OFF,
-    THINKING_DISABLED,
-    create_fast_model,
-    create_model,
-)
-from agent_common.models.base import ThinkingLevel
-
-_GW_ENV = {"LLM_GATEWAY_URL": "http://litellm-proxy.test", "LLM_GATEWAY_API_KEY": "sk-test"}
+from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS, REASONING_OFF, create_fast_model, create_model
 
 
 def _captured_kwargs(**kwargs):
@@ -38,34 +29,17 @@ def test_thinking_is_off():
     assert _captured_kwargs()["reasoning_effort"] == REASONING_OFF
 
 
-def _model_kwargs_sent(**kwargs) -> dict:
-    """What create_model hands the gateway client as request-body extras, without building
-    the real (module-cached) ChatOpenAI subclass."""
-    with patch.dict(os.environ, _GW_ENV), patch("agent_common.core.model_factory._gateway_chat_openai_cls") as cls:
-        create_model("alias", **kwargs)
-    return cls.return_value.call_args.kwargs["model_kwargs"]
-
-
-def test_off_also_sends_the_provider_off_switch():
-    # "none" reaches the proxy as "send no thinking parameter", which on the Claude 5
-    # family (thinking on by default) changes nothing: prod, 2026-09-23, claude-sonnet-5
-    # spent a whole 1024-token budget thinking and returned an empty reply. The explicit
-    # `thinking: disabled` is the only thing that switches it off there.
-    sent = _model_kwargs_sent(reasoning_effort=REASONING_OFF)
-    assert sent == {"reasoning_effort": REASONING_OFF, "thinking": {"type": "disabled"}}
-    assert sent["thinking"] is not THINKING_DISABLED  # a copy — the constant is never handed out
-
-
-def test_a_real_effort_tier_carries_no_off_switch():
-    # The off switch belongs to "none" alone; a caller asking for reasoning must not get a
-    # `thinking: disabled` contradicting it.
-    sent = _model_kwargs_sent(thinking_level=ThinkingLevel.high)
-    assert sent == {"reasoning_effort": "high"}
-
-
-def test_no_effort_sends_nothing_about_thinking():
-    # Silence stays silence: no thinking_level and no override leaves the provider default.
-    assert _model_kwargs_sent() == {}
+def test_off_is_the_effort_value_alone():
+    # The gateway adds a provider's own off switch per deployment. A `thinking` field from
+    # here is a 400 on Gemini 3, and in model_kwargs the OpenAI SDK rejects it before sending.
+    with (
+        patch.dict(os.environ, {"LLM_GATEWAY_URL": "http://litellm-proxy.test", "LLM_GATEWAY_API_KEY": "sk-test"}),
+        patch("agent_common.core.model_factory._gateway_chat_openai_cls") as cls,
+    ):
+        create_model("alias", reasoning_effort=REASONING_OFF, pre_resolved=True)
+    sent = cls.return_value.call_args.kwargs
+    assert sent["model_kwargs"] == {"reasoning_effort": REASONING_OFF}
+    assert "extra_body" not in sent
 
 
 def test_streaming_is_off():

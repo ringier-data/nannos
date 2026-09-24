@@ -77,22 +77,6 @@ def _first_message(resp_json: dict) -> dict:
     return _first_choice(resp_json).get("message", {})
 
 
-#: The provider-level off switch that has to travel WITH ``reasoning_effort="none"``.
-#:
-#: LiteLLM maps ``reasoning_effort: "none"`` to "send no thinking parameter" and drops any
-#: ``thinking`` key it finds — the right call for models where thinking is opt-in, and a
-#: no-op for the Claude 5 family (Sonnet 5, Opus 5, Fable 5.1), where thinking is ON by
-#: default and an omitted parameter means the provider default. On 2026-09-23 the prod
-#: ``chat`` default was ``claude-sonnet-5``: the condition generator asked for thinking off,
-#: the proxy sent nothing, and the model spent all 1024 output tokens thinking — a
-#: ``finish_reason=length`` reply with zero characters of content. Only an explicit
-#: ``thinking: {"type": "disabled"}`` turns it off there, so "none" sends both. The proxy
-#: processes ``reasoning_effort`` before ``thinking``, so the explicit value survives its
-#: pop; Anthropic and Bedrock pass it through, Gemini reads a non-enabled type as thoughts
-#: off, and ``drop_params`` discards it for models with no such control.
-THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
-
-
 class GatewayText(str):
     """The assistant text of a completion, carrying the provider's ``finish_reason``.
 
@@ -189,8 +173,10 @@ async def gateway_chat(
     would. The proxy runs `drop_params: true`, so a model that takes no such param is
     unaffected either way.
 
-    ``"none"`` also sends `thinking: {"type": "disabled"}` — see `THINKING_DISABLED` for why
-    the effort value alone does not switch thinking off on models where it is on by default.
+    ``"none"`` is sent alone, never with a `thinking` field: the provider-level off switch
+    some models need (the Claude 5 family) is a 400 on others (Gemini 3), and only the
+    gateway knows which deployment a request lands on, so it adds that switch itself — see
+    litellm-proxy's `_apply_thinking_off`.
 
     """
     payload: dict = {
@@ -200,8 +186,6 @@ async def gateway_chat(
     }
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
-        if reasoning_effort == "none":
-            payload["thinking"] = dict(THINKING_DISABLED)
     resp = await _client.get().post(
         _completions_url(),
         headers=_gateway_headers(metadata),

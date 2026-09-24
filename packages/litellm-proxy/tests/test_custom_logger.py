@@ -680,3 +680,69 @@ def test_strip_never_raises_on_odd_shapes():
         {},
     ):
         assert _run_deployment_hook(kwargs) is None
+
+
+# --- thinking off, per deployment -------------------------------------------------------
+
+
+def _off_kwargs(model, **overrides):
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "none",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+@pytest.mark.parametrize(
+    "model,extra",
+    [
+        ("bedrock/eu.anthropic.claude-sonnet-5", {}),
+        ("vertex_ai/claude-opus-5", {}),
+        ("claude-haiku-4-5", {"custom_llm_provider": "anthropic"}),
+        # A deployment addressed by an opaque id is recognised by its declared base model.
+        (
+            "bedrock/arn:aws:bedrock:eu-central-1:000000000000:application-inference-profile/x",
+            {"model_info": {"base_model": "anthropic.claude-sonnet-5"}},
+        ),
+    ],
+)
+def test_thinking_off_adds_the_explicit_switch_on_claude(model, extra):
+    # Claude 5 thinks by default and LiteLLM turns "none" into "no thinking parameter",
+    # so without this a small utility budget is spent thinking and the reply is empty.
+    out = _run_deployment_hook(_off_kwargs(model, **extra))
+    assert out["thinking"] == {"type": "disabled"}
+    assert out["reasoning_effort"] == "none"
+
+
+@pytest.mark.parametrize(
+    "model", ["vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "azure/gpt-4o"]
+)
+def test_thinking_off_removes_the_switch_elsewhere(model):
+    # Gemini 3 refuses thinking + reasoning_effort together ("Cannot specify both"); an
+    # older client that still sends both must not get a 400.
+    out = _run_deployment_hook(_off_kwargs(model, thinking={"type": "disabled"}))
+    assert "thinking" not in out
+    assert out["reasoning_effort"] == "none"
+
+
+def test_thinking_off_leaves_a_clean_non_claude_request_alone():
+    assert _run_deployment_hook(_off_kwargs("vertex_ai/gemini-3.5-flash")) is None
+
+
+def test_a_real_effort_is_not_touched():
+    kwargs = _off_kwargs(
+        "bedrock/eu.anthropic.claude-sonnet-5", reasoning_effort="high"
+    )
+    assert _run_deployment_hook(kwargs) is None
+    assert "thinking" not in kwargs
+
+
+def test_thinking_off_and_cache_control_strip_compose():
+    # Both fixes apply to one Gemini request; neither may shadow the other.
+    out = _run_deployment_hook(
+        _gemini_kwargs(reasoning_effort="none", thinking={"type": "disabled"})
+    )
+    assert "thinking" not in out
+    assert out["messages"][0]["content"][0] == {"type": "text", "text": "sys"}

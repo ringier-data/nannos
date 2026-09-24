@@ -182,6 +182,53 @@ def _should_strip_cache_control(provider: str | None, model: str) -> bool:
     return not prefixes or model.startswith(prefixes)
 
 
+# Thinking off, per deployment. Clients ask for it with `reasoning_effort: "none"` alone; the
+# provider's own off switch is added here because only here is the deployment known.
+#
+# LiteLLM translates "none" into "send no thinking parameter". That turns thinking off where it
+# is opt-in, but on the Claude 5 family thinking is ON by default, so an omitted parameter
+# leaves it on: a small utility budget is spent thinking and the reply comes back empty at
+# finish_reason=length. Claude needs an explicit `thinking: {"type": "disabled"}`, which the
+# Anthropic translation keeps because it reads `reasoning_effort` before `thinking`.
+#
+# The same field must never reach anything else: on Gemini 3 LiteLLM maps `reasoning_effort`
+# to thinking_level and `thinking` to thinking_budget and refuses the pair with a 400 ("Cannot
+# specify both"). The clients used to add it themselves, which decided per alias — wrong for
+# an alias whose deployments or failover span families, and a guess when the alias is just a
+# name like "fast". So the hook sets it for Claude deployments and removes it everywhere else.
+#
+# A Claude deployment is recognised the way LiteLLM's own Anthropic handling does: "claude"
+# in the deployment's model string (bedrock/eu.anthropic.claude-…, vertex_ai/claude-…,
+# claude-… on the anthropic provider), or in `model_info.base_model` for a deployment that
+# names its model only through an ARN or other opaque id.
+_THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
+
+
+def _is_claude_deployment(kwargs: dict) -> bool:
+    base_model = (kwargs.get("model_info") or {}).get("base_model") or ""
+    return "claude" in f"{kwargs.get('model') or ''} {base_model}".lower()
+
+
+def _apply_thinking_off(kwargs: dict) -> bool:
+    """Make a `reasoning_effort: "none"` request carry `thinking: disabled` exactly when its
+    deployment is a Claude model; True when ``kwargs`` changed.
+
+    Top-level keys only: the router hands each attempt its own shallow copy, so this never
+    leaks into a fallback attempt on another family.
+    """
+    if kwargs.get("reasoning_effort") != "none":
+        return False
+    if _is_claude_deployment(kwargs):
+        if kwargs.get("thinking") == _THINKING_DISABLED:
+            return False
+        kwargs["thinking"] = dict(_THINKING_DISABLED)
+        return True
+    if "thinking" in kwargs:
+        del kwargs["thinking"]
+        return True
+    return False
+
+
 def _strip_cache_control_entries(items: list) -> list | None:
     """Return a copy of ``items`` (messages or tools) with every ``cache_control`` removed,
     or None if no marker was found.
@@ -528,30 +575,41 @@ class NannosCostLogger(CustomLogger):
         return data
 
     async def async_pre_call_deployment_hook(self, kwargs, call_type):
-        """Strip cache_control markers from requests routed to gemini-format deployments.
+        """Per-deployment request fixes; both need the deployment the router picked, which
+        ``async_pre_call_hook`` runs too early to see.
 
-        Runs after the router picked a deployment (unlike ``async_pre_call_hook``), so the
-        provider/model are known. See ``_CACHE_CONTROL_STRIP_RULES`` for the why. Returning
-        the (mutated) kwargs replaces the request for this attempt only; returning None
-        leaves it unchanged. Never raise — stripping is an optimization, not a gate.
+        * Thinking off: a `reasoning_effort: "none"` request gets `thinking: disabled` on a
+          Claude deployment and loses any `thinking` elsewhere. See ``_apply_thinking_off``.
+        * cache_control: stripped from requests routed to gemini-format deployments. See
+          ``_CACHE_CONTROL_STRIP_RULES`` for the why.
+
+        Returning the (mutated) kwargs replaces the request for this attempt only; returning
+        None leaves it unchanged. Never raise: each fix is logged and skipped on failure.
         """
+        changed = False
+        try:
+            changed = _apply_thinking_off(kwargs)
+        except Exception as e:  # never break the call on a failed fix
+            logger.warning(
+                "[thinking] off-switch failed for model=%s: %s",
+                kwargs.get("model"),
+                e,
+                exc_info=True,
+            )
         try:
             model = kwargs.get("model") or ""
             provider = kwargs.get("custom_llm_provider")
             if not provider and "/" in model:
                 provider = model.split("/", 1)[0]
             bare_model = model.split("/", 1)[1] if "/" in model else model
-            if not _should_strip_cache_control(provider, bare_model):
-                return None
-            changed = False
-            for key in ("messages", "tools"):
-                items = kwargs.get(key)
-                if isinstance(items, list):
-                    stripped = _strip_cache_control_entries(items)
-                    if stripped is not None:
-                        kwargs[key] = stripped
-                        changed = True
-            return kwargs if changed else None
+            if _should_strip_cache_control(provider, bare_model):
+                for key in ("messages", "tools"):
+                    items = kwargs.get(key)
+                    if isinstance(items, list):
+                        stripped = _strip_cache_control_entries(items)
+                        if stripped is not None:
+                            kwargs[key] = stripped
+                            changed = True
         except Exception as e:  # never break the call on a stripping failure
             logger.warning(
                 "[cache-control] strip failed for model=%s: %s",
@@ -559,7 +617,7 @@ class NannosCostLogger(CustomLogger):
                 e,
                 exc_info=True,
             )
-            return None
+        return kwargs if changed else None
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         try:
