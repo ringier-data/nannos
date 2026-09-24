@@ -1,6 +1,7 @@
 import { defineConfig } from '@hey-api/openapi-ts';
 
-const url = process.env.OVERRIDE_URL || `http://localhost:5001/api/v1/openapi.json`;
+const backendPort = process.env.CONSOLE_BACKEND_PORT || '5001';
+const url = process.env.OVERRIDE_URL || `http://localhost:${backendPort}/api/v1/openapi.json`;
 module.exports = defineConfig({
   input: url,
   output: './src/api/generated',

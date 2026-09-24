@@ -76,6 +76,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCAL_DEV_DIR="$SCRIPT_DIR/local-dev"
 
+# Port console-backend listens on, and that every other service is pointed at.
+# Overridable for when something else already holds the default:
+#   CONSOLE_BACKEND_PORT=5002 ./scripts/start-local.sh
+# Exported so the frontend's vite proxy picks the same value up.
+export CONSOLE_BACKEND_PORT="${CONSOLE_BACKEND_PORT:-5001}"
+
 # Source .env from repo root if present (does not override existing env vars)
 _DOTENV_LOADED=false
 if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -504,7 +510,7 @@ fi
 if [[ -z "$FILES_S3_BUCKET" ]]; then
   log "Configuring local file storage (no S3 bucket configured)..."
   OBJECT_STORAGE_TYPE="local"
-  LOCAL_STORAGE_BASE_URL="http://localhost:5001/api/v1/files/download"
+  LOCAL_STORAGE_BASE_URL="http://localhost:${CONSOLE_BACKEND_PORT}/api/v1/files/download"
   LOCAL_STORAGE_PATH="${LOCAL_STORAGE_PATH:-./local-uploads}"
   ok "Local storage configured at: $LOCAL_STORAGE_PATH"
   ok "Download URL: $LOCAL_STORAGE_BASE_URL"
@@ -882,7 +888,7 @@ docker run -d --name "$_GW_CONTAINER" \
   -e GCP_KEY="${GCP_KEY:-}" \
   "${_GW_GCP_ENV[@]}" \
   -e DEFAULT_VERTEXAI_LOCATION="${DEFAULT_VERTEXAI_LOCATION:-eu}" \
-  -e CONSOLE_BACKEND_URL="http://host.docker.internal:5001" \
+  -e CONSOLE_BACKEND_URL="http://host.docker.internal:${CONSOLE_BACKEND_PORT}" \
   -e GATEWAY_INGEST_TOKEN="$GATEWAY_INGEST_TOKEN" \
   "$_LITELLM_IMAGE" --config /etc/litellm/config.yaml --port 4000 >/dev/null
 
@@ -1008,7 +1014,7 @@ cat <<'EOF'
 
   Services:
     Console ........... http://localhost:5173
-    Backend API ....... http://localhost:5001
+    Backend API ....... http://localhost:${CONSOLE_BACKEND_PORT}
     Orchestrator ...... http://localhost:10001
     Agent Runner ...... http://localhost:5005
     Voice Agent ....... http://localhost:8002
@@ -1064,8 +1070,10 @@ procs:
 
   console-backend:
     cwd: "$ROOT_DIR/packages/console-backend"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5678} -m uvicorn app:asgi_app --host 0.0.0.0 --port 5001 --reload 2>&1 | tee $_LOG_DIR/console-backend.log"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5678} -m uvicorn app:asgi_app --host 0.0.0.0 --port $CONSOLE_BACKEND_PORT --reload 2>&1 | tee $_LOG_DIR/console-backend.log"
     env:
+      # Read back at runtime by the CORS allowlist and the loopback MCP client.
+      CONSOLE_BACKEND_PORT: "$CONSOLE_BACKEND_PORT"
       FIRST_USER_IS_ADMIN: "true"
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "agent-console"
@@ -1103,7 +1111,7 @@ procs:
       CATALOG_SUMMARIZATION_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
       GOOGLE_OAUTH_CLIENT_ID: "$GOOGLE_OAUTH_CLIENT_ID"
       GOOGLE_OAUTH_CLIENT_SECRET: "$GOOGLE_OAUTH_CLIENT_SECRET"
-      GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:5001/api/v1/catalogs/connect/callback"
+      GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:${CONSOLE_BACKEND_PORT}/api/v1/catalogs/connect/callback"
       TWILIO_ACCOUNT_SID: "$TWILIO_ACCOUNT_SID"
       TWILIO_VERIFY_SERVICE_SID: "$TWILIO_VERIFY_SERVICE_SID"
       TWILIO_VERIFY_API_KEY: "$TWILIO_VERIFY_API_KEY"
@@ -1128,7 +1136,7 @@ procs:
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
-      CONSOLE_BACKEND_URL: "http://localhost:5001"
+      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
       SOFFICE_WORKER_URL: "http://localhost:8090"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
@@ -1163,7 +1171,7 @@ procs:
       ORCHESTRATOR_CLIENT_ID: "orchestrator"
       AGENT_ID: "1"
       AGENT_BASE_URL: "http://localhost:10001"
-      CONSOLE_BACKEND_URL: "http://localhost:5001"
+      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
       CONSOLE_FRONTEND_URL: "http://localhost:5173"
       POSTGRES_HOST: "localhost"
       POSTGRES_PORT: "5402"
@@ -1211,7 +1219,7 @@ procs:
       OIDC_CLIENT_ID: "agent-runner"
       OIDC_CLIENT_SECRET: "$_OIDC_SECRET_AGENT_RUNNER"
       AGENT_BASE_URL: "http://localhost:5005"
-      CONSOLE_BACKEND_URL: "http://localhost:5001"
+      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
       POSTGRES_HOST: "localhost"
       POSTGRES_PORT: "5402"
       POSTGRES_DB: "docstore"
@@ -1249,7 +1257,7 @@ procs:
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "voice-agent"
       VOICE_AGENT_BASE_URL: "http://localhost:8002"
-      CONSOLE_BACKEND_URL: "http://localhost:5001"
+      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
       PUBLIC_URL: "${PUBLIC_URL:-}"
       GCP_KEY: '$GCP_KEY'
       GCP_PROJECT_ID: "$GCP_PROJECT_ID"
