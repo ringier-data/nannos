@@ -146,6 +146,10 @@ Full flow, tables and sequence diagrams in `docs/subagent-flow.md`.
 
 The orchestrator's whitelisted tools always include `scheduler_*` and `console_*` prefixed tools (auto-included regardless of user config). This ensures scheduling and skill management are always available without explicit user configuration.
 
+### The Orchestrator Is Told How Many Tools Only Sub-Agents Have
+
+The console's MCP toggles narrow only the orchestrator's whitelist; the general-purpose agent always gets the full registry. So `DynamicToolDispatchMiddleware` appends `_CATALOG_GAP_NOTE` to the system prompt on every model call ("N of this user's M MCP tools are NOT among yours … delegate, never report it missing"). It lives here, not in the PTC middleware, so it holds with PTC on or off. Without it the orchestrator read its own short tool list as everything that exists: with GitHub toggled off it searched its memory for the user's GitHub username instead of delegating (2026-09-24). Only MCP tools (`server_name` metadata) count.
+
 ### File-Analyzer Costs Attributed to Orchestrator
 
 `file-analyzer` is created with `sub_agent_id=None`. This means its LLM costs are attributed to the orchestrator (not to any user-created sub-agent). This is intentional — it's a system capability.

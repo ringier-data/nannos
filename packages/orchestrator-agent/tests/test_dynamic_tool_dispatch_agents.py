@@ -5,12 +5,14 @@ Covers:
 - _enhance_system_prompt_agents: system-prompt replacement & fallback
 - _enhance_task_tool_schema: tool-description replacement & fallback
 - wrap_model_call / awrap_model_call: both pass enhanced system prompt
+- _append_catalog_gap_note: the orchestrator is told how many MCP tools only sub-agents have
 """
 
 from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import SystemMessage
+from langchain_core.tools import StructuredTool
 
 from app.middleware.dynamic_tool_dispatch import DynamicToolDispatchMiddleware
 from app.models.config import GraphRuntimeContext
@@ -315,3 +317,120 @@ class TestWrapModelCallSystemPrompt:
         combined = "".join(b["text"] for b in sm.content_blocks if isinstance(b, dict) and b.get("type") == "text")
         assert '<agent name="file-analyzer">' in combined
         assert '<agent name="jira-agent">' in combined
+
+
+# ===========================================================================
+# _append_catalog_gap_note
+# ===========================================================================
+
+GAP_MARKER = "<tool_catalog>"
+
+
+def _tool(name: str, server: str | None = "github") -> StructuredTool:
+    async def _fn() -> str:
+        return "ok"
+
+    return StructuredTool.from_function(
+        coroutine=_fn,
+        name=name,
+        description=f"{name} description",
+        metadata={"server_name": server} if server else None,
+    )
+
+
+def _registry(mcp_count: int) -> dict:
+    registry = {f"github_tool_{i}": _tool(f"github_tool_{i}") for i in range(mcp_count)}
+    # Not an MCP tool (no server_name): outside the console catalog, never counted.
+    registry["docstore_search"] = _tool("docstore_search", server=None)
+    return registry
+
+
+def _text(system_message: SystemMessage) -> str:
+    return "".join(b["text"] for b in system_message.content_blocks if isinstance(b, dict) and b.get("type") == "text")
+
+
+class TestCatalogGapNote:
+    """The console toggles narrow only the orchestrator's own tools; general-purpose has them all.
+
+    2026-09-24: with the GitHub tools toggled off, the orchestrator saw no GitHub tool, searched
+    its memory for the user's GitHub username and asked for it, instead of delegating. The note
+    must say how many tools exist beyond the orchestrator's own, whether PTC is on or off.
+    """
+
+    @pytest.fixture
+    def middleware(self):
+        return DynamicToolDispatchMiddleware()
+
+    def test_appends_counts_as_the_last_block(self, middleware):
+        ctx = _make_context(tool_registry=_registry(10), whitelisted_tool_names={"github_tool_0", "github_tool_1"})
+        result = middleware._append_catalog_gap_note(_make_system_message_with_agents(""), ctx)
+
+        last = result.content_blocks[-1]["text"]
+        assert GAP_MARKER in last
+        assert "8 of its 10 tools are NOT among them" in last
+        assert "general-purpose sub-agent can use every one of them" in last
+        assert "Base system prompt here." in _text(result), "earlier blocks are kept"
+
+    def test_all_toggles_off_counts_every_tool_as_hidden(self, middleware):
+        ctx = _make_context(tool_registry=_registry(4), whitelisted_tool_names=set())
+        result = middleware._append_catalog_gap_note(_make_system_message_with_agents(""), ctx)
+
+        assert "4 of its 4 tools are NOT among them" in _text(result)
+
+    def test_counts_only_mcp_tools(self, middleware):
+        ctx = _make_context(tool_registry=_registry(4), whitelisted_tool_names={"github_tool_0"})
+        result = middleware._append_catalog_gap_note(_make_system_message_with_agents(""), ctx)
+
+        assert "3 of its 4 tools are NOT among them" in _text(result)
+
+    def test_no_note_when_every_mcp_tool_is_enabled(self, middleware):
+        registry = _registry(5)
+        ctx = _make_context(
+            tool_registry=registry, whitelisted_tool_names={n for n in registry if n != "docstore_search"}
+        )
+        original = _make_system_message_with_agents("")
+
+        assert middleware._append_catalog_gap_note(original, ctx) is original
+
+    def test_no_note_on_the_skip_injection_path(self):
+        middleware = DynamicToolDispatchMiddleware(skip_tool_injection=True)
+        ctx = _make_context(tool_registry=_registry(5), whitelisted_tool_names=set())
+        original = _make_system_message_with_agents("")
+
+        assert middleware._append_catalog_gap_note(original, ctx) is original
+
+    def test_none_system_message_stays_none(self, middleware):
+        ctx = _make_context(tool_registry=_registry(5), whitelisted_tool_names=set())
+
+        assert middleware._append_catalog_gap_note(None, ctx) is None
+
+    @pytest.mark.parametrize("ptc", ["0", "1"])
+    @pytest.mark.asyncio
+    async def test_both_model_call_hooks_carry_the_note_with_ptc_on_or_off(self, middleware, monkeypatch, ptc):
+        monkeypatch.setenv("CODE_INTERPRETER_PTC", ptc)
+        ctx = _make_context(
+            subagent_registry=SAMPLE_REGISTRY,
+            tool_registry=_registry(10),
+            whitelisted_tool_names={"github_tool_0"},
+        )
+        hooks = TestWrapModelCallSystemPrompt()
+        captured = []
+
+        def handler(req):
+            captured.append(req.system_message)
+            return MagicMock()
+
+        async def ahandler(req):
+            captured.append(req.system_message)
+            return MagicMock()
+
+        system_message = _make_system_message_with_agents("- general-purpose: GP agent")
+        middleware.wrap_model_call(hooks._make_request(system_message, ctx), handler)
+        await middleware.awrap_model_call(hooks._make_request(system_message, ctx), ahandler)
+
+        assert len(captured) == 2
+        for sm in captured:
+            text = _text(sm)
+            assert text.count(GAP_MARKER) == 1
+            assert "9 of its 10 tools are NOT among them" in text
+            assert '<agent name="jira-agent">' in text, "the agent list is still enhanced"

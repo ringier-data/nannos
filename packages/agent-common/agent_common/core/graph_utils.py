@@ -397,14 +397,6 @@ _PTC_DISCOVERY_INSTRUCTION = (
     "above before calling it — calling an unknown `tools.<name>` throws."
 )
 
-# To avoid case where orchestrator does not think any tools exist.
-_PTC_CATALOG_GAP_NOTE = (
-    "\n\n`tools.*` is a slice of this user's MCP tool catalog: {hidden} of its {total} tools "
-    "are NOT in it (they are not enabled for you). Those are reachable only by delegating "
-    "with `task` — the general-purpose sub-agent can use every one of them. A tool you "
-    "cannot find in `tools.*` is not unavailable: delegate it, never report it missing.\n"
-)
-
 # Max characters of a tool result kept inline before the code-interpreter
 # middleware evicts it to a file. Override via env for tuning. Default: 20k chars.
 PTC_MAX_RESULT_CHARS = int(os.getenv("PTC_MAX_RESULT_CHARS", "20000"))
@@ -958,42 +950,6 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         return [t for name, t in registry.items() if name in whitelist and isinstance(t, BaseTool)]
 
     @staticmethod
-    def _context_catalog_gap(request: Any) -> tuple[int, int]:
-        """``(hidden, total)`` MCP tools in the request context's registry vs. its whitelist.
-
-        ``total`` counts the registry's MCP tools (``server_name`` metadata — the tools the
-        console toggles govern; docstore and static utilities are not part of that
-        catalog). ``hidden`` is how many of them the whitelist leaves out. That is non-zero
-        only on the orchestrator, whose whitelist is the console's enabled subset: a
-        catalog-mode sub-agent (general-purpose, ``all_tools``) sets its whitelist to the
-        whole catalog, and a plain sub-agent carries no registry at all, so both yield a
-        zero gap. Read as defensively as ``_context_tool_registry``.
-        """
-        runtime = getattr(request, "runtime", None)
-        context = getattr(runtime, "context", None)
-        registry = getattr(context, "tool_registry", None)
-        whitelist = getattr(context, "whitelisted_tool_names", None)
-        if not registry or whitelist is None:
-            return 0, 0
-        total = hidden = 0
-        for name, tool in registry.items():
-            if not isinstance(tool, BaseTool) or not (tool.metadata or {}).get("server_name"):
-                continue
-            total += 1
-            if name not in whitelist:
-                hidden += 1
-        return hidden, total
-
-    def _catalog_gap_note(self, request: Any) -> str:
-        """The always-on "the rest exists — delegate" line, or "" when nothing is hidden."""
-        if not self._expose_context_registry:
-            return ""
-        hidden, total = self._context_catalog_gap(request)
-        if hidden <= 0:
-            return ""
-        return _PTC_CATALOG_GAP_NOTE.format(hidden=hidden, total=total)
-
-    @staticmethod
     def _checkpointed_exposure(request: Any) -> set[str] | None:
         """Return the checkpointed PTC exposure name set, or ``None`` if absent.
 
@@ -1018,9 +974,6 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         exposed set) is installed so it is callable; only ``_render_partition``'s core
         subset is written into the prompt, with ``$ref``-resolved signatures via our
         own renderer (also fixing nested-arg type hints on the sub-agent inline path).
-        On the orchestrator the block always ends with ``_PTC_CATALOG_GAP_NOTE`` — how
-        many of the user's MCP tools are NOT in ``tools.*`` — so the inline list is never
-        read as the whole catalog (see the constant for the incident).
         """
         if self._ptc is None:
             # ``_base_system_prompt`` (an ``__init__`` attribute in langchain-quickjs
@@ -1041,9 +994,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         if self._ptc_prompt_cache is None or self._ptc_prompt_cache[0] != cache_key:
             body = render_tools_namespace(render_set, tool_name=self._tool_name, discovery_note=discovery_note)
             self._ptc_prompt_cache = (cache_key, body)
-        prompt = self._base_prompt(ptc_attached=bool(exposed)) + _TOP_LEVEL_RETURN_RULE + self._ptc_prompt_cache[1]
-        # Outside the body cache on purpose: the numbers are per user, the cache is per graph.
-        return prompt + self._catalog_gap_note(request)
+        return self._base_prompt(ptc_attached=bool(exposed)) + _TOP_LEVEL_RETURN_RULE + self._ptc_prompt_cache[1]
 
     def _ptc_prompt_and_hidden(self, request: Any) -> tuple[str, set[str]]:
         """Build the PTC prompt and the set of tool names exposed this turn.
