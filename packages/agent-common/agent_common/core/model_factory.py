@@ -263,9 +263,10 @@ REASONING_OFF = "none"
 # 1024-token utility call spends its whole budget thinking and returns an empty reply cut off
 # at `finish_reason=length` (prod, 2026-09-23, `chat` = claude-sonnet-5). Anthropic's only off
 # switch there is an explicit `thinking: {"type": "disabled"}`, so `create_model` sends both
-# whenever the effort is `REASONING_OFF`. Portable: Anthropic and Bedrock pass it through,
-# Gemini reads a non-enabled type as thoughts off, and the gateway's `drop_params` discards
-# it for models with no thinking control. Mirrored in console-backend's `llm_gateway`.
+# whenever the effort is `REASONING_OFF` — on Claude models only (`_wants_explicit_thinking_off`).
+# The pair is not portable: on Gemini 3 the proxy maps `reasoning_effort` to `thinking_level` and
+# `thinking` to `thinking_budget` and refuses both at once with a 400, while `reasoning_effort`
+# alone switches thinking off there. Mirrored in console-backend's `llm_gateway`.
 THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
 
 
@@ -381,11 +382,15 @@ def create_model(
         callbacks = [cb for cb in callbacks if type(cb).__name__ != "CostTrackingCallback"] or None
 
     model_kwargs: dict = {}
+    extra_body: dict = {}
     effort = reasoning_effort if reasoning_effort is not None else get_reasoning_effort(thinking_level, model_type)
     if effort:
         model_kwargs["reasoning_effort"] = effort
-        if effort == REASONING_OFF:
-            model_kwargs["thinking"] = dict(THINKING_DISABLED)
+        if effort == REASONING_OFF and _wants_explicit_thinking_off(model_type):
+            # extra_body, not model_kwargs: ChatOpenAI hands model_kwargs to the OpenAI SDK's
+            # `create()` as keyword arguments, and it rejects one it doesn't know ("unexpected
+            # keyword argument 'thinking'") before anything reaches the gateway.
+            extra_body["thinking"] = dict(THINKING_DISABLED)
 
     # Reasoning shares the output budget — give it headroom so thinking doesn't consume the
     # whole (low) gateway-default max_tokens and truncate the answer. Unset for reasoning-off
@@ -413,6 +418,8 @@ def create_model(
     optional: dict = {}
     if max_tokens is not None:
         optional["max_tokens"] = max_tokens
+    if extra_body:
+        optional["extra_body"] = extra_body
     return ChatOpenAI(
         base_url=_gateway_base_url(),
         api_key=_gateway_api_key(),
@@ -850,6 +857,17 @@ def get_model_provider(model_type: ModelType) -> str:
     """
     info = _gateway_models().get(model_type) or {}
     return info.get("litellm_provider") or ""
+
+
+def _wants_explicit_thinking_off(model_type: ModelType) -> bool:
+    """Whether `REASONING_OFF` for this model must also carry `THINKING_DISABLED`: a Claude model.
+
+    Decided on the underlying model id (`model_info.key`, e.g. ``anthropic.claude-sonnet-5``),
+    not the provider — Bedrock also serves DeepSeek, Vertex also serves Claude — falling back to
+    the alias itself when the gateway snapshot is unavailable or does not list it.
+    """
+    info = _gateway_models().get(model_type) or {}
+    return "claude" in (info.get("key") or model_type or "").lower()
 
 
 def is_gemini_model(model_type: ModelType) -> bool:

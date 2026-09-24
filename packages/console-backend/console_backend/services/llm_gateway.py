@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import httpx
@@ -77,7 +78,8 @@ def _first_message(resp_json: dict) -> dict:
     return _first_choice(resp_json).get("message", {})
 
 
-#: The provider-level off switch that has to travel WITH ``reasoning_effort="none"``.
+#: The provider-level off switch that has to travel WITH ``reasoning_effort="none"`` — on
+#: Anthropic models only.
 #:
 #: LiteLLM maps ``reasoning_effort: "none"`` to "send no thinking parameter" and drops any
 #: ``thinking`` key it finds — the right call for models where thinking is opt-in, and a
@@ -86,10 +88,14 @@ def _first_message(resp_json: dict) -> dict:
 #: ``chat`` default was ``claude-sonnet-5``: the condition generator asked for thinking off,
 #: the proxy sent nothing, and the model spent all 1024 output tokens thinking — a
 #: ``finish_reason=length`` reply with zero characters of content. Only an explicit
-#: ``thinking: {"type": "disabled"}`` turns it off there, so "none" sends both. The proxy
-#: processes ``reasoning_effort`` before ``thinking``, so the explicit value survives its
-#: pop; Anthropic and Bedrock pass it through, Gemini reads a non-enabled type as thoughts
-#: off, and ``drop_params`` discards it for models with no such control.
+#: ``thinking: {"type": "disabled"}`` turns it off there. The proxy processes
+#: ``reasoning_effort`` before ``thinking``, so the explicit value survives its pop.
+#:
+#: It is NOT portable, so it goes to Claude models alone (see `_wants_explicit_thinking_off`):
+#: on Gemini 3 the proxy maps ``reasoning_effort`` to ``thinking_level`` and ``thinking`` to
+#: ``thinking_budget``, and refuses the pair with a 400 ("Cannot specify both ...") — every
+#: thinking-off utility call failed on a Gemini 3 low tier. ``reasoning_effort`` alone is
+#: what switches thinking off there.
 THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
 
 
@@ -117,6 +123,47 @@ class GatewayReplyTruncated(RuntimeError):
     Distinct from "no object found" because the remedy is different: the request was fine,
     the output budget was not — typically because a reasoning model spent it thinking.
     """
+
+
+#: {alias: underlying model id} from the gateway's ``/v1/model/info``, re-read at most once a
+#: minute — `gateway_chat` consults it on every thinking-off call, and aliases are re-pointed
+#: rarely. The model id (``model_info.key``, e.g. ``anthropic.claude-sonnet-5`` or
+#: ``vertex_ai/gemini-3.5-flash``) is what identifies the model family; an alias is an
+#: admin-chosen name and ``litellm_provider`` only names the host (Bedrock also serves
+#: DeepSeek, Vertex also serves Claude).
+_MODEL_IDS_TTL = 60.0
+_model_ids: dict[str, str] = {}
+_model_ids_read_at = float("-inf")
+
+
+async def _gateway_model_ids(timeout: float = 5.0) -> dict[str, str]:
+    global _model_ids, _model_ids_read_at
+    if time.monotonic() - _model_ids_read_at < _MODEL_IDS_TTL:
+        return _model_ids
+    # Stamped before the read so a gateway outage is retried once a minute, not per call;
+    # a failed read keeps the last good map.
+    _model_ids_read_at = time.monotonic()
+    url = f"{config.model_gateway.url.rstrip('/')}/v1/model/info"
+    try:
+        resp = await _client.get().get(url, headers=_gateway_headers(), timeout=timeout)
+        resp.raise_for_status()
+        _model_ids = {
+            m["model_name"]: str((m.get("model_info") or {}).get("key") or "")
+            for m in resp.json().get("data", [])
+            if m.get("model_name")
+        }
+    except Exception as e:
+        logger.warning("Gateway model list unreadable (%s); model families unknown", e)
+    return _model_ids
+
+
+async def _wants_explicit_thinking_off(model: str) -> bool:
+    """Whether thinking-off for `model` must also carry `THINKING_DISABLED`: a Claude model.
+
+    Decided on the underlying model id, falling back to the alias itself when the gateway
+    list is unreadable or the alias is not on it.
+    """
+    return "claude" in ((await _gateway_model_ids()).get(model) or model).lower()
 
 
 async def gateway_registered_aliases(timeout: float = 10.0) -> set[str] | None:
@@ -189,8 +236,9 @@ async def gateway_chat(
     would. The proxy runs `drop_params: true`, so a model that takes no such param is
     unaffected either way.
 
-    ``"none"`` also sends `thinking: {"type": "disabled"}` — see `THINKING_DISABLED` for why
-    the effort value alone does not switch thinking off on models where it is on by default.
+    On a Claude model ``"none"`` also sends `thinking: {"type": "disabled"}` — see
+    `THINKING_DISABLED` for why the effort value alone does not switch thinking off there,
+    and why no other model may be sent it.
 
     """
     payload: dict = {
@@ -200,7 +248,7 @@ async def gateway_chat(
     }
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
-        if reasoning_effort == "none":
+        if reasoning_effort == "none" and await _wants_explicit_thinking_off(model):
             payload["thinking"] = dict(THINKING_DISABLED)
     resp = await _client.get().post(
         _completions_url(),
