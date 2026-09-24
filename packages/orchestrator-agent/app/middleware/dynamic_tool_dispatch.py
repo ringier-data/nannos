@@ -599,6 +599,16 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         "- Never call console_create_bug_report for errors you recovered from."
     )
 
+    # The console toggles narrow only the orchestrator's own tools. Say the rest exist, PTC on or off.
+    _CATALOG_GAP_NOTE = (
+        "\n\n<tool_catalog>\n"
+        "The tools you can call yourself are a slice of this user's MCP tool catalog: {hidden} of its "
+        "{total} tools are NOT among them (the user has not enabled them for you). Those are reachable "
+        "only by delegating with `task` — the general-purpose sub-agent can use every one of them. "
+        "A tool you do not have is not unavailable: delegate the work, never report the tool as missing.\n"
+        "</tool_catalog>"
+    )
+
     def _enhance_system_prompt_agents(
         self, system_message: SystemMessage | None, user_context: GraphRuntimeContext
     ) -> SystemMessage | None:
@@ -675,6 +685,33 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         new_blocks.append({"type": "text", "text": self._BUG_REPORT_TOOL_GUIDANCE})
 
         return SystemMessage(content_blocks=new_blocks)
+
+    @staticmethod
+    def _catalog_gap(user_context: GraphRuntimeContext) -> tuple[int, int]:
+        """``(hidden, total)``: the user's MCP tools, and how many the orchestrator whitelist leaves out.
+
+        Only tools with ``server_name`` metadata count: that is the catalog the console toggles govern.
+        """
+        total = hidden = 0
+        for name, tool in user_context.tool_registry.items():
+            if not isinstance(tool, BaseTool) or not (tool.metadata or {}).get("server_name"):
+                continue
+            total += 1
+            if name not in user_context.whitelisted_tool_names:
+                hidden += 1
+        return hidden, total
+
+    def _append_catalog_gap_note(
+        self, system_message: SystemMessage | None, user_context: GraphRuntimeContext
+    ) -> SystemMessage | None:
+        """Append ``_CATALOG_GAP_NOTE`` when the user has MCP tools the orchestrator itself lacks."""
+        if system_message is None or self.skip_tool_injection:
+            return system_message
+        hidden, total = self._catalog_gap(user_context)
+        if hidden <= 0:
+            return system_message
+        note = self._CATALOG_GAP_NOTE.format(hidden=hidden, total=total)
+        return SystemMessage(content_blocks=[*system_message.content_blocks, {"type": "text", "text": note}])
 
     def _enhance_task_tool_schema(
         self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
@@ -1419,6 +1456,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Enhance the system prompt so the LLM sees all runtime-discovered agents
         # (SubAgentMiddleware only listed agents known at graph creation time)
         enhanced_system = self._enhance_system_prompt_agents(request.system_message, user_context)
+        enhanced_system = self._append_catalog_gap_note(enhanced_system, user_context)
 
         # Override request with user's tools and enhanced system prompt
         # Cast needed because list is invariant in Python typing
@@ -1482,6 +1520,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Enhance the system prompt so the LLM sees all runtime-discovered agents
         # (SubAgentMiddleware only listed agents known at graph creation time)
         enhanced_system = self._enhance_system_prompt_agents(request.system_message, user_context)
+        enhanced_system = self._append_catalog_gap_note(enhanced_system, user_context)
 
         # Try progressive cleanup levels on INVALID_ARGUMENT errors
         # MODERATE removes all enums (solves global state space limit with 80+ tools)
