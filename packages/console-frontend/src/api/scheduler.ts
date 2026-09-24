@@ -16,6 +16,9 @@
 import { client } from './generated/client.gen';
 import {
   generateConditionApiV1SchedulerGenerateConditionPost,
+  listChannelsApiV1DeliveryChannelsGet,
+  schedulerListJobs,
+  schedulerListSharedJobs,
   generateJobDraftApiV1SchedulerGenerateJobDraftPost,
   invokeMcpToolApiV1McpToolsInvokePost,
   resumeParkedRunApiV1SchedulerJobsJobIdRunsRunIdResumePost,
@@ -120,21 +123,15 @@ export async function getDeliveryChannels(opts?: {
   page?: number;
   limit?: number;
 }): Promise<DeliveryChannelPage> {
-  const query: Record<string, string | number> = {};
-  if (opts?.search) query.search = opts.search;
-  if (opts?.limit !== undefined) {
-    query.limit = opts.limit;
-    query.page = opts.page ?? 1;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({
-    url: '/api/v1/delivery-channels',
-    query,
+  const { data, error } = await listChannelsApiV1DeliveryChannelsGet({
+    query: {
+      search: opts?.search || undefined,
+      ...(opts?.limit !== undefined ? { limit: opts.limit, page: opts.page ?? 1 } : {}),
+    },
   });
   if (error) throw error;
-  const body = data as { channels: DeliveryChannel[]; total?: number };
-  return { channels: body.channels, total: body.total ?? body.channels.length };
+  const body = data!;
+  return { channels: body.channels as DeliveryChannel[], total: body.total ?? body.channels.length };
 }
 
 export interface DeliveryChannelUpdate {
@@ -454,27 +451,22 @@ export interface ScheduledJobPage {
  *
  * The endpoint is an MCP tool, so its body stays a bare array for the agents
  * that call it; the count the console needs for pagination comes back in the
- * `X-Total-Count` header. Passing no options returns every job.
+ * `X-Total-Count` header, read off the generated operation's `response`.
+ * Passing no options returns every job.
  */
 export async function listJobs(opts?: {
   search?: string;
   page?: number;
   limit?: number;
 }): Promise<ScheduledJobPage> {
-  const query: Record<string, string | number> = {};
-  if (opts?.search) query.search = opts.search;
-  if (opts?.limit !== undefined) {
-    query.limit = opts.limit;
-    query.page = opts.page ?? 1;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error, response } = await (client as any).get({
-    url: '/api/v1/scheduler/jobs',
-    query,
+  const { data, error, response } = await schedulerListJobs({
+    query: {
+      search: opts?.search || undefined,
+      ...(opts?.limit !== undefined ? { limit: opts.limit, page: opts.page ?? 1 } : {}),
+    },
   });
   if (error) throw new Error(formatApiError(error));
-  const jobs = data as ScheduledJob[];
+  const jobs = data ?? [];
   // Absent when the caller asked for everything, and on any proxy that drops it;
   // the page length is then the honest count.
   const header = response?.headers?.get?.('X-Total-Count');
@@ -491,8 +483,9 @@ export interface SharedJobDefinitionPage {
  * Shared job definitions, optionally one page at a time.
  *
  * Mirrors `listJobs` — same MCP-tool constraint, so the body is a bare array and
- * the count travels in `X-Total-Count`. The generated tanstack wrapper discards
- * the response object, which is why this is hand-written.
+ * the count travels in `X-Total-Count`. It is the tanstack *query wrapper* that
+ * discards the response object; the generated operation itself exposes it, so
+ * this is a typed call.
  */
 export async function listSharedDefinitions(opts?: {
   search?: string;
@@ -500,21 +493,15 @@ export async function listSharedDefinitions(opts?: {
   page?: number;
   limit?: number;
 }): Promise<SharedJobDefinitionPage> {
-  const query: Record<string, string | number | boolean> = {};
-  if (opts?.search) query.search = opts.search;
-  if (opts?.subscribed !== undefined) query.subscribed = opts.subscribed;
-  if (opts?.limit !== undefined) {
-    query.limit = opts.limit;
-    query.page = opts.page ?? 1;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error, response } = await (client as any).get({
-    url: '/api/v1/scheduler/definitions',
-    query,
+  const { data, error, response } = await schedulerListSharedJobs({
+    query: {
+      search: opts?.search || undefined,
+      subscribed: opts?.subscribed,
+      ...(opts?.limit !== undefined ? { limit: opts.limit, page: opts.page ?? 1 } : {}),
+    },
   });
   if (error) throw new Error(formatApiError(error));
-  const definitions = data as SharedJobDefinition[];
+  const definitions = data ?? [];
   const header = response?.headers?.get?.('X-Total-Count');
   const total = header != null && header !== '' ? Number(header) : definitions.length;
   return { definitions, total: Number.isFinite(total) ? total : definitions.length };

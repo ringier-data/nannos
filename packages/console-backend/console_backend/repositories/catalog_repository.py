@@ -163,8 +163,12 @@ class CatalogRepository(AuditedRepository):
             return catalogs, len(catalogs)
 
         count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        # Deliberately not `SELECT COUNT(*) FROM (<the wide inner query>)`: the
+        # projection's page-stats aggregate and per-row EXISTS cost real work and
+        # cannot change how many rows match.
+        count_inner = inner.replace(projection, "c.id", 1)
         count = await db.execute(
-            text(f"SELECT COUNT(*) FROM ({inner}) AS accessible"), count_params
+            text(f"SELECT COUNT(*) FROM ({count_inner}) AS accessible"), count_params
         )
         return catalogs, count.scalar() or 0
 
