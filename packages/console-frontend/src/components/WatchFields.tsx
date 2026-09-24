@@ -569,7 +569,7 @@ export function WatchFields({
                         ? value.prompt.trim()
                           ? 'The message above is sent as written, so this brief is discarded on save.'
                           : 'The message above is sent as written. Empty it to have one written from the matched items instead.'
-                        : 'A brief for the model that writes the message from the matched items: what to include, how to build a link from their fields. Plain text goes out, so links are bare URLs.'}
+                        : 'A brief for the model that writes the message from the matched items: what to include, how to build a link from their fields, how to lay it out. It is written for the delivery channel, so a list or a table renders where the channel supports it.'}
                     </p>
                   </div>
                 </div>

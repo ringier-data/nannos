@@ -159,9 +159,15 @@ export async function handleA2ANotification(
         ? schedulerPayload.reply_to_message?.ts
         : undefined;
 
+    // Posted the way an interactive reply is (`markdown_text`, see taskResponseHandler),
+    // so a scheduled notification renders like an answer typed in a thread. `text` is
+    // mrkdwn and Slack refuses it alongside `markdown_text`; it stays only under the ask
+    // card, where `blocks` carry the message and `text` is the digest fallback.
     const postResult = await slackClient.chat.postMessage({
       channel: dmResult.channel.id,
-      text: schedulerPayload.agent_message,
+      ...(authPrompt
+        ? { text: schedulerPayload.agent_message }
+        : { markdown_text: schedulerPayload.agent_message }),
       ...(askThreadTs ? { thread_ts: askThreadTs } : {}),
       ...(authPrompt
         ? {

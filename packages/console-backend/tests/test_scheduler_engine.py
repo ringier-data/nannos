@@ -1845,6 +1845,66 @@ class TestWriteNotification:
         assert '"campaignId": 12' in prompt  # the facts still come from the evidence
 
     @pytest.mark.asyncio
+    async def test_the_channel_rules_reach_the_writer(self):
+        # The same rules an agent run on this channel is told through the dispatch
+        # metadata: a Slack notification is written as mrkdwn, not pinned to plain text.
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.prompt = "One bullet per item."
+        chat = AsyncMock(return_value="• item 1")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "m"}),
+            ):
+                await engine._write_notification(
+                    job, WatchOutcome(condition_met=True, check_result={"items": [1]}, evidence=[1]), "slack"
+                )
+        prompt = chat.await_args.args[0]
+        assert '<message_formatting format="slack">' in prompt
+        assert "mrkdwn" in prompt
+        assert "Plain text only" not in prompt
+        # A brief may ask for a row per item with a link each; the budget allows it.
+        assert chat.await_args.kwargs["max_tokens"] > 768
+
+    @pytest.mark.asyncio
+    async def test_markdown_needs_no_rules_and_no_plain_text_pin(self):
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        job.prompt = None
+        chat = AsyncMock(return_value="Something changed.")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "m"}),
+            ):
+                await engine._write_notification(job, WatchOutcome(condition_met=True, check_result={"a": 1}))
+        prompt = chat.await_args.args[0]
+        assert "<message_formatting" not in prompt
+        assert "Plain text only" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_the_dispatch_hands_the_writer_the_channels_format(self):
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None, delivery_channel_id=3)
+        job.check_tool = "ping_tool"
+        job.notification_message = ""
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {
+            "webhook_url": "https://hook",
+            "secret": "s",
+            "message_formatting": "google-chat",
+        }
+        with patch.object(engine, "_write_notification", AsyncMock(return_value="Written.")) as write:
+            await engine._build_message_args(
+                job,
+                run_id=7,
+                access_token="tok",
+                db=AsyncMock(),
+                watch_outcome=WatchOutcome(condition_met=True, check_result={"a": 1}),
+            )
+        assert write.await_args.args[2] == "google-chat"
+
+    @pytest.mark.asyncio
     async def test_a_cut_off_message_is_trimmed_to_its_last_full_line(self):
         # A brief asking for a line per item can outrun the budget; a half URL delivered
         # verbatim is worse than one line fewer.
