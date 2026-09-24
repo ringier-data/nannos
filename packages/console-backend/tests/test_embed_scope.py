@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from console_backend.models.socket_session import SocketSession
+from console_backend.services.embed_binding_service import EmbedBindingService
 
 NOW = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
 
@@ -45,10 +46,34 @@ def test_apply_embed_scope_unbound_connection_drops_client_claim():
     assert "executeOnlySubAgentId" not in metadata and "subAgentId" not in metadata
 
 
-def _token_path_mocks(*, azp: str | None, bind_result, existing_user=True):
+def _embed_service(bound_client_ids: dict[str, int], bind_result) -> EmbedBindingService:
+    """A real service — so the socket path runs the real candidate logic — whose binding
+    table lookup answers from *bound_client_ids*."""
+    service = EmbedBindingService(
+        sub_agent_service=MagicMock(),
+        user_service=MagicMock(),
+        session_factory=MagicMock(),
+        client=MagicMock(),
+        repository=MagicMock(),
+    )
+    service.sub_agent_id_for_azp = AsyncMock(side_effect=lambda azp, db=None: bound_client_ids.get(azp))
+    service.bind_connection = bind_result
+    return service
+
+
+def _token_path_mocks(
+    *,
+    azp: str | None,
+    bind_result,
+    existing_user=True,
+    aud: str | list[str] | None = None,
+    bound_client_ids: dict[str, int] | None = None,
+):
     claims = {"sub": "sub-1", "email": "e@x", "exp": time.time() + 600}
     if azp is not None:
         claims["azp"] = azp
+    if aud is not None:
+        claims["aud"] = aud
     validator = MagicMock()
     validator.validate = AsyncMock(return_value=claims)
 
@@ -65,7 +90,9 @@ def _token_path_mocks(*, azp: str | None, bind_result, existing_user=True):
         return_value=user if existing_user else None
     )
     sio.app_instance.state.user_service.upsert_user = AsyncMock(return_value=user)
-    sio.app_instance.state.embed_binding_service.bind_connection = bind_result
+    sio.app_instance.state.embed_binding_service = _embed_service(
+        bound_client_ids if bound_client_ids is not None else {"nannos-embedded": 20}, bind_result
+    )
     sio.app_instance.state.session_service.create_session = AsyncMock(
         return_value="stored-1"
     )
@@ -96,6 +123,62 @@ async def test_token_path_binds_azp_and_activates_user():
     bind.assert_awaited_once()
     assert bind.await_args.kwargs == {"user": user, "azp": "nannos-embedded"}
     db.commit.assert_awaited()  # the activation row must land
+
+
+@pytest.mark.asyncio
+async def test_token_path_binds_a_broker_minted_token_by_its_audience():
+    """A token the broker minted for a host carries console-backend's own client as azp
+    and the host's client id in aud. The host id is what the binding is keyed by."""
+    import app as app_module
+    from console_backend.config import config
+
+    bind = AsyncMock(return_value=21)
+    validator, factory, db, user, sio = _token_path_mocks(
+        azp=config.oidc.client_id,
+        aud=["cockpit-embed", "account"],
+        bind_result=bind,
+        bound_client_ids={"cockpit-embed": 21},
+    )
+    with (
+        patch(
+            "console_backend.utils.jwt_validators.get_jwt_validator",
+            return_value=validator,
+        ),
+        patch("app.get_async_session_factory", return_value=factory),
+        patch("app.sio", sio),
+    ):
+        result = await app_module._resolve_socket_user_via_token("a.jwt")
+
+    assert result == app_module._SocketTokenAuth(http_session_id="stored-1", embedded_sub_agent_id=21)
+    assert bind.await_args.kwargs == {"user": user, "azp": "cockpit-embed"}
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_token_path_ignores_aud_on_a_token_another_client_minted():
+    """Only console-backend can mint a token whose azp is its own client; a token of any
+    other client is bound by its azp alone, whatever its aud says."""
+    import app as app_module
+
+    bind = AsyncMock(return_value=21)
+    validator, factory, db, _, sio = _token_path_mocks(
+        azp="slack-client",
+        aud=["cockpit-embed"],
+        bind_result=bind,
+        bound_client_ids={"cockpit-embed": 21},
+    )
+    with (
+        patch(
+            "console_backend.utils.jwt_validators.get_jwt_validator",
+            return_value=validator,
+        ),
+        patch("app.get_async_session_factory", return_value=factory),
+        patch("app.sio", sio),
+    ):
+        result = await app_module._resolve_socket_user_via_token("a.jwt")
+
+    assert result is not None and result.embedded_sub_agent_id is None
+    bind.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -170,11 +253,11 @@ async def _list_conversations(bound: int | None, query_param: str | None):
     request.app.state.conversation_service.get_conversations_by_user_id = AsyncMock(
         return_value=conversations
     )
-    request.app.state.embed_binding_service.sub_agent_id_for_azp = AsyncMock(
+    request.app.state.embed_binding_service.sub_agent_id_for_token_claims = AsyncMock(
         return_value=bound
     )
     with patch.object(
-        cr, "get_client_id_from_request", AsyncMock(return_value="some-client")
+        cr, "get_token_claims_from_request", AsyncMock(return_value={"azp": "some-client"})
     ):
         out = await cr.get_conversations_by_user(
             request,

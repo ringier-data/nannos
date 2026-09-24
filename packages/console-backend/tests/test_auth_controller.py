@@ -612,3 +612,88 @@ class TestAuthController:
         # Should NOT raise — login completes despite Keycloak failure
         result = await controller.get_login_callback(request, response, db=pg_session)
         assert result.status_code == 303
+
+
+def test_both_oauth_registrations_are_the_same_keycloak_client(monkeypatch):
+    """The console login and the token broker each get their own Authlib registration
+    (separate session state), backed by one Keycloak client."""
+    import console_backend.controllers.auth_controller as ac
+
+    register = MagicMock()
+    monkeypatch.setattr(ac.oauth, "register", register)
+    ac.register_oauth_provider()
+
+    assert [c.kwargs["name"] for c in register.call_args_list] == ["oidc", "broker"]
+    assert len({c.kwargs["client_id"] for c in register.call_args_list}) == 1
+
+
+@pytest.mark.asyncio
+class TestSignInReleasesHeldSubscriptions:
+    """Every sign-in vaults the offline token; right after it, subscriptions held back
+    for the user's first sign-in are switched on. Neither may fail the sign-in."""
+
+    def _controller(self, session_service, user_service, token_service, scheduler_service):
+        controller = AuthController(
+            session_service,
+            user_service,
+            scheduler_token_service=token_service,
+            scheduler_service=scheduler_service,
+        )
+        controller.user_service.upsert_user = AsyncMock(return_value=MagicMock(id="user-123"))
+        return controller
+
+    def _token(self) -> dict:
+        return {
+            "access_token": "at",
+            "id_token": "it",
+            "refresh_token": "offline-rt",
+            "userinfo": {"sub": "sub-1", "email": "a@example.com", "given_name": "A", "family_name": "B"},
+        }
+
+    async def _callback(self, controller, create_mock_request, create_mock_response, mock_config, mock_oauth, db):
+        request = create_mock_request()
+        request.session["redirect_to"] = f"https://{mock_config.base_domain}/"
+        mock_oauth.authorize_access_token = AsyncMock(return_value=self._token())
+        return await controller.get_login_callback(request, create_mock_response(), db=db)
+
+    async def test_released_after_the_token_is_vaulted(
+        self, session_service, user_service, create_mock_request, create_mock_response, mock_config, mock_oauth
+    ):
+        tokens = MagicMock(store_offline_token=AsyncMock())
+        scheduler = MagicMock(release_sign_in_holds=AsyncMock(return_value=2))
+        controller = self._controller(session_service, user_service, tokens, scheduler)
+        db = MagicMock(rollback=AsyncMock())
+
+        result = await self._callback(controller, create_mock_request, create_mock_response, mock_config, mock_oauth, db)
+
+        assert result.status_code == 303
+        assert tokens.store_offline_token.await_args.kwargs["refresh_token"] == "offline-rt"
+        scheduler.release_sign_in_holds.assert_awaited_once()
+        assert scheduler.release_sign_in_holds.await_args.args[1].id == "user-123"
+
+    async def test_a_failed_release_rolls_back_only_itself(
+        self, session_service, user_service, create_mock_request, create_mock_response, mock_config, mock_oauth
+    ):
+        tokens = MagicMock(store_offline_token=AsyncMock())
+        scheduler = MagicMock(release_sign_in_holds=AsyncMock(side_effect=RuntimeError("db hiccup")))
+        controller = self._controller(session_service, user_service, tokens, scheduler)
+        db = MagicMock(rollback=AsyncMock())
+
+        result = await self._callback(controller, create_mock_request, create_mock_response, mock_config, mock_oauth, db)
+
+        assert result.status_code == 303
+        db.rollback.assert_awaited_once()
+
+    async def test_nothing_is_released_when_vaulting_failed(
+        self, session_service, user_service, create_mock_request, create_mock_response, mock_config, mock_oauth
+    ):
+        tokens = MagicMock(store_offline_token=AsyncMock(side_effect=RuntimeError("kms")))
+        scheduler = MagicMock(release_sign_in_holds=AsyncMock())
+        controller = self._controller(session_service, user_service, tokens, scheduler)
+
+        result = await self._callback(
+            controller, create_mock_request, create_mock_response, mock_config, mock_oauth, MagicMock()
+        )
+
+        assert result.status_code == 303
+        scheduler.release_sign_in_holds.assert_not_awaited()

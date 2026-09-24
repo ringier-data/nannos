@@ -20,6 +20,7 @@ import {
   Cpu,
   Wallet,
   Activity,
+  LogIn,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -145,5 +146,10 @@ export const adminNavItems: NavItem[] = [
     title: 'Tool Risk Scores',
     url: '/app/admin/tool-risk-scores',
     icon: ShieldAlert,
+  },
+  {
+    title: 'Broker Clients',
+    url: '/app/admin/broker-clients',
+    icon: LogIn,
   },
 ];

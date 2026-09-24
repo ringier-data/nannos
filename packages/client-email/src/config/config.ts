@@ -1,6 +1,15 @@
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
 export type EnvName = 'local' | 'dev' | 'stg' | 'prod';
+/**
+ * Who runs the per-user sign-in.
+ *   'local'  — this client runs its own Keycloak login and holds the user's tokens.
+ *   'broker' — console-backend's token broker runs it, keeps the one offline token, and
+ *              mints tokens on demand. Rows signed in locally keep working until they
+ *              drain. Requires CONSOLE_BACKEND_URL.
+ */
+export type UserAuthMode = 'local' | 'broker';
+const USER_AUTH_MODES: readonly UserAuthMode[] = ['local', 'broker'];
 
 export interface StorageConfig {
   provider: string;
@@ -50,6 +59,17 @@ export interface Config {
     url: string;
     timeout: number;
   };
+  /** console-backend; required for USER_AUTH_MODE=broker. */
+  readonly consoleBackend?: {
+    url: string;
+    audience: string;
+    /**
+     * The console's public URL (CONSOLE_FRONTEND_URL), for links a browser opens, such as
+     * the broker sign-in. `url` may be in-cluster only. Unset: the same as `url`.
+     */
+    publicUrl: string;
+  };
+  readonly userAuthMode: UserAuthMode;
   readonly localSqs: {
     queueUrl: string;
     pollIntervalMs: number;
@@ -123,6 +143,14 @@ export async function getConfigFromEnv(): Promise<Config> {
     throw new Error('Please provide A2A_SERVER_URL');
   }
 
+  const userAuthMode = (process.env.USER_AUTH_MODE || 'local') as UserAuthMode;
+  if (!USER_AUTH_MODES.includes(userAuthMode)) {
+    throw new Error(`Unknown USER_AUTH_MODE: ${userAuthMode} (expected one of ${USER_AUTH_MODES.join(', ')})`);
+  }
+  if (userAuthMode === 'broker' && !process.env.CONSOLE_BACKEND_URL) {
+    throw new Error('USER_AUTH_MODE=broker requires CONSOLE_BACKEND_URL');
+  }
+
   // Get OIDC client secret (potentially from SSM)
   const oidcClientSecret = await getSecretSSMValue('OIDC_CLIENT_SECRET', 'OIDC_CLIENT_SECRET_SSM_KEY');
 
@@ -184,6 +212,14 @@ export async function getConfigFromEnv(): Promise<Config> {
       url: process.env.A2A_SERVER_URL!,
       timeout: Number(process.env.A2A_SERVER_TIMEOUT) || 30000,
     },
+    consoleBackend: process.env.CONSOLE_BACKEND_URL
+      ? {
+          url: process.env.CONSOLE_BACKEND_URL,
+          audience: process.env.OIDC_CONSOLE_BACKEND_AUDIENCE || 'agent-console',
+          publicUrl: process.env.CONSOLE_FRONTEND_URL || process.env.CONSOLE_BACKEND_URL,
+        }
+      : undefined,
+    userAuthMode,
     localSqs: {
       queueUrl: process.env.LOCAL_SQS_QUEUE_URL || '',
       pollIntervalMs: Number(process.env.LOCAL_SQS_POLL_INTERVAL_MS) || 5000,

@@ -1,5 +1,5 @@
 import { App } from '@slack/bolt';
-import { UserAuthService } from '../../services/userAuthService.js';
+import type { IUserAuthService } from '../../services/userAuthService.js';
 import { A2AClientService } from '../../services/a2aClientService.js';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import { Logger } from '../../utils/logger.js';
@@ -25,7 +25,7 @@ import { FeedbackService } from '../../services/feedbackService.js';
  */
 export function registerMessageListeners(
   app: App,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   a2aClientService: A2AClientService,
   contextStore: IContextStore,
   pendingRequestStore: IPendingRequestStore,

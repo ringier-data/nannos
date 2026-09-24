@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, field_validator
 
 from ..config import config
-from ..dependencies import get_client_id_from_request, require_auth_or_bearer_token
+from ..dependencies import get_token_claims_from_request, require_auth_or_bearer_token
 from ..models.user import User
 from ..services.conversation_summary import MAX_TITLE_CHARS
 
@@ -96,11 +96,12 @@ async def get_conversations_by_user(
             # Exclude playground conversations (those with sub_agent_config_hash set)
             conversations = [c for c in conversations if c.sub_agent_config_hash is None]
 
-        # Embedded hosts (ADR-0006): the scope comes from the bearer token's azp when that
-        # azp is bound to a sub-agent, never from the query string alone.
+        # Embedded hosts (ADR-0006): the scope comes from the bearer token's azp (or, for a
+        # token the broker minted for a host, its aud) when that client id is bound to a
+        # sub-agent, never from the query string alone.
         embed_service = getattr(request.app.state, "embed_binding_service", None)
         if embed_service is not None:
-            bound = await embed_service.sub_agent_id_for_azp(await get_client_id_from_request(request))
+            bound = await embed_service.sub_agent_id_for_token_claims(await get_token_claims_from_request(request))
             if bound is not None:
                 embedded_sub_agent_id = str(bound)
         # Scope to one embedded application's conversations (see docstring).

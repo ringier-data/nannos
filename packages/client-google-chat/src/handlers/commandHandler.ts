@@ -1,7 +1,7 @@
 import { Logger } from '../utils/logger.js';
 
 import type { IContextStore, IInFlightTaskStore } from '../storage/types.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import { HandlerDependencies } from './types.js';
 
@@ -31,7 +31,7 @@ async function handleDebugCommand(
   chatService: GoogleChatService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
-  userAuthService: UserAuthService
+  userAuthService: IUserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('handleDebugCommand');
   logger.info(`debug command from user ${appCommand.userId} in thread ${appCommand.threadId}`);
@@ -97,7 +97,7 @@ async function handleDebugCommand(
 async function handleDebugLogoutCommand(
   appCommand: AppCommand,
   chatService: GoogleChatService,
-  userAuthService: UserAuthService
+  userAuthService: IUserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('handleDebugLogoutCommand');
   logger.info(`debug logout from user ${appCommand.userId} in thread ${appCommand.threadId}`);
@@ -146,7 +146,7 @@ async function handleDebugLogoutCommand(
 async function handleLoginCommand(
   appCommand: AppCommand,
   chatService: GoogleChatService,
-  userAuthService: UserAuthService
+  userAuthService: IUserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('handleLoginCommand');
   logger.info(`login command from user ${appCommand.userId}`);

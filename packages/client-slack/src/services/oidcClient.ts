@@ -4,6 +4,16 @@ import { Logger } from '../utils/logger.js';
 import { Config } from '../config/config.js';
 
 /**
+ * What a Keycloak token response maps to: a user_auth row minus its keys, with the
+ * token fields a local sign-in always has.
+ */
+export type LocalTokenSet = Omit<UserAuthToken, 'userId' | 'teamId'> & {
+  accessToken: string;
+  expiresAt: number;
+  tokenType: string;
+};
+
+/**
  * OIDC client for token exchange and refresh using openid-client
  */
 export class OIDCClient {
@@ -45,7 +55,7 @@ export class OIDCClient {
     callbackUrl: string,
     codeVerifier: string,
     expectedState: string
-  ): Promise<Omit<UserAuthToken, 'userId' | 'teamId'>> {
+  ): Promise<LocalTokenSet> {
     try {
       const config = await this.getConfiguration();
 
@@ -60,15 +70,18 @@ export class OIDCClient {
       return this.mapTokenSet(tokens);
     } catch (error) {
       this.logger.error(error, `Failed to exchange code for tokens: ${error}`);
-      throw new Error(`OIDC token exchange failed: ${error}`);
+      throw new Error(`OIDC token exchange failed: ${error}`, { cause: error });
     }
   }
 
   /**
    * Refresh an access token using refresh token
    * Note: userId and teamId must be added by the caller
+   *
+   * The Keycloak error travels as `cause`, so a caller can tell a dead refresh token
+   * (`cause.error === 'invalid_grant'`) from a transient failure.
    */
-  async refreshAccessToken(refreshToken: string): Promise<Omit<UserAuthToken, 'userId' | 'teamId'>> {
+  async refreshAccessToken(refreshToken: string): Promise<LocalTokenSet> {
     try {
       const config = await this.getConfiguration();
 
@@ -77,7 +90,7 @@ export class OIDCClient {
       return this.mapTokenSet(tokens);
     } catch (error) {
       this.logger.error(error, `Failed to refresh access token: ${error}`);
-      throw new Error(`OIDC token refresh failed: ${error}`);
+      throw new Error(`OIDC token refresh failed: ${error}`, { cause: error });
     }
   }
 
@@ -146,7 +159,7 @@ export class OIDCClient {
     callbackUrl: string,
     codeVerifier: string,
     expectedState: string
-  ): Promise<Omit<UserAuthToken, 'userId' | 'teamId'>> {
+  ): Promise<LocalTokenSet> {
     try {
       const config = await this.getConfiguration();
 
@@ -226,7 +239,8 @@ export class OIDCClient {
       };
     } catch (error) {
       this.logger.error(error, `Failed to exchange token for audience ${targetAudience}: ${error}`);
-      throw new Error(`Token exchange failed (original token=${subjectToken}): ${error}`);
+      // Never put the subject token into the error: it ends up in logs.
+      throw new Error(`Token exchange failed for audience ${targetAudience}: ${error}`, { cause: error });
     }
   }
 
@@ -234,26 +248,36 @@ export class OIDCClient {
    * Acquire a server-to-server access token via the OAuth2 client_credentials grant.
    */
   async getServiceToken(audience: string): Promise<string> {
+    return (await this.getServiceCredentials(audience)).accessToken;
+  }
+
+  /**
+   * Like `getServiceToken`, with the token's expiry, so a caller can cache it.
+   */
+  async getServiceCredentials(audience: string): Promise<{ accessToken: string; expiresAt: number }> {
     const config = await this.getConfiguration();
     this.logger.info(`Requesting client_credentials token for audience=${audience}`);
-    
+
     const response = await client.clientCredentialsGrant(config, {
       audience,
       scope: 'openid',
     });
-  
-    return response.access_token;
+
+    return {
+      accessToken: response.access_token,
+      expiresAt: Date.now() + (response.expires_in ?? 300) * 1000,
+    };
   }
 
   /**
    * Map openid-client token set to UserAuthToken
    */
-  private mapTokenSet(tokens: client.TokenEndpointResponse & client.TokenEndpointResponseHelpers): Omit<UserAuthToken, 'userId' | 'teamId'> {
+  private mapTokenSet(tokens: client.TokenEndpointResponse & client.TokenEndpointResponseHelpers): LocalTokenSet {
     const now = Date.now();
     const expiresIn = tokens.expires_in ?? 3600; // Default to 1 hour if not provided
     const expiresAt = now + expiresIn * 1000;
 
-    const result: Omit<UserAuthToken, 'userId' | 'teamId'> = {
+    const result: LocalTokenSet = {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresAt,

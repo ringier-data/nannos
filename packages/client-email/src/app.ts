@@ -3,7 +3,7 @@ import { getConfigFromEnv } from './config/config.js';
 import { Logger } from './utils/logger.js';
 import { Storage } from './storage/storage.js';
 import { OIDCClient } from './services/oidcClient.js';
-import { UserAuthService } from './services/userAuthService.js';
+import { createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { EmailOutboundService } from './services/emailOutboundService.js';
@@ -24,7 +24,8 @@ async function main() {
 
   // Initialize services
   const oidcClient = new OIDCClient(config);
-  const userAuthService = new UserAuthService(storage, oidcClient, config);
+  // USER_AUTH_MODE picks the client's own login or console-backend's token broker.
+  const userAuthService = createUserAuthService(config, storage, oidcClient);
   const a2aClientService = new A2AClientService(config.a2aServer.url, config.a2aServer.timeout);
   const fileStorageService = new FileStorageService(config);
   const emailOutboundService = new EmailOutboundService(config);
@@ -120,16 +121,20 @@ async function main() {
       res
         .status(result.success ? 200 : 400)
         .type('html')
-        .send(generateCallbackHTML(result.success, result.message));
+        .send(generateCallbackHTML(result.success, result.message, { acceptLanguage: req.headers['accept-language'] }));
     } catch (err) {
       logger.error(err, 'Unhandled error in OAuth callback');
-      res.status(500).type('html').send(generateCallbackHTML(false, 'An unexpected error occurred.'));
+      res
+        .status(500)
+        .type('html')
+        .send(generateCallbackHTML(false, 'An unexpected error occurred.', { acceptLanguage: req.headers['accept-language'] }));
     }
   });
 
   // Start server
   const server = app.listen(config.appPort, () => {
     logger.info(`Email A2A client listening on port ${config.appPort}`);
+    logger.info(`User sign-in: ${config.userAuthMode === 'broker' ? 'console-backend token broker' : 'local'}`);
   });
 
   // Ensure SNS subscription is active (idempotent)

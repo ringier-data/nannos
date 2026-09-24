@@ -16,6 +16,8 @@ from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 from .catalog.token_service import CatalogTokenService
 from .config import config
 from .db.connection import get_async_session_factory, get_sync_session_factory
+from .repositories.broker_client_repository import BrokerClientRepository
+from .repositories.broker_login_request_repository import BrokerLoginRequestRepository
 from .repositories.bug_report_repository import BugReportRepository
 from .repositories.catalog_repository import CatalogRepository
 from .repositories.delivery_channel_repository import DeliveryChannelRepository
@@ -36,6 +38,7 @@ from .repositories.voice_session_repository import VoiceSessionRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
 from .services.analytics_service import AnalyticsService
 from .services.audit_service import AuditService
+from .services.broker_service import BrokerService
 from .services.bug_report_service import BugReportService
 from .services.catalog_service import CatalogService
 from .services.conversation_service import ConversationService
@@ -357,9 +360,23 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.scheduler_service.set_delivery_channel_repository(app.state.delivery_channel_repository)
     app.state.scheduler_service.set_user_settings_service(app.state.user_settings_service)
     app.state.scheduler_service.set_notification_service(app.state.notification_service)
+    # A subscription runs under its subscriber's vaulted offline token; the service holds
+    # back (or refuses) subscriptions of users who have none yet.
+    app.state.scheduler_service.set_token_service(app.state.scheduler_token_service)
     # Group membership changes drive default-job subscriptions (ADR-0010), as they do
     # default-agent activations.
     app.state.user_group_service.set_scheduler_service(app.state.scheduler_service)
+
+    # Token broker: sign-in on behalf of registered clients, one offline token per user,
+    # audience-scoped tokens minted from it (routers/broker_router.py).
+    app.state.broker_client_repository = BrokerClientRepository()
+    app.state.broker_client_repository.set_audit_service(app.state.audit_service)
+    app.state.broker_service = BrokerService(
+        client_repo=app.state.broker_client_repository,
+        login_request_repo=BrokerLoginRequestRepository(),
+        user_service=app.state.user_service,
+        scheduler_token_service=app.state.scheduler_token_service,
+    )
 
     app.state.scheduler_engine = SchedulerEngine(
         repo=app.state.scheduled_job_repository,

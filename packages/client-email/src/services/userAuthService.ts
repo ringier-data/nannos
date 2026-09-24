@@ -4,19 +4,46 @@ import { Config } from '../config/config.js';
 import { Storage } from '../storage/storage.js';
 
 /**
- * Service to manage user authentication and OIDC tokens.
- * Uses email as the user identifier (no Slack userId/teamId).
+ * Per-user sign-in and tokens, keyed by the sender's email address.
+ *
+ * Two implementations: `LocalUserAuthService` runs this client's own Keycloak login and
+ * holds the user's tokens; `BrokerUserAuthService` sends the user through console-backend's
+ * token broker and has tokens minted on demand. `createUserAuthService` picks one from
+ * `USER_AUTH_MODE`.
  */
+export interface IUserAuthService {
+  /** Whether the user can be served without signing in again. */
+  isUserAuthorized(email: string): Promise<boolean>;
+  /**
+   * An access token for *audience*, or null when the user must sign in again. Throws
+   * when the token cannot be had for a reason a new sign-in does not fix (e.g. the
+   * broker is down); callers then answer "try again later", not "please sign in".
+   */
+  getTokenForAudience(email: string, audience: string): Promise<string | null>;
+  /** `getTokenForAudience` for the configured orchestrator audience. */
+  getOrchestratorToken(email: string): Promise<string | null>;
+  /** Finish a sign-in from the callback URL the browser came back to. */
+  completeOAuthFlow(email: string, callbackUrl: string, codeVerifier: string, state: string): Promise<void>;
+  /** Where to send the browser to sign in. */
+  getAuthorizationUrl(state: string, codeVerifier: string): Promise<string>;
+  /** Remember a sign-in in progress, for the callback. */
+  storeAuthState(state: string, email: string, codeVerifier: string): Promise<void>;
+}
+
 interface CachedAudienceToken {
   accessToken: string;
   expiresAt: number;
 }
 
-export class UserAuthService {
+/**
+ * The client's own Keycloak login: holds each user's access and refresh token and
+ * exchanges them for audience tokens (RFC 8693).
+ */
+export class LocalUserAuthService implements IUserAuthService {
   private readonly storage: Storage;
   private readonly oidcClient: OIDCClient;
   private readonly config: Config;
-  private readonly logger = Logger.getLogger(UserAuthService.name);
+  private readonly logger = Logger.getLogger(LocalUserAuthService.name);
 
   /** In-memory cache for audience-specific tokens. Key: `${email}:${audience}` */
   private readonly audienceTokenCache = new Map<string, CachedAudienceToken>();
@@ -57,7 +84,7 @@ export class UserAuthService {
     const now = Date.now();
     const bufferMs = 5 * 60 * 1000;
 
-    if (token.expiresAt > now + bufferMs) {
+    if (token.accessToken && token.expiresAt !== undefined && token.expiresAt > now + bufferMs) {
       this.logger.debug(`Token for ${email} still valid (expires in ${Math.round((token.expiresAt - now) / 1000)}s)`);
       return token.accessToken;
     }
@@ -130,12 +157,12 @@ export class UserAuthService {
   /**
    * Complete OAuth flow by exchanging authorization code for tokens
    */
-  async completeOAuthFlow(email: string, callbackUrl: string, codeVerifier: string, state: string) {
+  async completeOAuthFlow(email: string, callbackUrl: string, codeVerifier: string, state: string): Promise<void> {
     this.logger.info(`Completing OAuth flow for ${email}`);
     const tokens = await this.oidcClient.exchangeCodeForTokens(callbackUrl, codeVerifier, state);
-    await this.storage.saveToken({ email, ...tokens });
+    await this.storage.saveToken({ email, ...tokens, authMode: 'local' });
+    this.clearAudienceTokenCache(email);
     this.logger.info(`Successfully completed OAuth flow for ${email}`);
-    return tokens;
   }
 
   /** Get authorization URL for the user to start OAuth */

@@ -27,6 +27,7 @@ from ..models.scheduled_job import (
     SharedJobDefinition,
     TriggerPolicy,
 )
+from ..config import config
 from ..models.user import User
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run, first_run_at
 from ..utils.timezones import default_timezone_name, resolve_timezone, validate_timezone_name
@@ -37,6 +38,7 @@ _UNSET: Any = object()
 if TYPE_CHECKING:
     from ..repositories.delivery_channel_repository import DeliveryChannelRepository
     from .notification_service import NotificationService
+    from .scheduler_token_service import SchedulerTokenService
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +78,23 @@ _ACCESS_REVOKED_REASON = "Access to this shared job was revoked"
 #: different stories for the person reading the pause reason.
 _ELAPSED_ONCE_ON_SUBSCRIBE = "This one-time job already ran before you subscribed"
 _ELAPSED_ONCE_ON_INHERIT = "This one-time job had already run when this schedule took effect"
+#: Why a subscription is off until its subscriber signs in to Nannos: every run uses the
+#: subscriber's vaulted offline token, which only a sign-in stores. A group default holds
+#: a member's new subscription with it, and the engine holds a subscription whose run
+#: found no token. ``release_sign_in_holds`` switches these on at that sign-in and finds
+#: them by this exact text, as ``_ACCESS_REVOKED_REASON`` is found. The wording is
+#: load-bearing: rows already held keep the old text if it changes.
+_AWAITING_SIGN_IN_REASON = "Waiting for your first sign-in to Nannos, so it can run under your account"
 
 
 class SchedulerAccessError(PermissionError):
     """The caller lacks the permission an operation needs on a definition."""
 
+
+class SchedulerNotReadyError(ValueError):
+    """The caller has no vaulted offline token, so a job running under their account
+    could not run. A ValueError, so every router answers it with a 400 whose detail —
+    including the sign-in link — the task-scheduler agent relays to the user."""
 
 
 def effective_prompt(
@@ -119,9 +133,15 @@ class SchedulerService:
         #: delivery channel under the subscriber's identity. The engine owns the dispatch;
         #: injected so this service keeps no dependency on it (and tests can leave it out).
         self._notice_sender: Any = None
+        #: Answers "has this user a vaulted offline token?". Without it (unit tests that
+        #: leave it out) nobody is treated as not ready.
+        self._token_service: "SchedulerTokenService | None" = None
 
     def set_repository(self, repository: ScheduledJobRepository) -> None:
         self._repo = repository
+
+    def set_token_service(self, token_service: "SchedulerTokenService") -> None:
+        self._token_service = token_service
 
     def set_sub_agent_service(self, sub_agent_service: SubAgentService) -> None:
         self._sub_agent_service = sub_agent_service
@@ -302,6 +322,21 @@ class SchedulerService:
         """
         return await self.sub_agents.get_accessible_sub_agents(db, user_id)
 
+    async def _require_scheduler_ready(self, db: AsyncSession, user: User) -> None:
+        """Refuse to create or switch on a subscription of *user* that could not run.
+
+        Every run uses the subscriber's vaulted offline token (ADR-0010), and only a
+        sign-in stores one. A chat-only user has none yet, so their job would fail on its
+        first run and pause itself with an error that tells them nothing. Refusing up
+        front, with the link that fixes it, is the one moment they are reachable.
+        """
+        if self._token_service is None or await self._token_service.has_consent(db, user.id):
+            return
+        raise SchedulerNotReadyError(
+            "Scheduled jobs run under your account while you are away, and that needs a one-time "
+            f"sign-in to Nannos first. Please sign in at {config.console_sign_in_url} and then try again."
+        )
+
     async def _assert_agent_accessible(self, db: AsyncSession, user_id: str, sub_agent_id: int, verb: str) -> None:
         accessible = await self.schedulable_sub_agents(db, user_id)
         if not any(sa.id == sub_agent_id for sa in accessible):
@@ -468,6 +503,10 @@ class SchedulerService:
         actor: User,
     ) -> ScheduledJob:
         """Create a definition owned by the caller and their own subscription to it."""
+
+        # Before anything is written, including an inline sub-agent: a job its owner
+        # cannot run is refused with the sign-in link instead.
+        await self._require_scheduler_ready(db, actor)
 
         # Watch jobs can run an agent too — when their condition is met — so an inline
         # sub-agent is created for either job type. What differs between them is the
@@ -734,6 +773,10 @@ class SchedulerService:
                 await self._validate_delivery_channel(db, delivery_channel_id)
             sub_fields["delivery_channel_id"] = delivery_channel_id
         if data.enabled is not None:
+            if data.enabled and not job.enabled:
+                # Switching a job on is where it would start failing. An echo of an
+                # already-enabled job is not a switch, so editing one still works.
+                await self._require_scheduler_ready(db, actor)
             sub_fields["enabled"] = data.enabled
             # Toggling `enabled` is a deliberate stop or start, and the scheduler tells
             # those apart from one-shot retirement by `paused_reason`: the retry branch
@@ -952,6 +995,7 @@ class SchedulerService:
         existing = await self.repo.get_subscription_for(db, definition_id, actor.id)
         if existing is not None:
             return existing
+        await self._require_scheduler_ready(db, actor)
         definition = await self.repo.get_definition(db, definition_id)
         assert definition is not None
         # A regular agent must already be reachable; an inline automated one becomes
@@ -992,6 +1036,7 @@ class SchedulerService:
         their own subscription and no link back. Trigger defaults copied as values; an
         inline automated agent is copied with it; a referenced agent is referenced."""
         await self._require(db, definition_id, actor, "read", is_admin)
+        await self._require_scheduler_ready(db, actor)
         src = await self.repo.get_definition(db, definition_id)
         assert src is not None
         agent_id = src.get("sub_agent_id")
@@ -1097,6 +1142,7 @@ class SchedulerService:
         job = await self.repo.get_job(db, job_id)
         if job is None or job.user_id != actor.id:
             return False
+        await self._require_scheduler_ready(db, actor)
         # A once-job keeps its past run_at as next_run_at after completing, so
         # re-enabling it would make the engine claim and re-execute it on the
         # next tick — refuse instead of silently re-running a finished job.
@@ -1124,6 +1170,38 @@ class SchedulerService:
         await self.repo.update_subscription(db=db, actor=actor, subscription_id=job_id, fields=fields)
         await db.commit()
         return True
+
+    async def release_sign_in_holds(self, db: AsyncSession, user: User) -> int:
+        """Switch on the subscriptions held back until *user*'s sign-in.
+
+        Called by the sign-in right after it vaulted the user's offline token (console
+        login and token broker alike). Each is resumed as ``resume_job`` would, computing
+        its next occurrence from now; a one-shot whose moment passed while it waited stays
+        off with the reason that says so. Returns how many were switched on.
+        """
+        released = 0
+        for job in await self.repo.list_paused_jobs(db, user.id, _AWAITING_SIGN_IN_REASON):
+            now = datetime.now(timezone.utc)
+            if job.schedule_kind == ScheduleKind.ONCE:
+                moment = job.run_at or job.next_run_at
+                if moment is None or moment <= now:
+                    # resume_job would refuse it: the one-shot's moment passed while it
+                    # waited. It stays off, with the reason that says so.
+                    await self.repo.update_subscription(
+                        db=db,
+                        actor=user,
+                        subscription_id=job.id,
+                        fields={"paused_reason": _ELAPSED_ONCE_ON_INHERIT, "updated_at": now},
+                    )
+                    await db.commit()
+                    continue
+            try:
+                if await self.resume_job(db, job.id, user):
+                    released += 1
+            except ValueError as exc:
+                # E.g. a stored timezone that no longer resolves: leave it held and visible.
+                logger.warning("Could not switch on held job %d for user %s: %s", job.id, user.id, exc)
+        return released
 
     # ------------------------------------------------------------------
     # Definition-level: suspend / unsuspend / reset overrides / public
@@ -1397,11 +1475,21 @@ class SchedulerService:
             return []
         channel = await self._default_channel_for(db, definition)
         tzs = await self.repo.user_timezones(db, user_ids)
+        # A member who has never signed in to Nannos has no vaulted offline token, so a
+        # run under their account would fail. Their subscription is created switched off
+        # and switched on by their first sign-in (release_sign_in_holds).
+        ready = (
+            await self._token_service.users_with_consent(db, user_ids)
+            if self._token_service is not None
+            else set(user_ids)
+        )
         now = datetime.now(timezone.utc)
         activations = []
         for uid in user_ids:
             tz = self._effective_tz(definition.get("timezone"), tzs.get(uid)) or default_timezone_name()
             next_run_at, enabled, paused_reason = self._first_occurrence(definition, tz, now)
+            if enabled and uid not in ready:
+                enabled, paused_reason = False, _AWAITING_SIGN_IN_REASON
             activations.append(
                 {
                     "user_id": uid,
@@ -1432,6 +1520,22 @@ class SchedulerService:
             back = await self.repo.get_subscription_for(db, definition_id, uid)
             if back is None or not back.enabled:
                 continue
+            if uid not in ready:
+                # A row this call brought back (access revoked earlier, now restored) is
+                # switched on by bulk_subscribe whatever the activation said. Hold it like
+                # a new one until the member's first sign-in.
+                await self.repo.update_subscription(
+                    db=db,
+                    actor=actor,
+                    subscription_id=back.id,
+                    fields={
+                        "enabled": False,
+                        "paused_reason": _AWAITING_SIGN_IN_REASON,
+                        "retry_at": None,
+                        "updated_at": now,
+                    },
+                )
+                continue
             nxt = compute_next_run(
                 back.schedule_kind, back.cron_expr, back.interval_seconds, back.run_at, tz=back.timezone
             )
@@ -1459,8 +1563,16 @@ class SchedulerService:
                         notification_type=NotificationType.JOB_SUBSCRIPTION_ACTIVATED,
                         title=f"Scheduled job activated for you: {definition['name']}",
                         message=(
-                            f"'{definition['name']}' now runs under your account because it is a default job "
-                            "of one of your groups. You can disable it or change its delivery at any time."
+                            (
+                                f"'{definition['name']}' now runs under your account because it is a default job "
+                                "of one of your groups. You can disable it or change its delivery at any time."
+                            )
+                            if uid in ready
+                            else (
+                                f"'{definition['name']}' is a default job of one of your groups and will run under "
+                                "your account. It starts once you have signed in to Nannos once: "
+                                f"{config.console_sign_in_url}"
+                            )
                         ),
                         metadata={"definition_id": definition_id, "group_id": group_id, "activated_by": actor.id},
                     )
@@ -1488,6 +1600,12 @@ class SchedulerService:
         for uid in user_ids:
             job = await self.repo.get_subscription_for(db, definition_id, uid)
             if job is None:
+                continue
+            if job.paused_reason == _AWAITING_SIGN_IN_REASON:
+                # The notice is dispatched under the subscriber's own vaulted token, which a
+                # member held back for their first sign-in does not have. The console
+                # notification, with the sign-in link, is what reaches them.
+                logger.info("Job %d waits for its subscriber's first sign-in; no activation DM", job.id)
                 continue
             try:
                 await self._notice_sender(

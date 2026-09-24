@@ -204,8 +204,7 @@ async def connect_callback(
     logger.info("Google Drive connected for catalog %s by user %s", catalog_id, user.id)
 
     # Redirect back to the frontend catalog detail page
-    frontend_base = os.environ.get("FRONTEND_URL", "http://localhost:5173")
-    return RedirectResponse(url=f"{frontend_base}/app/catalogs/{catalog_id}", status_code=302)
+    return RedirectResponse(url=f"{config.frontend_url}/app/catalogs/{catalog_id}", status_code=302)
 
 
 @router.get("/shared-drives", operation_id="list_shared_drives")

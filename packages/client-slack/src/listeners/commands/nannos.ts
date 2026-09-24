@@ -1,5 +1,5 @@
 import { App, SlackCommandMiddlewareArgs, AllMiddlewareArgs } from '@slack/bolt';
-import { UserAuthService } from '../../services/userAuthService.js';
+import type { IUserAuthService } from '../../services/userAuthService.js';
 import type { IContextStore, IInFlightTaskStore, IPendingRequestStore, IOAuthStateStore } from '../../storage/types.js';
 import { Logger } from '../../utils/logger.js';
 
@@ -25,7 +25,7 @@ function formatSlackTs(slackTs: string): string {
  */
 async function handleLoginSubcommand(
   { command, respond, client }: NannosCommand,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   botName: string
 ): Promise<void> {
   const logger = Logger.getLogger('handleLoginSubcommand');
@@ -144,7 +144,7 @@ async function handleLoginSubcommand(
  */
 async function handleDebugSubcommand(
   { command, respond }: NannosCommand,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
   pendingRequestStore: IPendingRequestStore,
@@ -263,7 +263,7 @@ async function handleHelpSubcommand({ command, respond }: NannosCommand, botName
  */
 async function handleNannosCommand(
   args: NannosCommand,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
   pendingRequestStore: IPendingRequestStore,
@@ -329,7 +329,7 @@ async function handleNannosCommand(
 export function registerNannosCommand(
   app: App,
   slashCommand: string,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
   pendingRequestStore: IPendingRequestStore,

@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from urllib.parse import urlencode
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -389,6 +390,32 @@ class VoiceAgentConfig(BaseModel):
     client_id: str = Field(default_factory=lambda: os.getenv("VOICE_AGENT_CLIENT_ID", "voice-agent"))
 
 
+class BrokerConfig(BaseModel):
+    """Token broker (``/api/v1/auth/broker``): console-backend runs the login for chat
+    clients and the cockpit BFF, vaults the offline token, and mints tokens for them.
+
+    Which clients may use it is admin data (``/api/v1/admin/broker-clients``), not config.
+    """
+
+    enabled: bool = Field(default_factory=lambda: os.getenv("BROKER_ENABLED", "true").lower() == "true")
+    #: How long a client has to redeem the one-time code it was handed.
+    code_ttl_seconds: int = Field(default_factory=lambda: int(os.getenv("BROKER_CODE_TTL_SECONDS", "60")))
+    #: How long a started login may take. Matches the OAuth-state session's 10 minutes.
+    login_request_ttl_seconds: int = Field(
+        default_factory=lambda: int(os.getenv("BROKER_LOGIN_REQUEST_TTL_SECONDS", "600"))
+    )
+    #: Audiences every client may have tokens minted for, in addition to its own client
+    #: id: what each chat client needs (the orchestrator for chat and task recovery,
+    #: console-backend for feedback and scheduled-run resumes). Comma-separated env.
+    always_granted_audiences: list[str] = Field(
+        default_factory=lambda: [
+            a.strip()
+            for a in os.getenv("BROKER_ALWAYS_GRANTED_AUDIENCES", "orchestrator,agent-console").split(",")
+            if a.strip()
+        ]
+    )
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -410,9 +437,17 @@ class Config(BaseModel):
     secret_key: str = Field(default_factory=lambda: os.getenv("SECRET_KEY", "change-me-in-production"))
     session_ttl_seconds: int = Field(default=2592000)  # 30 days
     cookie_name: str = Field(default="a2a-chatui")
+    # Public URL of the console. Its /api is this backend (the ingress in deployments, the
+    # Vite proxy locally), so links to the console's own login are built from it. The
+    # default suits local development only; the API server refuses to start without
+    # FRONTEND_URL anywhere else (app.lifespan).
+    frontend_url: str = Field(
+        default_factory=lambda: os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    )
 
     oidc: OidcConfig = Field(default_factory=OidcConfig)
     federation: FederationConfig = Field(default_factory=lambda: FederationConfig(idps=FederationConfig._load_idps()))
+    broker: BrokerConfig = Field(default_factory=BrokerConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     voice_agent: VoiceAgentConfig = Field(default_factory=VoiceAgentConfig)
     docstore: DocstoreConfig = Field(default_factory=DocstoreConfig)
@@ -437,6 +472,16 @@ class Config(BaseModel):
 
     def is_production(self) -> bool:
         return self.environment == "prod"
+
+    @property
+    def console_sign_in_url(self) -> str:
+        """A link that signs the user in to the console and lands them on its home page.
+
+        Signing in once is what vaults the offline token scheduled jobs run with, so this
+        is the link a user who is not yet scheduler-ready is given.
+        """
+        home = f"{self.frontend_url}/"
+        return f"{self.frontend_url}/api/v1/auth/login?{urlencode({'redirectTo': home})}"
 
 
 # Global config instance

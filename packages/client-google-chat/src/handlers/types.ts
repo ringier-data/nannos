@@ -10,12 +10,12 @@ import { A2AClientService } from "../services/a2aClientService.js";
 import { FeedbackService } from "../services/feedbackService.js";
 import { FileStorageService } from "../services/fileStorageService.js";
 import { GoogleChatService } from "../services/googleChatService.js";
-import { UserAuthService } from "../services/userAuthService.js";
+import type { IUserAuthService } from "../services/userAuthService.js";
 import { Config } from '../config/config.js';
 import type { ScheduledRunResumeService } from '../services/scheduledRunResumeService.js';
 
 export interface HandlerDependencies {
-  userAuthService: UserAuthService;
+  userAuthService: IUserAuthService;
   a2aClientService: A2AClientService;
   chatService: GoogleChatService;
   contextStore: IContextStore;

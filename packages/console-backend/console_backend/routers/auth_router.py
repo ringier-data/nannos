@@ -82,6 +82,7 @@ def get_auth_controller(request: Request) -> AuthController:
         user_service=user_service,
         scheduler_token_service=scheduler_token_service,
         keycloak_admin_service=keycloak_admin_service,
+        scheduler_service=getattr(request.app.state, "scheduler_service", None),
     )
     return auth_controller
 

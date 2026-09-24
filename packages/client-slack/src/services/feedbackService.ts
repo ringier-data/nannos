@@ -1,5 +1,5 @@
 import { Logger } from '../utils/logger.js';
-import { UserAuthService } from './userAuthService.js';
+import type { IUserAuthService } from './userAuthService.js';
 import { Config } from '../config/config.js';
 
 const logger = Logger.getLogger('FeedbackService');
@@ -65,16 +65,16 @@ export class ResponseMappingCache {
 /**
  * Service for submitting message feedback to the console-backend API.
  *
- * Uses RFC 8693 token exchange (via `UserAuthService`) to obtain a
+ * Uses RFC 8693 token exchange (via `IUserAuthService`) to obtain a
  * console-backend-scoped access token before calling the feedback endpoint.
  */
 export class FeedbackService {
-  private readonly userAuthService: UserAuthService;
+  private readonly userAuthService: IUserAuthService;
   private readonly consoleBackendUrl: string;
   private readonly audience: string;
   readonly responseMapping = new ResponseMappingCache();
 
-  constructor(userAuthService: UserAuthService, config: Config) {
+  constructor(userAuthService: IUserAuthService, config: Config) {
     if (!config.consoleBackend) {
       throw new Error('CONSOLE_BACKEND_URL is required for FeedbackService');
     }

@@ -4,8 +4,40 @@ import { Logger } from '../utils/logger.js';
 import { Config } from '../config/config.js';
 
 /**
- * Service to manage user authentication and OIDC tokens
+ * Per-user sign-in and tokens, as the rest of the client needs them.
+ *
+ * Two implementations: `LocalUserAuthService` runs this client's own Keycloak login and
+ * holds the user's tokens; `BrokerUserAuthService` sends the user through console-backend's
+ * token broker and has tokens minted on demand. `createUserAuthService` picks one from
+ * `USER_AUTH_MODE`.
  */
+export interface IUserAuthService {
+  /** Whether the user can be served without signing in again. */
+  isUserAuthorized(userId: string, teamId: string): Promise<boolean>;
+  /**
+   * An access token for *audience*, or null when the user must sign in again. Throws
+   * when the token cannot be had for a reason a new sign-in does not fix (e.g. the
+   * broker is down); callers then answer "try again later", not "please sign in".
+   */
+  getTokenForAudience(userId: string, teamId: string, audience: string): Promise<string | null>;
+  /** `getTokenForAudience` for the configured orchestrator audience. */
+  getOrchestratorToken(userId: string, teamId: string): Promise<string | null>;
+  /** Finish a sign-in from the callback URL the browser came back to. */
+  completeOAuthFlow(
+    userId: string,
+    teamId: string,
+    callbackUrl: string,
+    codeVerifier: string,
+    state: string
+  ): Promise<UserAuthToken>;
+  /** Forget the user's sign-in here. */
+  revokeUserAuthorization(userId: string, teamId: string): Promise<void>;
+  /** Where to send the browser to sign in. */
+  getAuthorizationUrl(state: string, teamId: string, codeVerifier: string): Promise<string>;
+  /** Remember a sign-in in progress, for the callback. */
+  storeAuthState(state: string, userId: string, teamId: string): Promise<void>;
+}
+
 /**
  * Cached audience-specific token
  */
@@ -14,12 +46,16 @@ interface CachedAudienceToken {
   expiresAt: number;
 }
 
-export class UserAuthService {
+/**
+ * The client's own Keycloak login: holds each user's access and refresh token and
+ * exchanges them for audience tokens (RFC 8693).
+ */
+export class LocalUserAuthService implements IUserAuthService {
   private readonly storage: IUserAuthStorage;
   private readonly oidcClient: OIDCClient;
   private readonly config: Config;
   private readonly oauthStateStore: IOAuthStateStore;
-  private readonly logger = Logger.getLogger(UserAuthService.name);
+  private readonly logger = Logger.getLogger(LocalUserAuthService.name);
 
   /**
    * In-memory cache for audience-specific tokens
@@ -48,7 +84,7 @@ export class UserAuthService {
   }
 
   /**
-ai   * Check if user is authorized (has valid token, refreshing if needed)
+   * Check if user is authorized (has valid token, refreshing if needed)
    */
   async isUserAuthorized(userId: string, teamId: string): Promise<boolean> {
     // Try to get a valid access token (this will refresh if needed)
@@ -71,7 +107,7 @@ ai   * Check if user is authorized (has valid token, refreshing if needed)
     const now = Date.now();
     const bufferMs = 5 * 60 * 1000; // 5 minutes
 
-    if (token.expiresAt > now + bufferMs) {
+    if (token.accessToken && token.expiresAt !== undefined && token.expiresAt > now + bufferMs) {
       // Token is still valid
       this.logger.debug(
         `Token for user ${userId} is still valid (expires in ${Math.round((token.expiresAt - now) / 1000)}s)`
@@ -233,6 +269,6 @@ ai   * Check if user is authorized (has valid token, refreshing if needed)
     const oidc = await import('openid-client');
     const codeVerifier = oidc.randomPKCECodeVerifier();
 
-    this.oauthStateStore.set(state, userId, teamId, codeVerifier, 604800); // 7 day TTL
+    await this.oauthStateStore.set(state, userId, teamId, codeVerifier, 604800); // 7 day TTL
   }
 }

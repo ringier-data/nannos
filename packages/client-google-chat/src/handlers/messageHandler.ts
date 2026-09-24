@@ -7,7 +7,7 @@ import {
   processAttachmentsToS3,
   getFileProcessingWarnings,
 } from '../utils/fileUtils.js';
-import { UserAuthService } from '../services/userAuthService.js';
+import type { IUserAuthService } from '../services/userAuthService.js';
 import { A2AGoogleChatBasedRequest } from '../services/a2aClientService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
@@ -164,7 +164,7 @@ async function sendAuthorizationRequired(
   userId: string,
   projectId: string,
   threadId: string,
-  userAuthService: UserAuthService
+  userAuthService: IUserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('sendAuthorizationRequired');
   logger.info(`Sending authorization required message to user ${userId} in space ${spaceId}, thread ${threadId}`);
@@ -259,7 +259,7 @@ async function getRequestText(
 
 async function getOrchestratorAccessToken(
   logger: Logger,
-  userAuthService: UserAuthService,
+  userAuthService: IUserAuthService,
   pendingRequestStore: IPendingRequestStore,
   chatService: GoogleChatService,
   userId: string,

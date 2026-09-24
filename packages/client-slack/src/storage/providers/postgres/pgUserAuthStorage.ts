@@ -4,6 +4,27 @@ import { UserAuthToken } from '../../types.js';
 import { Logger } from '../../../utils/logger.js';
 
 /**
+ * Map a user_auth row. Broker rows carry no tokens, so their token columns are NULL and
+ * come back as undefined.
+ */
+function rowToToken(row: any): UserAuthToken {
+  return {
+    userId: row.user_id,
+    teamId: row.team_id,
+    accessToken: row.access_token ?? undefined,
+    refreshToken: row.refresh_token ?? undefined,
+    expiresAt: row.expires_at ? new Date(row.expires_at).getTime() : undefined,
+    tokenType: row.token_type ?? undefined,
+    scope: row.scope ?? undefined,
+    idToken: row.id_token ?? undefined,
+    oidcSub: row.oidc_sub ?? undefined,
+    authMode: row.auth_mode ?? 'local',
+    createdAt: new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime(),
+  };
+}
+
+/**
  * PostgreSQL storage layer for user authentication tokens
  */
 export class PgUserAuthStorage {
@@ -15,18 +36,20 @@ export class PgUserAuthStorage {
   }
 
   /**
-   * Store user authentication token
+   * Store user authentication token. A row signed in again replaces every column, so a
+   * user who signs in through the broker leaves no local tokens behind.
    */
   async saveToken(token: UserAuthToken): Promise<void> {
+    const expiresAt = token.expiresAt !== undefined ? new Date(token.expiresAt) : null;
     try {
       await this.pool.query(SQL`
         INSERT INTO user_auth (
           user_id, team_id, access_token, refresh_token, expires_at,
-          token_type, scope, id_token, oidc_sub
+          token_type, scope, id_token, oidc_sub, auth_mode
         ) VALUES (
-          ${token.userId}, ${token.teamId}, ${token.accessToken}, ${token.refreshToken},
-          ${new Date(token.expiresAt)}, ${token.tokenType}, ${token.scope}, ${token.idToken},
-          ${token.oidcSub}
+          ${token.userId}, ${token.teamId}, ${token.accessToken ?? null}, ${token.refreshToken ?? null},
+          ${expiresAt}, ${token.tokenType ?? null}, ${token.scope ?? null}, ${token.idToken ?? null},
+          ${token.oidcSub ?? null}, ${token.authMode ?? 'local'}
         )
         ON CONFLICT (user_id, team_id) DO UPDATE SET
           access_token = EXCLUDED.access_token,
@@ -35,7 +58,8 @@ export class PgUserAuthStorage {
           token_type = EXCLUDED.token_type,
           scope = EXCLUDED.scope,
           id_token = EXCLUDED.id_token,
-          oidc_sub = EXCLUDED.oidc_sub
+          oidc_sub = EXCLUDED.oidc_sub,
+          auth_mode = EXCLUDED.auth_mode
       `);
       this.logger.info(`Saved auth token for user ${token.userId} in team ${token.teamId}`);
     } catch (error) {
@@ -51,7 +75,7 @@ export class PgUserAuthStorage {
     try {
       const result = await this.pool.query(SQL`
         SELECT user_id, team_id, access_token, refresh_token, expires_at,
-               token_type, scope, id_token, oidc_sub, created_at, updated_at
+               token_type, scope, id_token, oidc_sub, auth_mode, created_at, updated_at
         FROM user_auth
         WHERE user_id = ${userId} AND team_id = ${teamId}
       `);
@@ -59,21 +83,7 @@ export class PgUserAuthStorage {
       if (result.rows.length === 0) {
         return null;
       }
-
-      const row = result.rows[0];
-      return {
-        userId: row.user_id,
-        teamId: row.team_id,
-        accessToken: row.access_token,
-        refreshToken: row.refresh_token,
-        expiresAt: new Date(row.expires_at).getTime(),
-        tokenType: row.token_type,
-        scope: row.scope,
-        idToken: row.id_token,
-        oidcSub: row.oidc_sub,
-        createdAt: new Date(row.created_at).getTime(),
-        updatedAt: new Date(row.updated_at).getTime(),
-      };
+      return rowToToken(result.rows[0]);
     } catch (error) {
       this.logger.error(error, `Failed to get auth token: ${error}`);
       throw new Error(`Failed to retrieve user auth token: ${error}`);
@@ -154,13 +164,13 @@ export class PgUserAuthStorage {
   }
 
   /**
-   * Check if user has valid token
+   * Check if user has a valid local access token. A broker row has none.
    */
   async hasValidToken(userId: string, teamId: string): Promise<boolean> {
     this.logger.info(`Checking token for userId=${userId}, teamId=${teamId}`);
     const token = await this.getToken(userId, teamId);
-    if (!token) {
-      this.logger.debug(`No token found for userId=${userId}, teamId=${teamId}`);
+    if (!token || token.expiresAt === undefined) {
+      this.logger.debug(`No local token found for userId=${userId}, teamId=${teamId}`);
       return false;
     }
 
@@ -179,7 +189,7 @@ export class PgUserAuthStorage {
     try {
       const result = await this.pool.query(SQL`
         SELECT user_id, team_id, access_token, refresh_token, expires_at,
-               token_type, scope, id_token, oidc_sub, created_at, updated_at
+               token_type, scope, id_token, oidc_sub, auth_mode, created_at, updated_at
         FROM user_auth
         WHERE oidc_sub = ${oidcSub} AND team_id = ${teamId}
         LIMIT 1
@@ -188,21 +198,7 @@ export class PgUserAuthStorage {
       if (result.rows.length === 0) {
         return null;
       }
-
-      const row = result.rows[0];
-      return {
-        userId: row.user_id,
-        teamId: row.team_id,
-        accessToken: row.access_token,
-        refreshToken: row.refresh_token,
-        expiresAt: new Date(row.expires_at).getTime(),
-        tokenType: row.token_type,
-        scope: row.scope,
-        idToken: row.id_token,
-        oidcSub: row.oidc_sub,
-        createdAt: new Date(row.created_at).getTime(),
-        updatedAt: new Date(row.updated_at).getTime(),
-      };
+      return rowToToken(result.rows[0]);
     } catch (error) {
       this.logger.error(error, `Failed to find user by OIDC sub and team: ${error}`);
       throw new Error(`Failed to find user by OIDC sub and team: ${error}`);

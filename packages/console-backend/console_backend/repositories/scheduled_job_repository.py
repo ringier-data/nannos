@@ -491,6 +491,25 @@ class ScheduledJobRepository(AuditedRepository):
         )
         return [_row_to_scheduled_job(r) for r in result.mappings().all()]
 
+    async def list_paused_jobs(self, db: AsyncSession, user_id: str, paused_reason: str) -> list[ScheduledJob]:
+        """The user's live subscriptions that are switched off for exactly *paused_reason*.
+
+        Usually none. It runs at every sign-in, so it selects only those rows instead of
+        loading every job of the user.
+        """
+        result = await db.execute(
+            text(
+                _JOB_VIEW_SELECT
+                + """
+                WHERE s.user_id = :user_id AND NOT s.enabled AND s.paused_reason = :paused_reason
+                  AND s.deleted_at IS NULL AND d.deleted_at IS NULL
+                ORDER BY s.id
+                """
+            ),
+            {"user_id": user_id, "paused_reason": paused_reason},
+        )
+        return [_row_to_scheduled_job(r) for r in result.mappings().all()]
+
     async def list_subscriptions(self, db: AsyncSession, definition_id: int) -> list[ScheduledJob]:
         """Every live subscription of a definition, as job views."""
         result = await db.execute(
