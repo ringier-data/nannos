@@ -46,6 +46,33 @@ class TestGatewayChatPayload:
         assert body["messages"] == [{"role": "user", "content": "hello"}]
 
     @pytest.mark.asyncio
+    async def test_thinking_off_is_also_said_the_provider_way(self):
+        """`reasoning_effort="none"` alone does not switch thinking off where it is on by
+        default (the Claude 5 family): the proxy maps it to "send no thinking parameter",
+        which is the provider default. Prod, 2026-09-23: claude-sonnet-5 spent all 1024
+        tokens thinking and answered with zero characters. The explicit off switch has to
+        ride along."""
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            await llm_gateway.gateway_chat("hello", model="chat")
+
+        body = fake_client.post.call_args.kwargs["json"]
+        assert body["reasoning_effort"] == "none"
+        assert body["thinking"] == {"type": "disabled"}
+
+    @pytest.mark.asyncio
+    async def test_a_caller_that_wants_reasoning_gets_no_off_switch(self):
+        """The off switch belongs to "none" only: a real effort tier must not be
+        contradicted by a `thinking: disabled` next to it."""
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            await llm_gateway.gateway_chat("think hard", model="chat", reasoning_effort="high")
+
+        body = fake_client.post.call_args.kwargs["json"]
+        assert body["reasoning_effort"] == "high"
+        assert "thinking" not in body
+
+    @pytest.mark.asyncio
     async def test_an_explicit_none_leaves_the_model_to_itself(self):
         """The escape hatch from the default: send no value at all and let the model
         reason however it normally would."""
@@ -53,7 +80,9 @@ class TestGatewayChatPayload:
         with patch.object(llm_gateway._client, "get", return_value=fake_client):
             await llm_gateway.gateway_chat("hello", model="chat-low", reasoning_effort=None)
 
-        assert "reasoning_effort" not in fake_client.post.call_args.kwargs["json"]
+        body = fake_client.post.call_args.kwargs["json"]
+        assert "reasoning_effort" not in body
+        assert "thinking" not in body
 
     @pytest.mark.asyncio
     async def test_json_calls_are_unthinking_by_default_too(self):
@@ -61,7 +90,9 @@ class TestGatewayChatPayload:
         with patch.object(llm_gateway._client, "get", return_value=fake_client):
             await llm_gateway.gateway_chat_json("x", model="m")
 
-        assert fake_client.post.call_args.kwargs["json"]["reasoning_effort"] == "none"
+        body = fake_client.post.call_args.kwargs["json"]
+        assert body["reasoning_effort"] == "none"
+        assert body["thinking"] == {"type": "disabled"}
 
 
 class TestSalvagingTheObject:

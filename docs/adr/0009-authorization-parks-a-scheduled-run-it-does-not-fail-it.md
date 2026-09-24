@@ -299,11 +299,34 @@ side". This decision is that caller.
    decline releases the schedule without counting a failure, and the next occurrence
    asks again.
 
-   A job with a delivery channel is told there too, with the link, as a plain
-   notification dispatched through agent-runner's push sender — decision 5's
-   un-upgraded-client path, deliberately: the outer task that notice completes is not
-   parked, so a card posted against it would have nothing to answer. The answer comes
-   back through the console.
+   A job with a delivery channel is told there **as a park, not as prose.** The first
+   cut sent a plain notice with the link and "confirm in the console", reasoning that the
+   outer task the notice completes is not parked, so a card posted against it would have
+   nothing to answer. That misread what the card answers: its button posts to the
+   *resume endpoint* for the run (decision 6), never to the task, so a card needs a run
+   id, not a parked task. And the prose failed in practice exactly as decision 5
+   predicts for an un-upgraded client — the owner read it in Slack, authorized, and
+   waited for a watch that nothing had told to continue. The scheduler now hands the
+   ask to agent-runner on `auth_ask`, with the run id and no sub-agent; the runner
+   publishes its task as `auth_required` with the ask, the job's name and the reply
+   target in the scheduler payload, and the push sender carries the same bytes an
+   agent's park arrives as. Every client renders the card it already has, and its
+   answer reaches `is_check_park` through the one resume endpoint. The prose with the
+   link stays in `agent_message` as decision 5's fallback. The task that publication
+   opens stays non-terminal like any unanswered park; nothing is ever addressed to it,
+   because the answer goes to the run — and it is not cancelled on resume either, since
+   a cancel pushes a `canceled` status that the email client reports as a closed task.
+   An answer from the card carries the card's coordinates into the re-run's dispatch, so
+   the re-run's result, or its second ask, threads under the ask (decision 5).
+   The park is written before the card is sent: the card is answerable the moment it
+   lands, so the run it answers must already be parked, and only `delivered` is raised
+   afterwards. Two things are accepted knowingly. A runner older than `auth_ask` delivers
+   the prose as a *completed* run carrying the run id, which a chat client stores as the
+   run's adoptable result while the run is parked — the un-adoptability invariant of
+   decision 5 is traded away for the window between the two images rolling, and only
+   there. And the notice task is left open rather than cancelled on resume: a cancel
+   pushes a `canceled` status, which the email client reports to the owner as a closed
+   task.
 
 ## Constraints
 

@@ -105,6 +105,28 @@ class TestANullScheduleIsNotAClear:
         client.app.state.scheduler_service.update_job.assert_awaited_once()
 
 
+class TestEveryDefinitionFieldReachesTheService:
+    def test_destroy_after_trigger_is_forwarded(self, client):
+        """The route builds the service call by hand, one kwarg per field, and this one was
+        missing: the console sent `destroy_after_trigger: false`, the route returned 200
+        with the job still `true`, and the checkbox snapped back on every save."""
+        client.app.state.scheduler_service.update_job = AsyncMock(return_value=_job(destroy_after_trigger=False))
+
+        r = client.patch("/api/v1/scheduler/jobs/7", json={"destroy_after_trigger": False})
+
+        assert r.status_code == 200
+        kwargs = client.app.state.scheduler_service.update_job.await_args.kwargs
+        assert kwargs["destroy_after_trigger"] is False
+
+    def test_an_absent_field_stays_unset(self, client):
+        client.app.state.scheduler_service.update_job = AsyncMock(return_value=_job())
+
+        client.patch("/api/v1/scheduler/jobs/7", json={"name": "Renamed"})
+
+        kwargs = client.app.state.scheduler_service.update_job.await_args.kwargs
+        assert kwargs["destroy_after_trigger"] is scheduler_router._UNSET
+
+
 class TestFollowDefaultScheduleEndpoint:
     def test_it_returns_the_callers_job_back_on_the_default(self, client):
         client.app.state.scheduler_service.follow_default_schedule = AsyncMock(return_value=_job())

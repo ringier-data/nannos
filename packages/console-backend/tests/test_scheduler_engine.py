@@ -881,6 +881,30 @@ class TestBuildMessageArgs:
         assert push_config is None
 
     @pytest.mark.asyncio
+    async def test_an_agent_is_handed_what_the_condition_matched_not_the_whole_response(self):
+        # The expression filtered the response down to what matters; sending the whole
+        # response as well would hand the agent the items the author excluded.
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH)
+        job.check_tool = "ping_tool"
+        job.cel_expr = "result.items.filter(i, i.status == 'FAILED')"
+        parts, _, _ = await engine._build_message_args(
+            job,
+            run_id=7,
+            access_token="tok",
+            db=AsyncMock(),
+            watch_outcome=WatchOutcome(
+                condition_met=True,
+                check_result={"items": [{"status": "FAILED", "id": 7}, {"status": "OK", "id": 8}]},
+                evidence=[{"status": "FAILED", "id": 7}],
+            ),
+        )
+        text = parts[0]["text"]
+        assert '"id": 7' in text
+        assert '"id": 8' not in text
+        assert "matched" in text  # told it is the filtered part, not the response
+
+    @pytest.mark.asyncio
     async def test_an_agent_without_an_instruction_gets_a_default(self):
         engine = _make_engine()
         job = make_job(job_type=JobType.WATCH)
@@ -1237,34 +1261,131 @@ class TestACheckNeedingAuthorizationParksTheRun:
         # consecutive_failures alone and never auto-pauses.
         assert repo.complete_job.call_args[1]["status"] == JobRunStatus.AUTH_REQUIRED
 
-    @pytest.mark.asyncio
-    async def test_a_job_with_a_channel_is_told_there_with_the_link(self):
-        repo, engine, evaluate = self._parked_engine(run_id=22)
-        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = {
-            "webhook_url": "https://hooks.example/x",
-            "secret": "s",
-            "message_formatting": "slack",
+    @staticmethod
+    def _channel(**overrides) -> dict:
+        return {"webhook_url": "https://hooks.example/x", "secret": "s", "message_formatting": "slack", **overrides}
+
+    @staticmethod
+    def _published_park(run_id: int) -> dict:
+        """What agent-runner answers when it published the ask as a park."""
+        meta = {
+            "scheduler_status": "auth_required",
+            "agent_message": "prose with the link",
+            "parked_task_id": "notice-task-1",
+            "reply_to": {"service": "console-backend", "endpoint": "scheduled_run_resume", "scheduled_job_run_id": run_id},
         }
+        return {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+    @pytest.mark.asyncio
+    async def test_a_job_with_a_channel_gets_the_card_through_agent_runner(self):
+        # Published as a PARK, not posted as prose: the ask rides on ``auth_ask`` and the
+        # runner publishes its task as auth_required, so the clients render the card
+        # whose button answers this run. The first cut sent a sentence with the link and
+        # "confirm in the console"; the owner authorized and waited for nothing.
+        repo, engine, evaluate = self._parked_engine(run_id=22)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
 
         with evaluate, patch(
             "console_backend.services.scheduler_engine.dispatch_streaming",
-            AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+            AsyncMock(return_value=self._published_park(22)),
         ) as dispatch:
             await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
 
         call = dispatch.await_args[1]
+        assert call["metadata"]["auth_ask"] == self.ASK
+        assert "sub_agent_id" not in call["metadata"], "nothing runs"
+        # The run id IS on it: the card's button answers reply_to.scheduled_job_run_id.
+        # Not adoptable for that — every client skips provenance for a park.
+        assert call["metadata"]["scheduled_job_run_id"] == 22
+        assert call["metadata"]["scheduled_job_name"] == "Test Job", "the card names the job that stopped"
+        assert call["metadata"]["messageFormatting"] == "slack"
+        assert "reply_to_message" not in call["metadata"], "a first ask threads under nothing"
+        # The prose fallback still carries a working link for a client without the card,
+        # and says where to confirm — that surface has no button.
         assert "https://gw.example/begin" in call["parts"][0]["text"]
         assert "Test Job" in call["parts"][0]["text"]
-        assert "sub_agent_id" not in call["metadata"], "a notice, not an agent run"
-        # Not a run either: with a run id on it the chat client would adopt the notice as
-        # this run's successful result, and ADR-0009 says the ask is not adoptable.
-        assert "scheduled_job_run_id" not in call["metadata"]
-        assert call["metadata"]["messageFormatting"] == "slack"
+        assert "in the console" in call["parts"][0]["text"]
         assert call["push_config"] == {"url": "https://hooks.example/x", "token": "s"}
         assert call["timeout_read"] == NOTIFY_TIMEOUT_SECONDS, "a dead runner must not hold the park for minutes"
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
-        assert run["delivered"] is True
+        # Still addressed to the CHECK: the notice task is never answered, the run is.
+        assert run["parked_task_id"] == "watch-check:22"
+        assert run["parked_payload"] == self.ASK
+        # Parked BEFORE the card went out, delivered raised after: a press the moment the
+        # card lands must find an AUTH_REQUIRED row, not a running one that 409s.
+        assert run["delivered"] is False
+        repo.mark_run_delivered.assert_awaited_once()
+        assert repo.mark_run_delivered.await_args[0][1] == 22
+
+    @pytest.mark.asyncio
+    async def test_the_park_is_written_before_the_card_is_sent(self):
+        repo, engine, evaluate = self._parked_engine(run_id=26)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        order: list[str] = []
+        repo.complete_run.side_effect = lambda *a, **k: order.append("park") or True
+
+        async def dispatch(**kwargs):
+            order.append("card")
+            return self._published_park(26)
+
+        with evaluate, patch("console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(side_effect=dispatch)):
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        assert order == ["park", "card"]
+
+    @pytest.mark.asyncio
+    async def test_the_card_reuses_the_token_the_dispatch_already_holds(self):
+        # One Keycloak round trip per park, not two — and a refresh blip cannot fail a
+        # delivery for a token that was already in hand.
+        repo, engine, evaluate = self._parked_engine(run_id=27)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        engine._token_service.get_access_token.return_value = "token-in-hand"
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value=self._published_park(27)),
+        ) as dispatch:
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        engine._token_service.get_access_token.assert_awaited_once()
+        assert dispatch.await_args[1]["access_token"] == "token-in-hand"
+
+    @pytest.mark.asyncio
+    async def test_an_older_runner_that_posts_prose_still_counts_as_told(self):
+        # Image skew: a runner without ``auth_ask`` completes the task and the clients
+        # post the sentence. The owner has the link and the console; not a failure.
+        repo, engine, evaluate = self._parked_engine(run_id=24)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        meta = {"scheduler_status": "success", "agent_message": "prose with the link"}
+        completed = {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(return_value=completed)
+        ):
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["parked_task_id"] == "watch-check:24"
+        repo.mark_run_delivered.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_runner_that_fails_the_notice_leaves_the_run_parked_but_undelivered(self):
+        repo, engine, evaluate = self._parked_engine(run_id=25)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        meta = {"scheduler_status": "failed", "error_message": "boom"}
+        failed = {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+        with evaluate, patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(return_value=failed)
+        ):
+            await engine._dispatch_job(self._watch_job(delivery_channel_id=5))
+
+        run = repo.complete_run.call_args[1]
+        assert run["status"] == JobRunStatus.AUTH_REQUIRED
+        assert run["delivered"] is False
+        repo.mark_run_delivered.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_failed_notice_still_parks_the_run(self):
@@ -1283,6 +1404,7 @@ class TestACheckNeedingAuthorizationParksTheRun:
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["parked_task_id"] == "watch-check:23"
         assert run["delivered"] is False
+        repo.mark_run_delivered.assert_not_awaited()
 
     @staticmethod
     def _parked_run(run_id: int) -> ScheduledJobRun:
@@ -1363,6 +1485,59 @@ class TestACheckNeedingAuthorizationParksTheRun:
         run = repo.complete_run.call_args[1]
         assert run["status"] == JobRunStatus.AUTH_REQUIRED
         assert run["parked_task_id"] == "watch-check:41"
+
+    @pytest.mark.asyncio
+    async def test_an_answer_from_a_card_threads_the_rerun_under_it(self):
+        # The card's coordinates ride into the re-run's dispatch, as the agent branch
+        # carries them, so the result — or a second ask — lands under the ask (ADR-0009
+        # decision 5). Here the credential is still missing: the re-park's card threads.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        card = {"channel": "D1", "ts": "1700000000.1"}
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, auth_ask=dict(self.ASK))),
+        ), patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value=self._published_park(43)),
+        ) as dispatch:
+            await engine.resume_parked_run(
+                self._watch_job(delivery_channel_id=5), self._parked_run(42), "approved", reply_to=card, run_id=43
+            )
+
+        assert dispatch.await_args[1]["metadata"]["reply_to_message"] == card
+        assert dispatch.await_args[1]["metadata"]["auth_ask"] == self.ASK
+        assert repo.complete_run.call_args[1]["parked_task_id"] == "watch-check:43"
+
+    @pytest.mark.asyncio
+    async def test_an_answer_from_a_card_threads_the_triggered_result_under_it(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+        engine._delivery_channel_repo.get_channel_for_dispatch.return_value = self._channel()
+        card = {"channel": "D1", "ts": "1700000000.1"}
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=True, check_result={"status": "FAILED"})),
+        ), patch(
+            "console_backend.services.scheduler_engine.dispatch_streaming",
+            AsyncMock(return_value={"result": {"kind": "task", "artifacts": []}}),
+        ) as dispatch:
+            await engine.resume_parked_run(
+                self._watch_job(delivery_channel_id=5), self._parked_run(44), "approved", reply_to=card, run_id=45
+            )
+
+        assert dispatch.await_args[1]["metadata"]["reply_to_message"] == card
+        assert "auth_ask" not in dispatch.await_args[1]["metadata"]
+        assert repo.complete_run.call_args[1]["status"] == JobRunStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_declining_releases_the_schedule_without_counting_a_failure(self):
@@ -1616,6 +1791,30 @@ class TestWriteNotification:
         # Thinking off: a reasoning model on the low tier would otherwise spend the
         # 256-token budget thinking and send a cut-off sentence to the person.
         assert chat.await_args.kwargs["reasoning_effort"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_it_is_written_from_what_the_condition_matched(self):
+        # Five notifications came back and the expression picked the unread one: the
+        # sentence is about that one, so the model is given only that one.
+        engine = _make_engine()
+        job = make_job(job_type=JobType.WATCH, sub_agent_id=None)
+        chat = AsyncMock(return_value="One unread issue.")
+        with patch("console_backend.services.scheduler_engine.gateway_chat", chat):
+            with patch(
+                "console_backend.services.scheduler_engine.ModelDefaultsRepository.get_all",
+                AsyncMock(return_value={"chat:low": "some-model"}),
+            ):
+                await engine._write_notification(
+                    job,
+                    WatchOutcome(
+                        condition_met=True,
+                        check_result={"items": [{"id": 1, "isRead": False}, {"id": 2, "isRead": True}]},
+                        evidence=[{"id": 1, "isRead": False}],
+                    ),
+                )
+        prompt = chat.await_args.args[0]
+        assert '"id": 1' in prompt
+        assert '"id": 2' not in prompt
 
     @pytest.mark.asyncio
     async def test_an_unreachable_model_still_says_something(self):

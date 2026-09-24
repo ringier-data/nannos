@@ -491,6 +491,28 @@ def _client_auth_payload(data: TaskResponseData) -> dict[str, Any] | None:
         return None
 
 
+def _check_ask_payload(check_ask: Any) -> dict[str, Any] | None:
+    """The ask a scheduler-evaluated check park hands over on ``auth_ask``, or None.
+
+    Round-tripped through ``AuthPayload`` exactly as ``_client_auth_payload`` does for an
+    agent's park, and for the same reason: this payload is rendered by three chat clients
+    and the console with a genuine park's chrome, and it arrives in an A2A request body
+    from whoever can reach this service, so it is rebuilt field by field rather than
+    forwarded. The round trip doubles as validation — a reshaped or truncated ask fails
+    here, loudly, and the run is then reported as a park with no ask (a failure), which
+    the scheduler records as not delivered instead of mistaking it for an older runner
+    that never read the field.
+    """
+    if not isinstance(check_ask, dict):
+        logger.warning("auth_ask in the dispatch metadata is not an object (%s); the run has no ask", type(check_ask))
+        return None
+    try:
+        return AuthPayload(**check_ask).client_payload()
+    except Exception:
+        logger.exception("Could not read the check-tool ask off the dispatch metadata")
+        return None
+
+
 def _extract_text_from_messages(messages: list) -> str | None:
     """Extract human-readable text from A2A response messages.
 
@@ -987,6 +1009,20 @@ class AgentRunner(BaseAgent):
                     content=json.dumps(result_meta, default=str),
                 )
                 return
+
+        # A watch whose CHECK tool needs the owner's credential (ADR-0009 decision 8). The
+        # scheduler evaluated the check itself, before any dispatch, so no agent ran and
+        # nothing in this process parked: it hands the ask over on ``auth_ask`` so the run
+        # is PUBLISHED as a park through this task's push sender — the one path every
+        # delivery client already reads a park from and renders as a card. From here on
+        # the run is indistinguishable from an agent's park: same payload shape, same
+        # reply target, same non-terminal task. Only the answer differs, and that is
+        # console-backend's business (it re-runs the check; nothing is addressed here).
+        # Meaningful only without a sub-agent — with one, the agent's own outcome decides.
+        check_ask = message_meta.get("auth_ask")
+        if not sub_agent_id and check_ask is not None:
+            sub_agent_task_state = "auth_required"
+            auth_payload = _check_ask_payload(check_ask)
 
         # A run blocked on the owner's credential is neither a success nor a failure,
         # and it is the one outcome that leaves work to come back to. The ask travels

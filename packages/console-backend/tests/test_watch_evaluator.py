@@ -208,6 +208,51 @@ class TestCelConditions:
         assert outcome.evaluation.extracted == [{"status": "FAILED", "id": 7}]
 
     @pytest.mark.asyncio
+    async def test_the_extraction_is_the_evidence_a_triggered_watch_hands_on(self, monkeypatch):
+        # The expression is gate and filter in one: what it matched is what the agent
+        # acts on and what the notification is written from, not the whole response.
+        _gateway(monkeypatch, {"items": [{"status": "FAILED", "id": 7}, {"status": "OK", "id": 8}]})
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "tok")
+        assert outcome.evidence == [{"status": "FAILED", "id": 7}]
+
+    @pytest.mark.asyncio
+    async def test_a_boolean_gate_narrows_nothing(self, monkeypatch):
+        _gateway(monkeypatch, {"items": [1, 2, 3]})
+        outcome = await WatchEvaluator().evaluate(
+            AsyncMock(), _job(cel_expr="size(result.items) > 2"), "tok"
+        )
+        assert outcome.evidence is None
+
+    @pytest.mark.asyncio
+    async def test_a_scalar_extraction_narrows_nothing_worth_acting_on(self, monkeypatch):
+        # A bare "FAILED" (the shape every migrated jsonpath watch returns) carries none
+        # of the ids an agent needs, so the whole response goes as before.
+        _gateway(monkeypatch, {"status": "FAILED", "incident": 41})
+        outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(cel_expr="result.status"), "tok")
+        assert outcome.condition_met is True
+        assert outcome.evidence is None
+
+    @pytest.mark.asyncio
+    async def test_a_judge_on_top_does_not_widen_the_evidence(self, monkeypatch):
+        # The judge is shown the extraction and the full response to decide; what the
+        # run hands on is still what the expression matched.
+        _gateway(monkeypatch, {"items": [{"status": "FAILED", "id": 7}, {"status": "OK", "id": 8}]})
+        monkeypatch.setattr(
+            "console_backend.services.watch_evaluator.ModelDefaultsRepository.get_all",
+            AsyncMock(return_value={"chat:low": "m"}),
+        )
+        monkeypatch.setattr(
+            "console_backend.services.llm_gateway.gateway_chat",
+            AsyncMock(return_value='{"condition_met": true, "reasoning": "disk full"}'),
+        )
+        outcome = await WatchEvaluator().evaluate(
+            AsyncMock(), _job(llm_condition="the failure looks like an outage"), "tok"
+        )
+        assert outcome.condition_met is True
+        assert outcome.evaluation.mode == "cel+judge"
+        assert outcome.evidence == [{"status": "FAILED", "id": 7}]
+
+    @pytest.mark.asyncio
     async def test_an_empty_extraction_is_a_quiet_poll(self, monkeypatch):
         _gateway(monkeypatch, {"items": [{"status": "OK"}]})
         outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "tok")
