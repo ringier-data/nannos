@@ -14,26 +14,6 @@ from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
 import console_backend.services.llm_gateway as llm_gateway
 
 
-@pytest.fixture(autouse=True)
-def _cold_model_ids():
-    """Each test starts with no cached {alias: model id} map, so none sees another's."""
-    llm_gateway._model_ids = {}
-    llm_gateway._model_ids_read_at = float("-inf")
-    yield
-    llm_gateway._model_ids = {}
-    llm_gateway._model_ids_read_at = float("-inf")
-
-
-def _model_info(**ids):
-    """A /v1/model/info response listing {alias: underlying model id}."""
-    resp = MagicMock()
-    resp.raise_for_status = MagicMock()
-    resp.json = MagicMock(
-        return_value={"data": [{"model_name": alias, "model_info": {"key": key}} for alias, key in ids.items()]}
-    )
-    return resp
-
-
 def _completion(content="ok"):
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
@@ -66,78 +46,14 @@ class TestGatewayChatPayload:
         assert body["messages"] == [{"role": "user", "content": "hello"}]
 
     @pytest.mark.asyncio
-    async def test_thinking_off_is_also_said_the_provider_way_to_claude(self):
-        """`reasoning_effort="none"` alone does not switch thinking off where it is on by
-        default (the Claude 5 family): the proxy maps it to "send no thinking parameter",
-        which is the provider default. Prod, 2026-09-23: claude-sonnet-5 spent all 1024
-        tokens thinking and answered with zero characters. The explicit off switch has to
-        ride along — decided by the model behind the alias, not the alias's name."""
-        fake_client = SimpleNamespace(
-            get=AsyncMock(return_value=_model_info(chat="anthropic.claude-sonnet-5")),
-            post=AsyncMock(return_value=_completion()),
-        )
-        with patch.object(llm_gateway._client, "get", return_value=fake_client):
-            await llm_gateway.gateway_chat("hello", model="chat")
-
-        body = fake_client.post.call_args.kwargs["json"]
-        assert body["reasoning_effort"] == "none"
-        assert body["thinking"] == {"type": "disabled"}
-
-    @pytest.mark.asyncio
-    async def test_gemini_gets_the_effort_value_alone(self):
-        """Gemini 3: the proxy maps the pair to thinking_level + thinking_budget and answers
-        400 "Cannot specify both" — which failed every thinking-off utility call on a Gemini
-        low tier. The effort value alone is what switches thinking off there."""
-        fake_client = SimpleNamespace(
-            get=AsyncMock(return_value=_model_info(**{"chat-low": "vertex_ai/gemini-3.5-flash"})),
-            post=AsyncMock(return_value=_completion()),
-        )
+    async def test_off_is_the_effort_value_alone(self):
+        """The gateway adds a provider's own off switch per deployment; a `thinking` field
+        from here is a 400 on Gemini 3 ("Cannot specify both")."""
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
         with patch.object(llm_gateway._client, "get", return_value=fake_client):
             await llm_gateway.gateway_chat("hello", model="chat-low")
 
-        body = fake_client.post.call_args.kwargs["json"]
-        assert body["reasoning_effort"] == "none"
-        assert "thinking" not in body
-
-    @pytest.mark.asyncio
-    async def test_an_unreadable_model_list_falls_back_to_the_alias(self):
-        """No model list to consult: the alias is all there is, and a failed read is not
-        retried on every call."""
-        fake_client = SimpleNamespace(
-            get=AsyncMock(side_effect=RuntimeError("gateway down")),
-            post=AsyncMock(return_value=_completion()),
-        )
-        with patch.object(llm_gateway._client, "get", return_value=fake_client):
-            await llm_gateway.gateway_chat("hello", model="claude-sonnet-5")
-            assert fake_client.post.call_args.kwargs["json"]["thinking"] == {"type": "disabled"}
-            await llm_gateway.gateway_chat("hello", model="gemini-3.5-flash")
-            assert "thinking" not in fake_client.post.call_args.kwargs["json"]
-
-        assert fake_client.get.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_the_model_list_is_read_once_per_ttl(self):
-        fake_client = SimpleNamespace(
-            get=AsyncMock(return_value=_model_info(chat="anthropic.claude-sonnet-5")),
-            post=AsyncMock(return_value=_completion()),
-        )
-        with patch.object(llm_gateway._client, "get", return_value=fake_client):
-            for _ in range(3):
-                await llm_gateway.gateway_chat("hello", model="chat")
-
-        assert fake_client.get.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_a_caller_that_wants_reasoning_gets_no_off_switch(self):
-        """The off switch belongs to "none" only: a real effort tier must not be
-        contradicted by a `thinking: disabled` next to it."""
-        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion()))
-        with patch.object(llm_gateway._client, "get", return_value=fake_client):
-            await llm_gateway.gateway_chat("think hard", model="chat", reasoning_effort="high")
-
-        body = fake_client.post.call_args.kwargs["json"]
-        assert body["reasoning_effort"] == "high"
-        assert "thinking" not in body
+        assert "thinking" not in fake_client.post.call_args.kwargs["json"]
 
     @pytest.mark.asyncio
     async def test_an_explicit_none_leaves_the_model_to_itself(self):
@@ -147,22 +63,15 @@ class TestGatewayChatPayload:
         with patch.object(llm_gateway._client, "get", return_value=fake_client):
             await llm_gateway.gateway_chat("hello", model="chat-low", reasoning_effort=None)
 
-        body = fake_client.post.call_args.kwargs["json"]
-        assert "reasoning_effort" not in body
-        assert "thinking" not in body
+        assert "reasoning_effort" not in fake_client.post.call_args.kwargs["json"]
 
     @pytest.mark.asyncio
     async def test_json_calls_are_unthinking_by_default_too(self):
-        fake_client = SimpleNamespace(
-            get=AsyncMock(return_value=_model_info(m="anthropic.claude-sonnet-5")),
-            post=AsyncMock(return_value=_completion("{}")),
-        )
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion("{}")))
         with patch.object(llm_gateway._client, "get", return_value=fake_client):
             await llm_gateway.gateway_chat_json("x", model="m")
 
-        body = fake_client.post.call_args.kwargs["json"]
-        assert body["reasoning_effort"] == "none"
-        assert body["thinking"] == {"type": "disabled"}
+        assert fake_client.post.call_args.kwargs["json"]["reasoning_effort"] == "none"
 
 
 class TestSalvagingTheObject:
@@ -324,10 +233,7 @@ class TestFinishReason:
 
     @pytest.mark.asyncio
     async def test_a_reply_that_finished_logs_nothing(self, caplog):
-        fake_client = SimpleNamespace(
-            get=AsyncMock(return_value=_model_info()),
-            post=AsyncMock(return_value=_completion_with("All done.", "stop")),
-        )
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=_completion_with("All done.", "stop")))
         with patch.object(llm_gateway._client, "get", return_value=fake_client), caplog.at_level("WARNING"):
             await llm_gateway.gateway_chat("x", model="chat-low")
 

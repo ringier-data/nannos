@@ -12,16 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_common.core.model_factory import (
-    FAST_MODEL_MAX_TOKENS,
-    REASONING_OFF,
-    THINKING_DISABLED,
-    create_fast_model,
-    create_model,
-)
-from agent_common.models.base import ThinkingLevel
-
-_GW_ENV = {"LLM_GATEWAY_URL": "http://litellm-proxy.test", "LLM_GATEWAY_API_KEY": "sk-test"}
+from agent_common.core.model_factory import FAST_MODEL_MAX_TOKENS, REASONING_OFF, create_fast_model, create_model
 
 
 def _captured_kwargs(**kwargs):
@@ -38,78 +29,17 @@ def test_thinking_is_off():
     assert _captured_kwargs()["reasoning_effort"] == REASONING_OFF
 
 
-_GATEWAY_MODELS = {
-    "claude-alias": {"key": "anthropic.claude-sonnet-5", "litellm_provider": "bedrock_converse"},
-    "gemini-alias": {"key": "vertex_ai/gemini-3.5-flash", "litellm_provider": "vertex_ai"},
-}
-
-
-def _model_kwargs_sent(alias: str = "claude-alias", **kwargs) -> dict:
-    """What create_model hands the gateway client as request-body extras — `model_kwargs` and
-    `extra_body` merged, as they reach the wire — without building the real (module-cached)
-    ChatOpenAI subclass or reading a gateway."""
+def test_off_is_the_effort_value_alone():
+    # The gateway adds a provider's own off switch per deployment. A `thinking` field from
+    # here is a 400 on Gemini 3, and in model_kwargs the OpenAI SDK rejects it before sending.
     with (
-        patch.dict(os.environ, _GW_ENV),
+        patch.dict(os.environ, {"LLM_GATEWAY_URL": "http://litellm-proxy.test", "LLM_GATEWAY_API_KEY": "sk-test"}),
         patch("agent_common.core.model_factory._gateway_chat_openai_cls") as cls,
-        patch("agent_common.core.model_factory._gateway_models", return_value=_GATEWAY_MODELS),
     ):
-        create_model(alias, pre_resolved=True, **kwargs)
+        create_model("alias", reasoning_effort=REASONING_OFF, pre_resolved=True)
     sent = cls.return_value.call_args.kwargs
-    return {**sent["model_kwargs"], **sent.get("extra_body", {})}
-
-
-def test_off_also_sends_the_provider_off_switch_to_claude():
-    # "none" reaches the proxy as "send no thinking parameter", which on the Claude 5
-    # family (thinking on by default) changes nothing: prod, 2026-09-23, claude-sonnet-5
-    # spent a whole 1024-token budget thinking and returned an empty reply. The explicit
-    # `thinking: disabled` is the only thing that switches it off there.
-    sent = _model_kwargs_sent(reasoning_effort=REASONING_OFF)
-    assert sent == {"reasoning_effort": REASONING_OFF, "thinking": {"type": "disabled"}}
-    assert sent["thinking"] is not THINKING_DISABLED  # a copy — the constant is never handed out
-
-
-def test_the_off_switch_rides_in_extra_body():
-    # model_kwargs become keyword arguments to the OpenAI SDK's create(), which raises on
-    # `thinking` ("unexpected keyword argument") before the request is even sent.
-    with (
-        patch.dict(os.environ, _GW_ENV),
-        patch("agent_common.core.model_factory._gateway_chat_openai_cls") as cls,
-        patch("agent_common.core.model_factory._gateway_models", return_value=_GATEWAY_MODELS),
-    ):
-        create_model("claude-alias", pre_resolved=True, reasoning_effort=REASONING_OFF)
-    sent = cls.return_value.call_args.kwargs
-    assert "thinking" not in sent["model_kwargs"]
-    assert sent["extra_body"] == {"thinking": {"type": "disabled"}}
-
-
-def test_off_is_the_effort_alone_on_gemini():
-    # Gemini 3: the proxy maps the pair to thinking_level + thinking_budget and 400s
-    # ("Cannot specify both"); the effort value alone is what switches thinking off.
-    assert _model_kwargs_sent("gemini-alias", reasoning_effort=REASONING_OFF) == {"reasoning_effort": REASONING_OFF}
-
-
-def test_the_model_id_decides_not_the_alias():
-    # An alias is an admin-chosen name: "fast" on a Claude deployment still needs the switch.
-    models = {"fast": {"key": "eu.anthropic.claude-haiku-4-5-20251001-v1:0"}}
-    with patch("agent_common.core.model_factory._gateway_models", return_value=models):
-        from agent_common.core.model_factory import _wants_explicit_thinking_off
-
-        assert _wants_explicit_thinking_off("fast")
-        # Unlisted (or snapshot unavailable): the alias is all there is to go on.
-        assert _wants_explicit_thinking_off("claude-sonnet-5")
-        assert not _wants_explicit_thinking_off("gemini-3.5-flash")
-
-
-def test_a_real_effort_tier_carries_no_off_switch():
-    # The off switch belongs to "none" alone; a caller asking for reasoning must not get a
-    # `thinking: disabled` contradicting it.
-    sent = _model_kwargs_sent(thinking_level=ThinkingLevel.high)
-    assert sent == {"reasoning_effort": "high"}
-
-
-def test_no_effort_sends_nothing_about_thinking():
-    # Silence stays silence: no thinking_level and no override leaves the provider default.
-    assert _model_kwargs_sent() == {}
+    assert sent["model_kwargs"] == {"reasoning_effort": REASONING_OFF}
+    assert "extra_body" not in sent
 
 
 def test_streaming_is_off():
