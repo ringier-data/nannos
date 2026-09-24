@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2, Globe } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2, Globe, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
+import { cn } from '@/lib/utils';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { config } from '@/config';
 import { client } from '@/api/generated/client.gen';
 import {
@@ -43,6 +45,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Pagination } from '@/components/admin/Pagination';
 
+const USER_PAGE_SIZE = 20;
+
 export function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -59,11 +63,30 @@ export function GroupDetailPage() {
   const [addMemberDialogOpen, setAddMemberDialogOpen] = useState(false);
   const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<Set<string>>(new Set());
   const [newMemberRole, setNewMemberRole] = useState<RoleEnum>('read');
+  const [userSearch, setUserSearch] = useState('');
+  const [userPage, setUserPage] = useState(1);
+  const debouncedUserSearch = useDebouncedValue(userSearch);
 
   const [selectedMembersToRemove, setSelectedMembersToRemove] = useState<Set<string>>(new Set());
   const [confirmRemoveMembers, setConfirmRemoveMembers] = useState(false);
 
   const [membersPage, setMembersPage] = useState(1);
+  const [memberSearch, setMemberSearch] = useState('');
+  const debouncedMemberSearch = useDebouncedValue(memberSearch);
+
+  // A new term re-pages from the start, otherwise a narrow search lands on an
+  // empty page 4 of the previous one. Selection is dropped with it, since the
+  // rows it referred to are no longer on screen to be unticked.
+  const handleMemberSearchChange = (value: string) => {
+    setMemberSearch(value);
+    setMembersPage(1);
+    setSelectedMembersToRemove(new Set());
+  };
+
+  const handleUserSearchChange = (value: string) => {
+    setUserSearch(value);
+    setUserPage(1);
+  };
 
   // MCP Gateway server access state
   const [grantServerDialogOpen, setGrantServerDialogOpen] = useState(false);
@@ -92,16 +115,29 @@ export function GroupDetailPage() {
   const { data: membersData, isLoading: membersLoading } = useQuery({
     ...listMembersApiV1GroupsGroupIdMembersGetOptions({
       path: { group_id: groupId },
-      query: { page: membersPage, limit: 20 },
+      query: { page: membersPage, limit: 20, search: debouncedMemberSearch || undefined },
     }),
     enabled: !isNaN(groupId),
+    placeholderData: keepPreviousData,
   });
 
-  const { data: usersData } = useQuery({
+  // The candidate list is narrowed by the server: filtering a single page of
+  // users client-side would both miss people past the page and offer members
+  // the current members page happens not to show.
+  const { data: usersData, isLoading: usersLoading, isFetching: usersFetching } = useQuery({
     ...listUsersApiV1AdminUsersGetOptions({
-      query: { limit: 100 },
+      query: {
+        page: userPage,
+        limit: USER_PAGE_SIZE,
+        search: debouncedUserSearch || undefined,
+        exclude_group_id: groupId,
+        status: 'active',
+      },
     }),
-    enabled: addMemberDialogOpen,
+    enabled: addMemberDialogOpen && !isNaN(groupId),
+    // Every keystroke is a new query key, so without this the rows blank out to
+    // a loading state and the dialog collapses and re-expands on each one.
+    placeholderData: keepPreviousData,
   });
 
   // Accessible agents queries
@@ -176,6 +212,8 @@ export function GroupDetailPage() {
       toast.success('Members added successfully');
       setAddMemberDialogOpen(false);
       setSelectedUsersToAdd(new Set());
+      setUserSearch('');
+      setUserPage(1);
       queryClient.invalidateQueries({
         queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({
           path: { group_id: groupId },
@@ -295,11 +333,9 @@ export function GroupDetailPage() {
   const group = groupData?.data;
   const members = membersData?.data ?? [];
   const membersMeta = membersData?.meta ?? { page: 1, limit: 20, total: 0 };
-  const allUsers = usersData?.data ?? [];
-  const memberUserIds = new Set(members.map((m) => m.user_id));
-  // Only active users can be added to a group — the backend rejects anyone else, and the admin user
-  // list this comes from deliberately still shows suspended users.
-  const availableUsers = allUsers.filter((u) => u.status === 'active' && !memberUserIds.has(u.id));
+  // Already filtered server-side to active non-members (see the query above).
+  const availableUsers = usersData?.data ?? [];
+  const availableUsersMeta = usersData?.meta ?? { page: 1, limit: USER_PAGE_SIZE, total: 0 };
 
   const accessibleAgents = defaultAgentsData ?? [];
   const accessibleJobs = accessibleJobsData ?? [];
@@ -791,6 +827,15 @@ export function GroupDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
+          <div className="relative mb-4">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search members by name or email..."
+              value={memberSearch}
+              onChange={(e) => handleMemberSearchChange(e.target.value)}
+              className="pl-9"
+            />
+          </div>
           <div className="border rounded-lg">
             <Table>
               <TableHeader>
@@ -822,7 +867,7 @@ export function GroupDetailPage() {
                 ) : members.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
-                      No members
+                      {debouncedMemberSearch ? 'No members match your search' : 'No members'}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -877,7 +922,17 @@ export function GroupDetailPage() {
       </Card>
 
       {/* Add Members Dialog */}
-      <Dialog open={addMemberDialogOpen} onOpenChange={setAddMemberDialogOpen}>
+      <Dialog
+        open={addMemberDialogOpen}
+        onOpenChange={(open) => {
+          setAddMemberDialogOpen(open);
+          if (!open) {
+            setUserSearch('');
+            setUserPage(1);
+            setSelectedUsersToAdd(new Set());
+          }
+        }}
+      >
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Add Members</DialogTitle>
@@ -899,9 +954,36 @@ export function GroupDetailPage() {
             </div>
             <div className="space-y-2">
               <Label>Users</Label>
-              <div className="border rounded-lg max-h-64 overflow-y-auto">
-                {availableUsers.length === 0 ? (
-                  <div className="p-4 text-center text-muted-foreground">No available users to add</div>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search users by name or email..."
+                  value={userSearch}
+                  onChange={(e) => handleUserSearchChange(e.target.value)}
+                  className="pl-9"
+                />
+              </div>
+              {/* Reserved row: appearing on the first tick would shove the list
+                  down by its height. */}
+              <p className="text-sm text-muted-foreground min-h-[1.25rem]">
+                {selectedUsersToAdd.size > 0
+                  ? `${selectedUsersToAdd.size} selected. Selection is kept while you search.`
+                  : ''}
+              </p>
+              <div
+                className={cn(
+                  'border rounded-lg h-64 overflow-y-auto transition-opacity',
+                  // Previous rows stay put while the new term loads; dim them so
+                  // the list still reads as busy without changing size.
+                  usersFetching && !usersLoading && 'opacity-60',
+                )}
+              >
+                {usersLoading ? (
+                  <div className="p-4 text-center text-muted-foreground">Loading...</div>
+                ) : availableUsers.length === 0 ? (
+                  <div className="p-4 text-center text-muted-foreground">
+                    {debouncedUserSearch ? 'No users match your search' : 'No available users to add'}
+                  </div>
                 ) : (
                   availableUsers.map((user) => (
                     <div key={user.id} className="flex items-center gap-3 p-3 border-b last:border-b-0">
@@ -926,6 +1008,17 @@ export function GroupDetailPage() {
                     </div>
                   ))
                 )}
+              </div>
+              {/* Pagination renders nothing at all when there are no results, so
+                  it gets a reserved row: otherwise the dialog jumps by its
+                  height every time a search empties or refills the list. */}
+              <div className="min-h-[68px]">
+                <Pagination
+                  page={availableUsersMeta.page}
+                  limit={availableUsersMeta.limit}
+                  total={availableUsersMeta.total}
+                  onPageChange={setUserPage}
+                />
               </div>
             </div>
           </div>

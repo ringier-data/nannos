@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..authorization import check_capability
 from ..db.session import DbSession
@@ -70,6 +70,11 @@ async def list_secrets(
     request: Request,
     db: DbSession,
     current_user: User = Depends(require_auth),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default: service callers fetch the whole set, and only the
+    # console asks for a page.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
+    search: str | None = Query(None, description="Search by name or description"),
 ):
     """List all secrets accessible to the current user.
 
@@ -87,11 +92,14 @@ async def list_secrets(
         )
 
     try:
-        secrets = await secrets_service.list_user_secrets(
+        secrets, total = await secrets_service.list_user_secrets(
             db=db,
             user_id=current_user.id,
+            search=search,
+            page=page,
+            limit=limit,
         )
-        return SecretListResponse(items=secrets, total=len(secrets))
+        return SecretListResponse(items=secrets, total=total)
     except Exception as e:
         logger.error(f"Failed to list secrets: {e}")
         raise HTTPException(

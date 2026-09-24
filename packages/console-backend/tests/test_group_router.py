@@ -399,7 +399,9 @@ class TestGroupMembersEndpoint:
         """Test that list_members returns all group members."""
         # mock_user is manager of group 1
         mock_request = get_mock_request(user=mock_user)
-        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=20)
+        result = await group_router.list_members(
+            1, mock_request, pg_session, mock_user, page=1, limit=20, search=None
+        )
         assert result.meta.total == 1
         assert len(result.data) == 1
         assert result.data[0].user_id == mock_user.id
@@ -415,10 +417,48 @@ class TestGroupMembersEndpoint:
     ):
         """Test pagination for member list (trivial with 1 member)."""
         mock_request = get_mock_request(user=mock_user)
-        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=1)
+        result = await group_router.list_members(
+            1, mock_request, pg_session, mock_user, page=1, limit=1, search=None
+        )
         assert result.meta.page == 1
         assert result.meta.limit == 1
         assert len(result.data) == 1
+
+    @pytest.mark.asyncio
+    async def test_list_members_search_matches_name_and_email(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
+        """Search narrows the member list by first name, last name or email."""
+        mock_request = get_mock_request(user=mock_user)
+
+        for term in ("Test", "User", "user@test.com", "TEST.COM"):
+            result = await group_router.list_members(
+                1, mock_request, pg_session, mock_user, page=1, limit=20, search=term
+            )
+            assert result.meta.total == 1, f"expected {term!r} to match"
+            assert result.data[0].user_id == mock_user.id
+
+    @pytest.mark.asyncio
+    async def test_list_members_search_excludes_non_matches(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
+        """A term nobody matches returns an empty page, and total agrees with it."""
+        mock_request = get_mock_request(user=mock_user)
+        result = await group_router.list_members(
+            1, mock_request, pg_session, mock_user, page=1, limit=20, search="nobodyhere"
+        )
+        assert result.meta.total == 0
+        assert result.data == []
 
 
 class TestAddMembersEndpoint:

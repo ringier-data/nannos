@@ -338,8 +338,9 @@ class TestCatalogAccessibleList:
         await _create_catalog(pg_session, catalog_service, test_user_db, name="Cat 1")
         await _create_catalog(pg_session, catalog_service, test_user_db, name="Cat 2")
 
-        catalogs = await catalog_service.get_accessible_catalogs(pg_session, test_user_db)
+        catalogs, total = await catalog_service.get_accessible_catalogs(pg_session, test_user_db)
         assert len(catalogs) == 2
+        assert total == 2
         names = {c.name for c in catalogs}
         assert "Cat 1" in names
         assert "Cat 2" in names
@@ -354,9 +355,50 @@ class TestCatalogAccessibleList:
     ):
         await _create_catalog(pg_session, catalog_service, test_user_db, name="User Cat")
 
-        catalogs = await catalog_service.get_accessible_catalogs(pg_session, test_admin_user_db, is_admin=True)
+        catalogs, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_admin_user_db, is_admin=True
+        )
         assert len(catalogs) >= 1
+        assert total == len(catalogs)
         assert any(c.name == "User Cat" for c in catalogs)
+
+
+    @pytest.mark.asyncio
+    async def test_paging_and_search_narrow_rows_and_total(
+        self,
+        pg_session: AsyncSession,
+        catalog_service: CatalogService,
+        test_user_db: User,
+    ):
+        """A page caps the rows; total counts every match, and search narrows both."""
+        for i in range(5):
+            await _create_catalog(pg_session, catalog_service, test_user_db, name=f"Cat {i}")
+        await _create_catalog(pg_session, catalog_service, test_user_db, name="Handbook")
+
+        page1, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_user_db, page=1, limit=2
+        )
+        assert len(page1) == 2
+        assert total == 6
+
+        page3, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_user_db, page=3, limit=2
+        )
+        assert len(page3) == 2
+        assert total == 6
+        assert {c.id for c in page1}.isdisjoint({c.id for c in page3})
+
+        found, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_user_db, search="handbook"
+        )
+        assert [c.name for c in found] == ["Handbook"]
+        assert total == 1
+
+        missing, total = await catalog_service.get_accessible_catalogs(
+            pg_session, test_user_db, search="no-such-catalog"
+        )
+        assert missing == []
+        assert total == 0
 
 
 class TestCatalogSync:

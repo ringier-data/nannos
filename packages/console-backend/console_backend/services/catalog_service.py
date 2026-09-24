@@ -66,9 +66,14 @@ class CatalogService:
         db: AsyncSession,
         user: User,
         is_admin: bool = False,
-    ) -> list[Catalog]:
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[Catalog], int]:
         """Get catalogs accessible to user."""
-        return await self.repo.get_accessible_catalogs(db, user.id, is_admin=is_admin)
+        return await self.repo.get_accessible_catalogs(
+            db, user.id, is_admin=is_admin, search=search, page=page, limit=limit
+        )
 
     async def get_catalog(
         self,
@@ -84,7 +89,8 @@ class CatalogService:
         if is_admin or catalog.owner_user_id == user.id:
             return catalog
         # Check group-based access
-        accessible = await self.repo.get_accessible_catalogs(db, user.id)
+        # An access check, so it must see every catalog the user can reach.
+        accessible, _ = await self.repo.get_accessible_catalogs(db, user.id)
         if any(c.id == catalog_id for c in accessible):
             return catalog
         return None

@@ -136,6 +136,7 @@ async def list_members(
     user: User = Depends(require_auth),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    search: str | None = Query(None, description="Search by name or email"),
 ) -> GroupMemberListResponse:
     """List members of a group.
 
@@ -153,7 +154,9 @@ async def list_members(
             detail="Group not found",
         )
 
-    members, total = await user_group_service.list_members(db, group_id, page=page, limit=limit)
+    members, total = await user_group_service.list_members(
+        db, group_id, page=page, limit=limit, search=search
+    )
 
     return GroupMemberListResponse(
         data=members,

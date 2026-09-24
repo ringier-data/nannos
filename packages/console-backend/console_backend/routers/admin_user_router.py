@@ -59,6 +59,11 @@ async def list_users(
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
     search: str | None = Query(None, description="Search by name or email"),
     group_id: int | None = Query(None, description="Filter by group membership"),
+    exclude_group_id: int | None = Query(
+        None, description="Exclude users who are already members of this group"
+    ),
+    # Aliased: the wire name is "status", but that is fastapi.status in this module.
+    user_status: UserStatus | None = Query(None, alias="status", description="Filter by user status"),
 ) -> UserListResponse:
     """List all users with pagination and filtering.
 
@@ -71,6 +76,8 @@ async def list_users(
         limit=limit,
         search=search,
         group_id=group_id,
+        exclude_group_id=exclude_group_id,
+        status=user_status,
     )
 
     return UserListResponse(

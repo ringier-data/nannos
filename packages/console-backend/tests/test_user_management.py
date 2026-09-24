@@ -80,6 +80,94 @@ class TestUserServiceExtended:
         users, total = await user_service.list_users(pg_session, include_deleted=True)
         assert total == 3
 
+    async def test_list_users_exclude_group_id(
+        self,
+        user_service: UserService,
+        user_group_service: UserGroupService,
+        pg_session: AsyncSession,
+        test_user: User,
+    ):
+        """exclude_group_id drops existing members over the whole table, not one page."""
+        members = []
+        for i in range(3):
+            members.append(
+                await user_service.upsert_user(
+                    db=pg_session,
+                    sub=f"member-{i}",
+                    email=f"member{i}@example.com",
+                    first_name=f"Member{i}",
+                    last_name="Test",
+                )
+            )
+        outsider = await user_service.upsert_user(
+            db=pg_session,
+            sub="outsider",
+            email="outsider@example.com",
+            first_name="Outsider",
+            last_name="Test",
+        )
+
+        group = await user_group_service.create_group(
+            pg_session, actor=test_user, name="Excludable", description=None
+        )
+        await user_group_service.add_members(
+            pg_session,
+            actor=test_user,
+            group_id=group.id,
+            user_ids=[m.id for m in members],
+            role="read",
+        )
+        await pg_session.commit()
+
+        # A page smaller than the membership: the exclusion has to happen in SQL,
+        # otherwise members leak onto later pages.
+        users, total = await user_service.list_users(
+            pg_session, page=1, limit=2, exclude_group_id=group.id
+        )
+        returned = {u.id for u in users}
+        assert not returned & {m.id for m in members}
+        assert outsider.id in {u.id for u in users} or total > len(users)
+
+        all_users, total = await user_service.list_users(
+            pg_session, page=1, limit=100, exclude_group_id=group.id
+        )
+        assert {m.id for m in members}.isdisjoint({u.id for u in all_users})
+        assert outsider.id in {u.id for u in all_users}
+        assert total == len(all_users)
+
+    async def test_list_users_status_filter(
+        self, user_service: UserService, pg_session: AsyncSession, test_user: User
+    ):
+        """status keeps only users in that status, and total agrees with the rows."""
+        active = await user_service.upsert_user(
+            db=pg_session,
+            sub="still-active",
+            email="still.active@example.com",
+            first_name="Still",
+            last_name="Active",
+        )
+        suspended = await user_service.upsert_user(
+            db=pg_session,
+            sub="suspended-user",
+            email="suspended@example.com",
+            first_name="Sus",
+            last_name="Pended",
+        )
+        await user_service.update_user_status(
+            db=pg_session, user_id=suspended.id, actor=test_user, status=UserStatus.SUSPENDED
+        )
+        await pg_session.commit()
+
+        users, total = await user_service.list_users(pg_session, status=UserStatus.ACTIVE)
+        ids = {u.id for u in users}
+        assert active.id in ids
+        assert suspended.id not in ids
+        assert total == len(users)
+
+        users, total = await user_service.list_users(pg_session, status=UserStatus.SUSPENDED)
+        assert [u.id for u in users] == [suspended.id]
+        assert total == 1
+
     async def test_list_users_search_by_email(self, user_service: UserService, pg_session: AsyncSession):
         """Test searching users by email."""
         await user_service.upsert_user(

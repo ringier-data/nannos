@@ -70,65 +70,91 @@ class CatalogRepository(AuditedRepository):
         db: AsyncSession,
         user_id: str,
         is_admin: bool = False,
-    ) -> list[Catalog]:
-        """Get catalogs accessible to user (owned + group-shared + admin-all)."""
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[Catalog], int]:
+        """Get catalogs accessible to user (owned + group-shared + admin-all).
+
+        `limit=None` returns every accessible catalog, which is what the agent
+        (bearer-token) callers expect; the console asks for a page.
+        """
+        # The admin and member variants differ only in how access is established,
+        # so the projection lives in one place.
+        projection = """
+            c.*,
+            u.id AS owner_id,
+            CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
+            u.email AS owner_email,
+            EXISTS(
+                SELECT 1 FROM catalog_connections cc
+                WHERE cc.catalog_id = c.id AND cc.status = 'active'
+            ) AS has_connection,
+            COALESCE(ps.total_pages, 0) AS total_pages,
+            COALESCE(ps.indexed_pages, 0) AS indexed_pages
+        """
+        page_stats = """
+            LEFT JOIN (
+                SELECT catalog_id,
+                       COUNT(*) AS total_pages,
+                       COUNT(indexed_at) AS indexed_pages
+                FROM catalog_pages
+                GROUP BY catalog_id
+            ) ps ON ps.catalog_id = c.id
+        """
+
+        params: dict[str, Any] = {}
+        search_filter = ""
+        if search:
+            search_filter = "AND (c.name ILIKE :search OR c.description ILIKE :search)"
+            params["search"] = f"%{search}%"
+
         if is_admin:
-            result = await db.execute(
-                text("""
-                    SELECT c.*,
-                           u.id AS owner_id,
-                           CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
-                           u.email AS owner_email,
-                           EXISTS(
-                               SELECT 1 FROM catalog_connections cc
-                               WHERE cc.catalog_id = c.id AND cc.status = 'active'
-                           ) AS has_connection,
-                           COALESCE(ps.total_pages, 0) AS total_pages,
-                           COALESCE(ps.indexed_pages, 0) AS indexed_pages
-                    FROM catalogs c
-                    JOIN users u ON c.owner_user_id = u.id
-                    LEFT JOIN (
-                        SELECT catalog_id,
-                               COUNT(*) AS total_pages,
-                               COUNT(indexed_at) AS indexed_pages
-                        FROM catalog_pages
-                        GROUP BY catalog_id
-                    ) ps ON ps.catalog_id = c.id
-                    ORDER BY c.updated_at DESC
-                """),
-            )
+            inner = f"""
+                SELECT {projection}
+                FROM catalogs c
+                JOIN users u ON c.owner_user_id = u.id
+                {page_stats}
+                WHERE TRUE
+                {search_filter}
+            """
         else:
-            result = await db.execute(
-                text("""
-                    SELECT DISTINCT ON (c.id) c.*,
-                           u.id AS owner_id,
-                           CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
-                           u.email AS owner_email,
-                           EXISTS(
-                               SELECT 1 FROM catalog_connections cc
-                               WHERE cc.catalog_id = c.id AND cc.status = 'active'
-                           ) AS has_connection,
-                           COALESCE(ps.total_pages, 0) AS total_pages,
-                           COALESCE(ps.indexed_pages, 0) AS indexed_pages
-                    FROM catalogs c
-                    JOIN users u ON c.owner_user_id = u.id
-                    LEFT JOIN (
-                        SELECT catalog_id,
-                               COUNT(*) AS total_pages,
-                               COUNT(indexed_at) AS indexed_pages
-                        FROM catalog_pages
-                        GROUP BY catalog_id
-                    ) ps ON ps.catalog_id = c.id
-                    LEFT JOIN catalog_permissions cp ON cp.catalog_id = c.id
-                    LEFT JOIN user_group_members ugm ON ugm.user_group_id = cp.user_group_id
-                    WHERE c.owner_user_id = :user_id
-                       OR ugm.user_id = :user_id
-                    ORDER BY c.id, c.updated_at DESC
-                """),
-                {"user_id": user_id},
-            )
-        rows = result.mappings().all()
-        return [self._map_catalog(row) for row in rows]
+            params["user_id"] = user_id
+            # DISTINCT ON collapses the permission fan-out, and forces its own
+            # ORDER BY; the wrapper below restores the intended ordering, which
+            # the admin branch has always used.
+            inner = f"""
+                SELECT DISTINCT ON (c.id) {projection}
+                FROM catalogs c
+                JOIN users u ON c.owner_user_id = u.id
+                {page_stats}
+                LEFT JOIN catalog_permissions cp ON cp.catalog_id = c.id
+                LEFT JOIN user_group_members ugm ON ugm.user_group_id = cp.user_group_id
+                WHERE (c.owner_user_id = :user_id OR ugm.user_id = :user_id)
+                {search_filter}
+                ORDER BY c.id
+            """
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        result = await db.execute(
+            text(f"SELECT * FROM ({inner}) AS accessible ORDER BY updated_at DESC {pagination}"),
+            params,
+        )
+        catalogs = [self._map_catalog(row) for row in result.mappings().all()]
+
+        if limit is None:
+            return catalogs, len(catalogs)
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count = await db.execute(
+            text(f"SELECT COUNT(*) FROM ({inner}) AS accessible"), count_params
+        )
+        return catalogs, count.scalar() or 0
 
     # --- Catalog Files ---
 

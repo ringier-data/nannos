@@ -582,7 +582,8 @@ async def generate_job_draft(
     # job the user cannot save, which is exactly what an is_admin=True offer did.
     sub_agents = await _get_scheduler_service(request).schedulable_sub_agents(db, current_user.id)
     agent_choices = _agent_choices(sub_agents)
-    channels = await request.app.state.delivery_channel_repository.list_all_channels(db)
+    # Draft offers must list every channel the user could pick, so no page here.
+    channels, _ = await request.app.state.delivery_channel_repository.list_all_channels(db)
     channel_choices = [
         {"id": c.id, "name": c.name, "description": (c.description or "")[:120]} for c in channels
     ]

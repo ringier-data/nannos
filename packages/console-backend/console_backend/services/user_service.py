@@ -319,6 +319,8 @@ class UserService:
         limit: int = 20,
         search: str | None = None,
         group_id: int | None = None,
+        exclude_group_id: int | None = None,
+        status: UserStatus | None = None,
         include_deleted: bool = False,
     ) -> tuple[list[UserWithGroups], int]:
         """List users with pagination and filtering.
@@ -329,6 +331,8 @@ class UserService:
             limit: Items per page
             search: Search term for name/email
             group_id: Filter by group membership
+            exclude_group_id: Drop users who are already members of this group
+            status: Keep only users in this status
             include_deleted: Whether to include deleted users
 
         Returns:
@@ -362,6 +366,22 @@ class UserService:
             """)
             params["group_id"] = group_id
 
+        # Backs the "add members" picker: the candidates are everyone the group
+        # does not already have, decided over the whole table rather than over
+        # whichever page of members the caller happens to be looking at.
+        if exclude_group_id:
+            conditions.append("""
+                NOT EXISTS (
+                    SELECT 1 FROM user_group_members ugm
+                    WHERE ugm.user_id = u.id AND ugm.user_group_id = :exclude_group_id
+                )
+            """)
+            params["exclude_group_id"] = exclude_group_id
+
+        if status:
+            conditions.append("u.status = :status")
+            params["status"] = status.value if isinstance(status, UserStatus) else status
+
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
         # Count query
@@ -374,7 +394,8 @@ class UserService:
         # Data query - get users
         data_query = text(f"""
             SELECT u.id, u.sub, u.email, u.first_name, u.last_name, u.company_name,
-                   u.is_administrator, u.is_service_account, u.role, u.status, u.deleted_at,
+                   u.is_administrator, u.is_service_account, u.role, u.status,
+                   u.phone_number_idp, u.scim_attributes, u.deleted_at,
                    u.created_at, u.updated_at
             FROM users u
             {where_clause}
@@ -391,7 +412,7 @@ class UserService:
             result = await db.execute(data_query, params)
             user_rows = result.mappings().all()
 
-            users_with_groups = []
+            users: list[User] = []
             for row in user_rows:
                 user = User(
                     id=row["id"],
@@ -404,15 +425,44 @@ class UserService:
                     is_service_account=row["is_service_account"],
                     role=row["role"],
                     status=UserStatus(row["status"]),
+                    phone_number_idp=row["phone_number_idp"],
+                    scim_attributes=row["scim_attributes"],
                     deleted_at=row["deleted_at"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                 )
+                users.append(user)
 
-                # Fetch groups for each user
-                user_with_groups = await self.get_user_with_groups(db, user.id)
-                if user_with_groups:
-                    users_with_groups.append(user_with_groups)
+            # Memberships for the whole page in one round trip. Asking per user
+            # made this endpoint 2+2N queries, and on a containerised Postgres a
+            # round trip dominates the actual work: a 6-user page spent ~500ms
+            # almost entirely waiting. The per-user call also re-read the very
+            # row the query above had just returned.
+            groups_by_user: dict[str, list[UserGroupMembership]] = {}
+            if users:
+                memberships = await db.execute(
+                    text("""
+                        SELECT ugm.user_id, ug.id as group_id, ug.name as group_name, ugm.group_role
+                        FROM user_group_members ugm
+                        JOIN user_groups ug ON ug.id = ugm.user_group_id
+                        WHERE ugm.user_id = ANY(:user_ids)
+                        AND ug.deleted_at IS NULL
+                    """),
+                    {"user_ids": [u.id for u in users]},
+                )
+                for row in memberships.mappings().all():
+                    groups_by_user.setdefault(row["user_id"], []).append(
+                        UserGroupMembership(
+                            group_id=row["group_id"],
+                            group_name=row["group_name"],
+                            group_role=row["group_role"],
+                        )
+                    )
+
+            users_with_groups = [
+                UserWithGroups(**user.model_dump(), groups=groups_by_user.get(user.id, []))
+                for user in users
+            ]
 
             return users_with_groups, total
         except Exception as e:

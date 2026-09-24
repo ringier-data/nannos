@@ -845,6 +845,7 @@ class UserGroupService:
         group_id: int,
         page: int = 1,
         limit: int = 20,
+        search: str | None = None,
     ) -> tuple[list[MemberInfo], int]:
         """List members of a group.
 
@@ -853,35 +854,49 @@ class UserGroupService:
             group_id: Group ID
             page: Page number
             limit: Items per page
+            search: Search term matched against first name, last name and email
 
         Returns:
             Tuple of (members, total count)
         """
-        count_query = text("""
+        params: dict[str, Any] = {
+            "group_id": group_id,
+            "limit": limit,
+            "offset": (page - 1) * limit,
+        }
+
+        # Matches the admin user list so the same term finds the same people in
+        # both places.
+        search_clause = ""
+        if search:
+            search_clause = """
+            AND (u.first_name ILIKE :search
+                OR u.last_name ILIKE :search
+                OR u.email ILIKE :search)
+            """
+            params["search"] = f"%{search}%"
+
+        count_query = text(f"""
             SELECT COUNT(*) as total
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             WHERE ugm.user_group_id = :group_id
             AND u.deleted_at IS NULL
             AND u.status = 'active'
+            {search_clause}
         """)
 
-        data_query = text("""
+        data_query = text(f"""
             SELECT u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             WHERE ugm.user_group_id = :group_id
             AND u.deleted_at IS NULL
             AND u.status = 'active'
+            {search_clause}
             ORDER BY u.first_name, u.last_name
             LIMIT :limit OFFSET :offset
         """)
-
-        params = {
-            "group_id": group_id,
-            "limit": limit,
-            "offset": (page - 1) * limit,
-        }
 
         try:
             count_result = await db.execute(count_query, params)

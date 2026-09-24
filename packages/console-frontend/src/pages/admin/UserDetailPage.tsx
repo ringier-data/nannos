@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { SearchableSelect } from '@/components/SearchableSelect';
 import { ArrowLeft, UserCheck, UserX, Trash2, Plus, X, UserCog } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -56,6 +57,7 @@ export function UserDetailPage() {
     status: UserStatus;
   } | null>(null);
   const [selectedGroupToAdd, setSelectedGroupToAdd] = useState<string>('');
+  const [groupSearch, setGroupSearch] = useState('');
   const [selectedRole, setSelectedRole] = useState<GroupRole>('read');
   const [editingRoleGroupId, setEditingRoleGroupId] = useState<number | null>(null);
 
@@ -66,9 +68,11 @@ export function UserDetailPage() {
     enabled: !!id,
   });
 
-  const { data: allGroupsData } = useQuery({
+  // Server-side search: a fixed slab of groups filtered in the browser cannot
+  // reach anything past the slab.
+  const { data: allGroupsData, isLoading: groupsLoading } = useQuery({
     ...listGroupsApiV1AdminGroupsGetOptions({
-      query: { limit: 100 },
+      query: { limit: 20, search: groupSearch || undefined },
     }),
   });
 
@@ -186,6 +190,9 @@ export function UserDetailPage() {
 
   const user = userData?.data;
   const allGroups = allGroupsData?.data ?? [];
+  const groupsTotal = allGroupsData?.meta?.total ?? allGroups.length;
+  // The user's own groups arrive whole on the detail payload, so subtracting
+  // them here is exact — unlike filtering a page of a larger collection.
   const userGroupIds = new Set(user?.groups?.map((g) => g.group_id) ?? []);
   const availableGroups = allGroups.filter((g) => !userGroupIds.has(g.id));
   const isViewingSelf = currentUser?.id === id;
@@ -476,24 +483,22 @@ export function UserDetailPage() {
           {/* Add to Group */}
           <div className="flex items-center gap-2 p-3 border rounded-lg bg-card">
             <div className="text-sm text-muted-foreground min-w-[80px]">Add to:</div>
-            <Select value={selectedGroupToAdd} onValueChange={setSelectedGroupToAdd}>
-              <SelectTrigger className="w-[200px]">
-                <SelectValue placeholder="Select group" />
-              </SelectTrigger>
-              <SelectContent>
-                {availableGroups.length === 0 ? (
-                  <div className="px-2 py-1.5 text-sm text-muted-foreground">
-                    No available groups
-                  </div>
-                ) : (
-                  availableGroups.map((group) => (
-                    <SelectItem key={group.id} value={group.id.toString()}>
-                      {group.name}
-                    </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
+            <SearchableSelect
+              className="w-[200px]"
+              value={selectedGroupToAdd}
+              onChange={setSelectedGroupToAdd}
+              onSearchChange={setGroupSearch}
+              isLoading={groupsLoading}
+              total={groupsTotal}
+              placeholder="Select group"
+              searchPlaceholder="Search groups..."
+              emptyLabel={groupSearch ? 'No groups match your search' : 'No available groups'}
+              options={availableGroups.map((group) => ({
+                value: group.id.toString(),
+                label: group.name,
+                hint: group.description ?? undefined,
+              }))}
+            />
             <div className="text-sm text-muted-foreground">with role:</div>
             <Select value={selectedRole} onValueChange={(val) => setSelectedRole(val as GroupRole)}>
               <SelectTrigger className="w-[130px]">

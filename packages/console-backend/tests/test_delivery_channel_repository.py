@@ -198,9 +198,10 @@ async def test_list_all_channels_is_not_group_scoped(repo, pg_session: AsyncSess
     )
     await pg_session.commit()
 
-    all_channels = await repo.list_all_channels(pg_session)
+    all_channels, total = await repo.list_all_channels(pg_session)
     names = {c.name for c in all_channels}
     assert {"a", "b"} <= names
+    assert total == len(all_channels)
 
 
 @pytest.mark.asyncio
@@ -227,3 +228,86 @@ async def test_list_channels_for_installation_scopes_across_clients(
     assert {c.name for c in globex} == {"other"}
 
     assert await repo.list_channels_for_installation(pg_session, "missing") == []
+
+
+@pytest.mark.asyncio
+async def test_list_all_channels_unbounded_by_default(
+    repo, pg_session: AsyncSession, test_user_db: User
+):
+    """No limit returns every channel — the A2A and MCP callers rely on this."""
+    for i in range(5):
+        await repo.create_channel(
+            db=pg_session, actor=test_user_db, client_id="client-a", data=_channel(f"chan-{i}", f"inst-{i}")
+        )
+
+    channels, total = await repo.list_all_channels(pg_session)
+    assert len(channels) == 5
+    assert total == 5
+
+
+@pytest.mark.asyncio
+async def test_list_all_channels_pages_with_accurate_total(
+    repo, pg_session: AsyncSession, test_user_db: User
+):
+    """A page is capped, but total still counts every match."""
+    for i in range(5):
+        await repo.create_channel(
+            db=pg_session, actor=test_user_db, client_id="client-a", data=_channel(f"chan-{i}", f"inst-{i}")
+        )
+
+    page1, total = await repo.list_all_channels(pg_session, page=1, limit=2)
+    assert len(page1) == 2
+    assert total == 5
+
+    page3, total = await repo.list_all_channels(pg_session, page=3, limit=2)
+    assert len(page3) == 1
+    assert total == 5
+    assert {c.id for c in page1}.isdisjoint({c.id for c in page3})
+
+
+@pytest.mark.asyncio
+async def test_list_all_channels_search_narrows_rows_and_total(
+    repo, pg_session: AsyncSession, test_user_db: User
+):
+    """Search filters in SQL, so total reflects the search and not the table."""
+    await repo.create_channel(
+        db=pg_session, actor=test_user_db, client_id="client-a", data=_channel("ada-slack", "inst-a")
+    )
+    await repo.create_channel(
+        db=pg_session, actor=test_user_db, client_id="client-a", data=_channel("nannos-email", "inst-b")
+    )
+
+    found, total = await repo.list_all_channels(pg_session, search="slack")
+    assert [c.name for c in found] == ["ada-slack"]
+    assert total == 1
+
+    missing, total = await repo.list_all_channels(pg_session, search="no-such-channel")
+    assert missing == []
+    assert total == 0
+
+
+@pytest.mark.asyncio
+async def test_list_channels_for_client_respects_search_and_scope(
+    repo, pg_session: AsyncSession, test_user_db: User
+):
+    """Client scoping and search compose, rather than one overriding the other."""
+    a, _ = await repo.upsert_channel_by_installation(
+        db=pg_session, actor=test_user_db, client_id="client-a", data=_channel("acme-slack", "inst-1")
+    )
+    await repo.upsert_channel_by_installation(
+        db=pg_session, actor=test_user_db, client_id="client-a", data=_channel("acme-email", "inst-2")
+    )
+    await repo.upsert_channel_by_installation(
+        db=pg_session, actor=test_user_db, client_id="client-b", data=_channel("other-slack", "inst-3")
+    )
+
+    scoped, total = await repo.list_channels_for_client(pg_session, client_id="client-a")
+    assert {c.name for c in scoped} == {"acme-slack", "acme-email"}
+    assert total == 2
+
+    narrowed, total = await repo.list_channels_for_client(
+        pg_session, client_id="client-a", search="slack"
+    )
+    assert [c.name for c in narrowed] == ["acme-slack"]
+    assert total == 1
+    assert narrowed[0].id == a.id

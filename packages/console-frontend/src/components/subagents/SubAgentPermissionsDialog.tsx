@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { Users, Loader2, Search, HelpCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -75,6 +76,7 @@ export function SubAgentPermissionsDialog({
   const [initialDefaults, setInitialDefaults] = useState<Set<number>>(new Set());
   const [hasChanges, setHasChanges] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearch = useDebouncedValue(searchQuery);
 
   // Fetch current permissions
   const { data: currentPermissions, isLoading: isLoadingPermissions, error: permissionsError } = useQuery({
@@ -85,11 +87,19 @@ export function SubAgentPermissionsDialog({
     retry: false,
   });
 
-  // Fetch available groups - admin mode: all groups, else only own groups
+  // Fetch available groups - admin mode: all groups, else only own groups.
+  // The admin list is org-wide, so the search term goes to the server; filtering
+  // a fixed first page here would hide every group past it.
   const { data: adminGroupsData, isLoading: isLoadingAdminGroups, error: adminGroupsError } = useQuery({
-    ...listGroupsApiV1AdminGroupsGetOptions({ query: { limit: 100 } }),
+    ...listGroupsApiV1AdminGroupsGetOptions({
+      query: { limit: 50, search: debouncedSearch || undefined },
+    }),
     enabled: open && canUseAdminGroups,
     retry: false,
+    // Without this the search block unmounts on every keystroke while the new
+    // query loads — which resizes the dialog and, worse, takes focus out of the
+    // search box mid-word.
+    placeholderData: keepPreviousData,
   });
 
   const { data: myGroupsData, isLoading: isLoadingMyGroups, error: myGroupsError } = useQuery({
@@ -104,15 +114,18 @@ export function SubAgentPermissionsDialog({
     ? (adminGroupsData?.data ?? [])
     : (myGroupsData ?? []);
 
-  // Filter groups based on search
-  const filteredGroups = availableGroups.filter(group => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return (
-      group.name.toLowerCase().includes(query) ||
-      (group.description?.toLowerCase().includes(query) ?? false)
-    );
-  });
+  // The admin list arrives already narrowed by the server; a member's own groups
+  // are few and come whole, so those filter here.
+  const filteredGroups = canUseAdminGroups
+    ? availableGroups
+    : availableGroups.filter(group => {
+        if (!searchQuery) return true;
+        const query = searchQuery.toLowerCase();
+        return (
+          group.name.toLowerCase().includes(query) ||
+          (group.description?.toLowerCase().includes(query) ?? false)
+        );
+      });
 
   // Sync state when permissions load
   useEffect(() => {
@@ -327,14 +340,16 @@ export function SubAgentPermissionsDialog({
             </div>
           )}
 
-          {!isLoading && !hasError && availableGroups.length === 0 && (
+          {/* An empty *search result* must not hide the search box, or there is no
+              way left to clear the term. Only a genuinely empty list does. */}
+          {!isLoading && !hasError && availableGroups.length === 0 && !debouncedSearch && (
             <div className="py-8 text-center text-sm text-muted-foreground">
               No groups available.
               {!isAdmin && ' You must be a member of a group to share access.'}
             </div>
           )}
 
-          {!isLoading && !hasError && availableGroups.length > 0 && (
+          {!isLoading && !hasError && (availableGroups.length > 0 || debouncedSearch) && (
             <>
               {/* Search */}
               <div className="relative">
@@ -348,7 +363,8 @@ export function SubAgentPermissionsDialog({
               </div>
 
               {/* Table */}
-              <div className="border rounded-md flex-1 overflow-auto">
+              {/* min-h keeps the dialog a stable size as results come and go. */}
+              <div className="border rounded-md flex-1 overflow-auto min-h-[16rem]">
                 <Table>
                   <TableHeader>
                     <TableRow>

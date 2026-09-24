@@ -10988,6 +10988,18 @@ export type ListUsersApiV1AdminUsersGetData = {
          * Filter by group membership
          */
         group_id?: number | null;
+        /**
+         * Exclude Group Id
+         *
+         * Exclude users who are already members of this group
+         */
+        exclude_group_id?: number | null;
+        /**
+         * Status
+         *
+         * Filter by user status
+         */
+        status?: UserStatus | null;
     };
     url: '/api/v1/admin/users';
 };
@@ -11736,6 +11748,12 @@ export type ListMembersApiV1GroupsGroupIdMembersGetData = {
          * Items per page
          */
         limit?: number;
+        /**
+         * Search
+         *
+         * Search by name or email
+         */
+        search?: string | null;
     };
     url: '/api/v1/groups/{group_id}/members';
 };

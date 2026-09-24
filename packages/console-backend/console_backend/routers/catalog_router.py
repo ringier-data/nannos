@@ -81,11 +81,17 @@ async def list_catalogs(
     user: User = Depends(
         require_auth_or_bearer_token
     ),  # called from agents with bearer token, so allow both auth methods
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default so agent callers still see every catalog.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
+    search: str | None = Query(None, description="Search by name or description"),
 ) -> CatalogListResponse:
     """List catalogs accessible to the current user."""
     service = get_catalog_service(request)
-    catalogs = await service.get_accessible_catalogs(db, user, is_admin=is_admin_mode(request, user))
-    return CatalogListResponse(items=catalogs, total=len(catalogs))
+    catalogs, total = await service.get_accessible_catalogs(
+        db, user, is_admin=is_admin_mode(request, user), search=search, page=page, limit=limit
+    )
+    return CatalogListResponse(items=catalogs, total=total)
 
 
 @router.post("", response_model=Catalog, status_code=201, operation_id="create_catalog")

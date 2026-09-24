@@ -25,13 +25,18 @@ def _request_with_repo(repo) -> MagicMock:
 async def test_human_user_sees_all_channels(monkeypatch):
     """A session-authenticated user (no client_id) is routed to list_all_channels."""
     repo = SimpleNamespace(
-        list_all_channels=AsyncMock(return_value=[]),
-        list_channels_for_client=AsyncMock(return_value=[]),
+        list_all_channels=AsyncMock(return_value=([], 0)),
+        list_channels_for_client=AsyncMock(return_value=([], 0)),
     )
     monkeypatch.setattr(router, "get_client_id_from_request", AsyncMock(return_value=None))
 
     await router.list_channels(
-        request=_request_with_repo(repo), db=MagicMock(), current_user=MagicMock()
+        request=_request_with_repo(repo),
+        db=MagicMock(),
+        current_user=MagicMock(),
+        page=1,
+        limit=None,
+        search=None,
     )
 
     repo.list_all_channels.assert_awaited_once()
@@ -42,13 +47,18 @@ async def test_human_user_sees_all_channels(monkeypatch):
 async def test_a2a_client_sees_only_own_channels(monkeypatch):
     """A Bearer-token client (azp present) is scoped to its own channels."""
     repo = SimpleNamespace(
-        list_all_channels=AsyncMock(return_value=[]),
-        list_channels_for_client=AsyncMock(return_value=[]),
+        list_all_channels=AsyncMock(return_value=([], 0)),
+        list_channels_for_client=AsyncMock(return_value=([], 0)),
     )
     monkeypatch.setattr(router, "get_client_id_from_request", AsyncMock(return_value="client-a"))
 
     await router.list_channels(
-        request=_request_with_repo(repo), db=MagicMock(), current_user=MagicMock()
+        request=_request_with_repo(repo),
+        db=MagicMock(),
+        current_user=MagicMock(),
+        page=1,
+        limit=None,
+        search=None,
     )
 
     repo.list_channels_for_client.assert_awaited_once()
@@ -60,7 +70,7 @@ async def test_mcp_list_scopes_to_forwarded_installation(monkeypatch):
     """console_list_delivery_channels filters by the installation from request context."""
     repo = SimpleNamespace(
         list_channels_for_installation=AsyncMock(return_value=[]),
-        list_all_channels=AsyncMock(return_value=[]),
+        list_all_channels=AsyncMock(return_value=([], 0)),
     )
     monkeypatch.setattr(router, "forwarded_installation", MagicMock(return_value="acme"))
 
@@ -78,7 +88,7 @@ async def test_mcp_list_without_installation_returns_all(monkeypatch):
     """No installation in context (e.g. web-console) → all channels (accepted trade-off)."""
     repo = SimpleNamespace(
         list_channels_for_installation=AsyncMock(return_value=[]),
-        list_all_channels=AsyncMock(return_value=[]),
+        list_all_channels=AsyncMock(return_value=([], 0)),
     )
     monkeypatch.setattr(router, "forwarded_installation", MagicMock(return_value=None))
 
