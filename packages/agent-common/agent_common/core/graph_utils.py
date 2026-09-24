@@ -397,7 +397,7 @@ _PTC_DISCOVERY_INSTRUCTION = (
     "above before calling it — calling an unknown `tools.<name>` throws."
 )
 
-# To avoit case where orchestrator does not think any tools exist.
+# To avoid case where orchestrator does not think any tools exist.
 _PTC_CATALOG_GAP_NOTE = (
     "\n\n`tools.*` is a slice of this user's MCP tool catalog: {hidden} of its {total} tools "
     "are NOT in it (they are not enabled for you). Those are reachable only by delegating "
