@@ -16,6 +16,7 @@ from ..models.notification import NotificationData, NotificationType
 from ..models.secret import Secret, SecretCreate, SecretType
 from ..models.user import User
 from ..services.notification_service import NotificationService
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -321,8 +322,8 @@ class SecretsService:
         if secret_type:
             params["secret_type"] = secret_type.value
         if search:
-            search_filter = "AND (s.name ILIKE :search OR s.description ILIKE :search)"
-            params["search"] = f"%{search}%"
+            search_filter = "AND " + like_clause("s.name", "s.description")
+            params["search"] = like_contains(search)
 
         from_clause = f"""
             FROM secrets s
@@ -347,7 +348,7 @@ class SecretsService:
             SELECT DISTINCT s.id, s.owner_user_id, s.name, s.description, s.secret_type,
                    s.ssm_parameter_name, s.created_at, s.updated_at, s.deleted_at
             {from_clause}
-            ORDER BY s.created_at DESC
+            ORDER BY s.created_at DESC, s.id DESC
             {pagination}
         """)
 

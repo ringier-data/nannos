@@ -20,6 +20,9 @@ import { useAuth } from '@/contexts/AuthContext';
 
 const PAGE_SIZE = 20;
 
+/** GET /sub-agents/pending takes a search term and nothing else. */
+const PENDING_FACETS = ['search'] as const;
+
 export function SubAgentsPage() {
   const navigate = useNavigate();
   const [scope, setScope] = useState<ScopeFilter>('all');
@@ -56,15 +59,16 @@ export function SubAgentsPage() {
         ownership: effectiveScope === 'mine' ? 'owned' : effectiveScope === 'shared' ? 'shared' : undefined,
         status: filters.status === 'all' ? undefined : filters.status,
         type: filters.type === 'all' ? undefined : filters.type,
-        activated_only: filters.activation === 'enabled' ? true : undefined,
-        deactivated_only: filters.activation === 'disabled' ? true : undefined,
+        activation: filters.activation === 'all' ? undefined : filters.activation,
       },
     }),
     enabled: effectiveScope !== 'pending',
     placeholderData: keepPreviousData,
   });
 
-  // Approval queue (admin only) — a distinct dataset surfaced via the 'pending' scope
+  // Approval queue (admin only) — a distinct dataset surfaced via the 'pending'
+  // scope. It supports search only, so the facets it cannot honour are hidden
+  // rather than rendered inert (see `availableFacets` below).
   const { data: pendingData, isFetching: pendingFetching } = useQuery({
     ...listPendingApprovalsApiV1SubAgentsPendingGetOptions({
       query: { page, limit: PAGE_SIZE, search: debouncedSearch || undefined },
@@ -127,6 +131,7 @@ export function SubAgentsPage() {
         showPendingScope={adminMode}
         filters={filters}
         onFiltersChange={handleFiltersChange}
+        availableFacets={effectiveScope === 'pending' ? PENDING_FACETS : undefined}
         total={total}
         isFetching={isFetching}
       />

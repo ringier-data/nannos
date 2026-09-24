@@ -55,7 +55,13 @@ export function CatalogsPage() {
   };
 
   useEffect(() => {
-    const onHashChange = () => setActiveTab(getTabFromHash());
+    // Back/forward changes the tab without going through handleTabChange, so the
+    // page has to be reset here as well — otherwise returning to a tab keeps the
+    // other one's page number and shows a false "no catalogs" empty state.
+    const onHashChange = () => {
+      setActiveTab(getTabFromHash());
+      setPage(1);
+    };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);

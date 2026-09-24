@@ -18,6 +18,8 @@ from ..models.catalog import (
 )
 from ..models.user import User
 from .base import AuditedRepository
+from ..models.listing import OwnershipFilter
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,7 @@ class CatalogRepository(AuditedRepository):
         user_id: str,
         is_admin: bool = False,
         search: str | None = None,
-        ownership: str | None = None,
+        ownership: OwnershipFilter | None = None,
         page: int = 1,
         limit: int | None = None,
     ) -> tuple[list[Catalog], int]:
@@ -107,16 +109,15 @@ class CatalogRepository(AuditedRepository):
         params: dict[str, Any] = {}
         search_filter = ""
         if search:
-            search_filter = "AND (c.name ILIKE :search OR c.description ILIKE :search)"
-            params["search"] = f"%{search}%"
+            search_filter = "AND " + like_clause("c.name", "c.description")
+            params["search"] = like_contains(search)
 
         # The console splits owned from shared-with-me. Doing that in the browser
         # would slice whichever page happened to arrive, so it is a SQL filter.
-        ownership_value = getattr(ownership, "value", ownership)
-        if ownership_value == "owned":
+        if ownership is OwnershipFilter.OWNED:
             search_filter += " AND c.owner_user_id = :ownership_user_id"
             params["ownership_user_id"] = user_id
-        elif ownership_value == "shared":
+        elif ownership is OwnershipFilter.SHARED:
             search_filter += " AND c.owner_user_id <> :ownership_user_id"
             params["ownership_user_id"] = user_id
 
@@ -153,7 +154,7 @@ class CatalogRepository(AuditedRepository):
             params["offset"] = (page - 1) * limit
 
         result = await db.execute(
-            text(f"SELECT * FROM ({inner}) AS accessible ORDER BY updated_at DESC {pagination}"),
+            text(f"SELECT * FROM ({inner}) AS accessible ORDER BY updated_at DESC, id DESC {pagination}"),
             params,
         )
         catalogs = [self._map_catalog(row) for row in result.mappings().all()]

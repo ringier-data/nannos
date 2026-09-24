@@ -28,6 +28,7 @@ from ..repositories.user_group_repository import UserGroupRepository
 from ..services.keycloak_admin_service import KeycloakAdminService
 from ..services.notification_service import NotificationService
 from ..services.sub_agent_service import SubAgentService
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,7 @@ class UserGroupService:
         page: int = 1,
         limit: int = 20,
         search: str | None = None,
+        exclude_user_id: str | None = None,
     ) -> tuple[list[UserGroupWithMembers], int]:
         """List groups with pagination.
 
@@ -214,7 +216,8 @@ class UserGroupService:
             db: Database session
             page: Page number (1-indexed)
             limit: Items per page
-            search: Search term for name
+            search: Search term for name or description
+            exclude_user_id: Drop groups this user is already a member of
 
         Returns:
             Tuple of (groups with member counts, total count)
@@ -226,8 +229,23 @@ class UserGroupService:
         }
 
         if search:
-            conditions.append("name ILIKE :search")
-            params["search"] = f"%{search}%"
+            # The member-side picker filters name OR description client-side, so
+            # searching name alone made the same term find different groups
+            # depending on whether the caller was an admin.
+            conditions.append(like_clause("name", "description"))
+            params["search"] = like_contains(search)
+
+        # Backs the "add to group" picker: the candidates are the groups the user
+        # is not in yet, decided over the whole table rather than over whichever
+        # page the picker happens to be showing.
+        if exclude_user_id:
+            conditions.append("""
+                NOT EXISTS (
+                    SELECT 1 FROM user_group_members ugm
+                    WHERE ugm.user_group_id = user_groups.id AND ugm.user_id = :exclude_user_id
+                )
+            """)
+            params["exclude_user_id"] = exclude_user_id
 
         where_clause = "WHERE " + " AND ".join(conditions)
 
@@ -239,13 +257,14 @@ class UserGroupService:
             SELECT id, name, description, keycloak_group_id, deleted_at, created_at, updated_at
             FROM user_groups
             {where_clause}
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT :limit OFFSET :offset
         """)
 
         try:
-            # Count query only needs search param if present
-            count_params = {"search": params["search"]} if search else {}
+            # The count shares the WHERE clause, so it needs every filter param
+            # it references — just not the paging ones.
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
             count_result = await db.execute(count_query, count_params)
             total = count_result.scalar() or 0
 
@@ -869,12 +888,8 @@ class UserGroupService:
         # both places.
         search_clause = ""
         if search:
-            search_clause = """
-            AND (u.first_name ILIKE :search
-                OR u.last_name ILIKE :search
-                OR u.email ILIKE :search)
-            """
-            params["search"] = f"%{search}%"
+            search_clause = "AND " + like_clause("u.first_name", "u.last_name", "u.email")
+            params["search"] = like_contains(search)
 
         count_query = text(f"""
             SELECT COUNT(*) as total
@@ -894,7 +909,7 @@ class UserGroupService:
             AND u.deleted_at IS NULL
             AND u.status = 'active'
             {search_clause}
-            ORDER BY u.first_name, u.last_name
+            ORDER BY u.first_name, u.last_name, u.id
             LIMIT :limit OFFSET :offset
         """)
 

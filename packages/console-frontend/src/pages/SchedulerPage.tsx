@@ -63,6 +63,7 @@ import {
   createScheduledJob,
   type DeliveryChannel,
   listJobs,
+  listSharedDefinitions,
   pauseJob,
   resumeJob,
   deleteJob,
@@ -71,7 +72,6 @@ import {
   consoleListSubAgentsOptions,
   consoleListMcpToolsOptions,
   getCurrentUserSettingsApiV1AuthMeSettingsGetOptions,
-  schedulerListSharedJobsOptions,
   schedulerSubscribeJobMutation,
   schedulerCopyJobMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
@@ -958,12 +958,15 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
   // subscribed:false is a server filter — anything already activated appears in
   // the viewer's own jobs table above, and dropping those rows here in the
   // browser would thin out whichever page arrived.
-  const { data: definitions = [] } = useQuery({
-    ...schedulerListSharedJobsOptions({
-      query: { subscribed: false, page: sharedPage, limit: SHARED_PAGE_SIZE },
-    }),
+  const { data: sharedPageData } = useQuery({
+    queryKey: ['scheduler-shared-definitions', { page: sharedPage }],
+    queryFn: () =>
+      listSharedDefinitions({ subscribed: false, page: sharedPage, limit: SHARED_PAGE_SIZE }),
     placeholderData: keepPreviousData,
   });
+
+  const definitions = sharedPageData?.definitions ?? [];
+  const sharedTotal = sharedPageData?.total ?? 0;
 
   // Both can fail on a definition that was reachable when the list loaded and is not
   // any more — access revoked, or the job's agent no longer shared with the viewer. With
@@ -971,13 +974,13 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
   // happened" rather than "that is no longer yours to activate".
   const onActivateError = (err: unknown) => {
     toast.error('That did not work', { description: formatApiError(err) });
-    qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+    qc.invalidateQueries({ queryKey: ['scheduler-shared-definitions'] });
   };
   const subscribe = useMutation({
     ...schedulerSubscribeJobMutation(),
     onSuccess: (job) => {
       qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
-      qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+      qc.invalidateQueries({ queryKey: ['scheduler-shared-definitions'] });
       onOpen(job.id);
     },
     onError: onActivateError,
@@ -986,15 +989,17 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
     ...schedulerCopyJobMutation(),
     onSuccess: (job) => {
       qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
-      qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+      qc.invalidateQueries({ queryKey: ['scheduler-shared-definitions'] });
       onOpen(job.id);
     },
     onError: onActivateError,
   });
 
-  // Already filtered server-side to what the viewer has not activated.
+  // Already filtered server-side to what the viewer has not activated. `total`
+  // is the whole matching set, so an emptied page > 1 hides the section too
+  // rather than leaving bare table headers behind.
   const available = definitions;
-  if (available.length === 0 && sharedPage === 1) return null;
+  if (sharedTotal === 0) return null;
 
   const pending = subscribe.isPending || copy.isPending;
 
@@ -1079,31 +1084,12 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
         </table>
       </div>
 
-      {/* Prev/next rather than a page count: this endpoint is an MCP tool whose
-          body is a bare array, and the generated SDK does not surface the
-          X-Total-Count header the console reads elsewhere. A full page means
-          there is probably another. */}
-      {(sharedPage > 1 || available.length === SHARED_PAGE_SIZE) && (
-        <div className="flex items-center justify-end gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={sharedPage === 1}
-            onClick={() => setSharedPage((p) => Math.max(1, p - 1))}
-          >
-            Previous
-          </Button>
-          <span className="text-muted-foreground text-sm">Page {sharedPage}</span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={available.length < SHARED_PAGE_SIZE}
-            onClick={() => setSharedPage((p) => p + 1)}
-          >
-            Next
-          </Button>
-        </div>
-      )}
+      <Pagination
+        page={sharedPage}
+        limit={SHARED_PAGE_SIZE}
+        total={sharedTotal}
+        onPageChange={setSharedPage}
+      />
     </div>
   );
 }
@@ -1158,7 +1144,7 @@ export function SchedulerPage() {
       // belongs back in "Shared with you" — which filters on a cached
       // `subscription_id == null`. Without this the job leaves both tables and looks
       // deleted, flatly contradicting the dialog's "you can activate it again later".
-      qc.invalidateQueries({ queryKey: schedulerListSharedJobsOptions().queryKey });
+      qc.invalidateQueries({ queryKey: ['scheduler-shared-definitions'] });
     },
   });
 

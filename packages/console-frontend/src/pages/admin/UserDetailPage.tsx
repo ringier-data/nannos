@@ -72,8 +72,16 @@ export function UserDetailPage() {
   // reach anything past the slab.
   const { data: allGroupsData, isLoading: groupsLoading } = useQuery({
     ...listGroupsApiV1AdminGroupsGetOptions({
-      query: { limit: 20, search: groupSearch || undefined },
+      query: {
+        limit: 20,
+        search: groupSearch || undefined,
+        // Server-side, or a 20-row page of groups the user is already in reads
+        // as "No available groups" while addable ones sit past it — and `total`
+        // would count groups that cannot be picked.
+        exclude_user_id: id,
+      },
     }),
+    enabled: !!id,
   });
 
   const statusMutation = useMutation({
@@ -189,12 +197,10 @@ export function UserDetailPage() {
   });
 
   const user = userData?.data;
-  const allGroups = allGroupsData?.data ?? [];
-  const groupsTotal = allGroupsData?.meta?.total ?? allGroups.length;
-  // The user's own groups arrive whole on the detail payload, so subtracting
-  // them here is exact — unlike filtering a page of a larger collection.
-  const userGroupIds = new Set(user?.groups?.map((g) => g.group_id) ?? []);
-  const availableGroups = allGroups.filter((g) => !userGroupIds.has(g.id));
+  // Already excludes the user's own groups server-side, so the rows and the
+  // total agree on what is actually addable.
+  const availableGroups = allGroupsData?.data ?? [];
+  const groupsTotal = allGroupsData?.meta?.total ?? availableGroups.length;
   const isViewingSelf = currentUser?.id === id;
 
   const handleStatusChange = (status: UserStatus) => {

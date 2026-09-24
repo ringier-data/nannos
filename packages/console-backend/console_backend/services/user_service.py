@@ -24,6 +24,7 @@ from ..models.user import (
 from ..repositories.user_repository import UserRepository
 from ..services.audit_service import AuditService
 from ..services.keycloak_admin_service import KeycloakAdminService
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -350,12 +351,8 @@ class UserService:
             conditions.append("u.deleted_at IS NULL")
 
         if search:
-            conditions.append("""
-                (u.first_name ILIKE :search
-                OR u.last_name ILIKE :search
-                OR u.email ILIKE :search)
-            """)
-            params["search"] = f"%{search}%"
+            conditions.append(like_clause("u.first_name", "u.last_name", "u.email"))
+            params["search"] = like_contains(search)
 
         if group_id:
             conditions.append("""
@@ -399,7 +396,7 @@ class UserService:
                    u.created_at, u.updated_at
             FROM users u
             {where_clause}
-            ORDER BY u.created_at DESC
+            ORDER BY u.created_at DESC, u.id DESC
             LIMIT :limit OFFSET :offset
         """)
 

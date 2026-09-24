@@ -75,9 +75,12 @@ export function SearchableSelect({
 
   useEffect(() => () => clearTimeout(debounceTimer.current), []);
 
-  // The label for the current value may live on a page that is not loaded, so
-  // fall back to the raw value rather than rendering an empty trigger.
+  // The chosen option's label is remembered, because the option itself lives on
+  // a server page: type a search and the current selection drops out of
+  // `options`, and the trigger would fall back to showing a raw id.
   const selected = options.find((o) => o.value === value);
+  const [lastLabel, setLastLabel] = useState<string | null>(null);
+  const shownLabel = selected?.label ?? (value ? lastLabel : null);
 
   return (
     <Popover
@@ -102,7 +105,7 @@ export function SearchableSelect({
           className={cn('justify-between font-normal', className)}
         >
           <span className={cn('truncate', !value && 'text-muted-foreground')}>
-            {selected?.label ?? (value || placeholder)}
+            {shownLabel ?? (value ? '…' : placeholder)}
           </span>
           <ChevronDown className="size-4 shrink-0 opacity-50" />
         </Button>
@@ -140,6 +143,7 @@ export function SearchableSelect({
                 type="button"
                 onClick={() => {
                   onChange(option.value);
+                  setLastLabel(option.label);
                   setOpen(false);
                 }}
                 className="hover:bg-accent flex w-full items-center gap-2 px-3 py-2 text-left text-sm"

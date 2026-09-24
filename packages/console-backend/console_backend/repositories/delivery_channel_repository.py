@@ -16,6 +16,7 @@ from ..models.delivery_channel import (
 )
 from ..models.user import User
 from .base import AuditedRepository
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +182,8 @@ class DeliveryChannelRepository(AuditedRepository):
         query_params = dict(params)
         conditions = [where] if where else []
         if search:
-            conditions.append("name ILIKE :search")
-            query_params["search"] = f"%{search}%"
+            conditions.append(like_clause("name"))
+            query_params["search"] = like_contains(search)
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         pagination = ""
@@ -192,7 +193,7 @@ class DeliveryChannelRepository(AuditedRepository):
             query_params["offset"] = (page - 1) * limit
 
         result = await db.execute(
-            text(f"SELECT * FROM delivery_channels {where_clause} ORDER BY name {pagination}"),
+            text(f"SELECT * FROM delivery_channels {where_clause} ORDER BY name, id {pagination}"),
             query_params,
         )
         channels = [_row_to_response(row) for row in result.mappings().all()]

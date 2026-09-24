@@ -14,7 +14,7 @@ from ..dependencies import (
     require_auth,
     require_auth_or_bearer_token,
 )
-from ..models.listing import OwnershipFilter
+from ..models.listing import ActivationFilter, OwnershipFilter
 from ..models.sub_agent import (
     SubAgent,
     SubAgentApproval,
@@ -134,7 +134,9 @@ async def list_sub_agents(
         None, description="Restrict to sub-agents the caller owns, or ones shared with them"
     ),
     activated_only: bool = Query(False, description="Only show activated sub-agents"),
-    deactivated_only: bool = Query(False, description="Only show sub-agents NOT activated for the caller"),
+    activation: ActivationFilter | None = Query(
+        None, description="Filter by whether the sub-agent is activated for the caller"
+    ),
     type_filter: SubAgentType | None = Query(
         None, alias="type", description="Filter by sub-agent type"
     ),
@@ -173,7 +175,7 @@ async def list_sub_agents(
             status_filter=status,
             include_owned=True,
             activated_only=activated_only,
-            deactivated_only=deactivated_only,
+            activation=activation,
             ownership=ownership,
             type_filter=type_filter,
             search=search,

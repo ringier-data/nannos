@@ -32,6 +32,20 @@ export type ActivateRequest = {
 };
 
 /**
+ * ActivationFilter
+ *
+ * Whether a sub-agent is activated *for the caller*, as the console means it.
+ *
+ * This matches the `is_activated` field exactly — `usa.sub_agent_id IS NOT NULL`
+ * — so the facet and the card's toggle always agree. It is deliberately NOT the
+ * same predicate as the service's `activated_only`, which additionally treats
+ * public system agents as activated because the orchestrator needs them in a
+ * user's registry; a seeded system agent renders a Disabled toggle, so listing
+ * it under Enabled would contradict what the card shows.
+ */
+export type ActivationFilter = 'enabled' | 'disabled';
+
+/**
  * ActivationSource
  *
  * Activation source enum matching database enum.
@@ -10161,11 +10175,11 @@ export type ConsoleListSubAgentsData = {
          */
         activated_only?: boolean;
         /**
-         * Deactivated Only
+         * Activation
          *
-         * Only show sub-agents NOT activated for the caller
+         * Filter by whether the sub-agent is activated for the caller
          */
-        deactivated_only?: boolean;
+        activation?: ActivationFilter | null;
         /**
          * Type
          *
@@ -11392,9 +11406,15 @@ export type ListGroupsApiV1AdminGroupsGetData = {
         /**
          * Search
          *
-         * Search by name
+         * Search by name or description
          */
         search?: string | null;
+        /**
+         * Exclude User Id
+         *
+         * Exclude groups this user is already a member of
+         */
+        exclude_user_id?: string | null;
     };
     url: '/api/v1/admin/groups';
 };

@@ -15,6 +15,7 @@ from console_backend.models.catalog import (
     CatalogSourceType,
     CatalogUpdate,
 )
+from console_backend.models.listing import OwnershipFilter
 from console_backend.models.user import User
 from console_backend.repositories.catalog_repository import CatalogRepository
 from console_backend.services.audit_service import AuditService
@@ -422,20 +423,20 @@ class TestCatalogAccessibleList:
             )
 
         owned, total = await catalog_service.get_accessible_catalogs(
-            pg_session, test_admin_user_db, is_admin=True, ownership="owned"
+            pg_session, test_admin_user_db, is_admin=True, ownership=OwnershipFilter.OWNED
         )
         assert total == 2
         assert all(c.owner_user_id == test_admin_user_db.id for c in owned)
 
         shared, total = await catalog_service.get_accessible_catalogs(
-            pg_session, test_admin_user_db, is_admin=True, ownership="shared"
+            pg_session, test_admin_user_db, is_admin=True, ownership=OwnershipFilter.SHARED
         )
         assert total == 3
         assert all(c.owner_user_id != test_admin_user_db.id for c in shared)
 
         # And it composes with paging: a full page, with the true total beside it.
         page, total = await catalog_service.get_accessible_catalogs(
-            pg_session, test_admin_user_db, is_admin=True, ownership="shared", page=1, limit=2
+            pg_session, test_admin_user_db, is_admin=True, ownership=OwnershipFilter.SHARED, page=1, limit=2
         )
         assert len(page) == 2
         assert total == 3

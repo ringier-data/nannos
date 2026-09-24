@@ -30,6 +30,7 @@ from console_backend.models.sub_agent import (
     SubAgentType,
     SubAgentUpdate,
 )
+from console_backend.models.listing import ActivationFilter, OwnershipFilter
 from console_backend.models.user import User
 from console_backend.services.notification_service import NotificationService
 from console_backend.services.secrets_service import SecretsService
@@ -2342,14 +2343,14 @@ class TestSubAgentListPagingAndSearch:
             )
 
         owned, total = await sub_agent_service.get_accessible_sub_agents(
-            pg_session, test_user_db.id, ownership="owned", search="Owned-", page=1, limit=2
+            pg_session, test_user_db.id, ownership=OwnershipFilter.OWNED, search="Owned-", page=1, limit=2
         )
         assert len(owned) == 2, "a full page of owned agents, not a post-filtered remnant"
         assert total == 3
         assert all(a.owner_user_id == test_user_db.id for a in owned)
 
         shared, total = await sub_agent_service.get_accessible_sub_agents(
-            pg_session, test_user_db.id, ownership="shared", search="Owned-", page=1, limit=2
+            pg_session, test_user_db.id, ownership=OwnershipFilter.SHARED, search="Owned-", page=1, limit=2
         )
         assert total == 3
         assert all(a.owner_user_id != test_user_db.id for a in shared)
@@ -2380,14 +2381,65 @@ class TestSubAgentListPagingAndSearch:
 
         # Freshly created agents are not activated for their owner.
         not_activated, total = await sub_agent_service.get_accessible_sub_agents(
-            pg_session, test_user_db.id, search="Facet-", deactivated_only=True
+            pg_session, test_user_db.id, search="Facet-", activation=ActivationFilter.DISABLED
         )
         assert total == 3
         assert all(a.is_activated is False for a in not_activated)
 
         activated, total = await sub_agent_service.get_accessible_sub_agents(
-            pg_session, test_user_db.id, search="Facet-", activated_only=True
+            pg_session, test_user_db.id, search="Facet-", activation=ActivationFilter.ENABLED
         )
         assert activated == []
         assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_draft_status_facet_finds_never_approved_agents(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """A never-approved agent is a draft, and the Draft facet must find it.
+
+        `cv` joins on default_version, which is only set at approval, so a fresh
+        agent has NULL there. Without COALESCE the Draft and Pending facets
+        matched nothing at all — the client filter this replaced read
+        `config_version?.status ?? 'draft'`.
+        """
+        agent = await _create_sub_agent(pg_session, test_user_db, "Never-Approved", sub_agent_service)
+        assert agent.default_version is None
+
+        drafts, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Never-Approved", status_filter=SubAgentStatus.DRAFT
+        )
+        assert total == 1
+        assert [a.id for a in drafts] == [agent.id]
+
+    @pytest.mark.asyncio
+    async def test_activation_facet_agrees_with_the_is_activated_field(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """The console facet and the card's toggle read the same predicate.
+
+        Seeded public system agents have no activation row, so their toggle shows
+        Disabled; reusing the orchestrator's activated_only predicate for the
+        facet listed them under Enabled instead.
+        """
+        everything, _ = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id
+        )
+        system_agents = [a for a in everything if a.owner_user_id == "system" and a.is_public]
+        assert system_agents, "fixture expectation: the schema seeds public system agents"
+        assert all(a.is_activated is False for a in system_agents)
+
+        enabled, _ = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, activation=ActivationFilter.ENABLED
+        )
+        disabled, _ = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, activation=ActivationFilter.DISABLED
+        )
+        system_ids = {a.id for a in system_agents}
+        assert system_ids.isdisjoint({a.id for a in enabled}), "toggle says Disabled"
+        assert system_ids <= {a.id for a in disabled}
+
+        # Every row each facet returns agrees with the field the card renders.
+        assert all(a.is_activated for a in enabled)
+        assert all(not a.is_activated for a in disabled)
 

@@ -31,6 +31,7 @@ import type {
   ScheduledJob,
   ScheduledJobDraft,
   ScheduledJobRun,
+  SharedJobDefinition,
   ValidateArgsExprRequest,
   ValidateArgsExprResponse,
   ValidateConditionRequest,
@@ -479,6 +480,44 @@ export async function listJobs(opts?: {
   const header = response?.headers?.get?.('X-Total-Count');
   const total = header != null && header !== '' ? Number(header) : jobs.length;
   return { jobs, total: Number.isFinite(total) ? total : jobs.length };
+}
+
+export interface SharedJobDefinitionPage {
+  definitions: SharedJobDefinition[];
+  total: number;
+}
+
+/**
+ * Shared job definitions, optionally one page at a time.
+ *
+ * Mirrors `listJobs` — same MCP-tool constraint, so the body is a bare array and
+ * the count travels in `X-Total-Count`. The generated tanstack wrapper discards
+ * the response object, which is why this is hand-written.
+ */
+export async function listSharedDefinitions(opts?: {
+  search?: string;
+  subscribed?: boolean;
+  page?: number;
+  limit?: number;
+}): Promise<SharedJobDefinitionPage> {
+  const query: Record<string, string | number | boolean> = {};
+  if (opts?.search) query.search = opts.search;
+  if (opts?.subscribed !== undefined) query.subscribed = opts.subscribed;
+  if (opts?.limit !== undefined) {
+    query.limit = opts.limit;
+    query.page = opts.page ?? 1;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error, response } = await (client as any).get({
+    url: '/api/v1/scheduler/definitions',
+    query,
+  });
+  if (error) throw new Error(formatApiError(error));
+  const definitions = data as SharedJobDefinition[];
+  const header = response?.headers?.get?.('X-Total-Count');
+  const total = header != null && header !== '' ? Number(header) : definitions.length;
+  return { definitions, total: Number.isFinite(total) ? total : definitions.length };
 }
 
 export async function getJob(jobId: number): Promise<ScheduledJob> {

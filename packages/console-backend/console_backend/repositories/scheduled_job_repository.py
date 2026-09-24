@@ -36,6 +36,7 @@ from ..models.scheduled_job import (
 from ..models.user import User
 from ..utils.timezones import resolve_timezone
 from .base import AuditedRepository
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -493,8 +494,8 @@ class ScheduledJobRepository(AuditedRepository):
         params: dict[str, Any] = {"user_id": user_id}
         where = "WHERE s.user_id = :user_id AND s.deleted_at IS NULL AND d.deleted_at IS NULL"
         if search:
-            where += " AND (d.name ILIKE :search OR d.prompt ILIKE :search)"
-            params["search"] = f"%{search}%"
+            where += " AND " + like_clause("d.name", "d.prompt")
+            params["search"] = like_contains(search)
 
         pagination = ""
         if limit is not None:
@@ -503,7 +504,7 @@ class ScheduledJobRepository(AuditedRepository):
             params["offset"] = (page - 1) * limit
 
         result = await db.execute(
-            text(f"{_JOB_VIEW_SELECT} {where} ORDER BY s.created_at DESC {pagination}"),
+            text(f"{_JOB_VIEW_SELECT} {where} ORDER BY s.created_at DESC, s.id DESC {pagination}"),
             params,
         )
         jobs = [_row_to_scheduled_job(r) for r in result.mappings().all()]
@@ -961,8 +962,8 @@ class ScheduledJobRepository(AuditedRepository):
         params: dict[str, Any] = {"user_id": user_id}
         search_filter = ""
         if search:
-            search_filter = "AND (d.name ILIKE :search OR d.prompt ILIKE :search)"
-            params["search"] = f"%{search}%"
+            search_filter = "AND " + like_clause("d.name", "d.prompt")
+            params["search"] = like_contains(search)
 
         # The console's "Shared with you" section lists only definitions the
         # viewer has not activated — anything activated already appears in their
@@ -1021,7 +1022,7 @@ class ScheduledJobRepository(AuditedRepository):
                 FROM scheduled_job_definitions d
                 JOIN users u ON u.id = d.owner_user_id
             """ + access_predicate + search_filter + subscription_filter + """
-                ORDER BY d.updated_at DESC
+                ORDER BY d.updated_at DESC, d.id DESC
             """ + pagination),
             params,
         )

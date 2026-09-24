@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
 from ..config import config
 from ..models.notification import NotificationData, NotificationType
-from ..models.listing import OwnershipFilter
+from ..models.listing import ActivationFilter, OwnershipFilter
 from ..models.sub_agent import (
     ActivationSource,
     SkillDefinition,
@@ -32,6 +32,7 @@ from ..models.user import User
 from ..repositories.sub_agent_repository import ApprovalContext
 from ..services.model_gateway_service import ModelGatewayError
 from ..services.notification_service import NotificationService
+from ..utils.sql_search import like_clause, like_contains
 
 if TYPE_CHECKING:
     from ..repositories.sub_agent_repository import SubAgentRepository
@@ -245,7 +246,7 @@ class SubAgentService:
         status_filter: SubAgentStatus | None = None,
         include_owned: bool = True,
         activated_only: bool = False,
-        deactivated_only: bool = False,
+        activation: ActivationFilter | None = None,
         ownership: OwnershipFilter | None = None,
         type_filter: SubAgentType | None = None,
         search: str | None = None,
@@ -312,21 +313,24 @@ class SubAgentService:
                 ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
         """
 
-        # activated_only keeps its historic meaning for the orchestrator; the
-        # console's third state (explicitly NOT activated) is a separate flag so
-        # its "Disabled" facet is decided in SQL rather than over a page.
+        # Two predicates, deliberately different:
+        #
+        #  * activated_only is the orchestrator's: a public system agent counts as
+        #    activated for everyone, because it belongs in every user's registry.
+        #  * `activation` is the console's facet, and matches the is_activated
+        #    field the card's toggle renders. Reusing the orchestrator's predicate
+        #    here listed seeded system agents under "Enabled" while their toggle
+        #    read Disabled.
+        activation_filter = ""
         if activated_only:
             activation_filter = (
                 "AND (usa.sub_agent_id IS NOT NULL "
                 "OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)) "
             )
-        elif deactivated_only:
-            activation_filter = (
-                "AND usa.sub_agent_id IS NULL "
-                "AND NOT (sa.owner_user_id = 'system' AND sa.is_public = TRUE) "
-            )
-        else:
-            activation_filter = ""
+        elif activation is ActivationFilter.ENABLED:
+            activation_filter = "AND usa.sub_agent_id IS NOT NULL "
+        elif activation is ActivationFilter.DISABLED:
+            activation_filter = "AND usa.sub_agent_id IS NULL "
 
         params: dict[str, Any] = {"user_id": user_id}
 
@@ -334,8 +338,8 @@ class SubAgentService:
         # cut from the filtered set, and `total` has to count it.
         search_filter = ""
         if search:
-            search_filter = "AND (sa.name ILIKE :search OR cv.description ILIKE :search) "
-            params["search"] = f"%{search}%"
+            search_filter = "AND " + like_clause("sa.name", "cv.description") + " "
+            params["search"] = like_contains(search)
 
         # Owned vs shared-with-me is decided in SQL, before the page is cut:
         # trimming rows afterwards silently short-changes a page and leaves
@@ -346,10 +350,9 @@ class SubAgentService:
             params["type_filter"] = getattr(type_filter, "value", type_filter)
 
         owned_filter = ""
-        ownership_value = getattr(ownership, "value", ownership)
-        if ownership_value == "owned":
+        if ownership is OwnershipFilter.OWNED:
             owned_filter = "AND sa.owner_user_id = :user_id "
-        elif ownership_value == "shared":
+        elif ownership is OwnershipFilter.SHARED:
             owned_filter = "AND sa.owner_user_id <> :user_id "
 
         if is_admin and status_filter is None:
@@ -365,7 +368,7 @@ class SubAgentService:
             params["status"] = status_filter.value
             query_str = f"""
                 {base_select}
-                WHERE cv.status = :status AND sa.deleted_at IS NULL {activation_filter}
+                WHERE COALESCE(cv.status, 'draft') = :status AND sa.deleted_at IS NULL {activation_filter}
                 {owned_filter}
                 {type_clause}
                 {search_filter}
@@ -443,7 +446,11 @@ class SubAgentService:
             """
             if status_filter:
                 params["status"] = status_filter.value
-                query_str += "AND cv.status = :status "
+                # default_version is only set on approval, so cv is NULL for a
+                # never-approved agent. The client-side filter this replaced read
+                # `config_version?.status ?? 'draft'`; without the COALESCE the
+                # Draft and Pending facets match nothing at all.
+                query_str += "AND COALESCE(cv.status, 'draft') = :status "
 
         pagination = ""
         if limit is not None:
@@ -452,7 +459,7 @@ class SubAgentService:
             params["offset"] = (page - 1) * limit
 
         result = await db.execute(
-            text(f"{query_str} ORDER BY sa.updated_at DESC {pagination}"), params
+            text(f"{query_str} ORDER BY sa.updated_at DESC, sa.id DESC {pagination}"), params
         )
         rows = result.mappings().all()
         sub_agents = [self._row_to_sub_agent_with_version(row) for row in rows]
@@ -572,8 +579,8 @@ class SubAgentService:
         params: dict[str, Any] = {}
         search_filter = ""
         if search:
-            search_filter = "AND (sa.name ILIKE :search OR cv.description ILIKE :search)"
-            params["search"] = f"%{search}%"
+            search_filter = "AND " + like_clause("sa.name", "cv.description")
+            params["search"] = like_contains(search)
 
         pagination = ""
         if limit is not None:
@@ -616,7 +623,7 @@ class SubAgentService:
                 ON sa.id = cv.sub_agent_id AND sa.current_version = cv.version
             WHERE cv.status = 'pending_approval' AND sa.deleted_at IS NULL
             {search_filter}
-            ORDER BY cv.created_at ASC
+            ORDER BY cv.created_at ASC, sa.id ASC
             {pagination}
         """)
         result = await db.execute(query, params)

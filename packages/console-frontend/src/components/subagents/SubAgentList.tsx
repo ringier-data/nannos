@@ -33,6 +33,12 @@ interface SubAgentListProps {
   onFiltersChange: (filters: SubAgentFilters) => void;
   /** Matches on the server, which exceeds the rows on this page. */
   total: number;
+  /**
+   * Which facets the current dataset can actually honour. A facet the endpoint
+   * has no parameter for is hidden rather than rendered inert — a dropdown that
+   * silently does nothing is worse than an absent one. Defaults to all of them.
+   */
+  availableFacets?: readonly ('search' | 'status' | 'type' | 'activation')[];
   isFetching?: boolean;
 }
 
@@ -48,7 +54,10 @@ export function SubAgentList({
   onFiltersChange,
   total,
   isFetching = false,
+  availableFacets = ['search', 'status', 'type', 'activation'],
 }: SubAgentListProps) {
+  const shows = (facet: 'search' | 'status' | 'type' | 'activation') =>
+    availableFacets.includes(facet);
   // The server already applied every facet; these rows are the page as-is.
   const filteredSubAgents = subAgents;
 
@@ -93,6 +102,7 @@ export function SubAgentList({
             className="pl-9"
           />
         </div>
+        {shows('status') && (
         <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as SubAgentStatus | 'all')}>
           <SelectTrigger className="w-[160px]">
             <Filter className="mr-2 h-4 w-4" />
@@ -106,6 +116,8 @@ export function SubAgentList({
             <SelectItem value="rejected">Rejected</SelectItem>
           </SelectContent>
         </Select>
+        )}
+        {shows('type') && (
         <Select value={typeFilter} onValueChange={(v) => setTypeFilter(v as SubAgentType | 'all')}>
           <SelectTrigger className="w-[140px]">
             <SelectValue placeholder="Type" />
@@ -116,6 +128,8 @@ export function SubAgentList({
             <SelectItem value="local">Local</SelectItem>
           </SelectContent>
         </Select>
+        )}
+        {shows('activation') && (
         <Select value={activationFilter} onValueChange={(v) => setActivationFilter(v as 'all' | 'enabled' | 'disabled')}>
           <SelectTrigger className="w-[150px]">
             <SelectValue placeholder="Activation" />
@@ -126,6 +140,7 @@ export function SubAgentList({
             <SelectItem value="disabled">Disabled</SelectItem>
           </SelectContent>
         </Select>
+        )}
         {hasFilters && (
           <Button variant="ghost" size="sm" onClick={clearFilters}>
             Clear filters
