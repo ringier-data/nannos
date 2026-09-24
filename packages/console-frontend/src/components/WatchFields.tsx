@@ -509,13 +509,20 @@ export function WatchFields({
                   selected={value.outcome === 'notify'}
                   title="Send a notification"
                   description="Deliver a message you write, or one written from the result."
-                  onClick={() => patch({ outcome: 'notify', sub_agent_id: '' })}
+                  onClick={() => {
+                    // The instruction field is shared: an agent's instruction and a
+                    // writing brief are different texts, so a flip starts it empty rather
+                    // than carrying "email the owner" into the writer's brief.
+                    if (value.outcome !== 'notify') patch({ outcome: 'notify', sub_agent_id: '', prompt: '' });
+                  }}
                 />
                 <OptionCard
                   selected={value.outcome === 'agent'}
                   title="Run a sub-agent"
                   description="Hand it the result; its reply is delivered instead."
-                  onClick={() => patch({ outcome: 'agent' })}
+                  onClick={() => {
+                    if (value.outcome !== 'agent') patch({ outcome: 'agent', prompt: '' });
+                  }}
                 />
               </div>
 
@@ -535,6 +542,36 @@ export function WatchFields({
                       patch({ notification_message: e.target.value });
                     }}
                   />
+                  {/* Always shown, so a brief is never invisible: with a verbatim message it
+                      is disabled and says it will be dropped, which is what the backend does
+                      on save (the two are exclusive, and an inert brief would come back the
+                      moment the message is emptied). */}
+                  <div className="grid gap-1.5 pt-1">
+                    <Label htmlFor="notification_brief">
+                      How to write it
+                      <span className="text-muted-foreground text-xs font-normal">optional</span>
+                      {filled.has('prompt') && <AiBadge />}
+                    </Label>
+                    <Textarea
+                      id="notification_brief"
+                      rows={3}
+                      value={value.prompt}
+                      disabled={Boolean(value.notification_message.trim())}
+                      placeholder={
+                        'e.g. One line per item, linking to its campaign: https://example.com/campaigns/{campaignId}. Mention the execution date.'
+                      }
+                      onChange={(e) => {
+                        patch({ prompt: e.target.value });
+                      }}
+                    />
+                    <p className="text-muted-foreground text-xs">
+                      {value.notification_message.trim()
+                        ? value.prompt.trim()
+                          ? 'The message above is sent as written, so this brief is discarded on save.'
+                          : 'The message above is sent as written. Empty it to have one written from the matched items instead.'
+                        : 'A brief for the model that writes the message from the matched items: what to include, how to build a link from their fields, how to lay it out. It is written for the delivery channel, so a list or a table renders where the channel supports it.'}
+                    </p>
+                  </div>
                 </div>
               ) : (
                 <AgentActionFields
@@ -654,6 +691,11 @@ function WatchFieldsRead({
           <ReadValue label="Message" empty="Written from what the condition matched when it triggers">
             {value.notification_message || undefined}
           </ReadValue>
+          {!value.notification_message.trim() && (
+            <ReadValue label="How to write it" empty="No brief: one or two sentences on what changed">
+              {value.prompt || undefined}
+            </ReadValue>
+          )}
         </>
       )}
     </>

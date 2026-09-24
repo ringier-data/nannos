@@ -1,13 +1,9 @@
 """Pydantic models for delivery channels."""
 
 from datetime import datetime
-from typing import Literal
-
 from pydantic import BaseModel, Field
-
-MessageFormatting = Literal["markdown", "slack", "google-chat", "plain"]
-#: What a channel renders when it declares no formatting of its own.
-DEFAULT_MESSAGE_FORMATTING: MessageFormatting = "markdown"
+# The one definition of a channel format, shared with every writer through the SDK.
+from ringier_a2a_sdk.message_formatting import DEFAULT_MESSAGE_FORMATTING, MessageFormatting
 
 _FORMATTING_DESCRIPTION = (
     "How this channel renders delivered text. Nothing rewrites an agent's output on the "

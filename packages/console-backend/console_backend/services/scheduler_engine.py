@@ -22,12 +22,12 @@ import httpx
 from sqlalchemy import text
 
 from ringier_a2a_sdk.cost_tracking.attribution import attribution_scope
+from ringier_a2a_sdk.message_formatting import DEFAULT_MESSAGE_FORMATTING, formatting_prompt_block
 
 from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from .llm_gateway import gateway_chat
 from .spend_attribution import SERVICE_SCHEDULER, billing_subject
 from .watch_evaluator import WatchEvaluator, WatchOutcome
-from ..models.delivery_channel import DEFAULT_MESSAGE_FORMATTING
 from ..models.notification import NotificationType
 from .notification_service import NotificationService
 from ..models.scheduled_job import (
@@ -278,9 +278,9 @@ class SchedulerEngine:
         carries the truth, and a notifier that retries during an incident is how one
         unhealthy process becomes a stampede.
         """
-        # Plain text, like every other notification the scheduler writes itself: it
-        # goes out verbatim on whichever channel the job notifies, and Slack renders
-        # Markdown literally.
+        # Plain text: a fixed one-line notice reads the same on every channel, so it
+        # needs none of the channel's rendering rules (which the written notification and
+        # the agent run are told).
         delivered = await self.send_plain_notice(
             job,
             f"'{job.name}' could not run. The process handling it stopped before it finished, "
@@ -1145,7 +1145,9 @@ class SchedulerEngine:
             # A triggered watch that only notifies: the text is the notification, written
             # here when the author left it empty. It used to be written inside the agent
             # run, which is why a notification-only watch needed one at all.
-            message_text = job.notification_message or await self._write_notification(job, watch_outcome)
+            message_text = job.notification_message or await self._write_notification(
+                job, watch_outcome, self._message_formatting(channel)
+            )
 
         # Voice-call dispatch: the target becomes the voice-agent, which reads its
         # configuration from a DataPart and injects any TextParts into the live session
@@ -1272,12 +1274,18 @@ class SchedulerEngine:
         """How the channel renders text, under the key an interactive client uses."""
         return (channel or {}).get("message_formatting") or DEFAULT_MESSAGE_FORMATTING
 
-    async def _write_notification(self, job: ScheduledJob, outcome: WatchOutcome | None) -> str:
+    async def _write_notification(
+        self, job: ScheduledJob, outcome: WatchOutcome | None, message_formatting: str = DEFAULT_MESSAGE_FORMATTING
+    ) -> str:
         """Write the notification for a triggered watch whose author left it empty.
 
         Moved here from agent-runner along with the rest of the decision: the scheduler
         already has the check result, and a notification-only watch was otherwise paying
         for a whole agent run just to have this sentence written.
+
+        ``message_formatting`` is how the job's delivery channel renders text — the same
+        value the dispatch metadata carries for an agent run, so a notification written
+        here reads like one written by an agent on the same channel.
 
         Falls back to reporting the raw result. A watch that triggered has something to
         say, so an unreachable model must not turn that into silence.
@@ -1286,7 +1294,10 @@ class SchedulerEngine:
         # items that matched rather than from a response that also holds everything that
         # did not (the read notifications next to the unread one, say).
         triggered = _what_triggered(outcome)
+        brief = (job.prompt or "").strip()
         if not triggered:
+            if brief:
+                logger.info("Job %d: nothing matched to write from, the brief is not applied", job.id)
             return f"The watch '{job.name}' triggered."
         label = _triggered_label(outcome)
         fallback = f"The watch '{job.name}' triggered. {label}: {json.dumps(triggered, default=str)[:300]}"
@@ -1298,17 +1309,34 @@ class SchedulerEngine:
             logger.warning("Job %d: no chat model configured, reporting the raw result", job.id)
             return fallback
 
-        # No markup, deliberately: this text goes out verbatim on whichever channel the job
-        # notifies (Slack renders Markdown literally), and one or two sentences lose nothing
-        # by being plain. The channel's own rules are applied where a full reply is composed
-        # — the sub-agent run, which is told them via the dispatch metadata.
+        # Written under the channel's own rendering rules, the ones an agent run on this
+        # channel is told through the dispatch metadata: nothing downstream rewrites the
+        # text, so the writer has to know whether it is producing Slack mrkdwn, Google Chat
+        # markup, plain text or Markdown. Before this the writer was pinned to plain text
+        # regardless, which a brief asking for a table or a list could not override — the
+        # model kept the plain-text rule and emitted one line per item instead.
+        #
+        # The author's brief, when there is one: for a notify-only watch the instruction
+        # field has no agent to instruct, so it steers this message instead — which fields
+        # to name, how to build a link from them, what to lead with, how to lay it out. It
+        # shapes the message, it does not replace the facts: the matched items stay the
+        # only source.
+        formatting_block = formatting_prompt_block(message_formatting)
         prompt = (
             "Write the notification a user receives when a scheduled watch triggers. "
-            "One or two sentences, factual, highlighting what changed. Plain text only — "
-            "no markdown, no bold, no headings, no bullet points. Reply with the "
-            "message text only, no preamble.\n\n"
-            f"Watch: {job.name}\n"
-            f"{label}:\n{json.dumps(triggered, indent=2, default=str)[:6000]}"
+            + (
+                "Follow the author's brief below for what to include and how to shape it; "
+                "otherwise one or two sentences, factual, highlighting what changed. If "
+                "there are more than 15 items, cover the first 15 and say how many more. "
+                if brief
+                else "One or two sentences, factual, highlighting what changed, no headings. "
+            )
+            + "Use only the data given, never invent fields or ids. Reply with the message "
+            "text only, no preamble.\n\n"
+            + (f"{formatting_block}\n\n" if formatting_block else "")
+            + f"Watch: {job.name}\n"
+            + (f"Author's brief:\n{brief}\n\n" if brief else "")
+            + f"{label}:\n{json.dumps(triggered, indent=2, default=str)[:6000]}"
         )
         try:
             # Thinking off: two sentences of plain text need no reasoning, and on the low
@@ -1316,8 +1344,16 @@ class SchedulerEngine:
             # — which would then be sent to the person verbatim.
             # Cost attribution comes from the scope `_dispatch_job` opened, not from an
             # argument here — the header is stamped by `_gateway_headers`.
-            message = await gateway_chat(prompt, model=model, max_tokens=256, reasoning_effort="none")
+            # A ceiling, not spend: the un-briefed sentence is bounded by its instruction;
+            # a brief may ask for a table row per item with a link each, up to 15 items.
+            max_tokens = 2048 if brief else 768
+            message = await gateway_chat(prompt, model=model, max_tokens=max_tokens, reasoning_effort="none")
             written = message.strip().strip('"')
+            if getattr(message, "finish_reason", None) == "length" and "\n" in written:
+                # Cut off mid-line: a half URL delivered verbatim is worse than one line
+                # fewer. (No newline means one long sentence; nothing to trim to.)
+                written = written.rsplit("\n", 1)[0].rstrip()
+                logger.warning("Job %d: notification was cut off, delivering up to its last full line", job.id)
             if written:
                 logger.info("Job %d: wrote notification %r", job.id, written[:100])
                 return written
