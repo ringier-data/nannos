@@ -144,7 +144,8 @@ function reasoningFinalStatus(raw: string): TaskUpdateChunk['status'] {
  * streaming message (chat.startStream / appendStream / stopStream):
  *
  *   - work-plan todos    → plan_update title + task_update cards (state-tracked)
- *   - activity-log       → task_update cards (one per discrete action)
+ *   - activity-log       → task_update cards (one per discrete action); a
+ *                          `note` (notify_user) → an ordinary thread message
  *   - intermediate-output→ task_update cards ("💭 reasoning") — collapsible,
  *                          kept OUT of the visible answer body
  *   - final answer       → the ONLY markdown_text (the visible response body)
@@ -392,6 +393,37 @@ export class ThinkingStepsStreamer {
       this.fallbackActivity = clean;
       await this.renderFallbackStatus();
     }
+  }
+
+  /**
+   * activity-log:1.0 with `kind: 'note'` → the agent's own words for the user
+   * (the `notify_user` tool), posted as an ordinary message in the thread. Not a
+   * task card: cards collapse into the thinking widget, and a note is meant to
+   * be read.
+   *
+   * The answer is a NEW message posted later, so the note lands between the
+   * thinking widget and the answer. In degraded mode the answer REPLACES the
+   * status message instead, so the status message becomes the note and a new
+   * status message is posted below it.
+   */
+  async postNote(text: string): Promise<void> {
+    const note = (text || '').trim();
+    if (!note || this.finished) return;
+    if (this.degraded && this.fallbackTs) {
+      try {
+        await this.client.chat.update({ channel: this.opts.channelId, ts: this.fallbackTs, markdown_text: note });
+      } catch (err) {
+        // Nothing changed on screen: drop the note and keep the status message.
+        logger.warn(`Failed to post note: ${err instanceof Error ? err.message : err}`);
+        return;
+      }
+      this.fallbackTs = undefined;
+      await this.renderFallbackStatus();
+      return;
+    }
+    await this.client.chat
+      .postMessage({ channel: this.opts.channelId, thread_ts: this.opts.threadTs, markdown_text: note })
+      .catch((err) => logger.warn(`Failed to post note: ${err instanceof Error ? err.message : err}`));
   }
 
   /**
