@@ -75,7 +75,7 @@ export function WatchFields({
   fieldErrors,
   aiFilled,
   onError,
-  onLiveResult,
+  onSampleResult,
   sectionOffset = 2,
 }: {
   value: WatchFieldsValue;
@@ -96,11 +96,13 @@ export function WatchFields({
   aiFilled?: Set<string>;
   onError?: (message: string) => void;
   /**
-   * This session's check response for the call as it now stands, or undefined once the
-   * tool or arguments change. For a caller that sends the response elsewhere — the AI
-   * edit — and must not send one this form has already stopped trusting.
+   * The response this form trusts for the call as it now stands: this session's check,
+   * else the stored one while it still matches the call, else undefined. A check the tool
+   * answered with an error is not one — the tester still shows it, labelled, but it is no
+   * sample of what the tool returns. For a caller that sends the response elsewhere (the
+   * AI edit), so the rule for trusting a response lives here once.
    */
-  onLiveResult?: (result: Record<string, unknown> | undefined) => void;
+  onSampleResult?: (result: Record<string, unknown> | undefined) => void;
   /** Section numbers continue the caller's own numbering. */
   sectionOffset?: number;
 }) {
@@ -185,13 +187,6 @@ export function WatchFields({
   const callSignature = `${value.check_tool}|${JSON.stringify(value.check_args)}|${value.check_args_text}|${argsExprsKey}`;
   const liveResult = check.signature === callSignature ? check.result : undefined;
 
-  useEffect(() => {
-    onLiveResult?.(liveResult);
-    // Keyed on the result alone: a caller passing a fresh callback each render must not
-    // re-fire it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveResult]);
-
   /** The response a condition is tested against: this session's call, else the last run's. */
   // Unparseable JSON mid-edit is no known call, so it matches nothing; "no arguments"
   // (args undefined, no error) is a call like any other.
@@ -206,6 +201,13 @@ export function WatchFields({
       }));
   const storedTestable = storedMatches ? (storedResult ?? undefined) : undefined;
   const testable = liveResult ?? storedTestable;
+  const sample = liveResult && !check.isError ? liveResult : storedTestable;
+  useEffect(() => {
+    onSampleResult?.(sample);
+    // Keyed on the sample alone: a caller passing a fresh callback each render must not
+    // re-fire it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample]);
 
   // The exclusive choices live on the value, not here: switching only changes what is
   // shown, every field keeps its text, and the save applies the choice

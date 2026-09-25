@@ -441,6 +441,142 @@ class TestEditingAnExistingJob:
         assert _filled(resp)["cel_expr"] == "result.reports.filter(r, r.severity == 'medium')"
 
 
+    # ── Review round 1 (PR #289) ────────────────────────────────────────────────────
+
+    def test_a_prev_reading_expression_verifies_against_the_sample(self, draft_client, gateway, catalogue):
+        # The run binds prev to the stored result; verification left it unbound, so the
+        # prompt's own `result != prev` failed and a correct edit was "repaired" or refused.
+        gateway.return_value = {"cel_expr": "result != prev"}
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT, "result": {"reports": []}})
+
+        assert resp.status_code == 200
+        assert gateway.await_count == 1
+        assert _filled(resp)["cel_expr"] == "result != prev"
+
+    def test_moving_to_another_tool_does_not_verify_against_the_old_tools_response(
+        self, draft_client, gateway, catalogue
+    ):
+        catalogue.return_value = MCPToolsResponse(tools=CATALOGUE + [_tool("crm_list_deals", "List CRM deals")])
+        gateway.return_value = {"check_tool": "crm_list_deals", "cel_expr": "result.deals"}
+
+        resp = draft_client.post(
+            URL, json={"query": "watch crm deals instead", "current": CURRENT, "result": {"reports": []}}
+        )
+
+        assert resp.status_code == 200
+        # `result.deals` is not in the old tool's response; evaluating it there failed
+        # every repair round.
+        assert gateway.await_count == 1
+        body = _filled(resp)
+        assert body["check_tool"] == "crm_list_deals"
+        assert body["cel_expr"] == "result.deals"
+        assert "check_args" not in body  # written for the old tool
+
+    def test_a_judgement_offered_on_retry_does_not_replace_a_broken_expression(self, draft_client, gateway, catalogue):
+        gateway.side_effect = [
+            {"cel_expr": "result.reports.filter(r,"},
+            {"llm_condition": "a report looks severe"},
+        ]
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT})
+
+        assert resp.status_code == 422
+        assert "refine the expression" in resp.json()["detail"]
+
+    def test_removing_the_only_condition_is_refused(self, draft_client, gateway, catalogue):
+        resp = _edit(draft_client, gateway, {"cel_expr": None})
+
+        assert resp.status_code == 422
+        assert "no condition" in resp.json()["detail"]
+
+    def test_restated_expressions_that_fail_to_compile_do_not_remove_the_jobs(
+        self, draft_client, gateway, catalogue
+    ):
+        exprs = {"since": "strftime(now - duration('168h'), '%Y-%m-%d')"}
+        current = {**CURRENT, "check_args_exprs": exprs}
+
+        gateway.return_value = {"check_args_exprs": {"since": "strftime(now -"}, "cel_expr": "result.reports"}
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": current})
+
+        assert resp.status_code == 200
+        assert _filled(resp)["check_args_exprs"] == exprs
+
+    def test_an_echoed_agent_does_not_keep_the_agent_outcome(self, draft_client, gateway, catalogue):
+        # Switching an agent job to a fixed message while the reply restates the agent it
+        # already had: the echo is no change, so the message wins.
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=3, name="triage", config_version=None)]
+        )
+        current = {**CURRENT, "sub_agent_id": 3, "prompt": "Triage it"}
+
+        gateway.return_value = {"notification_message": "A severe bug was filed", "sub_agent_id": 3}
+        resp = draft_client.post(URL, json={"query": "just notify me instead", "current": current})
+
+        body = _filled(resp)
+        assert body["notification_message"] == "A severe bug was filed"
+        assert "sub_agent_id" not in body
+
+
+class TestEditingATaskJob:
+    """generate-job-draft drafts task jobs as well as watches; an edit follows the job's type."""
+
+    TASK = {"job_type": "task", "sub_agent_id": 3, "prompt": "Summarise yesterday's bug reports"}
+
+    @pytest.fixture(autouse=True)
+    def _agents(self, draft_client):
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[
+                SimpleNamespace(id=3, name="digest", config_version=None),
+                SimpleNamespace(id=4, name="triage", config_version=None),
+            ]
+        )
+
+    def test_the_prompt_names_a_task_job_and_its_own_fields(self, draft_client, gateway, catalogue):
+        gateway.return_value = {"prompt": "Summarise yesterday's and today's bug reports"}
+
+        draft_client.post(URL, json={"query": "include today too", "current": self.TASK})
+
+        prompt = _prompt(gateway)
+        assert "EDITING an existing task job" in prompt
+        assert "Only these fields can change: prompt, sub_agent_id." in prompt
+        assert "When you change cel_expr" not in prompt
+
+    def test_the_instruction_and_agent_can_change(self, draft_client, gateway, catalogue):
+        gateway.return_value = {"sub_agent_id": 4, "prompt": "Triage yesterday's bug reports"}
+
+        resp = draft_client.post(URL, json={"query": "have triage do it", "current": self.TASK})
+
+        assert resp.status_code == 200
+        assert _filled(resp) == {"job_type": "task", "sub_agent_id": 4, "prompt": "Triage yesterday's bug reports"}
+
+    def test_watch_fields_are_not_added_to_a_task(self, draft_client, gateway, catalogue):
+        gateway.return_value = {"prompt": "Summarise all bug reports", "cel_expr": "result.reports"}
+
+        resp = draft_client.post(URL, json={"query": "all of them", "current": self.TASK})
+
+        assert "cel_expr" not in _filled(resp)
+
+
+def test_the_editable_watch_fields_are_what_the_frontend_writes_back():
+    # console-frontend's lib/watchDraft.ts wires each of these fields back into the form;
+    # a field added here without it would be merged server-side and silently dropped
+    # client-side. Change both together.
+    from console_backend.models.scheduled_job import JobType
+
+    assert scheduler_router._EDITABLE_DRAFT_FIELDS[JobType.WATCH] == {
+        "check_tool",
+        "check_args",
+        "check_args_exprs",
+        "cel_expr",
+        "llm_condition",
+        "notification_message",
+        "prompt",
+        "sub_agent_id",
+        "destroy_after_trigger",
+    }
+
+
 class TestRankMcpTools:
     """The scorer shared with /mcp/tools/search, used here as the candidate picker."""
 

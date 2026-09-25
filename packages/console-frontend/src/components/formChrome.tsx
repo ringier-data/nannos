@@ -6,9 +6,11 @@
  * drifted before.
  */
 import { type ReactNode } from 'react';
-import { AlertCircle, Info, Sparkles } from 'lucide-react';
+import { AlertCircle, Info, Loader2, Sparkles } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
@@ -199,6 +201,82 @@ export function ReadValue({
         {missing ? (empty ?? 'Not set') : children}
       </span>
       {hint && <span className="text-muted-foreground text-xs">{hint}</span>}
+    </div>
+  );
+}
+
+/**
+ * The one-line "describe it to the AI" input, shared by the page-level edit and the CEL
+ * refine so the two entry points cannot drift apart again — they had, in sizing and in
+ * whether Enter submitted a surrounding form.
+ *
+ * No greyed-out button while empty: it read as broken. The button appears once there is
+ * something to send; Enter works either way, Escape closes when the caller allows it.
+ */
+export function AiComposer({
+  value,
+  onChange,
+  onSubmit,
+  onCancel,
+  busy,
+  placeholder,
+  submitLabel,
+  autoFocus,
+  size = 'sm',
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onSubmit: () => void;
+  /** Closes the composer on Escape; omitted, Escape does nothing. */
+  onCancel?: () => void;
+  busy?: boolean;
+  placeholder: string;
+  submitLabel: string;
+  autoFocus?: boolean;
+  /** `sm` sits inside a field's toolbar, `md` at the top of a card. */
+  size?: 'sm' | 'md';
+}) {
+  const md = size === 'md';
+  return (
+    <div className="relative">
+      <Sparkles
+        className={cn(
+          'text-muted-foreground pointer-events-none absolute top-1/2 -translate-y-1/2',
+          md ? 'left-3 size-4' : 'left-2.5 size-3.5',
+        )}
+      />
+      <Input
+        autoFocus={autoFocus}
+        className={md ? 'pr-24 pl-9' : 'pr-20 pl-8 text-xs'}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            if (!busy && value.trim()) onSubmit();
+          }
+          if (e.key === 'Escape' && onCancel) {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+      />
+      {(busy || value.trim()) && (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          className={cn(
+            'absolute top-1/2 right-1 -translate-y-1/2',
+            md ? 'h-7' : 'h-6 px-2 text-[11px]',
+          )}
+          disabled={busy}
+          onClick={onSubmit}
+        >
+          {busy ? <Loader2 className={md ? 'size-4 animate-spin' : 'size-3 animate-spin'} /> : `${submitLabel} ↵`}
+        </Button>
+      )}
     </div>
   );
 }

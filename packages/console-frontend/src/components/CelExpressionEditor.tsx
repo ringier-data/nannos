@@ -14,13 +14,13 @@
 import { useState } from 'react';
 import CodeMirror, { EditorView } from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
-import { AlertCircle, Check, Loader2, Sparkles, WrapText } from 'lucide-react';
+import { AlertCircle, Check, Sparkles, WrapText } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { generateCondition } from '@/api/scheduler';
 import { formatCel } from '@/lib/watchCondition';
 import { cn } from '@/lib/utils';
+import { AiComposer } from '@/components/formChrome';
 
 /** The bare CEL editor, shared with smaller inputs (dynamic arguments). */
 export function CelCodeMirror({
@@ -142,74 +142,50 @@ export function CelExpressionEditor({
         ))}
         <div className="ml-auto flex items-center gap-1">
           {value.trim() && (
-            <Button
-              type="button"
-              variant={refineOpen ? 'secondary' : 'ghost'}
-              size="sm"
-              className="h-6 px-2 text-[11px]"
-              aria-expanded={refineOpen}
-              onClick={() => setRefineOpen((v) => !v)}
-            >
-              <Sparkles className="size-3" />
-              Refine with AI
-            </Button>
-          )}
-          {value.trim() && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-[11px]"
-              onClick={() => onChange({ cel_expr: formatCel(value) })}
-            >
-              <WrapText className="size-3" />
-              Format
-            </Button>
+            <>
+              <Button
+                type="button"
+                variant={refineOpen ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                aria-expanded={refineOpen}
+                onClick={() => setRefineOpen((v) => !v)}
+              >
+                <Sparkles className="size-3" />
+                Refine with AI
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => onChange({ cel_expr: formatCel(value) })}
+              >
+                <WrapText className="size-3" />
+                Format
+              </Button>
+            </>
           )}
         </div>
       </div>
 
       {composerOpen && (
-        <div className="relative">
-          <Sparkles className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
-          <Input
-            // Opened on purpose, so it takes the focus; the always-open empty case does not
-            // steal it on page load.
-            autoFocus={refineOpen}
-            className="pr-20 pl-8 text-xs"
-            placeholder={
-              value.trim()
-                ? 'Refine it: e.g. also ignore attendees who declined'
-                : 'Describe it: e.g. a meeting starts within the hour and has outside attendees'
-            }
-            value={aiQuery}
-            onChange={(e) => setAiQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                void runAi();
-              }
-              if (e.key === 'Escape' && refineOpen) {
-                e.preventDefault();
-                setRefineOpen(false);
-              }
-            }}
-          />
-          {/* No greyed-out button while the input is empty: it read as broken. It
-              appears once there is something to send; Enter works either way. */}
-          {(aiBusy || aiQuery.trim()) && (
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              className="absolute top-1/2 right-1 h-6 -translate-y-1/2 px-2 text-[11px]"
-              disabled={aiBusy}
-              onClick={() => void runAi()}
-            >
-              {aiBusy ? <Loader2 className="size-3 animate-spin" /> : value.trim() ? 'Refine ↵' : 'Generate ↵'}
-            </Button>
-          )}
-        </div>
+        <AiComposer
+          value={aiQuery}
+          onChange={setAiQuery}
+          onSubmit={() => void runAi()}
+          onCancel={refineOpen ? () => setRefineOpen(false) : undefined}
+          busy={aiBusy}
+          // Opened on purpose, so it takes the focus; the always-open empty case does not
+          // steal it on page load.
+          autoFocus={refineOpen}
+          placeholder={
+            value.trim()
+              ? 'Refine it: e.g. also ignore attendees who declined'
+              : 'Describe it: e.g. a meeting starts within the hour and has outside attendees'
+          }
+          submitLabel={value.trim() ? 'Refine' : 'Generate'}
+        />
       )}
       {aiError && (
         <span className="text-destructive flex items-start gap-1.5 text-xs">

@@ -189,6 +189,14 @@ export function ConditionTester({
             {verdict.tone === 'met' && <Check className="size-3" />}
             {verdict.label}
           </span>
+        ) : hasPayload ? (
+          // Tested, and failed: the error below says why. "Run the check" here read as if
+          // the check had not just run.
+          shown && (!shown.valid || runtimeError) ? (
+            <span className="text-destructive text-xs font-medium">
+              Fails{sourceText ? ` on ${sourceText}` : ''}
+            </span>
+          ) : null
         ) : (
           <span className="text-muted-foreground text-xs">
             {shown?.valid === false
@@ -313,9 +321,14 @@ export function ConditionTester({
       )}
 
       {/* The notes belong to the outcome, not to whichever branch above rendered it. Next
-          to an error they say how to fix it, so they stay out; on a good result they
-          explain what was extracted, so they fold away with it. */}
-      {(shown && (!shown.valid || runtimeError || (expanded && hasPayload)) ? (shown.notes ?? []) : []).map((note) => (
+          to an error they say how to fix it, so they stay out. With a judgement they
+          qualify the verdict itself ("the model would never be asked on this payload"),
+          so they stay out too. On an expression-only result they explain what was
+          extracted, so they fold away with it. */}
+      {(shown && (!shown.valid || runtimeError || (hasPayload && (expanded || Boolean(judge))))
+        ? (shown.notes ?? [])
+        : []
+      ).map((note) => (
         <span key={note} className="text-muted-foreground flex items-start gap-1.5 text-xs">
           <Info className="mt-0.5 size-3.5 shrink-0" />
           {note}

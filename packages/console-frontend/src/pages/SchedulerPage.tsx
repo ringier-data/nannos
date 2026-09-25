@@ -539,7 +539,10 @@ function CreateJobDialog({
 
       if (!chosen.cel_expr && !chosen.llm_condition) {
         // A watch needs something to decide with; either half of the condition works.
-        errors.cel_expr = 'Write an expression, a condition for the model to judge, or both.';
+        // Reported on a field the chosen mode shows: in judge mode the expression is
+        // hidden, and an error there left Create looking dead.
+        errors[form.condition_mode === 'judge' ? 'llm_condition' : 'cel_expr'] =
+          'Write an expression, a condition for the model to judge, or both.';
       }
 
       if (Object.keys(errors).length > 0) {

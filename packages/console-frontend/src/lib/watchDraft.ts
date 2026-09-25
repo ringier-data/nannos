@@ -12,7 +12,10 @@ import type { McpTool } from '@/api/generated/types.gen';
 import { argsModeFor, resolveArgs } from '@/lib/watchArgs';
 import { conditionModeOf, messageModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 
-/** The fields an edit may change — the backend's `_EDITABLE_DRAFT_FIELDS`. */
+/**
+ * The fields an edit may change: the backend's `_EDITABLE_DRAFT_FIELDS[watch]`, which a
+ * backend test pins to this list. Each one is written back below field by field.
+ */
 const EDITABLE = [
   'check_tool',
   'check_args',
@@ -129,20 +132,48 @@ export function applyDraftEdit(
     );
   }
 
-  if (differs.has('sub_agent_id') || differs.has('prompt') || differs.has('notification_message')) {
-    if (edited.sub_agent_id != null) {
+  const agentChanged = differs.has('sub_agent_id');
+  const messageChanged = differs.has('notification_message');
+  const promptChanged = differs.has('prompt');
+  if (agentChanged || messageChanged || promptChanged) {
+    // The outcome moves only by the edit's own choice of it: a new agent, a removed one,
+    // or a fixed message. Otherwise it stays what the form chose — "agent" with no agent
+    // picked yet is sent as no agent, and reading that echo as "notify" flipped the
+    // outcome and wrote the instruction into the brief.
+    const outcome = agentChanged
+      ? edited.sub_agent_id != null
+        ? 'agent'
+        : 'notify'
+      : messageChanged && edited.notification_message
+        ? 'notify'
+        : value.outcome;
+    if (outcome === 'agent') {
       next.outcome = 'agent';
-      next.sub_agent_mode = 'existing';
-      next.sub_agent_id = String(edited.sub_agent_id);
-      if (differs.has('sub_agent_id')) changed.add('sub_agent_id');
-      next.prompt = written(differs.has('prompt'), edited.prompt, next.prompt, true, changed, 'prompt');
+      if (agentChanged && edited.sub_agent_id != null) {
+        next.sub_agent_mode = 'existing';
+        next.sub_agent_id = String(edited.sub_agent_id);
+        changed.add('sub_agent_id');
+      }
+      next.prompt = written(promptChanged, edited.prompt, next.prompt, true, changed, 'prompt');
     } else {
       // One stored field, two meanings: without an agent `prompt` is the writer's brief.
       next.outcome = 'notify';
-      next.message_mode = messageModeOf(edited);
+      // The message choice follows what the edit wrote: a fixed text, else a brief (which
+      // only a written message reads — left under "fixed" it was badged and then dropped
+      // on save), else a removed fixed text. Otherwise the form's choice stands.
+      next.message_mode =
+        messageChanged && edited.notification_message
+          ? 'fixed'
+          : promptChanged && edited.prompt
+            ? 'written'
+            : messageChanged
+              ? 'written'
+              : value.outcome === 'notify'
+                ? value.message_mode
+                : messageModeOf(edited);
       const fixed = next.message_mode === 'fixed';
       next.notification_message = written(
-        differs.has('notification_message'),
+        messageChanged,
         edited.notification_message,
         next.notification_message,
         fixed,
@@ -150,7 +181,7 @@ export function applyDraftEdit(
         'notification_message',
       );
       next.notification_brief = written(
-        differs.has('prompt'),
+        promptChanged,
         edited.prompt,
         next.notification_brief,
         !fixed,

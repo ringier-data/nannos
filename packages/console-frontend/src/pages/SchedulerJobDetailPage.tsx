@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -44,9 +44,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
-import { HintTip } from '@/components/formChrome';
+import { AiComposer, HintTip } from '@/components/formChrome';
 import { LastCheckPanel } from '@/components/LastCheckPanel';
-import { resolveArgs, sameCheckCall } from '@/lib/watchArgs';
+import { resolveArgs } from '@/lib/watchArgs';
 import { conditionModeOf, messageModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 import { applyDraftEdit, draftOfWatch } from '@/lib/watchDraft';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
@@ -54,7 +54,6 @@ import { config } from '@/config';
 import {
   type JobRunStatus,
   type ScheduledJob,
-  type ScheduledJobDraft,
   type ScheduledJobRun,
   getDeliveryChannels,
   generateJobDraft,
@@ -662,8 +661,13 @@ function EditForm({
     check_args: job.check_args as Record<string, unknown> | null,
     check_args_exprs: job.check_args_exprs as Record<string, unknown> | null,
   };
-  /** This session's check response, as the form reports it; see `aiSampleResult`. */
-  const [liveCheck, setLiveCheck] = useState<Record<string, unknown> | undefined>();
+  /** The response the form trusts for its current call, as it reports it; sent to the AI. */
+  const [aiSample, setAiSample] = useState<Record<string, unknown> | undefined>();
+  /** The form as it is now, for a handler that resumes after an await. */
+  const watchRef = useRef(watch);
+  useEffect(() => {
+    watchRef.current = watch;
+  }, [watch]);
   /** Fields the last AI edit changed, badged so a generated value is not taken for a typed one. */
   const [aiFilled, setAiFilled] = useState<Set<string>>(new Set());
   const [aiLoading, setAiLoading] = useState(false);
@@ -735,20 +739,6 @@ function EditForm({
   }
 
   // ── AI generation (watch jobs only) ──────────────────────────────────────
-  /**
-   * The response the AI writes the expression against and verifies it on. A fresh check
-   * is the truth. Without one, the last run's response only while the call is still the
-   * one that produced it: after the tool or its arguments change, a correct expression
-   * fails against the old shape and gets "repaired" towards it, so nothing is sent and
-   * the expression is only compile-checked.
-   */
-  function aiSampleResult(sent: ScheduledJobDraft): unknown {
-    if (liveCheck) return liveCheck;
-    // Arguments that do not parse are no known call; `sent` carries none for them.
-    const unchanged = !resolveArgs(watch).error && sameCheckCall(sent, savedCall);
-    return unchanged ? (job.last_check_result ?? null) : null;
-  }
-
   async function handleAiGenerate() {
     if (!aiQuery.trim()) return;
     setAiLoading(true);
@@ -756,9 +746,14 @@ function EditForm({
     try {
       // The job as it stands goes with the request, so the sentence is read as a change
       // to it; the answer is the whole job, and only what differs is written back.
+      // The sample is the form's own trusted response (see WatchFields `onSampleResult`):
+      // a fresh check, else the stored one while it still matches the call, else none.
       const sent = draftOfWatch(watch);
-      const edited = await generateJobDraft(aiQuery, { current: sent, result: aiSampleResult(sent) });
-      const { next, changed } = applyDraftEdit(watch, sent, edited, mcpTools);
+      const edited = await generateJobDraft(aiQuery, { current: sent, result: aiSample ?? null });
+      // Applied to the form as it is now, not as it was sent: the fields stay editable
+      // while the model answers, and a snapshot from before the await discarded whatever
+      // was typed meanwhile. `sent` stays the baseline the edit is diffed against.
+      const { next, changed } = applyDraftEdit(watchRef.current, sent, edited, mcpTools);
       setWatch(next);
       setAiFilled(changed);
       setAiQuery('');
@@ -1118,32 +1113,17 @@ function EditForm({
                       job goes with the sentence, so it is read as a change to this job. */}
                   {aiOpen && editing && canWrite && (
                     <div className="grid gap-1.5">
-                      <div className="relative">
-                        <Sparkles className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
-                        <Input
-                          autoFocus
-                          className="pr-24 pl-9"
-                          placeholder="Describe the change: e.g. also include targeting issues, and link each line item"
-                          value={aiQuery}
-                          onChange={(e) => setAiQuery(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleAiGenerate();
-                            if (e.key === 'Escape') setAiOpen(false);
-                          }}
-                        />
-                        {(aiLoading || aiQuery.trim()) && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            className="absolute top-1/2 right-1 h-7 -translate-y-1/2"
-                            disabled={aiLoading}
-                            onClick={handleAiGenerate}
-                          >
-                            {aiLoading ? <Loader2 className="size-4 animate-spin" /> : 'Generate ↵'}
-                          </Button>
-                        )}
-                      </div>
+                      <AiComposer
+                        size="md"
+                        autoFocus
+                        value={aiQuery}
+                        onChange={setAiQuery}
+                        onSubmit={handleAiGenerate}
+                        onCancel={() => setAiOpen(false)}
+                        busy={aiLoading}
+                        placeholder="Describe the change: e.g. also include targeting issues, and link each line item"
+                        submitLabel="Generate"
+                      />
                       <p className="text-muted-foreground text-xs">
                         Changes only what you describe; changed fields are marked AI — review them before saving.
                       </p>
@@ -1164,7 +1144,7 @@ function EditForm({
                     storedResult={job.last_check_result as Record<string, unknown> | null}
                     storedCall={savedCall}
                     aiFilled={aiFilled}
-                    onLiveResult={setLiveCheck}
+                    onSampleResult={setAiSample}
                     onError={setError}
                     sectionOffset={1}
                   />
