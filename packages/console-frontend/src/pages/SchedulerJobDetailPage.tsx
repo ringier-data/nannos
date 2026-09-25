@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -43,8 +44,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
+import { AiComposer, HintTip } from '@/components/formChrome';
 import { LastCheckPanel } from '@/components/LastCheckPanel';
-import { argsModeFor, resolveArgs } from '@/lib/watchArgs';
+import { resolveArgs } from '@/lib/watchArgs';
+import { conditionModeOf, messageModeOf, resolveWatchChoices } from '@/lib/watchChoices';
+import { applyDraftEdit, draftOfWatch } from '@/lib/watchDraft';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
 import { config } from '@/config';
 import {
@@ -73,7 +77,7 @@ import {
   schedulerResetJobSchedulesMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { JobPermissionsDialog } from '@/components/scheduler/JobPermissionsDialog';
-import { SharingBadge } from '@/components/scheduler/sharing';
+import { OwnershipBadge, SharingBadge } from '@/components/scheduler/sharing';
 import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
 import { useAuth } from '@/contexts/AuthContext';
 import { CronField } from '@/components/CronField';
@@ -265,8 +269,18 @@ function RunStatusBadge({ run }: { run: Pick<ScheduledJobRun, 'status' | 'parked
 // Detail header
 // ---------------------------------------------------------------------------
 
+/** The page's sections, for the jump links in the header. */
+const SECTIONS = [
+  { id: 'job-definition', label: 'What it does' },
+  { id: 'job-schedule', label: 'Schedule' },
+  { id: 'job-delivery', label: 'Delivery' },
+  { id: 'job-activity', label: 'Activity' },
+] as const;
+
 function JobHeader({
   job,
+  editing,
+  actionsSlot,
   onPause,
   onResume,
   onDelete,
@@ -277,6 +291,9 @@ function JobHeader({
   isRunningNow,
 }: {
   job: ScheduledJob;
+  editing: boolean;
+  /** Where the configuration form puts its Edit / Discard / Save buttons. */
+  actionsSlot: (el: HTMLDivElement | null) => void;
   onPause: () => void;
   onResume: () => void;
   onDelete: () => void;
@@ -329,9 +346,12 @@ function JobHeader({
   });
   const definitionAction = { path: { definition_id: job.definition_id } };
 
+  // Sticky, with every action in it: the configuration is a long form, and its Save
+  // button used to scroll away with its top while the fields being edited were further
+  // down.
   return (
-    <div className="flex flex-wrap items-start justify-between gap-4">
-      <div>
+    <div className="bg-background sticky top-0 z-20 -mx-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b px-4 py-3">
+      <div className="min-w-0">
         <h1 className="text-2xl font-bold tracking-tight">{job.name}</h1>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
           <Badge variant="outline" className="capitalize">
@@ -373,9 +393,28 @@ function JobHeader({
             {!canWrite && ' You can change your own schedule and delivery; the rest is theirs.'}
           </p>
         )}
+        <nav aria-label="Sections" className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+          {SECTIONS.map((section) => (
+            <button
+              key={section.id}
+              type="button"
+              className="text-muted-foreground hover:text-foreground underline-offset-4 hover:underline"
+              onClick={() =>
+                document.getElementById(section.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+            >
+              {section.label}
+            </button>
+          ))}
+        </nav>
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex flex-wrap items-start justify-end gap-2">
+        {/* While editing, only the form's own buttons: "Run now" would run the saved
+            version, not the one on screen, and the rest change the job underneath the
+            unsaved edit. */}
+        {!editing && (
+        <>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="default" size="sm" disabled={isRunningNow} onClick={onRunNow}>
@@ -492,6 +531,9 @@ function JobHeader({
               : 'Removes only your own activation'}
           </TooltipContent>
         </Tooltip>
+        </>
+        )}
+        <div ref={actionsSlot} className="contents" />
       </div>
 
       <JobPermissionsDialog
@@ -542,6 +584,7 @@ function JobHeader({
  * outcome is a notification or an agent run.
  */
 function watchValueFromJob(job: ScheduledJob): WatchFieldsValue {
+  const agent = job.sub_agent_id != null;
   return {
     check_tool: job.check_tool ?? '',
     check_args: (job.check_args ?? {}) as Record<string, unknown>,
@@ -550,13 +593,18 @@ function watchValueFromJob(job: ScheduledJob): WatchFieldsValue {
     check_args_exprs: (job.check_args_exprs ?? {}) as Record<string, string>,
     cel_expr: job.cel_expr ?? '',
     llm_condition: job.llm_condition ?? '',
+    condition_mode: conditionModeOf(job),
     destroy_after_trigger: job.destroy_after_trigger ?? true,
     // A sub-agent is what makes the outcome an agent run; its reply replaces the message.
-    outcome: job.sub_agent_id != null ? 'agent' : 'notify',
+    outcome: agent ? 'agent' : 'notify',
+    message_mode: messageModeOf(job),
     notification_message: job.notification_message ?? '',
     sub_agent_mode: 'existing',
-    sub_agent_id: job.sub_agent_id != null ? String(job.sub_agent_id) : '',
-    prompt: job.prompt ?? '',
+    sub_agent_id: agent ? String(job.sub_agent_id) : '',
+    // One stored field, read into the half its outcome uses: the agent's instruction or
+    // the writer's brief. The other starts empty and stays so unless the user flips.
+    prompt: agent ? (job.prompt ?? '') : '',
+    notification_brief: agent ? '' : (job.prompt ?? ''),
     // Only relevant while defining an agent inline, which an existing job never is.
     automated_name: '',
     automated_description: '',
@@ -569,7 +617,18 @@ function watchValueFromJob(job: ScheduledJob): WatchFieldsValue {
 }
 
 
-function EditForm({ job }: { job: ScheduledJob }) {
+function EditForm({
+  job,
+  editing,
+  setEditing,
+  actionsSlot,
+}: {
+  job: ScheduledJob;
+  editing: boolean;
+  setEditing: (editing: boolean) => void;
+  /** The header's action area; the form's buttons render there, not at the form's top. */
+  actionsSlot: HTMLElement | null;
+}) {
   const qc = useQueryClient();
 
   // ── Per-field state ───────────────────────────────────────────────────────
@@ -592,10 +651,25 @@ function EditForm({ job }: { job: ScheduledJob }) {
   );
   const [voiceCall, setVoiceCall] = useState(job.voice_call ?? false);
   const [dirty, setDirty] = useState(false);
-  const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [watch, setWatch] = useState<WatchFieldsValue>(() => watchValueFromJob(job));
   const [aiQuery, setAiQuery] = useState('');
+  const [aiOpen, setAiOpen] = useState(false);
+  /** The call the saved job makes — what `last_check_result` is a response to. */
+  const savedCall = {
+    check_tool: job.check_tool,
+    check_args: job.check_args as Record<string, unknown> | null,
+    check_args_exprs: job.check_args_exprs as Record<string, unknown> | null,
+  };
+  /** The response the form trusts for its current call, as it reports it; sent to the AI. */
+  const [aiSample, setAiSample] = useState<Record<string, unknown> | undefined>();
+  /** The form as it is now, for a handler that resumes after an await. */
+  const watchRef = useRef(watch);
+  useEffect(() => {
+    watchRef.current = watch;
+  }, [watch]);
+  /** Fields the last AI edit changed, badged so a generated value is not taken for a typed one. */
+  const [aiFilled, setAiFilled] = useState<Set<string>>(new Set());
   const [aiLoading, setAiLoading] = useState(false);
 
   // ── What the viewer is allowed to change (ADR-0010) ──────────────────────
@@ -659,6 +733,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setDeliveryChannel((job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : '');
     setVoiceCall(job.voice_call ?? false);
     setWatch(watchValueFromJob(job));
+    setAiFilled(new Set());
     setDirty(false);
     setError(null);
   }
@@ -669,33 +744,19 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setAiLoading(true);
     setError(null);
     try {
-      const draft = await generateJobDraft(aiQuery);
-      setWatch((w) => {
-        const next = { ...w };
-        if (draft.check_tool) next.check_tool = draft.check_tool;
-        if (draft.check_args) {
-          const args = draft.check_args as Record<string, unknown>;
-          next.check_args = args;
-          next.check_args_text = JSON.stringify(args, null, 2);
-          next.args_mode = argsModeFor(
-            args,
-            mcpTools.find((t) => t.name === (draft.check_tool ?? next.check_tool)),
-          );
-        }
-        if (draft.check_args_exprs && Object.keys(draft.check_args_exprs).length > 0) {
-          next.check_args_exprs = draft.check_args_exprs as Record<string, string>;
-        }
-        if (draft.cel_expr) next.cel_expr = draft.cel_expr;
-        if (draft.llm_condition) next.llm_condition = draft.llm_condition;
-        if (draft.notification_message) {
-          next.notification_message = draft.notification_message;
-          next.outcome = 'notify';
-        }
-        if (draft.destroy_after_trigger != null) {
-          next.destroy_after_trigger = draft.destroy_after_trigger;
-        }
-        return next;
-      });
+      // The job as it stands goes with the request, so the sentence is read as a change
+      // to it; the answer is the whole job, and only what differs is written back.
+      // The sample is the form's own trusted response (see WatchFields `onSampleResult`):
+      // a fresh check, else the stored one while it still matches the call, else none.
+      const sent = draftOfWatch(watch);
+      const edited = await generateJobDraft(aiQuery, { current: sent, result: aiSample ?? null });
+      // Applied to the form as it is now, not as it was sent: the fields stay editable
+      // while the model answers, and a snapshot from before the await discarded whatever
+      // was typed meanwhile. `sent` stays the baseline the edit is diffed against.
+      const { next, changed } = applyDraftEdit(watchRef.current, sent, edited, mcpTools);
+      setWatch(next);
+      setAiFilled(changed);
+      setAiQuery('');
       touch();
     } catch (e) {
       setError(`AI generation failed: ${formatApiError(e)}. Please edit the fields manually.`);
@@ -764,6 +825,11 @@ function EditForm({ job }: { job: ScheduledJob }) {
 
     // Arguments are resolved the same way the fields read them, so a JSON editor left
     // mid-edit is reported here rather than being silently dropped on save.
+    // Only what the form's choices use; hidden fields keep their text but are not sent.
+    const chosen = resolveWatchChoices(watch);
+    // A notification outcome has no agent, whatever the hidden picker still holds.
+    const chosenSubAgentId = watch.outcome === 'agent' ? watch.sub_agent_id : '';
+
     if (job.job_type === 'watch') {
       const { error: argsError } = resolveArgs(watch);
       if (argsError) {
@@ -773,7 +839,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
       // Both halves are sent as explicit nulls, so emptying both would ask the backend
       // for a watch with nothing to decide with. It refuses; say so here, against the
       // fields the user is looking at.
-      if (!watch.cel_expr.trim() && !watch.llm_condition.trim()) {
+      if (!chosen.cel_expr && !chosen.llm_condition) {
         setError('Write an expression, a condition for the model to judge, or both.');
         return;
       }
@@ -813,11 +879,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
             // here, so switching to "agent" with one silently PATCHed sub_agent_id: null
             // and left the job notify-only.
             { sub_agent_parameters: automatedSubAgentParameters(watch) }
-          : watch.sub_agent_id !== initialSubAgentId && {
-              sub_agent_id:
-                watch.outcome === 'agent' && watch.sub_agent_id
-                  ? parseInt(watch.sub_agent_id)
-                  : null,
+          : chosenSubAgentId !== initialSubAgentId && {
+              sub_agent_id: chosenSubAgentId ? parseInt(chosenSubAgentId) : null,
             }
         : subAgentId !== initialSubAgentId && {
             sub_agent_id: subAgentId ? parseInt(subAgentId) : undefined,
@@ -833,19 +896,14 @@ function EditForm({ job }: { job: ScheduledJob }) {
         // The two halves of one condition: the expression gates deterministically,
         // the judgement is the semantic stage on what it returned. Cleared halves are
         // sent as null so a stale one cannot silently keep deciding the job.
-        cel_expr: watch.cel_expr.trim() || null,
-        llm_condition: watch.llm_condition.trim() || null,
+        cel_expr: chosen.cel_expr || null,
+        llm_condition: chosen.llm_condition || null,
         destroy_after_trigger: watch.destroy_after_trigger,
         // Exclusive outcomes: an agent's reply replaces the notification, so sending both
-        // would leave one of them dead.
-        ...(watch.outcome === 'agent'
-          ? { prompt: watch.prompt.trim() || null, notification_message: null }
-          : {
-              notification_message: watch.notification_message.trim() || null,
-              // The brief the written message follows; the backend drops it when a
-              // verbatim message is set (the rule lives there, for every writer of the job).
-              prompt: watch.prompt.trim() || null,
-            }),
+        // would leave one of them dead. `prompt` is the agent's instruction or the
+        // writer's brief, whichever the outcome uses.
+        notification_message: chosen.notification_message || null,
+        prompt: chosen.prompt || null,
       }),
       // Sent unconditionally, null included: omitting it on an emptied value would
       // make "in-app only" unreachable, since the backend only clears a field that
@@ -871,401 +929,444 @@ function EditForm({ job }: { job: ScheduledJob }) {
     mutation.mutate({ body, resume: false });
   }
 
-  return (
-    <Card>
-      <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
-        <div className="space-y-1">
-          <CardTitle>Job configuration</CardTitle>
-          <CardDescription>
-            {editing
-              ? canWrite
-                ? 'Editing — change the fields below, then save.'
-                : `Editing. ${job.owner_email ?? 'The owner'} owns what this job does; you can change your own schedule and where its results go.`
-              : 'Read-only. Click Edit configuration to make changes.'}
-          </CardDescription>
-        </div>
-        <div className="flex shrink-0 gap-2">
-          {editing ? (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  resetForm();
-                  setEditing(false);
-                }}
-                disabled={mutation.isPending}
-              >
-                <Undo2 className="mr-1.5 h-4 w-4" />
-                Discard
-              </Button>
-              <Button size="sm" onClick={handleSave} disabled={!dirty || mutation.isPending}>
-                <Save className="mr-1.5 h-4 w-4" />
-                {mutation.isPending ? 'Saving…' : 'Save changes'}
-              </Button>
-            </>
-          ) : (
-            <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
-              <Pencil className="mr-1.5 h-4 w-4" />
-              Edit configuration
-            </Button>
-          )}
-        </div>
-      </CardHeader>
-      <CardContent>
-        <fieldset disabled={!editing} className="m-0 grid min-w-0 gap-4 border-0 p-0">
-          {/* What the job DOES belongs to the definition, so a reader may look but not
-              touch it. One boundary rather than a per-field list: the backend's rule is
-              the same shape — a reader may change nothing on the definition at all. */}
-          <fieldset disabled={!canWrite} className="m-0 grid min-w-0 gap-4 border-0 p-0">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-1.5">
-                <Label>Name</Label>
-                <Input
-                  value={name}
-                  onChange={(e) => {
-                    setName(e.target.value);
-                    touch();
-                  }}
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <Label>Max failures before pause</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={maxFailures}
-                  onChange={(e) => {
-                    setMaxFailures(parseInt(e.target.value) || 3);
-                    touch();
-                  }}
-                />
-              </div>
-            </div>
-          </fieldset>
+  // Who each part of the page belongs to, stated once per section. Only on a job
+  // somebody else is involved in: for a job that is only yours there is nothing to
+  // tell apart, and a badge on every card would be noise.
+  const shared = others || !isOwnJob(job);
+  const definitionBadge = !shared ? null : canWrite ? (
+    <OwnershipBadge kind="shared">{`Shared with ${others ? `all ${subscriberCount(job)} subscribers` : 'the owner'}`}</OwnershipBadge>
+  ) : (
+    <OwnershipBadge kind="locked">{`Owned by ${job.owner_email ?? 'the owner'}`}</OwnershipBadge>
+  );
+  const definitionDescription = !shared
+    ? job.job_type === 'watch'
+      ? 'What the job checks, when it triggers, and what happens then.'
+      : 'Which agent runs, and what it is asked to do.'
+    : canWrite
+      ? `A change here applies to every subscriber on their next run.`
+      : `${job.owner_email ?? 'The owner'} decides what this job does. It runs under your account, with your credentials.`;
 
-          {/* The schedule is the one field group that can belong to either side. */}
-          <fieldset disabled={!canEditTrigger} className="m-0 grid min-w-0 gap-4 border-0 p-0">
-            {showScope && (
-              <div className="grid gap-1.5">
-                <Label>A schedule change applies to</Label>
-                <Select value={scope} onValueChange={(v) => setScope(v as 'mine' | 'everyone')}>
-                  <SelectTrigger className="sm:w-[320px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="mine">Just me</SelectItem>
-                    <SelectItem value="everyone">Everyone's default</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {scope === 'mine'
-                    ? 'Only your own runs move. The other subscribers keep theirs.'
-                    : job.trigger_inherited
-                      ? `Changes the job's default, so every subscriber who has not set their own schedule follows it — including you.`
-                      : // Saying "including you" is not enough for someone who has their
-                        // own schedule: what happens to them is that they LOSE it, and
-                        // that is the half they would not predict.
-                        `Changes the job's default, so every subscriber who has not set their own schedule follows it. Your own schedule is dropped and you follow the new default too.`}
-                </p>
+  const scheduleBadge = !sharedTrigger ? null : triggerFixed ? (
+    <OwnershipBadge kind="locked">Fixed for everyone</OwnershipBadge>
+  ) : job.trigger_inherited ? (
+    <OwnershipBadge kind="shared">Job default</OwnershipBadge>
+  ) : (
+    <OwnershipBadge kind="mine">Your own schedule</OwnershipBadge>
+  );
+  const scheduleDescription = !sharedTrigger
+    ? 'When the job runs.'
+    : triggerFixed
+      ? canWrite
+        ? "This job's schedule is fixed, so a change applies to every subscriber."
+        : `The schedule is fixed by ${job.owner_email ?? 'the owner'} and cannot be changed here.`
+      : job.trigger_inherited
+        ? canWrite
+          ? "You follow the job's default schedule."
+          : "You follow the job's default schedule, including later changes to it. Changing it here makes it yours alone."
+        : canWrite
+          ? `You run on your own schedule; the job's default is ${defaultScheduleLabel(job)}.`
+          : `This is your own schedule. The job's default is ${defaultScheduleLabel(job)}.`;
+
+  const controls = editing ? (
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => {
+          resetForm();
+          setEditing(false);
+        }}
+        disabled={mutation.isPending}
+      >
+        <Undo2 className="mr-1.5 h-4 w-4" />
+        Discard
+      </Button>
+      <Button size="sm" onClick={handleSave} disabled={!dirty || mutation.isPending}>
+        <Save className="mr-1.5 h-4 w-4" />
+        {mutation.isPending ? 'Saving…' : dirty ? 'Save changes' : 'No changes yet'}
+      </Button>
+      {/* Here and not by the fields: Save is pressed from the header, wherever the
+          page is scrolled, so the reason it refused has to be where the click was. */}
+      {error && <p className="text-destructive basis-full text-right text-sm">{error}</p>}
+    </>
+  ) : (
+    <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+      <Pencil className="mr-1.5 h-4 w-4" />
+      Edit configuration
+    </Button>
+  );
+
+  return (
+    <>
+      {actionsSlot && createPortal(controls, actionsSlot)}
+
+      <fieldset disabled={!editing} className="m-0 grid min-w-0 gap-6 border-0 p-0">
+        {/* ── What the job does: the definition ─────────────────────────────── */}
+        <Card id="job-definition" className="scroll-mt-36">
+          <CardHeader className="space-y-1">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="grid gap-1">
+                <CardTitle className="flex flex-wrap items-center gap-2">
+                  What it does
+                  {definitionBadge}
+                </CardTitle>
+                <CardDescription>{definitionDescription}</CardDescription>
               </div>
-            )}
-            {others && !showScope && canWrite && triggerFixed && (
-              <p className="text-xs text-muted-foreground">
-                This job's schedule is fixed, so a change applies to every subscriber.
-              </p>
-            )}
-            {sharedTrigger && !canWrite && (
-              <p className="text-xs text-muted-foreground">
-                {triggerFixed
-                  ? `The schedule is fixed by ${job.owner_email ?? 'the owner'} and cannot be changed here.`
-                  : job.trigger_inherited
-                    ? `You follow the job's default schedule, including later changes to it. Changing it here makes it yours alone.`
-                    : `This is your own schedule. The job's default is ${defaultScheduleLabel(job)}.`}
-              </p>
-            )}
-            {sharedTrigger && canWrite && !job.trigger_inherited && (
-              <p className="text-xs text-muted-foreground">
-                You run on your own schedule; the job's default is {defaultScheduleLabel(job)}.
-              </p>
-            )}
-            {/* Leaving the default is one click; without this, coming back was a favour
-                only the owner could do — and only for everybody at once. */}
-            {sharedTrigger && !triggerFixed && !job.trigger_inherited && (
-              <div>
+              {/* The AI entry point is an action on the definition, so it sits with the
+                  definition's title rather than as a boxed field above the form. */}
+              {job.job_type === 'watch' && editing && canWrite && (
                 <Button
                   type="button"
-                  variant="outline"
                   size="sm"
-                  disabled={followDefault.isPending}
-                  onClick={() => followDefault.mutate({ path: { job_id: job.id } })}
+                  variant={aiOpen ? 'secondary' : 'outline'}
+                  aria-expanded={aiOpen}
+                  onClick={() => setAiOpen((v) => !v)}
                 >
-                  <RotateCcw className="mr-1.5 h-4 w-4" />
-                  Follow the job's default again
+                  <Sparkles className="size-3.5" />
+                  Change with AI
                 </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {/* What the job DOES belongs to the definition, so a reader may look but not
+                touch it. One boundary rather than a per-field list: the backend's rule is
+                the same shape — a reader may change nothing on the definition at all. */}
+            <fieldset disabled={!canWrite} className="m-0 grid min-w-0 gap-4 border-0 p-0">
+              <div className="grid gap-4 sm:grid-cols-[1fr_12rem]">
+                <div className="grid gap-1.5">
+                  <Label>Name</Label>
+                  <Input
+                    value={name}
+                    onChange={(e) => {
+                      setName(e.target.value);
+                      touch();
+                    }}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label>
+                    Max failures
+                    <HintTip>The job pauses itself after this many failed runs in a row.</HintTip>
+                  </Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={maxFailures}
+                    onChange={(e) => {
+                      setMaxFailures(parseInt(e.target.value) || 3);
+                      touch();
+                    }}
+                  />
+                </div>
               </div>
-            )}
 
-            {job.schedule_kind === 'cron' && (
-              <CronField
-                value={cronExpr}
-                onChange={(v) => {
-                  setCronExpr(v);
-                  touch();
-                }}
-                timezone={job.timezone}
-              />
-            )}
+              {/* Sub-agent picker (task jobs) */}
+              {job.job_type === 'task' && (
+                <>
+                  <div className="grid gap-1.5">
+                    <Label>Sub-agent</Label>
+                    <SubAgentSelect
+                      value={subAgentId}
+                      onChange={(v) => {
+                        setSubAgentId(v);
+                        touch();
+                      }}
+                      subAgents={subAgents}
+                      disabled={!editing || !canWrite}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {subAgents.find((sa) => sa.id === parseInt(subAgentId))?.type === 'automated'
+                        ? 'This automated sub-agent has a predefined system prompt.'
+                        : 'Select a sub-agent to execute for this scheduled job.'}
+                    </p>
+                  </div>
 
-            {job.schedule_kind === 'interval' && (
-              <div className="grid gap-1.5">
-                <Label>Interval (seconds)</Label>
-                <Input
-                  type="number"
-                  min={60}
-                  value={intervalSeconds}
-                  onChange={(e) => {
-                    setIntervalSeconds(e.target.value);
+                  {/* Task instruction - always shown for task jobs */}
+                  <div className="grid gap-1.5">
+                    <Label>
+                      Task instruction <span className="text-muted-foreground text-xs">(optional)</span>
+                    </Label>
+                    <Textarea
+                      rows={3}
+                      value={taskPrompt}
+                      onChange={(e) => {
+                        setTaskPrompt(e.target.value);
+                        touch();
+                      }}
+                      placeholder="Specific task or instruction for this execution (leave empty for default behavior)…"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {subAgents.find((sa) => sa.id === parseInt(subAgentId))?.type === 'automated'
+                        ? 'Optional task-specific instruction. If empty, the agent will follow its configured system prompt.'
+                        : 'This instruction will be sent to the sub-agent. If empty, defaults to "Execute your configured task."'}
+                    </p>
+                  </div>
+                </>
+              )}
+
+              {/* Watch-specific fields */}
+              {job.job_type === 'watch' && (
+                <>
+                  {/* Describe-the-change entry point, above the fields it writes into. The
+                      job goes with the sentence, so it is read as a change to this job. */}
+                  {aiOpen && editing && canWrite && (
+                    <div className="grid gap-1.5">
+                      <AiComposer
+                        size="md"
+                        autoFocus
+                        value={aiQuery}
+                        onChange={setAiQuery}
+                        onSubmit={handleAiGenerate}
+                        onCancel={() => setAiOpen(false)}
+                        busy={aiLoading}
+                        placeholder="Describe the change: e.g. also include targeting issues, and link each line item"
+                        submitLabel="Generate"
+                      />
+                      <p className="text-muted-foreground text-xs">
+                        Changes only what you describe; changed fields are marked AI — review them before saving.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* The same fields the create dialog renders. `read` shows values as text;
+                      the check only runs while editing, since it is a real call. */}
+                  <WatchFields
+                    mode={editing && canWrite ? 'edit' : 'read'}
+                    value={watch}
+                    onChange={(next) => {
+                      setWatch((w) => ({ ...w, ...next }));
+                      touch();
+                    }}
+                    mcpTools={mcpTools}
+                    subAgents={subAgents}
+                    storedResult={job.last_check_result as Record<string, unknown> | null}
+                    storedCall={savedCall}
+                    aiFilled={aiFilled}
+                    onSampleResult={setAiSample}
+                    onError={setError}
+                    sectionOffset={1}
+                  />
+                </>
+              )}
+
+              {/* Voice call toggle. Not task-only any more: the scheduler evaluates a watch's
+                  condition before dispatching, so a call happens because something happened.
+                  Definition-owned, so it sits here and not with the delivery channel. */}
+              <div className="flex items-center gap-2.5">
+                <Switch
+                  id="voice-call-edit"
+                  checked={voiceCall}
+                  onCheckedChange={(v) => {
+                    setVoiceCall(v);
                     touch();
                   }}
-                />
-              </div>
-            )}
-
-            {job.schedule_kind === 'once' && (
-              <div className="grid gap-1.5">
-                <Label>Run at</Label>
-                <Input
-                  type="datetime-local"
-                  min={nowDatetimeLocal(job.timezone)}
-                  value={runAt}
-                  onChange={(e) => {
-                    setRunAt(e.target.value);
-                    touch();
-                  }}
-                />
-                {job.timezone && (
-                  <p className="text-xs text-muted-foreground">Interpreted in {job.timezone}</p>
-                )}
-              </div>
-            )}
-          </fieldset>
-
-          {/* Everything from here to the delivery channel is definition-owned too. */}
-          <fieldset disabled={!canWrite} className="m-0 grid min-w-0 gap-4 border-0 p-0">
-          {/* Sub-agent picker (task jobs) */}
-          {job.job_type === 'task' && (
-            <>
-              <div className="grid gap-1.5">
-                <Label>Sub-agent</Label>
-                <SubAgentSelect
-                  value={subAgentId}
-                  onChange={(v) => {
-                    setSubAgentId(v);
-                    touch();
-                  }}
-                  subAgents={subAgents}
                   disabled={!editing || !canWrite}
                 />
-                <p className="text-xs text-muted-foreground">
-                  {subAgents.find((sa) => sa.id === parseInt(subAgentId))?.type === 'automated'
-                    ? 'This automated sub-agent has a predefined system prompt.'
-                    : 'Select a sub-agent to execute for this scheduled job.'}
-                </p>
-              </div>
-
-              {/* Task instruction - always shown for task jobs */}
-              <div className="grid gap-1.5">
-                <Label>
-                  Task instruction <span className="text-muted-foreground text-xs">(optional)</span>
+                <Label htmlFor="voice-call-edit" className="cursor-pointer text-sm">
+                  Deliver as a phone call
                 </Label>
-                <Textarea
-                  rows={3}
-                  value={taskPrompt}
-                  onChange={(e) => {
-                    setTaskPrompt(e.target.value);
-                    touch();
-                  }}
-                  placeholder="Specific task or instruction for this execution (leave empty for default behavior)…"
-                />
-                <p className="text-xs text-muted-foreground">
-                  {subAgents.find((sa) => sa.id === parseInt(subAgentId))?.type === 'automated'
-                    ? 'Optional task-specific instruction. If empty, the agent will follow its configured system prompt.'
-                    : 'This instruction will be sent to the sub-agent. If empty, defaults to "Execute your configured task."'}
-                </p>
+                <HintTip>The response is delivered as a phone call instead of a text message.</HintTip>
               </div>
-            </>
-          )}
+            </fieldset>
+          </CardContent>
+        </Card>
 
-          {/* Watch-specific fields */}
-          {job.job_type === 'watch' && (
-            <>
-              {/* Describe-the-job entry point, above the fields it writes into. */}
-              {editing && canWrite && (
-                <div className="bg-muted grid gap-2.5 rounded-md border p-3.5">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Sparkles className="size-3.5" />
-                    <span className="text-[13px] font-semibold">Describe the change</span>
-                    <span className="text-muted-foreground text-xs">
-                      rewrites the fields below — review before saving
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    <Input
-                      className="bg-background flex-1"
-                      placeholder="e.g. also tell me when a meeting is cancelled"
-                      value={aiQuery}
-                      onChange={(e) => setAiQuery(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleAiGenerate()}
-                    />
-                    <Button
-                      type="button"
-                      disabled={!aiQuery.trim() || aiLoading}
-                      onClick={handleAiGenerate}
-                    >
-                      {aiLoading ? <Loader2 className="size-4 animate-spin" /> : 'Generate'}
-                    </Button>
-                  </div>
+        {/* ── Schedule: the one group that can belong to either side ─────────── */}
+        <Card id="job-schedule" className="scroll-mt-36">
+          <CardHeader className="space-y-1">
+            <CardTitle className="flex flex-wrap items-center gap-2">
+              Schedule
+              {scheduleBadge}
+            </CardTitle>
+            <CardDescription>{scheduleDescription}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <fieldset disabled={!canEditTrigger} className="m-0 grid min-w-0 gap-4 border-0 p-0">
+              {showScope && (
+                <div className="grid gap-1.5">
+                  <Label>A schedule change applies to</Label>
+                  <Select value={scope} onValueChange={(v) => setScope(v as 'mine' | 'everyone')}>
+                    <SelectTrigger className="sm:w-[320px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="mine">Just me</SelectItem>
+                      <SelectItem value="everyone">Everyone's default</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {scope === 'mine'
+                      ? 'Only your own runs move. The other subscribers keep theirs.'
+                      : job.trigger_inherited
+                        ? `Changes the job's default, so every subscriber who has not set their own schedule follows it — including you.`
+                        : // Saying "including you" is not enough for someone who has their
+                          // own schedule: what happens to them is that they LOSE it, and
+                          // that is the half they would not predict.
+                          `Changes the job's default, so every subscriber who has not set their own schedule follows it. Your own schedule is dropped and you follow the new default too.`}
+                  </p>
+                </div>
+              )}
+              {/* Leaving the default is one click; without this, coming back was a favour
+                  only the owner could do — and only for everybody at once. */}
+              {sharedTrigger && !triggerFixed && !job.trigger_inherited && (
+                <div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={followDefault.isPending}
+                    onClick={() => followDefault.mutate({ path: { job_id: job.id } })}
+                  >
+                    <RotateCcw className="mr-1.5 h-4 w-4" />
+                    Follow the job's default again
+                  </Button>
                 </div>
               )}
 
-              {/* The same fields the create dialog renders. `read` shows values as text;
-                  the check only runs while editing, since it is a real call. */}
-              <WatchFields
-                mode={editing && canWrite ? 'edit' : 'read'}
-                value={watch}
-                onChange={(next) => {
-                  setWatch((w) => ({ ...w, ...next }));
+              {job.schedule_kind === 'cron' && (
+                <CronField
+                  value={cronExpr}
+                  onChange={(v) => {
+                    setCronExpr(v);
+                    touch();
+                  }}
+                  timezone={job.timezone}
+                />
+              )}
+
+              {job.schedule_kind === 'interval' && (
+                <div className="grid gap-1.5">
+                  <Label>Interval (seconds)</Label>
+                  <Input
+                    type="number"
+                    min={60}
+                    value={intervalSeconds}
+                    onChange={(e) => {
+                      setIntervalSeconds(e.target.value);
+                      touch();
+                    }}
+                  />
+                </div>
+              )}
+
+              {job.schedule_kind === 'once' && (
+                <div className="grid gap-1.5">
+                  <Label>Run at</Label>
+                  <Input
+                    type="datetime-local"
+                    min={nowDatetimeLocal(job.timezone)}
+                    value={runAt}
+                    onChange={(e) => {
+                      setRunAt(e.target.value);
+                      touch();
+                    }}
+                  />
+                  {job.timezone && (
+                    <p className="text-xs text-muted-foreground">Interpreted in {job.timezone}</p>
+                  )}
+                </div>
+              )}
+            </fieldset>
+          </CardContent>
+        </Card>
+
+        {/* ── Delivery: the subscriber's own ─────────────────────────────────── */}
+        <Card id="job-delivery" className="scroll-mt-36">
+          <CardHeader className="space-y-1">
+            <CardTitle className="flex flex-wrap items-center gap-2">
+              Delivery
+              {shared && <OwnershipBadge kind="mine">Yours</OwnershipBadge>}
+            </CardTitle>
+            <CardDescription>
+              {/* The subscriber's own, on a shared job as on any other: a run of a job
+                  someone else authored still lands where THIS person reads. It is seeded
+                  once from the owner's channel at activation (`_default_channel_for`) and
+                  never follows it after — which "only you" hid from both sides. */}
+              {!shared
+                ? 'Where the results are delivered.'
+                : isOwnJob(job)
+                  ? 'Where your runs land. New subscribers start on your channel, but changing it here does not move anyone who has already joined.'
+                  : `Where your runs land, always as a message to you. It started as ${job.owner_email ?? "the owner"}'s channel when you joined; changing it moves only yours.`}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-1.5">
+              <Label>Delivery channel</Label>
+              {/* "_none" is a sentinel: a SelectItem cannot carry an empty value, so the
+                  absence of a channel needs a value of its own to be selectable at all. */}
+              <Select
+                value={deliveryChannel || '_none'}
+                disabled={!editing}
+                onValueChange={(v) => {
+                  setDeliveryChannel(v === '_none' ? '' : v);
                   touch();
                 }}
-                mcpTools={mcpTools}
-                subAgents={subAgents}
-                storedResult={job.last_check_result as Record<string, unknown> | null}
-                onError={setError}
-              />
-            </>
-          )}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="None (in-app notifications only)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_none">
+                    <span className="text-muted-foreground">None (in-app only)</span>
+                  </SelectItem>
+                  {channels.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">No delivery channels registered</div>
+                  ) : (
+                    channels.map((ch) => (
+                      <SelectItem key={ch.id} value={String(ch.id)}>
+                        {ch.name}
+                        {ch.description && <span className="ml-2 text-xs text-muted-foreground">— {ch.description}</span>}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+          </CardContent>
+        </Card>
+      </fieldset>
 
-      {/* Voice call toggle. Not task-only any more: the scheduler evaluates a watch's
-          condition before dispatching, so a call happens because something happened. */}
-          <div className="flex items-center gap-3 rounded-lg border px-3 py-2">
-            <Switch
-              id="voice-call-edit"
-              checked={voiceCall}
-              onCheckedChange={(v) => {
-                setVoiceCall(v);
-                touch();
-              }}
-              disabled={!editing || !canWrite}
-            />
-            <Label htmlFor="voice-call-edit" className="cursor-pointer text-sm">
-              Deliver as a phone call
-            </Label>
-            <span className="text-xs text-muted-foreground">
-              When enabled, the agent response is delivered as a phone call instead of a text message.
-            </span>
-          </div>
-
-          </fieldset>
-
-          {/* Delivery channel — the subscriber's own, on a shared job as on any other:
-              a run of a job someone else authored still lands where THIS person reads. */}
-          <div className="grid gap-1.5">
-            <Label>Delivery channel</Label>
-            {/* "_none" is a sentinel: a SelectItem cannot carry an empty value, so the
-                absence of a channel needs a value of its own to be selectable at all. */}
-            <Select
-              value={deliveryChannel || '_none'}
-              disabled={!editing}
-              onValueChange={(v) => {
-                setDeliveryChannel(v === '_none' ? '' : v);
-                touch();
+      {/* Saving a paused job stores an edit the scheduler will not act on, and nothing
+          downstream says so. Ask instead of letting the fix look applied. */}
+      <AlertDialog open={pendingSave !== null} onOpenChange={(open) => !open && setPendingSave(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>This job is paused</AlertDialogTitle>
+            <AlertDialogDescription>
+              <strong>{job.name}</strong> is paused{job.paused_reason ? ` (${job.paused_reason})` : ''}, so it
+              will not run on its schedule whatever you save. Resume it now, or keep it paused and resume it
+              later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={mutation.isPending}>Cancel</AlertDialogCancel>
+            <Button
+              variant="outline"
+              disabled={mutation.isPending}
+              onClick={() => {
+                const body = pendingSave;
+                setPendingSave(null);
+                if (body) mutation.mutate({ body, resume: false });
               }}
             >
-              <SelectTrigger>
-                <SelectValue placeholder="None (in-app notifications only)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_none">
-                  <span className="text-muted-foreground">None (in-app only)</span>
-                </SelectItem>
-                {channels.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-muted-foreground">No delivery channels registered</div>
-                ) : (
-                  channels.map((ch) => (
-                    <SelectItem key={ch.id} value={String(ch.id)}>
-                      {ch.name}
-                      {ch.description && <span className="ml-2 text-xs text-muted-foreground">— {ch.description}</span>}
-                    </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </fieldset>
-
-        {/* Read-only info — always visible */}
-        <div className="mt-4 grid gap-2 rounded-lg bg-muted/30 p-3 text-sm text-muted-foreground sm:grid-cols-2">
-          <div>
-            <span className="font-medium text-foreground">Created:</span> {formatDate(job.created_at)}
-          </div>
-          <div>
-            <span className="font-medium text-foreground">Last updated:</span> {formatDate(job.updated_at)}
-          </div>
-          <div>
-            <span className="font-medium text-foreground">Next run:</span>{' '}
-            {/* A paused job's stored next_run_at is a leftover: resuming recomputes it.
-                Printing it anyway is how a paused job reads as one that is about to run. */}
-            {job.enabled ? formatDate(job.next_run_at) : '— paused'}
-          </div>
-          <div>
-            <span className="font-medium text-foreground">Consecutive failures:</span> {job.consecutive_failures}
-          </div>
-        </div>
-
-        {/* Saving a paused job stores an edit the scheduler will not act on, and nothing
-            downstream says so. Ask instead of letting the fix look applied. */}
-        <AlertDialog open={pendingSave !== null} onOpenChange={(open) => !open && setPendingSave(null)}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>This job is paused</AlertDialogTitle>
-              <AlertDialogDescription>
-                <strong>{job.name}</strong> is paused{job.paused_reason ? ` (${job.paused_reason})` : ''}, so it
-                will not run on its schedule whatever you save. Resume it now, or keep it paused and resume it
-                later.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={mutation.isPending}>Cancel</AlertDialogCancel>
-              <Button
-                variant="outline"
-                disabled={mutation.isPending}
-                onClick={() => {
-                  const body = pendingSave;
-                  setPendingSave(null);
-                  if (body) mutation.mutate({ body, resume: false });
-                }}
-              >
-                Save, keep paused
-              </Button>
-              <Button
-                disabled={mutation.isPending}
-                onClick={() => {
-                  const body = pendingSave;
-                  setPendingSave(null);
-                  if (body) mutation.mutate({ body, resume: true });
-                }}
-              >
-                Save and resume
-              </Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </CardContent>
-    </Card>
+              Save, keep paused
+            </Button>
+            <Button
+              disabled={mutation.isPending}
+              onClick={() => {
+                const body = pendingSave;
+                setPendingSave(null);
+                if (body) mutation.mutate({ body, resume: true });
+              }}
+            >
+              Save and resume
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -1323,7 +1424,7 @@ function ParkedRunNotice({ jobId, run }: { jobId: number; run: ScheduledJobRun }
   };
 
   return (
-    <div className="mb-4 rounded-lg border border-amber-500/50 bg-amber-50/50 p-4 dark:bg-amber-950/20">
+    <div className="rounded-lg border border-amber-500/50 bg-amber-50/50 p-4 dark:bg-amber-950/20">
       <div className="flex items-start gap-3">
         <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
         <div className="flex-1 space-y-2">
@@ -1492,6 +1593,9 @@ export function SchedulerJobDetailPage() {
   const [runNowResult, setRunNowResult] = useState<RunNowResult | null>(null);
   const [runNowError, setRunNowError] = useState<string | null>(null);
   const [showDelete, setShowDelete] = useState(false);
+  const [editing, setEditing] = useState(false);
+  // State, not a ref: the form portals into it, so it has to re-render once it exists.
+  const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
 
   async function handleRunNow() {
     setRunNowLoading(true);
@@ -1594,6 +1698,8 @@ export function SchedulerJobDetailPage() {
         <>
           <JobHeader
             job={job}
+            editing={editing}
+            actionsSlot={setActionsSlot}
             onPause={() => pauseMutation.mutate()}
             onResume={() => resumeMutation.mutate()}
             onDelete={handleDelete}
@@ -1645,31 +1751,62 @@ export function SchedulerJobDetailPage() {
             </div>
           )}
 
-          {/* Why the last run did what it did. Above the configuration because on this
-              page that is the question being asked, and the answer is already stored. */}
-          {job.job_type === 'watch' && (
-            <LastCheckPanel
-              run={runs.find((r) => r.condition_evaluation) ?? runs[0]}
-              result={job.last_check_result as Record<string, unknown> | null}
-            />
-          )}
+          {/* The job not running at all is a fact about the JOB, and the one thing on
+              this page that needs an answer — so it sits under the header, not in the
+              history where you would only find it by scrolling. */}
+          {parkedRun && <ParkedRunNotice jobId={Number(jobId)} run={parkedRun} />}
 
           {/* Keyed on the trigger the server reports, so a schedule that changed under
               the form — dropping your own schedule, or the owner resetting everyone's —
               remounts it on the new values. Without this the form keeps the old
               override in `useState` and the next save resends it, quietly recreating the
               override the user just cleared. */}
-          <EditForm key={triggerIdentity(job)} job={job} />
+          <EditForm
+            key={triggerIdentity(job)}
+            job={job}
+            editing={editing}
+            setEditing={setEditing}
+            actionsSlot={actionsSlot}
+          />
 
-          <Card>
+          {/* What the job has done, as opposed to what it is: the bookkeeping, the last
+              check and every run. */}
+          <Card id="job-activity" className="scroll-mt-36">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                Run history
+                Activity
                 {runsLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
               </CardTitle>
             </CardHeader>
-            <CardContent>
-              {parkedRun && <ParkedRunNotice jobId={Number(jobId)} run={parkedRun} />}
+            <CardContent className="grid gap-4">
+              <div className="grid gap-2 rounded-lg bg-muted/30 p-3 text-sm text-muted-foreground sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <span className="font-medium text-foreground">Next run:</span>{' '}
+                  {/* A paused job's stored next_run_at is a leftover: resuming recomputes it.
+                      Printing it anyway is how a paused job reads as one that is about to run. */}
+                  {job.enabled ? formatDate(job.next_run_at) : '— paused'}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Consecutive failures:</span>{' '}
+                  {job.consecutive_failures}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Created:</span> {formatDate(job.created_at)}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Last updated:</span> {formatDate(job.updated_at)}
+                </div>
+              </div>
+
+              {/* Why the last run did what it did — the explanation of the newest row
+                  below, so it heads the history rather than the definition. */}
+              {job.job_type === 'watch' && (
+                <LastCheckPanel
+                  run={runs.find((r) => r.condition_evaluation) ?? runs[0]}
+                  result={job.last_check_result as Record<string, unknown> | null}
+                />
+              )}
+
               <RunHistoryTable runs={runs} />
             </CardContent>
           </Card>

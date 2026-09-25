@@ -78,3 +78,27 @@ export function missingRequiredArgs(
       }),
   );
 }
+
+/** The part of a watch that decides what the check tool returns. */
+export interface CheckCall {
+  check_tool?: string | null;
+  check_args?: Record<string, unknown> | null;
+  check_args_exprs?: Record<string, unknown> | null;
+}
+
+/**
+ * Whether two calls would get the same response shape: same tool, same arguments, same
+ * `= …` expressions. An empty object and a missing one are the same call.
+ *
+ * A stored response describes the call that produced it. Once the form's call differs,
+ * testing an expression against it fails on fields the new call does return.
+ */
+export function sameCheckCall(a: CheckCall, b: CheckCall): boolean {
+  const key = (c: CheckCall) =>
+    JSON.stringify([
+      c.check_tool || null,
+      c.check_args && Object.keys(c.check_args).length ? c.check_args : null,
+      c.check_args_exprs && Object.keys(c.check_args_exprs).length ? c.check_args_exprs : null,
+    ]);
+  return key(a) === key(b);
+}

@@ -48,7 +48,9 @@ export function LastCheckPanel({
   /** Offered while editing, so a wrong path can be repointed from the real response. */
   onUseValue?: (path: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  // Collapsed: it heads the run history now, and the response it shows can be long
+  // enough to push the runs off the screen. The header line already carries the verdict.
+  const [open, setOpen] = useState(false);
   const evaluation = run?.condition_evaluation;
 
   // Nothing to explain: a job that has never run, or one whose runs never got as far as

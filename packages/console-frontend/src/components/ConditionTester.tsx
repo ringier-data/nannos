@@ -16,7 +16,7 @@
  * differs from nothing), which is the opposite of what it does on the next real run.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Check, Info, Loader2, X } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, ClipboardPaste, Info, Loader2, X, Zap } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -31,9 +31,21 @@ export function ConditionTester({
   celExpr,
   llmCondition,
   prev,
+  resultSource,
+  onRun,
+  running,
 }: {
   /** Payload from the last real tool call, when there has been one. */
   liveResult?: Record<string, unknown>;
+  /**
+   * Where liveResult came from ("this check", "the last run"), shown next to the
+   * verdict. A collapsed verdict without it lets a stale stored result pass for a
+   * current one.
+   */
+  resultSource?: string;
+  /** Calls the tool for a fresh response; the tester is where the answer is read. */
+  onRun?: () => void;
+  running?: boolean;
   /** The CEL expression, when the condition has one. */
   celExpr?: string;
   /** The judged condition, when the condition has one. */
@@ -51,6 +63,9 @@ export function ConditionTester({
   const [outcome, setOutcome] = useState<ValidateConditionResponse | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // The verdict and the count are what is read every time; the extracted items only
+  // when the count looks wrong. So they are one click away rather than always open.
+  const [expanded, setExpanded] = useState(false);
 
   const cel = celExpr?.trim() || '';
   const judge = llmCondition?.trim() || '';
@@ -136,6 +151,10 @@ export function ConditionTester({
   // Derived rather than cleared in the effect: with no payload there is nothing to
   // report, and a stale outcome from a previous payload would be misleading.
   const shown = hasPayload || parseCheckOnly ? outcome : null;
+  // Without a payload the check runs against {}, so only "does it parse" means anything:
+  // every field is missing from {}, and reporting that as a failure called a correct
+  // expression broken whenever no response was at hand.
+  const runtimeError = hasPayload && shown?.valid ? shown.error : null;
   // A null verdict means the decision belongs to the model at run time — the gate (if
   // any) passed, and judging needs a model call this preview does not make.
   const verdict =
@@ -147,32 +166,95 @@ export function ConditionTester({
           : { label: 'Would not trigger', tone: 'unmet' as const }
         : { label: 'Decided by the model at run time', tone: 'muted' as const };
 
+  // What the condition picked out, counted: "would trigger" alone does not say whether
+  // it matched the right three items or all three hundred.
+  const extracted = shown?.valid && !shown.error && hasPayload ? shown.extracted : undefined;
+  const matchCount = Array.isArray(extracted) ? extracted.length : null;
+  const sourceText = source === 'mock' ? 'the pasted payload' : resultSource;
+
   return (
-    <div className="grid gap-2 rounded-md border border-dashed p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-muted-foreground text-[11px] font-semibold tracking-wide uppercase">
-          Test this condition
-        </span>
-        {pending && <Loader2 className="text-muted-foreground size-3 animate-spin" />}
+    <div className="bg-muted/50 grid gap-2 rounded-md px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        {pending ? (
+          <Loader2 className="text-muted-foreground size-3.5 animate-spin" />
+        ) : verdict ? (
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
+              verdict.tone === 'met'
+                ? 'bg-green-600/10 text-green-700 dark:text-green-400'
+                : 'bg-background text-muted-foreground',
+            )}
+          >
+            {verdict.tone === 'met' && <Check className="size-3" />}
+            {verdict.label}
+          </span>
+        ) : hasPayload ? (
+          // Tested, and failed: the error below says why. "Run the check" here read as if
+          // the check had not just run.
+          shown && (!shown.valid || runtimeError) ? (
+            <span className="text-destructive text-xs font-medium">
+              Fails{sourceText ? ` on ${sourceText}` : ''}
+            </span>
+          ) : null
+        ) : (
+          <span className="text-muted-foreground text-xs">
+            {shown?.valid === false
+              ? 'Not tested on data yet'
+              : source === 'live'
+                ? 'Run the check to test this condition on a real response.'
+                : 'Paste a payload to test this condition on it.'}
+          </span>
+        )}
+        {verdict && (
+          <span className="text-muted-foreground text-xs">
+            {matchCount !== null && `${matchCount} ${matchCount === 1 ? 'item' : 'items'} · `}
+            {sourceText ? `on ${sourceText}` : null}
+          </span>
+        )}
+
         <div className="ml-auto flex items-center gap-1">
+          {extracted !== undefined && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-xs"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? 'Hide' : 'Show'} what matched
+              <ChevronDown className={cn('size-3 transition-transform', expanded && 'rotate-180')} />
+            </Button>
+          )}
+          {onRun && source === 'live' && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-xs"
+              disabled={running}
+              onClick={onRun}
+            >
+              {running ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />}
+              {liveResult ? 'Run again' : 'Run check'}
+            </Button>
+          )}
           <Button
             type="button"
             size="sm"
-            variant={source === 'live' ? 'secondary' : 'ghost'}
+            variant="ghost"
             className="h-6 px-2 text-xs"
-            disabled={!liveResult}
-            onClick={() => setSource('live')}
+            onClick={() => setSource(source === 'mock' ? 'live' : 'mock')}
           >
-            Last result
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={source === 'mock' ? 'secondary' : 'ghost'}
-            className="h-6 px-2 text-xs"
-            onClick={() => setSource('mock')}
-          >
-            Pasted payload
+            {source === 'mock' ? (
+              'Use the real response'
+            ) : (
+              <>
+                <ClipboardPaste className="size-3" />
+                Paste
+              </>
+            )}
           </Button>
         </div>
       </div>
@@ -184,23 +266,14 @@ export function ConditionTester({
             value={mockText}
             onChange={(e) => setMockText(e.target.value)}
             placeholder={'Paste a response to test against, e.g.\n{"events": [{"attendees": [{"email": "someone@outside.com"}]}]}'}
-            className="font-mono text-xs"
+            className="bg-background font-mono text-xs"
             aria-invalid={Boolean(mock.error) || undefined}
           />
           {mock.error && <span className="text-destructive text-xs">{mock.error}</span>}
         </div>
       )}
 
-      {!hasPayload && !mock.error && (
-        <p className="text-muted-foreground text-xs">
-          {shown?.valid === false
-            ? 'The expression itself is checked without a payload; run the check or paste one to see whether it would trigger.'
-            : source === 'live'
-              ? 'Run the check above, or paste a payload, to see what this condition does.'
-              : 'Paste a payload to see what this condition does.'}
-        </p>
-      )}
-
+      {/* Errors are never behind the disclosure: they are the reason to look. */}
       {failure && (
         <span className="text-destructive flex items-start gap-1.5 text-xs">
           <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
@@ -209,48 +282,29 @@ export function ConditionTester({
       )}
 
       {shown && !shown.valid && (
-        <div className="grid gap-1.5">
-          <span className="text-destructive flex items-start gap-1.5 text-xs">
-            <X className="mt-0.5 size-3.5 shrink-0" />
-            <span>
-              This expression cannot be parsed, so the job would never trigger.
-              <span className="mt-0.5 block font-mono text-[11px] opacity-80">{shown.error}</span>
-            </span>
+        <span className="text-destructive flex items-start gap-1.5 text-xs">
+          <X className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            This expression cannot be parsed, so the job would never trigger.
+            <span className="mt-0.5 block font-mono text-[11px] opacity-80">{shown.error}</span>
           </span>
-        </div>
+        </span>
       )}
 
       {/* An expression can compile yet still fail against this payload (a missing
           field, a type mismatch); on a scheduled run that fails the run, so it is an
           error here too, not a quiet "would not trigger". */}
-      {shown?.valid && shown.error && (
-        <div className="grid gap-1.5">
-          <span className="text-destructive flex items-start gap-1.5 text-xs">
-            <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
-            {shown.error}
-          </span>
-        </div>
+      {runtimeError && (
+        <span className="text-destructive flex items-start gap-1.5 text-xs">
+          <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+          {runtimeError}
+        </span>
       )}
 
-      {shown?.valid && !shown.error && hasPayload && (
-        <div className="grid gap-1.5">
-          {verdict && (
-            <span
-              className={cn(
-                'inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
-                verdict.tone === 'met'
-                  ? 'bg-green-600/10 text-green-700 dark:text-green-400'
-                  : 'bg-muted text-muted-foreground',
-              )}
-            >
-              {verdict.tone === 'met' && <Check className="size-3" />}
-              {verdict.label}
-            </span>
-          )}
-          <pre className="bg-muted max-h-32 overflow-auto rounded-sm px-2 py-1.5 font-mono text-[11px] leading-5">
-            {JSON.stringify(shown.extracted, null, 2) ?? 'null'}
-          </pre>
-        </div>
+      {expanded && extracted !== undefined && (
+        <pre className="bg-background max-h-48 overflow-auto rounded-sm px-2 py-1.5 font-mono text-[11px] leading-5">
+          {JSON.stringify(extracted, null, 2) ?? 'null'}
+        </pre>
       )}
 
       {/* Which prev the verdict was decided against. A change-detection condition reads
@@ -266,8 +320,15 @@ export function ConditionTester({
         </span>
       )}
 
-      {/* The notes belong to the outcome, not to whichever branch above rendered it. */}
-      {(shown?.notes ?? []).map((note) => (
+      {/* The notes belong to the outcome, not to whichever branch above rendered it. Next
+          to an error they say how to fix it, so they stay out. With a judgement they
+          qualify the verdict itself ("the model would never be asked on this payload"),
+          so they stay out too. On an expression-only result they explain what was
+          extracted, so they fold away with it. */}
+      {(shown && (!shown.valid || runtimeError || (hasPayload && (expanded || Boolean(judge))))
+        ? (shown.notes ?? [])
+        : []
+      ).map((note) => (
         <span key={note} className="text-muted-foreground flex items-start gap-1.5 text-xs">
           <Info className="mt-0.5 size-3.5 shrink-0" />
           {note}

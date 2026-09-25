@@ -154,7 +154,9 @@ class TestToolsAreSelectedServerSide:
         # the model tools this user cannot reach. The field is gone, not just ignored.
         from console_backend.models.scheduled_job import GenerateJobDraftRequest
 
-        assert set(GenerateJobDraftRequest.model_fields) == {"query"}
+        # `current` is the job being edited and `result` a sample response; neither
+        # widens what the model may reference — the offer is still read server-side.
+        assert set(GenerateJobDraftRequest.model_fields) == {"query", "current", "result"}
 
     def test_the_relevant_tool_is_offered_and_chosen(self, draft_client, gateway, catalogue):
         gateway.return_value = {
@@ -300,6 +302,292 @@ class TestAnEmptyGenerationFailsLoudly:
 
         assert resp.status_code == 200
         assert _filled(resp) == {"job_type": "watch", "name": "Bugs"}
+
+
+#: The job as the detail page sends it when asking for a change to it.
+CURRENT = {
+    "job_type": "watch",
+    "check_tool": "console_list_bug_reports",
+    "check_args": {"status": "open"},
+    "cel_expr": "result.reports.filter(r, r.severity == 'high')",
+    "prompt": "One line per report, linking to it.",
+    "destroy_after_trigger": False,
+}
+CHANGE = "also include medium severity"
+
+
+def _edit(client, reply_to: AsyncMock, reply: dict, **body):
+    reply_to.return_value = reply
+    return client.post(URL, json={"query": CHANGE, "current": CURRENT, **body})
+
+
+class TestEditingAnExistingJob:
+    """With `current`, the query is a change to that job, and the answer is the job changed.
+
+    It used to be read as a description of a new job, so "also include medium severity"
+    produced a job about nothing in particular — and on the detail page it overwrote the
+    fields of the one being edited.
+    """
+
+    def test_the_prompt_shows_the_job_and_asks_for_changes_only(self, draft_client, gateway, catalogue):
+        _edit(draft_client, gateway, {"cel_expr": "result.reports"})
+
+        prompt = _prompt(gateway)
+        assert "EDITING an existing watch job" in prompt
+        assert "r.severity == 'high'" in prompt
+        assert f"Requested change: {CHANGE}" in prompt
+        assert "User request:" not in prompt
+
+    def test_what_the_change_does_not_touch_comes_back_as_sent(self, draft_client, gateway, catalogue):
+        new_expr = "result.reports.filter(r, r.severity in ['high', 'medium'])"
+
+        resp = _edit(draft_client, gateway, {"cel_expr": new_expr})
+
+        assert resp.status_code == 200
+        assert _filled(resp) == {**CURRENT, "cel_expr": new_expr}
+
+    def test_an_explicit_null_removes_a_field(self, draft_client, gateway, catalogue):
+        resp = _edit(draft_client, gateway, {"prompt": None, "notification_message": "New high-severity bug"})
+
+        assert resp.status_code == 200
+        body = _filled(resp)
+        assert "prompt" not in body
+        assert body["notification_message"] == "New high-severity bug"
+
+    def test_the_current_tool_is_offered_even_when_the_change_does_not_name_it(
+        self, draft_client, gateway, catalogue
+    ):
+        # "also include medium severity" ranks no tool; without the pin the job's own tool
+        # was missing from the offer, and a reply naming it was discarded as an invention
+        # — taking the job's arguments and condition with it.
+        catalogue.return_value = MCPToolsResponse(
+            tools=[_tool(f"crm_get_account_{i}", "Read one CRM account") for i in range(30)]
+            + [_tool("console_list_bug_reports")]
+        )
+
+        resp = _edit(draft_client, gateway, {"check_tool": "console_list_bug_reports", "cel_expr": "result.reports"})
+
+        assert resp.status_code == 200
+        assert '"name":"console_list_bug_reports"' in _prompt(gateway)
+        assert _filled(resp)["cel_expr"] == "result.reports"
+
+    def test_choosing_an_agent_drops_the_fixed_message(self, draft_client, gateway, catalogue):
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=7, name="triage", config_version=None)]
+        )
+        current = {**CURRENT, "notification_message": "A bug was filed"}
+
+        gateway.return_value = {"sub_agent_id": 7, "prompt": "Triage it"}
+        resp = draft_client.post(URL, json={"query": "have triage handle it", "current": current})
+
+        body = _filled(resp)
+        assert body["sub_agent_id"] == 7
+        assert "notification_message" not in body
+
+    def test_an_unreachable_agent_is_neither_applied_nor_a_removal(self, draft_client, gateway, catalogue):
+        current = {**CURRENT, "sub_agent_id": 3}
+
+        gateway.return_value = {"sub_agent_id": 99, "cel_expr": "result.reports"}
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": current})
+
+        assert _filled(resp)["sub_agent_id"] == 3
+
+    def test_fields_outside_the_definition_are_not_changed(self, draft_client, gateway, catalogue):
+        # Schedule and delivery have other owners on a shared job, and the type of an
+        # existing job is fixed; a change there would show and then not apply.
+        resp = _edit(
+            draft_client,
+            gateway,
+            {"job_type": "task", "cron_expr": "0 9 * * *", "delivery_channel_id": 1, "cel_expr": "result.reports"},
+        )
+
+        body = _filled(resp)
+        assert body["job_type"] == "watch"
+        assert "cron_expr" not in body
+        assert "delivery_channel_id" not in body
+
+    def test_a_reply_that_changes_nothing_is_a_422(self, draft_client, gateway, catalogue):
+        resp = _edit(draft_client, gateway, {"cel_expr": CURRENT["cel_expr"]})
+
+        assert resp.status_code == 422
+        assert "no change" in resp.json()["detail"]
+
+    def test_an_unrepairable_expression_is_refused_not_replaced_by_the_change_as_a_judgement(
+        self, draft_client, gateway, catalogue
+    ):
+        # On a new job the fallback judges the request's own words; "also include medium
+        # severity" is no condition, so an edit is refused instead.
+        gateway.return_value = {"cel_expr": "result.reports.filter(r,"}
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT})
+
+        assert resp.status_code == 422
+        assert "refine the expression" in resp.json()["detail"]
+
+    def test_a_sample_response_is_shown_and_verifies_the_expression(self, draft_client, gateway, catalogue):
+        # With a real response the expression is evaluated, not only compiled: a path
+        # the response does not have is sent back for repair.
+        sample = {"reports": [{"severity": "high"}]}
+        gateway.side_effect = [
+            {"cel_expr": "result.bugs.filter(b, b.severity == 'medium')"},
+            {"cel_expr": "result.reports.filter(r, r.severity == 'medium')"},
+        ]
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT, "result": sample})
+
+        assert resp.status_code == 200
+        assert '{"reports":[{"severity":"high"}]}' in _prompt(gateway)
+        assert gateway.await_count == 2
+        assert _filled(resp)["cel_expr"] == "result.reports.filter(r, r.severity == 'medium')"
+
+
+    # ── Review round 1 (PR #289) ────────────────────────────────────────────────────
+
+    def test_a_prev_reading_expression_verifies_against_the_sample(self, draft_client, gateway, catalogue):
+        # The run binds prev to the stored result; verification left it unbound, so the
+        # prompt's own `result != prev` failed and a correct edit was "repaired" or refused.
+        gateway.return_value = {"cel_expr": "result != prev"}
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT, "result": {"reports": []}})
+
+        assert resp.status_code == 200
+        assert gateway.await_count == 1
+        assert _filled(resp)["cel_expr"] == "result != prev"
+
+    def test_moving_to_another_tool_does_not_verify_against_the_old_tools_response(
+        self, draft_client, gateway, catalogue
+    ):
+        catalogue.return_value = MCPToolsResponse(tools=CATALOGUE + [_tool("crm_list_deals", "List CRM deals")])
+        gateway.return_value = {"check_tool": "crm_list_deals", "cel_expr": "result.deals"}
+
+        resp = draft_client.post(
+            URL, json={"query": "watch crm deals instead", "current": CURRENT, "result": {"reports": []}}
+        )
+
+        assert resp.status_code == 200
+        # `result.deals` is not in the old tool's response; evaluating it there failed
+        # every repair round.
+        assert gateway.await_count == 1
+        body = _filled(resp)
+        assert body["check_tool"] == "crm_list_deals"
+        assert body["cel_expr"] == "result.deals"
+        assert "check_args" not in body  # written for the old tool
+
+    def test_a_judgement_offered_on_retry_does_not_replace_a_broken_expression(self, draft_client, gateway, catalogue):
+        gateway.side_effect = [
+            {"cel_expr": "result.reports.filter(r,"},
+            {"llm_condition": "a report looks severe"},
+        ]
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT})
+
+        assert resp.status_code == 422
+        assert "refine the expression" in resp.json()["detail"]
+
+    def test_removing_the_only_condition_is_refused(self, draft_client, gateway, catalogue):
+        resp = _edit(draft_client, gateway, {"cel_expr": None})
+
+        assert resp.status_code == 422
+        assert "no condition" in resp.json()["detail"]
+
+    def test_restated_expressions_that_fail_to_compile_do_not_remove_the_jobs(
+        self, draft_client, gateway, catalogue
+    ):
+        exprs = {"since": "strftime(now - duration('168h'), '%Y-%m-%d')"}
+        current = {**CURRENT, "check_args_exprs": exprs}
+
+        gateway.return_value = {"check_args_exprs": {"since": "strftime(now -"}, "cel_expr": "result.reports"}
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": current})
+
+        assert resp.status_code == 200
+        assert _filled(resp)["check_args_exprs"] == exprs
+
+    def test_an_echoed_agent_does_not_keep_the_agent_outcome(self, draft_client, gateway, catalogue):
+        # Switching an agent job to a fixed message while the reply restates the agent it
+        # already had: the echo is no change, so the message wins.
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=3, name="triage", config_version=None)]
+        )
+        current = {**CURRENT, "sub_agent_id": 3, "prompt": "Triage it"}
+
+        gateway.return_value = {"notification_message": "A severe bug was filed", "sub_agent_id": 3}
+        resp = draft_client.post(URL, json={"query": "just notify me instead", "current": current})
+
+        body = _filled(resp)
+        assert body["notification_message"] == "A severe bug was filed"
+        assert "sub_agent_id" not in body
+
+
+class TestEditingATaskJob:
+    """generate-job-draft drafts task jobs as well as watches; an edit follows the job's type."""
+
+    TASK = {"job_type": "task", "sub_agent_id": 3, "prompt": "Summarise yesterday's bug reports"}
+
+    @pytest.fixture(autouse=True)
+    def _agents(self, draft_client):
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[
+                SimpleNamespace(id=3, name="digest", config_version=None),
+                SimpleNamespace(id=4, name="triage", config_version=None),
+            ]
+        )
+
+    def test_the_prompt_names_a_task_job_and_its_own_fields(self, draft_client, gateway, catalogue):
+        gateway.return_value = {"prompt": "Summarise yesterday's and today's bug reports"}
+
+        draft_client.post(URL, json={"query": "include today too", "current": self.TASK})
+
+        prompt = _prompt(gateway)
+        assert "EDITING an existing task job" in prompt
+        assert "Only these fields can change: prompt, sub_agent_id." in prompt
+        assert "When you change cel_expr" not in prompt
+
+    def test_the_instruction_and_agent_can_change(self, draft_client, gateway, catalogue):
+        gateway.return_value = {"sub_agent_id": 4, "prompt": "Triage yesterday's bug reports"}
+
+        resp = draft_client.post(URL, json={"query": "have triage do it", "current": self.TASK})
+
+        assert resp.status_code == 200
+        assert _filled(resp) == {"job_type": "task", "sub_agent_id": 4, "prompt": "Triage yesterday's bug reports"}
+
+    def test_a_broken_expression_volunteered_on_a_task_does_not_refuse_the_edit(
+        self, draft_client, gateway, catalogue
+    ):
+        # cel_expr is no field of a task; a broken one used to go through repair and
+        # refuse the edit with "refine the expression", on a job with none to refine.
+        gateway.return_value = {"prompt": "Summarise all bug reports", "cel_expr": "result.reports.filter(r,"}
+
+        resp = draft_client.post(URL, json={"query": "all of them", "current": self.TASK})
+
+        assert resp.status_code == 200
+        assert gateway.await_count == 1
+        assert _filled(resp)["prompt"] == "Summarise all bug reports"
+
+    def test_watch_fields_are_not_added_to_a_task(self, draft_client, gateway, catalogue):
+        gateway.return_value = {"prompt": "Summarise all bug reports", "cel_expr": "result.reports"}
+
+        resp = draft_client.post(URL, json={"query": "all of them", "current": self.TASK})
+
+        assert "cel_expr" not in _filled(resp)
+
+
+def test_the_editable_watch_fields_are_what_the_frontend_writes_back():
+    # console-frontend's lib/watchDraft.ts wires each of these fields back into the form;
+    # a field added here without it would be merged server-side and silently dropped
+    # client-side. Change both together.
+    from console_backend.models.scheduled_job import JobType
+
+    assert scheduler_router._EDITABLE_DRAFT_FIELDS[JobType.WATCH] == {
+        "check_tool",
+        "check_args",
+        "check_args_exprs",
+        "cel_expr",
+        "llm_condition",
+        "notification_message",
+        "prompt",
+        "sub_agent_id",
+        "destroy_after_trigger",
+    }
 
 
 class TestRankMcpTools:

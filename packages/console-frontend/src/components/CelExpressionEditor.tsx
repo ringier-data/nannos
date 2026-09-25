@@ -14,13 +14,13 @@
 import { useState } from 'react';
 import CodeMirror, { EditorView } from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
-import { AlertCircle, Check, Loader2, Sparkles, WrapText } from 'lucide-react';
+import { AlertCircle, Check, Sparkles, WrapText } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { generateCondition } from '@/api/scheduler';
 import { formatCel } from '@/lib/watchCondition';
 import { cn } from '@/lib/utils';
+import { AiComposer } from '@/components/formChrome';
 
 /** The bare CEL editor, shared with smaller inputs (dynamic arguments). */
 export function CelCodeMirror({
@@ -83,6 +83,7 @@ export function CelExpressionEditor({
   const [aiNotes, setAiNotes] = useState<string[]>([]);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiVerified, setAiVerified] = useState<boolean | null>(null);
+  const [refineOpen, setRefineOpen] = useState(false);
 
   const payloadKeys = payload ? Object.keys(payload).slice(0, 8) : [];
 
@@ -111,6 +112,7 @@ export function CelExpressionEditor({
       // hand-written one it replaced; null is this component's "not known".
       setAiVerified(generated.verified ?? null);
       setAiQuery('');
+      setRefineOpen(false);
     } catch (e) {
       setAiError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -118,32 +120,73 @@ export function CelExpressionEditor({
     }
   }
 
+  // An empty expression is where describing it is the way in, so the input is simply
+  // there. Once one is written, refining is occasional, and a full-width input above
+  // every expression read as a second field to fill — so it waits behind a button.
+  const composerOpen = !value.trim() || refineOpen;
+
   return (
     <div className="grid gap-2">
-      {/* Describe-it entry point above the editor it writes into, same reasoning as
-          the job-level AI fill: a box that writes into a field is read before it. */}
-      <div className="flex gap-2">
-        <Input
-          className="flex-1 text-xs"
+      <div className="flex flex-wrap items-center gap-1.5">
+        {payloadKeys.map((key) => (
+          <Button
+            key={`key-${key}`}
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground h-6 px-2 font-mono text-[11px]"
+            onClick={() => onChange({ cel_expr: value.trim() ? `${value}\nresult.${key}` : `result.${key}` })}
+          >
+            result.{key}
+          </Button>
+        ))}
+        <div className="ml-auto flex items-center gap-1">
+          {value.trim() && (
+            <>
+              <Button
+                type="button"
+                variant={refineOpen ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                aria-expanded={refineOpen}
+                onClick={() => setRefineOpen((v) => !v)}
+              >
+                <Sparkles className="size-3" />
+                Refine with AI
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => onChange({ cel_expr: formatCel(value) })}
+              >
+                <WrapText className="size-3" />
+                Format
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {composerOpen && (
+        <AiComposer
+          value={aiQuery}
+          onChange={setAiQuery}
+          onSubmit={() => void runAi()}
+          onCancel={refineOpen ? () => setRefineOpen(false) : undefined}
+          busy={aiBusy}
+          // Opened on purpose, so it takes the focus; the always-open empty case does not
+          // steal it on page load.
+          autoFocus={refineOpen}
           placeholder={
             value.trim()
               ? 'Refine it: e.g. also ignore attendees who declined'
               : 'Describe it: e.g. a meeting starts within the hour and has outside attendees'
           }
-          value={aiQuery}
-          onChange={(e) => setAiQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              void runAi();
-            }
-          }}
+          submitLabel={value.trim() ? 'Refine' : 'Generate'}
         />
-        <Button type="button" variant="outline" size="sm" disabled={aiBusy || !aiQuery.trim()} onClick={() => void runAi()}>
-          {aiBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
-          {value.trim() ? 'Refine' : 'Generate'}
-        </Button>
-      </div>
+      )}
       {aiError && (
         <span className="text-destructive flex items-start gap-1.5 text-xs">
           <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
@@ -154,7 +197,7 @@ export function CelExpressionEditor({
         (aiVerified && payload ? (
           <span className="flex items-center gap-1.5 text-xs text-green-700 dark:text-green-400">
             <Check className="size-3.5" />
-            Verified against the real response — see the tester below.
+            Verified against the real response — see the test below.
           </span>
         ) : null)}
       {aiNotes.map((note) => (
@@ -170,33 +213,6 @@ export function CelExpressionEditor({
         placeholder={"result.events.filter(e, timestamp(e.start.dateTime) - now < duration('1h'))"}
         onChange={(next) => onChange({ cel_expr: next })}
       />
-
-      <div className="flex flex-wrap items-center gap-1.5">
-        {value.trim() && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-6 px-2 text-[11px]"
-            onClick={() => onChange({ cel_expr: formatCel(value) })}
-          >
-            <WrapText className="size-3" />
-            Format
-          </Button>
-        )}
-        {payloadKeys.map((key) => (
-          <Button
-            key={`key-${key}`}
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground h-6 px-2 font-mono text-[11px]"
-            onClick={() => onChange({ cel_expr: value.trim() ? `${value}\nresult.${key}` : `result.${key}` })}
-          >
-            result.{key}
-          </Button>
-        ))}
-      </div>
     </div>
   );
 }

@@ -609,20 +609,6 @@ class ScheduledJobCreate(BaseModel):
         return self
 
 
-class GenerateJobDraftRequest(BaseModel):
-    """Request body for generating a scheduled job from a one-line description.
-
-    Only the request itself: the tools, sub-agents and channels the draft may reference
-    are the caller's own and are read server-side, never accepted from the body.
-    """
-
-    query: str = Field(
-        min_length=1,
-        max_length=500,
-        description="Natural-language description of what the job should do.",
-    )
-
-
 def _draft_field(info: FieldInfo) -> tuple[Any, FieldInfo]:
     """Relax one ScheduledJobCreate field into a draft field.
 
@@ -651,6 +637,40 @@ ScheduledJobDraft = create_model(  # type: ignore[call-overload]
     ),
     **{name: _draft_field(info) for name, info in ScheduledJobCreate.model_fields.items()},
 )
+
+
+class GenerateJobDraftRequest(BaseModel):
+    """Request body for generating a scheduled job from a one-line description.
+
+    The tools, sub-agents and channels the draft may reference are the caller's own and
+    are read server-side, never accepted from the body. What the body may add is the job
+    being edited: with `current`, the query is read as a change to that job rather than
+    a description of a new one.
+    """
+
+    query: str = Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "Natural-language description of what the job should do — or, with `current`, "
+            "of the change to make to it ('also tell me when a meeting is cancelled')."
+        ),
+    )
+    current: ScheduledJobDraft | None = Field(  # type: ignore[valid-type]
+        default=None,
+        description=(
+            "The job as it stands, when editing one. The answer is then that job with the "
+            "change applied: every field the change does not touch comes back as sent."
+        ),
+    )
+    result: Any = Field(
+        default=None,
+        description=(
+            "A real response of the check tool (the last run's, or a fresh check), so a "
+            "generated expression names fields that exist and is verified by evaluating it."
+        ),
+    )
+
 
 class GenerateConditionRequest(BaseModel):
     """Ask a model to write (or refine) just the condition of a watch job.
