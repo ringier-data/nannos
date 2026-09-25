@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType, AuditLog
 from ..models.user import User
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class AuditService:
         action: AuditAction | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
+        search: str | None = None,
     ) -> tuple[list[AuditLog], int]:
         """List audit logs with filtering.
 
@@ -100,6 +102,7 @@ class AuditService:
             action: Filter by action
             from_date: Filter by start date
             to_date: Filter by end date
+            search: Match against entity ID, actor sub, and the actor's name or email
 
         Returns:
             Tuple of (audit logs, total count)
@@ -134,6 +137,21 @@ class AuditService:
         if to_date:
             conditions.append("created_at <= :to_date")
             params["to_date"] = to_date
+
+        if search:
+            # `changes` is deliberately not searched: it is a JSONB blob on the
+            # largest table, and matching it would detoast and cast every row.
+            # The actor is matched through `users` as a semi-join so the data
+            # query needs no join; subs with no user row (service accounts) are
+            # still found by the `actor_sub` match itself.
+            conditions.append(
+                "("
+                + like_clause("entity_id", "actor_sub")
+                + " OR actor_sub IN (SELECT u.sub FROM users u WHERE "
+                + like_clause("u.email", "concat_ws(' ', u.first_name, u.last_name)")
+                + "))"
+            )
+            params["search"] = like_contains(search)
 
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

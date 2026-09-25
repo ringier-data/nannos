@@ -873,17 +873,54 @@ class ScheduledJobRepository(AuditedRepository):
 
     async def get_permissions(self, db: AsyncSession, definition_id: int) -> list[dict[str, Any]]:
         """Group permissions on a definition, with group names."""
+        rows, _ = await self.list_permissions(db, definition_id)
+        return rows
+
+    async def list_permissions(
+        self,
+        db: AsyncSession,
+        definition_id: int,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Group permissions on a definition filtered by group name, with the total match count.
+
+        `limit=None` returns every match.
+        """
+        params: dict[str, Any] = {"id": definition_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("ug.name")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
+            FROM scheduled_job_definition_permissions p
+            JOIN user_groups ug ON ug.id = p.user_group_id
+            WHERE p.definition_id = :id
+            {search_filter}
+        """
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
         result = await db.execute(
-            text("""
+            text(f"""
                 SELECT p.user_group_id, ug.name AS user_group_name, p.permissions
-                FROM scheduled_job_definition_permissions p
-                JOIN user_groups ug ON ug.id = p.user_group_id
-                WHERE p.definition_id = :id
-                ORDER BY ug.name
+                {from_clause}
+                ORDER BY ug.name, ug.id
+                {pagination}
             """),
-            {"id": definition_id},
+            params,
         )
-        return [dict(r) for r in result.mappings().all()]
+        rows = [dict(r) for r in result.mappings().all()]
+        if limit is None:
+            return rows, len(rows)
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count = await db.execute(text(f"SELECT COUNT(*) {from_clause}"), count_params)
+        return rows, count.scalar() or 0
 
     async def replace_permissions(
         self,
@@ -1042,23 +1079,55 @@ class ScheduledJobRepository(AuditedRepository):
         )
         return definitions, count.scalar() or 0
 
-    async def list_group_definitions(self, db: AsyncSession, group_id: int) -> list[dict[str, Any]]:
-        """Definitions shared to *group_id*, with whether each is one of its defaults."""
+    async def list_group_definitions(
+        self,
+        db: AsyncSession,
+        group_id: int,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Definitions shared to *group_id*, with whether each is one of its defaults.
+
+        Returns (definitions on this page, total matching). `limit=None` returns them all.
+        """
+        params: dict[str, Any] = {"group_id": group_id}
+        # Same columns as the job lists, so a term finds the same jobs everywhere.
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("d.name", "d.prompt")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        from_where = f"""
+            FROM scheduled_job_definition_permissions p
+            JOIN scheduled_job_definitions d ON d.id = p.definition_id
+            LEFT JOIN user_group_default_jobs dj
+                   ON dj.definition_id = d.id AND dj.user_group_id = :group_id
+            WHERE p.user_group_id = :group_id AND d.deleted_at IS NULL
+            {search_filter}
+        """
         result = await db.execute(
-            text("""
+            text(f"""
                 SELECT d.id, d.name, d.job_type, d.owner_user_id,
                        (d.suspended_at IS NOT NULL) AS suspended,
                        (dj.definition_id IS NOT NULL) AS is_default
-                FROM scheduled_job_definition_permissions p
-                JOIN scheduled_job_definitions d ON d.id = p.definition_id
-                LEFT JOIN user_group_default_jobs dj
-                       ON dj.definition_id = d.id AND dj.user_group_id = :group_id
-                WHERE p.user_group_id = :group_id AND d.deleted_at IS NULL
-                ORDER BY is_default DESC, d.name ASC
+                {from_where}
+                ORDER BY is_default DESC, d.name ASC, d.id ASC
+                {pagination}
             """),
-            {"group_id": group_id},
+            params,
         )
-        return [dict(r) for r in result.mappings().all()]
+        definitions = [dict(r) for r in result.mappings().all()]
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count = await db.execute(text(f"SELECT COUNT(*) {from_where}"), count_params)
+        return definitions, count.scalar() or 0
 
     async def group_has_grant(self, db: AsyncSession, definition_id: int, group_id: int) -> bool:
         result = await db.execute(
@@ -1808,12 +1877,14 @@ class ScheduledJobRepository(AuditedRepository):
         limit: int = 50,
         page: int = 1,
         status: str | None = None,
+        search: str | None = None,
     ) -> tuple[list[ScheduledJobRun], int]:
         """Fetch a page of runs for a job, newest first, with the total.
 
         Run history only grows, so unlike the other lists here this one has no
         unbounded mode: `limit` keeps its historic default of 50 and a caller
-        pages for older runs rather than asking for all of them.
+        pages for older runs rather than asking for all of them. `search` matches
+        the run's result summary and error message.
         """
         params: dict[str, Any] = {
             "subscription_id": subscription_id,
@@ -1824,6 +1895,9 @@ class ScheduledJobRepository(AuditedRepository):
         if status:
             where += " AND status = :status"
             params["status"] = status
+        if search:
+            where += " AND " + like_clause("result_summary", "error_message")
+            params["search"] = like_contains(search)
 
         result = await db.execute(
             text(f"""

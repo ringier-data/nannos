@@ -10,6 +10,7 @@ from sqlalchemy import text
 from ..db.connection import get_async_session_factory
 from ..exceptions import ConversationOwnershipError
 from ..models.conversation import Conversation
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +79,8 @@ class ConversationService:
             params: dict[str, object] = {"user_id": user_id, "limit": limit}
 
             if search and search.strip():
-                conditions.append("title ILIKE :search")
-                params["search"] = f"%{search.strip()}%"
+                conditions.append(like_clause("title"))
+                params["search"] = like_contains(search.strip())
 
             query = (
                 "SELECT * FROM conversations "

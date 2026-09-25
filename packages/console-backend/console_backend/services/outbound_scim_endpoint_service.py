@@ -1,6 +1,7 @@
 """Service for managing outbound SCIM endpoint configuration."""
 
 import logging
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,7 @@ from ..models.audit import AuditAction, AuditEntityType
 from ..models.outbound_scim import OutboundScimEndpoint, OutboundScimEndpointCreated
 from ..models.user import User
 from ..services.audit_service import AuditService
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -81,19 +83,60 @@ class OutboundScimEndpointService:
             created_at=row.created_at,
         )
 
-    async def list_endpoints(self, db: AsyncSession) -> list[OutboundScimEndpoint]:
-        """List all active (non-deleted) outbound SCIM endpoints."""
+    async def list_endpoints(
+        self,
+        db: AsyncSession,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[OutboundScimEndpoint], int]:
+        """List active (non-deleted) outbound SCIM endpoints.
+
+        Args:
+            db: Database session
+            search: Match against name and endpoint URL
+            page: Page number (1-indexed), only meaningful with a limit
+            limit: Page size. None returns every match.
+
+        Returns:
+            Tuple of (endpoints, total matching count)
+        """
+        search_filter = ""
+        params: dict[str, Any] = {}
+        if search:
+            search_filter = "AND " + like_clause("name", "endpoint_url")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        where_clause = f"WHERE deleted_at IS NULL {search_filter}"
         result = await db.execute(
-            text("""
+            text(f"""
                 SELECT id, name, endpoint_url, bearer_token, enabled,
                        push_users, push_groups, is_mcp_gateway, created_by, created_at, updated_at
                 FROM outbound_scim_endpoints
-                WHERE deleted_at IS NULL
-                ORDER BY created_at DESC
-            """)
+                {where_clause}
+                ORDER BY created_at DESC, id DESC
+                {pagination}
+            """),
+            params,
         )
         rows = result.fetchall()
-        return [
+
+        if limit is None:
+            total = len(rows)
+        else:
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            count_result = await db.execute(
+                text(f"SELECT COUNT(*) FROM outbound_scim_endpoints {where_clause}"), count_params
+            )
+            total = count_result.scalar() or 0
+
+        endpoints = [
             OutboundScimEndpoint(
                 id=row.id,
                 name=row.name,
@@ -109,6 +152,7 @@ class OutboundScimEndpointService:
             )
             for row in rows
         ]
+        return endpoints, total
 
     async def get_endpoint(self, db: AsyncSession, endpoint_id: int) -> OutboundScimEndpoint | None:
         """Get a single endpoint by ID (masked token)."""

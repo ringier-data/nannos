@@ -441,8 +441,15 @@ class SecretsService:
 
         return True
 
-    async def get_permissions(self, db: AsyncSession, secret_id: int) -> list[dict]:
-        """Get all group permissions for a secret.
+    async def get_permissions(
+        self,
+        db: AsyncSession,
+        secret_id: int,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict], int]:
+        """Get group permissions for a secret.
 
         Returns list of dicts with:
         - user_group_id: Group ID
@@ -452,24 +459,41 @@ class SecretsService:
         Args:
             db: Database session
             secret_id: Secret ID
+            search: Match against the group name
+            page: Page number (1-indexed), only meaningful with a limit
+            limit: Page size. None returns every grant.
 
         Returns:
-            List of permission dictionaries
+            Tuple of (permission dictionaries, total matching count)
         """
-        query = text("""
-            SELECT 
-                sp.user_group_id,
-                ug.name as user_group_name,
-                sp.permissions
+        params: dict[str, Any] = {"secret_id": secret_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("ug.name")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
             FROM secret_permissions sp
             JOIN user_groups ug ON sp.user_group_id = ug.id
             WHERE sp.secret_id = :secret_id
-            ORDER BY ug.name
+            {search_filter}
+        """
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        query = text(f"""
+            SELECT sp.user_group_id, ug.name AS user_group_name, sp.permissions
+            {from_clause}
+            ORDER BY ug.name, ug.id
+            {pagination}
         """)
-        result = await db.execute(query, {"secret_id": secret_id})
+        result = await db.execute(query, params)
         rows = result.fetchall()
 
-        return [
+        permissions = [
             {
                 "user_group_id": row[0],
                 "user_group_name": row[1],
@@ -477,6 +501,11 @@ class SecretsService:
             }
             for row in rows
         ]
+        if limit is None:
+            return permissions, len(permissions)
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count_result = await db.execute(text(f"SELECT COUNT(*) {from_clause}"), count_params)
+        return permissions, count_result.scalar() or 0
 
     async def update_permissions(
         self,

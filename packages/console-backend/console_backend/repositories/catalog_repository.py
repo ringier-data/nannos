@@ -192,8 +192,8 @@ class CatalogRepository(AuditedRepository):
         }
 
         if search:
-            conditions.append("(cf.source_file_name ILIKE :search OR cf.folder_path ILIKE :search)")
-            params["search"] = f"%{search}%"
+            conditions.append(like_clause("cf.source_file_name", "cf.folder_path"))
+            params["search"] = like_contains(search)
 
         if status:
             conditions.append("cf.sync_status = :status")
@@ -250,22 +250,38 @@ class CatalogRepository(AuditedRepository):
         catalog_id: str,
         limit: int = 50,
         offset: int = 0,
+        search: str | None = None,
     ) -> tuple[list[CatalogPage], int]:
-        """Get paginated pages for a catalog."""
-        count_result = await db.execute(
-            text("SELECT COUNT(*) FROM catalog_pages WHERE catalog_id = :catalog_id"),
-            {"catalog_id": catalog_id},
-        )
+        """Get paginated pages for a catalog.
+
+        `search` matches the page title and its file's name. The page body
+        (text_content / speaker_notes) is deliberately not matched: it is
+        unindexed, can run to kilobytes per page, and content search is what the
+        catalog's vector index is for.
+        """
+        params: dict[str, Any] = {"catalog_id": catalog_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("cp.title", "cf.source_file_name")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
+            FROM catalog_pages cp
+            JOIN catalog_files cf ON cf.id = cp.file_id
+            WHERE cp.catalog_id = :catalog_id
+            {search_filter}
+        """
+
+        count_result = await db.execute(text(f"SELECT COUNT(*) {from_clause}"), params)
         total = count_result.scalar() or 0
 
         result = await db.execute(
-            text("""
-                SELECT * FROM catalog_pages
-                WHERE catalog_id = :catalog_id
-                ORDER BY file_id, page_number
+            text(f"""
+                SELECT cp.* {from_clause}
+                ORDER BY cp.file_id, cp.page_number
                 LIMIT :limit OFFSET :offset
             """),
-            {"catalog_id": catalog_id, "limit": limit, "offset": offset},
+            {**params, "limit": limit, "offset": offset},
         )
         pages = [CatalogPage(**self._stringify_uuids(dict(row))) for row in result.mappings().all()]
         return pages, total
@@ -412,17 +428,54 @@ class CatalogRepository(AuditedRepository):
         catalog_id: str,
     ) -> list[dict[str, Any]]:
         """Get all permission entries for a catalog."""
+        rows, _ = await self.list_permissions(db, catalog_id)
+        return rows
+
+    async def list_permissions(
+        self,
+        db: AsyncSession,
+        catalog_id: str,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Permission entries for a catalog, optionally filtered by group name and paged.
+
+        Returns (rows, total matching). `limit=None` returns every match.
+        """
+        params: dict[str, Any] = {"catalog_id": catalog_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("ug.name")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
+            FROM catalog_permissions cp
+            JOIN user_groups ug ON cp.user_group_id = ug.id
+            WHERE cp.catalog_id = :catalog_id
+            {search_filter}
+        """
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
         result = await db.execute(
-            text("""
-                SELECT cp.*, ug.name AS group_name
-                FROM catalog_permissions cp
-                JOIN user_groups ug ON cp.user_group_id = ug.id
-                WHERE cp.catalog_id = :catalog_id
-                ORDER BY ug.name
+            text(f"""
+                SELECT cp.*, ug.name AS user_group_name
+                {from_clause}
+                ORDER BY ug.name, ug.id
+                {pagination}
             """),
-            {"catalog_id": catalog_id},
+            params,
         )
-        return [self._stringify_uuids(dict(row)) for row in result.mappings().all()]
+        rows = [self._stringify_uuids(dict(row)) for row in result.mappings().all()]
+        if limit is None:
+            return rows, len(rows)
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count = await db.execute(text(f"SELECT COUNT(*) {from_clause}"), count_params)
+        return rows, count.scalar() or 0
 
     async def set_permissions(
         self,

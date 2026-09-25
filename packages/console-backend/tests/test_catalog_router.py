@@ -254,3 +254,40 @@ class TestCatalogFilesEndpoints:
         data = response.json()
         assert data["items"] == []
         assert data["total"] == 0
+
+        response = await client_with_db.get(f"/api/v1/catalogs/{catalog_id}/pages", params={"search": "deck"})
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_permissions_total_header_with_paging_and_search(self, client_with_db: AsyncClient, pg_session):
+        """The body stays a bare array; the match count travels in X-Total-Count."""
+        created = await _create_catalog_via_api(client_with_db)
+        catalog_id = created["id"]
+        group_ids = []
+        for name in ("Perm Alpha", "Perm Beta", "Perm Gamma"):
+            result = await pg_session.execute(
+                text("INSERT INTO user_groups (name) VALUES (:name) RETURNING id"), {"name": name}
+            )
+            group_ids.append(result.scalar_one())
+        await pg_session.commit()
+        response = await client_with_db.put(
+            f"/api/v1/catalogs/{catalog_id}/permissions",
+            json={"permissions": [{"user_group_id": gid, "permissions": ["read"]} for gid in group_ids]},
+        )
+        assert response.status_code == 200, response.text
+
+        response = await client_with_db.get(f"/api/v1/catalogs/{catalog_id}/permissions")
+        assert response.status_code == 200
+        assert len(response.json()) == 3
+        assert response.headers["X-Total-Count"] == "3"
+
+        response = await client_with_db.get(
+            f"/api/v1/catalogs/{catalog_id}/permissions", params={"page": 2, "limit": 2}
+        )
+        assert [p["user_group_name"] for p in response.json()] == ["Perm Gamma"]
+        assert response.headers["X-Total-Count"] == "3"
+
+        response = await client_with_db.get(f"/api/v1/catalogs/{catalog_id}/permissions", params={"search": "beta"})
+        assert [p["user_group_name"] for p in response.json()] == ["Perm Beta"]
+        assert response.headers["X-Total-Count"] == "1"

@@ -459,7 +459,7 @@ class TestGroupDefaultsFollowMembership:
         assert theirs.enabled is True and theirs.activated_by == "group" and theirs.activated_by_groups == [gid]
         assert theirs.next_run_at.astimezone(ZoneInfo("Asia/Tokyo")).hour == 9
         assert NotificationType.JOB_SUBSCRIPTION_ACTIVATED.value in await _notifications(db, u["member"].id)
-        listing = await svc.list_group_definitions(db, gid)
+        listing, _ = await svc.list_group_definitions(db, gid)
         assert [(d["id"], d["is_default"]) for d in listing] == [(job.definition_id, True)]
 
         # A new member joins: activated too.
@@ -1270,3 +1270,37 @@ class TestRejoiningAGroupDoesNotFireACatchUpRun:
         assert back.enabled is True
         assert back.next_run_at > datetime.now(timezone.utc), "no immediate catch-up run on rejoin"
         assert back.next_run_at.astimezone(ZoneInfo(TZ["member"])).hour == 9
+
+
+class TestTheGroupsJobListSearchesAndPages:
+    """``/groups/{id}/accessible-jobs``: filtered in SQL before the page is cut, unpaged by default."""
+
+    @pytest.mark.asyncio
+    async def test_search_page_and_total(self, world):
+        svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
+        weekly = await svc.create_job(db, _watch_create(name="Weekly_digest"), u["owner"])
+        monday = await svc.create_job(db, _watch_create(name="Monday report", prompt="summarise the CRM"), u["owner"])
+        unshared = await svc.create_job(db, _watch_create(name="Private Weekly"), u["owner"])
+        for job in (weekly, monday):
+            await svc.update_permissions(
+                db, job.definition_id, [{"user_group_id": gid, "permissions": ["read"]}], u["owner"]
+            )
+        await svc.set_group_default_jobs(db, gid, [monday.definition_id], u["owner"])
+        await db.commit()
+
+        everything, total = await svc.list_group_definitions(db, gid)
+        # Defaults first, then by name; the unshared job is never a candidate.
+        assert [d["id"] for d in everything] == [monday.definition_id, weekly.definition_id]
+        assert total == 2 and unshared.definition_id not in {d["id"] for d in everything}
+
+        by_name, total = await svc.list_group_definitions(db, gid, search="weekly")
+        assert [d["id"] for d in by_name] == [weekly.definition_id] and total == 1
+        by_prompt, total = await svc.list_group_definitions(db, gid, search="crm")
+        assert [d["id"] for d in by_prompt] == [monday.definition_id] and total == 1
+        # `_` is a literal here, not LIKE's any-one-character.
+        literal, total = await svc.list_group_definitions(db, gid, search="y_d")
+        assert [d["id"] for d in literal] == [weekly.definition_id] and total == 1
+        assert (await svc.list_group_definitions(db, gid, search="t_e"))[1] == 0
+
+        second_page, total = await svc.list_group_definitions(db, gid, page=2, limit=1)
+        assert [d["id"] for d in second_page] == [weekly.definition_id] and total == 2

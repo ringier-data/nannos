@@ -636,3 +636,57 @@ async def test_set_non_approved_agent_as_default_deferred_activation(
         {"user_id": test_user_model.id},
     )
     assert activation_result.first() is None  # No activation record
+
+
+@pytest.mark.asyncio
+async def test_get_group_accessible_agents_search_and_paging(
+    client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
+):
+    """Search matches name or default-version description in SQL; paging is opt-in and
+    `X-Total-Count` always counts every match."""
+    await pg_session.execute(text("INSERT INTO user_groups (id, name) VALUES (1, 'Test Group')"))
+    await pg_session.execute(
+        text("INSERT INTO user_group_members (user_group_id, user_id, group_role) VALUES (1, :u, 'read')"),
+        {"u": test_user_model.id},
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO sub_agents (id, name, type, owner_status, owner_user_id, default_version, current_version)
+            VALUES
+                (9001, 'crm_helper', 'remote', 'active', :u, 1, 1),
+                (9002, 'Billing', 'remote', 'active', :u, 1, 1),
+                (9003, 'Calendar', 'remote', 'active', :u, 1, 1)
+        """),
+        {"u": test_user_model.id},
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO sub_agent_config_versions
+                (sub_agent_id, version, description, status, created_at, release_number, agent_url)
+            VALUES
+                (9001, 1, 'Salesforce lookups', 'approved', NOW(), 1, 'http://a1'),
+                (9002, 1, 'Invoices at 100% accuracy', 'approved', NOW(), 1, 'http://a2'),
+                (9003, 1, 'Meetings', 'approved', NOW(), 1, 'http://a3')
+        """)
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO sub_agent_permissions (user_group_id, sub_agent_id, permissions)
+            VALUES (1, 9001, ARRAY['read']), (1, 9002, ARRAY['read']), (1, 9003, ARRAY['read'])
+        """)
+    )
+    await pg_session.commit()
+
+    async def names(**params) -> tuple[list[str], str]:
+        response = await client_with_db.get("/api/v1/groups/1/accessible-agents", params=params)
+        assert response.status_code == 200
+        return [a["name"] for a in response.json()], response.headers["X-Total-Count"]
+
+    assert await names() == (["Billing", "Calendar", "crm_helper"], "3")
+    assert await names(search="CRM") == (["crm_helper"], "1")
+    assert await names(search="salesforce") == (["crm_helper"], "1")
+    # `%` and `_` are literals, not wildcards.
+    assert await names(search="100%") == (["Billing"], "1")
+    assert await names(search="m_h") == (["crm_helper"], "1")
+    assert await names(search="_") == (["crm_helper"], "1")
+    assert await names(page=2, limit=2) == (["crm_helper"], "3")

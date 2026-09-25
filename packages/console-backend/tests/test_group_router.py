@@ -24,7 +24,7 @@ from console_backend.models.user_group import (
     UserGroupWithMembers,
 )
 from console_backend.routers import group_router
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy import text
 
 
@@ -195,7 +195,9 @@ class TestGroupListingEndpoints:
         db_test_user,
     ):
         """Test that new users see empty group list."""
-        result = await group_router.list_my_groups(mock_request, pg_session, mock_user)
+        result = await group_router.list_my_groups(
+            mock_request, pg_session, Response(), mock_user, search=None, page=1, limit=None
+        )
 
         assert len(result) == 0
 
@@ -209,7 +211,9 @@ class TestGroupListingEndpoints:
         db_test_user_groups,
     ):
         """Test that new users see empty group list."""
-        result = await group_router.list_my_groups(mock_request, pg_session, mock_user)
+        result = await group_router.list_my_groups(
+            mock_request, pg_session, Response(), mock_user, search=None, page=1, limit=None
+        )
 
         assert len(result) == 2
 
@@ -231,6 +235,79 @@ class TestGroupListingEndpoints:
         assert data[0]["name"] == "Test Group 1"
         assert data[1]["name"] == "Test Group 2"
 
+    @pytest.mark.asyncio
+    async def test_list_my_groups_search_matches_name_and_description(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        """Search matches name or description, case-insensitively, and the header counts the matches."""
+        for term, expected in (("group 1", ["Test Group 1"]), ("DESCRIPTION 2", ["Test Group 2"]), ("nope", [])):
+            response = Response()
+            result = await group_router.list_my_groups(
+                mock_request, pg_session, response, mock_user, search=term, page=1, limit=None
+            )
+            assert [g.name for g in result] == expected, term
+            assert response.headers["X-Total-Count"] == str(len(expected))
+
+    @pytest.mark.asyncio
+    async def test_list_my_groups_search_treats_like_wildcards_literally(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        """A bare `_` or `%` would match every group if it reached ILIKE unescaped."""
+        for term in ("_", "%"):
+            result = await group_router.list_my_groups(
+                mock_request, pg_session, Response(), mock_user, search=term, page=1, limit=None
+            )
+            assert result == [], term
+
+    @pytest.mark.asyncio
+    async def test_list_my_groups_pages_with_the_whole_total(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        """A page holds `limit` groups in name order; the header counts all of them."""
+        pages = []
+        for page in (1, 2, 3):
+            response = Response()
+            result = await group_router.list_my_groups(
+                mock_request, pg_session, response, mock_user, search=None, page=page, limit=1
+            )
+            assert response.headers["X-Total-Count"] == "2"
+            pages.append([g.name for g in result])
+        assert pages == [["Test Group 1"], ["Test Group 2"], []]
+
+    @pytest.mark.asyncio
+    async def test_list_my_groups_hydrates_members_per_group(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        """Each group carries its own members and count, not a neighbour's."""
+        result = await group_router.list_my_groups(
+            mock_request, pg_session, Response(), mock_user, search=None, page=1, limit=None
+        )
+        assert [(g.member_count, [m.user_id for m in g.members]) for g in result] == [
+            (1, [mock_user.id]),
+            (1, [mock_user.id]),
+        ]
+        assert [m.group_role for g in result for m in g.members] == ["manager", "read"]
+
 
 class TestGroupSummariesForTheModel:
     """``console_list_my_groups`` (ADR-0010): the groups the model may reason about.
@@ -249,7 +326,9 @@ class TestGroupSummariesForTheModel:
         db_test_user,
         db_test_user_groups,
     ):
-        summaries = await group_router.list_my_group_summaries(mock_request, pg_session, mock_user)
+        summaries = await group_router.list_my_group_summaries(
+            mock_request, pg_session, Response(), mock_user, search=None, page=1, limit=None
+        )
 
         assert [s.name for s in summaries] == ["Test Group 1", "Test Group 2"]
         assert all(s.member_count >= 1 for s in summaries)
@@ -266,14 +345,38 @@ class TestGroupSummariesForTheModel:
         # /summaries would otherwise be matched by /{group_id} and 422 on the converter,
         # which is why the route is declared ahead of it.
         client_with_db._transport.app.dependency_overrides[group_router.require_auth] = lambda: mock_user
-        client_with_db._transport.app.dependency_overrides[group_router.require_auth_or_bearer_token] = (
-            lambda: mock_user
+        client_with_db._transport.app.dependency_overrides[group_router.require_auth_or_bearer_token] = lambda: (
+            mock_user
         )
         response = await client_with_db.get("/api/v1/groups/summaries")
 
         assert response.status_code == 200
         assert [g["name"] for g in response.json()] == ["Test Group 1", "Test Group 2"]
+        assert response.headers["X-Total-Count"] == "2"
         assert "members" not in response.json()[0]
+
+    @pytest.mark.asyncio
+    async def test_summaries_search_and_page(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        response = Response()
+        found = await group_router.list_my_group_summaries(
+            mock_request, pg_session, response, mock_user, search="description 2", page=1, limit=None
+        )
+        assert [s.name for s in found] == ["Test Group 2"]
+        assert response.headers["X-Total-Count"] == "1"
+
+        response = Response()
+        paged = await group_router.list_my_group_summaries(
+            mock_request, pg_session, response, mock_user, search=None, page=2, limit=1
+        )
+        assert [s.name for s in paged] == ["Test Group 2"]
+        assert response.headers["X-Total-Count"] == "2"
 
 
 class TestGroupDetailEndpoint:
@@ -399,9 +502,7 @@ class TestGroupMembersEndpoint:
         """Test that list_members returns all group members."""
         # mock_user is manager of group 1
         mock_request = get_mock_request(user=mock_user)
-        result = await group_router.list_members(
-            1, mock_request, pg_session, mock_user, page=1, limit=20, search=None
-        )
+        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=20, search=None)
         assert result.meta.total == 1
         assert len(result.data) == 1
         assert result.data[0].user_id == mock_user.id
@@ -417,9 +518,7 @@ class TestGroupMembersEndpoint:
     ):
         """Test pagination for member list (trivial with 1 member)."""
         mock_request = get_mock_request(user=mock_user)
-        result = await group_router.list_members(
-            1, mock_request, pg_session, mock_user, page=1, limit=1, search=None
-        )
+        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=1, search=None)
         assert result.meta.page == 1
         assert result.meta.limit == 1
         assert len(result.data) == 1

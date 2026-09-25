@@ -3,7 +3,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,17 +71,23 @@ async def list_outbound_scim_endpoints(
     request: Request,
     db: DbSession,
     _: User = Depends(require_admin),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page (omit for all)"),
+    search: str | None = Query(None, description="Search by name or endpoint URL"),
 ) -> OutboundScimEndpointListResponse:
-    """List all outbound SCIM endpoints.
+    """List outbound SCIM endpoints.
 
     Bearer token values are masked — only the last 4 characters are shown.
     """
     service = get_endpoint_service(request)
-    endpoints = await service.list_endpoints(db)
-    return OutboundScimEndpointListResponse(
-        data=endpoints,
-        meta=PaginationMeta(page=1, limit=len(endpoints), total=len(endpoints)),
+    endpoints, total = await service.list_endpoints(db, search=search, page=page, limit=limit)
+    # An unpaged listing is one page holding every match.
+    meta = (
+        PaginationMeta(page=1, limit=total, total=total)
+        if limit is None
+        else PaginationMeta(page=page, limit=limit, total=total)
     )
+    return OutboundScimEndpointListResponse(data=endpoints, meta=meta)
 
 
 @router.get("/{endpoint_id}", response_model=OutboundScimEndpointDetailResponse)

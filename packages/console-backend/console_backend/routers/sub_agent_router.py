@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import DbSession
@@ -692,13 +692,18 @@ async def approve_sub_agent(
 @router.get("/{sub_agent_id}/permissions", response_model=list[SubAgentGroupPermissionResponse])
 async def get_sub_agent_permissions(
     request: Request,
+    response: Response,
     sub_agent_id: int,
     db: DbSession,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by group name"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SubAgentGroupPermissionResponse]:
     """Get group permissions (read/write) for this sub-agent.
 
     Owner, admin (with admin mode enabled), or users with write permission can view permissions.
+    `X-Total-Count` carries how many grants match.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
@@ -714,7 +719,10 @@ async def get_sub_agent_permissions(
             if not has_write:
                 raise HTTPException(status_code=403, detail="Insufficient permissions or admin mode not enabled")
 
-        permissions = await sub_agent_service.get_permissions(db, sub_agent_id)
+        permissions, total = await sub_agent_service.get_permissions(
+            db, sub_agent_id, search=search, page=page, limit=limit
+        )
+        response.headers["X-Total-Count"] = str(total)
         return [SubAgentGroupPermissionResponse(**perm) for perm in permissions]
     except HTTPException:
         raise
@@ -726,14 +734,20 @@ async def get_sub_agent_permissions(
 @router.get("/{sub_agent_id}/versions", response_model=list[SubAgentConfigVersion])
 async def get_sub_agent_versions(
     request: Request,
+    response: Response,
     sub_agent_id: int,
     db: DbSession,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by change summary or version hash"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SubAgentConfigVersion]:
-    """Get all configuration versions for a sub-agent.
+    """Get configuration versions for a sub-agent, newest first.
 
     Returns version history with all configuration data.
     User must be owner, have group access, or be admin.
+    `X-Total-Count` carries how many versions match; history only grows, so the
+    console pages it.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
@@ -748,8 +762,11 @@ async def get_sub_agent_versions(
             if not any(sa.id == sub_agent_id for sa in accessible):
                 raise HTTPException(status_code=403, detail="Access denied")
 
-        versions = await sub_agent_service.get_config_versions(db, sub_agent_id)
+        versions, total = await sub_agent_service.get_config_versions(
+            db, sub_agent_id, search=search, page=page, limit=limit
+        )
         await annotate_models(request, db, list(versions))
+        response.headers["X-Total-Count"] = str(total)
         return versions
     except HTTPException:
         raise
@@ -1002,16 +1019,26 @@ async def set_default_version(
 @router.get("/admin/pending-versions")
 async def list_pending_version_approvals(
     request: Request,
+    response: Response,
     db: DbSession,
     user: User = Depends(require_admin),
+    search: str | None = Query(
+        None, description="Search by agent name, description, change summary, or owner name/email"
+    ),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[dict]:
-    """List all versions pending approval across all sub-agents (admin only).
+    """List versions pending approval across all sub-agents (admin only), oldest first.
 
     Returns version info with sub-agent context for approval queue.
+    `X-Total-Count` carries how many pending versions match.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        pending = await sub_agent_service.get_pending_version_approvals(db)
+        pending, total = await sub_agent_service.get_pending_version_approvals(
+            db, search=search, page=page, limit=limit
+        )
+        response.headers["X-Total-Count"] = str(total)
         return pending
     except Exception as e:
         logger.error(f"Failed to list pending version approvals: {e}")

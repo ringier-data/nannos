@@ -1,6 +1,6 @@
 """API routes for user notifications."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..db.session import DbSession
 from ..dependencies import User, require_auth
@@ -19,22 +19,21 @@ def get_notification_service(request: Request) -> NotificationService:
 async def get_notifications(
     request: Request,
     db: DbSession,
-    page: int = 1,
-    limit: int = 50,
+    # Bounded rather than clamped, like the bug report list: `page=0` reached the
+    # service as a negative OFFSET and answered 500.
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
     unread_only: bool = False,
+    search: str | None = Query(None, description="Match against notification title and message"),
     user: User = Depends(require_auth),
 ) -> NotificationListResponse:
     """Get notifications for the current user with pagination.
 
-    Query Parameters:
-    - page: Page number (default: 1)
-    - limit: Items per page (default: 50, max: 100)
-    - unread_only: If true, only return unread notifications (default: false)
+    `total` counts the notifications matching the filters; `unread_count` is the
+    user's overall unread count, independent of `search` and `unread_only`, so the
+    inbox badge does not change while the user types.
     """
     notification_service = get_notification_service(request)
-
-    if limit > 100:
-        limit = 100
 
     notifications, total = await notification_service.get_user_notifications(
         db=db,
@@ -42,6 +41,7 @@ async def get_notifications(
         page=page,
         limit=limit,
         unread_only=unread_only,
+        search=search,
     )
 
     return NotificationListResponse(

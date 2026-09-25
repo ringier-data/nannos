@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from ..authorization import check_capability
 from ..db.session import DbSession
@@ -228,12 +228,18 @@ async def delete_secret(
 async def get_secret_permissions(
     secret_id: int,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth),
     request: Request = None,  # type: ignore[assignment]
+    search: str | None = Query(None, description="Search by group name"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default: the permissions dialog replaces the whole grant set
+    # on save, so it must be able to load every grant.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SecretGroupPermissionResponse]:
     """Get group permissions for a secret.
 
-    Owner can view permissions.
+    Owner can view permissions. `X-Total-Count` carries how many grants match.
     Requires 'secrets:read' capability and ownership of the secret.
     """
     secrets_service = get_secrets_service(request)
@@ -262,7 +268,8 @@ async def get_secret_permissions(
         )
 
     try:
-        permissions = await secrets_service.get_permissions(db, secret_id)
+        permissions, total = await secrets_service.get_permissions(db, secret_id, search=search, page=page, limit=limit)
+        response.headers["X-Total-Count"] = str(total)
         return [SecretGroupPermissionResponse(**perm) for perm in permissions]
     except Exception as e:
         logger.error(f"Failed to get permissions for secret {secret_id}: {e}")

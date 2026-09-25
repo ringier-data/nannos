@@ -1375,6 +1375,20 @@ class SchedulerService:
         await self._require(db, definition_id, actor, "write", is_admin)
         return await self.repo.get_permissions(db, definition_id)
 
+    async def list_permissions(
+        self,
+        db: AsyncSession,
+        definition_id: int,
+        actor: User,
+        is_admin: bool = False,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """`get_permissions` filtered by group name and paged, with the total match count."""
+        await self._require(db, definition_id, actor, "write", is_admin)
+        return await self.repo.list_permissions(db, definition_id, search=search, page=page, limit=limit)
+
     async def update_permissions(
         self,
         db: AsyncSession,
@@ -1476,9 +1490,16 @@ class SchedulerService:
     # Group defaults
     # ------------------------------------------------------------------
 
-    async def list_group_definitions(self, db: AsyncSession, group_id: int) -> list[dict[str, Any]]:
-        """Definitions shared to a group, flagged with which are its defaults."""
-        return await self.repo.list_group_definitions(db, group_id)
+    async def list_group_definitions(
+        self,
+        db: AsyncSession,
+        group_id: int,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Definitions shared to a group, flagged with which are its defaults, plus the total."""
+        return await self.repo.list_group_definitions(db, group_id, search=search, page=page, limit=limit)
 
     async def _activate_default(self, db: AsyncSession, actor: User, group_id: int, definition_id: int, user_ids: list[str]) -> list[str]:
         """Subscribe *user_ids* to *definition_id* as a group default — enabled, inherited,
@@ -1739,11 +1760,12 @@ class SchedulerService:
         limit: int = 50,
         page: int = 1,
         status: str | None = None,
+        search: str | None = None,
     ) -> tuple[list[ScheduledJobRun], int] | None:
         job = await self.repo.get_job(db, job_id)
         if job is None or job.user_id != user_id:
             return None
-        return await self.repo.list_runs(db, job_id, limit, page=page, status=status)
+        return await self.repo.list_runs(db, job_id, limit, page=page, status=status, search=search)
 
     async def get_run(
         self,

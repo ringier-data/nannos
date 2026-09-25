@@ -682,7 +682,7 @@ class TestSubAgentVersionCreation:
         await service.delete_sub_agent(pg_session, agent.id, actor=user)
 
         # Versions should still be accessible (including deleted)
-        versions = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
+        versions, _ = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
         assert len(versions) == 2
         assert versions[0].version == 2
         assert versions[1].version == 1
@@ -1400,7 +1400,7 @@ class TestVersionDeletion:
         assert result is True
 
         # Verify version is soft-deleted
-        versions = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
+        versions, _ = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
         v2 = next(v for v in versions if v.version == 2)
         assert v2.deleted_at is not None
 
@@ -2443,3 +2443,149 @@ class TestSubAgentListPagingAndSearch:
         assert all(a.is_activated for a in enabled)
         assert all(not a.is_activated for a in disabled)
 
+
+class TestSubAgentVersionHistoryPaging:
+    """Opt-in paging and search on a sub-agent's version history (newest first)."""
+
+    async def _agent_with_versions(
+        self, session: AsyncSession, service: SubAgentService, user: User, summaries: list[str]
+    ) -> SubAgent:
+        agent = await _create_sub_agent(session, user, "History", service)
+        for i, summary in enumerate(summaries):
+            await service.update_sub_agent(
+                session,
+                agent.id,
+                SubAgentUpdate(system_prompt=f"Prompt {i} " * 100, change_summary=summary),
+                actor=user,
+            )
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default_newest_first(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await self._agent_with_versions(
+            pg_session, sub_agent_service, test_user_db, ["Second", "Third", "Fourth"]
+        )
+
+        versions, total = await sub_agent_service.get_config_versions(pg_session, agent.id)
+        assert [v.version for v in versions] == [4, 3, 2, 1]
+        assert total == 4
+
+    @pytest.mark.asyncio
+    async def test_paging_caps_rows_but_not_total(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await self._agent_with_versions(
+            pg_session, sub_agent_service, test_user_db, ["Second", "Third", "Fourth"]
+        )
+
+        page1, total = await sub_agent_service.get_config_versions(pg_session, agent.id, page=1, limit=3)
+        assert [v.version for v in page1] == [4, 3, 2]
+        assert total == 4
+
+        page2, total = await sub_agent_service.get_config_versions(pg_session, agent.id, page=2, limit=3)
+        assert [v.version for v in page2] == [1]
+        assert total == 4
+
+    @pytest.mark.asyncio
+    async def test_search_matches_change_summary_and_hash_literally(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await self._agent_with_versions(
+            pg_session, sub_agent_service, test_user_db, ["Raised cap to 50%", "Raised cap to 500"]
+        )
+
+        # `%` is a LIKE wildcard; unescaped, "50%" would match both summaries.
+        found, total = await sub_agent_service.get_config_versions(pg_session, agent.id, search="50%", limit=10)
+        assert [v.change_summary for v in found] == ["Raised cap to 50%"]
+        assert total == 1
+
+        everything, _ = await sub_agent_service.get_config_versions(pg_session, agent.id)
+        target = everything[-1]
+        by_hash, total = await sub_agent_service.get_config_versions(
+            pg_session, agent.id, search=target.version_hash[:7].upper()
+        )
+        assert [v.id for v in by_hash] == [target.id]
+        assert total == 1
+
+
+class TestPendingVersionApprovalsPaging:
+    """Opt-in paging and search on the admin queue of versions pending approval."""
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default_paged_on_request(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        for i in range(3):
+            agent = await _create_sub_agent(pg_session, test_user_db, f"Queue-{i}", sub_agent_service)
+            await sub_agent_service.submit_for_approval(pg_session, agent.id, "Please review", actor=test_user_db)
+
+        everything, total = await sub_agent_service.get_pending_version_approvals(pg_session)
+        assert total == len(everything) >= 3
+
+        page, total = await sub_agent_service.get_pending_version_approvals(
+            pg_session, search="Queue-", page=1, limit=2
+        )
+        assert [p["name"] for p in page] == ["Queue-0", "Queue-1"], "oldest first"
+        assert total == 3
+
+        last, total = await sub_agent_service.get_pending_version_approvals(
+            pg_session, search="Queue-", page=2, limit=2
+        )
+        assert [p["name"] for p in last] == ["Queue-2"]
+        assert total == 3
+
+    @pytest.mark.asyncio
+    async def test_search_matches_name_summary_and_owner(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await _create_sub_agent(pg_session, test_user_db, "Invoice_Bot", sub_agent_service)
+        await sub_agent_service.submit_for_approval(pg_session, agent.id, "Adds VAT rounding", actor=test_user_db)
+        other = await _create_sub_agent(pg_session, test_user_db, "InvoiceXBot", sub_agent_service)
+        await sub_agent_service.submit_for_approval(pg_session, other.id, "Unrelated", actor=test_user_db)
+
+        # `_` is a LIKE wildcard; unescaped it would match "InvoiceXBot" too.
+        by_name, total = await sub_agent_service.get_pending_version_approvals(pg_session, search="invoice_")
+        assert [p["name"] for p in by_name] == ["Invoice_Bot"]
+        assert total == 1
+
+        by_summary, _ = await sub_agent_service.get_pending_version_approvals(pg_session, search="vat round")
+        assert [p["sub_agent_id"] for p in by_summary] == [agent.id]
+
+        full_name = f"{test_user_db.first_name} {test_user_db.last_name}"
+        by_owner, total = await sub_agent_service.get_pending_version_approvals(pg_session, search=full_name, limit=10)
+        assert {agent.id, other.id} <= {p["sub_agent_id"] for p in by_owner}
+        assert total == len(by_owner)
+
+
+class TestSubAgentPermissionsPaging:
+    """Opt-in paging and search (by group name) on a sub-agent's group grants."""
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default_and_paged_on_request(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await _create_sub_agent(pg_session, test_user_db, "Granted", sub_agent_service)
+        for name in ("Gamma", "Alpha", "Beta"):
+            await _grant_group_write_access(pg_session, agent.id, test_user_db, group_name=name)
+
+        everything, total = await sub_agent_service.get_permissions(pg_session, agent.id)
+        assert [p["user_group_name"] for p in everything] == ["Alpha", "Beta", "Gamma"]
+        assert total == 3
+
+        page, total = await sub_agent_service.get_permissions(pg_session, agent.id, page=2, limit=2)
+        assert [p["user_group_name"] for p in page] == ["Gamma"]
+        assert total == 3
+
+    @pytest.mark.asyncio
+    async def test_search_by_group_name_escapes_wildcards(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await _create_sub_agent(pg_session, test_user_db, "Granted", sub_agent_service)
+        for name in ("Team_A", "TeamXA", "Finance"):
+            await _grant_group_write_access(pg_session, agent.id, test_user_db, group_name=name)
+
+        found, total = await sub_agent_service.get_permissions(pg_session, agent.id, search="team_", limit=10)
+        assert [p["user_group_name"] for p in found] == ["Team_A"]
+        assert total == 1

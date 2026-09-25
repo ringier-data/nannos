@@ -132,6 +132,22 @@ class TestScimTokenList:
         assert "token_hint" in token
         assert len(token["token_hint"]) == 4
 
+    async def test_list_tokens_paged_meta_and_search(self, admin_client):
+        for name in ("alpha", "beta", "gamma"):
+            response = await admin_client.post("/api/v1/admin/scim-tokens", json={"name": name})
+            assert response.status_code == 201
+
+        response = await admin_client.get("/api/v1/admin/scim-tokens", params={"page": 2, "limit": 2})
+        data = response.json()
+        assert [t["name"] for t in data["data"]] == ["alpha"]
+        assert data["meta"] == {"page": 2, "limit": 2, "total": 3}
+
+        response = await admin_client.get("/api/v1/admin/scim-tokens", params={"search": "AMM"})
+        data = response.json()
+        assert [t["name"] for t in data["data"]] == ["gamma"]
+        # Unpaged: one page holding every match.
+        assert data["meta"] == {"page": 1, "limit": 1, "total": 1}
+
 
 @pytest.mark.asyncio
 class TestScimTokenGet:

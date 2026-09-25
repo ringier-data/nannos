@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,7 @@ from ..models.notification import (
     NotificationType,
     UserNotification,
 )
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,7 @@ class NotificationService:
         db: AsyncSession,
         user_id: str,
         unread_only: bool = False,
+        search: str | None = None,
         page: int = 1,
         limit: int = 20,
     ) -> tuple[list[UserNotification], int]:
@@ -161,6 +164,7 @@ class NotificationService:
             db: Database session
             user_id: User ID
             unread_only: If True, only return unread notifications
+            search: Match against title and message
             page: Page number (1-indexed)
             limit: Items per page
 
@@ -168,31 +172,32 @@ class NotificationService:
             Tuple of (notifications, total_count)
         """
         read_filter = "AND read_at IS NULL" if unread_only else ""
+        search_filter = ""
+        params: dict[str, Any] = {"user_id": user_id}
+        if search:
+            search_filter = "AND " + like_clause("title", "message")
+            params["search"] = like_contains(search)
 
         count_query = text(f"""
             SELECT COUNT(*) as total
             FROM user_notifications
-            WHERE user_id = :user_id {read_filter}
+            WHERE user_id = :user_id {read_filter} {search_filter}
         """)
 
+        # `id` breaks ties: a bulk insert stamps every row with the same created_at, and
+        # paging over an unstable order could show a notification twice or not at all.
         data_query = text(f"""
             SELECT id, user_id, type, title, message, metadata, read_at, created_at
             FROM user_notifications
-            WHERE user_id = :user_id {read_filter}
-            ORDER BY created_at DESC
+            WHERE user_id = :user_id {read_filter} {search_filter}
+            ORDER BY created_at DESC, id DESC
             LIMIT :limit OFFSET :offset
         """)
-
-        params = {
-            "user_id": user_id,
-            "limit": limit,
-            "offset": (page - 1) * limit,
-        }
 
         count_result = await db.execute(count_query, params)
         total = count_result.scalar() or 0
 
-        data_result = await db.execute(data_query, params)
+        data_result = await db.execute(data_query, {**params, "limit": limit, "offset": (page - 1) * limit})
         rows = data_result.mappings().all()
 
         notifications = [

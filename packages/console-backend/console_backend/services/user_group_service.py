@@ -271,22 +271,7 @@ class UserGroupService:
             result = await db.execute(data_query, params)
             rows = result.mappings().all()
 
-            groups = []
-            for row in rows:
-                group = UserGroup(
-                    id=row["id"],
-                    name=row["name"],
-                    description=row["description"],
-                    keycloak_group_id=row["keycloak_group_id"],
-                    deleted_at=row["deleted_at"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                )
-                group_with_members = await self.get_group_with_members(db, group.id)
-                if group_with_members:
-                    groups.append(group_with_members)
-
-            return groups, total
+            return await self._with_members(db, [UserGroup(**row) for row in rows]), total
         except Exception as e:
             logger.error(f"Failed to list groups: {e}")
             raise
@@ -296,39 +281,113 @@ class UserGroupService:
         db: AsyncSession,
         user_id: str,
     ) -> list[UserGroupWithMembers]:
-        """List groups where a user is a member.
+        """List every group a user is a member of, unpaged."""
+        groups, _ = await self.search_user_groups(db, user_id)
+        return groups
+
+    async def search_user_groups(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[UserGroupWithMembers], int]:
+        """List the groups a user is a member of, optionally filtered and paged.
 
         Args:
             db: Database session
             user_id: User ID
+            search: Search term for name or description
+            page: Page number (1-indexed), only used with `limit`
+            limit: Items per page; None returns every matching group
 
         Returns:
-            List of groups the user belongs to
+            Tuple of (groups on this page, total matching)
         """
-        query = text("""
-            SELECT ug.id, ug.name, ug.description, ug.keycloak_group_id,
-                   ug.deleted_at, ug.created_at, ug.updated_at
+        params: dict[str, Any] = {"user_id": user_id}
+
+        # Same columns as the admin list, so a term finds the same groups there.
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("ug.name", "ug.description")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        from_where = f"""
             FROM user_groups ug
             JOIN user_group_members ugm ON ugm.user_group_id = ug.id
             WHERE ugm.user_id = :user_id
             AND ug.deleted_at IS NULL
-            ORDER BY ug.name
+            {search_filter}
+        """
+        data_query = text(f"""
+            SELECT ug.id, ug.name, ug.description, ug.keycloak_group_id,
+                   ug.deleted_at, ug.created_at, ug.updated_at
+            {from_where}
+            ORDER BY ug.name, ug.id
+            {pagination}
         """)
+        count_query = text(f"SELECT COUNT(*) {from_where}")
 
         try:
-            result = await db.execute(query, {"user_id": user_id})
+            result = await db.execute(data_query, params)
             rows = result.mappings().all()
 
-            groups = []
-            for row in rows:
-                group_with_members = await self.get_group_with_members(db, row["id"])
-                if group_with_members:
-                    groups.append(group_with_members)
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            total = (await db.execute(count_query, count_params)).scalar() or 0
 
-            return groups
+            return await self._with_members(db, [UserGroup(**row) for row in rows]), total
         except Exception as e:
             logger.error(f"Failed to list user groups: {e}")
             raise
+
+    async def _with_members(self, db: AsyncSession, groups: list[UserGroup]) -> list[UserGroupWithMembers]:
+        """Attach the active members to each group with one query for the whole page.
+
+        Hydrating group by group cost two round trips per row, which a search box
+        re-running the list on every keystroke turns into real latency.
+        """
+        if not groups:
+            return []
+
+        result = await db.execute(
+            text("""
+                SELECT ugm.user_group_id, u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
+                FROM user_group_members ugm
+                JOIN users u ON u.id = ugm.user_id
+                WHERE ugm.user_group_id = ANY(:group_ids)
+                AND u.deleted_at IS NULL
+                AND u.status = 'active'
+                ORDER BY u.first_name, u.last_name, u.id
+            """),
+            {"group_ids": [g.id for g in groups]},
+        )
+        members_by_group: dict[int, list[MemberInfo]] = {g.id: [] for g in groups}
+        for row in result.mappings().all():
+            members_by_group[row["user_group_id"]].append(
+                MemberInfo(
+                    user_id=row["user_id"],
+                    email=row["email"],
+                    first_name=row["first_name"],
+                    last_name=row["last_name"],
+                    group_role=row["group_role"],
+                )
+            )
+
+        return [
+            UserGroupWithMembers(
+                **g.model_dump(),
+                member_count=len(members_by_group[g.id]),
+                members=members_by_group[g.id],
+            )
+            for g in groups
+        ]
 
     async def get_user_group_memberships(
         self,
@@ -1555,7 +1614,10 @@ class UserGroupService:
         db: AsyncSession,
         group_id: int,
         user_id: str,
-    ) -> list[SubAgentRefWithStatus]:
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SubAgentRefWithStatus], int]:
         """
         Get all accessible approved agents for a group with default flags and status indicators.
 
@@ -1566,21 +1628,34 @@ class UserGroupService:
             db: Database session
             group_id: Group ID
             user_id: User ID to check activation status
+            search: Search term for the agent's name or its default version's description
+            page: Page number (1-indexed), only used with `limit`
+            limit: Items per page; None returns every accessible agent
 
         Returns:
-            List of accessible approved sub-agents with default flag, approval status, and activation status
+            Tuple of (sub-agents on this page with default flag, approval status and
+            activation status, total matching)
         """
-        query = text("""
-            SELECT 
-                sa.id, 
-                sa.name,
-                COALESCE(cv_default.status, cv_current.status, 'draft') as approval_status,
-                (ugda.sub_agent_id IS NOT NULL) as is_default,
-                (uaa.user_id IS NOT NULL) as is_activated,
-                uaa.activated_by_groups
+        params: dict[str, Any] = {"group_id": group_id, "user_id": user_id}
+
+        # The description searched is the default version's: `default_version IS NOT
+        # NULL` is required below, so that version always exists, and it is the one
+        # the group's members actually get.
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("sa.name", "cv_default.description")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        from_where = f"""
             FROM sub_agent_permissions sap
             JOIN sub_agents sa ON sap.sub_agent_id = sa.id
-            LEFT JOIN user_group_default_agents ugda 
+            LEFT JOIN user_group_default_agents ugda
                 ON sa.id = ugda.sub_agent_id AND ugda.user_group_id = :group_id
             LEFT JOIN sub_agent_config_versions cv_default
                 ON sa.id = cv_default.sub_agent_id AND sa.default_version = cv_default.version
@@ -1591,12 +1666,28 @@ class UserGroupService:
             WHERE sap.user_group_id = :group_id
                 AND sa.deleted_at IS NULL
                 AND sa.default_version IS NOT NULL
-            ORDER BY is_default DESC, sa.name ASC
+                {search_filter}
+        """
+        query = text(f"""
+            SELECT
+                sa.id,
+                sa.name,
+                COALESCE(cv_default.status, cv_current.status, 'draft') as approval_status,
+                (ugda.sub_agent_id IS NOT NULL) as is_default,
+                (uaa.user_id IS NOT NULL) as is_activated,
+                uaa.activated_by_groups
+            {from_where}
+            ORDER BY is_default DESC, sa.name ASC, sa.id ASC
+            {pagination}
         """)
+        count_query = text(f"SELECT COUNT(*) {from_where}")
 
         try:
-            result = await db.execute(query, {"group_id": group_id, "user_id": user_id})
+            result = await db.execute(query, params)
             rows = result.mappings().all()
+
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            total = (await db.execute(count_query, count_params)).scalar() or 0
 
             return [
                 SubAgentRefWithStatus(
@@ -1608,7 +1699,7 @@ class UserGroupService:
                     is_default=row["is_default"],
                 )
                 for row in rows
-            ]
+            ], total
         except Exception as e:
             logger.error(f"Failed to get accessible agents with defaults for group {group_id}: {e}")
             raise

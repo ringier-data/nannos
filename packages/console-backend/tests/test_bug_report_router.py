@@ -263,6 +263,103 @@ async def test_update_status_audit_log(
 
 
 # ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_bug_reports_search(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
+    """search matches description, id and conversation id, and escapes LIKE wildcards."""
+    first = (
+        await client_with_db.post(
+            "/api/v1/bug-reports", json={"conversation_id": "conv-alpha", "description": "Chart 100% blank"}
+        )
+    ).json()
+    await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-beta", "description": "Chart 1000"})
+    await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-gamma", "description": None})
+
+    async def ids(search: str) -> tuple[list[str], int]:
+        response = await client_with_db.get("/api/v1/bug-reports", params={"search": search})
+        assert response.status_code == 200
+        data = response.json()
+        return [r["id"] for r in data["data"]], data["meta"]["total"]
+
+    assert (await ids("chart"))[1] == 2
+    # `%` is a literal, not "anything": "100%" must not also match "1000".
+    assert await ids("100%") == ([first["id"]], 1)
+    assert await ids("conv-alpha") == ([first["id"]], 1)
+    assert await ids(first["id"][:8]) == ([first["id"]], 1)
+    assert await ids("no such thing") == ([], 0)
+
+
+@pytest.mark.asyncio
+async def test_list_bug_reports_search_by_reporter_respects_visibility(
+    app_with_db, client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
+):
+    """An admin finds reports by reporter name/email; a member searching still sees only their own."""
+    from datetime import datetime, timezone
+
+    from console_backend.models.user import User, UserRole, UserStatus
+
+    await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "conv-1", "description": "Mine"})
+    await pg_session.execute(
+        text("INSERT INTO users (id, sub, email, first_name, last_name) VALUES (:id, :sub, :email, 'Zelda', 'Hyrule')"),
+        {"id": "other-user-id", "sub": "other-sub", "email": "zelda@example.com"},
+    )
+    await pg_session.execute(
+        text(
+            "INSERT INTO bug_reports (conversation_id, user_id, source, status, description) "
+            "VALUES ('conv-other', 'other-user-id', 'client', 'open', 'Theirs')"
+        ),
+    )
+    await pg_session.commit()
+
+    response = await client_with_db.get("/api/v1/bug-reports", params={"search": "zelda"})
+    assert response.json()["meta"]["total"] == 0
+
+    admin = User(
+        id="admin-id",
+        sub="admin-sub",
+        email="admin@example.com",
+        first_name="Admin",
+        last_name="User",
+        is_administrator=True,
+        role=UserRole.ADMIN,
+        status=UserStatus.ACTIVE,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    app_with_db.dependency_overrides[require_auth] = lambda: admin
+    try:
+        for term in ("zelda", "HYRULE", "zelda@example"):
+            response = await client_with_db.get("/api/v1/bug-reports", params={"search": term})
+            assert response.status_code == 200
+            data = response.json()
+            assert data["meta"]["total"] == 1, term
+            assert data["data"][0]["description"] == "Theirs"
+    finally:
+        app_with_db.dependency_overrides.pop(require_auth, None)
+
+
+@pytest.mark.asyncio
+async def test_list_bug_reports_search_pages_over_matches(
+    client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
+):
+    """total counts the matches, not every report, and the page is cut after filtering."""
+    for i in range(5):
+        await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "c", "description": f"match {i}"})
+    await client_with_db.post("/api/v1/bug-reports", json={"conversation_id": "c", "description": "other"})
+
+    seen: list[str] = []
+    for page in (1, 2, 3):
+        response = await client_with_db.get("/api/v1/bug-reports", params={"search": "match", "page": page, "limit": 2})
+        data = response.json()
+        assert data["meta"] == {"page": page, "limit": 2, "total": 5}
+        seen += [r["description"] for r in data["data"]]
+    assert seen == [f"match {i}" for i in (4, 3, 2, 1, 0)]
+
+
+# ---------------------------------------------------------------------------
 # created_after filter
 # ---------------------------------------------------------------------------
 

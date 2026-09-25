@@ -3,7 +3,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
@@ -59,17 +59,23 @@ async def list_scim_tokens(
     request: Request,
     db: DbSession,
     _: User = Depends(require_admin),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page (omit for all)"),
+    search: str | None = Query(None, description="Search by name or description"),
 ) -> ScimTokenListResponse:
-    """List all SCIM tokens (active and revoked).
+    """List SCIM tokens (active and revoked).
 
     Token values are masked — only the last 4 characters are shown.
     """
     service = get_scim_token_service(request)
-    tokens = await service.list_tokens(db)
-    return ScimTokenListResponse(
-        data=tokens,
-        meta=PaginationMeta(page=1, limit=len(tokens), total=len(tokens)),
+    tokens, total = await service.list_tokens(db, search=search, page=page, limit=limit)
+    # An unpaged listing is one page holding every match.
+    meta = (
+        PaginationMeta(page=1, limit=total, total=total)
+        if limit is None
+        else PaginationMeta(page=page, limit=limit, total=total)
     )
+    return ScimTokenListResponse(data=tokens, meta=meta)
 
 
 @router.get("/{token_id}", response_model=ScimTokenDetailResponse)

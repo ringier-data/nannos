@@ -1523,6 +1523,7 @@ async def list_runs(
     run_status: JobRunStatus | None = Query(
         None, alias="status", description="Filter by run status"
     ),
+    search: str | None = Query(None, description="Search by result summary or error message"),
 ) -> list[ScheduledJobRun]:
     service = _get_scheduler_service(request)
     result = await service.list_runs(
@@ -1532,6 +1533,7 @@ async def list_runs(
         limit=limit,
         page=page,
         status=run_status.value if run_status else None,
+        search=search,
     )
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
@@ -1714,15 +1716,29 @@ async def get_definition_permissions(
     definition_id: int,
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by group name"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default: the permissions dialog replaces the whole grant set
+    # on save, so it must be able to load every grant.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[JobGroupPermissionResponse]:
     service = _get_scheduler_service(request)
     try:
-        perms = await service.get_permissions(
-            db, definition_id, current_user, is_admin=is_admin_mode(request, current_user)
+        perms, total = await service.list_permissions(
+            db,
+            definition_id,
+            current_user,
+            is_admin=is_admin_mode(request, current_user),
+            search=search,
+            page=page,
+            limit=limit,
         )
     except (LookupError, SchedulerAccessError) as e:
         raise _translate(e) from e
+    # Bare array for the same reason as the sibling list endpoints.
+    response.headers["X-Total-Count"] = str(total)
     return [JobGroupPermissionResponse(**p) for p in perms]
 
 
