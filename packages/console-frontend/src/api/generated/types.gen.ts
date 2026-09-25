@@ -2835,6 +2835,12 @@ export type McpActivateSkillInput = {
      */
     group_id?: string | null;
     mode?: ModeEnum2;
+    /**
+     * Inline
+     *
+     * Sub-agent scope only. true puts the skill's full SKILL.md into the agent's system prompt on every turn, so it never needs load_skill. Every turn then costs more, and the text counts toward the auto-approve prompt limit. Set it only when the user has asked for it. false stops inlining; omit it to keep the current setting.
+     */
+    inline?: boolean | null;
 };
 
 /**
@@ -2860,6 +2866,14 @@ export type McpActivateSkillResponse = {
      */
     registry_id: string;
     mode?: ModeEnum2;
+    /**
+     * Inline
+     */
+    inline?: boolean | null;
+    /**
+     * Pending Approval
+     */
+    pending_approval?: boolean;
     /**
      * Message
      */
@@ -5601,6 +5615,12 @@ export type SkillActivationRequest = {
      */
     group_id?: number | null;
     mode?: ModeEnum2;
+    /**
+     * Inline
+     *
+     * Sub-agent scope only (ADR-0012). true: the skill's full SKILL.md goes into the agent's system prompt on every turn instead of behind load_skill. Written into the config version, so it counts toward the auto-approve prompt limit. null keeps the config's value (false for a new skill).
+     */
+    inline?: boolean | null;
 };
 
 /**
@@ -5894,6 +5914,12 @@ export type SkillDefinition = {
      * Set on read for a following skill whose last bump was skipped; says why it is behind.
      */
     bump_error?: string | null;
+    /**
+     * Inline
+     *
+     * Inlined skill (ADR-0012): the full SKILL.md goes into the system prompt on every turn instead of behind load_skill. A config-version property: saved with the version, restored by a revert, and counted toward the auto-approve prompt length.
+     */
+    inline?: boolean;
     /**
      * Server-set. A host sync that mirrors a skill it does not author (well-known) stamps this so the registry updates the row it wrote last time instead of creating a new one. Ignored on create/update request bodies — a client cannot declare its own skill mirrored, which would make it permanently uneditable.
      */
@@ -8755,6 +8781,12 @@ export type WellKnownSkillInfo = {
      */
     digest: string;
     visibility?: VisibilityEnum;
+    /**
+     * Inline
+     *
+     * Inlined on the bound sub-agent: SKILL.md `metadata.nannos-inline` (ADR-0012)
+     */
+    inline?: boolean;
 };
 
 /**
@@ -8836,6 +8868,10 @@ export type ConsoleBackendModelsSubAgentSkillSummary = {
      * Sandbox Required
      */
     sandbox_required?: boolean;
+    /**
+     * Inline
+     */
+    inline?: boolean;
 };
 
 /**

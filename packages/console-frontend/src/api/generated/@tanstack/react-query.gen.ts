@@ -6404,6 +6404,9 @@ export const listActivationsApiV1SkillsActivationsSubAgentIdGetOptions = (option
  * Sub-agent (write access on the agent required): the agent's config gains a REFERENCE
  * to the registry row (ADR-0011) in the requested ``mode`` — 'pinned' (default) or
  * 'following'. Re-activating an already active skill with the other mode switches it.
+ * ``inline`` (ADR-0012) is written into the config version; over the auto-approve prompt
+ * limit an automated agent is refused with 422 and a local agent's version waits for
+ * approval (``pending_approval``).
  */
 export const activateSkillApiV1SkillsActivationsPostMutation = (options?: Partial<Options<ActivateSkillApiV1SkillsActivationsPostData>>): UseMutationOptions<unknown, ActivateSkillApiV1SkillsActivationsPostError, Options<ActivateSkillApiV1SkillsActivationsPostData>> => {
     const mutationOptions: UseMutationOptions<unknown, ActivateSkillApiV1SkillsActivationsPostError, Options<ActivateSkillApiV1SkillsActivationsPostData>> = {
