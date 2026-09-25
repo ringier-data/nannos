@@ -116,3 +116,6 @@ referrers until the last one detaches.
   activating agent may "read and activate" stands; what it holds is defined here.
 - Follow-ups, not in scope: a notification when a bump fails, and a UI hint on
   the referrer explaining why a following skill is behind.
+- ADR-0012 adds `inline` on the `SkillRef`. It is a config-version property and
+  independent of mode: a bump carries the new hash and keeps the existing `inline`
+  value.
