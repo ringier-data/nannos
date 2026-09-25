@@ -11,6 +11,7 @@ import {
 } from '@/components/subagents/types';
 import { Pagination } from '@/components/admin/Pagination';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { useKeyedPage } from '@/hooks/use-keyed-page';
 import {
   consoleListSubAgentsOptions,
   listPendingApprovalsApiV1SubAgentsPendingGetOptions,
@@ -27,9 +28,15 @@ export function SubAgentsPage() {
   const navigate = useNavigate();
   const [scope, setScope] = useState<ScopeFilter>('all');
   const [filters, setFilters] = useState<SubAgentFilters>(EMPTY_SUB_AGENT_FILTERS);
-  const [page, setPage] = useState(1);
   const debouncedSearch = useDebouncedValue(filters.search);
   const { adminMode } = useAuth();
+
+  // Derive the effective scope so the approval queue isn't shown once admin mode is off,
+  // without resetting state in an effect.
+  const effectiveScope: ScopeFilter = !adminMode && scope === 'pending' ? 'all' : scope;
+  // Keyed on the effective scope, so that silent fallback re-pages from the start
+  // exactly like a scope the user picked.
+  const [page, setPage] = useKeyedPage(effectiveScope);
 
   // Any facet change re-pages from the start, or a narrower filter lands on a
   // page that no longer exists.
@@ -42,10 +49,6 @@ export function SubAgentsPage() {
     setScope(next);
     setPage(1);
   };
-
-  // Derive the effective scope so the approval queue isn't shown once admin mode is off,
-  // without resetting state in an effect.
-  const effectiveScope: ScopeFilter = !adminMode && scope === 'pending' ? 'all' : scope;
 
   // Every facet — owner, status, type, activation and the search term — is a
   // query parameter. Filtering in the browser would slice whichever page

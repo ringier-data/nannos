@@ -5,6 +5,7 @@ import { Search, Plus, MoreHorizontal, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { useKeyedPage } from '@/hooks/use-keyed-page';
 import { listMyGroupsApiV1GroupsGet } from '@/api/generated/sdk.gen';
 import { totalCountFrom } from '@/api/total-count';
 import {
@@ -48,7 +49,6 @@ import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 export function GroupsPage() {
   const queryClient = useQueryClient();
   const { isAdmin, adminMode } = useAuth();
-  const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
@@ -61,6 +61,9 @@ export function GroupsPage() {
 
   const limit = 20;
   const isAdminView = isAdmin && adminMode;
+  // The admin list and the my-groups list are different datasets: toggling
+  // admin mode starts the other one from page 1.
+  const [page, setPage] = useKeyedPage(isAdminView ? 'admin' : 'mine');
 
   const debouncedSearch = useDebouncedValue(search);
 
