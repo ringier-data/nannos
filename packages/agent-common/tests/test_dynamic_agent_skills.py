@@ -173,3 +173,36 @@ class TestDynamicAgentEnsureAgentSkipsGraphForSandbox:
 
         # Only built once
         mock_build.assert_called_once()
+
+
+class TestInlinedSkillsWithoutStore:
+    """ADR-0012: an inlined config skill reaches the prompt even with no document store."""
+
+    @pytest.mark.asyncio
+    async def test_config_skills_resolve_and_inline_without_a_store(self):
+        from agent_common.models.skill import SkillDefinition
+
+        config = LocalLangGraphSubAgentConfig(
+            name="bound-agent",
+            description="An embed-bound agent",
+            system_prompt="You are a test agent.",
+            sandbox_enabled=False,
+            skills=[
+                SkillDefinition(name="kb", description="Knowledge", body="Always cite the KB.", inline=True),
+                SkillDefinition(name="booking", description="Book line items", body="Steps."),
+            ],
+        )
+        runnable = DynamicLocalAgentRunnable(config=config, model=MagicMock(), sandbox_pool=None)
+
+        mock_graph = MagicMock()
+        mock_graph.with_config = MagicMock(return_value=mock_graph)
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
+            await runnable._ensure_agent()
+
+        assert set(runnable._resolved_skills) == {"kb", "booking"}
+        addendum = await runnable._build_playbook_addendum()
+        listed, inlined = addendum.split("\n\n## Inlined skills\n")
+        assert "- `booking` (default): Book line items" in listed
+        assert "`kb`" not in listed
+        assert "Always cite the KB." in inlined
+

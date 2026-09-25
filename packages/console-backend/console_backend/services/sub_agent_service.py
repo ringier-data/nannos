@@ -95,6 +95,11 @@ def _meets_auto_approve_constraints(
     )
 
 
+def _left_pending(sub_agent: "SubAgent | None") -> bool:
+    """After update_sub_agent: True when the version it just wrote waits for approval."""
+    return sub_agent is not None and sub_agent.current_version != sub_agent.default_version
+
+
 def _strip_skill_frontmatter(content: str) -> str:
     """Strip YAML frontmatter from SKILL.md, returning only the body."""
     trimmed = content.strip()
@@ -2150,7 +2155,7 @@ class SubAgentService:
         content_hash: str,
         actor: User,
         inline: bool | None = None,
-    ) -> None:
+    ) -> bool:
         """Add a registry skill reference to the agent's config by creating a new version.
 
         Appends the skill to the current default config version's skills list,
@@ -2159,6 +2164,9 @@ class SubAgentService:
         unless ``inline`` (ADR-0012) asks for a different value than the config holds;
         then it writes a version that changes only that flag. ``None`` keeps the value
         (``False`` for a skill being added).
+
+        Returns True when it wrote a version that was NOT auto-approved (it waits for
+        review), False when it wrote an approved one or nothing at all.
 
         Args:
             db: Database session
@@ -2187,13 +2195,10 @@ class SubAgentService:
 
         # Idempotent: skip if skill already in config (by registry_id reference)
         for s in current_skills:
-            rid = (
-                s.registry_id if hasattr(s, "registry_id") else (s.get("registry_id") if isinstance(s, dict) else None)
-            )
-            if rid == registry_id:
+            if s.registry_id == registry_id:
                 if inline is None or s.inline == inline:
-                    return
-                await self.update_sub_agent(
+                    return False
+                updated = await self.update_sub_agent(
                     db=db,
                     sub_agent_id=sub_agent_id,
                     data=SubAgentUpdate(
@@ -2205,7 +2210,7 @@ class SubAgentService:
                     ),
                     actor=actor,
                 )
-                return
+                return _left_pending(updated)
 
         # Build the new skill reference
         new_skill = SkillDefinition(
@@ -2220,12 +2225,13 @@ class SubAgentService:
         updated_skills = list(current_skills) + [new_skill]
 
         # Create a new version via the standard update path
-        await self.update_sub_agent(
+        updated = await self.update_sub_agent(
             db=db,
             sub_agent_id=sub_agent_id,
             data=SubAgentUpdate(skills=updated_skills),
             actor=actor,
         )
+        return _left_pending(updated)
 
     async def update_skill_hash_in_config(
         self,
@@ -2743,10 +2749,13 @@ class SubAgentService:
     ) -> int:
         """Total SKILL.md body length of the inlined skills in ``skills`` (ADR-0012).
 
-        A skill this agent owns counts with the body it is saved with. A skill it does
-        not own counts with the body stored for its pinned hash, never the body in the
-        payload: a request body could otherwise send a short copy of a long skill and
-        pass the auto-approve limit.
+        A skill this agent owns counts with the body it is being saved with, or, when the
+        skills came from a stored version (bare refs, no body), with its registry row's
+        current body, which is what an owned skill resolves to. A skill it does not own
+        always counts with the body stored for its pinned hash, never the body in the
+        payload: a request could otherwise send a short copy of a long skill and pass the
+        auto-approve limit. The count is the body only; the rendered block adds a few
+        dozen characters of wrapper per skill.
         """
         inlined = [s for s in skills or [] if s.inline]
         if not inlined:
@@ -2758,53 +2767,61 @@ class SubAgentService:
             foreign = await self._foreign_registry_ids(db, sub_agent_id, ref_ids)
 
         total = 0
-        lookups: list[tuple[str, str]] = []
+        pinned: list[tuple[str, str]] = []  # foreign: (registry_id, pinned hash)
+        latest: set[str] = set()  # owned, body not in hand: the row's current body
         for skill in inlined:
             if skill.registry_id and skill.registry_id in foreign:
                 if not skill.content_hash:
                     raise ValueError(f"Inlined skill '{skill.name}' is missing content_hash.")
-                lookups.append((skill.registry_id, skill.content_hash))
-            else:
+                pinned.append((skill.registry_id, skill.content_hash))
+            elif skill.body or not skill.registry_id:
                 total += len(skill.body or "")
-        if not lookups:
-            return total
+            else:
+                latest.add(skill.registry_id)
 
-        conditions = []
-        params: dict[str, str] = {}
-        for i, (sid, shash) in enumerate(lookups):
-            conditions.append(f"(skill_id = CAST(:sid_{i} AS uuid) AND content_hash = :hash_{i})")
-            params[f"sid_{i}"] = sid
-            params[f"hash_{i}"] = shash
-        result = await db.execute(
-            text(
-                "SELECT skill_id::text AS skill_id, content_hash, files FROM skill_registry_versions "
-                f"WHERE {' OR '.join(conditions)}"
-            ),
-            params,
+        # Only the SKILL.md entry is fetched, not every bundled file.
+        skill_md = (
+            "(SELECT f->>'content' FROM jsonb_array_elements(files) f WHERE f->>'path' = 'SKILL.md' LIMIT 1)"
         )
-        bodies: dict[tuple[str, str], int] = {}
-        for row in result.mappings().all():
-            skill_md = next((f for f in row["files"] or [] if f.get("path") == "SKILL.md"), None)
-            bodies[(row["skill_id"], row["content_hash"])] = len(
-                _strip_skill_frontmatter(skill_md.get("content", "")) if skill_md else ""
-            )
-        missing = [key for key in lookups if key not in bodies]
-        if missing:
-            # The current content of a row may predate its first version snapshot.
+        at_hash: dict[tuple[str, str], int] = {}
+        if pinned:
+            conditions = []
+            params: dict[str, str] = {}
+            for i, (sid, shash) in enumerate(pinned):
+                conditions.append(f"(skill_id = CAST(:sid_{i} AS uuid) AND content_hash = :hash_{i})")
+                params[f"sid_{i}"] = sid
+                params[f"hash_{i}"] = shash
             result = await db.execute(
-                text("SELECT id::text AS id, content_hash, files FROM skill_registry WHERE id = ANY(CAST(:ids AS uuid[]))"),
-                {"ids": list({sid for sid, _ in missing})},
+                text(
+                    f"SELECT skill_id::text AS id, content_hash, {skill_md} AS skill_md "
+                    f"FROM skill_registry_versions WHERE {' OR '.join(conditions)}"
+                ),
+                params,
             )
             for row in result.mappings().all():
-                skill_md = next((f for f in row["files"] or [] if f.get("path") == "SKILL.md"), None)
-                bodies.setdefault(
-                    (row["id"], row["content_hash"]),
-                    len(_strip_skill_frontmatter(skill_md.get("content", "")) if skill_md else ""),
+                at_hash[(row["id"], row["content_hash"])] = len(_strip_skill_frontmatter(row["skill_md"] or ""))
+
+        # A pinned hash with no version snapshot falls back to the row's current body, as
+        # the read path does: an estimate, rather than an agent that can no longer be saved.
+        need_current = latest | {sid for sid, shash in pinned if (sid, shash) not in at_hash}
+        current: dict[str, int] = {}
+        if need_current:
+            result = await db.execute(
+                text(f"SELECT id::text AS id, {skill_md} AS skill_md FROM skill_registry WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                {"ids": list(need_current)},
+            )
+            current = {row["id"]: len(_strip_skill_frontmatter(row["skill_md"] or "")) for row in result.mappings().all()}
+
+        for sid in latest:
+            total += current.get(sid, 0)
+        for key in pinned:
+            if key in at_hash:
+                total += at_hash[key]
+            else:
+                logger.warning(
+                    "Inlined skill %s has no snapshot for pinned hash %s; counting its current body", key[0], key[1][:12]
                 )
-        for key in lookups:
-            if key not in bodies:
-                raise ValueError(f"Inlined skill {key[0]} has no content for hash {key[1][:12]}.")
-            total += bodies[key]
+                total += current.get(key[0], 0)
         return total
 
     @staticmethod

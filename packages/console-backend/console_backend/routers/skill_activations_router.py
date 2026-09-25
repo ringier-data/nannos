@@ -214,16 +214,13 @@ async def activate_skill(
     # Activate
     activation_service = _get_activation_service(request)
     switched = False
-    version_before: int | None = None
     if body.scope == "sub-agent":
         existing = await activation_service.find_activation_by_registry_id(
             db, registry_id=body.registry_id, sub_agent_id=body.sub_agent_id, scope="sub-agent"
         )
         switched = existing is not None and existing.mode != body.mode
-        if body.inline is not None:  # only an inline change can leave a version pending here
-            version_before = await _current_version(db, body.sub_agent_id)
     try:
-        activation_id = await activation_service.activate(
+        activation_id, pending_approval = await activation_service.activate_with_outcome(
             db=db,
             registry_id=body.registry_id,
             sub_agent_id=body.sub_agent_id,
@@ -241,9 +238,6 @@ async def activate_skill(
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    pending_approval = body.inline is not None and await _wrote_pending_version(
-        db, body.sub_agent_id, version_before
-    )
     await db.commit()
 
     return {
@@ -256,30 +250,6 @@ async def activate_skill(
         "pending_approval": pending_approval,
         "activated": True,
     }
-
-
-async def _current_version(db: AsyncSession, sub_agent_id: int) -> int | None:
-    from sqlalchemy import text as sa_text
-
-    result = await db.execute(sa_text("SELECT current_version FROM sub_agents WHERE id = :id"), {"id": sub_agent_id})
-    return result.scalar_one_or_none()
-
-
-async def _wrote_pending_version(db: AsyncSession, sub_agent_id: int, version_before: int | None) -> bool:
-    """True when the activation wrote a new version that was not auto-approved.
-
-    That happens when an inlined skill takes a local agent past the auto-approve
-    prompt limit (ADR-0012): the skill is only live once someone approves the version.
-    """
-    from sqlalchemy import text as sa_text
-
-    result = await db.execute(
-        sa_text("SELECT current_version, default_version FROM sub_agents WHERE id = :id"), {"id": sub_agent_id}
-    )
-    row = result.mappings().first()
-    if row is None or row["current_version"] == version_before:
-        return False
-    return row["current_version"] != row["default_version"]
 
 
 @router.delete("/{activation_id}", status_code=status.HTTP_204_NO_CONTENT)

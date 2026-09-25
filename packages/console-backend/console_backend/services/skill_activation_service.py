@@ -76,7 +76,16 @@ class SkillActivationService:
             raise RuntimeError("SubAgentService not configured on SkillActivationService")
         return self._sub_agent_service
 
-    async def activate(
+    async def activate(self, *args, **kwargs) -> int:
+        """Activate a registry skill on an agent; returns the activation record id.
+
+        See :meth:`activate_with_outcome`, which also says whether the config version the
+        activation wrote waits for approval.
+        """
+        activation_id, _ = await self.activate_with_outcome(*args, **kwargs)
+        return activation_id
+
+    async def activate_with_outcome(
         self,
         db: AsyncSession,
         registry_id: str,
@@ -90,7 +99,7 @@ class SkillActivationService:
         actor: "User | None" = None,
         mode: ActivationMode = "pinned",
         inline: bool | None = None,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """Activate a registry skill on an agent.
 
         For personal/group scope: creates activation record + writes docstore snapshot.
@@ -118,7 +127,9 @@ class SkillActivationService:
             actor: Required for sub-agent scope (config version creation + audit)
 
         Returns:
-            The activation record ID
+            (activation record ID, pending): pending is True when the config version this
+            call wrote was not auto-approved and waits for review (ADR-0012: an inlined
+            skill can take the agent past the auto-approve prompt limit).
 
         Raises:
             ValueError: If the skill is already activated in this scope,
@@ -147,14 +158,17 @@ class SkillActivationService:
         if scope == "sub-agent":
             assert actor is not None
             is_reference = registry.sub_agent_id != sub_agent_id
+            embed_bound = (mode == "following" or inline is not None) and await self.sub_agent_service.is_embed_bound(
+                db, sub_agent_id
+            )
             if mode == "following":
                 if not is_reference:
                     raise ValueError("An agent cannot follow its own skill; following is for skills it does not own.")
-                if await self.sub_agent_service.is_embed_bound(db, sub_agent_id):
+                if embed_bound:
                     raise ValueError(
                         "An embed-bound agent cannot follow a skill: its skill list is published by the host."
                     )
-            if inline is not None and await self.sub_agent_service.is_embed_bound(db, sub_agent_id):
+            if inline is not None and embed_bound:
                 raise ValueError(
                     "An embed-bound agent's inlined skills are published by the host (metadata.nannos-inline)."
                 )
@@ -201,9 +215,10 @@ class SkillActivationService:
                             ),
                             {"hash": registry.content_hash, "id": existing["id"]},
                         )
+                pending = False
                 if inline is not None:
                     # Already in the config: a no-op unless the flag changes (ADR-0012).
-                    await self.sub_agent_service.add_skill_to_config(
+                    pending = await self.sub_agent_service.add_skill_to_config(
                         db=db,
                         sub_agent_id=sub_agent_id,
                         registry_id=registry_id,
@@ -213,12 +228,12 @@ class SkillActivationService:
                         actor=actor,
                         inline=inline,
                     )
-                return existing["id"]
+                return existing["id"], pending
 
             # Create a new config version with this skill appended (immutable versions).
             # add_skill_to_config is idempotent — skips if already present by source ref.
             # The config holds a REFERENCE to the publisher's row (ADR-0011), never a copy.
-            await self.sub_agent_service.add_skill_to_config(
+            pending = await self.sub_agent_service.add_skill_to_config(
                 db=db,
                 sub_agent_id=sub_agent_id,
                 registry_id=registry_id,
@@ -254,7 +269,7 @@ class SkillActivationService:
             # Check for existing activation — idempotent: return existing ID
             existing = await self._find_activation(db, sub_agent_id, registry_id, scope, user_id, group_id)
             if existing:
-                return existing.id
+                return existing.id, False
 
             # Insert activation record
             result = await db.execute(
@@ -295,7 +310,7 @@ class SkillActivationService:
             mode,
             registry.content_hash[:12],
         )
-        return activation_id
+        return activation_id, scope == "sub-agent" and pending
 
     async def deactivate(
         self,

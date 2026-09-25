@@ -792,6 +792,8 @@ export function SubAgentDetailPage() {
               source: s.source ?? null,
               content_hash: s.content_hash ?? null,
               scope: s.scope ?? null,
+              // ADR-0012: inline travels in the config save, so a rebuild must carry it
+              inline: s.inline ?? false,
             }))
           : []
       );
@@ -943,6 +945,7 @@ export function SubAgentDetailPage() {
           : `Imported "${newSkill.name}"`
       );
       setIsSkillImportOpen(false);
+      setImportInline(false);
     } finally {
       setImportingSkillId(null);
     }
@@ -1021,6 +1024,8 @@ export function SubAgentDetailPage() {
               source: s.source ?? null,
               content_hash: s.content_hash ?? null,
               scope: s.scope ?? null,
+              // ADR-0012: inline travels in the config save, so a rebuild must carry it
+              inline: s.inline ?? false,
             }))
           : [];
         const updatedSkills = currentSkills.map((s) =>
@@ -2489,6 +2494,7 @@ export function SubAgentDetailPage() {
                                     })),
                                     registry_id: existing?.registry_id ?? null,
                                     scope: existing?.scope ?? null,
+                                    inline: existing?.inline ?? false,
                                   };
                                 });
                                 setEditSkills([...importedSkills, ...customSkills]);

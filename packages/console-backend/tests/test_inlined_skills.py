@@ -200,6 +200,28 @@ async def test_inlined_bodies_count_toward_auto_approve_on_a_local_agent(
 
 
 @pytest.mark.asyncio
+async def test_an_owned_inlined_skill_counts_on_a_save_without_skills(
+    wired, pg_session, test_user_db, prompt_limit
+):
+    """A save that carries no skills measures the stored own skill, not an empty ref."""
+    svc, _, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "inline-owner")
+    own = SkillDefinition(
+        name="kb", description="knowledge", body="x" * 80, inline=True
+    )
+    await svc.update_sub_agent(
+        pg_session, agent_id, SubAgentUpdate(skills=[own]), test_user_db
+    )
+    prompt_limit(50)
+
+    await svc.update_sub_agent(
+        pg_session, agent_id, SubAgentUpdate(description="renamed"), test_user_db
+    )
+    agent = await svc.get_sub_agent_by_id(pg_session, agent_id)
+    assert agent.current_version != agent.default_version
+
+
+@pytest.mark.asyncio
 async def test_a_foreign_skill_counts_with_its_stored_body_not_the_payload(
     wired, pg_session, test_user_db, prompt_limit
 ):

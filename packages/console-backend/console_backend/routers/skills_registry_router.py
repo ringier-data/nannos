@@ -1437,20 +1437,15 @@ async def mcp_activate_skill(
             ),
         )
 
-    from console_backend.routers.skill_activations_router import _current_version, _wrote_pending_version
-
     switched = False
-    version_before: int | None = None
     if body.scope == "sub-agent":
         existing = await activation_service.find_activation_by_registry_id(
             db, registry_id=entry.id, sub_agent_id=sub_agent_id, scope="sub-agent"
         )
         switched = existing is not None and existing.mode != body.mode
-        if body.inline is not None:  # only an inline change can leave a version pending here
-            version_before = await _current_version(db, sub_agent_id)
 
     try:
-        await activation_service.activate(
+        _, pending_approval = await activation_service.activate_with_outcome(
             db=db,
             registry_id=entry.id,
             sub_agent_id=sub_agent_id,
@@ -1467,7 +1462,6 @@ async def mcp_activate_skill(
         raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    pending_approval = body.inline is not None and await _wrote_pending_version(db, sub_agent_id, version_before)
 
     if switched:
         message = (
@@ -1486,10 +1480,7 @@ async def mcp_activate_skill(
     if body.inline is not None and body.scope == "sub-agent":
         message += " Its full text is inlined in the system prompt." if body.inline else " It is not inlined."
     if pending_approval:
-        message += (
-            " The new version is over the auto-approve prompt limit, so it waits for approval in the console "
-            "before it takes effect."
-        )
+        message += " The new version was not auto-approved: it waits for approval in the console before it takes effect."
 
     return McpActivateSkillResponse(
         skill_name=entry.slug,

@@ -82,3 +82,10 @@ can't forget to load it.
   available". This needs the failed-bump notification ADR-0011 left as a
   follow-up.
 - **Host order no longer matters.** Inlined skills render sorted by name.
+- **Overrides are not measured.** A personal or group override of an inlined skill
+  is inlined with a body no auto-approve check has seen. That was chosen on purpose
+  (decision 2): the override only reaches the prompt in the sessions of the user or
+  group that wrote it, and that content could already be loaded with `load_skill`.
+- **No document store needed.** Without a store, a runtime still resolves the
+  config's own skills, so an inlined host skill reaches the prompt, as #290's
+  pasted text always did.
