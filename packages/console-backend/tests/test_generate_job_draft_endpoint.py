@@ -154,7 +154,9 @@ class TestToolsAreSelectedServerSide:
         # the model tools this user cannot reach. The field is gone, not just ignored.
         from console_backend.models.scheduled_job import GenerateJobDraftRequest
 
-        assert set(GenerateJobDraftRequest.model_fields) == {"query"}
+        # `current` is the job being edited and `result` a sample response; neither
+        # widens what the model may reference — the offer is still read server-side.
+        assert set(GenerateJobDraftRequest.model_fields) == {"query", "current", "result"}
 
     def test_the_relevant_tool_is_offered_and_chosen(self, draft_client, gateway, catalogue):
         gateway.return_value = {
@@ -300,6 +302,143 @@ class TestAnEmptyGenerationFailsLoudly:
 
         assert resp.status_code == 200
         assert _filled(resp) == {"job_type": "watch", "name": "Bugs"}
+
+
+#: The job as the detail page sends it when asking for a change to it.
+CURRENT = {
+    "job_type": "watch",
+    "check_tool": "console_list_bug_reports",
+    "check_args": {"status": "open"},
+    "cel_expr": "result.reports.filter(r, r.severity == 'high')",
+    "prompt": "One line per report, linking to it.",
+    "destroy_after_trigger": False,
+}
+CHANGE = "also include medium severity"
+
+
+def _edit(client, reply_to: AsyncMock, reply: dict, **body):
+    reply_to.return_value = reply
+    return client.post(URL, json={"query": CHANGE, "current": CURRENT, **body})
+
+
+class TestEditingAnExistingJob:
+    """With `current`, the query is a change to that job, and the answer is the job changed.
+
+    It used to be read as a description of a new job, so "also include medium severity"
+    produced a job about nothing in particular — and on the detail page it overwrote the
+    fields of the one being edited.
+    """
+
+    def test_the_prompt_shows_the_job_and_asks_for_changes_only(self, draft_client, gateway, catalogue):
+        _edit(draft_client, gateway, {"cel_expr": "result.reports"})
+
+        prompt = _prompt(gateway)
+        assert "EDITING an existing watch job" in prompt
+        assert "r.severity == 'high'" in prompt
+        assert f"Requested change: {CHANGE}" in prompt
+        assert "User request:" not in prompt
+
+    def test_what_the_change_does_not_touch_comes_back_as_sent(self, draft_client, gateway, catalogue):
+        new_expr = "result.reports.filter(r, r.severity in ['high', 'medium'])"
+
+        resp = _edit(draft_client, gateway, {"cel_expr": new_expr})
+
+        assert resp.status_code == 200
+        assert _filled(resp) == {**CURRENT, "cel_expr": new_expr}
+
+    def test_an_explicit_null_removes_a_field(self, draft_client, gateway, catalogue):
+        resp = _edit(draft_client, gateway, {"prompt": None, "notification_message": "New high-severity bug"})
+
+        assert resp.status_code == 200
+        body = _filled(resp)
+        assert "prompt" not in body
+        assert body["notification_message"] == "New high-severity bug"
+
+    def test_the_current_tool_is_offered_even_when_the_change_does_not_name_it(
+        self, draft_client, gateway, catalogue
+    ):
+        # "also include medium severity" ranks no tool; without the pin the job's own tool
+        # was missing from the offer, and a reply naming it was discarded as an invention
+        # — taking the job's arguments and condition with it.
+        catalogue.return_value = MCPToolsResponse(
+            tools=[_tool(f"crm_get_account_{i}", "Read one CRM account") for i in range(30)]
+            + [_tool("console_list_bug_reports")]
+        )
+
+        resp = _edit(draft_client, gateway, {"check_tool": "console_list_bug_reports", "cel_expr": "result.reports"})
+
+        assert resp.status_code == 200
+        assert '"name":"console_list_bug_reports"' in _prompt(gateway)
+        assert _filled(resp)["cel_expr"] == "result.reports"
+
+    def test_choosing_an_agent_drops_the_fixed_message(self, draft_client, gateway, catalogue):
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=7, name="triage", config_version=None)]
+        )
+        current = {**CURRENT, "notification_message": "A bug was filed"}
+
+        gateway.return_value = {"sub_agent_id": 7, "prompt": "Triage it"}
+        resp = draft_client.post(URL, json={"query": "have triage handle it", "current": current})
+
+        body = _filled(resp)
+        assert body["sub_agent_id"] == 7
+        assert "notification_message" not in body
+
+    def test_an_unreachable_agent_is_neither_applied_nor_a_removal(self, draft_client, gateway, catalogue):
+        current = {**CURRENT, "sub_agent_id": 3}
+
+        gateway.return_value = {"sub_agent_id": 99, "cel_expr": "result.reports"}
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": current})
+
+        assert _filled(resp)["sub_agent_id"] == 3
+
+    def test_fields_outside_the_definition_are_not_changed(self, draft_client, gateway, catalogue):
+        # Schedule and delivery have other owners on a shared job, and the type of an
+        # existing job is fixed; a change there would show and then not apply.
+        resp = _edit(
+            draft_client,
+            gateway,
+            {"job_type": "task", "cron_expr": "0 9 * * *", "delivery_channel_id": 1, "cel_expr": "result.reports"},
+        )
+
+        body = _filled(resp)
+        assert body["job_type"] == "watch"
+        assert "cron_expr" not in body
+        assert "delivery_channel_id" not in body
+
+    def test_a_reply_that_changes_nothing_is_a_422(self, draft_client, gateway, catalogue):
+        resp = _edit(draft_client, gateway, {"cel_expr": CURRENT["cel_expr"]})
+
+        assert resp.status_code == 422
+        assert "no change" in resp.json()["detail"]
+
+    def test_an_unrepairable_expression_is_refused_not_replaced_by_the_change_as_a_judgement(
+        self, draft_client, gateway, catalogue
+    ):
+        # On a new job the fallback judges the request's own words; "also include medium
+        # severity" is no condition, so an edit is refused instead.
+        gateway.return_value = {"cel_expr": "result.reports.filter(r,"}
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT})
+
+        assert resp.status_code == 422
+        assert "refine the expression" in resp.json()["detail"]
+
+    def test_a_sample_response_is_shown_and_verifies_the_expression(self, draft_client, gateway, catalogue):
+        # With a real response the expression is evaluated, not only compiled: a path
+        # the response does not have is sent back for repair.
+        sample = {"reports": [{"severity": "high"}]}
+        gateway.side_effect = [
+            {"cel_expr": "result.bugs.filter(b, b.severity == 'medium')"},
+            {"cel_expr": "result.reports.filter(r, r.severity == 'medium')"},
+        ]
+
+        resp = draft_client.post(URL, json={"query": CHANGE, "current": CURRENT, "result": sample})
+
+        assert resp.status_code == 200
+        assert '{"reports":[{"severity":"high"}]}' in _prompt(gateway)
+        assert gateway.await_count == 2
+        assert _filled(resp)["cel_expr"] == "result.reports.filter(r, r.severity == 'medium')"
 
 
 class TestRankMcpTools:
