@@ -1737,11 +1737,13 @@ class SchedulerService:
         job_id: int,
         user_id: str,
         limit: int = 50,
-    ) -> list[ScheduledJobRun] | None:
+        page: int = 1,
+        status: str | None = None,
+    ) -> tuple[list[ScheduledJobRun], int] | None:
         job = await self.repo.get_job(db, job_id)
         if job is None or job.user_id != user_id:
             return None
-        return await self.repo.list_runs(db, job_id, limit)
+        return await self.repo.list_runs(db, job_id, limit, page=page, status=status)
 
     async def get_run(
         self,

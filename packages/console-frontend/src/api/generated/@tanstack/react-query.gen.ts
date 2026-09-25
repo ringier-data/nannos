@@ -4332,7 +4332,7 @@ export const listRunsApiV1SchedulerJobsJobIdRunsGetQueryKey = (options: Options<
 /**
  * List execution history for a scheduled job.
  *
- * Returns the most recent execution runs (up to 50) for the given job.
+ * Execution runs for the given job, newest first, one page at a time. `X-Total-Count` carries how many runs match. Run history only grows, so this list is always paged — there is no 'return everything' mode.
  */
 export const listRunsApiV1SchedulerJobsJobIdRunsGetOptions = (options: Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData>) => queryOptions<ListRunsApiV1SchedulerJobsJobIdRunsGetResponse, ListRunsApiV1SchedulerJobsJobIdRunsGetError, ListRunsApiV1SchedulerJobsJobIdRunsGetResponse, ReturnType<typeof listRunsApiV1SchedulerJobsJobIdRunsGetQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -4347,12 +4347,41 @@ export const listRunsApiV1SchedulerJobsJobIdRunsGetOptions = (options: Options<L
     queryKey: listRunsApiV1SchedulerJobsJobIdRunsGetQueryKey(options)
 });
 
+export const listRunsApiV1SchedulerJobsJobIdRunsGetInfiniteQueryKey = (options: Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData>): QueryKey<Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData>> => createQueryKey('listRunsApiV1SchedulerJobsJobIdRunsGet', options, true);
+
+/**
+ * List execution history for a scheduled job.
+ *
+ * Execution runs for the given job, newest first, one page at a time. `X-Total-Count` carries how many runs match. Run history only grows, so this list is always paged — there is no 'return everything' mode.
+ */
+export const listRunsApiV1SchedulerJobsJobIdRunsGetInfiniteOptions = (options: Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData>) => infiniteQueryOptions<ListRunsApiV1SchedulerJobsJobIdRunsGetResponse, ListRunsApiV1SchedulerJobsJobIdRunsGetError, InfiniteData<ListRunsApiV1SchedulerJobsJobIdRunsGetResponse>, QueryKey<Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData>>, number | Pick<QueryKey<Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
+// @ts-ignore
+{
+    queryFn: async ({ pageParam, queryKey, signal }) => {
+        // @ts-ignore
+        const page: Pick<QueryKey<Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
+            query: {
+                page: pageParam
+            }
+        };
+        const params = createInfiniteParams(queryKey, page);
+        const { data } = await listRunsApiV1SchedulerJobsJobIdRunsGet({
+            ...options,
+            ...params,
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listRunsApiV1SchedulerJobsJobIdRunsGetInfiniteQueryKey(options)
+});
+
 export const getRunApiV1SchedulerJobsJobIdRunsRunIdGetQueryKey = (options: Options<GetRunApiV1SchedulerJobsJobIdRunsRunIdGetData>) => createQueryKey('getRunApiV1SchedulerJobsJobIdRunsRunIdGet', options);
 
 /**
  * Get a single execution run of a scheduled job.
  *
- * Returns one run by id, however old — the run listing is capped to the most recent 50.
+ * Returns one run by id, however old — the run listing is paged, newest first.
  */
 export const getRunApiV1SchedulerJobsJobIdRunsRunIdGetOptions = (options: Options<GetRunApiV1SchedulerJobsJobIdRunsRunIdGetData>) => queryOptions<GetRunApiV1SchedulerJobsJobIdRunsRunIdGetResponse, GetRunApiV1SchedulerJobsJobIdRunsRunIdGetError, GetRunApiV1SchedulerJobsJobIdRunsRunIdGetResponse, ReturnType<typeof getRunApiV1SchedulerJobsJobIdRunsRunIdGetQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {

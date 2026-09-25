@@ -2241,14 +2241,14 @@ export const resumeParkedRunApiV1SchedulerJobsJobIdRunsRunIdResumePost = <ThrowO
 /**
  * List execution history for a scheduled job.
  *
- * Returns the most recent execution runs (up to 50) for the given job.
+ * Execution runs for the given job, newest first, one page at a time. `X-Total-Count` carries how many runs match. Run history only grows, so this list is always paged — there is no 'return everything' mode.
  */
 export const listRunsApiV1SchedulerJobsJobIdRunsGet = <ThrowOnError extends boolean = false>(options: Options<ListRunsApiV1SchedulerJobsJobIdRunsGetData, ThrowOnError>) => (options.client ?? client).get<ListRunsApiV1SchedulerJobsJobIdRunsGetResponses, ListRunsApiV1SchedulerJobsJobIdRunsGetErrors, ThrowOnError>({ url: '/api/v1/scheduler/jobs/{job_id}/runs', ...options });
 
 /**
  * Get a single execution run of a scheduled job.
  *
- * Returns one run by id, however old — the run listing is capped to the most recent 50.
+ * Returns one run by id, however old — the run listing is paged, newest first.
  */
 export const getRunApiV1SchedulerJobsJobIdRunsRunIdGet = <ThrowOnError extends boolean = false>(options: Options<GetRunApiV1SchedulerJobsJobIdRunsRunIdGetData, ThrowOnError>) => (options.client ?? client).get<GetRunApiV1SchedulerJobsJobIdRunsRunIdGetResponses, GetRunApiV1SchedulerJobsJobIdRunsRunIdGetErrors, ThrowOnError>({ url: '/api/v1/scheduler/jobs/{job_id}/runs/{run_id}', ...options });
 

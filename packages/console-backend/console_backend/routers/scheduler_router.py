@@ -1506,18 +1506,38 @@ async def resume_parked_run(
     "/jobs/{job_id}/runs",
     response_model=list[ScheduledJobRun],
     summary="List execution history for a scheduled job.",
-    description="Returns the most recent execution runs (up to 50) for the given job.",
+    description=(
+        "Execution runs for the given job, newest first, one page at a time. "
+        "`X-Total-Count` carries how many runs match. Run history only grows, so "
+        "this list is always paged — there is no 'return everything' mode."
+    ),
 )
 async def list_runs(
     job_id: int,
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth_or_bearer_token),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    run_status: JobRunStatus | None = Query(
+        None, alias="status", description="Filter by run status"
+    ),
 ) -> list[ScheduledJobRun]:
     service = _get_scheduler_service(request)
-    runs = await service.list_runs(db=db, job_id=job_id, user_id=current_user.id)
-    if runs is None:
+    result = await service.list_runs(
+        db=db,
+        job_id=job_id,
+        user_id=current_user.id,
+        limit=limit,
+        page=page,
+        status=run_status.value if run_status else None,
+    )
+    if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    runs, total = result
+    # Bare array for the same reason as the sibling list endpoints.
+    response.headers["X-Total-Count"] = str(total)
     return runs
 
 
@@ -1525,7 +1545,7 @@ async def list_runs(
     "/jobs/{job_id}/runs/{run_id}",
     response_model=ScheduledJobRun,
     summary="Get a single execution run of a scheduled job.",
-    description="Returns one run by id, however old — the run listing is capped to the most recent 50.",
+    description="Returns one run by id, however old — the run listing is paged, newest first.",
 )
 async def get_run(
     job_id: int,

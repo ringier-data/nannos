@@ -13911,7 +13911,26 @@ export type ListRunsApiV1SchedulerJobsJobIdRunsGetData = {
          */
         job_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number;
+        /**
+         * Status
+         *
+         * Filter by run status
+         */
+        status?: JobRunStatus | null;
+    };
     url: '/api/v1/scheduler/jobs/{job_id}/runs';
 };
 

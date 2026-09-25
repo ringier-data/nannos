@@ -186,3 +186,47 @@ async def test_available_definitions_subscribed_filter(repo, pg_session: AsyncSe
     activated, total = await repo.list_available_definitions(pg_session, viewer, subscribed=True)
     assert total == 1
     assert [d.id for d in activated] == [ids[0]]
+
+
+@pytest.mark.asyncio
+async def test_run_history_pages_past_the_old_fifty_cap(repo, pg_session: AsyncSession):
+    """Run 51 has to be reachable.
+
+    The listing used to take a bare `LIMIT 50` with no offset, so a job's 51st
+    run simply could not be retrieved through the list at all — and run history
+    is the one table here that only ever grows.
+    """
+    user_id = await _seed_user(pg_session, "runs-user")
+    job_id = await _seed_job(pg_session, user_id, "Busy job")
+    for _ in range(55):
+        await repo.create_run(pg_session, job_id)
+    await pg_session.commit()
+
+    first, total = await repo.list_runs(pg_session, job_id)
+    assert len(first) == 50, "the historic default page size is unchanged"
+    assert total == 55, "but the total no longer stops at the page size"
+
+    second, total = await repo.list_runs(pg_session, job_id, limit=50, page=2)
+    assert len(second) == 5
+    assert total == 55
+    assert {r.id for r in first}.isdisjoint({r.id for r in second})
+
+
+@pytest.mark.asyncio
+async def test_run_history_status_filter(repo, pg_session: AsyncSession):
+    """The status facet narrows rows and total together."""
+    user_id = await _seed_user(pg_session, "runs-status-user")
+    job_id = await _seed_job(pg_session, user_id, "Mixed job")
+    run_ids = [await repo.create_run(pg_session, job_id) for _ in range(4)]
+    await pg_session.execute(
+        text("UPDATE scheduled_job_runs SET status = 'failed' WHERE id = ANY(:ids)"),
+        {"ids": run_ids[:1]},
+    )
+    await pg_session.commit()
+
+    failed, total = await repo.list_runs(pg_session, job_id, status="failed")
+    assert total == 1
+    assert [r.id for r in failed] == run_ids[:1]
+
+    everything, total = await repo.list_runs(pg_session, job_id)
+    assert total == 4

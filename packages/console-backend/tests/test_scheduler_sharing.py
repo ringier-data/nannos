@@ -652,7 +652,9 @@ class TestRunsAreTheSubscribers:
         # The owner cannot reach the member's run through their own job id, nor vice versa.
         assert await svc.get_run(db, job.id, run_id, u["owner"].id) is None
         assert await svc.get_run(db, mine.id, run_id, u["owner"].id) is None
-        assert (await svc.list_runs(db, job.id, u["owner"].id)) == []
+        owner_runs, owner_total = await svc.list_runs(db, job.id, u["owner"].id)
+        assert owner_runs == []
+        assert owner_total == 0
         assert timedelta(0) <= datetime.now(timezone.utc) - run.started_at < timedelta(minutes=1)
 
 

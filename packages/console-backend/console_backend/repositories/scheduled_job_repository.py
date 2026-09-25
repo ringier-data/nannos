@@ -1806,15 +1806,38 @@ class ScheduledJobRepository(AuditedRepository):
         db: AsyncSession,
         subscription_id: int,
         limit: int = 50,
-    ) -> list[ScheduledJobRun]:
-        """Fetch the most recent runs for a job, newest first."""
+        page: int = 1,
+        status: str | None = None,
+    ) -> tuple[list[ScheduledJobRun], int]:
+        """Fetch a page of runs for a job, newest first, with the total.
+
+        Run history only grows, so unlike the other lists here this one has no
+        unbounded mode: `limit` keeps its historic default of 50 and a caller
+        pages for older runs rather than asking for all of them.
+        """
+        params: dict[str, Any] = {
+            "subscription_id": subscription_id,
+            "limit": limit,
+            "offset": (page - 1) * limit,
+        }
+        where = "WHERE subscription_id = :subscription_id"
+        if status:
+            where += " AND status = :status"
+            params["status"] = status
+
         result = await db.execute(
-            text("""
+            text(f"""
                 SELECT * FROM scheduled_job_runs
-                WHERE subscription_id = :subscription_id
-                ORDER BY started_at DESC
-                LIMIT :limit
+                {where}
+                ORDER BY started_at DESC, id DESC
+                LIMIT :limit OFFSET :offset
             """),
-            {"subscription_id": subscription_id, "limit": limit},
+            params,
         )
-        return [_row_to_run(r) for r in result.mappings().all()]
+        runs = [_row_to_run(r) for r in result.mappings().all()]
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count = await db.execute(
+            text(f"SELECT COUNT(*) FROM scheduled_job_runs {where}"), count_params
+        )
+        return runs, count.scalar() or 0

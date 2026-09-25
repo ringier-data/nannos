@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, useNavigate } from 'react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { Pagination } from '@/components/admin/Pagination';
 import {
   ArrowLeft,
   Pause,
@@ -1582,6 +1583,8 @@ function RunHistoryTable({ runs }: { runs: ScheduledJobRun[] }) {
 // Main page
 // ---------------------------------------------------------------------------
 
+const RUNS_PAGE_SIZE = 50;
+
 export function SchedulerJobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -1641,12 +1644,18 @@ export function SchedulerJobDetailPage() {
     enabled,
   });
 
-  const { data: runs = [], isLoading: runsLoading } = useQuery({
-    queryKey: ['scheduler-runs', jobId],
-    queryFn: () => listRuns(jobId),
+  const [runsPage, setRunsPage] = useState(1);
+
+  const { data: runsData, isLoading: runsLoading } = useQuery({
+    queryKey: ['scheduler-runs', jobId, { page: runsPage }],
+    queryFn: () => listRuns(jobId, { page: runsPage, limit: RUNS_PAGE_SIZE }),
     enabled,
     refetchInterval: 15_000, // refresh run history every 15s
+    placeholderData: keepPreviousData,
   });
+
+  const runs = runsData?.runs ?? [];
+  const runsTotal = runsData?.total ?? 0;
 
   // At most one run of a job is ever parked (claim_due_jobs will not claim a job while
   // one is), so the first match is the one waiting — and the reason the job is idle.
@@ -1810,6 +1819,14 @@ export function SchedulerJobDetailPage() {
               )}
 
               <RunHistoryTable runs={runs} />
+              {/* Run history only grows, and the endpoint used to answer with a
+                  bare LIMIT 50 — the 51st run was unreachable. */}
+              <Pagination
+                page={runsPage}
+                limit={RUNS_PAGE_SIZE}
+                total={runsTotal}
+                onPageChange={setRunsPage}
+              />
             </CardContent>
           </Card>
 

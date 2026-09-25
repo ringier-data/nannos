@@ -17,6 +17,7 @@ import { client } from './generated/client.gen';
 import {
   generateConditionApiV1SchedulerGenerateConditionPost,
   listChannelsApiV1DeliveryChannelsGet,
+  listRunsApiV1SchedulerJobsJobIdRunsGet,
   schedulerListJobs,
   schedulerListSharedJobs,
   generateJobDraftApiV1SchedulerGenerateJobDraftPost,
@@ -27,6 +28,7 @@ import {
 } from './generated/sdk.gen';
 import type {
   GenerateConditionRequest,
+  JobRunStatus,
   GenerateConditionResponse,
   McpToolInvokeResponse,
   McpToolRisk,
@@ -544,12 +546,34 @@ export async function deleteJob(jobId: number): Promise<void> {
   if (error) throw new Error(formatApiError(error));
 }
 
-export async function listRuns(jobId: number, limit?: number): Promise<ScheduledJobRun[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({
-    url: `/api/v1/scheduler/jobs/${jobId}/runs`,
-    query: limit ? { limit } : undefined,
+export interface ScheduledJobRunPage {
+  runs: ScheduledJobRun[];
+  total: number;
+}
+
+/**
+ * A page of a job's execution history, newest first.
+ *
+ * Always paged: run history only grows, and the endpoint used to answer with a
+ * bare `LIMIT 50` and no offset, so a job's 51st run could not be reached at
+ * all. Like the sibling scheduler lists the body is a bare array and the count
+ * comes back in `X-Total-Count`.
+ */
+export async function listRuns(
+  jobId: number,
+  opts?: { page?: number; limit?: number; status?: JobRunStatus },
+): Promise<ScheduledJobRunPage> {
+  const { data, error, response } = await listRunsApiV1SchedulerJobsJobIdRunsGet({
+    path: { job_id: jobId },
+    query: {
+      page: opts?.page ?? 1,
+      ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+      ...(opts?.status ? { status: opts.status } : {}),
+    },
   });
   if (error) throw new Error(formatApiError(error));
-  return data as ScheduledJobRun[];
+  const runs = data ?? [];
+  const header = response?.headers?.get?.('X-Total-Count');
+  const total = header != null && header !== '' ? Number(header) : runs.length;
+  return { runs, total: Number.isFinite(total) ? total : runs.length };
 }
