@@ -275,7 +275,7 @@ async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession,
     )
     await pg_session.commit()
 
-    assert len(user_ids_deactivated) == 2  # Updated 2 rows
+    assert user_ids_deactivated == []  # Both stay activated through group 4
 
     # Verify group 3 removed, group 4 remains
     result = await pg_session.execute(

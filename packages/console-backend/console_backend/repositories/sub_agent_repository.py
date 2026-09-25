@@ -463,7 +463,8 @@ class SubAgentRepository(AuditedRepository):
             group_id: Optional group ID to remove from activated_by_groups
 
         Returns:
-            List of user IDs whose activation state changed
+            List of user IDs whose activation was removed. With a ``group_id``, users who
+            only lost that group's attribution and stay activated are not included.
         """
         if not user_ids:
             return []
@@ -512,8 +513,10 @@ class SubAgentRepository(AuditedRepository):
                         "group_id": group_id,
                     },
                 )
-                updated_user_ids = [row[0] for row in update_result.fetchall()]
-                affected_user_ids = list(set(deleted_user_ids + updated_user_ids))
+                # Losing one group's attribution while staying activated (self-activated,
+                # or still backed by another group) is bookkeeping, not a deactivation.
+                affected_user_ids = deleted_user_ids
+                detached_user_ids = [row[0] for row in update_result.fetchall()]
             else:
                 # Full deactivation (user request)
                 query = text("""
@@ -527,6 +530,7 @@ class SubAgentRepository(AuditedRepository):
                     {"user_ids": user_ids, "sub_agent_id": sub_agent_id},
                 )
                 affected_user_ids = [row[0] for row in result.fetchall()]
+                detached_user_ids = []
 
             # Bulk audit log
             await self.audit_service.log_action(
@@ -538,6 +542,7 @@ class SubAgentRepository(AuditedRepository):
                 changes={
                     "user_ids": user_ids,
                     "affected_user_ids": affected_user_ids,
+                    "detached_user_ids": detached_user_ids,
                     "sub_agent_id": sub_agent_id,
                     "group_id": group_id,
                     "count": len(affected_user_ids),

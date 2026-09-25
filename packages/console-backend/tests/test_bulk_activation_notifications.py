@@ -358,3 +358,115 @@ async def test_add_members_only_notifies_members_with_new_activations(pg_session
     assert len(notifications) == 1
     assert notifications[0]["user_id"] == "user-3"
     assert notifications[0]["type"] == NotificationType.AGENT_ACTIVATED.value
+
+
+@pytest.mark.asyncio
+async def test_remove_default_does_not_notify_members_who_stay_activated(pg_session: AsyncSession, test_user):
+    """Removing a group default only deactivates members whose activation depended on
+    that group alone. A self-activated member, or one still backed by another group,
+    merely loses the group attribution: no "disabled" notification, and the audit
+    entry lists them as detached rather than deactivated."""
+    from console_backend.models.audit import AuditAction
+    from console_backend.repositories.sub_agent_repository import SubAgentRepository
+    from console_backend.repositories.user_group_repository import UserGroupRepository
+    from console_backend.services.audit_service import AuditService
+    from console_backend.services.notification_service import NotificationService
+    from console_backend.services.sub_agent_service import SubAgentService
+    from console_backend.services.user_group_service import UserGroupService
+
+    audit_service = AuditService()
+    sub_agent_repo = SubAgentRepository()
+    sub_agent_repo.set_audit_service(audit_service)
+    notification_service = NotificationService()
+    sub_agent_service = SubAgentService(sub_agent_repository=sub_agent_repo, notification_service=notification_service)
+    user_group_service = UserGroupService(
+        user_group_repository=UserGroupRepository(),
+        sub_agent_service=sub_agent_service,
+        notification_service=notification_service,
+    )
+
+    await pg_session.execute(
+        text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, role, status)
+            VALUES ('user-1', 'user-1', 'user1@test.com', 'User', 'One', 'member', 'active'),
+                   ('user-2', 'user-2', 'user2@test.com', 'User', 'Two', 'member', 'active'),
+                   ('user-3', 'user-3', 'user3@test.com', 'User', 'Three', 'member', 'active'),
+                   ('test-user-id', 'test-user-sub', 'test@example.com', 'Test', 'User', 'member', 'active')
+        """)
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO user_groups (id, name, description)
+            VALUES (1, 'Test Group', 'Test group'), (2, 'Other Group', 'Other group')
+        """)
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO user_group_members (user_group_id, user_id, group_role)
+            VALUES (1, 'user-1', 'manager'),
+                   (1, 'user-2', 'write'),
+                   (1, 'user-3', 'write'),
+                   (2, 'user-2', 'write')
+        """)
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO sub_agents (id, name, owner_user_id, type, current_version, default_version)
+            VALUES (99, 'Test Agent', 'user-1', 'local', 1, 1)
+        """)
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO sub_agent_config_versions (sub_agent_id, version, description, system_prompt, model, status, approved_by_user_id)
+            VALUES (99, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', 'user-1')
+        """)
+    )
+    await pg_session.execute(
+        text("""
+            INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions)
+            VALUES (99, 1, ARRAY['read', 'write']::TEXT[]),
+                   (99, 2, ARRAY['read', 'write']::TEXT[])
+        """)
+    )
+    # user-1 activated it themselves; user-2 already has it through group 2
+    await pg_session.execute(
+        text("""
+            INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_at, activated_by, activated_by_groups)
+            VALUES ('user-1', 99, NOW(), 'user', NULL),
+                   ('user-2', 99, NOW(), 'group', '[2]'::jsonb)
+        """)
+    )
+    await pg_session.commit()
+
+    # Adding the default attaches group 1 to every member's row, creating one for user-3
+    await user_group_service.add_group_default_agent(db=pg_session, group_id=1, sub_agent_id=99, actor=test_user)
+    await pg_session.commit()
+    await pg_session.execute(text("DELETE FROM user_notifications"))
+    await pg_session.commit()
+
+    await user_group_service.remove_group_default_agent(db=pg_session, group_id=1, sub_agent_id=99, actor=test_user)
+    await pg_session.commit()
+
+    result = await pg_session.execute(text("SELECT user_id, type FROM user_notifications ORDER BY user_id"))
+    notifications = result.mappings().all()
+    assert [(n["user_id"], n["type"]) for n in notifications] == [("user-3", NotificationType.AGENT_DEACTIVATED.value)]
+
+    result = await pg_session.execute(
+        text("""
+            SELECT user_id, activated_by, activated_by_groups FROM user_sub_agent_activations
+            WHERE sub_agent_id = 99 ORDER BY user_id
+        """)
+    )
+    assert [tuple(r) for r in result.fetchall()] == [("user-1", "user", None), ("user-2", "group", [2])]
+
+    result = await pg_session.execute(
+        text("""
+            SELECT changes FROM audit_logs
+            WHERE entity_id = '99' AND action = :action ORDER BY id DESC LIMIT 1
+        """),
+        {"action": AuditAction.DEACTIVATE},
+    )
+    changes = result.scalar_one()
+    assert changes["affected_user_ids"] == ["user-3"]
+    assert sorted(changes["detached_user_ids"]) == ["user-1", "user-2"]
+    assert changes["count"] == 1
