@@ -511,6 +511,35 @@ names the referrers while any referrer exists.
   signal". That is true only for the *owner*. For a referrer the same row is
   pinned by hash like any imported skill.
 
+## Own skills are versioned too (2026-09-25, nannos#294, ADR-0013)
+
+**Own skill**:
+A sub-agent-scoped registry row whose `sub_agent_id` is this agent. The agent's
+writers edit it through a config save (body in the payload) or through an
+**Out-of-config edit**. Like a referenced skill, it is pinned by the hash the
+config version holds; the row's latest content is not what runs until a version
+carries its hash.
+_Avoid_: always-latest skill, live skill
+
+**Out-of-config edit**:
+A content change of an own skill made without a config save: the registry UI,
+`console_update_skill`, `console_write_skill_file`, `console_delete_skill_file`.
+All end in `SkillRegistryService.update_skill`, which writes the **Owner version**
+in the same transaction.
+
+**Owner version**:
+The config version an out-of-config edit writes on the owning agent: the approved
+default with the one hash replaced, signed by the editor, through the normal
+auto-approve rules. Pending when they fail (the agent keeps running the previous
+content); refused outright for an AUTOMATED agent over a limit.
+_Avoid_: self-bump (a **Bump** is system-signed and follower-side; this is the editor's own change)
+
+### Relationships
+
+- Every content change of an **Own skill** writes exactly one version of the owner: the config save writes it itself, an **Out-of-config edit** writes the **Owner version**. A host sync writes its own (ADR-0006) and is exempt.
+- A revert restores own-skill content, because the owner is pinned. The row keeps its latest content and the agent shows "update available" until a save or edit moves the hash.
+- A config save resends own-skill bodies, so after a revert the next save moves the row back to the reverted content. The row is the content of the last write.
+
 ## Inlined skills (grilling 2026-09-25, nannos#291)
 
 **Inlined skill**:

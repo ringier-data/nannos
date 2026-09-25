@@ -2334,8 +2334,11 @@ export function SubAgentDetailPage() {
                                           </TooltipContent>
                                         </Tooltip>
                                       )}
+                                      {/* ADR-0013: an own skill is pinned too, so it can be behind its
+                                          row (after a revert, or while an owner version is pending). The
+                                          badge and diff show for it; the update action stays reference-only,
+                                          because an own skill moves through a config save that carries its body. */}
                                       {!isEditing &&
-                                        isReferenceSkill(skill) &&
                                         skill.update_available &&
                                         skill.registry_id &&
                                         skill.content_hash && (
@@ -2348,7 +2351,8 @@ export function SubAgentDetailPage() {
                                                 contentHash: skill.content_hash!,
                                                 name: skill.name || 'Skill',
                                                 ...(canEdit &&
-                                                  !isEmbedBound && {
+                                                  !isEmbedBound &&
+                                                  isReferenceSkill(skill) && {
                                                     updateTarget: {
                                                       type: 'imported-skill-direct' as const,
                                                       skillName: skill.name!,
