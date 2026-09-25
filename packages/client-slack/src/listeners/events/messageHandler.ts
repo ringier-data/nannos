@@ -1019,20 +1019,9 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             };
             await streamer.applyWorkPlan(workPlan?.todos ?? []);
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
+            // activity-log → a completed task card for the discrete action.
             const activityText = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
-            if (event.status.message.metadata?.kind === 'note') {
-              // A mid-turn note (notify_user) → an ordinary message for the user.
-              await streamer.postNote(activityText);
-              // In degraded mode the note takes over the status message; recovery
-              // must update the new status message, not the note.
-              if (streamer.ts && streamer.ts !== statusMessageTs) {
-                statusMessageTs = streamer.ts;
-                await inFlightTaskStore.updateStatusMessageTs(accumulatedTask.id, statusMessageTs);
-              }
-            } else {
-              // activity-log → a completed task card for the discrete action.
-              await streamer.applyActivity(activityText, updateSource);
-            }
+            await streamer.applyActivity(activityText, updateSource);
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:intermediate-output:1.0')) {
             // intermediate-output → collapsible "💭 reasoning" card (kept out of the answer body).
             const thinkingText = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
