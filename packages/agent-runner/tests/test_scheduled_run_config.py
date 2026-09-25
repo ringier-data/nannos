@@ -110,9 +110,41 @@ class TestApprovedVersionIsFetched:
     async def test_an_agent_with_no_approved_version_does_not_run(self, agent_runner):
         """Only drafts exist: nothing a reviewer signed off, so nothing to execute."""
         cls, client = _console([_record(version=1, default_version=None)])
-        with patch("httpx.AsyncClient", cls), pytest.raises(UnapprovedSubAgentError, match="no approved version"):
+        with (
+            patch("httpx.AsyncClient", cls),
+            pytest.raises(UnapprovedSubAgentError, match="no approved version") as exc,
+        ):
             await agent_runner._fetch_sub_agent_config(7, "tok")
         assert client.get.await_count == 1
+        # The failure record is built before a record exists to take the name from.
+        assert exc.value.sub_agent_name == "digest-writer"
+        assert "'digest-writer' (id 7)" in str(exc.value)
+
+    async def test_a_null_name_falls_back_to_the_id(self, agent_runner):
+        record = _record(version=1, default_version=None)
+        record["name"] = None
+        cls, _ = _console([record])
+        with patch("httpx.AsyncClient", cls), pytest.raises(UnapprovedSubAgentError, match="'sub-agent-7'"):
+            await agent_runner._fetch_sub_agent_config(7, "tok")
+
+    async def test_an_approved_version_that_cannot_be_read_does_not_run(self, agent_runner):
+        """The console answers a version it cannot join with ``config_version: null`` and a
+        200. Taken at face value that would be an agent with an empty prompt and no tools."""
+        unreadable = _record(version=3, default_version=2)
+        unreadable["config_version"] = None
+        cls, client = _console([_record(version=3, default_version=2), unreadable])
+        with (
+            patch("httpx.AsyncClient", cls),
+            pytest.raises(UnapprovedSubAgentError, match="version 2 .* could not be read"),
+        ):
+            await agent_runner._fetch_sub_agent_config(7, "tok")
+        assert client.get.await_count == 2
+
+    async def test_a_re_read_answering_with_the_wrong_version_does_not_run(self, agent_runner):
+        """A console that ignores the query parameter hands the draft back again."""
+        cls, _ = _console([_record(version=3, default_version=2), _record(version=3, default_version=2)])
+        with patch("httpx.AsyncClient", cls), pytest.raises(UnapprovedSubAgentError, match="could not be read"):
+            await agent_runner._fetch_sub_agent_config(7, "tok")
 
 
 class TestSkillsAreCarried:
@@ -126,6 +158,7 @@ class TestSkillsAreCarried:
     def test_the_built_config_carries_them_as_skill_definitions(self):
         """The same field the orchestrator sets (``skills=cv.skills``), from the same wire shape."""
         cfg = {
+            "type": "local",
             "name": "digest-writer",
             "description": "v2",
             "system_prompt": "Prompt of v2.",
@@ -150,6 +183,8 @@ class TestSkillsAreCarried:
         assert config.enable_thinking is True
         assert config.thinking_level == "medium"
         assert config.sandbox_enabled is True
+        assert config.interactive is True
+        assert config.all_tools is False
         assert config.system_prompt.startswith("Prompt of v2.")
 
     def test_no_skills_is_an_empty_list_not_a_failure(self):
@@ -158,9 +193,44 @@ class TestSkillsAreCarried:
         assert config.skills == []
         assert config.thinking_level is None
 
-    def test_a_level_without_thinking_on_is_dropped(self):
-        """Mirrors ``create_model``: the level only counts when thinking is enabled."""
-        cfg = {"name": "plain", "system_prompt": "x", "enable_thinking": False, "thinking_level": "high"}
+
+class TestOtherFieldsTheOrchestratorSets:
+    """``_to_user`` in the orchestrator's registry is the reference projection."""
+
+    def test_thinking_fields_pass_through_as_stored(self):
+        """The runnable picks its response-format strategy from ``thinking_level`` alone,
+        so a stored level with thinking off must read the same for both callers."""
+        cfg = {"name": "plain", "system_prompt": "x", "enable_thinking": None, "thinking_level": "high"}
         config = _local_sub_agent_config(cfg, model_name="claude-sonnet-4.6", message_formatting="markdown")
-        assert config.enable_thinking is False
-        assert config.thinking_level is None
+        assert config.enable_thinking is None
+        assert config.thinking_level == "high"
+
+    def test_an_automated_agent_is_not_interactive(self):
+        cfg = {"type": "automated", "name": "nightly", "system_prompt": "x"}
+        config = _local_sub_agent_config(cfg, model_name="claude-sonnet-4.6", message_formatting="markdown")
+        assert config.interactive is False
+
+    async def test_an_embed_bound_agent_with_no_tool_list_takes_the_whole_catalogue(self, agent_runner):
+        """ADR-0006. The record's ``all_tools`` is what ``_is_full_catalogue_agent`` reads."""
+        from agent.core import _is_full_catalogue_agent
+
+        bound = _record(version=1, default_version=1, mcp_tools=[])
+        bound["embed_binding"] = {"authority": "https://embed.example"}
+        cls, _ = _console([bound])
+        with patch("httpx.AsyncClient", cls):
+            cfg = await agent_runner._fetch_sub_agent_config(7, "tok")
+
+        assert cfg["all_tools"] is True
+        assert _is_full_catalogue_agent(cfg)
+        assert _local_sub_agent_config(cfg, model_name="m", message_formatting="markdown").all_tools is True
+
+    async def test_a_tool_list_or_no_binding_keeps_the_whitelist(self, agent_runner):
+        bound_with_list = _record(version=1, default_version=1)
+        bound_with_list["embed_binding"] = {"authority": "https://embed.example"}
+        unbound_empty = _record(version=1, default_version=1, mcp_tools=[])
+        cls, _ = _console([bound_with_list, unbound_empty])
+        with patch("httpx.AsyncClient", cls):
+            first = await agent_runner._fetch_sub_agent_config(7, "tok")
+            second = await agent_runner._fetch_sub_agent_config(7, "tok")
+        assert first["all_tools"] is False
+        assert second["all_tools"] is False

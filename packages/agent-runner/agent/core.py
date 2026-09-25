@@ -406,7 +406,23 @@ class UnapprovedSubAgentError(Exception):
     one unattended would put the review gate's whole purpose aside. Reported as a FAILED
     run: nothing about the infrastructure is wrong, and a job that cannot run until
     someone approves the agent should count toward auto-pause rather than retry forever.
+
+    Also raised when the approved version exists on the record but could not be read
+    back: the console answers a version it cannot join with ``config_version: null`` and
+    a 200, and accepting that would run an agent with an empty prompt and no tools.
+
+    The guarantee is about the version's prompt, tools and skill *list*. Skill bodies are
+    resolved by the console from the registry at read time, so an edit to one of the
+    agent's own skills reaches the next run without a new version — the same as it
+    reaches a delegation from a conversation.
+
+    ``sub_agent_name`` rides on the exception because the failure record is built from
+    it before the fetch has returned a record to take the name from.
     """
+
+    def __init__(self, message: str, *, sub_agent_name: str | None = None) -> None:
+        super().__init__(message)
+        self.sub_agent_name = sub_agent_name
 
 
 def _local_sub_agent_config(
@@ -414,12 +430,19 @@ def _local_sub_agent_config(
 ) -> LocalLangGraphSubAgentConfig:
     """The scheduled run's ``LocalLangGraphSubAgentConfig`` from a fetched sub-agent record.
 
-    Kept next to the orchestrator's projection in ``orchestrator-agent``'s registry
-    (``_to_user``): both build the same config type for the same agent, and every field
-    one carries and the other does not is a way the agent behaves differently depending
-    on who called it. Skills were exactly such a field — a scheduled run had none of the
-    agent's own, referenced (ADR-0011) or inlined (ADR-0012) skills, while a delegation
-    from a conversation had them all.
+    Mirrors the orchestrator's projection in ``orchestrator-agent``'s registry
+    (``_to_user``) field for field: both build the same config type for the same agent,
+    and every field one carries and the other does not is a way the agent behaves
+    differently depending on who called it. Skills were exactly such a field — a
+    scheduled run had none of the agent's own, referenced (ADR-0011) or inlined
+    (ADR-0012) skills, while a delegation from a conversation had them all. The thinking
+    fields pass through untouched for the same reason: the runnable picks its
+    response-format strategy from ``thinking_level`` alone, and it must pick the same
+    one for both callers.
+
+    Known gap: ``effective_permission``. The per-agent read does not compute it (only the
+    listing the orchestrator uses does), so the self-improvement guidance in the prompt
+    is the unprivileged variant on a scheduled run.
 
     ``model_name`` is passed rather than read from the record because the caller has
     already validated it against the gateway and possibly substituted the default.
@@ -430,13 +453,14 @@ def _local_sub_agent_config(
     return LocalLangGraphSubAgentConfig(
         name=sub_agent_cfg["name"],
         description=sub_agent_cfg.get("description") or f"Scheduled sub-agent {sub_agent_cfg['name']}",
+        # Automated agents exist for scheduling; only ``local`` ones are also delegation targets.
+        interactive=sub_agent_cfg.get("type") == "local",
         system_prompt=_build_sub_agent_system_prompt(sub_agent_cfg["system_prompt"], message_formatting),
         mcp_tools=sub_agent_cfg.get("mcp_tools") or None,
+        all_tools=bool(sub_agent_cfg.get("all_tools")),
         model_name=model_name,
-        # The same reading ``create_model`` gets: a level only counts when thinking is on.
-        # The runnable reads the level off the config to pick the response-format strategy.
-        enable_thinking=bool(sub_agent_cfg.get("enable_thinking")),
-        thinking_level=sub_agent_cfg.get("thinking_level") if sub_agent_cfg.get("enable_thinking") else None,
+        enable_thinking=sub_agent_cfg.get("enable_thinking"),
+        thinking_level=sub_agent_cfg.get("thinking_level"),
         sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
         sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
         skills=sub_agent_cfg.get("skills") or [],
@@ -1032,6 +1056,9 @@ class AgentRunner(BaseAgent):
                 # one fresh attempt ADR-0007 grants — by the next tick the gateway is
                 # usually back.
                 interrupted = isinstance(exc, CatalogueDiscoveryError)
+                if isinstance(exc, UnapprovedSubAgentError):
+                    # The fetch is what failed, so the record above never got a name.
+                    sub_agent_name = exc.sub_agent_name
                 if interrupted:
                     logger.warning(
                         "Tool discovery failed for job %s; reporting the run as interrupted "
@@ -1280,26 +1307,37 @@ class AgentRunner(BaseAgent):
             resp.raise_for_status()
             data = resp.json()
 
+            name = data.get("name") or f"sub-agent-{sub_agent_id}"
             default_version = data.get("default_version")
             if default_version is None:
                 raise UnapprovedSubAgentError(
-                    f"Sub-agent '{data.get('name', sub_agent_id)}' (id {sub_agent_id}) has no approved "
-                    "version. A scheduled run executes only an approved configuration; approve the "
-                    "agent, or point the job at one that is approved."
+                    f"Sub-agent '{name}' (id {sub_agent_id}) has no approved version. A scheduled run "
+                    "executes only an approved configuration; approve the agent, or point the job at "
+                    "one that is approved.",
+                    sub_agent_name=name,
                 )
-            cfg_version = data.get("config_version") or {}
-            if cfg_version.get("version") != default_version:
+            if (data.get("config_version") or {}).get("version") != default_version:
                 # The unqualified read answered with a newer draft; ask for the approved one.
                 resp = await client.get(url, headers=headers, params={"version": default_version})
                 resp.raise_for_status()
                 data = resp.json()
-                cfg_version = data.get("config_version") or {}
+
+        cfg_version = data.get("config_version") or {}
+        if cfg_version.get("version") != default_version:
+            # A version the console cannot join comes back as ``config_version: null`` with a
+            # 200 (a soft-deleted row, or a console that ignored the query parameter). Taken
+            # at face value that is an agent with no prompt and no tools; refuse instead.
+            raise UnapprovedSubAgentError(
+                f"Approved version {default_version} of sub-agent '{name}' (id {sub_agent_id}) could not be read.",
+                sub_agent_name=name,
+            )
 
         agent_type = data.get("type", "")
+        mcp_tools = [sanitize_tool_name(n) for n in (cfg_version.get("mcp_tools") or [])]
 
         return {
             "type": agent_type,
-            "name": data.get("name", f"sub-agent-{sub_agent_id}"),
+            "name": name,
             "sub_agent_id": sub_agent_id,
             # Exact running config-version id, for precise cost attribution
             "sub_agent_config_version_id": cfg_version.get("id"),
@@ -1309,13 +1347,19 @@ class AgentRunner(BaseAgent):
             # stored name may be a tool's wire name, while the catalogue exposes it under
             # its sanitised one (see ``sanitize_tool_name``). Everything downstream then
             # compares exposed names only.
-            "mcp_tools": [sanitize_tool_name(n) for n in (cfg_version.get("mcp_tools") or [])],
+            "mcp_tools": mcp_tools,
+            # ADR-0006, the orchestrator's rule: an embed-bound agent whose authority
+            # published no tool list, and that has none set here, gets the whole catalogue.
+            # ``_is_full_catalogue_agent`` reads this key; without it the predicate could
+            # only ever fire on the literal name ``general-purpose``.
+            "all_tools": data.get("embed_binding") is not None and not mcp_tools,
             # Prefer effective_model: the backend (annotate_models) resolves a tier-bound config
             # (model is None, model_tier set) to its current alias here, so a tier-bound sub-agent
             # honors its tier instead of silently falling back to the standard default.
             "model": cfg_version.get("effective_model") or cfg_version.get("model") or require_default_model(),
             "agent_url": cfg_version.get("agent_url"),
-            "enable_thinking": cfg_version.get("enable_thinking", False),
+            # Passed through as stored (tri-state), the way the orchestrator reads them.
+            "enable_thinking": cfg_version.get("enable_thinking"),
             "thinking_level": cfg_version.get("thinking_level"),
             # Foundry-specific fields
             "foundry_hostname": cfg_version.get("foundry_hostname"),
