@@ -1,6 +1,7 @@
 """Router for sub-agent management endpoints."""
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -463,12 +464,23 @@ async def get_sub_agent(
     sub_agent_id: int,
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
-    version: int | None = Query(None, description="Specific version to fetch (defaults to current)"),
+    version: int | Literal["default"] | None = Query(
+        None,
+        description=(
+            "Which version's config to embed: a version number, `default` for the approved "
+            "default version (whatever a reviewer signed off, the one delegations and scheduled "
+            "runs execute), or omitted for the current version (the newest, possibly a draft). "
+            "`default` on an agent with no approved version returns the agent with `config_version` null."
+        ),
+    ),
 ) -> SubAgent:
     """Get a sub-agent by ID.
 
     Returns the sub-agent with owner info and the specified version's config.
-    If no version is specified, returns the current version.
+    If no version is specified, returns the current version; ``default`` names the
+    approved default version by role rather than by number, so a caller that wants
+    "what was approved" gets it in one read instead of reading the number first and
+    the version second (with a default change able to land in between).
     User must be owner, have group access, or be admin (with admin mode enabled).
     """
     sub_agent_service = get_sub_agent_service(request)
@@ -487,6 +499,10 @@ async def get_sub_agent(
 
         await sub_agent_service.resolve_imported_skills(db, sub_agent)
         await annotate_models(request, db, [sub_agent.config_version])
+        # The bearer's own standing on the agent, as the listings report it. A run that
+        # reads one agent by id (agent-runner, for the subscriber of a scheduled job)
+        # gets the same value a delegation from a conversation would.
+        await sub_agent_service.populate_effective_permissions(db, [sub_agent], user.id)
         embed_service = getattr(request.app.state, "embed_binding_service", None)
         if embed_service is not None:
             sub_agent.embed_binding = await embed_service.get_binding(db, sub_agent_id)

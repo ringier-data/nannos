@@ -902,7 +902,10 @@ export const deleteSubAgentApiV1SubAgentsSubAgentIdDelete = <ThrowOnError extend
  * Get a sub-agent by ID.
  *
  * Returns the sub-agent with owner info and the specified version's config.
- * If no version is specified, returns the current version.
+ * If no version is specified, returns the current version; ``default`` names the
+ * approved default version by role rather than by number, so a caller that wants
+ * "what was approved" gets it in one read instead of reading the number first and
+ * the version second (with a default change able to land in between).
  * User must be owner, have group access, or be admin (with admin mode enabled).
  */
 export const getSubAgentApiV1SubAgentsSubAgentIdGet = <ThrowOnError extends boolean = false>(options: Options<GetSubAgentApiV1SubAgentsSubAgentIdGetData, ThrowOnError>) => (options.client ?? client).get<GetSubAgentApiV1SubAgentsSubAgentIdGetResponses, GetSubAgentApiV1SubAgentsSubAgentIdGetErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}', ...options });

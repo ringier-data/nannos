@@ -397,6 +397,88 @@ class CatalogueDiscoveryError(Exception):
     """
 
 
+class ConsoleContractError(Exception):
+    """The console answered in a way this runner does not speak: a deployment mismatch.
+
+    Raised when the console rejects the request itself (a 422 on ``version=default``
+    from a console older than this runner). Nothing about the job is wrong and no change
+    to it would help, so like ``CatalogueDiscoveryError`` it is reported as INTERRUPTED:
+    ``consecutive_failures`` stays put through a mixed deploy instead of marching every
+    job toward auto-pause, and the run gets the fresh attempt ADR-0007 grants once the
+    console catches up. Deploy console-backend before agent-runner and it never fires.
+    """
+
+
+class UnapprovedSubAgentError(Exception):
+    """The job's sub-agent has no approved default version, so there is nothing to run.
+
+    A scheduled run executes what a reviewer approved — the agent's ``default_version``,
+    the same version the orchestrator runs when a person delegates to the agent. An
+    agent that missed auto-approval and was never approved has only drafts, and running
+    one unattended would put the review gate's whole purpose aside. Reported as a FAILED
+    run: nothing about the infrastructure is wrong, and a job that cannot run until
+    someone approves the agent should count toward auto-pause rather than retry forever.
+
+    Also raised when the approved version exists on the record but could not be read
+    back: the console answers a version it cannot join with ``config_version: null`` and
+    a 200, and accepting that would run an agent with an empty prompt and no tools.
+
+    The guarantee is about the version's prompt, tools and skill *list*. Skill bodies are
+    resolved by the console from the registry at read time, so an edit to one of the
+    agent's own skills reaches the next run without a new version — the same as it
+    reaches a delegation from a conversation.
+
+    ``sub_agent_name`` rides on the exception because the failure record is built from
+    it before the fetch has returned a record to take the name from.
+    """
+
+    def __init__(self, message: str, *, sub_agent_name: str | None = None) -> None:
+        super().__init__(message)
+        self.sub_agent_name = sub_agent_name
+
+
+def _local_sub_agent_config(
+    sub_agent_cfg: dict, *, model_name: str, message_formatting: str
+) -> LocalLangGraphSubAgentConfig:
+    """The scheduled run's ``LocalLangGraphSubAgentConfig`` from a fetched sub-agent record.
+
+    Mirrors the orchestrator's projection in ``orchestrator-agent``'s registry
+    (``_to_user``) field for field: both build the same config type for the same agent,
+    and every field one carries and the other does not is a way the agent behaves
+    differently depending on who called it. Skills were exactly such a field — a
+    scheduled run had none of the agent's own, referenced (ADR-0011) or inlined
+    (ADR-0012) skills, while a delegation from a conversation had them all. The thinking
+    fields pass through untouched for the same reason: the runnable picks its
+    response-format strategy from ``thinking_level`` alone, and it must pick the same
+    one for both callers. ``effective_permission`` is the run-as user's standing on the
+    agent — the subscriber's, for a shared job — computed by the console for the bearer
+    of the token the fetch carried, exactly as the listing computes it for a delegation.
+
+    ``model_name`` is passed rather than read from the record because the caller has
+    already validated it against the gateway and possibly substituted the default.
+    ``message_formatting`` is baked into the system prompt here rather than passed
+    alongside it, because the shared runnable does not read it — it only forwards it on
+    the wire. Left to the shared path, a Slack notification would arrive as raw Markdown.
+    """
+    return LocalLangGraphSubAgentConfig(
+        name=sub_agent_cfg["name"],
+        description=sub_agent_cfg.get("description") or f"Scheduled sub-agent {sub_agent_cfg['name']}",
+        # Automated agents exist for scheduling; only ``local`` ones are also delegation targets.
+        interactive=sub_agent_cfg.get("type") == "local",
+        system_prompt=_build_sub_agent_system_prompt(sub_agent_cfg["system_prompt"], message_formatting),
+        mcp_tools=sub_agent_cfg.get("mcp_tools") or None,
+        all_tools=bool(sub_agent_cfg.get("all_tools")),
+        model_name=model_name,
+        enable_thinking=sub_agent_cfg.get("enable_thinking"),
+        thinking_level=sub_agent_cfg.get("thinking_level"),
+        sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
+        sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
+        skills=sub_agent_cfg.get("skills") or [],
+        sandbox_enabled=bool(sub_agent_cfg.get("sandbox_enabled", False)),
+        effective_permission=sub_agent_cfg.get("effective_permission"),
+    )
+
+
 @dataclass(frozen=True)
 class SubAgentRun:
     """What one sub-agent execution reported back.
@@ -984,11 +1066,14 @@ class AgentRunner(BaseAgent):
                 # INTERRUPTED, which leaves ``consecutive_failures`` alone and earns the
                 # one fresh attempt ADR-0007 grants — by the next tick the gateway is
                 # usually back.
-                interrupted = isinstance(exc, CatalogueDiscoveryError)
+                interrupted = isinstance(exc, (CatalogueDiscoveryError, ConsoleContractError))
+                if isinstance(exc, UnapprovedSubAgentError):
+                    # The fetch is what failed, so the record above never got a name.
+                    sub_agent_name = exc.sub_agent_name
                 if interrupted:
                     logger.warning(
-                        "Tool discovery failed for job %s; reporting the run as interrupted "
-                        "rather than failed: %s",
+                        "Infrastructure failed before job %s could start; reporting the run as "
+                        "interrupted rather than failed: %s",
                         scheduled_job_id,
                         exc,
                     )
@@ -1206,29 +1291,71 @@ class AgentRunner(BaseAgent):
         Returns the full sub-agent record including type and config_version fields
         so the dispatcher can route to the correct execution strategy.
 
+        The version fetched is the agent's **approved default**, the one a reviewer
+        signed off and the one the orchestrator runs on a person's behalf (its
+        ``/sub-agents/activated`` read joins on ``default_version``). Asked for by role
+        (``version=default``) rather than by number, so the console resolves it in one
+        statement and the number and the row cannot disagree. Without a ``version`` the
+        endpoint answers with ``current_version`` instead, which is the newest draft
+        whenever one exists — so a saved-but-unapproved edit would have run unattended,
+        under the draft's prompt and tools, before anyone approved it, and cost
+        attribution would have pointed at the draft's id. An agent with no approved
+        default at all cannot run: see ``UnapprovedSubAgentError``.
+
         Args:
             sub_agent_id: ID of the sub-agent.
             user_access_token: User's access token for authentication.
 
         Returns:
             Dict with keys: type, name, config_version (dict with model, system_prompt,
-            agent_url, mcp_tools, foundry_*, enable_thinking, thinking_level, etc.)
+            agent_url, mcp_tools, foundry_*, enable_thinking, thinking_level, skills, etc.)
+
+        Raises:
+            UnapprovedSubAgentError: the agent has no approved default version, or the
+                approved version could not be read back.
+            ConsoleContractError: the console does not accept ``version=default`` yet.
         """
         url = f"{_CONSOLE_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}"
+        headers = {"Authorization": f"Bearer {user_access_token}"}
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {user_access_token}"},
-            )
+            resp = await client.get(url, headers=headers, params={"version": "default"})
+            if resp.status_code == 422:
+                # A console older than this runner types the parameter as a number and
+                # rejects the role before any handler runs. Deploy order, not the job.
+                raise ConsoleContractError(
+                    f"console-backend rejected version=default for sub-agent {sub_agent_id} (422): "
+                    "it predates this agent-runner; deploy console-backend first."
+                )
             resp.raise_for_status()
             data = resp.json()
 
-        agent_type = data.get("type", "")
+        name = data.get("name") or f"sub-agent-{sub_agent_id}"
+        default_version = data.get("default_version")
+        if default_version is None:
+            raise UnapprovedSubAgentError(
+                f"Sub-agent '{name}' (id {sub_agent_id}) has no approved version. A scheduled run "
+                "executes only an approved configuration; approve the agent, or point the job at "
+                "one that is approved.",
+                sub_agent_name=name,
+            )
+
         cfg_version = data.get("config_version") or {}
+        if cfg_version.get("version") != default_version:
+            # A version the console cannot join (a soft-deleted row) comes back as
+            # ``config_version: null`` with a 200. Taken at face value that is an agent with
+            # no prompt and no tools; refuse instead. The same check keeps any answer that
+            # is not the approved version — whatever produced it — from running.
+            raise UnapprovedSubAgentError(
+                f"Approved version {default_version} of sub-agent '{name}' (id {sub_agent_id}) could not be read.",
+                sub_agent_name=name,
+            )
+
+        agent_type = data.get("type", "")
+        mcp_tools = [sanitize_tool_name(n) for n in (cfg_version.get("mcp_tools") or [])]
 
         return {
             "type": agent_type,
-            "name": data.get("name", f"sub-agent-{sub_agent_id}"),
+            "name": name,
             "sub_agent_id": sub_agent_id,
             # Exact running config-version id, for precise cost attribution
             "sub_agent_config_version_id": cfg_version.get("id"),
@@ -1238,13 +1365,19 @@ class AgentRunner(BaseAgent):
             # stored name may be a tool's wire name, while the catalogue exposes it under
             # its sanitised one (see ``sanitize_tool_name``). Everything downstream then
             # compares exposed names only.
-            "mcp_tools": [sanitize_tool_name(n) for n in (cfg_version.get("mcp_tools") or [])],
+            "mcp_tools": mcp_tools,
+            # ADR-0006, the orchestrator's rule: an embed-bound agent whose authority
+            # published no tool list, and that has none set here, gets the whole catalogue.
+            # ``_is_full_catalogue_agent`` reads this key; without it the predicate could
+            # only ever fire on the literal name ``general-purpose``.
+            "all_tools": data.get("embed_binding") is not None and not mcp_tools,
             # Prefer effective_model: the backend (annotate_models) resolves a tier-bound config
             # (model is None, model_tier set) to its current alias here, so a tier-bound sub-agent
             # honors its tier instead of silently falling back to the standard default.
             "model": cfg_version.get("effective_model") or cfg_version.get("model") or require_default_model(),
             "agent_url": cfg_version.get("agent_url"),
-            "enable_thinking": cfg_version.get("enable_thinking", False),
+            # Passed through as stored (tri-state), the way the orchestrator reads them.
+            "enable_thinking": cfg_version.get("enable_thinking"),
             "thinking_level": cfg_version.get("thinking_level"),
             # Foundry-specific fields
             "foundry_hostname": cfg_version.get("foundry_hostname"),
@@ -1254,6 +1387,16 @@ class AgentRunner(BaseAgent):
             "foundry_query_api_name": cfg_version.get("foundry_query_api_name"),
             "foundry_scopes": cfg_version.get("foundry_scopes") or [],
             "foundry_version": cfg_version.get("foundry_version"),
+            # The version's skills, resolved with bodies and files by the console
+            # (``resolve_imported_skills``): the agent's own, the referenced ones
+            # (ADR-0011) and the inlined ones (ADR-0012), exactly what the orchestrator
+            # hands the same agent. Dropped here, a scheduled run saw only the running
+            # user's personal and group skills from the docstore.
+            "skills": cfg_version.get("skills") or [],
+            # The bearer's standing on the agent (owner/write/read), computed by the
+            # console for the token this fetch carried: the run-as user's, so a
+            # subscriber running a shared job gets the subscriber's, not the owner's.
+            "effective_permission": data.get("effective_permission"),
             # Sandbox
             "sandbox_enabled": cfg_version.get("sandbox_enabled", False),
         }
@@ -1401,20 +1544,7 @@ class AgentRunner(BaseAgent):
         if not context_id:
             raise ValueError(f"Missing context_id in A2A task for scheduled job {scheduled_job_id}")
 
-        # The channel's rendering rules are baked into the system prompt here rather
-        # than passed alongside it, because the shared runnable does not read
-        # ``message_formatting`` — it only forwards it on the wire. Left to the shared
-        # path, a Slack notification would arrive as raw Markdown again.
-        config = LocalLangGraphSubAgentConfig(
-            name=sub_agent_cfg["name"],
-            description=sub_agent_cfg.get("description") or f"Scheduled sub-agent {sub_agent_cfg['name']}",
-            system_prompt=_build_sub_agent_system_prompt(sub_agent_cfg["system_prompt"], message_formatting),
-            mcp_tools=sub_agent_cfg.get("mcp_tools") or None,
-            model_name=model_name,
-            sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
-            sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
-            sandbox_enabled=bool(sub_agent_cfg.get("sandbox_enabled", False)),
-        )
+        config = _local_sub_agent_config(sub_agent_cfg, model_name=model_name, message_formatting=message_formatting)
 
         if config.sandbox_enabled and self._sandbox_pool is None:
             logger.warning(

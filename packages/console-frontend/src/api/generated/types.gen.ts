@@ -10590,9 +10590,9 @@ export type GetSubAgentApiV1SubAgentsSubAgentIdGetData = {
         /**
          * Version
          *
-         * Specific version to fetch (defaults to current)
+         * Which version's config to embed: a version number, `default` for the approved default version (whatever a reviewer signed off, the one delegations and scheduled runs execute), or omitted for the current version (the newest, possibly a draft). `default` on an agent with no approved version returns the agent with `config_version` null.
          */
-        version?: number | null;
+        version?: number | 'default' | null;
     };
     url: '/api/v1/sub-agents/{sub_agent_id}';
 };

@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -652,17 +652,23 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-        version: int | None = None,
+        version: int | Literal["default"] | None = None,
     ) -> SubAgent | None:
         """Get a sub-agent by ID.
 
         Args:
             db: Database session
             sub_agent_id: The sub-agent ID
-            version: If provided, join with this specific version.
-                     Otherwise join with current_version.
+            version: If a number, join with this specific version. ``"default"`` joins
+                     with the approved default version, in the same statement, so the
+                     number and the row cannot disagree. Otherwise join with
+                     current_version.
         """
-        query = text("""
+        if version == "default":
+            version_clause = "cv.version = sa.default_version"
+        else:
+            version_clause = "cv.version = COALESCE(:version, sa.current_version)"
+        query = text(f"""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
                    sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
@@ -692,12 +698,15 @@ class SubAgentService:
                    cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
             FROM sub_agents sa
             JOIN users u ON sa.owner_user_id = u.id
-            LEFT JOIN sub_agent_config_versions cv 
-                ON sa.id = cv.sub_agent_id 
-                AND cv.version = COALESCE(:version, sa.current_version)
+            LEFT JOIN sub_agent_config_versions cv
+                ON sa.id = cv.sub_agent_id
+                AND {version_clause}
             WHERE sa.id = :id
         """)
-        result = await db.execute(query, {"id": sub_agent_id, "version": version})
+        params: dict[str, Any] = {"id": sub_agent_id}
+        if version != "default":
+            params["version"] = version
+        result = await db.execute(query, params)
         row = result.mappings().first()
 
         if not row:
@@ -3630,6 +3639,15 @@ class SubAgentService:
             skills=skill_refs,
             sandbox_enabled=sandbox_enabled,
         )
+
+    async def populate_effective_permissions(self, db: AsyncSession, sub_agents: list[SubAgent], user_id: str) -> None:
+        """Set ``effective_permission`` on *sub_agents* as *user_id* sees them.
+
+        The listings do this on their own; a single-agent read has to ask for it, so
+        that what one caller learns about an agent by id agrees with what another
+        learns from the list.
+        """
+        await self._populate_effective_permissions(db, sub_agents, user_id)
 
     async def _populate_effective_permissions(self, db: AsyncSession, sub_agents: list[SubAgent], user_id: str) -> None:
         """Compute and set effective_permission for a list of sub-agents.
