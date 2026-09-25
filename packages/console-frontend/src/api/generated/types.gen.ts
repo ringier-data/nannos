@@ -1368,6 +1368,10 @@ export type CatalogPermission = {
      */
     user_group_id: number;
     /**
+     * User Group Name
+     */
+    user_group_name: string;
+    /**
      * Permissions
      */
     permissions?: Array<string>;
@@ -10098,7 +10102,26 @@ export type GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetData = {
          */
         secret_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by group name
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/secrets/{secret_id}/permissions';
 };
 
@@ -10762,7 +10785,26 @@ export type GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetData = {
          */
         sub_agent_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by group name
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/sub-agents/{sub_agent_id}/permissions';
 };
 
@@ -10824,7 +10866,26 @@ export type GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetData = {
          */
         sub_agent_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by change summary or version hash
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/sub-agents/{sub_agent_id}/versions';
 };
 
@@ -11021,9 +11082,37 @@ export type SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutResponse =
 export type ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by agent name, description, change summary, or owner name/email
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/sub-agents/admin/pending-versions';
 };
+
+export type ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetError = ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetErrors[keyof ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetErrors];
 
 export type ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponses = {
     /**
@@ -11764,6 +11853,12 @@ export type ListAuditLogsApiV1AdminAuditLogsGetData = {
          * Filter to date
          */
         to_date?: string | null;
+        /**
+         * Search
+         *
+         * Search by entity ID, actor sub, or actor name/email
+         */
+        search?: string | null;
     };
     url: '/api/v1/admin/audit-logs';
 };
@@ -11789,9 +11884,37 @@ export type ListAuditLogsApiV1AdminAuditLogsGetResponse = ListAuditLogsApiV1Admi
 export type ListMyGroupsApiV1GroupsGetData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by name or description
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/groups';
 };
+
+export type ListMyGroupsApiV1GroupsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListMyGroupsApiV1GroupsGetError = ListMyGroupsApiV1GroupsGetErrors[keyof ListMyGroupsApiV1GroupsGetErrors];
 
 export type ListMyGroupsApiV1GroupsGetResponses = {
     /**
@@ -11807,9 +11930,37 @@ export type ListMyGroupsApiV1GroupsGetResponse = ListMyGroupsApiV1GroupsGetRespo
 export type ConsoleListMyGroupsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by group name or description
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/groups/summaries';
 };
+
+export type ConsoleListMyGroupsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleListMyGroupsError = ConsoleListMyGroupsErrors[keyof ConsoleListMyGroupsErrors];
 
 export type ConsoleListMyGroupsResponses = {
     /**
@@ -12003,7 +12154,26 @@ export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetData = 
          */
         group_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by agent name or description
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/groups/{group_id}/accessible-agents';
 };
 
@@ -12035,7 +12205,26 @@ export type GetGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetData = {
          */
         group_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by job name or prompt
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/groups/{group_id}/accessible-jobs';
 };
 
@@ -13408,6 +13597,12 @@ export type GetNotificationsApiV1NotificationsGetData = {
          * Unread Only
          */
         unread_only?: boolean;
+        /**
+         * Search
+         *
+         * Match against notification title and message
+         */
+        search?: string | null;
     };
     url: '/api/v1/notifications';
 };
@@ -13930,6 +14125,12 @@ export type ListRunsApiV1SchedulerJobsJobIdRunsGetData = {
          * Filter by run status
          */
         status?: JobRunStatus | null;
+        /**
+         * Search
+         *
+         * Search by result summary or error message
+         */
+        search?: string | null;
     };
     url: '/api/v1/scheduler/jobs/{job_id}/runs';
 };
@@ -14168,7 +14369,26 @@ export type GetDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermiss
          */
         definition_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by group name
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/scheduler/definitions/{definition_id}/permissions';
 };
 
@@ -14854,7 +15074,26 @@ export type GetCatalogPermissionsData = {
          */
         catalog_id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by group name
+         */
+        search?: string | null;
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page
+         */
+        limit?: number | null;
+    };
     url: '/api/v1/catalogs/{catalog_id}/permissions';
 };
 
@@ -14974,6 +15213,12 @@ export type ListCatalogPagesData = {
          * Offset
          */
         offset?: number;
+        /**
+         * Search
+         *
+         * Search by page title or file name
+         */
+        search?: string | null;
     };
     url: '/api/v1/catalogs/{catalog_id}/pages';
 };
@@ -15605,6 +15850,12 @@ export type ListBugReportsApiV1BugReportsGetData = {
          * Created After
          */
         created_after?: string | null;
+        /**
+         * Search
+         *
+         * Match against description, report id, conversation id and reporter name/email
+         */
+        search?: string | null;
     };
     url: '/api/v1/bug-reports';
 };
@@ -17413,9 +17664,37 @@ export type GetRiskScoreApiMcpToolsRiskScoresToolNameServerSlugGetResponse = Get
 export type ListScimTokensApiV1AdminScimTokensGetData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page (omit for all)
+         */
+        limit?: number | null;
+        /**
+         * Search
+         *
+         * Search by name or description
+         */
+        search?: string | null;
+    };
     url: '/api/v1/admin/scim-tokens';
 };
+
+export type ListScimTokensApiV1AdminScimTokensGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListScimTokensApiV1AdminScimTokensGetError = ListScimTokensApiV1AdminScimTokensGetErrors[keyof ListScimTokensApiV1AdminScimTokensGetErrors];
 
 export type ListScimTokensApiV1AdminScimTokensGetResponses = {
     /**
@@ -17954,9 +18233,37 @@ export type ReplaceGroupApiScimV2GroupsGroupIdPutResponses = {
 export type ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Page
+         *
+         * Page number
+         */
+        page?: number;
+        /**
+         * Limit
+         *
+         * Items per page (omit for all)
+         */
+        limit?: number | null;
+        /**
+         * Search
+         *
+         * Search by name or endpoint URL
+         */
+        search?: string | null;
+    };
     url: '/api/v1/admin/outbound-scim-endpoints';
 };
+
+export type ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetError = ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetErrors[keyof ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetErrors];
 
 export type ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetResponses = {
     /**
