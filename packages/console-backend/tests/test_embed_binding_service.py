@@ -67,7 +67,7 @@ def make_definition(
     model_tier: str | None = "standard",
     tools: list[str] | None = ("list_campaigns", "get_campaign"),
     skill_visibility: str = "private",
-    skills_inline: list[str] = (),
+    skill_inline: bool = False,
 ) -> WellKnownDefinition:
     agent = WellKnownAgent(
         name="Alloy AI Assistant",
@@ -77,7 +77,6 @@ def make_definition(
         tools=list(tools) if tools is not None else None,
         model_tier=model_tier,
         thinking_level=thinking,
-        skills_inline=list(skills_inline),
         url=f"{BASE}/.well-known/agent-skills/AGENT.md",
         digest="sha256:" + "a" * 64,
     )
@@ -87,6 +86,7 @@ def make_definition(
             description="Use when booking.",
             body="Steps.",
             visibility=skill_visibility,
+            inline=skill_inline,
             url=f"{BASE}/.well-known/agent-skills/book-line-items/SKILL.md",
             digest="sha256:" + "b" * 64,
         )
@@ -177,10 +177,9 @@ async def test_sync_new_revision_publishes_one_approved_version():
 
 
 @pytest.mark.asyncio
-async def test_sync_appends_inlined_skills_to_the_system_prompt():
-    service, sas, _, _ = make_service(
-        fetch=AsyncMock(return_value=make_definition(skills_inline=["book-line-items"]))
-    )
+async def test_sync_carries_the_published_inline_flag_into_the_version():
+    """ADR-0012: an inlined host skill is flagged on the skill, never pasted into the prompt."""
+    service, sas, _, _ = make_service(fetch=AsyncMock(return_value=make_definition(skill_inline=True)))
     service.get_binding = AsyncMock(
         side_effect=[make_binding(revision=None), make_binding(revision=REV)]
     )
@@ -188,13 +187,9 @@ async def test_sync_appends_inlined_skills_to_the_system_prompt():
     await service.sync_binding(make_db(), 20)
 
     kwargs = sas.publish_managed_version.await_args.kwargs
-    assert kwargs["system_prompt"].endswith(
-        "\n\nDomain guidance.\n\n"
-        "The skill `book-line-items` is loaded in full below. Do not call load_skill for it.\n\n"
-        '<skill name="book-line-items">\nSteps.\n</skill>'
-    )
-    # still synced as a skill, so a public one keeps its registry row
-    assert [s.name for s in kwargs["skills"]] == ["book-line-items"]
+    assert kwargs["system_prompt"].endswith("\n\nDomain guidance.")
+    assert "Steps." not in kwargs["system_prompt"]
+    assert [(s.name, s.inline) for s in kwargs["skills"]] == [("book-line-items", True)]
 
 
 @pytest.mark.asyncio
