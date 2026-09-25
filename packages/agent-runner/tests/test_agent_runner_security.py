@@ -39,8 +39,11 @@ class TestFetchSubAgentConfig:
         mock_response.json.return_value = {
             "type": "automated",
             "name": "okr-watch",
+            "current_version": 1,
+            "default_version": 1,
             "config_version": {
                 "id": 7,
+                "version": 1,
                 "system_prompt": "You read OKRs.",
                 "model": "claude-sonnet-4.6",
                 "mcp_tools": ["authrion-atp-v1_okrs.v1.search_okrs", "gcal_list_events"],

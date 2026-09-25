@@ -397,6 +397,53 @@ class CatalogueDiscoveryError(Exception):
     """
 
 
+class UnapprovedSubAgentError(Exception):
+    """The job's sub-agent has no approved default version, so there is nothing to run.
+
+    A scheduled run executes what a reviewer approved — the agent's ``default_version``,
+    the same version the orchestrator runs when a person delegates to the agent. An
+    agent that missed auto-approval and was never approved has only drafts, and running
+    one unattended would put the review gate's whole purpose aside. Reported as a FAILED
+    run: nothing about the infrastructure is wrong, and a job that cannot run until
+    someone approves the agent should count toward auto-pause rather than retry forever.
+    """
+
+
+def _local_sub_agent_config(
+    sub_agent_cfg: dict, *, model_name: str, message_formatting: str
+) -> LocalLangGraphSubAgentConfig:
+    """The scheduled run's ``LocalLangGraphSubAgentConfig`` from a fetched sub-agent record.
+
+    Kept next to the orchestrator's projection in ``orchestrator-agent``'s registry
+    (``_to_user``): both build the same config type for the same agent, and every field
+    one carries and the other does not is a way the agent behaves differently depending
+    on who called it. Skills were exactly such a field — a scheduled run had none of the
+    agent's own, referenced (ADR-0011) or inlined (ADR-0012) skills, while a delegation
+    from a conversation had them all.
+
+    ``model_name`` is passed rather than read from the record because the caller has
+    already validated it against the gateway and possibly substituted the default.
+    ``message_formatting`` is baked into the system prompt here rather than passed
+    alongside it, because the shared runnable does not read it — it only forwards it on
+    the wire. Left to the shared path, a Slack notification would arrive as raw Markdown.
+    """
+    return LocalLangGraphSubAgentConfig(
+        name=sub_agent_cfg["name"],
+        description=sub_agent_cfg.get("description") or f"Scheduled sub-agent {sub_agent_cfg['name']}",
+        system_prompt=_build_sub_agent_system_prompt(sub_agent_cfg["system_prompt"], message_formatting),
+        mcp_tools=sub_agent_cfg.get("mcp_tools") or None,
+        model_name=model_name,
+        # The same reading ``create_model`` gets: a level only counts when thinking is on.
+        # The runnable reads the level off the config to pick the response-format strategy.
+        enable_thinking=bool(sub_agent_cfg.get("enable_thinking")),
+        thinking_level=sub_agent_cfg.get("thinking_level") if sub_agent_cfg.get("enable_thinking") else None,
+        sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
+        sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
+        skills=sub_agent_cfg.get("skills") or [],
+        sandbox_enabled=bool(sub_agent_cfg.get("sandbox_enabled", False)),
+    )
+
+
 @dataclass(frozen=True)
 class SubAgentRun:
     """What one sub-agent execution reported back.
@@ -1206,25 +1253,49 @@ class AgentRunner(BaseAgent):
         Returns the full sub-agent record including type and config_version fields
         so the dispatcher can route to the correct execution strategy.
 
+        The version fetched is the agent's **approved default**, the one a reviewer
+        signed off and the one the orchestrator runs on a person's behalf (its
+        ``/sub-agents/activated`` read joins on ``default_version``). Without a
+        ``version`` the endpoint answers with ``current_version`` instead, which is the
+        newest draft whenever one exists — so a saved-but-unapproved edit would have run
+        unattended, under the draft's prompt and tools, before anyone approved it, and
+        cost attribution would have pointed at the draft's id. An agent with no approved
+        default at all cannot run: see ``UnapprovedSubAgentError``.
+
         Args:
             sub_agent_id: ID of the sub-agent.
             user_access_token: User's access token for authentication.
 
         Returns:
             Dict with keys: type, name, config_version (dict with model, system_prompt,
-            agent_url, mcp_tools, foundry_*, enable_thinking, thinking_level, etc.)
+            agent_url, mcp_tools, foundry_*, enable_thinking, thinking_level, skills, etc.)
+
+        Raises:
+            UnapprovedSubAgentError: the agent has no approved default version.
         """
         url = f"{_CONSOLE_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}"
+        headers = {"Authorization": f"Bearer {user_access_token}"}
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {user_access_token}"},
-            )
+            resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             data = resp.json()
 
+            default_version = data.get("default_version")
+            if default_version is None:
+                raise UnapprovedSubAgentError(
+                    f"Sub-agent '{data.get('name', sub_agent_id)}' (id {sub_agent_id}) has no approved "
+                    "version. A scheduled run executes only an approved configuration; approve the "
+                    "agent, or point the job at one that is approved."
+                )
+            cfg_version = data.get("config_version") or {}
+            if cfg_version.get("version") != default_version:
+                # The unqualified read answered with a newer draft; ask for the approved one.
+                resp = await client.get(url, headers=headers, params={"version": default_version})
+                resp.raise_for_status()
+                data = resp.json()
+                cfg_version = data.get("config_version") or {}
+
         agent_type = data.get("type", "")
-        cfg_version = data.get("config_version") or {}
 
         return {
             "type": agent_type,
@@ -1254,6 +1325,12 @@ class AgentRunner(BaseAgent):
             "foundry_query_api_name": cfg_version.get("foundry_query_api_name"),
             "foundry_scopes": cfg_version.get("foundry_scopes") or [],
             "foundry_version": cfg_version.get("foundry_version"),
+            # The version's skills, resolved with bodies and files by the console
+            # (``resolve_imported_skills``): the agent's own, the referenced ones
+            # (ADR-0011) and the inlined ones (ADR-0012), exactly what the orchestrator
+            # hands the same agent. Dropped here, a scheduled run saw only the running
+            # user's personal and group skills from the docstore.
+            "skills": cfg_version.get("skills") or [],
             # Sandbox
             "sandbox_enabled": cfg_version.get("sandbox_enabled", False),
         }
@@ -1401,20 +1478,7 @@ class AgentRunner(BaseAgent):
         if not context_id:
             raise ValueError(f"Missing context_id in A2A task for scheduled job {scheduled_job_id}")
 
-        # The channel's rendering rules are baked into the system prompt here rather
-        # than passed alongside it, because the shared runnable does not read
-        # ``message_formatting`` — it only forwards it on the wire. Left to the shared
-        # path, a Slack notification would arrive as raw Markdown again.
-        config = LocalLangGraphSubAgentConfig(
-            name=sub_agent_cfg["name"],
-            description=sub_agent_cfg.get("description") or f"Scheduled sub-agent {sub_agent_cfg['name']}",
-            system_prompt=_build_sub_agent_system_prompt(sub_agent_cfg["system_prompt"], message_formatting),
-            mcp_tools=sub_agent_cfg.get("mcp_tools") or None,
-            model_name=model_name,
-            sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
-            sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
-            sandbox_enabled=bool(sub_agent_cfg.get("sandbox_enabled", False)),
-        )
+        config = _local_sub_agent_config(sub_agent_cfg, model_name=model_name, message_formatting=message_formatting)
 
         if config.sandbox_enabled and self._sandbox_pool is None:
             logger.warning(
