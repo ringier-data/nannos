@@ -16,11 +16,14 @@ built config ends up with.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from a2a.types import Message, Part, Role
 
-from agent.core import UnapprovedSubAgentError, _local_sub_agent_config
+import agent.core as core
+from agent.core import ConsoleContractError, UnapprovedSubAgentError, _local_sub_agent_config
 
 APPROVED_SKILL = {
     "name": "weekly-digest",
@@ -68,7 +71,7 @@ def _console(responses: list[dict]) -> tuple[MagicMock, AsyncMock]:
     """An httpx client that answers successive GETs from *responses*, in order."""
     answers = []
     for body in responses:
-        resp = MagicMock()
+        resp = MagicMock(status_code=200)
         resp.json.return_value = body
         resp.raise_for_status = MagicMock()
         answers.append(resp)
@@ -129,10 +132,19 @@ class TestApprovedVersionIsFetched:
         ):
             await agent_runner._fetch_sub_agent_config(7, "tok")
 
-    async def test_a_console_that_does_not_know_the_role_does_not_run_the_draft(self, agent_runner):
-        """An older console reading ``version=default`` as no version hands the draft back."""
+    async def test_an_answer_that_is_not_the_approved_version_does_not_run(self, agent_runner):
+        """Whatever produced it, a record embedding the draft is not what runs."""
         cls, _ = _console([_record(version=3, default_version=2)])
         with patch("httpx.AsyncClient", cls), pytest.raises(UnapprovedSubAgentError, match="could not be read"):
+            await agent_runner._fetch_sub_agent_config(7, "tok")
+
+    async def test_a_console_older_than_the_runner_is_a_deployment_mismatch_not_a_job_failure(self, agent_runner):
+        """The previous console types ``version`` as a number and answers ``default`` with a
+        422 before any handler runs. That is deploy order, so it must not count against the job."""
+        cls, _ = _console([{}])
+        cls.return_value.__aenter__.return_value.get.return_value = MagicMock(status_code=422)
+        cls.return_value.__aenter__.return_value.get.side_effect = None
+        with patch("httpx.AsyncClient", cls), pytest.raises(ConsoleContractError, match="deploy console-backend first"):
             await agent_runner._fetch_sub_agent_config(7, "tok")
 
 
@@ -223,3 +235,33 @@ class TestOtherFieldsTheOrchestratorSets:
             second = await agent_runner._fetch_sub_agent_config(7, "tok")
         assert first["all_tools"] is False
         assert second["all_tools"] is False
+
+
+class TestDeploymentMismatchIsInterrupted:
+    async def test_a_console_contract_error_does_not_count_against_the_job(self, agent_runner):
+        """Like a catalogue that could not be listed: infrastructure, before the job began,
+        so INTERRUPTED (counter untouched, one fresh attempt) rather than FAILED."""
+        task = MagicMock()
+        task.id = "outer-task-9"
+        task.context_id = "ctx-oldconsole"
+        task.history = [MagicMock(metadata={"sub_agent_id": 5, "scheduled_job_id": 10})]
+        agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
+        agent_runner._fetch_sub_agent_config = AsyncMock(
+            side_effect=core.ConsoleContractError("console-backend rejected version=default (422)")
+        )
+        user_config = MagicMock()
+        user_config.user_sub = "sub-1"
+        user_config.access_token = MagicMock()
+        user_config.access_token.get_secret_value.return_value = "tok"
+
+        responses = []
+        async for r in agent_runner._stream_impl(
+            [Message(role=Role.ROLE_USER, parts=[Part(text="Do the thing.")], message_id="m")],
+            user_config,
+            task,
+        ):
+            responses.append(r)
+
+        result = [json.loads(r.content) for r in responses if r.content.startswith("{")][-1]
+        assert result["scheduler_status"] == "interrupted"
+        assert "422" in result["error_message"]

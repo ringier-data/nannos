@@ -397,6 +397,18 @@ class CatalogueDiscoveryError(Exception):
     """
 
 
+class ConsoleContractError(Exception):
+    """The console answered in a way this runner does not speak: a deployment mismatch.
+
+    Raised when the console rejects the request itself (a 422 on ``version=default``
+    from a console older than this runner). Nothing about the job is wrong and no change
+    to it would help, so like ``CatalogueDiscoveryError`` it is reported as INTERRUPTED:
+    ``consecutive_failures`` stays put through a mixed deploy instead of marching every
+    job toward auto-pause, and the run gets the fresh attempt ADR-0007 grants once the
+    console catches up. Deploy console-backend before agent-runner and it never fires.
+    """
+
+
 class UnapprovedSubAgentError(Exception):
     """The job's sub-agent has no approved default version, so there is nothing to run.
 
@@ -1055,14 +1067,14 @@ class AgentRunner(BaseAgent):
                 # INTERRUPTED, which leaves ``consecutive_failures`` alone and earns the
                 # one fresh attempt ADR-0007 grants — by the next tick the gateway is
                 # usually back.
-                interrupted = isinstance(exc, CatalogueDiscoveryError)
+                interrupted = isinstance(exc, (CatalogueDiscoveryError, ConsoleContractError))
                 if isinstance(exc, UnapprovedSubAgentError):
                     # The fetch is what failed, so the record above never got a name.
                     sub_agent_name = exc.sub_agent_name
                 if interrupted:
                     logger.warning(
-                        "Tool discovery failed for job %s; reporting the run as interrupted "
-                        "rather than failed: %s",
+                        "Infrastructure failed before job %s could start; reporting the run as "
+                        "interrupted rather than failed: %s",
                         scheduled_job_id,
                         exc,
                     )
@@ -1300,12 +1312,21 @@ class AgentRunner(BaseAgent):
             agent_url, mcp_tools, foundry_*, enable_thinking, thinking_level, skills, etc.)
 
         Raises:
-            UnapprovedSubAgentError: the agent has no approved default version.
+            UnapprovedSubAgentError: the agent has no approved default version, or the
+                approved version could not be read back.
+            ConsoleContractError: the console does not accept ``version=default`` yet.
         """
         url = f"{_CONSOLE_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}"
         headers = {"Authorization": f"Bearer {user_access_token}"}
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers=headers, params={"version": "default"})
+            if resp.status_code == 422:
+                # A console older than this runner types the parameter as a number and
+                # rejects the role before any handler runs. Deploy order, not the job.
+                raise ConsoleContractError(
+                    f"console-backend rejected version=default for sub-agent {sub_agent_id} (422): "
+                    "it predates this agent-runner; deploy console-backend first."
+                )
             resp.raise_for_status()
             data = resp.json()
 
@@ -1321,10 +1342,10 @@ class AgentRunner(BaseAgent):
 
         cfg_version = data.get("config_version") or {}
         if cfg_version.get("version") != default_version:
-            # A version the console cannot join comes back as ``config_version: null`` with a
-            # 200 (a soft-deleted row, or a console that does not know ``default`` and read
-            # the query parameter as nothing). Taken at face value that is an agent with no
-            # prompt and no tools; refuse instead.
+            # A version the console cannot join (a soft-deleted row) comes back as
+            # ``config_version: null`` with a 200. Taken at face value that is an agent with
+            # no prompt and no tools; refuse instead. The same check keeps any answer that
+            # is not the approved version — whatever produced it — from running.
             raise UnapprovedSubAgentError(
                 f"Approved version {default_version} of sub-agent '{name}' (id {sub_agent_id}) could not be read.",
                 sub_agent_name=name,
