@@ -8,6 +8,10 @@ Tests cover HTTP-level integration:
 """
 
 import pytest
+from console_backend.models.catalog import CatalogCreate, CatalogSourceType
+from console_backend.repositories.catalog_repository import CatalogRepository
+from console_backend.services.audit_service import AuditService
+from console_backend.services.catalog_service import CatalogService
 from httpx import AsyncClient
 from sqlalchemy import text
 
@@ -291,3 +295,43 @@ class TestCatalogFilesEndpoints:
         response = await client_with_db.get(f"/api/v1/catalogs/{catalog_id}/permissions", params={"search": "beta"})
         assert [p["user_group_name"] for p in response.json()] == ["Perm Beta"]
         assert response.headers["X-Total-Count"] == "1"
+
+
+class TestCatalogOwnershipTabsInAdminMode:
+    """An ownership tab answers from the caller's own view, even in admin mode."""
+
+    @pytest.mark.asyncio
+    async def test_shared_tab_excludes_private_catalogs_of_others(
+        self, client_with_db: AsyncClient, pg_session, test_admin_user_db, monkeypatch
+    ):
+        monkeypatch.setattr("console_backend.routers.catalog_router.is_admin_mode", lambda request, user: True)
+        mine = await _create_catalog_via_api(client_with_db, name="Mine")
+
+        repo = CatalogRepository()
+        repo.set_audit_service(AuditService())
+        service = CatalogService()
+        service.set_repository(repo)
+        theirs = await service.create_catalog(
+            pg_session,
+            CatalogCreate(
+                name="Their private catalog",
+                description="never shared",
+                source_type=CatalogSourceType.GOOGLE_DRIVE,
+                source_config={},
+            ),
+            actor=test_admin_user_db,
+        )
+        await pg_session.commit()
+
+        # No tab: the admin view still lists everything.
+        response = await client_with_db.get("/api/v1/catalogs")
+        assert {c["id"] for c in response.json()["items"]} >= {mine["id"], theirs.id}
+
+        # "Shared with me" is catalogs actually shared with the caller, not
+        # every catalog someone else owns.
+        response = await client_with_db.get("/api/v1/catalogs", params={"ownership": "shared"})
+        assert response.status_code == 200
+        assert theirs.id not in {c["id"] for c in response.json()["items"]}
+
+        response = await client_with_db.get("/api/v1/catalogs", params={"ownership": "owned"})
+        assert [c["id"] for c in response.json()["items"]] == [mine["id"]]

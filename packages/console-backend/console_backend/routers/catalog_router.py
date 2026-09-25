@@ -95,7 +95,11 @@ async def list_catalogs(
     catalogs, total = await service.get_accessible_catalogs(
         db,
         user,
-        is_admin=is_admin_mode(request, user),
+        # An ownership split is a question about this user's own relation to
+        # each catalog, so it is answered from their view, not the admin one —
+        # otherwise an admin's "shared with me" is every private catalog they
+        # do not own. Matches the sub-agent list.
+        is_admin=False if ownership else is_admin_mode(request, user),
         search=search,
         ownership=ownership,
         page=page,
