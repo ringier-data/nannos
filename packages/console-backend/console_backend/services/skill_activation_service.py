@@ -149,6 +149,7 @@ class SkillActivationService:
             raise ValueError("Inline is a sub-agent scope concept: personal and group activations are never inlined.")
 
         activated_by = activated_by or (actor.id if actor else user_id)
+        pending = False  # set by the sub-agent paths when the version they write awaits approval
 
         # Fetch the registry entry
         registry = await self._get_registry_entry(db, registry_id)
@@ -310,7 +311,7 @@ class SkillActivationService:
             mode,
             registry.content_hash[:12],
         )
-        return activation_id, scope == "sub-agent" and pending
+        return activation_id, pending
 
     async def deactivate(
         self,
