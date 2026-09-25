@@ -38,7 +38,10 @@ async def list_groups(
     _: User = Depends(require_admin),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
-    search: str | None = Query(None, description="Search by name"),
+    search: str | None = Query(None, description="Search by name or description"),
+    exclude_user_id: str | None = Query(
+        None, description="Exclude groups this user is already a member of"
+    ),
 ) -> UserGroupListResponse:
     """List all groups with pagination.
 
@@ -50,6 +53,7 @@ async def list_groups(
         page=page,
         limit=limit,
         search=search,
+        exclude_user_id=exclude_user_id,
     )
 
     return UserGroupListResponse(

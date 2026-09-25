@@ -3,6 +3,7 @@
 import logging
 import os
 from datetime import datetime, timezone
+from typing import Any
 
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError
@@ -15,6 +16,7 @@ from ..models.notification import NotificationData, NotificationType
 from ..models.secret import Secret, SecretCreate, SecretType
 from ..models.user import User
 from ..services.notification_service import NotificationService
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +291,10 @@ class SecretsService:
         db: AsyncSession,
         user_id: str,
         secret_type: SecretType | None = None,
-    ) -> list[Secret]:
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[Secret], int]:
         """List all secrets accessible to a user.
 
         Returns secrets that are either:
@@ -300,34 +305,67 @@ class SecretsService:
             db: Database session
             user_id: User ID
             secret_type: Optional filter by secret type
+            search: Match against name and description
+            page: Page number (1-indexed), only meaningful with a limit
+            limit: Page size. None returns every match, which is what service
+                callers expect; the console passes an explicit page size.
 
         Returns:
-            List of secret metadata (without actual secret values)
+            Tuple of (secret metadata without values, total matching count)
         """
         # TODO: system scope capabilities and group role checks should be enforced here as well
         # Query for secrets owned by user OR accessible via group permissions
         # Use DISTINCT to avoid duplicates if user is in multiple groups with access
         type_filter = "AND s.secret_type = :secret_type" if secret_type else ""
-        query = text(f"""
-            SELECT DISTINCT s.id, s.owner_user_id, s.name, s.description, s.secret_type,
-                   s.ssm_parameter_name, s.created_at, s.updated_at, s.deleted_at
+        search_filter = ""
+        params: dict[str, Any] = {"user_id": user_id}
+        if secret_type:
+            params["secret_type"] = secret_type.value
+        if search:
+            search_filter = "AND " + like_clause("s.name", "s.description")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
             FROM secrets s
             LEFT JOIN secret_permissions sp ON s.id = sp.secret_id
             LEFT JOIN user_group_members ugm ON sp.user_group_id = ugm.user_group_id AND ugm.user_id = :user_id
-            WHERE s.deleted_at IS NULL 
+            WHERE s.deleted_at IS NULL
               AND (s.owner_user_id = :user_id OR ugm.user_id IS NOT NULL)
               {type_filter}
-            ORDER BY s.created_at DESC
+              {search_filter}
+        """
+
+        # DISTINCT is load-bearing above (a secret shared with several of the
+        # user's groups joins more than once), so the count has to wrap it
+        # rather than COUNT(*) the joined rows.
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        query = text(f"""
+            SELECT DISTINCT s.id, s.owner_user_id, s.name, s.description, s.secret_type,
+                   s.ssm_parameter_name, s.created_at, s.updated_at, s.deleted_at
+            {from_clause}
+            ORDER BY s.created_at DESC, s.id DESC
+            {pagination}
         """)
 
-        params = {"user_id": user_id}
-        if secret_type:
-            params["secret_type"] = secret_type.value
-
         result = await db.execute(query, params)
-
         rows = result.fetchall()
-        return [
+
+        if limit is None:
+            total = len(rows)
+        else:
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            count_result = await db.execute(
+                text(f"SELECT COUNT(*) FROM (SELECT DISTINCT s.id {from_clause}) AS matches"),
+                count_params,
+            )
+            total = count_result.scalar() or 0
+
+        secrets = [
             Secret(
                 id=row[0],
                 owner_user_id=row[1],
@@ -341,6 +379,7 @@ class SecretsService:
             )
             for row in rows
         ]
+        return secrets, total
 
     async def delete_secret(
         self,
@@ -402,8 +441,15 @@ class SecretsService:
 
         return True
 
-    async def get_permissions(self, db: AsyncSession, secret_id: int) -> list[dict]:
-        """Get all group permissions for a secret.
+    async def get_permissions(
+        self,
+        db: AsyncSession,
+        secret_id: int,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict], int]:
+        """Get group permissions for a secret.
 
         Returns list of dicts with:
         - user_group_id: Group ID
@@ -413,24 +459,41 @@ class SecretsService:
         Args:
             db: Database session
             secret_id: Secret ID
+            search: Match against the group name
+            page: Page number (1-indexed), only meaningful with a limit
+            limit: Page size. None returns every grant.
 
         Returns:
-            List of permission dictionaries
+            Tuple of (permission dictionaries, total matching count)
         """
-        query = text("""
-            SELECT 
-                sp.user_group_id,
-                ug.name as user_group_name,
-                sp.permissions
+        params: dict[str, Any] = {"secret_id": secret_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("ug.name")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
             FROM secret_permissions sp
             JOIN user_groups ug ON sp.user_group_id = ug.id
             WHERE sp.secret_id = :secret_id
-            ORDER BY ug.name
+            {search_filter}
+        """
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        query = text(f"""
+            SELECT sp.user_group_id, ug.name AS user_group_name, sp.permissions
+            {from_clause}
+            ORDER BY ug.name, ug.id
+            {pagination}
         """)
-        result = await db.execute(query, {"secret_id": secret_id})
+        result = await db.execute(query, params)
         rows = result.fetchall()
 
-        return [
+        permissions = [
             {
                 "user_group_id": row[0],
                 "user_group_name": row[1],
@@ -438,6 +501,11 @@ class SecretsService:
             }
             for row in rows
         ]
+        if limit is None:
+            return permissions, len(permissions)
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count_result = await db.execute(text(f"SELECT COUNT(*) {from_clause}"), count_params)
+        return permissions, count_result.scalar() or 0
 
     async def update_permissions(
         self,

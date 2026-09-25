@@ -30,6 +30,7 @@ from console_backend.models.sub_agent import (
     SubAgentType,
     SubAgentUpdate,
 )
+from console_backend.models.listing import ActivationFilter, OwnershipFilter
 from console_backend.models.user import User
 from console_backend.services.notification_service import NotificationService
 from console_backend.services.secrets_service import SecretsService
@@ -681,7 +682,7 @@ class TestSubAgentVersionCreation:
         await service.delete_sub_agent(pg_session, agent.id, actor=user)
 
         # Versions should still be accessible (including deleted)
-        versions = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
+        versions, _ = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
         assert len(versions) == 2
         assert versions[0].version == 2
         assert versions[1].version == 1
@@ -1399,7 +1400,7 @@ class TestVersionDeletion:
         assert result is True
 
         # Verify version is soft-deleted
-        versions = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
+        versions, _ = await service.get_config_versions(pg_session, agent.id, include_deleted=True)
         v2 = next(v for v in versions if v.version == 2)
         assert v2.deleted_at is not None
 
@@ -2251,3 +2252,340 @@ class TestConcurrentVersionCreation:
         ).scalar_one()
         stored_ids = {ref["registry_id"] for ref in skills}
         assert stored_ids == set(registry_ids)
+
+
+class TestSubAgentListPagingAndSearch:
+    """Opt-in paging and server-side search on the accessible-sub-agents list.
+
+    The migrated schema seeds public system agents (general-purpose, task-scheduler,
+    …), which are genuinely accessible to everyone. Assertions here are therefore
+    scoped with a search prefix or taken as a delta, never as absolute counts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """No limit returns everything — the orchestrator's registry depends on it."""
+        _, baseline = await sub_agent_service.get_accessible_sub_agents(pg_session, test_user_db.id)
+        for i in range(5):
+            await _create_sub_agent(pg_session, test_user_db, f"Paging-{i}", sub_agent_service)
+
+        agents, total = await sub_agent_service.get_accessible_sub_agents(pg_session, test_user_db.id)
+        assert len(agents) == baseline + 5
+        assert total == baseline + 5
+
+    @pytest.mark.asyncio
+    async def test_paging_caps_rows_but_not_total(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """A page is capped; total still counts every match of the same filter."""
+        for i in range(5):
+            await _create_sub_agent(pg_session, test_user_db, f"Paging-{i}", sub_agent_service)
+
+        page1, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Paging-", page=1, limit=2
+        )
+        assert len(page1) == 2
+        assert total == 5
+
+        page3, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Paging-", page=3, limit=2
+        )
+        assert len(page3) == 1
+        assert total == 5
+        assert {a.id for a in page1}.isdisjoint({a.id for a in page3})
+
+    @pytest.mark.asyncio
+    async def test_search_narrows_rows_and_total(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        await _create_sub_agent(pg_session, test_user_db, "Invoice-Reconciler", sub_agent_service)
+        await _create_sub_agent(pg_session, test_user_db, "Meeting-Notes", sub_agent_service)
+
+        found, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="invoice"
+        )
+        assert [a.name for a in found] == ["Invoice-Reconciler"]
+        assert total == 1
+
+        missing, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="no-such-agent"
+        )
+        assert missing == []
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_ownership_is_applied_before_the_page(
+        self,
+        pg_session: AsyncSession,
+        sub_agent_service: SubAgentService,
+        test_user_db: User,
+        test_admin_user_db: User,
+    ):
+        """ownership must filter in SQL, or a page gets silently short-changed.
+
+        With the old post-filter, asking for 2 rows returned the first 2 accessible
+        agents and *then* dropped the ones the user did not own — so a page could
+        come back short, or empty, while later pages still held owned agents. The
+        seeded public system agents make that failure mode reachable here.
+        """
+        for i in range(3):
+            await _create_sub_agent(pg_session, test_user_db, f"Owned-{i}", sub_agent_service)
+        for i in range(3):
+            other = await _create_sub_agent(
+                pg_session, test_admin_user_db, f"Owned-other-{i}", sub_agent_service
+            )
+            # Genuinely shared with the user, or the "shared" half is empty for
+            # want of a grant rather than for want of the filter.
+            await _grant_group_write_access(
+                pg_session, other.id, test_user_db, group_name=f"Shared Group {i}"
+            )
+
+        owned, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, ownership=OwnershipFilter.OWNED, search="Owned-", page=1, limit=2
+        )
+        assert len(owned) == 2, "a full page of owned agents, not a post-filtered remnant"
+        assert total == 3
+        assert all(a.owner_user_id == test_user_db.id for a in owned)
+
+        shared, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, ownership=OwnershipFilter.SHARED, search="Owned-", page=1, limit=2
+        )
+        assert total == 3
+        assert all(a.owner_user_id != test_user_db.id for a in shared)
+
+    @pytest.mark.asyncio
+    async def test_type_and_activation_facets_are_server_side(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """Every console facet filters in SQL, so a page is cut from the filtered set.
+
+        The console offers owner, status, type and activation together; any one of
+        them left as a browser-side filter would slice whichever page arrived.
+        """
+        for i in range(3):
+            await _create_sub_agent(pg_session, test_user_db, f"Facet-{i}", sub_agent_service)
+
+        by_type, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Facet-", type_filter="local"
+        )
+        assert total == 3
+        assert all(a.type == "local" for a in by_type)
+
+        none_remote, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Facet-", type_filter="remote"
+        )
+        assert none_remote == []
+        assert total == 0
+
+        # Freshly created agents are not activated for their owner.
+        not_activated, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Facet-", activation=ActivationFilter.DISABLED
+        )
+        assert total == 3
+        assert all(a.is_activated is False for a in not_activated)
+
+        activated, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Facet-", activation=ActivationFilter.ENABLED
+        )
+        assert activated == []
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_draft_status_facet_finds_never_approved_agents(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """A never-approved agent is a draft, and the Draft facet must find it.
+
+        `cv` joins on default_version, which is only set at approval, so a fresh
+        agent has NULL there. Without COALESCE the Draft and Pending facets
+        matched nothing at all — the client filter this replaced read
+        `config_version?.status ?? 'draft'`.
+        """
+        agent = await _create_sub_agent(pg_session, test_user_db, "Never-Approved", sub_agent_service)
+        assert agent.default_version is None
+
+        drafts, total = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, search="Never-Approved", status_filter=SubAgentStatus.DRAFT
+        )
+        assert total == 1
+        assert [a.id for a in drafts] == [agent.id]
+
+    @pytest.mark.asyncio
+    async def test_activation_facet_agrees_with_the_is_activated_field(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        """The console facet and the card's toggle read the same predicate.
+
+        Seeded public system agents have no activation row, so their toggle shows
+        Disabled; reusing the orchestrator's activated_only predicate for the
+        facet listed them under Enabled instead.
+        """
+        everything, _ = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id
+        )
+        system_agents = [a for a in everything if a.owner_user_id == "system" and a.is_public]
+        assert system_agents, "fixture expectation: the schema seeds public system agents"
+        assert all(a.is_activated is False for a in system_agents)
+
+        enabled, _ = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, activation=ActivationFilter.ENABLED
+        )
+        disabled, _ = await sub_agent_service.get_accessible_sub_agents(
+            pg_session, test_user_db.id, activation=ActivationFilter.DISABLED
+        )
+        system_ids = {a.id for a in system_agents}
+        assert system_ids.isdisjoint({a.id for a in enabled}), "toggle says Disabled"
+        assert system_ids <= {a.id for a in disabled}
+
+        # Every row each facet returns agrees with the field the card renders.
+        assert all(a.is_activated for a in enabled)
+        assert all(not a.is_activated for a in disabled)
+
+
+class TestSubAgentVersionHistoryPaging:
+    """Opt-in paging and search on a sub-agent's version history (newest first)."""
+
+    async def _agent_with_versions(
+        self, session: AsyncSession, service: SubAgentService, user: User, summaries: list[str]
+    ) -> SubAgent:
+        agent = await _create_sub_agent(session, user, "History", service)
+        for i, summary in enumerate(summaries):
+            await service.update_sub_agent(
+                session,
+                agent.id,
+                SubAgentUpdate(system_prompt=f"Prompt {i} " * 100, change_summary=summary),
+                actor=user,
+            )
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default_newest_first(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await self._agent_with_versions(
+            pg_session, sub_agent_service, test_user_db, ["Second", "Third", "Fourth"]
+        )
+
+        versions, total = await sub_agent_service.get_config_versions(pg_session, agent.id)
+        assert [v.version for v in versions] == [4, 3, 2, 1]
+        assert total == 4
+
+    @pytest.mark.asyncio
+    async def test_paging_caps_rows_but_not_total(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await self._agent_with_versions(
+            pg_session, sub_agent_service, test_user_db, ["Second", "Third", "Fourth"]
+        )
+
+        page1, total = await sub_agent_service.get_config_versions(pg_session, agent.id, page=1, limit=3)
+        assert [v.version for v in page1] == [4, 3, 2]
+        assert total == 4
+
+        page2, total = await sub_agent_service.get_config_versions(pg_session, agent.id, page=2, limit=3)
+        assert [v.version for v in page2] == [1]
+        assert total == 4
+
+    @pytest.mark.asyncio
+    async def test_search_matches_change_summary_and_hash_literally(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await self._agent_with_versions(
+            pg_session, sub_agent_service, test_user_db, ["Raised cap to 50%", "Raised cap to 500"]
+        )
+
+        # `%` is a LIKE wildcard; unescaped, "50%" would match both summaries.
+        found, total = await sub_agent_service.get_config_versions(pg_session, agent.id, search="50%", limit=10)
+        assert [v.change_summary for v in found] == ["Raised cap to 50%"]
+        assert total == 1
+
+        everything, _ = await sub_agent_service.get_config_versions(pg_session, agent.id)
+        target = everything[-1]
+        by_hash, total = await sub_agent_service.get_config_versions(
+            pg_session, agent.id, search=target.version_hash[:7].upper()
+        )
+        assert [v.id for v in by_hash] == [target.id]
+        assert total == 1
+
+
+class TestPendingVersionApprovalsPaging:
+    """Opt-in paging and search on the admin queue of versions pending approval."""
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default_paged_on_request(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        for i in range(3):
+            agent = await _create_sub_agent(pg_session, test_user_db, f"Queue-{i}", sub_agent_service)
+            await sub_agent_service.submit_for_approval(pg_session, agent.id, "Please review", actor=test_user_db)
+
+        everything, total = await sub_agent_service.get_pending_version_approvals(pg_session)
+        assert total == len(everything) >= 3
+
+        page, total = await sub_agent_service.get_pending_version_approvals(
+            pg_session, search="Queue-", page=1, limit=2
+        )
+        assert [p["name"] for p in page] == ["Queue-0", "Queue-1"], "oldest first"
+        assert total == 3
+
+        last, total = await sub_agent_service.get_pending_version_approvals(
+            pg_session, search="Queue-", page=2, limit=2
+        )
+        assert [p["name"] for p in last] == ["Queue-2"]
+        assert total == 3
+
+    @pytest.mark.asyncio
+    async def test_search_matches_name_summary_and_owner(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await _create_sub_agent(pg_session, test_user_db, "Invoice_Bot", sub_agent_service)
+        await sub_agent_service.submit_for_approval(pg_session, agent.id, "Adds VAT rounding", actor=test_user_db)
+        other = await _create_sub_agent(pg_session, test_user_db, "InvoiceXBot", sub_agent_service)
+        await sub_agent_service.submit_for_approval(pg_session, other.id, "Unrelated", actor=test_user_db)
+
+        # `_` is a LIKE wildcard; unescaped it would match "InvoiceXBot" too.
+        by_name, total = await sub_agent_service.get_pending_version_approvals(pg_session, search="invoice_")
+        assert [p["name"] for p in by_name] == ["Invoice_Bot"]
+        assert total == 1
+
+        by_summary, _ = await sub_agent_service.get_pending_version_approvals(pg_session, search="vat round")
+        assert [p["sub_agent_id"] for p in by_summary] == [agent.id]
+
+        full_name = f"{test_user_db.first_name} {test_user_db.last_name}"
+        by_owner, total = await sub_agent_service.get_pending_version_approvals(pg_session, search=full_name, limit=10)
+        assert {agent.id, other.id} <= {p["sub_agent_id"] for p in by_owner}
+        assert total == len(by_owner)
+
+
+class TestSubAgentPermissionsPaging:
+    """Opt-in paging and search (by group name) on a sub-agent's group grants."""
+
+    @pytest.mark.asyncio
+    async def test_unbounded_by_default_and_paged_on_request(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await _create_sub_agent(pg_session, test_user_db, "Granted", sub_agent_service)
+        for name in ("Gamma", "Alpha", "Beta"):
+            await _grant_group_write_access(pg_session, agent.id, test_user_db, group_name=name)
+
+        everything, total = await sub_agent_service.get_permissions(pg_session, agent.id)
+        assert [p["user_group_name"] for p in everything] == ["Alpha", "Beta", "Gamma"]
+        assert total == 3
+
+        page, total = await sub_agent_service.get_permissions(pg_session, agent.id, page=2, limit=2)
+        assert [p["user_group_name"] for p in page] == ["Gamma"]
+        assert total == 3
+
+    @pytest.mark.asyncio
+    async def test_search_by_group_name_escapes_wildcards(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
+    ):
+        agent = await _create_sub_agent(pg_session, test_user_db, "Granted", sub_agent_service)
+        for name in ("Team_A", "TeamXA", "Finance"):
+            await _grant_group_write_access(pg_session, agent.id, test_user_db, group_name=name)
+
+        found, total = await sub_agent_service.get_permissions(pg_session, agent.id, search="team_", limit=10)
+        assert [p["user_group_name"] for p in found] == ["Team_A"]
+        assert total == 1

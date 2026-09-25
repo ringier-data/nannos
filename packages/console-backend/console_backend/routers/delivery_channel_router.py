@@ -7,7 +7,7 @@ consumed by the scheduler when delivering job notifications.
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from ..db.session import DbSession
 from ..dependencies import get_client_id_from_request, is_admin_mode, require_auth_or_bearer_token
@@ -84,6 +84,10 @@ async def list_channels(
     request: Request,
     db: DbSession,
     current_user: User = Depends(require_auth_or_bearer_token),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default so A2A clients keep seeing all of their channels.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
+    search: str | None = Query(None, description="Search by channel name"),
 ) -> DeliveryChannelListResponse:
     """List delivery channels scoped to the authenticated caller."""
     repo = _get_delivery_channel_repository(request)
@@ -91,12 +95,16 @@ async def list_channels(
     client_id = await get_client_id_from_request(request)
     if client_id:
         # A2A client — return only its own channels
-        channels = await repo.list_channels_for_client(db=db, client_id=client_id)
+        channels, total = await repo.list_channels_for_client(
+            db=db, client_id=client_id, search=search, page=page, limit=limit
+        )
     else:
         # Human console user — all channels (no group scoping).
-        channels = await repo.list_all_channels(db=db)
+        channels, total = await repo.list_all_channels(
+            db=db, search=search, page=page, limit=limit
+        )
 
-    return DeliveryChannelListResponse(channels=channels)
+    return DeliveryChannelListResponse(channels=channels, total=total)
 
 
 @router.get(
@@ -133,9 +141,10 @@ async def list_delivery_channels_mcp(
     if installation:
         channels = await repo.list_channels_for_installation(db=db, installation_id=installation)
     else:
-        channels = await repo.list_all_channels(db=db)
+        # MCP tool: the agent needs every channel it could send to, never a page.
+        channels, _ = await repo.list_all_channels(db=db)
 
-    return DeliveryChannelListResponse(channels=channels)
+    return DeliveryChannelListResponse(channels=channels, total=len(channels))
 
 
 @router.patch(

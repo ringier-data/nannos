@@ -147,7 +147,7 @@ class TestSchedulableSubAgents:
         from console_backend.services.scheduler_service import SchedulerService
 
         sub_agent_service = AsyncMock()
-        sub_agent_service.get_accessible_sub_agents = AsyncMock(return_value=[])
+        sub_agent_service.get_accessible_sub_agents = AsyncMock(return_value=([], 0))
         service = SchedulerService()
         service.set_sub_agent_service(sub_agent_service)
 

@@ -8,6 +8,10 @@ Tests cover HTTP-level integration:
 """
 
 import pytest
+from console_backend.models.catalog import CatalogCreate, CatalogSourceType
+from console_backend.repositories.catalog_repository import CatalogRepository
+from console_backend.services.audit_service import AuditService
+from console_backend.services.catalog_service import CatalogService
 from httpx import AsyncClient
 from sqlalchemy import text
 
@@ -254,3 +258,80 @@ class TestCatalogFilesEndpoints:
         data = response.json()
         assert data["items"] == []
         assert data["total"] == 0
+
+        response = await client_with_db.get(f"/api/v1/catalogs/{catalog_id}/pages", params={"search": "deck"})
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_permissions_total_header_with_paging_and_search(self, client_with_db: AsyncClient, pg_session):
+        """The body stays a bare array; the match count travels in X-Total-Count."""
+        created = await _create_catalog_via_api(client_with_db)
+        catalog_id = created["id"]
+        group_ids = []
+        for name in ("Perm Alpha", "Perm Beta", "Perm Gamma"):
+            result = await pg_session.execute(
+                text("INSERT INTO user_groups (name) VALUES (:name) RETURNING id"), {"name": name}
+            )
+            group_ids.append(result.scalar_one())
+        await pg_session.commit()
+        response = await client_with_db.put(
+            f"/api/v1/catalogs/{catalog_id}/permissions",
+            json={"permissions": [{"user_group_id": gid, "permissions": ["read"]} for gid in group_ids]},
+        )
+        assert response.status_code == 200, response.text
+
+        response = await client_with_db.get(f"/api/v1/catalogs/{catalog_id}/permissions")
+        assert response.status_code == 200
+        assert len(response.json()) == 3
+        assert response.headers["X-Total-Count"] == "3"
+
+        response = await client_with_db.get(
+            f"/api/v1/catalogs/{catalog_id}/permissions", params={"page": 2, "limit": 2}
+        )
+        assert [p["user_group_name"] for p in response.json()] == ["Perm Gamma"]
+        assert response.headers["X-Total-Count"] == "3"
+
+        response = await client_with_db.get(f"/api/v1/catalogs/{catalog_id}/permissions", params={"search": "beta"})
+        assert [p["user_group_name"] for p in response.json()] == ["Perm Beta"]
+        assert response.headers["X-Total-Count"] == "1"
+
+
+class TestCatalogOwnershipTabsInAdminMode:
+    """An ownership tab answers from the caller's own view, even in admin mode."""
+
+    @pytest.mark.asyncio
+    async def test_shared_tab_excludes_private_catalogs_of_others(
+        self, client_with_db: AsyncClient, pg_session, test_admin_user_db, monkeypatch
+    ):
+        monkeypatch.setattr("console_backend.routers.catalog_router.is_admin_mode", lambda request, user: True)
+        mine = await _create_catalog_via_api(client_with_db, name="Mine")
+
+        repo = CatalogRepository()
+        repo.set_audit_service(AuditService())
+        service = CatalogService()
+        service.set_repository(repo)
+        theirs = await service.create_catalog(
+            pg_session,
+            CatalogCreate(
+                name="Their private catalog",
+                description="never shared",
+                source_type=CatalogSourceType.GOOGLE_DRIVE,
+                source_config={},
+            ),
+            actor=test_admin_user_db,
+        )
+        await pg_session.commit()
+
+        # No tab: the admin view still lists everything.
+        response = await client_with_db.get("/api/v1/catalogs")
+        assert {c["id"] for c in response.json()["items"]} >= {mine["id"], theirs.id}
+
+        # "Shared with me" is catalogs actually shared with the caller, not
+        # every catalog someone else owns.
+        response = await client_with_db.get("/api/v1/catalogs", params={"ownership": "shared"})
+        assert response.status_code == 200
+        assert theirs.id not in {c["id"] for c in response.json()["items"]}
+
+        response = await client_with_db.get("/api/v1/catalogs", params={"ownership": "owned"})
+        assert [c["id"] for c in response.json()["items"]] == [mine["id"]]

@@ -79,6 +79,76 @@ async def _create_user(
     return user_id
 
 
+class TestSecretListing:
+    """Paging and search on the accessible-secrets list."""
+
+    @pytest.mark.asyncio
+    async def test_list_unbounded_by_default(
+        self, pg_session: AsyncSession, secrets_service: SecretsService, test_user: User, aws_mock
+    ):
+        """No limit returns every match — service callers depend on this."""
+        user_id = await _create_user(pg_session, test_user.email, test_user.sub)
+        test_user.id = user_id
+        for i in range(5):
+            await _create_secret(secrets_service, pg_session, f"secret-{i}", test_user)
+
+        secrets, total = await secrets_service.list_user_secrets(db=pg_session, user_id=user_id)
+        assert len(secrets) == 5
+        assert total == 5
+
+    @pytest.mark.asyncio
+    async def test_list_paginates_with_accurate_total(
+        self, pg_session: AsyncSession, secrets_service: SecretsService, test_user: User, aws_mock
+    ):
+        """A page is capped, but total still counts every match."""
+        user_id = await _create_user(pg_session, test_user.email, test_user.sub)
+        test_user.id = user_id
+        for i in range(5):
+            await _create_secret(secrets_service, pg_session, f"secret-{i}", test_user)
+
+        page1, total = await secrets_service.list_user_secrets(
+            db=pg_session, user_id=user_id, page=1, limit=2
+        )
+        assert len(page1) == 2
+        assert total == 5
+
+        page3, total = await secrets_service.list_user_secrets(
+            db=pg_session, user_id=user_id, page=3, limit=2
+        )
+        assert len(page3) == 1
+        assert total == 5
+        assert {s.id for s in page1}.isdisjoint({s.id for s in page3})
+
+    @pytest.mark.asyncio
+    async def test_list_search_matches_name_and_description(
+        self, pg_session: AsyncSession, secrets_service: SecretsService, test_user: User, aws_mock
+    ):
+        """Search narrows both the rows and the total."""
+        user_id = await _create_user(pg_session, test_user.email, test_user.sub)
+        test_user.id = user_id
+        await _create_secret(secrets_service, pg_session, "foundry-prod", test_user)
+        await _create_secret(secrets_service, pg_session, "slack-token", test_user)
+
+        found, total = await secrets_service.list_user_secrets(
+            db=pg_session, user_id=user_id, search="foundry"
+        )
+        assert [s.name for s in found] == ["foundry-prod"]
+        assert total == 1
+
+        # _create_secret writes "Test secret: <name>" as the description.
+        by_description, total = await secrets_service.list_user_secrets(
+            db=pg_session, user_id=user_id, search="Test secret: slack"
+        )
+        assert [s.name for s in by_description] == ["slack-token"]
+        assert total == 1
+
+        none_found, total = await secrets_service.list_user_secrets(
+            db=pg_session, user_id=user_id, search="nothing-matches-this"
+        )
+        assert none_found == []
+        assert total == 0
+
+
 class TestSecretCreation:
     """Test secret creation and SSM parameter generation."""
 

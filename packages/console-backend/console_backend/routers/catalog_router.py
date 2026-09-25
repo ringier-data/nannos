@@ -4,7 +4,7 @@ import logging
 import os
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from ..catalog.token_service import CatalogTokenService
@@ -32,6 +32,7 @@ from ..models.catalog import (
     UpdateFileIndexing,
     UpdateSourceRequest,
 )
+from ..models.listing import OwnershipFilter
 from ..models.user import User
 from ..services.catalog_service import CatalogService
 from ..services.feature_status import is_embedding_ready
@@ -81,11 +82,30 @@ async def list_catalogs(
     user: User = Depends(
         require_auth_or_bearer_token
     ),  # called from agents with bearer token, so allow both auth methods
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default so agent callers still see every catalog.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
+    search: str | None = Query(None, description="Search by name or description"),
+    ownership: OwnershipFilter | None = Query(
+        None, description="Restrict to catalogs the caller owns, or ones shared with them"
+    ),
 ) -> CatalogListResponse:
     """List catalogs accessible to the current user."""
     service = get_catalog_service(request)
-    catalogs = await service.get_accessible_catalogs(db, user, is_admin=is_admin_mode(request, user))
-    return CatalogListResponse(items=catalogs, total=len(catalogs))
+    catalogs, total = await service.get_accessible_catalogs(
+        db,
+        user,
+        # An ownership split is a question about this user's own relation to
+        # each catalog, so it is answered from their view, not the admin one —
+        # otherwise an admin's "shared with me" is every private catalog they
+        # do not own. Matches the sub-agent list.
+        is_admin=False if ownership else is_admin_mode(request, user),
+        search=search,
+        ownership=ownership,
+        page=page,
+        limit=limit,
+    )
+    return CatalogListResponse(items=catalogs, total=total)
 
 
 @router.post("", response_model=Catalog, status_code=201, operation_id="create_catalog")
@@ -333,15 +353,22 @@ async def get_catalog_permissions(
     request: Request,
     db: DbSession,
     catalog_id: str,
+    response: Response,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by group name"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default: the permissions dialog replaces the whole grant set
+    # on save, so it must be able to load every grant.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[CatalogPermission]:
-    """Get permissions for a catalog."""
+    """Get permissions for a catalog. `X-Total-Count` carries how many grants match."""
     service = get_catalog_service(request)
     # Verify access
     catalog = await service.get_catalog(db, catalog_id, user, is_admin=is_admin_mode(request, user))
     if not catalog:
         raise HTTPException(status_code=404, detail="Catalog not found")
-    rows = await service.get_permissions(db, catalog_id)
+    rows, total = await service.list_permissions(db, catalog_id, search=search, page=page, limit=limit)
+    response.headers["X-Total-Count"] = str(total)
     return [CatalogPermission(**r) for r in rows]
 
 
@@ -402,13 +429,14 @@ async def list_catalog_pages(
     user: User = Depends(require_auth),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    search: str | None = Query(None, max_length=200, description="Search by page title or file name"),
 ) -> CatalogPageListResponse:
     """List pages across all files in a catalog (paginated)."""
     service = get_catalog_service(request)
     catalog = await service.get_catalog(db, catalog_id, user, is_admin=is_admin_mode(request, user))
     if not catalog:
         raise HTTPException(status_code=404, detail="Catalog not found")
-    pages, total = await service.get_catalog_pages(db, catalog_id, limit, offset)
+    pages, total = await service.get_catalog_pages(db, catalog_id, limit, offset, search)
     return CatalogPageListResponse(items=pages, total=total)
 
 

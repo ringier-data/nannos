@@ -16,6 +16,7 @@ from ..models.delivery_channel import (
 )
 from ..models.user import User
 from .base import AuditedRepository
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,13 @@ class DeliveryChannelRepository(AuditedRepository):
         row = result.mappings().first()
         return dict(row) if row else None
 
-    async def list_all_channels(self, db: AsyncSession) -> list[DeliveryChannelResponse]:
+    async def list_all_channels(
+        self,
+        db: AsyncSession,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[DeliveryChannelResponse], int]:
         """Return all delivery channels.
 
         Channel visibility is no longer scoped by user groups: every authenticated
@@ -138,20 +145,67 @@ class DeliveryChannelRepository(AuditedRepository):
         installation/client_id) because the agent/MCP-layer installation filter
         protects only the agent path, not a direct console GET.
         """
-        result = await db.execute(text("SELECT * FROM delivery_channels ORDER BY name"))
-        return [_row_to_response(row) for row in result.mappings().all()]
+        return await self._list_channels(db, where="", params={}, search=search, page=page, limit=limit)
 
     async def list_channels_for_client(
         self,
         db: AsyncSession,
         client_id: str,
-    ) -> list[DeliveryChannelResponse]:
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[DeliveryChannelResponse], int]:
         """Return all channels registered by a given Keycloak client ID."""
-        result = await db.execute(
-            text("SELECT * FROM delivery_channels WHERE client_id = :client_id ORDER BY name"),
-            {"client_id": client_id},
+        return await self._list_channels(
+            db,
+            where="client_id = :client_id",
+            params={"client_id": client_id},
+            search=search,
+            page=page,
+            limit=limit,
         )
-        return [_row_to_response(row) for row in result.mappings().all()]
+
+    async def _list_channels(
+        self,
+        db: AsyncSession,
+        where: str,
+        params: dict[str, Any],
+        search: str | None,
+        page: int,
+        limit: int | None,
+    ) -> tuple[list[DeliveryChannelResponse], int]:
+        """Shared listing: optional search, optional page, always an honest total.
+
+        `limit=None` returns everything, which is what the A2A and MCP callers
+        expect; only the console asks for a page.
+        """
+        query_params = dict(params)
+        conditions = [where] if where else []
+        if search:
+            conditions.append(like_clause("name"))
+            query_params["search"] = like_contains(search)
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            query_params["limit"] = limit
+            query_params["offset"] = (page - 1) * limit
+
+        result = await db.execute(
+            text(f"SELECT * FROM delivery_channels {where_clause} ORDER BY name, id {pagination}"),
+            query_params,
+        )
+        channels = [_row_to_response(row) for row in result.mappings().all()]
+
+        if limit is None:
+            return channels, len(channels)
+
+        count_params = {k: v for k, v in query_params.items() if k not in ("limit", "offset")}
+        count = await db.execute(
+            text(f"SELECT COUNT(*) FROM delivery_channels {where_clause}"), count_params
+        )
+        return channels, count.scalar() or 0
 
     async def list_channels_for_installation(
         self,

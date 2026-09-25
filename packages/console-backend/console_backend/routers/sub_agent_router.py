@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import DbSession
@@ -14,6 +14,7 @@ from ..dependencies import (
     require_auth,
     require_auth_or_bearer_token,
 )
+from ..models.listing import ActivationFilter, OwnershipFilter
 from ..models.sub_agent import (
     SubAgent,
     SubAgentApproval,
@@ -27,6 +28,7 @@ from ..models.sub_agent import (
     SubAgentSetDefaultVersion,
     SubAgentStatus,
     SubAgentSubmitRequest,
+    SubAgentType,
     SubAgentUpdate,
     SubAgentVersionApproval,
 )
@@ -128,8 +130,21 @@ async def list_sub_agents(
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
     status: SubAgentStatus | None = Query(None, description="Filter by status"),
-    owned_only: bool = Query(False, description="Only show owned sub-agents"),
+    ownership: OwnershipFilter | None = Query(
+        None, description="Restrict to sub-agents the caller owns, or ones shared with them"
+    ),
     activated_only: bool = Query(False, description="Only show activated sub-agents"),
+    activation: ActivationFilter | None = Query(
+        None, description="Filter by whether the sub-agent is activated for the caller"
+    ),
+    type_filter: SubAgentType | None = Query(
+        None, alias="type", description="Filter by sub-agent type"
+    ),
+    search: str | None = Query(None, description="Search by name or description"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default: the orchestrator builds a user's whole registry from
+    # this endpoint, so a page size must never be assumed on its behalf.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> SubAgentListResponse:
     """List sub-agents accessible to the current user.
 
@@ -141,7 +156,7 @@ async def list_sub_agents(
     - Admins (with admin mode enabled) see all sub-agents
     - When impersonating, shows only what the impersonated user can see (not admin view)
     - Use `status` to filter by status (e.g., pending_approval for admin queue)
-    - Use `owned_only=true` to see only owned sub-agents
+    - Use `ownership=owned` (or `shared`) to see only one side of that split
     - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
     """
     sub_agent_service = get_sub_agent_service(request)
@@ -151,23 +166,28 @@ async def list_sub_agents(
         is_impersonating = hasattr(request.state, "original_user") and request.state.original_user
         effective_admin = is_admin_mode(request, user) and not is_impersonating
 
-        if owned_only:
-            # Only show owned sub-agents
-            sub_agents = await sub_agent_service.get_accessible_sub_agents(
-                db, user.id, is_admin=False, status_filter=status, include_owned=True, activated_only=activated_only
-            )
-            # Filter to owned only
-            sub_agents = [sa for sa in sub_agents if sa.owner_user_id == user.id]
-        else:
-            sub_agents = await sub_agent_service.get_accessible_sub_agents(
-                db, user.id, is_admin=effective_admin, status_filter=status, activated_only=activated_only
-            )
+        sub_agents, total = await sub_agent_service.get_accessible_sub_agents(
+            db,
+            user.id,
+            # An ownership split is a question about this user's own relation to
+            # each agent, so it is answered from their view, not the admin one.
+            is_admin=False if ownership else effective_admin,
+            status_filter=status,
+            include_owned=True,
+            activated_only=activated_only,
+            activation=activation,
+            ownership=ownership,
+            type_filter=type_filter,
+            search=search,
+            page=page,
+            limit=limit,
+        )
 
         # Resolve skill references so names/descriptions are populated (needed by orchestrator)
         await sub_agent_service.resolve_imported_skills_bulk(db, sub_agents)
 
         items = [SubAgentListItem.from_sub_agent(sa) for sa in sub_agents]
-        return SubAgentListResponse(items=items, total=len(items))
+        return SubAgentListResponse(items=items, total=total)
     except Exception as e:
         logger.error(f"Failed to list sub-agents: {e}")
         raise HTTPException(status_code=500, detail="Failed to list sub-agents")
@@ -186,7 +206,9 @@ async def list_activated_sub_agents(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agents = await sub_agent_service.get_accessible_sub_agents(
+        # Deliberately unpaged: the orchestrator builds the user's whole registry
+        # from this response.
+        sub_agents, _ = await sub_agent_service.get_accessible_sub_agents(
             db, user.id, is_admin=False, status_filter=SubAgentStatus.APPROVED, activated_only=True
         )
 
@@ -213,13 +235,18 @@ async def list_pending_approvals(
     request: Request,
     db: DbSession,
     user: User = Depends(require_admin),
+    search: str | None = Query(None, description="Search by name or description"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> SubAgentListResponse:
     """List sub-agents pending approval (admin only)."""
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agents = await sub_agent_service.get_pending_approvals(db)
+        sub_agents, total = await sub_agent_service.get_pending_approvals(
+            db, search=search, page=page, limit=limit
+        )
         items = [SubAgentListItem.from_sub_agent(sa) for sa in sub_agents]
-        return SubAgentListResponse(items=items, total=len(items))
+        return SubAgentListResponse(items=items, total=total)
     except Exception as e:
         logger.error(f"Failed to list pending approvals: {e}")
         raise HTTPException(status_code=500, detail="Failed to list pending approvals")
@@ -246,7 +273,7 @@ async def get_sub_agent_by_config_hash(
             raise HTTPException(status_code=404, detail="Config version not found")
 
         # Check access
-        accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+        accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
         if not any(sa.id == sub_agent.id for sa in accessible):
             raise HTTPException(status_code=403, detail="Access denied")
 
@@ -285,7 +312,7 @@ async def get_sub_agent_by_config_version(
             raise HTTPException(status_code=404, detail="Config version not found")
 
         # Check access
-        accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+        accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
         if not any(sa.id == sub_agent.id for sa in accessible):
             raise HTTPException(status_code=403, detail="Access denied")
 
@@ -454,7 +481,7 @@ async def get_sub_agent(
         # Check access
         if not effective_admin and sub_agent.owner_user_id != user.id:
             # Check group access
-            accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+            accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
             if not any(sa.id == sub_agent_id for sa in accessible):
                 raise HTTPException(status_code=403, detail="Access denied")
 
@@ -665,13 +692,18 @@ async def approve_sub_agent(
 @router.get("/{sub_agent_id}/permissions", response_model=list[SubAgentGroupPermissionResponse])
 async def get_sub_agent_permissions(
     request: Request,
+    response: Response,
     sub_agent_id: int,
     db: DbSession,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by group name"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SubAgentGroupPermissionResponse]:
     """Get group permissions (read/write) for this sub-agent.
 
     Owner, admin (with admin mode enabled), or users with write permission can view permissions.
+    `X-Total-Count` carries how many grants match.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
@@ -687,7 +719,10 @@ async def get_sub_agent_permissions(
             if not has_write:
                 raise HTTPException(status_code=403, detail="Insufficient permissions or admin mode not enabled")
 
-        permissions = await sub_agent_service.get_permissions(db, sub_agent_id)
+        permissions, total = await sub_agent_service.get_permissions(
+            db, sub_agent_id, search=search, page=page, limit=limit
+        )
+        response.headers["X-Total-Count"] = str(total)
         return [SubAgentGroupPermissionResponse(**perm) for perm in permissions]
     except HTTPException:
         raise
@@ -699,14 +734,20 @@ async def get_sub_agent_permissions(
 @router.get("/{sub_agent_id}/versions", response_model=list[SubAgentConfigVersion])
 async def get_sub_agent_versions(
     request: Request,
+    response: Response,
     sub_agent_id: int,
     db: DbSession,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by change summary or version hash"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SubAgentConfigVersion]:
-    """Get all configuration versions for a sub-agent.
+    """Get configuration versions for a sub-agent, newest first.
 
     Returns version history with all configuration data.
     User must be owner, have group access, or be admin.
+    `X-Total-Count` carries how many versions match; history only grows, so the
+    console pages it.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
@@ -717,12 +758,15 @@ async def get_sub_agent_versions(
 
         # Check access
         if not effective_admin and sub_agent.owner_user_id != user.id:
-            accessible = await sub_agent_service.get_accessible_sub_agents(db, user.id)
+            accessible, _ = await sub_agent_service.get_accessible_sub_agents(db, user.id)
             if not any(sa.id == sub_agent_id for sa in accessible):
                 raise HTTPException(status_code=403, detail="Access denied")
 
-        versions = await sub_agent_service.get_config_versions(db, sub_agent_id)
+        versions, total = await sub_agent_service.get_config_versions(
+            db, sub_agent_id, search=search, page=page, limit=limit
+        )
         await annotate_models(request, db, list(versions))
+        response.headers["X-Total-Count"] = str(total)
         return versions
     except HTTPException:
         raise
@@ -975,16 +1019,26 @@ async def set_default_version(
 @router.get("/admin/pending-versions")
 async def list_pending_version_approvals(
     request: Request,
+    response: Response,
     db: DbSession,
     user: User = Depends(require_admin),
+    search: str | None = Query(
+        None, description="Search by agent name, description, change summary, or owner name/email"
+    ),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[dict]:
-    """List all versions pending approval across all sub-agents (admin only).
+    """List versions pending approval across all sub-agents (admin only), oldest first.
 
     Returns version info with sub-agent context for approval queue.
+    `X-Total-Count` carries how many pending versions match.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        pending = await sub_agent_service.get_pending_version_approvals(db)
+        pending, total = await sub_agent_service.get_pending_version_approvals(
+            db, search=search, page=page, limit=limit
+        )
+        response.headers["X-Total-Count"] = str(total)
         return pending
     except Exception as e:
         logger.error(f"Failed to list pending version approvals: {e}")

@@ -3,6 +3,7 @@
 import logging
 import secrets
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,7 @@ from ..models.audit import AuditAction, AuditEntityType
 from ..models.scim_token import ScimToken, ScimTokenCreated
 from ..models.user import User
 from ..services.audit_service import AuditService
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -80,18 +82,57 @@ class ScimTokenService:
             created_at=row.created_at,
         )
 
-    async def list_tokens(self, db: AsyncSession) -> list[ScimToken]:
-        """List all SCIM tokens (active and revoked) with masked token values."""
+    async def list_tokens(
+        self,
+        db: AsyncSession,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[ScimToken], int]:
+        """List SCIM tokens (active and revoked) with masked token values.
+
+        Args:
+            db: Database session
+            search: Match against name and description
+            page: Page number (1-indexed), only meaningful with a limit
+            limit: Page size. None returns every match.
+
+        Returns:
+            Tuple of (tokens, total matching count)
+        """
+        where_clause = ""
+        params: dict[str, Any] = {}
+        if search:
+            where_clause = "WHERE " + like_clause("name", "description")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
         result = await db.execute(
-            text("""
+            text(f"""
                 SELECT id, name, description, token, created_by,
                        last_used_at, expires_at, revoked_at, created_at
                 FROM scim_tokens
-                ORDER BY created_at DESC
-            """)
+                {where_clause}
+                ORDER BY created_at DESC, id DESC
+                {pagination}
+            """),
+            params,
         )
         rows = result.fetchall()
-        return [
+
+        if limit is None:
+            total = len(rows)
+        else:
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            count_result = await db.execute(text(f"SELECT COUNT(*) FROM scim_tokens {where_clause}"), count_params)
+            total = count_result.scalar() or 0
+
+        tokens = [
             ScimToken(
                 id=row.id,
                 name=row.name,
@@ -105,6 +146,7 @@ class ScimTokenService:
             )
             for row in rows
         ]
+        return tokens, total
 
     async def get_token(self, db: AsyncSession, token_id: int) -> ScimToken | None:
         """Get a single SCIM token by ID (masked)."""

@@ -35,6 +35,7 @@ async def list_audit_logs(
     action: AuditAction | None = Query(None, description="Filter by action"),
     from_date: datetime | None = Query(None, description="Filter from date"),
     to_date: datetime | None = Query(None, description="Filter to date"),
+    search: str | None = Query(None, description="Search by entity ID, actor sub, or actor name/email"),
 ) -> AuditLogListResponse:
     """List audit logs with filtering.
 
@@ -51,6 +52,7 @@ async def list_audit_logs(
         action=action,
         from_date=from_date,
         to_date=to_date,
+        search=search,
     )
 
     return AuditLogListResponse(

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
 from ..config import config
 from ..models.notification import NotificationData, NotificationType
+from ..models.listing import ActivationFilter, OwnershipFilter
 from ..models.sub_agent import (
     ActivationSource,
     SkillDefinition,
@@ -31,6 +32,7 @@ from ..models.user import User
 from ..repositories.sub_agent_repository import ApprovalContext
 from ..services.model_gateway_service import ModelGatewayError
 from ..services.notification_service import NotificationService
+from ..utils.sql_search import like_clause, like_contains
 
 if TYPE_CHECKING:
     from ..repositories.sub_agent_repository import SubAgentRepository
@@ -244,7 +246,13 @@ class SubAgentService:
         status_filter: SubAgentStatus | None = None,
         include_owned: bool = True,
         activated_only: bool = False,
-    ) -> list[SubAgent]:
+        activation: ActivationFilter | None = None,
+        ownership: OwnershipFilter | None = None,
+        type_filter: SubAgentType | None = None,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SubAgent], int]:
         """Get sub-agents accessible to the user.
 
         Returns sub-agents that are:
@@ -258,6 +266,10 @@ class SubAgentService:
         Always joins with current_version to show the latest state.
         Includes is_activated field showing if user has activated the sub-agent.
         If activated_only=True, only returns activated sub-agents.
+
+        `limit=None` returns every accessible sub-agent — the orchestrator builds
+        a user's whole registry from this — and the console asks for a page.
+        Returns (sub_agents, total matching).
         """
         base_select = """
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
@@ -301,29 +313,70 @@ class SubAgentService:
                 ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
         """
 
-        activation_filter = (
-            "AND (usa.sub_agent_id IS NOT NULL OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)) "
-            if activated_only
-            else ""
-        )
+        # Two predicates, deliberately different:
+        #
+        #  * activated_only is the orchestrator's: a public system agent counts as
+        #    activated for everyone, because it belongs in every user's registry.
+        #  * `activation` is the console's facet, and matches the is_activated
+        #    field the card's toggle renders. Reusing the orchestrator's predicate
+        #    here listed seeded system agents under "Enabled" while their toggle
+        #    read Disabled.
+        activation_filter = ""
+        if activated_only:
+            activation_filter = (
+                "AND (usa.sub_agent_id IS NOT NULL "
+                "OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)) "
+            )
+        elif activation is ActivationFilter.ENABLED:
+            activation_filter = "AND usa.sub_agent_id IS NOT NULL "
+        elif activation is ActivationFilter.DISABLED:
+            activation_filter = "AND usa.sub_agent_id IS NULL "
+
+        params: dict[str, Any] = {"user_id": user_id}
+
+        # Search and ownership are SQL filters, not post-filters: a page has to be
+        # cut from the filtered set, and `total` has to count it.
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("sa.name", "cv.description") + " "
+            params["search"] = like_contains(search)
+
+        # Owned vs shared-with-me is decided in SQL, before the page is cut:
+        # trimming rows afterwards silently short-changes a page and leaves
+        # `total` counting the untrimmed set.
+        type_clause = ""
+        if type_filter is not None:
+            type_clause = "AND sa.type = :type_filter "
+            params["type_filter"] = getattr(type_filter, "value", type_filter)
+
+        owned_filter = ""
+        if ownership is OwnershipFilter.OWNED:
+            owned_filter = "AND sa.owner_user_id = :user_id "
+        elif ownership is OwnershipFilter.SHARED:
+            owned_filter = "AND sa.owner_user_id <> :user_id "
 
         if is_admin and status_filter is None:
             # Admins see all sub-agents
-            query = text(f"""
+            query_str = f"""
                 {base_select}
                 WHERE sa.deleted_at IS NULL {activation_filter}
-                ORDER BY sa.updated_at DESC
-            """)
-            result = await db.execute(query, {"user_id": user_id})
+                {owned_filter}
+                {type_clause}
+                {search_filter}
+            """
         elif is_admin and status_filter:
-            query = text(f"""
+            params["status"] = status_filter.value
+            query_str = f"""
                 {base_select}
-                WHERE cv.status = :status AND sa.deleted_at IS NULL {activation_filter}
-                ORDER BY sa.updated_at DESC
-            """)
-            result = await db.execute(query, {"status": status_filter.value, "user_id": user_id})
+                WHERE COALESCE(cv.status, 'draft') = :status AND sa.deleted_at IS NULL {activation_filter}
+                {owned_filter}
+                {type_clause}
+                {search_filter}
+            """
         else:
             # Non-admins see owned + public + group-assigned sub-agents
+            params["include_owned"] = include_owned
+            params["embed_source"] = ActivationSource.EMBED.value
             query_str = f"""
                 SELECT DISTINCT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
                        sa.system_role,
@@ -347,8 +400,6 @@ class SubAgentService:
                        cv.foundry_scopes as cv_foundry_scopes,
                        cv.foundry_version as cv_foundry_version,
                        cv.pricing_config as cv_pricing_config,
-                       cv.enable_thinking as cv_enable_thinking,
-                       cv.thinking_level as cv_thinking_level,
                        cv.skills as cv_skills,
                        cv.sandbox_enabled as cv_sandbox_enabled,
                        cv.change_summary as cv_change_summary, cv.status as cv_status,
@@ -361,12 +412,12 @@ class SubAgentService:
                        usa.activated_by_groups as activated_by_groups
                 FROM sub_agents sa
                 JOIN users u ON sa.owner_user_id = u.id
-                LEFT JOIN sub_agent_config_versions cv 
+                LEFT JOIN sub_agent_config_versions cv
                     ON sa.id = cv.sub_agent_id AND sa.default_version = cv.version
                 LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
                 LEFT JOIN sub_agent_permissions sap ON sa.id = sap.sub_agent_id
                 LEFT JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
-                LEFT JOIN user_sub_agent_activations usa 
+                LEFT JOIN user_sub_agent_activations usa
                     ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
                 WHERE sa.deleted_at IS NULL AND (
                     (:include_owned AND sa.owner_user_id = :user_id)
@@ -389,39 +440,41 @@ class SubAgentService:
                           AND sjd.deleted_at IS NULL
                     ))
                 ) {activation_filter}
+                {owned_filter}
+                {type_clause}
+                {search_filter}
             """
             if status_filter:
-                query_str += "AND cv.status = :status "
-                query_str += "ORDER BY sa.updated_at DESC"
-                query = text(query_str)
-                result = await db.execute(
-                    query,
-                    {
-                        "user_id": user_id,
-                        "include_owned": include_owned,
-                        "status": status_filter.value,
-                        "embed_source": ActivationSource.EMBED.value,
-                    },
-                )
-            else:
-                query_str += "ORDER BY sa.updated_at DESC"
-                query = text(query_str)
-                result = await db.execute(
-                    query,
-                    {
-                        "user_id": user_id,
-                        "include_owned": include_owned,
-                        "embed_source": ActivationSource.EMBED.value,
-                    },
-                )
+                params["status"] = status_filter.value
+                # default_version is only set on approval, so cv is NULL for a
+                # never-approved agent. The client-side filter this replaced read
+                # `config_version?.status ?? 'draft'`; without the COALESCE the
+                # Draft and Pending facets match nothing at all.
+                query_str += "AND COALESCE(cv.status, 'draft') = :status "
 
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        result = await db.execute(
+            text(f"{query_str} ORDER BY sa.updated_at DESC, sa.id DESC {pagination}"), params
+        )
         rows = result.mappings().all()
         sub_agents = [self._row_to_sub_agent_with_version(row) for row in rows]
 
         # Compute effective_permission for each sub-agent
         await self._populate_effective_permissions(db, sub_agents, user_id)
 
-        return sub_agents
+        if limit is None:
+            return sub_agents, len(sub_agents)
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count_result = await db.execute(
+            text(f"SELECT COUNT(*) FROM ({query_str}) AS matches"), count_params
+        )
+        return sub_agents, count_result.scalar() or 0
 
     async def get_accessible_sub_agents_for_voice_call(
         self,
@@ -512,9 +565,30 @@ class SubAgentService:
             updated_at=row["updated_at"],
         )
 
-    async def get_pending_approvals(self, db: AsyncSession) -> list[SubAgent]:
-        """Get all sub-agents with versions pending approval (admin only)."""
-        query = text("""
+    async def get_pending_approvals(
+        self,
+        db: AsyncSession,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SubAgent], int]:
+        """Get all sub-agents with versions pending approval (admin only).
+
+        Returns (sub_agents, total matching). `limit=None` returns the whole queue.
+        """
+        params: dict[str, Any] = {}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("sa.name", "cv.description")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        query = text(f"""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
                    sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
@@ -548,11 +622,31 @@ class SubAgentService:
             JOIN sub_agent_config_versions cv 
                 ON sa.id = cv.sub_agent_id AND sa.current_version = cv.version
             WHERE cv.status = 'pending_approval' AND sa.deleted_at IS NULL
-            ORDER BY cv.created_at ASC
+            {search_filter}
+            ORDER BY cv.created_at ASC, sa.id ASC
+            {pagination}
         """)
-        result = await db.execute(query)
+        result = await db.execute(query, params)
         rows = result.mappings().all()
-        return [self._row_to_sub_agent_with_version(row) for row in rows]
+        pending = [self._row_to_sub_agent_with_version(row) for row in rows]
+
+        if limit is None:
+            return pending, len(pending)
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count_result = await db.execute(
+            text(f"""
+                SELECT COUNT(*)
+                FROM sub_agents sa
+                JOIN users u ON sa.owner_user_id = u.id
+                JOIN sub_agent_config_versions cv
+                    ON sa.id = cv.sub_agent_id AND sa.current_version = cv.version
+                WHERE cv.status = 'pending_approval' AND sa.deleted_at IS NULL
+                {search_filter}
+            """),
+            count_params,
+        )
+        return pending, count_result.scalar() or 0
 
     async def get_sub_agent_by_id(
         self,
@@ -719,51 +813,65 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         include_deleted: bool = False,
-    ) -> list[SubAgentConfigVersion]:
-        """Get all configuration versions for a sub-agent.
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SubAgentConfigVersion], int]:
+        """Get configuration versions for a sub-agent, newest first.
 
         Args:
             db: Database session
             sub_agent_id: The sub-agent ID
             include_deleted: If True, include soft-deleted versions
+            search: Matches the change summary or the version hash
+            page: 1-based page number, only used with `limit`
+            limit: Page size; None returns the whole history
+
+        Returns (versions, total matching).
         """
-        if include_deleted:
-            query = text("""
-                SELECT cv.id, cv.sub_agent_id, cv.version, cv.version_hash, cv.release_number,
-                       cv.description, cv.model, cv.model_tier, cv.system_prompt, cv.agent_url, cv.mcp_tools,
-                       cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
-                       s.ssm_parameter_name as foundry_client_secret_ssmkey,
-                       cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
-                       cv.pricing_config, cv.enable_thinking, cv.thinking_level,
-                       cv.skills, cv.sandbox_enabled,
-                       cv.change_summary, cv.status, 
-                       cv.submitted_by_user_id,
-                       cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
-                FROM sub_agent_config_versions cv
-                LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
-                WHERE cv.sub_agent_id = :sub_agent_id
-                ORDER BY cv.version DESC
-            """)
-        else:
-            query = text("""
-                SELECT cv.id, cv.sub_agent_id, cv.version, cv.version_hash, cv.release_number,
-                       cv.description, cv.model, cv.model_tier, cv.system_prompt, cv.agent_url, cv.mcp_tools,
-                       cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
-                       s.ssm_parameter_name as foundry_client_secret_ssmkey,
-                       cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
-                       cv.pricing_config, cv.enable_thinking, cv.thinking_level,
-                       cv.skills, cv.sandbox_enabled,
-                       cv.change_summary, cv.status, 
-                       cv.submitted_by_user_id,
-                       cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
-                FROM sub_agent_config_versions cv
-                LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
-                WHERE cv.sub_agent_id = :sub_agent_id AND cv.deleted_at IS NULL
-                ORDER BY cv.version DESC
-            """)
-        result = await db.execute(query, {"sub_agent_id": sub_agent_id})
+        params: dict[str, Any] = {"sub_agent_id": sub_agent_id}
+        where = "cv.sub_agent_id = :sub_agent_id"
+        if not include_deleted:
+            where += " AND cv.deleted_at IS NULL"
+        if search:
+            where += " AND " + like_clause("cv.change_summary", "cv.version_hash")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        query = text(f"""
+            SELECT cv.id, cv.sub_agent_id, cv.version, cv.version_hash, cv.release_number,
+                   cv.description, cv.model, cv.model_tier, cv.system_prompt, cv.agent_url, cv.mcp_tools,
+                   cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref,
+                   s.ssm_parameter_name as foundry_client_secret_ssmkey,
+                   cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
+                   cv.pricing_config, cv.enable_thinking, cv.thinking_level,
+                   cv.skills, cv.sandbox_enabled,
+                   cv.change_summary, cv.status,
+                   cv.submitted_by_user_id,
+                   cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
+            FROM sub_agent_config_versions cv
+            LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
+            WHERE {where}
+            ORDER BY cv.version DESC, cv.id DESC
+            {pagination}
+        """)
+        result = await db.execute(query, params)
         rows = result.mappings().all()
         raw_versions = [self._row_to_config_version(row) for row in rows]
+
+        if limit is None:
+            total = len(raw_versions)
+        else:
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            count_result = await db.execute(
+                text(f"SELECT COUNT(*) FROM sub_agent_config_versions cv WHERE {where}"), count_params
+            )
+            total = count_result.scalar() or 0
 
         # Resolve skills fully via SQL join on (registry_id, content_hash).
         # _row_to_config_version returns SubAgentConfigVersionRaw with typed SkillRefs;
@@ -823,7 +931,7 @@ class SubAgentService:
                 resolved_by_version.setdefault(cv_id, []).append(skill)
 
         # Convert raw versions to fully resolved SubAgentConfigVersion objects
-        return [v.to_resolved(resolved_by_version.get(v.id, [])) for v in raw_versions]
+        return [v.to_resolved(resolved_by_version.get(v.id, [])) for v in raw_versions], total
 
     async def create_sub_agent(
         self,
@@ -2568,25 +2676,56 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-    ) -> list[dict[str, Any]]:
-        """Get group permissions with read/write details for a sub-agent."""
-        query = text("""
-            SELECT sap.user_group_id, ug.name as user_group_name, sap.permissions
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Get group permissions with read/write details for a sub-agent.
+
+        `search` matches the group name. `limit=None` returns every grant.
+        Returns (permissions, total matching).
+        """
+        params: dict[str, Any] = {"id": sub_agent_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("ug.name")
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        from_where = f"""
             FROM sub_agent_permissions sap
             JOIN user_groups ug ON sap.user_group_id = ug.id
-            WHERE sap.sub_agent_id = :id
-            ORDER BY ug.name
-        """)
-        result = await db.execute(query, {"id": sub_agent_id})
-        rows = result.mappings().all()
-        return [
+            WHERE sap.sub_agent_id = :id {search_filter}
+        """
+        result = await db.execute(
+            text(f"""
+                SELECT sap.user_group_id, ug.name as user_group_name, sap.permissions
+                {from_where}
+                ORDER BY ug.name, sap.user_group_id
+                {pagination}
+            """),
+            params,
+        )
+        permissions = [
             {
                 "user_group_id": row["user_group_id"],
                 "user_group_name": row["user_group_name"],
                 "permissions": row["permissions"],
             }
-            for row in rows
+            for row in result.mappings().all()
         ]
+
+        if limit is None:
+            return permissions, len(permissions)
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count_result = await db.execute(text(f"SELECT COUNT(*) {from_where}"), count_params)
+        return permissions, count_result.scalar() or 0
 
     async def check_user_permission(
         self,
@@ -2651,27 +2790,69 @@ class SubAgentService:
 
         return False
 
-    async def get_pending_version_approvals(self, db: AsyncSession) -> list[dict[str, Any]]:
-        """Get all versions pending approval with sub-agent info (admin only)."""
-        query = text("""
-            SELECT 
-                sa.id as sub_agent_id, sa.name, sa.type, sa.default_version, sa.owner_user_id,
-                u.email as owner_email, u.first_name, u.last_name,
-                v.id as version_id, v.version, v.description, v.model, 
-                v.system_prompt, v.agent_url, v.mcp_tools, 
-                v.foundry_hostname, v.foundry_client_id, v.foundry_client_secret_ref,
-                v.foundry_ontology_rid, v.foundry_query_api_name, v.foundry_scopes, v.foundry_version,
-                v.change_summary, v.created_at as version_created_at
+    async def get_pending_version_approvals(
+        self,
+        db: AsyncSession,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Get versions pending approval with sub-agent info (admin only), oldest first.
+
+        `search` matches the agent name, the version's description and change
+        summary, and the owner's name or email. `limit=None` returns the whole queue.
+        Returns (pending versions, total matching).
+        """
+        params: dict[str, Any] = {}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause(
+                "sa.name",
+                "v.description",
+                "v.change_summary",
+                "u.email",
+                # The full name, so "Ada Love" matches across the two columns.
+                "CONCAT_WS(' ', u.first_name, u.last_name)",
+            )
+            params["search"] = like_contains(search)
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        from_where = f"""
             FROM sub_agent_config_versions v
             JOIN sub_agents sa ON v.sub_agent_id = sa.id
             JOIN users u ON sa.owner_user_id = u.id
             WHERE v.status = 'pending_approval' AND sa.deleted_at IS NULL
-            ORDER BY v.created_at ASC
+            {search_filter}
+        """
+        query = text(f"""
+            SELECT
+                sa.id as sub_agent_id, sa.name, sa.type, sa.default_version, sa.owner_user_id,
+                u.email as owner_email, u.first_name, u.last_name,
+                v.id as version_id, v.version, v.description, v.model,
+                v.system_prompt, v.agent_url, v.mcp_tools,
+                v.foundry_hostname, v.foundry_client_id, v.foundry_client_secret_ref,
+                v.foundry_ontology_rid, v.foundry_query_api_name, v.foundry_scopes, v.foundry_version,
+                v.change_summary, v.created_at as version_created_at
+            {from_where}
+            ORDER BY v.created_at ASC, v.id ASC
+            {pagination}
         """)
-        result = await db.execute(query)
+        result = await db.execute(query, params)
         rows = result.mappings().all()
 
-        return [
+        if limit is None:
+            total = len(rows)
+        else:
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            count_result = await db.execute(text(f"SELECT COUNT(*) {from_where}"), count_params)
+            total = count_result.scalar() or 0
+
+        pending = [
             {
                 "sub_agent_id": row["sub_agent_id"],
                 "name": row["name"],
@@ -2694,6 +2875,7 @@ class SubAgentService:
             }
             for row in rows
         ]
+        return pending, total
 
     def _generate_version_hash(
         self,

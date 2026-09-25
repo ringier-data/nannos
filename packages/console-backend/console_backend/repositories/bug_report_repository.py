@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.audit import AuditEntityType
 from ..models.bug_report import BugReportResponse, BugReportStatus
 from ..models.user import User
+from ..utils.sql_search import like_clause, like_contains
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ class BugReportRepository(AuditedRepository):
         user_id: str | None = None,
         status: BugReportStatus | None = None,
         created_after: datetime | None = None,
+        search: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> tuple[list[BugReportResponse], int]:
@@ -115,6 +117,17 @@ class BugReportRepository(AuditedRepository):
                 created_after = created_after.replace(tzinfo=timezone.utc)
             conditions.append("created_at > :created_after")
             params["created_after"] = created_after
+
+        if search:
+            # The id and conversation id are what an admin pastes from a LangSmith trace or a
+            # notification; the reporter is matched on the same fields as the admin user list.
+            reporter_match = like_clause("u.first_name", "u.last_name", "u.email")
+            conditions.append(
+                "("
+                + like_clause("bug_reports.description", "bug_reports.conversation_id", "bug_reports.id::text")
+                + f" OR EXISTS (SELECT 1 FROM users u WHERE u.id = bug_reports.user_id AND {reporter_match}))"
+            )
+            params["search"] = like_contains(search)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { Search, Calendar } from 'lucide-react';
 import { listAuditLogsApiV1AdminAuditLogsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
 import type { AuditAction, AuditEntityType } from '@/api/generated';
@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/select';
 import { Pagination } from '@/components/admin/Pagination';
 import { AuditDiffViewer } from '@/components/admin/AuditDiffViewer';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 
 const actionColors: Record<AuditAction, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   create: 'default',
@@ -76,24 +77,28 @@ export function AuditPage() {
   const [page, setPage] = useState(1);
   const [entityType, setEntityType] = useState<AuditEntityType | 'all'>('all');
   const [action, setAction] = useState<AuditAction | 'all'>('all');
-  const [userId, setUserId] = useState('');
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
 
   const limit = 50;
 
-  const { data: logsData, isLoading } = useQuery({
+  const { data: logsData, isLoading, isFetching } = useQuery({
     ...listAuditLogsApiV1AdminAuditLogsGetOptions({
       query: {
         page,
         limit,
         entity_type: entityType !== 'all' ? entityType : undefined,
         action: action !== 'all' ? action : undefined,
-        user_id: userId || undefined,
+        // Supersedes the exact-match actor ID box: it matches the actor sub as a
+        // substring, plus the actor's name/email and the entity ID.
+        search: debouncedSearch || undefined,
         from_date: fromDate || undefined,
         to_date: toDate || undefined,
       },
     }),
+    placeholderData: keepPreviousData,
   });
 
   const logs = logsData?.data ?? [];
@@ -159,13 +164,13 @@ export function AuditPage() {
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Actor ID..."
-            value={userId}
+            placeholder="Search actor or entity ID..."
+            value={search}
             onChange={(e) => {
-              setUserId(e.target.value);
+              setSearch(e.target.value);
               setPage(1);
             }}
-            className="pl-9 w-[180px]"
+            className="pl-9 w-[260px]"
           />
         </div>
 
@@ -193,7 +198,7 @@ export function AuditPage() {
         </div>
       </div>
 
-      <div className="border rounded-lg">
+      <div className={`border rounded-lg transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}>
         <Table>
           <TableHeader>
             <TableRow>

@@ -104,7 +104,7 @@ class TestCreateJobAutoSubAgent:
 
         mock_sub_agent_service.create_sub_agent.return_value = created_agent
         # Accessible agents — newly created agent included
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([created_agent], len([created_agent]))
 
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
@@ -148,7 +148,7 @@ class TestCreateJobAutoSubAgent:
         created_agent = MagicMock()
         created_agent.id = 77
         mock_sub_agent_service.create_sub_agent.return_value = created_agent
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([created_agent], len([created_agent]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=77)
@@ -185,7 +185,7 @@ class TestCreateJobAutoSubAgent:
         created_agent = MagicMock()
         created_agent.id = 55
         mock_sub_agent_service.create_sub_agent.return_value = created_agent
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([created_agent], len([created_agent]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=55)
@@ -222,7 +222,7 @@ class TestCreateJobAccessControl:
         """Raises ValueError when referencing a sub-agent the user cannot access."""
         db = AsyncMock()
         # Accessible agents list does NOT include sub-agent 999
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = []
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([], len([]))
 
         with pytest.raises(ValueError, match="Access denied"):
             await service.create_job(
@@ -239,7 +239,7 @@ class TestCreateJobAccessControl:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1, sub_agent_id=42)
@@ -263,7 +263,7 @@ class TestCreateJobAccessControl:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_delivery_channel_repo.get_channel_by_id.return_value = None
 
         data = _make_interval_create(sub_agent_id=42)
@@ -327,7 +327,7 @@ class TestCreateJobNextRunAt:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
 
@@ -349,7 +349,7 @@ class TestCreateJobNextRunAt:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
@@ -462,7 +462,7 @@ class TestUpdateJobUnsetSentinel:
         mock_repo.get_job.side_effect = [existing_job, existing_job]
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
 
         await service.update_job(
             db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, sub_agent_id=42
@@ -816,7 +816,7 @@ class TestJobTimezone:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
@@ -847,7 +847,7 @@ class TestJobTimezone:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
@@ -868,7 +868,7 @@ class TestJobTimezone:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
@@ -889,7 +889,7 @@ class TestJobTimezone:
         db = AsyncMock()
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
@@ -999,7 +999,7 @@ class TestSettingsTimezoneFallback:
         mock_user_settings_service.get_settings.return_value = UserSettings(user_id=actor.id, timezone="")
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
         mock_repo.create_definition.return_value = 1
         mock_repo.create_subscription.return_value = 1
         mock_repo.get_job.return_value = make_job(job_id=1)
@@ -1034,7 +1034,7 @@ class TestSettingsTimezoneFallback:
         mock_user_settings_service.get_settings.return_value = UserSettings(user_id=actor.id, timezone="Zurich")
         accessible = MagicMock()
         accessible.id = 42
-        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = ([accessible], len([accessible]))
 
         data = ScheduledJobCreate(
             sub_agent_id=42,

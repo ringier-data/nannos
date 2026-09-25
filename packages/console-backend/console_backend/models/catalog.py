@@ -93,6 +93,9 @@ class CatalogPermission(BaseModel):
     id: int
     catalog_id: str
     user_group_id: int
+    #: Returned so a searched or paged grant list can be rendered on its own,
+    #: like the secret and scheduled-job permission lists.
+    user_group_name: str
     permissions: list[str] = Field(default_factory=lambda: ["read"])
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

@@ -1,8 +1,16 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Copy, Check, Key } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { Plus, Trash2, Copy, Check, Key, Search } from 'lucide-react';
 import { toast } from 'sonner';
-import { client } from '@/api/generated/client.gen';
+import {
+  createScimTokenApiV1AdminScimTokensPostMutation,
+  listScimTokensApiV1AdminScimTokensGetOptions,
+  listScimTokensApiV1AdminScimTokensGetQueryKey,
+  revokeScimTokenApiV1AdminScimTokensTokenIdDeleteMutation,
+} from '@/api/generated/@tanstack/react-query.gen';
+import type { ScimToken, ScimTokenCreate, ScimTokenCreated } from '@/api/generated/types.gen';
+import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -27,31 +35,7 @@ import {
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 
-interface ScimToken {
-  id: number;
-  name: string;
-  description: string | null;
-  token_hint: string;
-  created_by: string;
-  last_used_at: string | null;
-  expires_at: string | null;
-  revoked_at: string | null;
-  created_at: string;
-}
-
-interface ScimTokenCreated {
-  id: number;
-  name: string;
-  description: string | null;
-  token: string;
-  expires_at: string | null;
-  created_at: string;
-}
-
-interface ScimTokenListResponse {
-  data: ScimToken[];
-  meta: { page: number; limit: number; total: number };
-}
+const PAGE_SIZE = 20;
 
 export function ScimTokensPage() {
   const queryClient = useQueryClient();
@@ -68,29 +52,29 @@ export function ScimTokensPage() {
   const [description, setDescription] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
 
-  const { data, isLoading } = useQuery<ScimTokenListResponse>({
-    queryKey: ['scimTokens'],
-    queryFn: async () => {
-      const res = await client.get<ScimTokenListResponse>({
-        url: '/api/v1/admin/scim-tokens',
-      });
-      return res.data as ScimTokenListResponse;
-    },
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(search);
+
+  const { data, isLoading, isFetching } = useQuery({
+    ...listScimTokensApiV1AdminScimTokensGetOptions({
+      query: { page, limit: PAGE_SIZE, search: debouncedSearch || undefined },
+    }),
+    placeholderData: keepPreviousData,
   });
 
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setPage(1);
+  };
+
   const createMutation = useMutation({
-    mutationFn: async (body: { name: string; description?: string; expires_at?: string }) => {
-      const res = await client.post<ScimTokenCreated>({
-        url: '/api/v1/admin/scim-tokens',
-        body,
-      });
-      return res.data as ScimTokenCreated;
-    },
+    ...createScimTokenApiV1AdminScimTokensPostMutation(),
     onSuccess: (token) => {
       setCreatedToken(token);
       setCreateDialogOpen(false);
       resetForm();
-      queryClient.invalidateQueries({ queryKey: ['scimTokens'] });
+      queryClient.invalidateQueries({ queryKey: listScimTokensApiV1AdminScimTokensGetQueryKey() });
       toast.success('SCIM token created');
     },
     onError: () => {
@@ -99,11 +83,9 @@ export function ScimTokensPage() {
   });
 
   const revokeMutation = useMutation({
-    mutationFn: async (tokenId: number) => {
-      await client.delete({ url: `/api/v1/admin/scim-tokens/${tokenId}` });
-    },
+    ...revokeScimTokenApiV1AdminScimTokensTokenIdDeleteMutation(),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['scimTokens'] });
+      queryClient.invalidateQueries({ queryKey: listScimTokensApiV1AdminScimTokensGetQueryKey() });
       toast.success('SCIM token revoked');
       setRevokeDialog({ open: false, token: null });
     },
@@ -119,10 +101,10 @@ export function ScimTokensPage() {
   };
 
   const handleCreate = () => {
-    const body: { name: string; description?: string; expires_at?: string } = { name };
+    const body: ScimTokenCreate = { name };
     if (description) body.description = description;
     if (expiresAt) body.expires_at = new Date(expiresAt).toISOString();
-    createMutation.mutate(body);
+    createMutation.mutate({ body });
   };
 
   const handleCopy = async (token: string) => {
@@ -133,8 +115,9 @@ export function ScimTokensPage() {
   };
 
   const tokens = data?.data ?? [];
+  const total = data?.meta.total ?? 0;
 
-  const formatDate = (dateStr: string | null) => {
+  const formatDate = (dateStr: string | null | undefined) => {
     if (!dateStr) return '—';
     return new Date(dateStr).toLocaleDateString(undefined, {
       year: 'numeric',
@@ -166,8 +149,18 @@ export function ScimTokensPage() {
         </Button>
       </div>
 
+      <div className="relative max-w-sm">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          placeholder="Search by name or description..."
+          value={search}
+          onChange={(e) => handleSearchChange(e.target.value)}
+          className="pl-9"
+        />
+      </div>
+
       {/* Token Table */}
-      <div className="border rounded-lg">
+      <div className={`border rounded-lg transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}>
         <Table>
           <TableHeader>
             <TableRow>
@@ -184,7 +177,10 @@ export function ScimTokensPage() {
             {isLoading ? (
               <TableRowsSkeleton columns={7} />
             ) : tokens.length === 0 ? (
-              <TableEmptyRow colSpan={7} title="No SCIM tokens created yet" />
+              <TableEmptyRow
+                colSpan={7}
+                title={debouncedSearch ? 'No SCIM tokens match your search' : 'No SCIM tokens created yet'}
+              />
             ) : (
               tokens.map((token) => {
                 const status = getTokenStatus(token);
@@ -240,6 +236,8 @@ export function ScimTokensPage() {
           </TableBody>
         </Table>
       </div>
+
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
 
       {/* Create Token Dialog */}
       <Dialog
@@ -347,7 +345,7 @@ export function ScimTokensPage() {
           description={`Are you sure you want to revoke "${revokeDialog.token.name}"? Any identity provider using this token will lose access immediately.`}
           confirmLabel="Revoke"
           variant="destructive"
-          onConfirm={() => revokeMutation.mutate(revokeDialog.token!.id)}
+          onConfirm={() => revokeMutation.mutate({ path: { token_id: revokeDialog.token!.id } })}
           isLoading={revokeMutation.isPending}
         />
       )}

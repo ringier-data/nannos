@@ -46,7 +46,7 @@ async def test_embed_activation_makes_a_private_sub_agent_reachable_for_a_non_ow
     assert agent.default_version == 1 and agent.is_public is False
 
     async def activated_for(user: User) -> list[int]:
-        rows = await sub_agent_service.get_accessible_sub_agents(
+        rows, _ = await sub_agent_service.get_accessible_sub_agents(
             pg_session,
             user.id,
             is_admin=False,
@@ -70,9 +70,11 @@ async def test_embed_activation_makes_a_private_sub_agent_reachable_for_a_non_ow
     assert agent.id in await activated_for(test_user_db)
     (visible,) = [
         sa
-        for sa in await sub_agent_service.get_accessible_sub_agents(
-            pg_session, test_user_db.id, is_admin=False, activated_only=True
-        )
+        for sa in (
+            await sub_agent_service.get_accessible_sub_agents(
+                pg_session, test_user_db.id, is_admin=False, activated_only=True
+            )
+        )[0]
         if sa.id == agent.id
     ]
     assert visible.is_activated is True
@@ -81,13 +83,15 @@ async def test_embed_activation_makes_a_private_sub_agent_reachable_for_a_non_ow
 
     # The grant follows the row: in the console list too (activated_only=False), and
     # never for a third user who did not arrive through the host.
-    console_list = await sub_agent_service.get_accessible_sub_agents(
+    console_list, _ = await sub_agent_service.get_accessible_sub_agents(
         pg_session, test_user_db.id, is_admin=False
     )
     assert agent.id in [sa.id for sa in console_list]
     assert agent.id not in [
         sa.id
-        for sa in await sub_agent_service.get_accessible_sub_agents(
-            pg_session, "someone-else", is_admin=False
-        )
+        for sa in (
+            await sub_agent_service.get_accessible_sub_agents(
+                pg_session, "someone-else", is_admin=False
+            )
+        )[0]
     ]

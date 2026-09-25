@@ -66,9 +66,21 @@ class CatalogService:
         db: AsyncSession,
         user: User,
         is_admin: bool = False,
-    ) -> list[Catalog]:
+        search: str | None = None,
+        ownership: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[Catalog], int]:
         """Get catalogs accessible to user."""
-        return await self.repo.get_accessible_catalogs(db, user.id, is_admin=is_admin)
+        return await self.repo.get_accessible_catalogs(
+            db,
+            user.id,
+            is_admin=is_admin,
+            search=search,
+            ownership=ownership,
+            page=page,
+            limit=limit,
+        )
 
     async def get_catalog(
         self,
@@ -84,7 +96,8 @@ class CatalogService:
         if is_admin or catalog.owner_user_id == user.id:
             return catalog
         # Check group-based access
-        accessible = await self.repo.get_accessible_catalogs(db, user.id)
+        # An access check, so it must see every catalog the user can reach.
+        accessible, _ = await self.repo.get_accessible_catalogs(db, user.id)
         if any(c.id == catalog_id for c in accessible):
             return catalog
         return None
@@ -174,6 +187,17 @@ class CatalogService:
         """Get permissions for a catalog."""
         return await self.repo.get_permissions(db, catalog_id)
 
+    async def list_permissions(
+        self,
+        db: AsyncSession,
+        catalog_id: str,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Permissions for a catalog filtered by group name, with the total match count."""
+        return await self.repo.list_permissions(db, catalog_id, search=search, page=page, limit=limit)
+
     async def set_permissions(
         self,
         db: AsyncSession,
@@ -262,9 +286,10 @@ class CatalogService:
         catalog_id: str,
         limit: int = 50,
         offset: int = 0,
+        search: str | None = None,
     ) -> tuple[list[CatalogPage], int]:
-        """Get paginated pages for a catalog."""
-        return await self.repo.get_catalog_pages(db, catalog_id, limit, offset)
+        """Get paginated pages for a catalog, optionally matching page title or file name."""
+        return await self.repo.get_catalog_pages(db, catalog_id, limit, offset, search)
 
     # --- Sources ---
 

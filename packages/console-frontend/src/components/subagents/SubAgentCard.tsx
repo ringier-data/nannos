@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
-  consoleListSubAgentsOptions,
   activateSubAgentApiV1SubAgentsSubAgentIdActivatePostMutation,
   deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
@@ -35,8 +34,13 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
   const [showPermissionsDialog, setShowPermissionsDialog] = useState(false);
 
   const invalidateList = () => {
-    queryClient.invalidateQueries({ queryKey: consoleListSubAgentsOptions({}).queryKey });
-    queryClient.invalidateQueries({ queryKey: consoleListSubAgentsOptions({ query: { owned_only: true } }).queryKey });
+    // The page number and every facet are part of the query key now, so an exact
+    // key would only ever match the unfiltered first page. Match on the
+    // generated `_id` instead, which is stable across all of them.
+    queryClient.invalidateQueries({
+      predicate: (query) =>
+        (query.queryKey[0] as { _id?: string } | undefined)?._id === 'consoleListSubAgents',
+    });
   };
 
   const activateMutation = useMutation({

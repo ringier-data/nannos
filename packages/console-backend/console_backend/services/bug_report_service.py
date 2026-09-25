@@ -166,6 +166,7 @@ class BugReportService:
         user: User,
         status: BugReportStatus | None = None,
         created_after: datetime | None = None,
+        search: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> BugReportListResponse:
@@ -186,6 +187,7 @@ class BugReportService:
             user_id=user_id_filter,
             status=status,
             created_after=created_after,
+            search=search,
             page=page,
             limit=limit,
         )

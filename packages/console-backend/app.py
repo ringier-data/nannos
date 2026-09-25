@@ -377,7 +377,7 @@ if not config.is_local():
 # with "not an accepted origin" before auth even ran.
 #
 # Composition:
-#  - local: the localhost dev frontends (console 5001/5173, cockpit 3000)
+#  - local: the localhost dev frontends (console backend/5173, cockpit 3000)
 #  - deployed: the console's own domain (same-origin console-frontend needs no
 #    CORS, but Socket.IO checks the Origin header on every handshake)
 #  - ALL environments: + CORS_ALLOWED_CHAT_ORIGINS (from env; exact origins and
@@ -385,11 +385,14 @@ if not config.is_local():
 #    such as the embed SDK in the cockpit, which connect cross-origin with bearer
 #    tokens (ADR-0002/0004).
 if config.is_local():
+    # The backend's own port is overridable (CONSOLE_BACKEND_PORT) for when
+    # something else already holds the default.
+    _local_api_port = os.getenv("CONSOLE_BACKEND_PORT", "5001")
     cors_origins = [
-        "http://localhost:5001",
-        "http://127.0.0.1:5001",
-        "https://localhost:5001",
-        "https://127.0.0.1:5001",
+        f"http://localhost:{_local_api_port}",
+        f"http://127.0.0.1:{_local_api_port}",
+        f"https://localhost:{_local_api_port}",
+        f"https://127.0.0.1:{_local_api_port}",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         # Embedded Nannos: the cockpit frontend (guinea-pig host) runs on :3000
@@ -2711,4 +2714,11 @@ if __name__ == "__main__":
     # In a production environment, use a proper process manager like Gunicorn.
     log_config = yaml.safe_load("log_conf.yml")
     # Run the combined ASGI app (Socket.IO + FastAPI)
-    uvicorn.run("app:asgi_app", host="127.0.0.1", port=5001, reload=True, log_config=log_config, access_log=False)
+    uvicorn.run(
+        "app:asgi_app",
+        host="127.0.0.1",
+        port=int(os.getenv("CONSOLE_BACKEND_PORT", "5001")),
+        reload=True,
+        log_config=log_config,
+        access_log=False,
+    )

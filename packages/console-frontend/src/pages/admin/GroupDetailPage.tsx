@@ -1,11 +1,18 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2, Globe } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2, Globe, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
+import { cn, getErrorMessage } from '@/lib/utils';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { config } from '@/config';
 import { client } from '@/api/generated/client.gen';
+import {
+  getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGet,
+  getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGet,
+} from '@/api/generated/sdk.gen';
+import { totalCountFrom } from '@/api/total-count';
 import {
   getGroupApiV1AdminGroupsGroupIdGetOptions,
   getGroupApiV1GroupsGroupIdGetOptions,
@@ -15,10 +22,12 @@ import {
   removeMembersApiV1GroupsGroupIdMembersRemovePostMutation,
   updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation,
   listUsersApiV1AdminUsersGetOptions,
-  getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
-  setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation,
-  getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions,
-  setGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutMutation,
+  getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetQueryKey,
+  addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostMutation,
+  removeGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteMutation,
+  getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetQueryKey,
+  schedulerAddGroupDefaultJobMutation,
+  schedulerRemoveGroupDefaultJobMutation,
   consoleListMcpServersOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { RoleEnum, McpGatewayStatusResponse, McpGatewayServerPermissionsResponse } from '@/api/generated';
@@ -43,6 +52,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Pagination } from '@/components/admin/Pagination';
 
+const USER_PAGE_SIZE = 20;
+const ACCESSIBLE_PAGE_SIZE = 20;
+
 export function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -59,11 +71,46 @@ export function GroupDetailPage() {
   const [addMemberDialogOpen, setAddMemberDialogOpen] = useState(false);
   const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<Set<string>>(new Set());
   const [newMemberRole, setNewMemberRole] = useState<RoleEnum>('read');
+  const [userSearch, setUserSearch] = useState('');
+  const [userPage, setUserPage] = useState(1);
+  const debouncedUserSearch = useDebouncedValue(userSearch);
 
   const [selectedMembersToRemove, setSelectedMembersToRemove] = useState<Set<string>>(new Set());
   const [confirmRemoveMembers, setConfirmRemoveMembers] = useState(false);
 
   const [membersPage, setMembersPage] = useState(1);
+  const [memberSearch, setMemberSearch] = useState('');
+  const debouncedMemberSearch = useDebouncedValue(memberSearch);
+
+  // A new term re-pages from the start, otherwise a narrow search lands on an
+  // empty page 4 of the previous one. Selection is dropped with it, since the
+  // rows it referred to are no longer on screen to be unticked.
+  const handleMemberSearchChange = (value: string) => {
+    setMemberSearch(value);
+    setMembersPage(1);
+    setSelectedMembersToRemove(new Set());
+  };
+
+  const handleUserSearchChange = (value: string) => {
+    setUserSearch(value);
+    setUserPage(1);
+  };
+
+  const [agentsPage, setAgentsPage] = useState(1);
+  const [agentSearch, setAgentSearch] = useState('');
+  const debouncedAgentSearch = useDebouncedValue(agentSearch);
+  const handleAgentSearchChange = (value: string) => {
+    setAgentSearch(value);
+    setAgentsPage(1);
+  };
+
+  const [jobsPage, setJobsPage] = useState(1);
+  const [jobSearch, setJobSearch] = useState('');
+  const debouncedJobSearch = useDebouncedValue(jobSearch);
+  const handleJobSearchChange = (value: string) => {
+    setJobSearch(value);
+    setJobsPage(1);
+  };
 
   // MCP Gateway server access state
   const [grantServerDialogOpen, setGrantServerDialogOpen] = useState(false);
@@ -92,34 +139,82 @@ export function GroupDetailPage() {
   const { data: membersData, isLoading: membersLoading } = useQuery({
     ...listMembersApiV1GroupsGroupIdMembersGetOptions({
       path: { group_id: groupId },
-      query: { page: membersPage, limit: 20 },
+      query: { page: membersPage, limit: 20, search: debouncedMemberSearch || undefined },
     }),
     enabled: !isNaN(groupId),
+    placeholderData: keepPreviousData,
   });
 
-  const { data: usersData } = useQuery({
+  // The candidate list is narrowed by the server: filtering a single page of
+  // users client-side would both miss people past the page and offer members
+  // the current members page happens not to show.
+  const { data: usersData, isLoading: usersLoading, isFetching: usersFetching } = useQuery({
     ...listUsersApiV1AdminUsersGetOptions({
-      query: { limit: 100 },
+      query: {
+        page: userPage,
+        limit: USER_PAGE_SIZE,
+        search: debouncedUserSearch || undefined,
+        exclude_group_id: groupId,
+        status: 'active',
+      },
     }),
-    enabled: addMemberDialogOpen,
+    enabled: addMemberDialogOpen && !isNaN(groupId),
+    // Every keystroke is a new query key, so without this the rows blank out to
+    // a loading state and the dialog collapses and re-expands on each one.
+    placeholderData: keepPreviousData,
   });
 
-  // Accessible agents queries
-  const { data: defaultAgentsData, isLoading: defaultAgentsLoading } = useQuery({
-    ...getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
-      path: { group_id: groupId },
-    }),
+  // Agents this group can reach, one server-searched page at a time. Both lists
+  // below are bare arrays (agents read them too), so the count comes from
+  // `X-Total-Count` — which the tanstack wrapper drops, hence the direct
+  // operation calls. The trailing key element keeps this `{rows, total}` shape
+  // apart from any plain-array cache entry, while the permission dialogs'
+  // `{path}`-only invalidations still reach it by prefix.
+  const agentsOptions = {
+    path: { group_id: groupId },
+    query: { page: agentsPage, limit: ACCESSIBLE_PAGE_SIZE, search: debouncedAgentSearch || undefined },
+  };
+  const {
+    data: defaultAgentsData,
+    isLoading: defaultAgentsLoading,
+    isFetching: defaultAgentsFetching,
+  } = useQuery({
+    queryKey: [...getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetQueryKey(agentsOptions), 'with-total'] as const,
+    queryFn: async ({ signal }) => {
+      const { data, response } = await getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGet({
+        ...agentsOptions,
+        signal,
+        throwOnError: true,
+      });
+      return { rows: data, total: totalCountFrom(response, data.length) };
+    },
     enabled: !isNaN(groupId),
+    placeholderData: keepPreviousData,
   });
 
   // Scheduled jobs shared with this group, flagged with which are its defaults
   // (ADR-0010). Sharing a job is done from the job's own page; this is where a
   // manager decides whether the whole group runs it.
-  const { data: accessibleJobsData, isLoading: accessibleJobsLoading } = useQuery({
-    ...getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions({
-      path: { group_id: groupId },
-    }),
+  const jobsOptions = {
+    path: { group_id: groupId },
+    query: { page: jobsPage, limit: ACCESSIBLE_PAGE_SIZE, search: debouncedJobSearch || undefined },
+  };
+  const {
+    data: accessibleJobsData,
+    isLoading: accessibleJobsLoading,
+    isFetching: accessibleJobsFetching,
+  } = useQuery({
+    queryKey: [...getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetQueryKey(jobsOptions), 'with-total'] as const,
+    queryFn: async ({ signal }) => {
+      const { data, response } = await getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGet({
+        ...jobsOptions,
+        signal,
+        throwOnError: true,
+      });
+      return { rows: data, total: totalCountFrom(response, data.length) };
+    },
     enabled: !isNaN(groupId),
+    placeholderData: keepPreviousData,
   });
 
   // MCP Gateway server access queries
@@ -176,6 +271,8 @@ export function GroupDetailPage() {
       toast.success('Members added successfully');
       setAddMemberDialogOpen(false);
       setSelectedUsersToAdd(new Set());
+      setUserSearch('');
+      setUserPage(1);
       queryClient.invalidateQueries({
         queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({
           path: { group_id: groupId },
@@ -240,21 +337,33 @@ export function GroupDetailPage() {
     },
   });
 
-  const addDefaultAgentsMutation = useMutation({
-    ...setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation(),
+  // Defaults are toggled one agent at a time rather than by writing the whole
+  // set: the list is paged, so the set this page knows about is not the group's.
+  const invalidateAccessibleAgents = () =>
+    queryClient.invalidateQueries({
+      queryKey: getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetQueryKey({
+        path: { group_id: groupId },
+      }),
+    });
+  const onDefaultAgentError = (error: unknown) =>
+    toast.error('Failed to update default agent', { description: getErrorMessage(error) });
+  const addDefaultAgentMutation = useMutation({
+    ...addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostMutation(),
     onSuccess: () => {
       toast.success('Default agent status updated');
-      queryClient.invalidateQueries({
-        queryKey: getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
-          path: { group_id: groupId },
-        }).queryKey,
-      });
+      invalidateAccessibleAgents();
     },
-    onError: (error: any) => {
-      const message = error?.detail || error?.response?.data?.detail || 'Failed to update default agent';
-      toast.error(message);
-    },
+    onError: onDefaultAgentError,
   });
+  const removeDefaultAgentMutation = useMutation({
+    ...removeGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteMutation(),
+    onSuccess: () => {
+      toast.success('Default agent status updated');
+      invalidateAccessibleAgents();
+    },
+    onError: onDefaultAgentError,
+  });
+  const defaultAgentPending = addDefaultAgentMutation.isPending || removeDefaultAgentMutation.isPending;
 
   const grantServerAccessMutation = useMutation({
     mutationFn: async ({ serverSlug, role }: { serverSlug: string; role: string }) => {
@@ -295,16 +404,18 @@ export function GroupDetailPage() {
   const group = groupData?.data;
   const members = membersData?.data ?? [];
   const membersMeta = membersData?.meta ?? { page: 1, limit: 20, total: 0 };
-  const allUsers = usersData?.data ?? [];
-  const memberUserIds = new Set(members.map((m) => m.user_id));
-  // Only active users can be added to a group — the backend rejects anyone else, and the admin user
-  // list this comes from deliberately still shows suspended users.
-  const availableUsers = allUsers.filter((u) => u.status === 'active' && !memberUserIds.has(u.id));
+  // Already filtered server-side to active non-members (see the query above).
+  const availableUsers = usersData?.data ?? [];
+  const availableUsersMeta = usersData?.meta ?? { page: 1, limit: USER_PAGE_SIZE, total: 0 };
 
-  const accessibleAgents = defaultAgentsData ?? [];
-  const accessibleJobs = accessibleJobsData ?? [];
-  const defaultJobIds = accessibleJobs.filter((j) => j.is_default).map((j) => j.id);
-  const defaultAgents = accessibleAgents.filter((a: any) => a.is_default);
+  // The members list total follows its search box, so the group's own count is
+  // what a "this reaches N people" confirmation must quote.
+  const groupMemberCount = group?.member_count ?? membersMeta.total;
+
+  const accessibleAgents = defaultAgentsData?.rows ?? [];
+  const accessibleAgentsTotal = defaultAgentsData?.total ?? 0;
+  const accessibleJobs = accessibleJobsData?.rows ?? [];
+  const accessibleJobsTotal = accessibleJobsData?.total ?? 0;
 
   const gatewayPermissions = gatewayServers?.permissions ?? [];
   const grantedSlugs = new Set(gatewayPermissions.map((p) => p.server_slug));
@@ -374,42 +485,47 @@ export function GroupDetailPage() {
     null,
   );
 
-  const setDefaultJobsMutation = useMutation({
-    ...setGroupDefaultJobsApiV1GroupsGroupIdDefaultJobsPutMutation(),
+  // Per-job toggles, for the same reason as the agents above: a paged list
+  // cannot rewrite the whole default set without dropping the unseen rows.
+  const invalidateAccessibleJobs = () =>
+    queryClient.invalidateQueries({
+      queryKey: getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetQueryKey({
+        path: { group_id: groupId },
+      }),
+    });
+  const addDefaultJobMutation = useMutation({
+    ...schedulerAddGroupDefaultJobMutation(),
     onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions({
-          path: { group_id: groupId },
-        }).queryKey,
-      });
+      invalidateAccessibleJobs();
       toast.success('Default jobs updated');
     },
     onError: (err) => toast.error('Could not update default jobs', { description: String(err) }),
   });
-
-  const writeDefaultJobs = (definition_ids: number[]) =>
-    setDefaultJobsMutation.mutate({ path: { group_id: groupId }, body: { definition_ids } });
+  const removeDefaultJobMutation = useMutation({
+    ...schedulerRemoveGroupDefaultJobMutation(),
+    onSuccess: () => {
+      invalidateAccessibleJobs();
+      toast.success('Default jobs updated');
+    },
+    onError: (err) => toast.error('Could not update default jobs', { description: String(err) }),
+  });
+  const defaultJobPending = addDefaultJobMutation.isPending || removeDefaultJobMutation.isPending;
 
   const handleToggleDefaultJob = (jobId: number, currentlyDefault: boolean, jobName: string) => {
     if (currentlyDefault) {
-      writeDefaultJobs(defaultJobIds.filter((id) => id !== jobId));
+      removeDefaultJobMutation.mutate({ path: { group_id: groupId, definition_id: jobId } });
       return;
     }
     setPendingDefaultJob({ id: jobId, name: jobName });
   };
 
   const handleToggleDefault = (agentId: number, currentlyDefault: boolean) => {
-    const currentDefaultIds = defaultAgents.map((a: any) => a.id);
-    const newDefaultIds = currentlyDefault
-      ? currentDefaultIds.filter((id) => id !== agentId) // Remove from defaults
-      : [...currentDefaultIds, agentId]; // Add to defaults
-
-    addDefaultAgentsMutation.mutate({
-      path: { group_id: groupId },
-      body: {
-        sub_agent_ids: newDefaultIds,
-      },
-    });
+    const path = { group_id: groupId, sub_agent_id: agentId };
+    if (currentlyDefault) {
+      removeDefaultAgentMutation.mutate({ path });
+    } else {
+      addDefaultAgentMutation.mutate({ path });
+    }
   };
 
   if (isLoading) {
@@ -541,7 +657,21 @@ export function GroupDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="border rounded-lg">
+          <div className="relative mb-4">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search agents by name or description..."
+              value={agentSearch}
+              onChange={(e) => handleAgentSearchChange(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+          <div
+            className={cn(
+              'border rounded-lg transition-opacity',
+              defaultAgentsFetching && !defaultAgentsLoading && 'opacity-60',
+            )}
+          >
             <Table>
               <TableHeader>
                 <TableRow>
@@ -562,7 +692,9 @@ export function GroupDetailPage() {
                 ) : accessibleAgents.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                      No accessible agents. Add permissions first.
+                      {debouncedAgentSearch
+                        ? 'No agents match your search'
+                        : 'No accessible agents. Add permissions first.'}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -572,7 +704,7 @@ export function GroupDetailPage() {
                         <Checkbox
                           checked={agent.is_default}
                           onCheckedChange={() => handleToggleDefault(agent.id, agent.is_default)}
-                          disabled={addDefaultAgentsMutation.isPending}
+                          disabled={defaultAgentPending}
                         />
                       </TableCell>
                       <TableCell className="font-medium">{agent.name}</TableCell>
@@ -591,6 +723,12 @@ export function GroupDetailPage() {
               </TableBody>
             </Table>
           </div>
+          <Pagination
+            page={agentsPage}
+            limit={ACCESSIBLE_PAGE_SIZE}
+            total={accessibleAgentsTotal}
+            onPageChange={setAgentsPage}
+          />
         </CardContent>
       </Card>
 
@@ -609,7 +747,21 @@ export function GroupDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="border rounded-lg">
+          <div className="relative mb-4">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search jobs by name or prompt..."
+              value={jobSearch}
+              onChange={(e) => handleJobSearchChange(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+          <div
+            className={cn(
+              'border rounded-lg transition-opacity',
+              accessibleJobsFetching && !accessibleJobsLoading && 'opacity-60',
+            )}
+          >
             <Table>
               <TableHeader>
                 <TableRow>
@@ -630,8 +782,9 @@ export function GroupDetailPage() {
                 ) : accessibleJobs.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                      No jobs are shared with this group. Share one from its own page in the
-                      Scheduler first.
+                      {debouncedJobSearch
+                        ? 'No jobs match your search'
+                        : 'No jobs are shared with this group. Share one from its own page in the Scheduler first.'}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -643,7 +796,7 @@ export function GroupDetailPage() {
                           onCheckedChange={() =>
                             handleToggleDefaultJob(job.id, !!job.is_default, job.name)
                           }
-                          disabled={setDefaultJobsMutation.isPending}
+                          disabled={defaultJobPending}
                         />
                       </TableCell>
                       <TableCell className="font-medium">{job.name}</TableCell>
@@ -662,6 +815,12 @@ export function GroupDetailPage() {
               </TableBody>
             </Table>
           </div>
+          <Pagination
+            page={jobsPage}
+            limit={ACCESSIBLE_PAGE_SIZE}
+            total={accessibleJobsTotal}
+            onPageChange={setJobsPage}
+          />
         </CardContent>
       </Card>
 
@@ -670,11 +829,15 @@ export function GroupDetailPage() {
         onOpenChange={(open) => !open && setPendingDefaultJob(null)}
         title="Activate this job for everyone in the group?"
         description={`"${pendingDefaultJob?.name}" will start running for ${
-          membersMeta.total === 1 ? 'the 1 member' : `all ${membersMeta.total} members`
+          groupMemberCount === 1 ? 'the 1 member' : `all ${groupMemberCount} members`
         } of ${group?.name}, each under their own account and using their own credentials. They will be told, and can turn it off.`}
         confirmLabel="Activate"
         onConfirm={() => {
-          if (pendingDefaultJob) writeDefaultJobs([...defaultJobIds, pendingDefaultJob.id]);
+          if (pendingDefaultJob) {
+            addDefaultJobMutation.mutate({
+              path: { group_id: groupId, definition_id: pendingDefaultJob.id },
+            });
+          }
           setPendingDefaultJob(null);
         }}
       />
@@ -791,6 +954,15 @@ export function GroupDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
+          <div className="relative mb-4">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search members by name or email..."
+              value={memberSearch}
+              onChange={(e) => handleMemberSearchChange(e.target.value)}
+              className="pl-9"
+            />
+          </div>
           <div className="border rounded-lg">
             <Table>
               <TableHeader>
@@ -822,7 +994,7 @@ export function GroupDetailPage() {
                 ) : members.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
-                      No members
+                      {debouncedMemberSearch ? 'No members match your search' : 'No members'}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -877,7 +1049,17 @@ export function GroupDetailPage() {
       </Card>
 
       {/* Add Members Dialog */}
-      <Dialog open={addMemberDialogOpen} onOpenChange={setAddMemberDialogOpen}>
+      <Dialog
+        open={addMemberDialogOpen}
+        onOpenChange={(open) => {
+          setAddMemberDialogOpen(open);
+          if (!open) {
+            setUserSearch('');
+            setUserPage(1);
+            setSelectedUsersToAdd(new Set());
+          }
+        }}
+      >
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Add Members</DialogTitle>
@@ -899,9 +1081,36 @@ export function GroupDetailPage() {
             </div>
             <div className="space-y-2">
               <Label>Users</Label>
-              <div className="border rounded-lg max-h-64 overflow-y-auto">
-                {availableUsers.length === 0 ? (
-                  <div className="p-4 text-center text-muted-foreground">No available users to add</div>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search users by name or email..."
+                  value={userSearch}
+                  onChange={(e) => handleUserSearchChange(e.target.value)}
+                  className="pl-9"
+                />
+              </div>
+              {/* Reserved row: appearing on the first tick would shove the list
+                  down by its height. */}
+              <p className="text-sm text-muted-foreground min-h-[1.25rem]">
+                {selectedUsersToAdd.size > 0
+                  ? `${selectedUsersToAdd.size} selected. Selection is kept while you search.`
+                  : ''}
+              </p>
+              <div
+                className={cn(
+                  'border rounded-lg h-64 overflow-y-auto transition-opacity',
+                  // Previous rows stay put while the new term loads; dim them so
+                  // the list still reads as busy without changing size.
+                  usersFetching && !usersLoading && 'opacity-60',
+                )}
+              >
+                {usersLoading ? (
+                  <div className="p-4 text-center text-muted-foreground">Loading...</div>
+                ) : availableUsers.length === 0 ? (
+                  <div className="p-4 text-center text-muted-foreground">
+                    {debouncedUserSearch ? 'No users match your search' : 'No available users to add'}
+                  </div>
                 ) : (
                   availableUsers.map((user) => (
                     <div key={user.id} className="flex items-center gap-3 p-3 border-b last:border-b-0">
@@ -926,6 +1135,17 @@ export function GroupDetailPage() {
                     </div>
                   ))
                 )}
+              </div>
+              {/* Pagination renders nothing at all when there are no results, so
+                  it gets a reserved row: otherwise the dialog jumps by its
+                  height every time a search empties or refills the list. */}
+              <div className="min-h-[68px]">
+                <Pagination
+                  page={availableUsersMeta.page}
+                  limit={availableUsersMeta.limit}
+                  total={availableUsersMeta.total}
+                  onPageChange={setUserPage}
+                />
               </div>
             </div>
           </div>

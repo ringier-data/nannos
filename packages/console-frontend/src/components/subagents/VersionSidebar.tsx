@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   CheckCircle,
@@ -10,6 +10,7 @@ import {
   MoreVertical,
   PanelRightClose,
   RotateCcw,
+  Search,
   Star,
   Trash2,
   XCircle,
@@ -17,6 +18,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -36,6 +38,11 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import {
+  getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
+  getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetQueryKey,
+} from '@/api/generated/@tanstack/react-query.gen';
+import {
+  getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGet,
   deleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDelete,
   revertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPost,
   setDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPut,
@@ -44,6 +51,10 @@ import {
 import { ExpandableText } from './ExpandableText';
 import { VersionDiffViewer } from './VersionDiffViewer';
 import type { SubAgent, SubAgentConfigVersion, SubAgentStatus } from './types';
+import { totalCountFrom } from '@/api/total-count';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
+
+const VERSION_PAGE_SIZE = 20;
 
 const statusConfig: Record<
   SubAgentStatus,
@@ -57,7 +68,8 @@ const statusConfig: Record<
 
 interface VersionSidebarProps {
   subAgent: SubAgent;
-  versions: SubAgentConfigVersion[];
+  /** How many versions the sub-agent has, unsearched. The list itself is fetched here, a page at a time. */
+  versionCount: number;
   isOwner: boolean;
   isAdmin: boolean;
   hasWriteAccess?: boolean;
@@ -67,12 +79,13 @@ interface VersionSidebarProps {
   onCollapsedChange?: (collapsed: boolean) => void;
   onRefresh?: () => void;
   viewingVersion?: number | null;
-  onViewVersion?: (version: number | null) => void;
+  /** The clicked row, or null for the current version. */
+  onViewVersion?: (version: SubAgentConfigVersion | null) => void;
 }
 
 export function VersionSidebar({
   subAgent,
-  versions,
+  versionCount,
   isOwner,
   isAdmin,
   hasWriteAccess = false,
@@ -98,8 +111,66 @@ export function VersionSidebar({
   // Delete confirmation state
   const [deleteVersion, setDeleteVersion] = useState<number | null>(null);
 
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
+
+  // History only grows, so it is paged, newest first, with a "load more" rather
+  // than numbered pages — the sidebar is a narrow scrolling column. The body is a
+  // bare array; the match count comes from `X-Total-Count`, read off the
+  // generated operation because the tanstack wrapper drops the response. The
+  // `_id`-predicate invalidations below (and on the page) still reach this key.
+  const versionsQuery = { search: debouncedSearch || undefined, limit: VERSION_PAGE_SIZE };
+  const {
+    data: versionPages,
+    isLoading: versionsLoading,
+    isFetching: versionsFetching,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+  } = useInfiniteQuery({
+    queryKey: [
+      ...getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetQueryKey({
+        path: { sub_agent_id: subAgent.id },
+        query: versionsQuery,
+      }),
+      'infinite',
+    ] as const,
+    queryFn: async ({ pageParam, signal }) => {
+      const { data, response } = await getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGet({
+        path: { sub_agent_id: subAgent.id },
+        query: { ...versionsQuery, page: pageParam },
+        signal,
+        throwOnError: true,
+      });
+      return { rows: data, total: totalCountFrom(response, data.length) };
+    },
+    initialPageParam: 1,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((n, p) => n + p.rows.length, 0);
+      return lastPage.rows.length > 0 && loaded < lastPage.total ? allPages.length + 1 : undefined;
+    },
+    enabled: !isCollapsed && versionCount > 0,
+    placeholderData: keepPreviousData,
+  });
+  const versions = versionPages?.pages.flatMap((p) => p.rows) ?? [];
+  const matchCount = versionPages?.pages[0]?.total ?? 0;
+
   const defaultVersion = subAgent.default_version;
-  const currentVersion = subAgent.current_version ?? versions.length;
+  const currentVersion = subAgent.current_version ?? versionCount;
+
+  // A version by number, whether or not it is on a loaded page (or matches the
+  // search). Null when it does not exist or was deleted — deleted versions stay
+  // joinable by number but are gone from the history.
+  const fetchVersion = async (version: number): Promise<SubAgentConfigVersion | null> => {
+    const agent = await queryClient.fetchQuery(
+      getSubAgentApiV1SubAgentsSubAgentIdGetOptions({
+        path: { sub_agent_id: subAgent.id },
+        query: { version },
+      }),
+    );
+    const config = agent.config_version;
+    return config && config.version === version && !config.deleted_at ? config : null;
+  };
 
   const setDefaultMutation = useMutation({
     mutationFn: (version: number) =>
@@ -194,19 +265,39 @@ export function VersionSidebar({
     },
   });
 
-  const handleCompareWithDefault = (version: SubAgentConfigVersion) => {
-    const defaultVer = versions.find((v) => v.version === defaultVersion);
-    setCompareVersions({ from: defaultVer ?? null, to: version });
+  // The default and previous versions are looked up by number rather than in
+  // `versions`: that is only the loaded pages, narrowed by any search.
+  const handleCompareWithDefault = async (version: SubAgentConfigVersion) => {
+    let defaultVer: SubAgentConfigVersion | null = null;
+    if (defaultVersion != null) {
+      try {
+        defaultVer = versions.find((v) => v.version === defaultVersion) ?? (await fetchVersion(defaultVersion));
+      } catch {
+        defaultVer = null;
+      }
+    }
+    setCompareVersions({ from: defaultVer, to: version });
     setDiffDialogOpen(true);
   };
 
-  const handleCompareWithPrevious = (version: SubAgentConfigVersion) => {
-    // Find the actual previous version in the list (not just version - 1)
-    // This handles cases where intermediate versions have been deleted
-    const sortedVersions = [...versions].sort((a, b) => a.version - b.version);
-    const currentIndex = sortedVersions.findIndex((v) => v.version === version.version);
-    const prevVersion = currentIndex > 0 ? sortedVersions[currentIndex - 1] : null;
-    
+  const handleCompareWithPrevious = async (version: SubAgentConfigVersion) => {
+    // The actual previous version, not just version - 1: intermediate versions
+    // may have been deleted. Unsearched, the loaded rows are a contiguous newest-
+    // first run, so the next row is it when loaded; otherwise walk down by number.
+    let prevVersion: SubAgentConfigVersion | null = null;
+    const index = versions.findIndex((v) => v.version === version.version);
+    if (!debouncedSearch && index >= 0 && index + 1 < versions.length) {
+      prevVersion = versions[index + 1];
+    } else {
+      try {
+        for (let n = version.version - 1; n >= 1 && !prevVersion; n--) {
+          prevVersion = await fetchVersion(n);
+        }
+      } catch {
+        prevVersion = null;
+      }
+    }
+
     if (!prevVersion) {
       toast.error('No previous version available', {
         description: 'The previous version may have been deleted.',
@@ -227,7 +318,7 @@ export function VersionSidebar({
     });
   };
 
-  if (versions.length === 0) {
+  if (versionCount === 0) {
     return null;
   }
 
@@ -248,7 +339,7 @@ export function VersionSidebar({
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold text-foreground">Version History</h3>
             <Badge variant="secondary" className="text-xs">
-              {versions.length}
+              {debouncedSearch ? `${matchCount} of ${versionCount}` : versionCount}
             </Badge>
           </div>
           <Button
@@ -262,10 +353,36 @@ export function VersionSidebar({
           </Button>
         </div>
 
+        <div className="px-3 pt-3 shrink-0">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              placeholder="Search summary or hash..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-8 pl-8 text-xs"
+            />
+          </div>
+        </div>
+
         <ScrollArea className="flex-1 min-h-0">
-          <div className="p-3 space-y-2">
+          <div
+            className={`p-3 space-y-2 transition-opacity ${
+              versionsFetching && !versionsLoading && !isFetchingNextPage ? 'opacity-60' : ''
+            }`}
+          >
+            {versionsLoading && (
+              <div className="flex justify-center py-6">
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              </div>
+            )}
+            {!versionsLoading && versions.length === 0 && (
+              <p className="py-6 text-center text-xs text-muted-foreground">
+                {debouncedSearch ? 'No versions match your search' : 'No versions'}
+              </p>
+            )}
             {versions
-              .map((version, _index, allVersions) => {
+              .map((version) => {
                 const status = version.status ?? 'draft';
                 const statusInfo = statusConfig[status];
                 const StatusIcon = statusInfo.icon;
@@ -283,12 +400,11 @@ export function VersionSidebar({
                 const canSubmit = canWrite && (isDraft || isRejected);
                 const canRevert = canWrite && !isEmbedBound && !isCurrent;
                 const canCompare = version.version > 1 || (defaultVersion !== undefined && defaultVersion !== version.version);
-                // Check if there's actually a previous version available in the list
-                const sortedVersions = [...allVersions].sort((a, b) => a.version - b.version);
-                const currentVersionIndex = sortedVersions.findIndex((v) => v.version === version.version);
-                const hasPreviousVersion = currentVersionIndex > 0;
+                // Version 1 has nothing before it; for any other, deleted
+                // predecessors are found (or reported missing) on click.
+                const hasPreviousVersion = version.version > 1;
                 // Can delete non-approved versions (except if it's the only version)
-                const canDelete = canManage && !isEmbedBound && !isApproved && versions.length > 1;
+                const canDelete = canManage && !isEmbedBound && !isApproved && versionCount > 1;
 
                 return (
                   <div
@@ -300,7 +416,7 @@ export function VersionSidebar({
                           ? 'border-primary/50 bg-primary/5 hover:bg-primary/10'
                           : 'hover:bg-muted/50'
                     }`}
-                    onClick={() => onViewVersion?.(isCurrent ? null : version.version)}
+                    onClick={() => onViewVersion?.(isCurrent ? null : version)}
                   >
                     {/* Version identifier and current indicator */}
                     <div className="flex items-center justify-between mb-2">
@@ -476,6 +592,18 @@ export function VersionSidebar({
                   </div>
                 );
               })}
+            {hasNextPage && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs"
+                onClick={() => fetchNextPage()}
+                disabled={isFetchingNextPage}
+              >
+                {isFetchingNextPage && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+                Load older versions
+              </Button>
+            )}
           </div>
         </ScrollArea>
       </div>

@@ -320,7 +320,9 @@ class SchedulerService:
         Note it is deliberately not admin-aware: a scheduled job runs as its owner, so
         being an administrator does not widen what a job of theirs may invoke.
         """
-        return await self.sub_agents.get_accessible_sub_agents(db, user_id)
+        # Every agent the user could schedule, never a page.
+        sub_agents, _ = await self.sub_agents.get_accessible_sub_agents(db, user_id)
+        return sub_agents
 
     async def _require_scheduler_ready(self, db: AsyncSession, user: User) -> None:
         """Refuse to create or switch on a subscription of *user* that could not run.
@@ -585,8 +587,15 @@ class SchedulerService:
     # Read
     # ------------------------------------------------------------------
 
-    async def list_jobs(self, db: AsyncSession, user_id: str) -> list[ScheduledJob]:
-        return await self.repo.list_jobs(db, user_id)
+    async def list_jobs(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[ScheduledJob], int]:
+        return await self.repo.list_jobs(db, user_id, search=search, page=page, limit=limit)
 
     async def get_job(self, db: AsyncSession, job_id: int, user_id: str) -> ScheduledJob | None:
         """The caller's own subscription *job_id*; another user's is a None (→ 404)."""
@@ -595,9 +604,19 @@ class SchedulerService:
             return None
         return job
 
-    async def list_available_definitions(self, db: AsyncSession, user_id: str) -> list[SharedJobDefinition]:
+    async def list_available_definitions(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        search: str | None = None,
+        subscribed: bool | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[SharedJobDefinition], int]:
         """Definitions the user may subscribe to or copy, with their subscription id if any."""
-        return await self.repo.list_available_definitions(db, user_id)
+        return await self.repo.list_available_definitions(
+            db, user_id, search=search, subscribed=subscribed, page=page, limit=limit
+        )
 
     # ------------------------------------------------------------------
     # Update: one path, server-side routing
@@ -1356,6 +1375,20 @@ class SchedulerService:
         await self._require(db, definition_id, actor, "write", is_admin)
         return await self.repo.get_permissions(db, definition_id)
 
+    async def list_permissions(
+        self,
+        db: AsyncSession,
+        definition_id: int,
+        actor: User,
+        is_admin: bool = False,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """`get_permissions` filtered by group name and paged, with the total match count."""
+        await self._require(db, definition_id, actor, "write", is_admin)
+        return await self.repo.list_permissions(db, definition_id, search=search, page=page, limit=limit)
+
     async def update_permissions(
         self,
         db: AsyncSession,
@@ -1457,9 +1490,16 @@ class SchedulerService:
     # Group defaults
     # ------------------------------------------------------------------
 
-    async def list_group_definitions(self, db: AsyncSession, group_id: int) -> list[dict[str, Any]]:
-        """Definitions shared to a group, flagged with which are its defaults."""
-        return await self.repo.list_group_definitions(db, group_id)
+    async def list_group_definitions(
+        self,
+        db: AsyncSession,
+        group_id: int,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Definitions shared to a group, flagged with which are its defaults, plus the total."""
+        return await self.repo.list_group_definitions(db, group_id, search=search, page=page, limit=limit)
 
     async def _activate_default(self, db: AsyncSession, actor: User, group_id: int, definition_id: int, user_ids: list[str]) -> list[str]:
         """Subscribe *user_ids* to *definition_id* as a group default — enabled, inherited,
@@ -1718,11 +1758,14 @@ class SchedulerService:
         job_id: int,
         user_id: str,
         limit: int = 50,
-    ) -> list[ScheduledJobRun] | None:
+        page: int = 1,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> tuple[list[ScheduledJobRun], int] | None:
         job = await self.repo.get_job(db, job_id)
         if job is None or job.user_id != user_id:
             return None
-        return await self.repo.list_runs(db, job_id, limit)
+        return await self.repo.list_runs(db, job_id, limit, page=page, status=status, search=search)
 
     async def get_run(
         self,

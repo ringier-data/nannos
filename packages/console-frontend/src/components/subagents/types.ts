@@ -1,3 +1,5 @@
+import type { SubAgentStatus, SubAgentType } from '@/api/generated/types.gen';
+
 // Re-export types from generated SDK for consistency
 export type {
   SubAgent,
@@ -92,3 +94,20 @@ export function isLocalConfiguration(config: { [key: string]: unknown }): boolea
 export function isFoundryConfiguration(config: { [key: string]: unknown }): boolean {
   return 'foundry_hostname' in config && 'foundry_client_id' in config;
 }
+
+/** The console's sub-agent facets. Every one is a server query parameter. */
+export interface SubAgentFilters {
+  search: string;
+  status: SubAgentStatus | 'all';
+  type: SubAgentType | 'all';
+  activation: 'all' | 'enabled' | 'disabled';
+}
+
+export const EMPTY_SUB_AGENT_FILTERS: SubAgentFilters = {
+  search: '',
+  status: 'all',
+  type: 'all',
+  activation: 'all',
+};
+
+export type ScopeFilter = 'all' | 'mine' | 'shared' | 'pending';

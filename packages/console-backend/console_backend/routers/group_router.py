@@ -1,6 +1,6 @@
 """Group management router for non-admin users."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from ..db.session import DbSession
 from ..dependencies import (
@@ -38,10 +38,15 @@ def get_user_group_service(request: Request) -> UserGroupService:
 async def list_my_groups(
     request: Request,
     db: DbSession,
+    response: Response,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by name or description"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[UserGroupWithMembers]:
     """List groups where the current user is a member.
 
+    Unpaged unless `limit` is given; `X-Total-Count` carries how many groups match.
     Requires groups.read permission.
     """
     user_group_service = get_user_group_service(request)
@@ -53,7 +58,8 @@ async def list_my_groups(
             detail="Insufficient permissions: groups.read required",
         )
 
-    groups = await user_group_service.list_user_groups(db, user.id)
+    groups, total = await user_group_service.search_user_groups(db, user.id, search=search, page=page, limit=limit)
+    response.headers["X-Total-Count"] = str(total)
     return groups
 
 
@@ -74,7 +80,12 @@ async def list_my_groups(
 async def list_my_group_summaries(
     request: Request,
     db: DbSession,
+    response: Response,
     user: User = Depends(require_auth_or_bearer_token),
+    search: str | None = Query(None, description="Search by group name or description"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default so the model sees every group it could share with.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[GroupSummary]:
     """Declared ahead of ``/{group_id}`` on purpose: a literal segment only wins when it
     is matched first, and ``group_id`` is an int, so this path would otherwise 422."""
@@ -84,6 +95,10 @@ async def list_my_group_summaries(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient permissions: groups.read required",
         )
+    groups, total = await user_group_service.search_user_groups(db, user.id, search=search, page=page, limit=limit)
+    # A bare array on purpose: this is an MCP tool, and an envelope would change
+    # what every agent calling it receives. The console reads the count off the header.
+    response.headers["X-Total-Count"] = str(total)
     return [
         GroupSummary(
             id=g.id,
@@ -91,7 +106,7 @@ async def list_my_group_summaries(
             description=g.description,
             member_count=g.member_count,
         )
-        for g in await user_group_service.list_user_groups(db, user.id)
+        for g in groups
     ]
 
 
@@ -136,6 +151,7 @@ async def list_members(
     user: User = Depends(require_auth),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    search: str | None = Query(None, description="Search by name or email"),
 ) -> GroupMemberListResponse:
     """List members of a group.
 
@@ -153,7 +169,7 @@ async def list_members(
             detail="Group not found",
         )
 
-    members, total = await user_group_service.list_members(db, group_id, page=page, limit=limit)
+    members, total = await user_group_service.list_members(db, group_id, page=page, limit=limit, search=search)
 
     return GroupMemberListResponse(
         data=members,
@@ -301,7 +317,11 @@ async def get_group_accessible_agents(
     group_id: int,
     request: Request,
     db: DbSession,
+    response: Response,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by agent name or description"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SubAgentRefWithStatus]:
     """Get all accessible approved agents for a group with default flags and status.
 
@@ -311,6 +331,7 @@ async def get_group_accessible_agents(
     - is_activated: whether the agent is currently activated for the user
     - activated_by_groups: list of group IDs that activated this agent
 
+    Unpaged unless `limit` is given; `X-Total-Count` carries how many agents match.
     Requires group member role.
     """
     user_group_service = get_user_group_service(request)
@@ -324,12 +345,15 @@ async def get_group_accessible_agents(
             detail="Group not found",
         )
 
-    sub_agents = await user_group_service.get_group_accessible_agents(
+    sub_agents, total = await user_group_service.get_group_accessible_agents(
         db=db,
         group_id=group_id,
         user_id=user.id,
+        search=search,
+        page=page,
+        limit=limit,
     )
-
+    response.headers["X-Total-Count"] = str(total)
     return sub_agents
 
 
@@ -338,14 +362,22 @@ async def get_group_accessible_jobs(
     group_id: int,
     request: Request,
     db: DbSession,
+    response: Response,
     user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by job name or prompt"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[JobDefinitionRefWithStatus]:
     """Scheduled job definitions shared with this group, flagged with which are its
-    default jobs (activated for every current and future member). Requires group member role."""
+    default jobs (activated for every current and future member). Unpaged unless `limit`
+    is given; `X-Total-Count` carries how many match. Requires group member role."""
     await require_group_member(request, group_id, db, user)
     if await get_user_group_service(request).get_group(db, group_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-    rows = await request.app.state.scheduler_service.list_group_definitions(db, group_id)
+    rows, total = await request.app.state.scheduler_service.list_group_definitions(
+        db, group_id, search=search, page=page, limit=limit
+    )
+    response.headers["X-Total-Count"] = str(total)
     return [JobDefinitionRefWithStatus(**row) for row in rows]
 
 

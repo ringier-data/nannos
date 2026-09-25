@@ -18,6 +18,8 @@ from ..models.catalog import (
 )
 from ..models.user import User
 from .base import AuditedRepository
+from ..models.listing import OwnershipFilter
+from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
@@ -70,65 +72,105 @@ class CatalogRepository(AuditedRepository):
         db: AsyncSession,
         user_id: str,
         is_admin: bool = False,
-    ) -> list[Catalog]:
-        """Get catalogs accessible to user (owned + group-shared + admin-all)."""
+        search: str | None = None,
+        ownership: OwnershipFilter | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[Catalog], int]:
+        """Get catalogs accessible to user (owned + group-shared + admin-all).
+
+        `limit=None` returns every accessible catalog, which is what the agent
+        (bearer-token) callers expect; the console asks for a page.
+        """
+        # The admin and member variants differ only in how access is established,
+        # so the projection lives in one place.
+        projection = """
+            c.*,
+            u.id AS owner_id,
+            CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
+            u.email AS owner_email,
+            EXISTS(
+                SELECT 1 FROM catalog_connections cc
+                WHERE cc.catalog_id = c.id AND cc.status = 'active'
+            ) AS has_connection,
+            COALESCE(ps.total_pages, 0) AS total_pages,
+            COALESCE(ps.indexed_pages, 0) AS indexed_pages
+        """
+        page_stats = """
+            LEFT JOIN (
+                SELECT catalog_id,
+                       COUNT(*) AS total_pages,
+                       COUNT(indexed_at) AS indexed_pages
+                FROM catalog_pages
+                GROUP BY catalog_id
+            ) ps ON ps.catalog_id = c.id
+        """
+
+        params: dict[str, Any] = {}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("c.name", "c.description")
+            params["search"] = like_contains(search)
+
+        # The console splits owned from shared-with-me. Doing that in the browser
+        # would slice whichever page happened to arrive, so it is a SQL filter.
+        if ownership is OwnershipFilter.OWNED:
+            search_filter += " AND c.owner_user_id = :ownership_user_id"
+            params["ownership_user_id"] = user_id
+        elif ownership is OwnershipFilter.SHARED:
+            search_filter += " AND c.owner_user_id <> :ownership_user_id"
+            params["ownership_user_id"] = user_id
+
         if is_admin:
-            result = await db.execute(
-                text("""
-                    SELECT c.*,
-                           u.id AS owner_id,
-                           CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
-                           u.email AS owner_email,
-                           EXISTS(
-                               SELECT 1 FROM catalog_connections cc
-                               WHERE cc.catalog_id = c.id AND cc.status = 'active'
-                           ) AS has_connection,
-                           COALESCE(ps.total_pages, 0) AS total_pages,
-                           COALESCE(ps.indexed_pages, 0) AS indexed_pages
-                    FROM catalogs c
-                    JOIN users u ON c.owner_user_id = u.id
-                    LEFT JOIN (
-                        SELECT catalog_id,
-                               COUNT(*) AS total_pages,
-                               COUNT(indexed_at) AS indexed_pages
-                        FROM catalog_pages
-                        GROUP BY catalog_id
-                    ) ps ON ps.catalog_id = c.id
-                    ORDER BY c.updated_at DESC
-                """),
-            )
+            inner = f"""
+                SELECT {projection}
+                FROM catalogs c
+                JOIN users u ON c.owner_user_id = u.id
+                {page_stats}
+                WHERE TRUE
+                {search_filter}
+            """
         else:
-            result = await db.execute(
-                text("""
-                    SELECT DISTINCT ON (c.id) c.*,
-                           u.id AS owner_id,
-                           CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
-                           u.email AS owner_email,
-                           EXISTS(
-                               SELECT 1 FROM catalog_connections cc
-                               WHERE cc.catalog_id = c.id AND cc.status = 'active'
-                           ) AS has_connection,
-                           COALESCE(ps.total_pages, 0) AS total_pages,
-                           COALESCE(ps.indexed_pages, 0) AS indexed_pages
-                    FROM catalogs c
-                    JOIN users u ON c.owner_user_id = u.id
-                    LEFT JOIN (
-                        SELECT catalog_id,
-                               COUNT(*) AS total_pages,
-                               COUNT(indexed_at) AS indexed_pages
-                        FROM catalog_pages
-                        GROUP BY catalog_id
-                    ) ps ON ps.catalog_id = c.id
-                    LEFT JOIN catalog_permissions cp ON cp.catalog_id = c.id
-                    LEFT JOIN user_group_members ugm ON ugm.user_group_id = cp.user_group_id
-                    WHERE c.owner_user_id = :user_id
-                       OR ugm.user_id = :user_id
-                    ORDER BY c.id, c.updated_at DESC
-                """),
-                {"user_id": user_id},
-            )
-        rows = result.mappings().all()
-        return [self._map_catalog(row) for row in rows]
+            params["user_id"] = user_id
+            # DISTINCT ON collapses the permission fan-out, and forces its own
+            # ORDER BY; the wrapper below restores the intended ordering, which
+            # the admin branch has always used.
+            inner = f"""
+                SELECT DISTINCT ON (c.id) {projection}
+                FROM catalogs c
+                JOIN users u ON c.owner_user_id = u.id
+                {page_stats}
+                LEFT JOIN catalog_permissions cp ON cp.catalog_id = c.id
+                LEFT JOIN user_group_members ugm ON ugm.user_group_id = cp.user_group_id
+                WHERE (c.owner_user_id = :user_id OR ugm.user_id = :user_id)
+                {search_filter}
+                ORDER BY c.id
+            """
+
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
+        result = await db.execute(
+            text(f"SELECT * FROM ({inner}) AS accessible ORDER BY updated_at DESC, id DESC {pagination}"),
+            params,
+        )
+        catalogs = [self._map_catalog(row) for row in result.mappings().all()]
+
+        if limit is None:
+            return catalogs, len(catalogs)
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        # Deliberately not `SELECT COUNT(*) FROM (<the wide inner query>)`: the
+        # projection's page-stats aggregate and per-row EXISTS cost real work and
+        # cannot change how many rows match.
+        count_inner = inner.replace(projection, "c.id", 1)
+        count = await db.execute(
+            text(f"SELECT COUNT(*) FROM ({count_inner}) AS accessible"), count_params
+        )
+        return catalogs, count.scalar() or 0
 
     # --- Catalog Files ---
 
@@ -150,8 +192,8 @@ class CatalogRepository(AuditedRepository):
         }
 
         if search:
-            conditions.append("(cf.source_file_name ILIKE :search OR cf.folder_path ILIKE :search)")
-            params["search"] = f"%{search}%"
+            conditions.append(like_clause("cf.source_file_name", "cf.folder_path"))
+            params["search"] = like_contains(search)
 
         if status:
             conditions.append("cf.sync_status = :status")
@@ -208,22 +250,38 @@ class CatalogRepository(AuditedRepository):
         catalog_id: str,
         limit: int = 50,
         offset: int = 0,
+        search: str | None = None,
     ) -> tuple[list[CatalogPage], int]:
-        """Get paginated pages for a catalog."""
-        count_result = await db.execute(
-            text("SELECT COUNT(*) FROM catalog_pages WHERE catalog_id = :catalog_id"),
-            {"catalog_id": catalog_id},
-        )
+        """Get paginated pages for a catalog.
+
+        `search` matches the page title and its file's name. The page body
+        (text_content / speaker_notes) is deliberately not matched: it is
+        unindexed, can run to kilobytes per page, and content search is what the
+        catalog's vector index is for.
+        """
+        params: dict[str, Any] = {"catalog_id": catalog_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("cp.title", "cf.source_file_name")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
+            FROM catalog_pages cp
+            JOIN catalog_files cf ON cf.id = cp.file_id
+            WHERE cp.catalog_id = :catalog_id
+            {search_filter}
+        """
+
+        count_result = await db.execute(text(f"SELECT COUNT(*) {from_clause}"), params)
         total = count_result.scalar() or 0
 
         result = await db.execute(
-            text("""
-                SELECT * FROM catalog_pages
-                WHERE catalog_id = :catalog_id
-                ORDER BY file_id, page_number
+            text(f"""
+                SELECT cp.* {from_clause}
+                ORDER BY cp.file_id, cp.page_number
                 LIMIT :limit OFFSET :offset
             """),
-            {"catalog_id": catalog_id, "limit": limit, "offset": offset},
+            {**params, "limit": limit, "offset": offset},
         )
         pages = [CatalogPage(**self._stringify_uuids(dict(row))) for row in result.mappings().all()]
         return pages, total
@@ -370,17 +428,54 @@ class CatalogRepository(AuditedRepository):
         catalog_id: str,
     ) -> list[dict[str, Any]]:
         """Get all permission entries for a catalog."""
+        rows, _ = await self.list_permissions(db, catalog_id)
+        return rows
+
+    async def list_permissions(
+        self,
+        db: AsyncSession,
+        catalog_id: str,
+        search: str | None = None,
+        page: int = 1,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Permission entries for a catalog, optionally filtered by group name and paged.
+
+        Returns (rows, total matching). `limit=None` returns every match.
+        """
+        params: dict[str, Any] = {"catalog_id": catalog_id}
+        search_filter = ""
+        if search:
+            search_filter = "AND " + like_clause("ug.name")
+            params["search"] = like_contains(search)
+
+        from_clause = f"""
+            FROM catalog_permissions cp
+            JOIN user_groups ug ON cp.user_group_id = ug.id
+            WHERE cp.catalog_id = :catalog_id
+            {search_filter}
+        """
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = (page - 1) * limit
+
         result = await db.execute(
-            text("""
-                SELECT cp.*, ug.name AS group_name
-                FROM catalog_permissions cp
-                JOIN user_groups ug ON cp.user_group_id = ug.id
-                WHERE cp.catalog_id = :catalog_id
-                ORDER BY ug.name
+            text(f"""
+                SELECT cp.*, ug.name AS user_group_name
+                {from_clause}
+                ORDER BY ug.name, ug.id
+                {pagination}
             """),
-            {"catalog_id": catalog_id},
+            params,
         )
-        return [self._stringify_uuids(dict(row)) for row in result.mappings().all()]
+        rows = [self._stringify_uuids(dict(row)) for row in result.mappings().all()]
+        if limit is None:
+            return rows, len(rows)
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        count = await db.execute(text(f"SELECT COUNT(*) {from_clause}"), count_params)
+        return rows, count.scalar() or 0
 
     async def set_permissions(
         self,

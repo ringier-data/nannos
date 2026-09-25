@@ -16,27 +16,11 @@
  * What it shares is the job's DEFINITION. The caller passes the subscription's
  * `definition_id`, which for an unshared job is also the id its owner has always seen.
  */
-import { useState, useEffect, useMemo } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Users, Loader2, Search, HelpCircle } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Users, Loader2, HelpCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Input } from '@/components/ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import {
   Dialog,
   DialogContent,
@@ -61,19 +45,20 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { GrantedGroupsTable, GroupGrantPicker } from '@/components/GroupGrantPicker';
 import {
-  consoleListMyGroupsOptions,
   getDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetOptions,
+  getDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetQueryKey,
   getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions,
+  getGroupApiV1GroupsGroupIdGetOptions,
   schedulerShareJobMutation,
   schedulerAddGroupDefaultJobMutation,
   schedulerRemoveGroupDefaultJobMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
+import { useGroupDefaults } from '@/hooks/use-group-defaults';
+import { useGroupGrants, type GrantRole, type GrantTarget } from '@/hooks/use-group-grants';
 import { getErrorMessage } from '@/lib/utils';
-import type { JobGroupPermission } from '@/api/generated/types.gen';
 import { toast } from 'sonner';
-
-type Role = 'none' | 'read' | 'write';
 
 interface JobPermissionsDialogProps {
   /** The job's DEFINITION id — what is shared. Not the subscription id. */
@@ -89,15 +74,39 @@ export function JobPermissionsDialog({
   open,
   onOpenChange,
 }: JobPermissionsDialogProps) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {/* A fixed height, not a max: the group list below changes length as you search
+          and page, and a content-sized dialog re-centres and jumps on every keystroke. */}
+      <DialogContent className="sm:max-w-3xl h-[85vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Users className="h-5 w-5" />
+            Share this job
+          </DialogTitle>
+          <DialogDescription>
+            Who can run "{jobName}". Every member who activates it runs it under their own
+            account, with their own credentials — so sharing means one run per person, not
+            one run sent to several people.
+          </DialogDescription>
+        </DialogHeader>
+        {/* Mounted only while open, so unsaved edits and the search reset on close. */}
+        <JobPermissionsBody definitionId={definitionId} jobName={jobName} onOpenChange={onOpenChange} />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function JobPermissionsBody({
+  definitionId,
+  jobName,
+  onOpenChange,
+}: Omit<JobPermissionsDialogProps, 'open'>) {
   const queryClient = useQueryClient();
-  const [roles, setRoles] = useState<Map<number, Role>>(new Map());
-  const [initialRoles, setInitialRoles] = useState<Map<number, Role>>(new Map());
-  const [defaults, setDefaults] = useState<Set<number>>(new Set());
-  const [initialDefaults, setInitialDefaults] = useState<Set<number>>(new Set());
-  const [searchQuery, setSearchQuery] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // The whole grant set, unpaged: saving replaces it.
   const {
     data: currentPermissions,
     isLoading: isLoadingPermissions,
@@ -106,141 +115,96 @@ export function JobPermissionsDialog({
     ...getDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetOptions({
       path: { definition_id: definitionId },
     }),
-    enabled: open,
     retry: false,
   });
 
-  // The groups the user can actually share to — their own, with member counts and
-  // without the member list (`console_list_my_groups`). An administrator sharing
-  // somebody else's job shares it to their own groups too: the grant is theirs to make.
+  const { grants, roleOf, setRole, hasChanges: grantsChanged, toPermissions } =
+    useGroupGrants(currentPermissions);
+
+  const grantedGroupIds = useMemo(
+    () => currentPermissions?.map((perm) => perm.user_group_id) ?? [],
+    [currentPermissions],
+  );
+
+  // Which groups have this job as a default. One request per group holding a grant,
+  // as the sub-agent dialog does: the group page owns the default list, and there is
+  // no "which groups default to this job" read. Each list is read WHOLE — the
+  // question is whether one definition id is in it, there is no id filter, and a page
+  // of it would miss the job whenever it sorts past that page.
   const {
-    data: groups,
-    isLoading: isLoadingGroups,
-    error: groupsError,
-  } = useQuery({ ...consoleListMyGroupsOptions(), enabled: open, retry: false });
-
-  const availableGroups = useMemo(() => groups ?? [], [groups]);
-
-  useEffect(() => {
-    if (!currentPermissions) return;
-    const next = new Map<number, Role>();
-    currentPermissions.forEach((perm) => {
-      const role: Role = perm.permissions.includes('write')
-        ? 'write'
-        : perm.permissions.includes('read')
-          ? 'read'
-          : 'none';
-      if (role !== 'none') next.set(perm.user_group_id, role);
-    });
-    setRoles(next);
-    setInitialRoles(new Map(next));
-  }, [currentPermissions]);
-
-  // Which of those groups have this job as a default. One request per group, as the
-  // sub-agent dialog does: the group page owns the default list, and there is no
-  // "which groups default to this job" read.
-  useEffect(() => {
-    if (!open || availableGroups.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      const found = new Set<number>();
-      await Promise.all(
-        availableGroups.map(async (group) => {
-          try {
-            const rows = await queryClient.fetchQuery(
-              getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions({
-                path: { group_id: group.id },
-              }),
-            );
-            if (rows?.some((job) => job.id === definitionId && job.is_default)) {
-              found.add(group.id);
-            }
-          } catch {
-            // One unreadable group must not blank the others out.
-          }
+    defaults,
+    added: newDefaults,
+    removed: droppedDefaults,
+    hasChanges: defaultsChanged,
+    setDefault,
+    isLoading: isLoadingDefaults,
+  } = useGroupDefaults({
+    queryKey: ['job-group-defaults', definitionId],
+    groupIds: grantedGroupIds,
+    isDefaultFor: async (groupId) => {
+      const rows = await queryClient.fetchQuery(
+        getGroupAccessibleJobsApiV1GroupsGroupIdAccessibleJobsGetOptions({
+          path: { group_id: groupId },
         }),
       );
-      if (cancelled) return;
-      setDefaults(found);
-      setInitialDefaults(new Set(found));
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, availableGroups, definitionId, queryClient]);
+      return rows.some((job) => job.id === definitionId && job.is_default);
+    },
+    granted: (groupId) => roleOf(groupId) !== undefined,
+  });
 
-  useEffect(() => {
-    if (open) return;
-    setSearchQuery('');
-    setDefaults(new Set());
-    setInitialDefaults(new Set());
-    setConfirming(false);
-  }, [open]);
+  const grantFor = (groupId: number) => grants.find((g) => g.groupId === groupId);
+
+  // Newly switched-on defaults, and how many people they turn the job on for. This is
+  // the number the confirmation names — the honest cost of the decision, since each of
+  // those members gets a run of their own. A group picked from the list brings its
+  // count along; one that already held a grant does not (permission rows carry only
+  // the name), so its count is read from the group itself, and only once it matters.
+  const memberCountQueries = useQueries({
+    queries: newDefaults
+      .filter((groupId) => grantFor(groupId)?.memberCount === undefined)
+      .map((groupId) => ({
+        ...getGroupApiV1GroupsGroupIdGetOptions({ path: { group_id: groupId } }),
+        retry: false,
+      })),
+  });
+  const memberCountOf = (groupId: number) =>
+    grantFor(groupId)?.memberCount ??
+    memberCountQueries.find((q) => q.data?.data.id === groupId)?.data?.data.member_count;
+  const newDefaultCounts = newDefaults.map(memberCountOf);
+  const affectedMembers = newDefaultCounts.every((n) => n !== undefined)
+    ? newDefaultCounts.reduce<number>((total, n) => total + (n ?? 0), 0)
+    : undefined;
+
+  const hasChanges = grantsChanged || defaultsChanged;
+
+  const changeRole = (group: GrantTarget, role: GrantRole | null) => {
+    // A default without a grant behind it is not a state the backend accepts.
+    if (role === null) setDefault(group.id, false);
+    setRole(group, role);
+  };
 
   const shareMutation = useMutation({ ...schedulerShareJobMutation() });
   const addDefaultMutation = useMutation({ ...schedulerAddGroupDefaultJobMutation() });
   const removeDefaultMutation = useMutation({ ...schedulerRemoveGroupDefaultJobMutation() });
 
-  const sameSet = (a: Set<number>, b: Set<number>) =>
-    a.size === b.size && [...a].every((id) => b.has(id));
-  const sameRoles = (a: Map<number, Role>, b: Map<number, Role>) =>
-    a.size === b.size && [...a].every(([id, role]) => b.get(id) === role);
-
-  const hasChanges = !sameRoles(roles, initialRoles) || !sameSet(defaults, initialDefaults);
-
-  // Newly switched-on defaults, and how many people they turn the job on for. This is
-  // the number the confirmation names — the honest cost of the decision, since each of
-  // those members gets a run of their own.
-  const newDefaults = [...defaults].filter((id) => !initialDefaults.has(id));
-  const affectedMembers = newDefaults.reduce(
-    (total, id) => total + (availableGroups.find((g) => g.id === id)?.member_count ?? 0),
-    0,
-  );
-
-  const setRole = (groupId: number, role: Role) => {
-    setRoles((prev) => {
-      const next = new Map(prev);
-      if (role === 'none') {
-        next.delete(groupId);
-        // A default without a grant behind it is not a state the backend accepts.
-        setDefaults((d) => {
-          const copy = new Set(d);
-          copy.delete(groupId);
-          return copy;
-        });
-      } else {
-        next.set(groupId, role);
-      }
-      return next;
-    });
-  };
-
   const save = async () => {
     setSaving(true);
     try {
-      const group_permissions: JobGroupPermission[] = [...roles.entries()].map(
-        ([user_group_id, role]) => ({
-          user_group_id,
-          permissions: role === 'write' ? ['read', 'write'] : ['read'],
-        }),
-      );
       // Permissions first, always: a default is only accepted for a group that already
       // has the grant, so the two calls are ordered, not merely both made.
       await shareMutation.mutateAsync({
         path: { definition_id: definitionId },
-        body: { group_permissions },
+        body: { group_permissions: toPermissions() },
       });
       await Promise.all([
         ...newDefaults.map((group_id) =>
           addDefaultMutation.mutateAsync({ path: { group_id, definition_id: definitionId } }),
         ),
-        ...[...initialDefaults]
-          .filter((id) => !defaults.has(id))
-          .map((group_id) =>
-            removeDefaultMutation.mutateAsync({
-              path: { group_id, definition_id: definitionId },
-            }),
-          ),
+        ...droppedDefaults.map((group_id) =>
+          removeDefaultMutation.mutateAsync({
+            path: { group_id, definition_id: definitionId },
+          }),
+        ),
       ]);
       toast.success('Sharing updated');
       // Both keys: sharing changes `subscriber_count`, and the detail page this dialog
@@ -251,6 +215,12 @@ export function JobPermissionsDialog({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['scheduler-jobs'] }),
         queryClient.invalidateQueries({ queryKey: ['scheduler-job'] }),
+        queryClient.invalidateQueries({
+          queryKey: getDefinitionPermissionsApiV1SchedulerDefinitionsDefinitionIdPermissionsGetQueryKey({
+            path: { definition_id: definitionId },
+          }),
+        }),
+        queryClient.invalidateQueries({ queryKey: ['job-group-defaults', definitionId] }),
       ]);
       onOpenChange(false);
     } catch (err) {
@@ -261,214 +231,104 @@ export function JobPermissionsDialog({
     }
   };
 
-  const isLoading = isLoadingPermissions || isLoadingGroups;
-  const loadError = permissionsError || groupsError;
-
-  const displayGroups = availableGroups
-    .filter((group) => {
-      if (!searchQuery) return true;
-      const query = searchQuery.toLowerCase();
-      return (
-        group.name.toLowerCase().includes(query) ||
-        (group.description?.toLowerCase().includes(query) ?? false)
-      );
-    })
-    .sort((a, b) => {
-      const aShared = roles.has(a.id);
-      const bShared = roles.has(b.id);
-      if (aShared === bShared) return a.name.localeCompare(b.name);
-      return aShared ? -1 : 1;
-    });
-
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-3xl max-h-[85vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Users className="h-5 w-5" />
-              Share this job
-            </DialogTitle>
-            <DialogDescription>
-              Who can run "{jobName}". Every member who activates it runs it under their own
-              account, with their own credentials — so sharing means one run per person, not
-              one run sent to several people.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="flex-1 flex flex-col min-h-0 space-y-4">
-            {isLoading && (
-              <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading groups…
-              </div>
-            )}
-
-            {loadError && (
-              <div className="py-8 text-center">
-                <p className="text-sm text-destructive mb-2">{getErrorMessage(loadError)}</p>
-                <p className="text-xs text-muted-foreground">
-                  {permissionsError
-                    ? 'You do not have permission to manage sharing for this job.'
-                    : 'Failed to load your groups.'}
-                </p>
-              </div>
-            )}
-
-            {!isLoading && !loadError && availableGroups.length === 0 && (
-              <div className="py-8 text-center text-sm text-muted-foreground">
-                You are not a member of any group, so there is nobody to share this job with.
-              </div>
-            )}
-
-            {!isLoading && !loadError && availableGroups.length > 0 && (
-              <>
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    placeholder="Search groups…"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="pl-9"
-                  />
-                </div>
-
-                <div className="border rounded-md flex-1 overflow-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Group</TableHead>
-                        <TableHead className="w-[180px]">
-                          <div className="flex items-center gap-1">
-                            Permission
-                            <TooltipProvider>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
-                                </TooltipTrigger>
-                                <TooltipContent>
-                                  <p className="max-w-xs">
-                                    <strong>Read:</strong> members may activate or copy the job
-                                    <br />
-                                    <strong>Write:</strong> members may also edit it, suspend it
-                                    and share it on
-                                  </p>
-                                </TooltipContent>
-                              </Tooltip>
-                            </TooltipProvider>
-                          </div>
-                        </TableHead>
-                        <TableHead className="w-[160px]">
-                          <div className="flex items-center gap-1">
-                            Activate for all
-                            <TooltipProvider>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
-                                </TooltipTrigger>
-                                <TooltipContent>
-                                  <p className="max-w-xs">
-                                    Turns the job on for every current and future member of the
-                                    group, each running it under their own account. They are
-                                    told, and can turn it off.
-                                  </p>
-                                </TooltipContent>
-                              </Tooltip>
-                            </TooltipProvider>
-                          </div>
-                        </TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {displayGroups.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={3} className="text-center py-8 text-muted-foreground">
-                            No groups match your search.
-                          </TableCell>
-                        </TableRow>
-                      ) : (
-                        displayGroups.map((group) => {
-                          const role = roles.get(group.id) ?? 'none';
-                          return (
-                            <TableRow key={group.id}>
-                              <TableCell>
-                                <div className="font-medium">{group.name}</div>
-                                <div className="text-xs text-muted-foreground">
-                                  {group.member_count}{' '}
-                                  {group.member_count === 1 ? 'member' : 'members'}
-                                  {group.description && ` • ${group.description}`}
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <Select
-                                  value={role}
-                                  onValueChange={(value) => setRole(group.id, value as Role)}
-                                >
-                                  <SelectTrigger className="w-[160px]">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="none">No access</SelectItem>
-                                    <SelectItem value="read">Read</SelectItem>
-                                    <SelectItem value="write">Write</SelectItem>
-                                  </SelectContent>
-                                </Select>
-                              </TableCell>
-                              <TableCell>
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <div className="inline-flex">
-                                        <Checkbox
-                                          checked={defaults.has(group.id)}
-                                          disabled={role === 'none'}
-                                          onCheckedChange={(checked) => {
-                                            setDefaults((prev) => {
-                                              const next = new Set(prev);
-                                              if (checked) next.add(group.id);
-                                              else next.delete(group.id);
-                                              return next;
-                                            });
-                                          }}
-                                        />
-                                      </div>
-                                    </TooltipTrigger>
-                                    <TooltipContent>
-                                      <p className="max-w-xs">
-                                        {role === 'none'
-                                          ? 'Give the group access first.'
-                                          : group.member_count === 1
-                                            ? 'Activates the job for the 1 member.'
-                                            : `Activates the job for all ${group.member_count} members.`}
-                                      </p>
-                                    </TooltipContent>
-                                  </Tooltip>
-                                </TooltipProvider>
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })
-                      )}
-                    </TableBody>
-                  </Table>
-                </div>
-              </>
-            )}
+      <div className="flex-1 overflow-y-auto min-h-0 space-y-6">
+        {isLoadingPermissions ? (
+          <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading sharing…
           </div>
+        ) : permissionsError ? (
+          <div className="py-8 text-center">
+            <p className="text-sm text-destructive mb-2">{getErrorMessage(permissionsError)}</p>
+            <p className="text-xs text-muted-foreground">
+              You do not have permission to manage sharing for this job.
+            </p>
+          </div>
+        ) : (
+          <>
+            <GrantedGroupsTable
+              grants={grants}
+              onRoleChange={changeRole}
+              roleHelp={
+                <>
+                  <strong>Read:</strong> members may activate or copy the job
+                  <br />
+                  <strong>Write:</strong> members may also edit it, suspend it and share it on
+                </>
+              }
+              extraColumn={{
+                className: 'w-[160px]',
+                header: (
+                  <div className="flex items-center gap-1">
+                    Activate for all
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-xs">
+                            Turns the job on for every current and future member of the
+                            group, each running it under their own account. They are
+                            told, and can turn it off.
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
+                ),
+                cell: (grant) => (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="inline-flex">
+                          <Checkbox
+                            checked={defaults.has(grant.groupId)}
+                            disabled={isLoadingDefaults}
+                            onCheckedChange={(checked) => setDefault(grant.groupId, checked === true)}
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs">
+                          {grant.memberCount === undefined
+                            ? 'Activates the job for every member of the group.'
+                            : grant.memberCount === 1
+                              ? 'Activates the job for the 1 member.'
+                              : `Activates the job for all ${grant.memberCount} members.`}
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ),
+              }}
+              emptyMessage="Not shared with any group yet."
+            />
+            {/* The groups the user can actually share to — their own. An administrator
+                sharing somebody else's job shares it to their own groups too: the grant
+                is theirs to make. */}
+            <GroupGrantPicker
+              roleOf={roleOf}
+              onGrant={changeRole}
+              emptyMessage="You are not a member of any group, so there is nobody to share this job with."
+            />
+          </>
+        )}
+      </div>
 
-          <DialogFooter>
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button
-              onClick={() => (newDefaults.length > 0 ? setConfirming(true) : save())}
-              disabled={!hasChanges || saving || !!loadError}
-            >
-              {saving ? 'Saving…' : 'Save'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DialogFooter>
+        <Button variant="outline" onClick={() => onOpenChange(false)}>
+          Cancel
+        </Button>
+        <Button
+          onClick={() => (newDefaults.length > 0 ? setConfirming(true) : save())}
+          disabled={!hasChanges || saving || !!permissionsError}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </Button>
+      </DialogFooter>
 
       {/* Switching a job on for other people is confirmed with the count. */}
       <AlertDialog open={confirming} onOpenChange={(o) => !o && setConfirming(false)}>
@@ -477,10 +337,13 @@ export function JobPermissionsDialog({
             <AlertDialogTitle>Activate this job for everyone in the group?</AlertDialogTitle>
             <AlertDialogDescription>
               "{jobName}" will start running for{' '}
-              {affectedMembers === 1 ? 'the 1 member' : `all ${affectedMembers} members`} of{' '}
-              {newDefaults
-                .map((id) => availableGroups.find((g) => g.id === id)?.name ?? `group ${id}`)
-                .join(', ')}
+              {affectedMembers === undefined
+                ? 'every member'
+                : affectedMembers === 1
+                  ? 'the 1 member'
+                  : `all ${affectedMembers} members`}{' '}
+              of{' '}
+              {newDefaults.map((id) => grantFor(id)?.name ?? `group ${id}`).join(', ')}
               , each under their own account and using their own credentials. They will be told,
               and can turn it off.
             </AlertDialogDescription>

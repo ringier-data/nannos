@@ -85,3 +85,5 @@ class DeliveryChannelListResponse(BaseModel):
     """Wrapper around a list of delivery channels."""
 
     channels: list[DeliveryChannelResponse]
+    # Total matching channels, which exceeds len(channels) when a page was asked for.
+    total: int = 0

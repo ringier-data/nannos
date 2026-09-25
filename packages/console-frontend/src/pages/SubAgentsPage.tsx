@@ -1,9 +1,17 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Plus } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
-import { SubAgentList, type ScopeFilter } from '@/components/subagents/SubAgentList';
+import { SubAgentList } from '@/components/subagents/SubAgentList';
+import {
+  EMPTY_SUB_AGENT_FILTERS,
+  type ScopeFilter,
+  type SubAgentFilters,
+} from '@/components/subagents/types';
+import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { useKeyedPage } from '@/hooks/use-keyed-page';
 import {
   consoleListSubAgentsOptions,
   listPendingApprovalsApiV1SubAgentsPendingGetOptions,
@@ -11,33 +19,74 @@ import {
 import type { SubAgentListItem, SubAgentListResponse } from '@/api/generated/types.gen';
 import { useAuth } from '@/contexts/AuthContext';
 
+const PAGE_SIZE = 20;
+
+/** GET /sub-agents/pending takes a search term and nothing else. */
+const PENDING_FACETS = ['search'] as const;
+
 export function SubAgentsPage() {
   const navigate = useNavigate();
   const [scope, setScope] = useState<ScopeFilter>('all');
-  const { user, adminMode } = useAuth();
+  const [filters, setFilters] = useState<SubAgentFilters>(EMPTY_SUB_AGENT_FILTERS);
+  const debouncedSearch = useDebouncedValue(filters.search);
+  const { adminMode } = useAuth();
 
   // Derive the effective scope so the approval queue isn't shown once admin mode is off,
   // without resetting state in an effect.
   const effectiveScope: ScopeFilter = !adminMode && scope === 'pending' ? 'all' : scope;
+  // Keyed on the effective scope, so that silent fallback re-pages from the start
+  // exactly like a scope the user picked.
+  const [page, setPage] = useKeyedPage(effectiveScope);
 
-  // Full list (owned + shared) — owner faceting happens client-side in SubAgentList
-  const { data: listData } = useQuery({
-    ...consoleListSubAgentsOptions({}),
+  // Any facet change re-pages from the start, or a narrower filter lands on a
+  // page that no longer exists.
+  const handleFiltersChange = (next: SubAgentFilters) => {
+    setFilters(next);
+    setPage(1);
+  };
+
+  const handleScopeChange = (next: ScopeFilter) => {
+    setScope(next);
+    setPage(1);
+  };
+
+  // Every facet — owner, status, type, activation and the search term — is a
+  // query parameter. Filtering in the browser would slice whichever page
+  // arrived, so each facet would show an arbitrary fraction of its matches.
+  const { data: listData, isFetching: listFetching } = useQuery({
+    ...consoleListSubAgentsOptions({
+      query: {
+        page,
+        limit: PAGE_SIZE,
+        search: debouncedSearch || undefined,
+        ownership: effectiveScope === 'mine' ? 'owned' : effectiveScope === 'shared' ? 'shared' : undefined,
+        status: filters.status === 'all' ? undefined : filters.status,
+        type: filters.type === 'all' ? undefined : filters.type,
+        activation: filters.activation === 'all' ? undefined : filters.activation,
+      },
+    }),
     enabled: effectiveScope !== 'pending',
+    placeholderData: keepPreviousData,
   });
 
-  // Approval queue (admin only) — a distinct dataset surfaced via the 'pending' scope
-  const { data: pendingData } = useQuery({
-    ...listPendingApprovalsApiV1SubAgentsPendingGetOptions(),
+  // Approval queue (admin only) — a distinct dataset surfaced via the 'pending'
+  // scope. It supports search only, so the facets it cannot honour are hidden
+  // rather than rendered inert (see `availableFacets` below).
+  const { data: pendingData, isFetching: pendingFetching } = useQuery({
+    ...listPendingApprovalsApiV1SubAgentsPendingGetOptions({
+      query: { page, limit: PAGE_SIZE, search: debouncedSearch || undefined },
+    }),
     enabled: effectiveScope === 'pending' && adminMode,
+    placeholderData: keepPreviousData,
   });
 
-  const subAgents: SubAgentListItem[] =
-    effectiveScope === 'pending'
-      ? (pendingData as SubAgentListResponse)?.items ?? []
-      : (listData as SubAgentListResponse)?.items ?? [];
+  const active = effectiveScope === 'pending' ? pendingData : listData;
+  const subAgents: SubAgentListItem[] = (active as SubAgentListResponse)?.items ?? [];
+  const total = (active as SubAgentListResponse)?.total ?? 0;
+  const isFetching = effectiveScope === 'pending' ? pendingFetching : listFetching;
 
   const getEmptyMessage = (): string => {
+    if (debouncedSearch) return 'No sub-agents match your search';
     switch (effectiveScope) {
       case 'mine':
         return "You haven't created any sub-agents yet";
@@ -80,11 +129,17 @@ export function SubAgentsPage() {
         onSelect={handleSelectSubAgent}
         emptyMessage={getEmptyMessage()}
         showManageAccess
-        currentUserId={user?.id}
         scope={effectiveScope}
-        onScopeChange={setScope}
+        onScopeChange={handleScopeChange}
         showPendingScope={adminMode}
+        filters={filters}
+        onFiltersChange={handleFiltersChange}
+        availableFacets={effectiveScope === 'pending' ? PENDING_FACETS : undefined}
+        total={total}
+        isFetching={isFetching}
       />
+
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
     </div>
   );
 }

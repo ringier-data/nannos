@@ -14,8 +14,13 @@
  * types (createScheduledJob's delivery_channel_id, for one).
  */
 import { client } from './generated/client.gen';
+import { totalCountFrom } from './total-count';
 import {
   generateConditionApiV1SchedulerGenerateConditionPost,
+  listChannelsApiV1DeliveryChannelsGet,
+  listRunsApiV1SchedulerJobsJobIdRunsGet,
+  schedulerListJobs,
+  schedulerListSharedJobs,
   generateJobDraftApiV1SchedulerGenerateJobDraftPost,
   invokeMcpToolApiV1McpToolsInvokePost,
   resumeParkedRunApiV1SchedulerJobsJobIdRunsRunIdResumePost,
@@ -24,6 +29,7 @@ import {
 } from './generated/sdk.gen';
 import type {
   GenerateConditionRequest,
+  JobRunStatus,
   GenerateConditionResponse,
   McpToolInvokeResponse,
   McpToolRisk,
@@ -31,6 +37,7 @@ import type {
   ScheduledJob,
   ScheduledJobDraft,
   ScheduledJobRun,
+  SharedJobDefinition,
   ValidateArgsExprRequest,
   ValidateArgsExprResponse,
   ValidateConditionRequest,
@@ -102,17 +109,32 @@ export interface DeliveryChannel {
   updated_at: string;
 }
 
+export interface DeliveryChannelPage {
+  channels: DeliveryChannel[];
+  total: number;
+}
+
 /**
- * Fetch delivery channels. Console users receive all channels; machine clients
- * receive only their own.
+ * Delivery channels, optionally one page at a time.
+ *
+ * Console users receive all channels; machine clients receive only their own.
+ * Passing no options keeps the old behaviour — every channel — which the job
+ * editor's channel picker relies on.
  */
-export async function getDeliveryChannels(): Promise<DeliveryChannel[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({
-    url: '/api/v1/delivery-channels',
+export async function getDeliveryChannels(opts?: {
+  search?: string;
+  page?: number;
+  limit?: number;
+}): Promise<DeliveryChannelPage> {
+  const { data, error } = await listChannelsApiV1DeliveryChannelsGet({
+    query: {
+      search: opts?.search || undefined,
+      ...(opts?.limit !== undefined ? { limit: opts.limit, page: opts.page ?? 1 } : {}),
+    },
   });
   if (error) throw error;
-  return (data as { channels: DeliveryChannel[] }).channels;
+  const body = data!;
+  return { channels: body.channels as DeliveryChannel[], total: body.total ?? body.channels.length };
 }
 
 export interface DeliveryChannelUpdate {
@@ -422,13 +444,64 @@ export async function resumeParkedRun(
 // Additional CRUD operations for scheduler pages
 // ---------------------------------------------------------------------------
 
-export async function listJobs(): Promise<ScheduledJob[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({
-    url: '/api/v1/scheduler/jobs',
+export interface ScheduledJobPage {
+  jobs: ScheduledJob[];
+  total: number;
+}
+
+/**
+ * Scheduled jobs, optionally one page at a time.
+ *
+ * The endpoint is an MCP tool, so its body stays a bare array for the agents
+ * that call it; the count the console needs for pagination comes back in the
+ * `X-Total-Count` header, read off the generated operation's `response`.
+ * Passing no options returns every job.
+ */
+export async function listJobs(opts?: {
+  search?: string;
+  page?: number;
+  limit?: number;
+}): Promise<ScheduledJobPage> {
+  const { data, error, response } = await schedulerListJobs({
+    query: {
+      search: opts?.search || undefined,
+      ...(opts?.limit !== undefined ? { limit: opts.limit, page: opts.page ?? 1 } : {}),
+    },
   });
   if (error) throw new Error(formatApiError(error));
-  return data as ScheduledJob[];
+  const jobs = data ?? [];
+  return { jobs, total: totalCountFrom(response, jobs.length) };
+}
+
+export interface SharedJobDefinitionPage {
+  definitions: SharedJobDefinition[];
+  total: number;
+}
+
+/**
+ * Shared job definitions, optionally one page at a time.
+ *
+ * Mirrors `listJobs` — same MCP-tool constraint, so the body is a bare array and
+ * the count travels in `X-Total-Count`. It is the tanstack *query wrapper* that
+ * discards the response object; the generated operation itself exposes it, so
+ * this is a typed call.
+ */
+export async function listSharedDefinitions(opts?: {
+  search?: string;
+  subscribed?: boolean;
+  page?: number;
+  limit?: number;
+}): Promise<SharedJobDefinitionPage> {
+  const { data, error, response } = await schedulerListSharedJobs({
+    query: {
+      search: opts?.search || undefined,
+      subscribed: opts?.subscribed,
+      ...(opts?.limit !== undefined ? { limit: opts.limit, page: opts.page ?? 1 } : {}),
+    },
+  });
+  if (error) throw new Error(formatApiError(error));
+  const definitions = data ?? [];
+  return { definitions, total: totalCountFrom(response, definitions.length) };
 }
 
 export async function getJob(jobId: number): Promise<ScheduledJob> {
@@ -468,12 +541,34 @@ export async function deleteJob(jobId: number): Promise<void> {
   if (error) throw new Error(formatApiError(error));
 }
 
-export async function listRuns(jobId: number, limit?: number): Promise<ScheduledJobRun[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({
-    url: `/api/v1/scheduler/jobs/${jobId}/runs`,
-    query: limit ? { limit } : undefined,
+export interface ScheduledJobRunPage {
+  runs: ScheduledJobRun[];
+  total: number;
+}
+
+/**
+ * A page of a job's execution history, newest first.
+ *
+ * Always paged: run history only grows, and the endpoint used to answer with a
+ * bare `LIMIT 50` and no offset, so a job's 51st run could not be reached at
+ * all. Like the sibling scheduler lists the body is a bare array and the count
+ * comes back in `X-Total-Count`. `search` matches the result summary or error
+ * message and combines with the `status` facet.
+ */
+export async function listRuns(
+  jobId: number,
+  opts?: { page?: number; limit?: number; status?: JobRunStatus; search?: string },
+): Promise<ScheduledJobRunPage> {
+  const { data, error, response } = await listRunsApiV1SchedulerJobsJobIdRunsGet({
+    path: { job_id: jobId },
+    query: {
+      page: opts?.page ?? 1,
+      ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+      ...(opts?.status ? { status: opts.status } : {}),
+      search: opts?.search || undefined,
+    },
   });
   if (error) throw new Error(formatApiError(error));
-  return data as ScheduledJobRun[];
+  const runs = data ?? [];
+  return { runs, total: totalCountFrom(response, runs.length) };
 }

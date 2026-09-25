@@ -167,7 +167,7 @@ class TestAdminGroupListing:
         )
 
         result = await admin_group_router.list_groups(
-            mock_request, pg_session, test_admin_user_db, page=1, limit=20, search=None
+            mock_request, pg_session, test_admin_user_db, page=1, limit=20, search=None, exclude_user_id=None
         )
 
         assert len(result.data) >= 2
@@ -192,7 +192,7 @@ class TestAdminGroupListing:
         )
 
         result = await admin_group_router.list_groups(
-            mock_request, pg_session, test_admin_user_db, page=1, limit=20, search="Searchable"
+            mock_request, pg_session, test_admin_user_db, page=1, limit=20, search="Searchable", exclude_user_id=None
         )
 
         assert len(result.data) >= 1

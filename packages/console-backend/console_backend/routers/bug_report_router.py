@@ -57,6 +57,9 @@ async def list_bug_reports(
     limit: int = Query(50, ge=1, le=100),
     status_filter: BugReportStatus | None = None,
     created_after: datetime | None = None,
+    search: str | None = Query(
+        None, description="Match against description, report id, conversation id and reporter name/email"
+    ),
     user: User = Depends(require_auth),
 ) -> BugReportListResponse:
     service = get_bug_report_service(request)
@@ -65,6 +68,7 @@ async def list_bug_reports(
         user=user,
         status=status_filter,
         created_after=created_after,
+        search=search,
         page=page,
         limit=limit,
     )

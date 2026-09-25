@@ -14,8 +14,9 @@ import {
   getPlaybookApiV1PlaybooksAgentsAgentNameGetQueryKey,
   updatePlaybookApiV1PlaybooksAgentsAgentNameScopePutMutation,
   consoleListSubAgentsOptions,
-  listMyGroupsApiV1GroupsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
+import { useMyGroupsPicker } from '@/hooks/use-my-groups-picker';
+import { SearchableSelect, type SearchableSelectOption } from '@/components/SearchableSelect';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
@@ -66,18 +67,22 @@ export function PlaybooksPage() {
     setEditedContent(null);
   };
 
+  // Name of a group picked from the scope picker. The picker only holds one
+  // server page of groups, so once its search moves on, the chosen group is no
+  // longer there to read the name from.
+  const [pickedGroupName, setPickedGroupName] = useState<string | null>(null);
+
   const handleScopeChange = (scope: ScopeSelection) => {
     updateParams({ scope });
     setEditedContent(null);
+    setPickedGroupName(scopeOptions.find((o) => o.value === scope)?.label ?? null);
   };
 
   // Fetch sub-agents for the agent selector
   const { data: subAgentsData } = useQuery(consoleListSubAgentsOptions());
 
-  // Fetch user's groups
-  const { data: myGroupsData } = useQuery(listMyGroupsApiV1GroupsGetOptions());
-  const groups = Array.isArray(myGroupsData) ? myGroupsData : [];
-  const selectedGroupName = groups.find((g) => String(g.id) === selectedScope)?.name;
+  // User's groups for the scope picker, searched on the server
+  const groupPicker = useMyGroupsPicker();
 
   const agentNames = [
     'orchestrator',
@@ -90,6 +95,30 @@ export function PlaybooksPage() {
       path: { agent_name: selectedAgent },
     }),
   });
+
+  // A deep-linked group (?scope=<id>) may sit past the picker's page; the
+  // playbook response names every group that has content, which covers the rest.
+  const selectedGroupName = isPersonalScope
+    ? undefined
+    : (groupPicker.groups.find((g) => String(g.id) === selectedScope)?.name ??
+      playbookData?.groups?.find((g) => g.group_id === selectedScope)?.group_name ??
+      pickedGroupName ??
+      undefined);
+
+  // "Personal" is not a group, so it is offered alongside the server page — and
+  // only while the term could still mean it. The selected group is pinned to the
+  // unsearched list so the trigger has a label for it even when it is off-page.
+  const term = groupPicker.search.trim().toLowerCase();
+  const scopeOptions: SearchableSelectOption[] = [
+    ...(!term || 'personal'.includes(term) ? [{ value: PERSONAL_SCOPE, label: 'Personal' }] : []),
+    ...(!term &&
+    !isPersonalScope &&
+    selectedGroupName &&
+    !groupPicker.options.some((o) => o.value === selectedScope)
+      ? [{ value: selectedScope, label: selectedGroupName }]
+      : []),
+    ...groupPicker.options,
+  ];
 
   const serverContent = isPersonalScope
     ? playbookData?.personal?.content ?? ''
@@ -161,19 +190,22 @@ export function PlaybooksPage() {
               <Users className="h-4 w-4 text-muted-foreground" />
             )}
             <Label className="text-sm font-medium text-muted-foreground">Scope</Label>
-            <Select value={selectedScope} onValueChange={handleScopeChange}>
-              <SelectTrigger className="w-[220px] bg-background">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={PERSONAL_SCOPE}>Personal</SelectItem>
-                {groups.map((g) => (
-                  <SelectItem key={g.id} value={String(g.id)}>
-                    {g.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <SearchableSelect
+              className="w-[220px] bg-background"
+              value={selectedScope}
+              onChange={handleScopeChange}
+              options={scopeOptions}
+              onSearchChange={groupPicker.onSearchChange}
+              // Count the extra non-server rows in, or "showing N of M" is off.
+              total={
+                groupPicker.total === undefined
+                  ? undefined
+                  : groupPicker.total + scopeOptions.length - groupPicker.options.length
+              }
+              isLoading={groupPicker.isLoading}
+              searchPlaceholder="Search groups..."
+              emptyLabel="No groups match your search"
+            />
           </div>
         </CardContent>
       </Card>

@@ -33,18 +33,22 @@ const embedSdkSourceAliases = [
   { find: '@nannos/embed-sdk', replacement: path.join(sdkSrc, 'index.ts') },
 ];
 
+// Where console-backend listens. Overridable so the stack can be moved off a
+// port something else has taken; start-local.sh exports the same variable.
+const backendTarget = `http://localhost:${process.env.CONSOLE_BACKEND_PORT || '5001'}`;
+
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:5001',
+        target: backendTarget,
         changeOrigin: true,
         ws: true, // Explicitly enable WebSocket proxying
       },
       '/mcp': {
-        target: 'http://localhost:5001',
+        target: backendTarget,
         changeOrigin: true,
       },
     },

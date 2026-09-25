@@ -98,6 +98,59 @@ async def test_get_notifications_unread_only(client_with_db: AsyncClient, pg_ses
 
 
 @pytest.mark.asyncio
+async def test_get_notifications_search(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
+    """search matches title and message, filters before paging, and leaves unread_count alone."""
+    now = datetime.now(timezone.utc)
+    rows = [
+        ("Agent shared", "Alice shared Sales Bot with you"),
+        ("Agent shared", "Bob shared Support Bot with you"),
+        ("Quota at 100%", "You used 100% of your budget"),
+        ("Quota at 1000", "Different thing"),
+        ("Group added", "You were added to sales_team"),
+        ("Group added", "You were added to salesXteam"),
+    ]
+    for i, (title, message) in enumerate(rows):
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_notifications (user_id, type, title, message, created_at, metadata)
+                VALUES (:user_id, 'agent_activated', :title, :message, :created_at, '{}')
+            """),
+            {
+                "user_id": test_user_model.id,
+                "title": title,
+                "message": message,
+                "created_at": now + timedelta(minutes=i),
+            },
+        )
+    await pg_session.commit()
+
+    async def search(term: str, **extra) -> dict:
+        response = await client_with_db.get("/api/v1/notifications", params={"search": term, **extra})
+        assert response.status_code == 200
+        return response.json()
+
+    data = await search("SALES BOT")
+    assert [n["message"] for n in data["items"]] == ["Alice shared Sales Bot with you"]
+    assert data["total"] == 1
+    assert data["unread_count"] == 6
+
+    # Title match, newest first, paged after filtering.
+    data = await search("agent shared", page=2, limit=1)
+    assert data["total"] == 2
+    assert [n["message"] for n in data["items"]] == ["Alice shared Sales Bot with you"]
+
+    # LIKE metacharacters are literals.
+    assert [n["title"] for n in (await search("100%"))["items"]] == ["Quota at 100%"]
+    assert [n["message"] for n in (await search("sales_team"))["items"]] == ["You were added to sales_team"]
+
+
+@pytest.mark.asyncio
+async def test_get_notifications_rejects_out_of_range_paging(client_with_db: AsyncClient, test_user_model):
+    assert (await client_with_db.get("/api/v1/notifications?page=0")).status_code == 422
+    assert (await client_with_db.get("/api/v1/notifications?limit=101")).status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_get_unread_count(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
     """Test getting unread notification count."""
     # Initially no notifications

@@ -54,7 +54,7 @@ def draft_client():
     scheduler_service.schedulable_sub_agents = AsyncMock(return_value=[])
     scheduler_service._resolve_timezone = AsyncMock(return_value="Europe/Zurich")
     app.state.scheduler_service = scheduler_service
-    app.state.delivery_channel_repository = MagicMock(list_all_channels=AsyncMock(return_value=[]))
+    app.state.delivery_channel_repository = MagicMock(list_all_channels=AsyncMock(return_value=([], 0)))
     return TestClient(app)
 
 

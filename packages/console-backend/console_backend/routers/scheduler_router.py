@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
@@ -582,7 +582,8 @@ async def generate_job_draft(
     # job the user cannot save, which is exactly what an is_admin=True offer did.
     sub_agents = await _get_scheduler_service(request).schedulable_sub_agents(db, current_user.id)
     agent_choices = _agent_choices(sub_agents)
-    channels = await request.app.state.delivery_channel_repository.list_all_channels(db)
+    # Draft offers must list every channel the user could pick, so no page here.
+    channels, _ = await request.app.state.delivery_channel_repository.list_all_channels(db)
     channel_choices = [
         {"id": c.id, "name": c.name, "description": (c.description or "")[:120]} for c in channels
     ]
@@ -1116,10 +1117,22 @@ async def create_job(
 async def list_jobs(
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth_or_bearer_token),
+    search: str | None = Query(None, description="Search by job name or prompt"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default so the MCP callers keep listing a user's whole schedule.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[ScheduledJob]:
     service = _get_scheduler_service(request)
-    return await service.list_jobs(db=db, user_id=current_user.id)
+    jobs, total = await service.list_jobs(
+        db=db, user_id=current_user.id, search=search, page=page, limit=limit
+    )
+    # The body stays a bare array: this is an MCP tool, and wrapping it in an
+    # envelope would change what every agent calling it receives. The console
+    # reads the count it needs for pagination off the header instead.
+    response.headers["X-Total-Count"] = str(total)
+    return jobs
 
 
 @router.get(
@@ -1493,18 +1506,40 @@ async def resume_parked_run(
     "/jobs/{job_id}/runs",
     response_model=list[ScheduledJobRun],
     summary="List execution history for a scheduled job.",
-    description="Returns the most recent execution runs (up to 50) for the given job.",
+    description=(
+        "Execution runs for the given job, newest first, one page at a time. "
+        "`X-Total-Count` carries how many runs match. Run history only grows, so "
+        "this list is always paged — there is no 'return everything' mode."
+    ),
 )
 async def list_runs(
     job_id: int,
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth_or_bearer_token),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    run_status: JobRunStatus | None = Query(
+        None, alias="status", description="Filter by run status"
+    ),
+    search: str | None = Query(None, description="Search by result summary or error message"),
 ) -> list[ScheduledJobRun]:
     service = _get_scheduler_service(request)
-    runs = await service.list_runs(db=db, job_id=job_id, user_id=current_user.id)
-    if runs is None:
+    result = await service.list_runs(
+        db=db,
+        job_id=job_id,
+        user_id=current_user.id,
+        limit=limit,
+        page=page,
+        status=run_status.value if run_status else None,
+        search=search,
+    )
+    if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    runs, total = result
+    # Bare array for the same reason as the sibling list endpoints.
+    response.headers["X-Total-Count"] = str(total)
     return runs
 
 
@@ -1512,7 +1547,7 @@ async def list_runs(
     "/jobs/{job_id}/runs/{run_id}",
     response_model=ScheduledJobRun,
     summary="Get a single execution run of a scheduled job.",
-    description="Returns one run by id, however old — the run listing is capped to the most recent 50.",
+    description="Returns one run by id, however old — the run listing is paged, newest first.",
 )
 async def get_run(
     job_id: int,
@@ -1558,10 +1593,22 @@ def _translate(e: Exception) -> HTTPException:
 async def list_shared_definitions(
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth_or_bearer_token),
+    search: str | None = Query(None, description="Search by job name or prompt"),
+    subscribed: bool | None = Query(
+        None, description="Only definitions the caller has (or has not) already activated"
+    ),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[SharedJobDefinition]:
     service = _get_scheduler_service(request)
-    return await service.list_available_definitions(db, current_user.id)
+    definitions, total = await service.list_available_definitions(
+        db, current_user.id, search=search, subscribed=subscribed, page=page, limit=limit
+    )
+    # Bare array for the same reason as scheduler_list_jobs above.
+    response.headers["X-Total-Count"] = str(total)
+    return definitions
 
 
 @router.post(
@@ -1669,15 +1716,29 @@ async def get_definition_permissions(
     definition_id: int,
     request: Request,
     db: DbSession,
+    response: Response,
     current_user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by group name"),
+    page: int = Query(1, ge=1, description="Page number"),
+    # Unbounded by default: the permissions dialog replaces the whole grant set
+    # on save, so it must be able to load every grant.
+    limit: int | None = Query(None, ge=1, le=100, description="Items per page"),
 ) -> list[JobGroupPermissionResponse]:
     service = _get_scheduler_service(request)
     try:
-        perms = await service.get_permissions(
-            db, definition_id, current_user, is_admin=is_admin_mode(request, current_user)
+        perms, total = await service.list_permissions(
+            db,
+            definition_id,
+            current_user,
+            is_admin=is_admin_mode(request, current_user),
+            search=search,
+            page=page,
+            limit=limit,
         )
     except (LookupError, SchedulerAccessError) as e:
         raise _translate(e) from e
+    # Bare array for the same reason as the sibling list endpoints.
+    response.headers["X-Total-Count"] = str(total)
     return [JobGroupPermissionResponse(**p) for p in perms]
 
 
