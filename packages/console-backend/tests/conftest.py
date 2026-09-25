@@ -1203,6 +1203,7 @@ def wired(
     activation.set_sub_agent_service(sub_agent_service)
     activation.set_user_service(user_service)
     registry_service.set_content_changed_hook(activation.bump_following_referrers)
+    registry_service.set_owner_edit_hook(sub_agent_service.bump_own_skill)
     return sub_agent_service, registry_service, activation
 
 

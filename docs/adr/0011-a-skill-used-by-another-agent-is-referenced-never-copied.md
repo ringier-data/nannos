@@ -39,6 +39,10 @@ referrers until the last one detaches.
    (`skill_registry.sub_agent_id == this agent`), not on the row's scope: the
    owner sees always-latest, a referrer is pinned by hash and gets the existing
    update signal, diff and update action.
+   _Amended by ADR-0013 (2026-09-25): the owner is pinned by hash too. Ownership
+   now decides only what is reported around the skill (visibility, no mode), not
+   which content is served; an own-skill edit outside a config save writes the
+   owner's version._
 2. **Two modes on the activation row, not in the version.** `skill_activations`
    gains `mode` (`pinned` default, `following`) plus a nullable last-bump error
    and timestamp. Mode is a relationship between agents; reverting the referrer

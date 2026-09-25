@@ -415,6 +415,8 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.skill_registry_service.set_content_changed_hook(
         app.state.skill_activation_service.bump_following_referrers
     )
+    # ADR-0013: an own skill edited outside a config save writes the owner's config version.
+    app.state.skill_registry_service.set_owner_edit_hook(app.state.sub_agent_service.bump_own_skill)
 
     # Initialize orchestrator cookie cache
     app.state.orchestrator_cookie_cache = OrchestratorCookieCache(
