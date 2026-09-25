@@ -503,7 +503,7 @@ class EmbedBindingService:
             change_summary=f"well-known revision {definition.revision} from {definition.base_url}",
             description=agent.description,
             system_prompt=compose_system_prompt(
-                definition.base_url, agent, definition.revision
+                definition.base_url, agent, definition.revision, definition.skills
             ),
             mcp_tools=list(agent.tools) if agent.tools is not None else None,
             model_tier=agent.model_tier,
@@ -587,6 +587,7 @@ def _definition_summary(definition: WellKnownDefinition) -> dict[str, Any]:
             tools=list(agent.tools) if agent.tools is not None else None,
             model_tier=agent.model_tier,
             thinking_level=agent.thinking_level,
+            skills_inline=list(agent.skills_inline),
         ).model_dump(),
         "skills": [
             WellKnownSkillInfo(

@@ -140,7 +140,7 @@ for byte, and the digest is SHA-256 over those bytes.
 | URL | Content |
 |---|---|
 | `/.well-known/agent-skills/index.json` | RFC 0.2.0 index: `$schema`, `skills[]` of `{name, type: "skill-md", description, url, digest}`, plus the `x-nannos-agent` extension. |
-| `/.well-known/agent-skills/AGENT.md` | YAML frontmatter `name`, `description`, optional `organization`, `model-tier`, `thinking-level`; the body is the system prompt. |
+| `/.well-known/agent-skills/AGENT.md` | YAML frontmatter `name`, `description`, optional `organization`, `model-tier`, `thinking-level`, `skills-inline`; the body is the system prompt. |
 | `/.well-known/agent-skills/<name>/SKILL.md` | agentskills.io skill: frontmatter `name` (equals the directory), `description` (1-1024 chars, "what and when"), optional `metadata: {nannos-visibility: public\|private}`; the body is the instructions. |
 
 `metadata.nannos-visibility` decides how the synced skill lands in the Nannos skill
@@ -172,7 +172,8 @@ the next revision re-applies the host's visibility.
     "prompt": { "url": "/.well-known/agent-skills/AGENT.md", "digest": "sha256:…" },
     "organization": "Ringier Advertising",
     "model_tier": "standard",
-    "thinking_level": "low"
+    "thinking_level": "low",
+    "skills_inline": ["alloy-knowledge-base"]
   }
 }
 ```
@@ -199,6 +200,12 @@ Rules the consumer relies on:
   treats it like the GP agent. A plain (unbound) sub-agent with an empty list still
   gets the essential tools only. Setting a list in the console, or publishing one,
   narrows it again.
+- `skills_inline` is **optional** (2026-09-25): skill names from `skills[]`, each at
+  most once. The sync appends each skill's body to the system prompt, in this order,
+  after the AGENT.md body, wrapped in `<skill name="…">` with a note not to call
+  `load_skill` for it. The skill is still synced as a normal skill, so a public one
+  keeps its registry row. A name that is not in `skills[]` is a hard error for that
+  fetch. The list and its order are part of the revision.
 - Unknown fields must be ignored. `x-nannos-agent` is defined by Nannos, here.
 - Content type of `.md` may be `text/markdown` or `application/octet-stream` (S3
   guesses by extension). Do not reject on content type.
@@ -244,12 +251,13 @@ most 3 redirects and only within the origin, verifies digests, parses frontmatte
 with `yaml.safe_load`, validates names, tools, tiers and levels, and caches per base
 URL for `max-age` clamped to [60 s, 3600 s]. `revision` is the first 16 hex chars of
 the sha256 of a canonical JSON of: `FRAMING_TEMPLATE_VERSION`, the agent block (name,
-description, organization, tools, model tier, thinking level, prompt digest) and the
+description, organization, tools, model tier, thinking level, inlined skills, prompt digest) and the
 skills sorted by name (name, description, digest) — every served byte through the
 digests, plus the index.json-only fields, so a host changing its tool list or a
 description re-syncs too. `version_hash_for(revision) = "wk" + revision[:10]`. Any problem raises `WellKnownFetchError(base_url, step, detail)` and
-caches nothing. `render_embed_framing` is the Nannos-owned prefix; changing its
-wording bumps `FRAMING_TEMPLATE_VERSION` so bound agents re-sync.
+caches nothing. `render_embed_framing` is the Nannos-owned prefix and
+`render_inlined_skill` the wrapper of each inlined skill; changing the wording of
+either bumps `FRAMING_TEMPLATE_VERSION` so bound agents re-sync.
 
 ### Sync — `services/embed_binding_service.py`
 
@@ -381,8 +389,9 @@ exclusivity). Migration 091 is applied by the database fixtures.
   surface says which assistant answers without the host writing any chrome. Breaking
   for hosts that set `subAgentId`: release as a new minor (0.x).
 - **cockpit**: `AGENT.md` frontmatter accepts optional `organization`, `model-tier`,
-  `thinking-level`, validated against the Nannos enums at build time and emitted as
-  `organization`, `model_tier`, `thinking_level`. `REACT_APP_NANNOS_SUB_AGENT_ID` and
+  `thinking-level`, `skills-inline`, validated against the Nannos enums and the skill
+  directories at build time and emitted as `organization`, `model_tier`,
+  `thinking_level`, `skills_inline`. `REACT_APP_NANNOS_SUB_AGENT_ID` and
   `subAgentId` are removed from `app/src/nannos/config.ts`, `vite.config.ts` and the
   local `.env`. Docs updated (`docs/nannos-embed/well-known.md`, README, 03-plan).
 

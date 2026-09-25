@@ -12,6 +12,10 @@ skill is written to the Nannos skill registry as a public entry, so every user c
 discover and activate it on other agents. Without it a synced skill stays private to the
 bound sub-agent, as every inline sub-agent skill does.
 
+The optional `x-nannos-agent.skills_inline` list names skills whose body is appended to
+the system prompt, in that order, so the agent has them without a `load_skill` call. They
+stay ordinary synced skills as well.
+
 Every file the index points at carries a `sha256:` digest over the exact bytes served.
 The `x-nannos-agent` block carries name, description and the prompt; `tools`, `model_tier`,
 `thinking_level` and `organization` are optional — whatever the host leaves out stays a
@@ -42,6 +46,7 @@ import logging
 import re
 import socket
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -70,8 +75,8 @@ SKILL_VISIBILITY_METADATA_KEY = "nannos-visibility"
 DEFAULT_SKILL_VISIBILITY: RegistryVisibility = "private"
 _SKILL_VISIBILITIES: frozenset[str] = frozenset({"private", "public"})
 
-#: Bump when `render_embed_framing` changes wording, so bound sub-agents re-sync a new
-#: version even though the host published nothing new.
+#: Bump when `render_embed_framing` or `render_inlined_skill` changes wording, so bound
+#: sub-agents re-sync a new version even though the host published nothing new.
 FRAMING_TEMPLATE_VERSION = "1"
 
 #: `thinking_level` value that disables extended thinking (the enum has no "off").
@@ -162,6 +167,10 @@ class WellKnownAgent(BaseModel):
     thinking_level: str | None = Field(
         default=None, description="'off' or a ThinkingLevel value"
     )
+    skills_inline: list[str] = Field(
+        default_factory=list,
+        description="Skill names whose body is appended to the system prompt, in this order",
+    )
     url: str
     digest: str
 
@@ -199,10 +208,10 @@ def compute_revision(
     """The 16-hex revision of a fetched definition.
 
     Covers every served byte through the file digests AND the index.json metadata that
-    is published nowhere else: agent name, description, organization, tools, model tier
-    and thinking level, plus each skill's name, description and visibility. Without the metadata a
-    host could change its tool list or description and the sync would read "same
-    revision" and skip. Skill order does not matter. The framing template version is
+    is published nowhere else: agent name, description, organization, tools, model tier,
+    thinking level and inlined skills, plus each skill's name, description and visibility.
+    Without the metadata a host could change its tool list or description and the sync
+    would read "same revision" and skip. Skill order does not matter. The framing template version is
     part of it so a wording change in the Nannos-owned prefix re-syncs every bound agent.
     """
     material = {
@@ -214,6 +223,8 @@ def compute_revision(
             "tools": agent.tools,
             "model_tier": agent.model_tier,
             "thinking_level": agent.thinking_level,
+            # Order matters: it is the order the bodies are appended in.
+            "skills_inline": agent.skills_inline,
             "digest": agent.digest,
         },
         "skills": sorted(
@@ -277,8 +288,32 @@ def render_embed_framing(base_url: str, agent: WellKnownAgent, revision: str) ->
     )
 
 
-def compose_system_prompt(base_url: str, agent: WellKnownAgent, revision: str) -> str:
-    return render_embed_framing(base_url, agent, revision) + "\n\n" + agent.prompt_body
+def render_inlined_skill(skill: WellKnownSkill) -> str:
+    """One `skills_inline` skill as appended to the host prompt.
+
+    The skill is also in the agent's skill list; the note keeps the model from loading it twice.
+    Changing this text must bump FRAMING_TEMPLATE_VERSION.
+    """
+    return (
+        f"The skill `{skill.name}` is loaded in full below. Do not call load_skill for it.\n"
+        "\n"
+        f'<skill name="{skill.name}">\n'
+        f"{skill.body}\n"
+        "</skill>"
+    )
+
+
+def compose_system_prompt(
+    base_url: str,
+    agent: WellKnownAgent,
+    revision: str,
+    skills: Sequence[WellKnownSkill] = (),
+) -> str:
+    """Framing, the host prompt, then each skill named in `agent.skills_inline`, in that order."""
+    by_name = {s.name: s for s in skills}
+    parts = [render_embed_framing(base_url, agent, revision), agent.prompt_body]
+    parts.extend(render_inlined_skill(by_name[name]) for name in agent.skills_inline)
+    return "\n\n".join(parts)
 
 
 def thinking_params(
@@ -416,6 +451,7 @@ class WellKnownAgentClient:
             else None,
             model_tier=agent_meta.get("model_tier"),
             thinking_level=agent_meta.get("thinking_level"),
+            skills_inline=list(agent_meta.get("skills_inline") or []),
             url=prompt_url,
             digest=agent_meta["prompt"]["digest"],
         )
@@ -684,6 +720,27 @@ def _validate_index(
             astep,
             f"thinking_level {thinking_level!r} is not one of {sorted(allowed_thinking)}",
         )
+    skills_inline = agent.get("skills_inline")
+    if skills_inline is not None:
+        if not isinstance(skills_inline, list):
+            raise WellKnownFetchError(
+                base_url, astep, "'skills_inline' must be a list of skill names"
+            )
+        seen_inline: set[str] = set()
+        for skill_name in skills_inline:
+            if not isinstance(skill_name, str) or skill_name not in seen_names:
+                raise WellKnownFetchError(
+                    base_url,
+                    astep,
+                    f"skills_inline entry {skill_name!r} is not a skill listed in 'skills'",
+                )
+            if skill_name in seen_inline:
+                raise WellKnownFetchError(
+                    base_url,
+                    astep,
+                    f"skills_inline entry '{skill_name}' is listed twice",
+                )
+            seen_inline.add(skill_name)
     return agent, skill_entries
 
 
