@@ -6,9 +6,10 @@
  * drifted before.
  */
 import { type ReactNode } from 'react';
-import { AlertCircle, Sparkles } from 'lucide-react';
+import { AlertCircle, Info, Sparkles } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
 /**
@@ -17,16 +18,41 @@ import { cn } from '@/lib/utils';
  * as one undifferentiated column.
  */
 export function SectionHeader({ n, title }: { n: number; title: string }) {
+  // Heavier than the field labels under it and set off by space above: a muted
+  // uppercase caption read lighter than "Expression", so the steps did not split the
+  // form at all.
   return (
-    <div className="flex items-center gap-2.5">
-      <span className="bg-secondary text-muted-foreground flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold">
+    <div className="flex items-center gap-2.5 pt-4 first:pt-0">
+      <span className="bg-primary text-primary-foreground flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold">
         {n}
       </span>
-      <span className="text-muted-foreground text-[13px] font-semibold tracking-wide uppercase">
-        {title}
-      </span>
+      <span className="text-foreground text-[15px] font-semibold">{title}</span>
       <span className="bg-border h-px flex-1" />
     </div>
+  );
+}
+
+/**
+ * The explanation a label needs once, not on every visit. Helper paragraphs under every
+ * field were most of the page's height and mostly restated the label.
+ *
+ * A span, not a button: these sit inside fieldsets that disable their buttons, and a
+ * disabled trigger never shows its tooltip.
+ */
+export function HintTip({ children, label = 'More about this field' }: { children: ReactNode; label?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          tabIndex={0}
+          aria-label={label}
+          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex cursor-help rounded-full focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <Info className="size-3.5" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs text-xs leading-snug font-normal">{children}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -53,18 +79,23 @@ export function Segmented<T extends string>({
   onChange,
   options,
   className,
+  label,
 }: {
   value: T;
   onChange: (next: T) => void;
   options: { value: T; label: string }[];
   className?: string;
+  /** Names the choice for assistive tech; the visible label is the caller's. */
+  label?: string;
 }) {
   return (
-    <div className={cn('bg-muted flex gap-1 rounded-md p-1', className)}>
+    <div role="radiogroup" aria-label={label} className={cn('bg-muted flex gap-1 rounded-md p-1', className)}>
       {options.map((option) => (
         <button
           key={option.value}
           type="button"
+          role="radio"
+          aria-checked={value === option.value}
           onClick={() => onChange(option.value)}
           className={cn(
             'h-7 flex-1 rounded-sm px-2 text-[13px] font-medium transition-colors',
@@ -80,7 +111,12 @@ export function Segmented<T extends string>({
   );
 }
 
-/** Exclusive choice with room for the one line that explains the consequence. */
+/**
+ * Exclusive choice with room for the one line that explains the consequence.
+ *
+ * Drawn as a radio, not a plain card: two bordered boxes side by side read as two
+ * things to fill in, and "pick one" was only discoverable by clicking.
+ */
 export function OptionCard({
   selected,
   title,
@@ -95,18 +131,39 @@ export function OptionCard({
   return (
     <button
       type="button"
+      role="radio"
+      aria-checked={selected}
       onClick={onClick}
       className={cn(
-        'bg-background flex flex-col items-start gap-0.5 rounded-md border px-3 py-2.5 text-left shadow-xs transition-colors',
+        'bg-background flex items-start gap-2.5 rounded-md border px-3 py-2.5 text-left shadow-xs transition-colors',
         selected ? 'border-primary ring-primary ring-1' : 'hover:border-ring',
       )}
     >
-      <span className="text-sm font-medium">{title}</span>
-      <span className="text-muted-foreground text-xs leading-snug">{description}</span>
+      <span
+        className={cn(
+          'mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border',
+          selected ? 'border-primary' : 'border-muted-foreground/40',
+        )}
+      >
+        {selected && <span className="bg-primary size-2 rounded-full" />}
+      </span>
+      <span className="flex flex-col gap-0.5">
+        <span className="text-sm font-medium">{title}</span>
+        <span className="text-muted-foreground text-xs leading-snug">{description}</span>
+      </span>
     </button>
   );
 }
 
+/** Caption over an exclusive choice, so "only one of these" is said rather than implied. */
+export function ChoiceLabel({ children, hint }: { children: ReactNode; hint?: string }) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      <span className="text-sm leading-none font-medium">{children}</span>
+      <span className="text-muted-foreground text-xs">{hint ?? 'choose one'}</span>
+    </div>
+  );
+}
 
 /**
  * One field in read-only form: a label and the value as text.

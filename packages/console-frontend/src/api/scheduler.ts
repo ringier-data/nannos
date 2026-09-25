@@ -163,10 +163,18 @@ export type { ScheduledJobDraft } from './generated/types.gen';
  * are omitted for the form to fill in. The tools the draft may pick from are the user's
  * own catalogue, ranked against the query on the backend — nothing is posted from here.
  * A generation that infers nothing at all is an error, not an empty draft.
+ *
+ * With `current`, the query is a change to that job ("also tell me when it is
+ * cancelled") and the answer is the whole job with the change applied, so the caller
+ * can diff it against what it sent. `result` is a real response of the check tool, for
+ * writing and verifying the expression against.
  */
-export async function generateJobDraft(query: string): Promise<ScheduledJobDraft> {
+export async function generateJobDraft(
+  query: string,
+  edit?: { current: ScheduledJobDraft; result?: unknown },
+): Promise<ScheduledJobDraft> {
   const { data, error } = await generateJobDraftApiV1SchedulerGenerateJobDraftPost({
-    body: { query },
+    body: { query, ...(edit && { current: edit.current, result: edit.result ?? null }) },
   });
   if (error) throw error;
   return data as ScheduledJobDraft;

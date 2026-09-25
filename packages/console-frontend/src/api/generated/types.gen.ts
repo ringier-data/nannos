@@ -2404,16 +2404,28 @@ export type GenerateConditionResponse = {
  *
  * Request body for generating a scheduled job from a one-line description.
  *
- * Only the request itself: the tools, sub-agents and channels the draft may reference
- * are the caller's own and are read server-side, never accepted from the body.
+ * The tools, sub-agents and channels the draft may reference are the caller's own and
+ * are read server-side, never accepted from the body. What the body may add is the job
+ * being edited: with `current`, the query is read as a change to that job rather than
+ * a description of a new one.
  */
 export type GenerateJobDraftRequest = {
     /**
      * Query
      *
-     * Natural-language description of what the job should do.
+     * Natural-language description of what the job should do — or, with `current`, of the change to make to it ('also tell me when a meeting is cancelled').
      */
     query: string;
+    /**
+     * The job as it stands, when editing one. The answer is then that job with the change applied: every field the change does not touch comes back as sent.
+     */
+    current?: ScheduledJobDraft | null;
+    /**
+     * Result
+     *
+     * A real response of the check tool (the last run's, or a fresh check), so a generated expression names fields that exist and is verified by evaluating it.
+     */
+    result?: unknown;
 };
 
 /**

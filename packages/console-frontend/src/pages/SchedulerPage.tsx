@@ -79,6 +79,7 @@ import { CronField } from '@/components/CronField';
 import { AgentActionFields } from '@/components/AgentActionFields';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
 import { argsModeFor, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
+import { type ConditionMode, type MessageMode, conditionModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
@@ -226,8 +227,14 @@ interface CreateJobForm {
   cel_expr: string;
   /** Judged by a model — alone over the whole response, or on what cel_expr returned. */
   llm_condition: string;
+  /** Which of the two halves decide; the other keeps its text but is not sent. */
+  condition_mode: ConditionMode;
   /** Notify, or hand the result to a sub-agent. Mutually exclusive. */
   outcome: 'notify' | 'agent';
+  /** A notification's text: written from what matched, or sent verbatim. */
+  message_mode: MessageMode;
+  /** The writer's brief for a written notification (`prompt` is the agent's instruction). */
+  notification_brief: string;
   destroy_after_trigger: boolean;
   delivery_channel: string;
 }
@@ -260,7 +267,10 @@ const defaultForm: CreateJobForm = {
   check_args_exprs: {},
   cel_expr: '',
   llm_condition: '',
+  condition_mode: 'cel',
   outcome: 'notify',
+  message_mode: 'written',
+  notification_brief: '',
   destroy_after_trigger: true,
   delivery_channel: '',
 };
@@ -412,6 +422,15 @@ function CreateJobDialog({
           next.llm_condition = result.llm_condition;
           filled.add('llm_condition');
         }
+        // Show what the fill wrote: a generated half behind a hidden choice would be
+        // dropped on create as if it were not there.
+        if (result.cel_expr || result.llm_condition) {
+          next.condition_mode = conditionModeOf({
+            cel_expr: result.cel_expr ?? (next.condition_mode === 'judge' ? '' : next.cel_expr),
+            llm_condition:
+              result.llm_condition ?? (next.condition_mode === 'cel' ? '' : next.llm_condition),
+          });
+        }
         // A sub-agent means the outcome is "run an agent"; the notification text is
         // then unused, so the two are applied as the exclusive choice they are.
         if (result.sub_agent_id) {
@@ -427,11 +446,18 @@ function CreateJobDialog({
           next.outcome = 'notify';
           if (result.notification_message) {
             next.notification_message = result.notification_message;
+            next.message_mode = 'fixed';
             filled.add('notification_message');
           } else if (result.prompt) {
-            // With no agent the instruction is a brief for how the message is written.
-            next.prompt = result.prompt;
-            filled.add('prompt');
+            if (next.job_type === 'watch') {
+              // With no agent the instruction is a brief for how the message is written.
+              next.notification_brief = result.prompt;
+              next.message_mode = 'written';
+              filled.add('notification_brief');
+            } else {
+              next.prompt = result.prompt;
+              filled.add('prompt');
+            }
           }
         }
         if (result.delivery_channel_id) {
@@ -495,6 +521,8 @@ function CreateJobDialog({
     // Watch job validations. Errors are collected per field rather than returned as
     // one string, so the user is told which control to fix instead of hunting for it.
     let check_args: Record<string, unknown> | undefined;
+    // Only what the form's choices use; a hidden field keeps its text but is not sent.
+    const chosen = resolveWatchChoices(form);
     if (form.job_type === 'watch') {
       const errors: Record<string, string> = {};
       if (!form.check_tool) errors.check_tool = 'Choose the tool this job should call.';
@@ -509,7 +537,7 @@ function CreateJobDialog({
         errors.check_args = `Fill in ${[...missing].join(', ')}.`;
       }
 
-      if (!form.cel_expr.trim() && !form.llm_condition.trim()) {
+      if (!chosen.cel_expr && !chosen.llm_condition) {
         // A watch needs something to decide with; either half of the condition works.
         errors.cel_expr = 'Write an expression, a condition for the model to judge, or both.';
       }
@@ -561,8 +589,8 @@ function CreateJobDialog({
       // The two halves of the condition: the expression gates deterministically, the
       // judgement is the semantic stage on what it returned. At least one is set —
       // validated above and by the API.
-      body.cel_expr = form.cel_expr.trim() || undefined;
-      body.llm_condition = form.llm_condition.trim() || undefined;
+      body.cel_expr = chosen.cel_expr || undefined;
+      body.llm_condition = chosen.llm_condition || undefined;
 
       // The two outcomes are exclusive: a sub-agent's reply replaces the
       // notification, so sending both would leave one of them dead.
@@ -574,12 +602,12 @@ function CreateJobDialog({
           // used to be dropped here, silently downgrading the job to notify-only.
           body.sub_agent_parameters = automatedSubAgentParameters(form);
         }
-        body.prompt = form.prompt.trim() || undefined;
+        body.prompt = chosen.prompt || undefined;
       } else {
-        body.notification_message = form.notification_message.trim();
-        // The brief the written message follows; the backend drops it when a verbatim
-        // message is set (the rule lives there, for every writer of the job).
-        body.prompt = form.prompt.trim() || undefined;
+        body.notification_message = chosen.notification_message;
+        // The brief the written message follows, when the message is written rather
+        // than fixed.
+        body.prompt = chosen.prompt || undefined;
       }
     }
 

@@ -4,7 +4,7 @@
  * Renders nothing at all for a job nobody else runs — which is every job until somebody
  * shares one. See `@/lib/sharedJobs` for how the flat job view is read.
  */
-import { Users } from 'lucide-react';
+import { Lock, User, Users } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ScheduledJob } from '@/api/generated/types.gen';
@@ -45,4 +45,29 @@ export function SharingBadge({ job }: { job: ScheduledJob }) {
     );
   }
   return null;
+}
+
+/**
+ * Whose a part of the job page is, on a job somebody else also runs (ADR-0010).
+ *
+ * A shared job is one definition plus a subscription per person, and the page shows
+ * both folded together. Without a marker per section there was no telling which field
+ * changes everyone's job and which only your own.
+ */
+export function OwnershipBadge({ kind, children }: { kind: 'shared' | 'mine' | 'locked'; children: string }) {
+  const Icon = kind === 'shared' ? Users : kind === 'mine' ? User : Lock;
+  return (
+    <Badge
+      variant="outline"
+      className={
+        kind === 'mine'
+          ? 'gap-1 border-sky-500/50 text-sky-700 dark:text-sky-400'
+          : kind === 'shared'
+            ? 'gap-1 border-violet-500/50 text-violet-700 dark:text-violet-400'
+            : 'gap-1 text-muted-foreground'
+      }
+    >
+      <Icon className="h-3 w-3" /> {children}
+    </Badge>
+  );
 }
