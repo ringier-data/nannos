@@ -36,7 +36,7 @@ from console_backend.models.skills_registry import (
     SkillSourceInfo,
 )
 from console_backend.models.user import User
-from console_backend.services.skill_registry_service import SkillReferencedError, SkillRegistryService
+from console_backend.services.skill_registry_service import OwnerVersion, SkillReferencedError, SkillRegistryService
 from console_backend.services.skills_registry_service import skills_registry_service
 from console_backend.services.sub_agent_service import PromptLimitError
 
@@ -51,6 +51,18 @@ router = APIRouter(prefix="/api/v1/skills/registry", tags=["skills-registry"])
 
 def get_skill_registry_service(request: Request) -> SkillRegistryService:
     return request.app.state.skill_registry_service
+
+
+def _owner_version_note(owner_version: OwnerVersion | None) -> str:
+    """What an own-skill edit did to the owning agent's config (ADR-0013), for a tool reply."""
+    if owner_version is None:
+        return ""
+    if owner_version.approved:
+        return f" The owning agent now runs it as config version {owner_version.version}."
+    return (
+        f" Config version {owner_version.version} of the owning agent waits for approval; "
+        "the agent runs the previous skill content until it is approved."
+    )
 
 
 def _referenced_conflict(exc: SkillReferencedError) -> HTTPException:
@@ -630,9 +642,20 @@ async def update_registry_skill(
     await db.commit()
 
     return {
-        "id": updated.id,
-        "slug": updated.slug,
-        "content_hash": updated.content_hash,
+        "id": updated.entry.id,
+        "slug": updated.entry.slug,
+        "content_hash": updated.entry.content_hash,
+        # ADR-0013: the owning agent's config version this edit wrote, if any. `approved`
+        # False means the agent runs the previous content until the version is approved.
+        "owner_version": (
+            {
+                "sub_agent_id": updated.owner_version.sub_agent_id,
+                "version": updated.owner_version.version,
+                "approved": updated.owner_version.approved,
+            }
+            if updated.owner_version
+            else None
+        ),
     }
 
 
@@ -684,7 +707,7 @@ async def write_registry_file(
 
     await db.commit()
 
-    return {"id": updated.id, "file_path": file_path, "content_hash": updated.content_hash}
+    return {"id": updated.entry.id, "file_path": file_path, "content_hash": updated.entry.content_hash}
 
 
 @router.delete("/{skill_id}/files/{file_path:path}", status_code=status.HTTP_204_NO_CONTENT)
@@ -975,8 +998,8 @@ async def apply_skill_update(
     await db.commit()
 
     return {
-        "id": updated.id,
-        "content_hash": updated.content_hash,
+        "id": updated.entry.id,
+        "content_hash": updated.entry.content_hash,
         "files_updated": len(latest.files),
     }
 
@@ -2122,9 +2145,10 @@ async def mcp_update_skill(
 
     registry_files.insert(0, SkillFile(path="SKILL.md", content=skill_content))
 
-    # Update registry (bumps following referrers in the same transaction, ADR-0011)
+    # Update registry (bumps following referrers in the same transaction, ADR-0011, and
+    # writes the owning agent's config version for an own skill, ADR-0013)
     try:
-        await registry_service.update_skill(
+        result = await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
@@ -2150,7 +2174,8 @@ async def mcp_update_skill(
         scope=body.scope,
         agent_name=agent_name,
         registry_id=entry.id,
-        message=f"Skill '{body.skill_name}' updated in registry and refreshed on this agent.",
+        message=f"Skill '{body.skill_name}' updated in registry and refreshed on this agent."
+        + _owner_version_note(result.owner_version),
     )
 
 
@@ -2368,7 +2393,7 @@ async def mcp_write_skill_file(
 
     # Update registry
     try:
-        await registry_service.update_skill(
+        result = await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
@@ -2391,7 +2416,8 @@ async def mcp_write_skill_file(
         scope=body.scope,
         agent_name=agent_name,
         registry_id=entry.id,
-        message=f"File '{body.file_path}' written to skill '{body.skill_name}' in registry.",
+        message=f"File '{body.file_path}' written to skill '{body.skill_name}' in registry."
+        + _owner_version_note(result.owner_version),
     )
 
 
@@ -2483,7 +2509,7 @@ async def mcp_delete_skill_file(
 
     # Update registry
     try:
-        await registry_service.update_skill(
+        result = await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
@@ -2506,5 +2532,6 @@ async def mcp_delete_skill_file(
         scope=body.scope,
         agent_name=agent_name,
         registry_id=entry.id,
-        message=f"File '{body.file_path}' removed from skill '{body.skill_name}' in registry.",
+        message=f"File '{body.file_path}' removed from skill '{body.skill_name}' in registry."
+        + _owner_version_note(result.owner_version),
     )

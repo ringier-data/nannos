@@ -17,6 +17,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -44,6 +45,36 @@ logger = logging.getLogger(__name__)
 ContentChangedHook = Callable[[AsyncSession, "User | None", str, str, str], Awaitable[None]]
 
 
+@dataclass(frozen=True)
+class OwnerVersion:
+    """The config version an own-skill edit wrote on the owning sub-agent (ADR-0013).
+
+    ``approved`` is False when the version waits for approval: the agent keeps running
+    the previous content until then.
+    """
+
+    sub_agent_id: int
+    version: int
+    approved: bool
+
+
+#: Called when a sub-agent-scoped row is edited OUTSIDE a config save (registry UI, MCP
+#: skill tools): ``(db, actor, sub_agent_id, skill_id, previous_hash, new_hash)``. Writes
+#: the owner's config version carrying the new hash (ADR-0013). Returns None when no
+#: version was written (the owner's baseline does not hold the skill, or the host owns
+#: the agent's versions). Raises to refuse the edit, which the caller must not commit.
+OwnerEditHook = Callable[[AsyncSession, "User", int, str, str, str], Awaitable["OwnerVersion | None"]]
+
+
+@dataclass(frozen=True)
+class SkillUpdateResult:
+    """What :meth:`SkillRegistryService.update_skill` did: the row as it now stands, and
+    the owner's config version when the edit was an out-of-config edit of an own skill."""
+
+    entry: SkillRegistryEntry
+    owner_version: OwnerVersion | None = None
+
+
 class SkillReferencedError(ValueError):
     """A registry row other sub-agents reference cannot be deleted or made private (ADR-0011).
 
@@ -68,6 +99,7 @@ class SkillRegistryService:
     def __init__(self) -> None:
         self.repo = SkillRegistryRepository()
         self._content_changed_hook: ContentChangedHook | None = None
+        self._owner_edit_hook: OwnerEditHook | None = None
 
     def set_repository(self, repo: SkillRegistryRepository) -> None:
         self.repo = repo
@@ -75,6 +107,10 @@ class SkillRegistryService:
     def set_content_changed_hook(self, hook: ContentChangedHook | None) -> None:
         """Register the one listener for "an existing row's content changed" (ADR-0011)."""
         self._content_changed_hook = hook
+
+    def set_owner_edit_hook(self, hook: OwnerEditHook | None) -> None:
+        """Register the listener for "an own skill was edited outside a config save" (ADR-0013)."""
+        self._owner_edit_hook = hook
 
     async def referrers(self, db: AsyncSession, skill_id: str) -> list[tuple[int, str]]:
         """Sub-agents that REFERENCE this row without owning it (ADR-0011).
@@ -600,11 +636,19 @@ class SkillRegistryService:
         name: str | None = None,
         sandbox_required: bool | None = None,
         visibility: RegistryVisibility | None = None,
-    ) -> SkillRegistryEntry:
-        """Update a skill in the registry. Returns entry with new content_hash.
+    ) -> SkillUpdateResult:
+        """Update a skill in the registry. Returns the entry with its new content_hash.
 
         Only updates fields that are provided (non-None).
         Recomputes content_hash if files change.
+
+        This is the one write path for an edit made OUTSIDE a config save (registry UI,
+        MCP skill tools); a config save and a host sync go through
+        :meth:`upsert_agent_skill` and write their own version. So when the files of a
+        sub-agent-scoped row change here, the owner's config version is written by the
+        owner-edit hook in the same transaction (ADR-0013), and its outcome is returned as
+        ``owner_version``. The hook may refuse the edit (an AUTOMATED agent over the
+        auto-approve prompt limit): the error propagates and nothing is committed.
         """
         entry = await self.get_by_id(db, skill_id)
         if not entry:
@@ -649,6 +693,7 @@ class SkillRegistryService:
         await self.repo.update(db=db, actor=actor, entity_id=skill_id, fields=fields)
 
         # Save version snapshot if files changed
+        owner_version: OwnerVersion | None = None
         if files is not None:
             await self._save_version_snapshot(
                 db=db,
@@ -660,11 +705,25 @@ class SkillRegistryService:
                 previous_hash=entry.content_hash,
                 actor=actor,
             )
+            if (
+                self._owner_edit_hook
+                and entry.scope == "sub-agent"
+                and entry.sub_agent_id is not None
+                and entry.content_hash != content_hash  # type: ignore[possibly-unbound]
+            ):
+                owner_version = await self._owner_edit_hook(
+                    db,
+                    actor,
+                    entry.sub_agent_id,
+                    skill_id,
+                    entry.content_hash,
+                    content_hash,  # type: ignore[possibly-unbound]
+                )
 
         updated = await self.get_by_id(db, skill_id)
         if not updated:
             raise RuntimeError("Failed to read back updated registry entry")
-        return updated
+        return SkillUpdateResult(entry=updated, owner_version=owner_version)
 
     async def upsert_agent_skill(
         self,

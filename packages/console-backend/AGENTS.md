@@ -751,8 +751,17 @@ The activation service manages the lifecycle:
 **References, not copies (ADR-0011)**: a sub-agent that activates a registry row it does not
 own — another agent's public sub-agent skill or a standalone import — holds `{registry_id,
 content_hash}` in its config and nothing else. `resolve_imported_skills` branches on OWNERSHIP
-(`skill_registry.sub_agent_id == agent`), not on the row's scope: the owner sees always-latest,
-a referrer is pinned by hash with `update_available`/`latest_hash` and `mode`/`bump_error` set.
+(`skill_registry.sub_agent_id == agent`), not on the row's scope, but only for what is REPORTED:
+every skill, own or referenced, is pinned by the version's hash with `update_available`/`latest_hash`
+(ADR-0013); a referrer additionally carries `mode`/`bump_error`, an own row its `visibility`.
+
+**An own skill edited outside a config save writes the owner's version (ADR-0013)**: the registry
+UI and the MCP skill tools all end in `SkillRegistryService.update_skill`, whose owner-edit hook
+(`SubAgentService.bump_own_skill`, registered in `service_instances.py`) writes one version of the
+owning agent from its approved default, signed by the editor, through the auto-approve rules: an
+AUTOMATED agent over a limit refuses the edit (`PromptLimitError`, the write rolls back), anyone
+else's version is left pending. `update_skill` returns `SkillUpdateResult(entry, owner_version)`.
+The config-save path (`upsert_agent_skill`) writes its own version and must not trigger the hook.
 A row other agents reference cannot be deleted or made private: `SkillRegistryService` raises
 `SkillReferencedError`, which the routers map to 409 with the referrers listed.
 

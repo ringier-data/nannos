@@ -434,7 +434,7 @@ export function SkillRegistryPage() {
       if (flushed.existingId) {
         // Update existing skill via bulk update
         const filesChanged = JSON.stringify(flushed.files) !== JSON.stringify(flushed.originalFiles);
-        await updateRegistrySkillApiV1SkillsRegistrySkillIdPut({
+        const res = await updateRegistrySkillApiV1SkillsRegistrySkillIdPut({
           path: { skill_id: flushed.existingId },
           body: {
             name: flushed.name !== flushed.originalName ? flushed.name : undefined,
@@ -444,7 +444,17 @@ export function SkillRegistryPage() {
           } as any,
           throwOnError: true,
         });
-        toast.success('Skill saved');
+        // ADR-0013: an own-skill edit writes the owning agent's config version; say when it waits.
+        const ownerVersion = (
+          res as { data?: { owner_version?: { sub_agent_id: number; version: number; approved: boolean } | null } }
+        ).data?.owner_version;
+        if (ownerVersion && !ownerVersion.approved) {
+          toast.success(
+            `Skill saved. Config version ${ownerVersion.version} of the owning agent waits for approval; the agent runs the previous content until then.`
+          );
+        } else {
+          toast.success('Skill saved');
+        }
         setDraftSkill(null);
         setEditedContent(null);
         setEditedDescription(null);

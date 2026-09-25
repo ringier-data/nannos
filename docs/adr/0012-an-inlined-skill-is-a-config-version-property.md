@@ -89,9 +89,7 @@ can't forget to load it.
 - **No document store needed.** Without a store, a runtime still resolves the
   config's own skills, so an inlined host skill reaches the prompt, as #290's
   pasted text always did.
-- **Known gap: an agent's own skill edited outside a config save.** An edit through
-  the registry or `console_update_skill` writes no config version, and the owner
-  always resolves to the latest content (ADR-0011 decision 1). An own inlined skill
-  can therefore grow past the auto-approve limit with no check. #294 proposes
-  writing a pinned config version for every own-skill edit, which closes this gap
-  and also makes a revert restore skill content.
+- **An agent's own skill edited outside a config save** used to write no config
+  version, so an own inlined skill could grow past the auto-approve limit with no
+  check. Closed by ADR-0013 (nannos#294): every own-skill edit writes the owner's
+  version through the auto-approve rules, and the owner is pinned by hash.

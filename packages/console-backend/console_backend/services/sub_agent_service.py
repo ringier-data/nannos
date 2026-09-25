@@ -32,6 +32,7 @@ from ..models.user import User
 from ..repositories.sub_agent_repository import ApprovalContext
 from ..services.model_gateway_service import ModelGatewayError
 from ..services.notification_service import NotificationService
+from ..services.skill_registry_service import OwnerVersion
 from ..utils.sql_search import like_clause, like_contains
 
 if TYPE_CHECKING:
@@ -2393,6 +2394,12 @@ class SubAgentService:
                 continue
 
             if rid == registry_id:
+                current_hash = skill.content_hash if hasattr(skill, "content_hash") else skill.get("content_hash")
+                if current_hash == new_hash:
+                    # Already there: the owner-edit hook (ADR-0013) wrote this hash in the
+                    # same transaction, and a second identical version would say nothing.
+                    updated_skills.append(skill)
+                    continue
                 # Clone with updated hash
                 if hasattr(skill, "model_copy"):
                     new_skill = skill.model_copy(update={"content_hash": new_hash})
@@ -2941,12 +2948,12 @@ class SubAgentService:
         """Total SKILL.md body length of the inlined skills in ``skills`` (ADR-0012).
 
         A skill this agent owns counts with the body it is being saved with, or, when the
-        skills came from a stored version (bare refs, no body), with its registry row's
-        current body, which is what an owned skill resolves to. A skill it does not own
-        always counts with the body stored for its pinned hash, never the body in the
-        payload: a request could otherwise send a short copy of a long skill and pass the
-        auto-approve limit. The count is the body only; the rendered block adds a few
-        dozen characters of wrapper per skill.
+        skills came from a stored version (bare refs, no body), with the body stored for
+        the ref's hash, which is what an owned skill resolves to (ADR-0013). A skill it
+        does not own always counts with the body stored for its pinned hash, never the
+        body in the payload: a request could otherwise send a short copy of a long skill
+        and pass the auto-approve limit. The count is the body only; the rendered block
+        adds a few dozen characters of wrapper per skill.
         """
         inlined = [s for s in skills or [] if s.inline]
         if not inlined:
@@ -2958,8 +2965,8 @@ class SubAgentService:
             foreign = await self._foreign_registry_ids(db, sub_agent_id, ref_ids)
 
         total = 0
-        pinned: list[tuple[str, str]] = []  # foreign: (registry_id, pinned hash)
-        latest: set[str] = set()  # owned, body not in hand: the row's current body
+        pinned: list[tuple[str, str]] = []  # (registry_id, pinned hash): foreign, or owned with no body in hand
+        latest: set[str] = set()  # owned bare ref without a hash: the row's current body
         for skill in inlined:
             if skill.registry_id and skill.registry_id in foreign:
                 if not skill.content_hash:
@@ -2967,6 +2974,8 @@ class SubAgentService:
                 pinned.append((skill.registry_id, skill.content_hash))
             elif skill.body or not skill.registry_id:
                 total += len(skill.body or "")
+            elif skill.content_hash:
+                pinned.append((skill.registry_id, skill.content_hash))
             else:
                 latest.add(skill.registry_id)
 
@@ -3283,17 +3292,13 @@ class SubAgentService:
                         if not skill.name and entry["slug"]:
                             skill.name = entry["slug"]
 
-                        # The agent's OWN row is always-latest: it is the editable content
-                        # itself. Any other row is a reference pinned by hash (ADR-0011) —
-                        # including another agent's sub-agent-scoped published skill.
+                        # Every row, the agent's OWN included, is pinned to the version's
+                        # hash (ADR-0011 for references, ADR-0013 for own skills): the
+                        # version is what the agent ran with, and a revert restores it. An
+                        # own row differs only in what else is reported: its visibility is
+                        # the agent's to change, and it has no activation mode.
                         owns_row = entry["owner_sub_agent_id"] is not None and entry["owner_sub_agent_id"] == sa.id
                         if owns_row:
-                            files = entry["files"]
-                            if not skill.description and entry["description"]:
-                                skill.description = entry["description"]
-                            skill.content_hash = current_hash
-                            skill.update_available = False
-                            skill.latest_hash = None
                             skill.mode = None
                             if entry["visibility"] in ("private", "public"):
                                 skill.visibility = entry["visibility"]
@@ -3301,28 +3306,30 @@ class SubAgentService:
                             activation = mode_map.get((sa.id, skill.registry_id)) if sa.id is not None else None
                             skill.mode = activation["mode"] if activation else "pinned"
                             skill.bump_error = activation["last_bump_error"] if activation else None
-                            use_pinned = (
-                                skill.content_hash
-                                and skill.content_hash != current_hash
-                                and (skill.registry_id, skill.content_hash) in pinned_map
-                            )
+                        use_pinned = (
+                            skill.content_hash
+                            and skill.content_hash != current_hash
+                            and (skill.registry_id, skill.content_hash) in pinned_map
+                        )
 
-                            if use_pinned:
-                                assert skill.content_hash is not None
-                                pinned = pinned_map[(skill.registry_id, skill.content_hash)]
-                                files = pinned["files"]
-                                if not skill.description and pinned["description"]:
-                                    skill.description = pinned["description"]
+                        if use_pinned:
+                            assert skill.content_hash is not None
+                            pinned = pinned_map[(skill.registry_id, skill.content_hash)]
+                            files = pinned["files"]
+                            if not skill.description and pinned["description"]:
+                                skill.description = pinned["description"]
+                            skill.update_available = True
+                            skill.latest_hash = current_hash
+                        else:
+                            files = entry["files"]
+                            if not skill.description and entry["description"]:
+                                skill.description = entry["description"]
+                            if skill.content_hash and skill.content_hash != current_hash:
+                                # No snapshot for the pinned hash: serve the row's current
+                                # body and say so, rather than an empty skill.
                                 skill.update_available = True
                                 skill.latest_hash = current_hash
-                            else:
-                                files = entry["files"]
-                                if not skill.description and entry["description"]:
-                                    skill.description = entry["description"]
-                                if skill.content_hash and skill.content_hash != current_hash:
-                                    skill.update_available = True
-                                    skill.latest_hash = current_hash
-                                    skill.content_hash = current_hash
+                                skill.content_hash = current_hash
 
                         for f in files:
                             if f.get("path") == "SKILL.md":
@@ -3405,6 +3412,101 @@ class SubAgentService:
                     f"inlined skills {inlined_length} > {max_prompt} characters; update it by hand for review"
                 )
 
+        new_version = await self._write_version_with_skills(db, actor, sub_agent_id, baseline, skills, change_summary)
+        await self.repo.approve_version(
+            db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
+        )
+        return new_version
+
+    async def bump_own_skill(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        registry_id: str,
+        previous_hash: str,
+        new_hash: str,
+    ) -> OwnerVersion | None:
+        """Owner-edit hook (ADR-0013): one config version of the OWNER carrying an own skill's new hash.
+
+        Runs inside the registry edit's transaction, for an edit made outside a config
+        save (registry UI, MCP skill tools). Built from the agent's APPROVED DEFAULT, like
+        a following bump, so a pending draft is never promoted unreviewed; ``current_version``
+        moves past such a draft, which survives as a version. An agent with no approved
+        default yet builds from its current version instead.
+
+        The version goes through the normal auto-approve rules with the skills it now
+        holds (``_meets_auto_approve_constraints``, inlined bodies included, ADR-0012). An
+        AUTOMATED agent over a limit REFUSES the edit (``PromptLimitError`` / ``ValueError``,
+        the registry write rolls back with it); any other agent's version is left pending,
+        and the agent keeps running the previous content until it is approved. Signed by
+        the editor: unlike a following bump, this is the actor's own change.
+
+        Returns None without writing when the baseline does not hold the skill, or when a
+        host publishes the agent's versions (ADR-0006: the next sync re-points the hash).
+        """
+        await self.repo.lock_for_update(db, sub_agent_id)
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if existing is None or existing.deleted_at is not None:
+            return None
+        if await self.is_embed_bound(db, sub_agent_id):
+            logger.info("Sub-agent %s is embed-bound; own-skill edit of %s leaves versioning to the host", sub_agent_id, registry_id)
+            return None
+
+        baseline = existing.config_version
+        if existing.default_version is not None and (baseline is None or baseline.version != existing.default_version):
+            approved = await self.get_sub_agent_by_id(db, sub_agent_id, version=existing.default_version)
+            baseline = approved.config_version if approved and approved.config_version else None
+        if baseline is None:
+            return None
+
+        skills: list[SkillDefinition] = []
+        held = False
+        slug = ""
+        for skill in baseline.skills or []:
+            if skill.registry_id == registry_id:
+                if skill.content_hash == new_hash:
+                    return None
+                skills.append(skill.model_copy(update={"content_hash": new_hash}))
+                held = True
+                slug = skill.name
+            else:
+                skills.append(skill)
+        if not held:
+            return None
+        if not slug:
+            row = await db.execute(text("SELECT slug FROM skill_registry WHERE id = CAST(:id AS uuid)"), {"id": registry_id})
+            slug = row.scalar_one_or_none() or registry_id
+
+        inlined_length = await self._inlined_skills_length(db, sub_agent_id, skills)
+        if existing.type == SubAgentType.AUTOMATED:
+            _validate_automated_constraints(baseline.system_prompt, baseline.mcp_tools, existing.is_public, inlined_length)
+
+        summary = f"Edited skill '{slug}' {previous_hash[:12]} -> {new_hash[:12]}"
+        new_version = await self._write_version_with_skills(db, actor, sub_agent_id, baseline, skills, summary)
+        approved_now = existing.type == SubAgentType.AUTOMATED or _meets_auto_approve_constraints(
+            existing.type, baseline.system_prompt, baseline.mcp_tools, existing.is_public, inlined_length
+        )
+        if approved_now:
+            await self.repo.approve_version(
+                db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
+            )
+        return OwnerVersion(sub_agent_id=sub_agent_id, version=new_version, approved=approved_now)
+
+    async def _write_version_with_skills(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        baseline: "SubAgentConfigVersion",
+        skills: list[SkillDefinition],
+        change_summary: str,
+    ) -> int:
+        """Write a DRAFT version that is ``baseline`` with ``skills`` swapped in, and make it current.
+
+        MAX(version)+1, not current_version+1: a soft-deleted draft keeps its number under
+        UNIQUE(sub_agent_id, version). The caller decides whether to approve it.
+        """
         max_version_result = await db.execute(
             text(
                 "SELECT COALESCE(MAX(version), 0) FROM sub_agent_config_versions WHERE sub_agent_id = :sub_agent_id"
@@ -3439,9 +3541,6 @@ class SubAgentService:
             sandbox_enabled=bool(baseline.sandbox_enabled),
         )
         await self.repo.update_current_version(db, actor, sub_agent_id, new_version)
-        await self.repo.approve_version(
-            db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
-        )
         return new_version
 
     async def create_managed_sub_agent(
