@@ -1696,7 +1696,10 @@ export const getSubAgentApiV1SubAgentsSubAgentIdGetQueryKey = (options: Options<
  * Get a sub-agent by ID.
  *
  * Returns the sub-agent with owner info and the specified version's config.
- * If no version is specified, returns the current version.
+ * If no version is specified, returns the current version; ``default`` names the
+ * approved default version by role rather than by number, so a caller that wants
+ * "what was approved" gets it in one read instead of reading the number first and
+ * the version second (with a default change able to land in between).
  * User must be owner, have group access, or be admin (with admin mode enabled).
  */
 export const getSubAgentApiV1SubAgentsSubAgentIdGetOptions = (options: Options<GetSubAgentApiV1SubAgentsSubAgentIdGetData>) => queryOptions<GetSubAgentApiV1SubAgentsSubAgentIdGetResponse, GetSubAgentApiV1SubAgentsSubAgentIdGetError, GetSubAgentApiV1SubAgentsSubAgentIdGetResponse, ReturnType<typeof getSubAgentApiV1SubAgentsSubAgentIdGetQueryKey>>({

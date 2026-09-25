@@ -81,31 +81,21 @@ def _console(responses: list[dict]) -> tuple[MagicMock, AsyncMock]:
 
 
 class TestApprovedVersionIsFetched:
-    async def test_a_draft_newer_than_the_default_is_not_what_runs(self, agent_runner):
-        """current_version=3 is a draft; default_version=2 is approved. The run gets v2."""
-        cls, client = _console(
-            [
-                _record(version=3, default_version=2),
-                _record(version=2, default_version=2, skills=[APPROVED_SKILL]),
-            ]
-        )
+    async def test_the_approved_version_is_asked_for_by_role_in_one_read(self, agent_runner):
+        """current_version=3 is a draft; default_version=2 is approved. The run gets v2,
+        and the console resolved which one that is — the caller never read a number first."""
+        approved = _record(version=2, default_version=2, skills=[APPROVED_SKILL])
+        approved["current_version"] = 3
+        cls, client = _console([approved])
         with patch("httpx.AsyncClient", cls):
             cfg = await agent_runner._fetch_sub_agent_config(7, "tok")
 
         assert cfg["sub_agent_config_version_id"] == 102
         assert cfg["system_prompt"] == "Prompt of v2."
-        # The second read asked for the approved version by number.
-        second = client.get.call_args_list[1]
-        assert second.kwargs["params"] == {"version": 2}
-        assert second.kwargs["headers"] == {"Authorization": "Bearer tok"}
-
-    async def test_one_read_when_the_current_version_is_the_approved_one(self, agent_runner):
-        cls, client = _console([_record(version=2, default_version=2)])
-        with patch("httpx.AsyncClient", cls):
-            cfg = await agent_runner._fetch_sub_agent_config(7, "tok")
-
-        assert cfg["sub_agent_config_version_id"] == 102
         assert client.get.await_count == 1
+        only = client.get.call_args_list[0]
+        assert only.kwargs["params"] == {"version": "default"}
+        assert only.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
     async def test_an_agent_with_no_approved_version_does_not_run(self, agent_runner):
         """Only drafts exist: nothing a reviewer signed off, so nothing to execute."""
@@ -132,17 +122,16 @@ class TestApprovedVersionIsFetched:
         200. Taken at face value that would be an agent with an empty prompt and no tools."""
         unreadable = _record(version=3, default_version=2)
         unreadable["config_version"] = None
-        cls, client = _console([_record(version=3, default_version=2), unreadable])
+        cls, _ = _console([unreadable])
         with (
             patch("httpx.AsyncClient", cls),
             pytest.raises(UnapprovedSubAgentError, match="version 2 .* could not be read"),
         ):
             await agent_runner._fetch_sub_agent_config(7, "tok")
-        assert client.get.await_count == 2
 
-    async def test_a_re_read_answering_with_the_wrong_version_does_not_run(self, agent_runner):
-        """A console that ignores the query parameter hands the draft back again."""
-        cls, _ = _console([_record(version=3, default_version=2), _record(version=3, default_version=2)])
+    async def test_a_console_that_does_not_know_the_role_does_not_run_the_draft(self, agent_runner):
+        """An older console reading ``version=default`` as no version hands the draft back."""
+        cls, _ = _console([_record(version=3, default_version=2)])
         with patch("httpx.AsyncClient", cls), pytest.raises(UnapprovedSubAgentError, match="could not be read"):
             await agent_runner._fetch_sub_agent_config(7, "tok")
 

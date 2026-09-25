@@ -1282,11 +1282,13 @@ class AgentRunner(BaseAgent):
 
         The version fetched is the agent's **approved default**, the one a reviewer
         signed off and the one the orchestrator runs on a person's behalf (its
-        ``/sub-agents/activated`` read joins on ``default_version``). Without a
-        ``version`` the endpoint answers with ``current_version`` instead, which is the
-        newest draft whenever one exists — so a saved-but-unapproved edit would have run
-        unattended, under the draft's prompt and tools, before anyone approved it, and
-        cost attribution would have pointed at the draft's id. An agent with no approved
+        ``/sub-agents/activated`` read joins on ``default_version``). Asked for by role
+        (``version=default``) rather than by number, so the console resolves it in one
+        statement and the number and the row cannot disagree. Without a ``version`` the
+        endpoint answers with ``current_version`` instead, which is the newest draft
+        whenever one exists — so a saved-but-unapproved edit would have run unattended,
+        under the draft's prompt and tools, before anyone approved it, and cost
+        attribution would have pointed at the draft's id. An agent with no approved
         default at all cannot run: see ``UnapprovedSubAgentError``.
 
         Args:
@@ -1303,30 +1305,26 @@ class AgentRunner(BaseAgent):
         url = f"{_CONSOLE_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}"
         headers = {"Authorization": f"Bearer {user_access_token}"}
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=headers)
+            resp = await client.get(url, headers=headers, params={"version": "default"})
             resp.raise_for_status()
             data = resp.json()
 
-            name = data.get("name") or f"sub-agent-{sub_agent_id}"
-            default_version = data.get("default_version")
-            if default_version is None:
-                raise UnapprovedSubAgentError(
-                    f"Sub-agent '{name}' (id {sub_agent_id}) has no approved version. A scheduled run "
-                    "executes only an approved configuration; approve the agent, or point the job at "
-                    "one that is approved.",
-                    sub_agent_name=name,
-                )
-            if (data.get("config_version") or {}).get("version") != default_version:
-                # The unqualified read answered with a newer draft; ask for the approved one.
-                resp = await client.get(url, headers=headers, params={"version": default_version})
-                resp.raise_for_status()
-                data = resp.json()
+        name = data.get("name") or f"sub-agent-{sub_agent_id}"
+        default_version = data.get("default_version")
+        if default_version is None:
+            raise UnapprovedSubAgentError(
+                f"Sub-agent '{name}' (id {sub_agent_id}) has no approved version. A scheduled run "
+                "executes only an approved configuration; approve the agent, or point the job at "
+                "one that is approved.",
+                sub_agent_name=name,
+            )
 
         cfg_version = data.get("config_version") or {}
         if cfg_version.get("version") != default_version:
             # A version the console cannot join comes back as ``config_version: null`` with a
-            # 200 (a soft-deleted row, or a console that ignored the query parameter). Taken
-            # at face value that is an agent with no prompt and no tools; refuse instead.
+            # 200 (a soft-deleted row, or a console that does not know ``default`` and read
+            # the query parameter as nothing). Taken at face value that is an agent with no
+            # prompt and no tools; refuse instead.
             raise UnapprovedSubAgentError(
                 f"Approved version {default_version} of sub-agent '{name}' (id {sub_agent_id}) could not be read.",
                 sub_agent_name=name,
