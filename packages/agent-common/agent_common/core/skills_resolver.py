@@ -23,6 +23,9 @@ async def resolve_skills_for_agent(
 
     Resolution order: personal > group > default.
     A personal skill with the same name as a default skill overrides it.
+    Inline (ADR-0012) belongs to the name in the config: an override of an inlined
+    default skill is inlined in its place, and a skill only personal or group has
+    is never inlined.
 
     Args:
         store: Document store for reading personal/group skills
@@ -38,14 +41,18 @@ async def resolve_skills_for_agent(
 
     # 1. Start with default skills (lowest priority)
     default_names = set()
+    inline_names = set()
     for skill in default_skills:
         default_names.add(skill.name)
+        if skill.inline:
+            inline_names.add(skill.name)
         resolved[skill.name] = ResolvedSkill(
             name=skill.name,
             description=skill.description,
             body=skill.body,
             scope="default",
             files=skill.files,
+            inline=skill.inline,
         )
 
     # 2. Read personal + group skills from docstore via PlaybookReaderService
@@ -86,6 +93,7 @@ async def resolve_skills_for_agent(
             scope=entry.scope,
             files=skill_files,
             overrides=overrides,
+            inline=entry.name in inline_names,
         )
 
     logger.debug(

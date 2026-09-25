@@ -22,6 +22,7 @@ class SkillDefinition:
     description: str
     body: str
     files: list[SkillFile] = field(default_factory=list)
+    inline: bool = False  # ADR-0012: body goes into the system prompt instead of behind load_skill
 
 
 @dataclass
@@ -34,3 +35,4 @@ class ResolvedSkill:
     scope: str  # "personal", "group", or "default"
     files: list[SkillFile] = field(default_factory=list)
     overrides: str | None = None  # scope that this skill overrides (e.g., "default")
+    inline: bool = False  # ADR-0012; an override of an inlined default skill is inlined too

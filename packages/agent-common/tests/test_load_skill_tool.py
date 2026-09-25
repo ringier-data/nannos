@@ -11,6 +11,7 @@ from agent_common.core.load_skill_tool import (
     LOAD_SKILL_TOOL_NAME,
     create_load_skill_tool,
     render_loaded_skill,
+    render_skills_prompt,
 )
 from agent_common.middleware.tool_status import _build_status
 from agent_common.models.skill import ResolvedSkill, SkillFile
@@ -99,3 +100,40 @@ class TestWiring:
         )
         assert score == 0.0
         assert entry is not None and entry.base_score == 0.0
+
+
+class TestRenderSkillsPrompt:
+    """ADR-0012: an inlined skill is in the prompt in full and out of the load_skill list."""
+
+    def _mixed(self) -> dict[str, ResolvedSkill]:
+        skills = _skills()
+        skills["alloy-kb"].inline = True
+        return skills
+
+    def test_no_inlined_skill_keeps_the_single_skills_system_block(self):
+        sections = render_skills_prompt(_skills())
+        assert len(sections) == 1
+        assert sections[0].startswith("## Skills System")
+        assert "- `alloy-kb` (default): Alloy knowledge base" in sections[0]
+        assert "- `tiny` (personal): Tiny skill" in sections[0]
+
+    def test_inlined_skill_is_rendered_as_load_skill_would_return_it(self):
+        skills = self._mixed()
+        listed, inlined = render_skills_prompt(skills)
+        assert "`alloy-kb`" not in listed
+        assert "- `tiny` (personal): Tiny skill" in listed
+        assert inlined.startswith("## Inlined skills\n")
+        assert "do not call load_skill for them" in inlined
+        assert f'<skill name="alloy-kb">\n{render_loaded_skill(skills["alloy-kb"]).rstrip()}\n</skill>' in inlined
+        assert "- /skills/alloy-kb/references/consent.md" in inlined
+
+    def test_only_inlined_skills_have_no_skills_system_block(self):
+        skills = self._mixed()
+        skills["tiny"].inline = True
+        (inlined,) = render_skills_prompt(skills)
+        assert inlined.startswith("## Inlined skills")
+        assert inlined.index('<skill name="alloy-kb">') < inlined.index('<skill name="tiny">')
+
+    def test_load_skill_still_resolves_an_inlined_skill(self):
+        out = create_load_skill_tool(self._mixed()).invoke({"name": "alloy-kb"})
+        assert out.startswith("---\nname: alloy-kb\n")

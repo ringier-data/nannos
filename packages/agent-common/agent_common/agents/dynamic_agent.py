@@ -634,27 +634,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 "</playbook_conflict_resolution>"
             )
 
-        # Build Skills System block from resolved skills
+        # Skills System block (and the inlined skills, ADR-0012) from resolved skills
         if self._resolved_skills:
-            skill_lines = []
-            for skill in sorted(self._resolved_skills.values(), key=lambda s: s.name):
-                scope_label = skill.scope
-                if skill.overrides:
-                    scope_label += f", overrides {skill.overrides}"
-                skill_lines.append(f"- `{skill.name}` ({scope_label}): {skill.description}")
+            from agent_common.core.load_skill_tool import render_skills_prompt
 
-            parts.append(
-                "## Skills System\n"
-                "You have access to the following skills. Each skill is a directory under /skills/\n"
-                "containing a SKILL.md file (and optionally scripts, references, assets).\n\n"
-                "To use a skill:\n"
-                "1. Match the user's request to a skill description below.\n"
-                "2. Call load_skill(name='<name>'). It returns the COMPLETE SKILL.md in one call — "
-                "do not read it through read_file, grep or eval, and never page it with offset/limit.\n"
-                "3. Follow its instructions. If they refer to a bundled file, read that file with "
-                "read_file('/skills/<name>/<file>').\n\n"
-                "Available skills:\n" + "\n".join(skill_lines)
-            )
+            parts.extend(render_skills_prompt(self._resolved_skills))
 
         if not parts:
             return ""
@@ -1389,8 +1373,15 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                         description=s.get("description", ""),
                         body=s.get("body", ""),
                         files=files,
+                        inline=bool(s.get("inline", False)),
                     )
-                return AgentSkillDef(name=s.name, description=s.description, body=s.body, files=s.files)
+                return AgentSkillDef(
+                    name=s.name,
+                    description=s.description,
+                    body=s.body,
+                    files=s.files,
+                    inline=bool(getattr(s, "inline", False)),
+                )
 
             default_skills = []
             if hasattr(self.config, "skills") and self.config.skills:
