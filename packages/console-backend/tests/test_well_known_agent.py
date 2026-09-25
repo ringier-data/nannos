@@ -349,6 +349,57 @@ async def test_revision_tracks_index_only_changes_end_to_end():
 
 
 @pytest.mark.asyncio
+async def test_skills_inline_is_read_from_the_index():
+    client = WellKnownAgentClient()
+    skills = {
+        "book-line-items": skill_md("book-line-items"),
+        "build-targeting": skill_md("build-targeting"),
+    }
+    index_bytes, files = build_tree(
+        skills=skills,
+        extension={"skills_inline": ["build-targeting", "book-line-items"]},
+    )
+    with respx.mock(assert_all_called=False) as router:
+        mount(router, index_bytes, files)
+        definition = await client.fetch(BASE, force=True)
+    assert definition.agent.skills_inline == ["build-targeting", "book-line-items"]
+    # an inlined skill is still an ordinary synced skill
+    assert [s.name for s in definition.skills] == ["book-line-items", "build-targeting"]
+
+    index_bytes, files = build_tree()
+    with respx.mock(assert_all_called=False) as router:
+        mount(router, index_bytes, files)
+        definition = await client.fetch(BASE, force=True)
+    assert definition.agent.skills_inline == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "skills_inline,detail",
+    [
+        ("book-line-items", "must be a list of skill names"),
+        (["no-such-skill"], "'no-such-skill' is not a skill listed in 'skills'"),
+        ([42], "42 is not a skill listed in 'skills'"),
+        (["book-line-items", "book-line-items"], "'book-line-items' is listed twice"),
+    ],
+)
+async def test_invalid_skills_inline_is_refused(skills_inline, detail):
+    err = await fetch_error(
+        WellKnownAgentClient(), extension={"skills_inline": skills_inline}
+    )
+    assert err.step == "index.x-nannos-agent"
+    assert detail in err.detail
+
+
+def test_skills_inline_is_part_of_the_revision():
+    skills = [_skill("a-skill", "b"), _skill("z-skill", "c")]
+    none = compute_revision(_agent(), skills)
+    forward = compute_revision(_agent(skills_inline=["a-skill", "z-skill"]), skills)
+    backward = compute_revision(_agent(skills_inline=["z-skill", "a-skill"]), skills)
+    assert len({none, forward, backward}) == 3  # the append order counts
+
+
+@pytest.mark.asyncio
 async def test_digest_mismatch_is_a_hard_error():
     client = WellKnownAgentClient()
     index_bytes, files = build_tree()
@@ -564,6 +615,26 @@ def test_compose_system_prompt_frames_before_the_host_prompt():
     assert "operated by" not in compose_system_prompt(
         BASE, agent_no_org, "abcdef0123456789"
     )
+
+
+def test_compose_system_prompt_appends_inlined_skills_in_order():
+    agent = _agent(skills_inline=["z-skill", "a-skill"])
+    skills = [
+        _skill("a-skill", "b", body="A body."),
+        _skill("z-skill", "c", body="Z body."),
+        _skill("other-skill", "d", body="Not inlined."),
+    ]
+    prompt = compose_system_prompt(BASE, agent, "abc123", skills)
+
+    head, _, tail = prompt.partition("\n\nDomain guidance.\n\n")
+    assert head.startswith("You are Nannos, Ringier's AI assistant.")
+    assert tail == (
+        "The skill `z-skill` is loaded in full below. Do not call load_skill for it.\n\n"
+        '<skill name="z-skill">\nZ body.\n</skill>\n\n'
+        "The skill `a-skill` is loaded in full below. Do not call load_skill for it.\n\n"
+        '<skill name="a-skill">\nA body.\n</skill>'
+    )
+    assert "Not inlined." not in prompt
 
 
 @pytest.mark.parametrize(

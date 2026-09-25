@@ -118,6 +118,7 @@ class WellKnownAgentInfo(BaseModel):
     tools: list[str] | None = None
     model_tier: str | None = None
     thinking_level: str | None = None
+    skills_inline: list[str] = []
 
 
 class EmbedBinding(BaseModel):
