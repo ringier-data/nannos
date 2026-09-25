@@ -8793,10 +8793,6 @@ export type WellKnownAgentInfo = {
      * Thinking Level
      */
     thinking_level?: string | null;
-    /**
-     * Skills Inline
-     */
-    skills_inline?: Array<string>;
 };
 
 /**
