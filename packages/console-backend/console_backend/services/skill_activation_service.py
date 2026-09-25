@@ -89,6 +89,7 @@ class SkillActivationService:
         *,
         actor: "User | None" = None,
         mode: ActivationMode = "pinned",
+        inline: bool | None = None,
     ) -> int:
         """Activate a registry skill on an agent.
 
@@ -99,6 +100,11 @@ class SkillActivationService:
         until a writer updates it, 'following' bumps the agent on every publisher write.
         Re-activating an already active sub-agent skill with the other mode SWITCHES it;
         a switch to following bumps at once when the agent is behind the publisher.
+
+        ``inline`` (ADR-0012) is sub-agent scope too, but it is a config-version property,
+        not an activation one: it is written into the version this activation creates, or,
+        for a skill already in the config, into a new version that changes only the flag.
+        ``None`` keeps the config's value.
 
         Args:
             db: Database session (console DB)
@@ -128,6 +134,8 @@ class SkillActivationService:
             raise ValueError(
                 "Following is a sub-agent scope concept: personal and group activations are always pinned."
             )
+        if inline is not None and scope != "sub-agent":
+            raise ValueError("Inline is a sub-agent scope concept: personal and group activations are never inlined.")
 
         activated_by = activated_by or (actor.id if actor else user_id)
 
@@ -146,6 +154,10 @@ class SkillActivationService:
                     raise ValueError(
                         "An embed-bound agent cannot follow a skill: its skill list is published by the host."
                     )
+            if inline is not None and await self.sub_agent_service.is_embed_bound(db, sub_agent_id):
+                raise ValueError(
+                    "An embed-bound agent's inlined skills are published by the host (metadata.nannos-inline)."
+                )
 
             # Existing sub-agent activation: idempotent, or a mode switch (ADR-0011).
             result = await db.execute(
@@ -189,6 +201,18 @@ class SkillActivationService:
                             ),
                             {"hash": registry.content_hash, "id": existing["id"]},
                         )
+                if inline is not None:
+                    # Already in the config: a no-op unless the flag changes (ADR-0012).
+                    await self.sub_agent_service.add_skill_to_config(
+                        db=db,
+                        sub_agent_id=sub_agent_id,
+                        registry_id=registry_id,
+                        skill_name=registry.slug,
+                        skill_description=registry.description or "",
+                        content_hash=registry.content_hash,
+                        actor=actor,
+                        inline=inline,
+                    )
                 return existing["id"]
 
             # Create a new config version with this skill appended (immutable versions).
@@ -202,6 +226,7 @@ class SkillActivationService:
                 skill_description=registry.description or "",
                 content_hash=registry.content_hash,
                 actor=actor,
+                inline=inline,
             )
 
             # Create sub-agent activation record (mode, tracking, update-detection)

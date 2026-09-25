@@ -317,6 +317,14 @@ class SkillActivationRequest(BaseModel):
             "this agent automatically. Re-activating an already active skill with the other mode switches it."
         ),
     )
+    inline: bool | None = Field(
+        default=None,
+        description=(
+            "Sub-agent scope only (ADR-0012). true: the skill's full SKILL.md goes into the agent's system prompt "
+            "on every turn instead of behind load_skill. Written into the config version, so it counts toward the "
+            "auto-approve prompt limit. null keeps the config's value (false for a new skill)."
+        ),
+    )
 
 
 class SkillActivationListResponse(BaseModel):

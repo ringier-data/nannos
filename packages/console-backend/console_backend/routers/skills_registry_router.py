@@ -38,6 +38,7 @@ from console_backend.models.skills_registry import (
 from console_backend.models.user import User
 from console_backend.services.skill_registry_service import SkillReferencedError, SkillRegistryService
 from console_backend.services.skills_registry_service import skills_registry_service
+from console_backend.services.sub_agent_service import PromptLimitError
 
 if TYPE_CHECKING:
     from console_backend.services.skill_activation_service import SkillActivationService
@@ -1284,6 +1285,15 @@ class McpActivateSkillInput(BaseModel):
             "Activating an already active skill with the other mode switches its mode."
         ),
     )
+    inline: bool | None = Field(
+        default=None,
+        description=(
+            "Sub-agent scope only. true puts the skill's full SKILL.md into the agent's system prompt on "
+            "every turn, so it never needs load_skill. Every turn then costs more, and the text counts toward "
+            "the auto-approve prompt limit. Set it only when the user has asked for it. "
+            "false stops inlining; omit it to keep the current setting."
+        ),
+    )
 
 
 class McpActivateSkillResponse(BaseModel):
@@ -1294,6 +1304,8 @@ class McpActivateSkillResponse(BaseModel):
     scope: str
     registry_id: str
     mode: ActivationMode = "pinned"
+    inline: bool | None = None
+    pending_approval: bool = False
     message: str
 
 
@@ -1335,6 +1347,11 @@ async def mcp_activate_skill(
         raise HTTPException(
             status_code=400,
             detail="mode='following' is only available with scope='sub-agent'; personal and group activations are pinned.",
+        )
+    if body.inline is not None and body.scope != "sub-agent":
+        raise HTTPException(
+            status_code=400,
+            detail="inline is only available with scope='sub-agent'; personal and group activations are never inlined.",
         )
 
     if not body.registry_id and not body.skill_name:
@@ -1420,12 +1437,17 @@ async def mcp_activate_skill(
             ),
         )
 
+    from console_backend.routers.skill_activations_router import _current_version, _wrote_pending_version
+
     switched = False
+    version_before: int | None = None
     if body.scope == "sub-agent":
         existing = await activation_service.find_activation_by_registry_id(
             db, registry_id=entry.id, sub_agent_id=sub_agent_id, scope="sub-agent"
         )
         switched = existing is not None and existing.mode != body.mode
+        if body.inline is not None:  # only an inline change can leave a version pending here
+            version_before = await _current_version(db, sub_agent_id)
 
     try:
         await activation_service.activate(
@@ -1439,9 +1461,13 @@ async def mcp_activate_skill(
             activated_by=user.id,
             actor=user,
             mode=body.mode,
+            inline=body.inline,
         )
+    except PromptLimitError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    pending_approval = body.inline is not None and await _wrote_pending_version(db, sub_agent_id, version_before)
 
     if switched:
         message = (
@@ -1457,6 +1483,13 @@ async def mcp_activate_skill(
         message = f"Skill '{entry.slug}' activated on agent '{agent_name}' (sub-agent scope, {how})."
     else:
         message = f"Skill '{entry.slug}' activated on agent '{agent_name}' ({body.scope} scope)."
+    if body.inline is not None and body.scope == "sub-agent":
+        message += " Its full text is inlined in the system prompt." if body.inline else " It is not inlined."
+    if pending_approval:
+        message += (
+            " The new version is over the auto-approve prompt limit, so it waits for approval in the console "
+            "before it takes effect."
+        )
 
     return McpActivateSkillResponse(
         skill_name=entry.slug,
@@ -1464,6 +1497,8 @@ async def mcp_activate_skill(
         scope=body.scope,
         registry_id=entry.id,
         mode=body.mode if body.scope == "sub-agent" else "pinned",
+        inline=body.inline if body.scope == "sub-agent" else None,
+        pending_approval=pending_approval,
         message=message,
     )
 

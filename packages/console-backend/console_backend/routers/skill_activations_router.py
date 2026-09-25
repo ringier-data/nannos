@@ -23,6 +23,7 @@ from console_backend.models.skills_registry import (
 from console_backend.models.user import User
 from console_backend.services.skill_activation_service import SkillActivationService
 from console_backend.services.skill_registry_service import SkillRegistryService
+from console_backend.services.sub_agent_service import PromptLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,9 @@ async def activate_skill(
     Sub-agent (write access on the agent required): the agent's config gains a REFERENCE
     to the registry row (ADR-0011) in the requested ``mode`` — 'pinned' (default) or
     'following'. Re-activating an already active skill with the other mode switches it.
+    ``inline`` (ADR-0012) is written into the config version; over the auto-approve prompt
+    limit an automated agent is refused with 422 and a local agent's version waits for
+    approval (``pending_approval``).
     """
     if body.scope not in ("personal", "group", "sub-agent"):
         raise HTTPException(status_code=400, detail="scope must be 'personal', 'group' or 'sub-agent'")
@@ -166,6 +170,11 @@ async def activate_skill(
         raise HTTPException(
             status_code=400,
             detail="mode 'following' is only available with scope 'sub-agent'; personal and group activations are pinned",
+        )
+    if body.inline is not None and body.scope != "sub-agent":
+        raise HTTPException(
+            status_code=400,
+            detail="inline is only available with scope 'sub-agent'; personal and group activations are never inlined",
         )
 
     # Verify registry entry exists
@@ -205,11 +214,14 @@ async def activate_skill(
     # Activate
     activation_service = _get_activation_service(request)
     switched = False
+    version_before: int | None = None
     if body.scope == "sub-agent":
         existing = await activation_service.find_activation_by_registry_id(
             db, registry_id=body.registry_id, sub_agent_id=body.sub_agent_id, scope="sub-agent"
         )
         switched = existing is not None and existing.mode != body.mode
+        if body.inline is not None:  # only an inline change can leave a version pending here
+            version_before = await _current_version(db, body.sub_agent_id)
     try:
         activation_id = await activation_service.activate(
             db=db,
@@ -222,10 +234,16 @@ async def activate_skill(
             activated_by=user.id,
             actor=user if body.scope == "sub-agent" else None,
             mode=body.mode,
+            inline=body.inline,
         )
+    except PromptLimitError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    pending_approval = body.inline is not None and await _wrote_pending_version(
+        db, body.sub_agent_id, version_before
+    )
     await db.commit()
 
     return {
@@ -234,8 +252,34 @@ async def activate_skill(
         "scope": body.scope,
         "mode": body.mode,
         "switched": switched,
+        "inline": body.inline,
+        "pending_approval": pending_approval,
         "activated": True,
     }
+
+
+async def _current_version(db: AsyncSession, sub_agent_id: int) -> int | None:
+    from sqlalchemy import text as sa_text
+
+    result = await db.execute(sa_text("SELECT current_version FROM sub_agents WHERE id = :id"), {"id": sub_agent_id})
+    return result.scalar_one_or_none()
+
+
+async def _wrote_pending_version(db: AsyncSession, sub_agent_id: int, version_before: int | None) -> bool:
+    """True when the activation wrote a new version that was not auto-approved.
+
+    That happens when an inlined skill takes a local agent past the auto-approve
+    prompt limit (ADR-0012): the skill is only live once someone approves the version.
+    """
+    from sqlalchemy import text as sa_text
+
+    result = await db.execute(
+        sa_text("SELECT current_version, default_version FROM sub_agents WHERE id = :id"), {"id": sub_agent_id}
+    )
+    row = result.mappings().first()
+    if row is None or row["current_version"] == version_before:
+        return False
+    return row["current_version"] != row["default_version"]
 
 
 @router.delete("/{activation_id}", status_code=status.HTTP_204_NO_CONTENT)
