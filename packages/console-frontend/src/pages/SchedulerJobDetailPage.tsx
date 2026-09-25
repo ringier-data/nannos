@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import {
   ArrowLeft,
   Pause,
@@ -23,6 +24,7 @@ import {
   Users,
   Ban,
   RotateCcw,
+  Search,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -1475,8 +1477,17 @@ function ParkedRunNotice({ jobId, run }: { jobId: number; run: ScheduledJobRun }
 // Run history table
 // ---------------------------------------------------------------------------
 
-function RunHistoryTable({ runs }: { runs: ScheduledJobRun[] }) {
+function RunHistoryTable({ runs, filtered }: { runs: ScheduledJobRun[]; filtered: boolean }) {
   const { isAdmin } = useAuth();
+
+  if (runs.length === 0 && filtered) {
+    return (
+      <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center">
+        <Clock className="h-6 w-6 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">No runs match these filters</p>
+      </div>
+    );
+  }
 
   if (runs.length === 0) {
     return (
@@ -1645,17 +1656,46 @@ export function SchedulerJobDetailPage() {
   });
 
   const [runsPage, setRunsPage] = useState(1);
+  const [runsSearch, setRunsSearch] = useState('');
+  const [runsStatus, setRunsStatus] = useState<JobRunStatus | 'all'>('all');
+  const debouncedRunsSearch = useDebouncedValue(runsSearch);
+  const runsFilter = {
+    search: debouncedRunsSearch || undefined,
+    status: runsStatus === 'all' ? undefined : runsStatus,
+  };
+  const runsFiltered = !!(runsFilter.search || runsFilter.status);
 
-  const { data: runsData, isLoading: runsLoading } = useQuery({
-    queryKey: ['scheduler-runs', jobId, { page: runsPage }],
-    queryFn: () => listRuns(jobId, { page: runsPage, limit: RUNS_PAGE_SIZE }),
+  const { data: runsData, isLoading: runsLoading, isFetching: runsFetching } = useQuery({
+    queryKey: ['scheduler-runs', jobId, { page: runsPage, ...runsFilter }],
+    queryFn: () => listRuns(jobId, { page: runsPage, limit: RUNS_PAGE_SIZE, ...runsFilter }),
     enabled,
     refetchInterval: 15_000, // refresh run history every 15s
     placeholderData: keepPreviousData,
   });
 
+  // The parked-run card and the last-check panel describe the job's LATEST runs, not
+  // whatever page or filter the table is showing — a search for an error message must
+  // not make the authorization prompt vanish. At the defaults this is the same query
+  // key as the table's, so it costs no extra request.
+  const { data: latestRunsData } = useQuery({
+    queryKey: ['scheduler-runs', jobId, { page: 1 }],
+    queryFn: () => listRuns(jobId, { page: 1, limit: RUNS_PAGE_SIZE }),
+    enabled,
+    refetchInterval: 15_000,
+  });
+
   const runs = runsData?.runs ?? [];
   const runsTotal = runsData?.total ?? 0;
+  const latestRuns = latestRunsData?.runs ?? [];
+
+  const handleRunsSearchChange = (value: string) => {
+    setRunsSearch(value);
+    setRunsPage(1);
+  };
+  const handleRunsStatusChange = (value: string) => {
+    setRunsStatus(value as JobRunStatus | 'all');
+    setRunsPage(1);
+  };
 
   // At most one run of a job is ever parked (claim_due_jobs will not claim a job while
   // one is), so the first match is the one waiting — and the reason the job is idle.
@@ -1664,7 +1704,7 @@ export function SchedulerJobDetailPage() {
   // keeps `auth_required` forever, because that is a true record of how that occurrence
   // ended. Keying the card on status alone left it on screen after the answer, and a
   // second click hit a task that had since gone terminal.
-  const parkedRun = runs.find((r) => r.status === 'auth_required' && r.parked_task_id);
+  const parkedRun = latestRuns.find((r) => r.status === 'auth_required' && r.parked_task_id);
 
   const pauseMutation = useMutation({
     mutationFn: () => pauseJob(jobId),
@@ -1813,12 +1853,42 @@ export function SchedulerJobDetailPage() {
                   below, so it heads the history rather than the definition. */}
               {job.job_type === 'watch' && (
                 <LastCheckPanel
-                  run={runs.find((r) => r.condition_evaluation) ?? runs[0]}
+                  run={latestRuns.find((r) => r.condition_evaluation) ?? latestRuns[0]}
                   result={job.last_check_result as Record<string, unknown> | null}
                 />
               )}
 
-              <RunHistoryTable runs={runs} />
+              {/* Shown while a filter is active too, so an empty result keeps its way back. */}
+              {(runsTotal > 0 || runsFiltered) && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative min-w-[12rem] flex-1">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      placeholder="Search results and errors..."
+                      value={runsSearch}
+                      onChange={(e) => handleRunsSearchChange(e.target.value)}
+                      className="pl-9"
+                    />
+                  </div>
+                  <Select value={runsStatus} onValueChange={handleRunsStatusChange}>
+                    <SelectTrigger className="w-[200px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All statuses</SelectItem>
+                      <SelectItem value="success">Success</SelectItem>
+                      <SelectItem value="failed">Failed</SelectItem>
+                      <SelectItem value="running">Running</SelectItem>
+                      <SelectItem value="condition_not_met">Condition not met</SelectItem>
+                      <SelectItem value="interrupted">Interrupted</SelectItem>
+                      <SelectItem value="auth_required">Authorization</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className={`transition-opacity ${runsFetching && !runsLoading ? 'opacity-60' : ''}`}>
+                <RunHistoryTable runs={runs} filtered={runsFiltered} />
+              </div>
               {/* Run history only grows, and the endpoint used to answer with a
                   bare LIMIT 50 — the 51st run was unreachable. */}
               <Pagination

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { Search, MoreHorizontal, ExternalLink, Bug, Loader2, FlaskConical } from 'lucide-react';
 import { config } from '@/config';
 import { toast } from 'sonner';
@@ -45,6 +45,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { BugReportStatusBadge } from '@/components/admin/BugReportStatusBadge';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { Badge } from '@/components/ui/badge';
@@ -54,6 +55,7 @@ export function BugReportsPage() {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [confirmDialog, setConfirmDialog] = useState<{
     open: boolean;
@@ -70,14 +72,16 @@ export function BugReportsPage() {
 
   const limit = 20;
 
-  const { data: reportsData, isLoading } = useQuery({
+  const { data: reportsData, isLoading, isFetching } = useQuery({
     ...listBugReportsApiV1BugReportsGetOptions({
       query: {
         page,
         limit,
         status_filter: statusFilter !== 'all' ? statusFilter as BugReportStatus : undefined,
+        search: debouncedSearch || undefined,
       },
     }),
+    placeholderData: keepPreviousData,
   });
 
   const statusMutation = useMutation({
@@ -98,7 +102,7 @@ export function BugReportsPage() {
         path: { report_id: reportId },
       });
       if (response.error) {
-        const detail = (response.error as any)?.detail ?? '';
+        const detail = (response.error as { detail?: unknown } | undefined)?.detail ?? '';
         if (typeof detail === 'string' && detail.includes('No active debug agent')) {
           throw new Error('NO_DEBUG_AGENT');
         }
@@ -162,10 +166,6 @@ export function BugReportsPage() {
   const reports = reportsData?.data ?? [];
   const meta = reportsData?.meta ?? { page: 1, limit: 20, total: 0 };
 
-  const filteredReports = search
-    ? reports.filter((r) => r.description?.toLowerCase().includes(search.toLowerCase()))
-    : reports;
-
   const handleStatusChange = (report: BugReportResponse, newStatus: BugReportStatus) => {
     setConfirmDialog({
       open: true,
@@ -209,7 +209,7 @@ export function BugReportsPage() {
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search by description..."
+            placeholder="Search description, reporter, conversation or report ID..."
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
@@ -238,7 +238,7 @@ export function BugReportsPage() {
         </Select>
       </div>
 
-      <div className="rounded-md border">
+      <div className={`rounded-md border transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}>
         <Table>
           <TableHeader>
             <TableRow>
@@ -254,10 +254,10 @@ export function BugReportsPage() {
           <TableBody>
             {isLoading ? (
               <TableRowsSkeleton columns={7} />
-            ) : filteredReports.length === 0 ? (
+            ) : reports.length === 0 ? (
               <TableEmptyRow colSpan={7} title="No bug reports found" />
             ) : (
-              filteredReports.map((report) => (
+              reports.map((report) => (
                 <TableRow key={report.id}>
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {truncateId(report.id)}
@@ -414,8 +414,8 @@ export function BugReportsPage() {
             </SelectTrigger>
             <SelectContent>
               {Array.isArray(availableAgents) && availableAgents
-                .filter((a: any) => a.default_version != null)
-                .map((a: any) => (
+                .filter((a) => a.default_version != null)
+                .map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {a.name} ({a.type})
                   </SelectItem>

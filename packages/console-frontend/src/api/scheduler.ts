@@ -14,6 +14,7 @@
  * types (createScheduledJob's delivery_channel_id, for one).
  */
 import { client } from './generated/client.gen';
+import { totalCountFrom } from './total-count';
 import {
   generateConditionApiV1SchedulerGenerateConditionPost,
   listChannelsApiV1DeliveryChannelsGet,
@@ -469,11 +470,7 @@ export async function listJobs(opts?: {
   });
   if (error) throw new Error(formatApiError(error));
   const jobs = data ?? [];
-  // Absent when the caller asked for everything, and on any proxy that drops it;
-  // the page length is then the honest count.
-  const header = response?.headers?.get?.('X-Total-Count');
-  const total = header != null && header !== '' ? Number(header) : jobs.length;
-  return { jobs, total: Number.isFinite(total) ? total : jobs.length };
+  return { jobs, total: totalCountFrom(response, jobs.length) };
 }
 
 export interface SharedJobDefinitionPage {
@@ -504,9 +501,7 @@ export async function listSharedDefinitions(opts?: {
   });
   if (error) throw new Error(formatApiError(error));
   const definitions = data ?? [];
-  const header = response?.headers?.get?.('X-Total-Count');
-  const total = header != null && header !== '' ? Number(header) : definitions.length;
-  return { definitions, total: Number.isFinite(total) ? total : definitions.length };
+  return { definitions, total: totalCountFrom(response, definitions.length) };
 }
 
 export async function getJob(jobId: number): Promise<ScheduledJob> {
@@ -557,11 +552,12 @@ export interface ScheduledJobRunPage {
  * Always paged: run history only grows, and the endpoint used to answer with a
  * bare `LIMIT 50` and no offset, so a job's 51st run could not be reached at
  * all. Like the sibling scheduler lists the body is a bare array and the count
- * comes back in `X-Total-Count`.
+ * comes back in `X-Total-Count`. `search` matches the result summary or error
+ * message and combines with the `status` facet.
  */
 export async function listRuns(
   jobId: number,
-  opts?: { page?: number; limit?: number; status?: JobRunStatus },
+  opts?: { page?: number; limit?: number; status?: JobRunStatus; search?: string },
 ): Promise<ScheduledJobRunPage> {
   const { data, error, response } = await listRunsApiV1SchedulerJobsJobIdRunsGet({
     path: { job_id: jobId },
@@ -569,11 +565,10 @@ export async function listRuns(
       page: opts?.page ?? 1,
       ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
       ...(opts?.status ? { status: opts.status } : {}),
+      search: opts?.search || undefined,
     },
   });
   if (error) throw new Error(formatApiError(error));
   const runs = data ?? [];
-  const header = response?.headers?.get?.('X-Total-Count');
-  const total = header != null && header !== '' ? Number(header) : runs.length;
-  return { runs, total: Number.isFinite(total) ? total : runs.length };
+  return { runs, total: totalCountFrom(response, runs.length) };
 }

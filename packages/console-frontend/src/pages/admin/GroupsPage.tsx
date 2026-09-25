@@ -1,12 +1,16 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { Link } from 'react-router';
 import { Search, Plus, MoreHorizontal, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { listMyGroupsApiV1GroupsGet } from '@/api/generated/sdk.gen';
+import { totalCountFrom } from '@/api/total-count';
 import {
   listGroupsApiV1AdminGroupsGetOptions,
-  listMyGroupsApiV1GroupsGetOptions,
+  listGroupsApiV1AdminGroupsGetQueryKey,
+  listMyGroupsApiV1GroupsGetQueryKey,
   createGroupApiV1AdminGroupsPostMutation,
   deleteGroupApiV1AdminGroupsGroupIdDeleteMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
@@ -58,37 +62,49 @@ export function GroupsPage() {
   const limit = 20;
   const isAdminView = isAdmin && adminMode;
 
-  // Admins use the admin endpoint with pagination, group managers use the my groups endpoint
-  const { data: adminGroupsData, isLoading: isLoadingAdmin } = useQuery({
+  const debouncedSearch = useDebouncedValue(search);
+
+  // Admins use the admin endpoint, group managers the my-groups one; both page
+  // and search on the server.
+  const { data: adminGroupsData, isLoading: isLoadingAdmin, isFetching: isFetchingAdmin } = useQuery({
     ...listGroupsApiV1AdminGroupsGetOptions({
       query: {
         page,
         limit,
-        search: search || undefined,
+        search: debouncedSearch || undefined,
       },
     }),
     enabled: isAdminView,
+    placeholderData: keepPreviousData,
   });
 
-  const { data: myGroupsData, isLoading: isLoadingMy } = useQuery({
-    ...listMyGroupsApiV1GroupsGetOptions(),
+  // The my-groups body is a bare array (agents read it too), so the count comes
+  // from `X-Total-Count` — which the tanstack wrapper drops, hence the direct
+  // operation call. The trailing key element keeps this `{rows, total}` shape
+  // apart from the plain-array cache entries of other callers, while `_id`-
+  // and prefix-based invalidations still reach it.
+  const myGroupsQuery = { page, limit, search: debouncedSearch || undefined };
+  const { data: myGroupsData, isLoading: isLoadingMy, isFetching: isFetchingMy } = useQuery({
+    queryKey: [...listMyGroupsApiV1GroupsGetQueryKey({ query: myGroupsQuery }), 'with-total'] as const,
+    queryFn: async ({ signal }) => {
+      const { data, response } = await listMyGroupsApiV1GroupsGet({
+        query: myGroupsQuery,
+        signal,
+        throwOnError: true,
+      });
+      return { rows: data, total: totalCountFrom(response, data.length) };
+    },
     enabled: !isAdminView,
+    placeholderData: keepPreviousData,
   });
 
   const isLoading = isAdminView ? isLoadingAdmin : isLoadingMy;
+  const isFetching = isAdminView ? isFetchingAdmin : isFetchingMy;
 
-  // For group managers, filter locally by search
-  const filteredMyGroups = myGroupsData?.filter(group => {
-    if (!search) return true;
-    const query = search.toLowerCase();
-    return group.name.toLowerCase().includes(query) || 
-           (group.description?.toLowerCase().includes(query) ?? false);
-  }) ?? [];
-
-  const groups = isAdminView ? (adminGroupsData?.data ?? []) : filteredMyGroups;
-  const meta = isAdminView 
-    ? (adminGroupsData?.meta ?? { page: 1, limit: 20, total: 0 })
-    : { page: 1, limit: filteredMyGroups.length, total: filteredMyGroups.length };
+  const groups = isAdminView ? (adminGroupsData?.data ?? []) : (myGroupsData?.rows ?? []);
+  const meta = isAdminView
+    ? (adminGroupsData?.meta ?? { page: 1, limit, total: 0 })
+    : { page, limit, total: myGroupsData?.total ?? 0 };
 
   const createMutation = useMutation({
     ...createGroupApiV1AdminGroupsPostMutation(),
@@ -97,15 +113,8 @@ export function GroupsPage() {
       setCreateDialogOpen(false);
       setNewGroupName('');
       setNewGroupDescription('');
-      queryClient.invalidateQueries({ 
-        queryKey: listGroupsApiV1AdminGroupsGetOptions({
-          query: {
-            page,
-            limit,
-            search: search || undefined,
-          },
-        }).queryKey
-      });
+      // No query in the key: partial matching then refreshes every page and term.
+      queryClient.invalidateQueries({ queryKey: listGroupsApiV1AdminGroupsGetQueryKey() });
     },
     onError: (error: any) => {
       const message = error?.detail || error?.response?.data?.detail || 'Failed to create group';
@@ -117,15 +126,8 @@ export function GroupsPage() {
     ...deleteGroupApiV1AdminGroupsGroupIdDeleteMutation(),
     onSuccess: () => {
       toast.success('Group deleted successfully');
-      queryClient.invalidateQueries({ 
-        queryKey: listGroupsApiV1AdminGroupsGetOptions({
-          query: {
-            page,
-            limit,
-            search: search || undefined,
-          },
-        }).queryKey
-      });
+      // No query in the key: partial matching then refreshes every page and term.
+      queryClient.invalidateQueries({ queryKey: listGroupsApiV1AdminGroupsGetQueryKey() });
     },
     onError: () => {
       toast.error('Failed to delete group');
@@ -194,11 +196,14 @@ export function GroupsPage() {
               <TableHead className="w-12"></TableHead>
             </TableRow>
           </TableHeader>
-          <TableBody>
+          <TableBody className={isFetching && !isLoading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
             {isLoading ? (
               <TableRowsSkeleton columns={5} />
             ) : groups.length === 0 ? (
-              <TableEmptyRow colSpan={5} title="No groups found" />
+              <TableEmptyRow
+                colSpan={5}
+                title={debouncedSearch ? 'No groups match your search' : 'No groups found'}
+              />
             ) : (
               groups.map((group) => (
                 <TableRow key={group.id}>
@@ -257,14 +262,12 @@ export function GroupsPage() {
         </Table>
       </div>
 
-      {isAdminView && (
-        <Pagination
-          page={meta.page}
-          limit={meta.limit}
-          total={meta.total}
-          onPageChange={setPage}
-        />
-      )}
+      <Pagination
+        page={meta.page}
+        limit={meta.limit}
+        total={meta.total}
+        onPageChange={setPage}
+      />
 
       {/* Create Group Dialog - Admin only */}
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>

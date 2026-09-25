@@ -1,8 +1,19 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, TestTube, Pencil, Globe, RefreshCw } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { Plus, Trash2, TestTube, Pencil, Globe, RefreshCw, Search } from 'lucide-react';
 import { toast } from 'sonner';
-import { client } from '@/api/generated/client.gen';
+import {
+  createOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostMutation,
+  deleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteMutation,
+  listOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetOptions,
+  listOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetQueryKey,
+  pushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostMutation,
+  testOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostMutation,
+  updateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchMutation,
+} from '@/api/generated/@tanstack/react-query.gen';
+import type { OutboundScimEndpoint, OutboundScimEndpointUpdate } from '@/api/generated/types.gen';
+import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -22,50 +33,7 @@ import {
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
-interface OutboundScimEndpoint {
-  id: string;
-  name: string;
-  endpoint_url: string;
-  token_hint: string;
-  enabled: boolean;
-  push_users: boolean;
-  push_groups: boolean;
-  is_mcp_gateway: boolean;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface OutboundScimEndpointCreated {
-  id: string;
-  name: string;
-  endpoint_url: string;
-  bearer_token: string;
-  enabled: boolean;
-  push_users: boolean;
-  push_groups: boolean;
-  is_mcp_gateway: boolean;
-  created_at: string;
-}
-
-interface OutboundScimListResponse {
-  data: OutboundScimEndpoint[];
-  meta: { page: number; limit: number; total: number };
-}
-
-interface TestResult {
-  success: boolean;
-  status_code: number | null;
-  message: string;
-}
-
-interface PushAllResult {
-  message: string;
-  users_queued: number;
-  groups_queued: number;
-}
-
-const API_BASE = '/api/v1/admin/outbound-scim-endpoints';
+const PAGE_SIZE = 20;
 
 export function OutboundScimPage() {
   const queryClient = useQueryClient();
@@ -96,30 +64,31 @@ export function OutboundScimPage() {
   const [editEnabled, setEditEnabled] = useState(true);
   const [editIsMcpGateway, setEditIsMcpGateway] = useState(false);
 
-  const { data, isLoading } = useQuery<OutboundScimListResponse>({
-    queryKey: ['outboundScimEndpoints'],
-    queryFn: async () => {
-      const res = await client.get<OutboundScimListResponse>({ url: API_BASE });
-      return res.data as OutboundScimListResponse;
-    },
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const debouncedSearch = useDebouncedValue(search);
+
+  const { data, isLoading, isFetching } = useQuery({
+    ...listOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetOptions({
+      query: { page, limit: PAGE_SIZE, search: debouncedSearch || undefined },
+    }),
+    placeholderData: keepPreviousData,
   });
 
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setPage(1);
+  };
+
+  const invalidateList = () =>
+    queryClient.invalidateQueries({ queryKey: listOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetQueryKey() });
+
   const createMutation = useMutation({
-    mutationFn: async (body: {
-      name: string;
-      endpoint_url: string;
-      bearer_token: string;
-      push_users: boolean;
-      push_groups: boolean;
-      is_mcp_gateway: boolean;
-    }) => {
-      const res = await client.post<OutboundScimEndpointCreated>({ url: API_BASE, body });
-      return res.data as OutboundScimEndpointCreated;
-    },
+    ...createOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostMutation(),
     onSuccess: () => {
       setCreateDialogOpen(false);
       resetCreateForm();
-      queryClient.invalidateQueries({ queryKey: ['outboundScimEndpoints'] });
+      invalidateList();
       toast.success('Outbound SCIM endpoint created');
     },
     onError: () => {
@@ -128,13 +97,10 @@ export function OutboundScimPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: async ({ id, body }: { id: string; body: Record<string, unknown> }) => {
-      const res = await client.patch({ url: `${API_BASE}/${id}`, body });
-      return res.data;
-    },
+    ...updateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchMutation(),
     onSuccess: () => {
       setEditDialog({ open: false, endpoint: null });
-      queryClient.invalidateQueries({ queryKey: ['outboundScimEndpoints'] });
+      invalidateList();
       toast.success('Endpoint updated');
     },
     onError: () => {
@@ -143,11 +109,9 @@ export function OutboundScimPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async (id: string) => {
-      await client.delete({ url: `${API_BASE}/${id}` });
-    },
+    ...deleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteMutation(),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['outboundScimEndpoints'] });
+      invalidateList();
       toast.success('Endpoint deleted');
       setDeleteDialog({ open: false, endpoint: null });
     },
@@ -157,15 +121,14 @@ export function OutboundScimPage() {
   });
 
   const testMutation = useMutation({
-    mutationFn: async (id: string) => {
-      const res = await client.post<TestResult>({ url: `${API_BASE}/${id}/test` });
-      return res.data as TestResult;
-    },
+    ...testOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostMutation(),
     onSuccess: (result) => {
       if (result.success) {
         toast.success(`Connection successful (${result.status_code})`);
       } else {
-        toast.error(`Connection failed: ${result.message}`);
+        // The backend's detail is already a complete sentence ("Connection timed out",
+        // "Endpoint returned HTTP 500", "Connection failed: …"); prefixing it doubled it.
+        toast.error(result.detail ?? 'Connection failed');
       }
     },
     onError: () => {
@@ -174,10 +137,7 @@ export function OutboundScimPage() {
   });
 
   const pushAllMutation = useMutation({
-    mutationFn: async (id: string) => {
-      const res = await client.post<PushAllResult>({ url: `${API_BASE}/${id}/push-all` });
-      return res.data as PushAllResult;
-    },
+    ...pushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostMutation(),
     onSuccess: (result) => {
       toast.success(`Push started: ${result.users_queued} users, ${result.groups_queued} groups queued`);
     },
@@ -197,12 +157,14 @@ export function OutboundScimPage() {
 
   const handleCreate = () => {
     createMutation.mutate({
-      name,
-      endpoint_url: endpointUrl,
-      bearer_token: bearerToken,
-      push_users: pushUsers,
-      push_groups: pushGroups,
-      is_mcp_gateway: isMcpGateway,
+      body: {
+        name,
+        endpoint_url: endpointUrl,
+        bearer_token: bearerToken,
+        push_users: pushUsers,
+        push_groups: pushGroups,
+        is_mcp_gateway: isMcpGateway,
+      },
     });
   };
 
@@ -219,7 +181,7 @@ export function OutboundScimPage() {
 
   const handleUpdate = () => {
     if (!editDialog.endpoint) return;
-    const body: Record<string, unknown> = {
+    const body: OutboundScimEndpointUpdate = {
       name: editName,
       endpoint_url: editEndpointUrl,
       push_users: editPushUsers,
@@ -228,10 +190,11 @@ export function OutboundScimPage() {
       is_mcp_gateway: editIsMcpGateway,
     };
     if (editBearerToken) body.bearer_token = editBearerToken;
-    updateMutation.mutate({ id: editDialog.endpoint.id, body });
+    updateMutation.mutate({ path: { endpoint_id: editDialog.endpoint.id }, body });
   };
 
   const endpoints = data?.data ?? [];
+  const total = data?.meta.total ?? 0;
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
@@ -255,8 +218,18 @@ export function OutboundScimPage() {
         </Button>
       </div>
 
+      <div className="relative max-w-sm">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          placeholder="Search by name or URL..."
+          value={search}
+          onChange={(e) => handleSearchChange(e.target.value)}
+          className="pl-9"
+        />
+      </div>
+
       {/* Endpoints Table */}
-      <div className="border rounded-lg">
+      <div className={`border rounded-lg transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}>
         <Table>
           <TableHeader>
             <TableRow>
@@ -272,7 +245,11 @@ export function OutboundScimPage() {
             {isLoading ? (
               <TableRowsSkeleton columns={6} />
             ) : endpoints.length === 0 ? (
-              <TableEmptyRow colSpan={6} icon={Globe} title="No outbound SCIM endpoints configured" />
+              <TableEmptyRow
+                colSpan={6}
+                icon={Globe}
+                title={debouncedSearch ? 'No endpoints match your search' : 'No outbound SCIM endpoints configured'}
+              />
             ) : (
               endpoints.map((ep) => (
                 <TableRow key={ep.id}>
@@ -300,7 +277,7 @@ export function OutboundScimPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => pushAllMutation.mutate(ep.id)}
+                            onClick={() => pushAllMutation.mutate({ path: { endpoint_id: ep.id } })}
                             disabled={pushAllMutation.isPending || !ep.enabled}
                           >
                             <RefreshCw className="h-4 w-4" /> Full Sync
@@ -313,7 +290,7 @@ export function OutboundScimPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => testMutation.mutate(ep.id)}
+                            onClick={() => testMutation.mutate({ path: { endpoint_id: ep.id } })}
                             disabled={testMutation.isPending}
                           >
                             <TestTube className="h-4 w-4" /> Test
@@ -350,6 +327,8 @@ export function OutboundScimPage() {
           </TableBody>
         </Table>
       </div>
+
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
 
       {/* Create Dialog */}
       <Dialog
@@ -503,7 +482,7 @@ export function OutboundScimPage() {
           description={`Are you sure you want to delete "${deleteDialog.endpoint.name}"? Provisioning to this endpoint will stop immediately.`}
           confirmLabel="Delete"
           variant="destructive"
-          onConfirm={() => deleteMutation.mutate(deleteDialog.endpoint!.id)}
+          onConfirm={() => deleteMutation.mutate({ path: { endpoint_id: deleteDialog.endpoint!.id } })}
           isLoading={deleteMutation.isPending}
         />
       )}

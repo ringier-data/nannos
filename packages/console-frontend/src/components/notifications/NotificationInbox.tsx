@@ -1,15 +1,18 @@
 import { useState } from 'react';
-import { Bell, Check, CheckCheck } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Bell, Check, CheckCheck, Search } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import { toast } from 'sonner';
 import {
   getNotificationsApiV1NotificationsGetOptions,
+  getNotificationsApiV1NotificationsGetQueryKey,
   getUnreadCountApiV1NotificationsUnreadCountGetOptions,
   markNotificationsAsReadApiV1NotificationsMarkReadPutMutation,
   markAllNotificationsAsReadApiV1NotificationsMarkAllReadPutMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
@@ -19,8 +22,12 @@ import {
 } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
 
+type ApiErrorLike = { detail?: string; response?: { data?: { detail?: string } } };
+
 export function NotificationInbox() {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
   const queryClient = useQueryClient();
 
   const { data: unreadCountData } = useQuery({
@@ -30,23 +37,25 @@ export function NotificationInbox() {
 
   const { data: notificationsData } = useQuery({
     ...getNotificationsApiV1NotificationsGetOptions({
-      query: { limit: 20, unread_only: false },
+      query: { limit: 20, unread_only: false, search: debouncedSearch || undefined },
     }),
     enabled: open,
+    placeholderData: keepPreviousData,
   });
 
   const markAsReadMutation = useMutation({
     ...markNotificationsAsReadApiV1NotificationsMarkReadPutMutation(),
     onSuccess: () => {
       queryClient.invalidateQueries({
-        queryKey: getNotificationsApiV1NotificationsGetOptions({ query: { limit: 20, unread_only: false } }).queryKey,
+        queryKey: getNotificationsApiV1NotificationsGetQueryKey(),
       });
       queryClient.invalidateQueries({
         queryKey: getUnreadCountApiV1NotificationsUnreadCountGetOptions({}).queryKey,
       });
     },
-    onError: (error: any) => {
-      const message = error?.detail || error?.response?.data?.detail || 'Failed to mark notifications as read';
+    onError: (error) => {
+      const e = error as ApiErrorLike | null;
+      const message = e?.detail || e?.response?.data?.detail || 'Failed to mark notifications as read';
       toast.error(message);
     },
   });
@@ -56,20 +65,22 @@ export function NotificationInbox() {
     onSuccess: () => {
       toast.success('All notifications marked as read');
       queryClient.invalidateQueries({
-        queryKey: getNotificationsApiV1NotificationsGetOptions({ query: { limit: 20, unread_only: false } }).queryKey,
+        queryKey: getNotificationsApiV1NotificationsGetQueryKey(),
       });
       queryClient.invalidateQueries({
         queryKey: getUnreadCountApiV1NotificationsUnreadCountGetOptions({}).queryKey,
       });
     },
-    onError: (error: any) => {
-      const message = error?.detail || error?.response?.data?.detail || 'Failed to mark all as read';
+    onError: (error) => {
+      const e = error as ApiErrorLike | null;
+      const message = e?.detail || e?.response?.data?.detail || 'Failed to mark all as read';
       toast.error(message);
     },
   });
 
   const unreadCount = unreadCountData?.count ?? 0;
   const notifications = notificationsData?.items ?? [];
+  const notificationsTotal = notificationsData?.total ?? 0;
 
   const handleMarkAsRead = (notificationIds: number[]) => {
     markAsReadMutation.mutate({
@@ -82,7 +93,14 @@ export function NotificationInbox() {
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // Reopening the inbox should show the latest notifications, not a stale filter.
+        if (!next) setSearch('');
+      }}
+    >
       <PopoverTrigger asChild>
         <Button variant="ghost" size="icon" className="relative">
           <Bell className="h-5 w-5" />
@@ -111,16 +129,27 @@ export function NotificationInbox() {
             </Button>
           )}
         </div>
+        <div className="px-4 pb-3">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Search notifications..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-8 pl-8 text-sm"
+            />
+          </div>
+        </div>
         <Separator />
         <ScrollArea className="h-[400px]">
           {notifications.length === 0 ? (
             <div className="flex flex-col items-center justify-center p-8 text-center text-muted-foreground">
               <Bell className="h-12 w-12 mb-2 opacity-50" />
-              <p className="text-sm">No notifications</p>
+              <p className="text-sm">{debouncedSearch ? 'No notifications match your search' : 'No notifications'}</p>
             </div>
           ) : (
             <div className="divide-y">
-              {notifications.map((notification: any) => {
+              {notifications.map((notification) => {
                 const isUnread = !notification.read_at;
                 return (
                   <div
@@ -139,7 +168,8 @@ export function NotificationInbox() {
                         </div>
                         <p className="text-sm text-muted-foreground">{notification.message}</p>
                         <p className="text-xs text-muted-foreground">
-                          {formatDistanceToNow(new Date(notification.created_at), { addSuffix: true })}
+                          {notification.created_at &&
+                            formatDistanceToNow(new Date(notification.created_at), { addSuffix: true })}
                         </p>
                       </div>
                       {isUnread && (
@@ -160,6 +190,14 @@ export function NotificationInbox() {
             </div>
           )}
         </ScrollArea>
+        {notificationsTotal > notifications.length && (
+          <>
+            <Separator />
+            <p className="px-4 py-2 text-xs text-muted-foreground">
+              Showing the latest {notifications.length} of {notificationsTotal}. Search to find older ones.
+            </p>
+          </>
+        )}
       </PopoverContent>
     </Popover>
   );

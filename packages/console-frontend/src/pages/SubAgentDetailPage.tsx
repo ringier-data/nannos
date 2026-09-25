@@ -88,7 +88,7 @@ import { config } from '@/config';
 import { ModelStatusText } from '@/components/models/ModelStatusText';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
-  getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions,
+  getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetQueryKey,
   consoleUpdateSubAgentMutation,
   deleteSubAgentApiV1SubAgentsSubAgentIdDeleteMutation,
   submitForApprovalApiV1SubAgentsSubAgentIdSubmitPostMutation,
@@ -100,7 +100,6 @@ import {
   activateSkillApiV1SkillsActivationsPostMutation,
   deactivateSkillApiV1SkillsActivationsActivationIdDeleteMutation,
   updateActivationApiV1SkillsActivationsActivationIdUpdatePostMutation,
-  listMyGroupsApiV1GroupsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type {
   SubAgentConfigVersion,
@@ -119,6 +118,10 @@ import { PlaygroundChatPanel } from '@/components/subagents/PlaygroundChatPanel'
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { SkillRegistryBrowseDialog } from '@/components/skills/SkillRegistryBrowseDialog';
 import { SkillDiffDialog } from '@/components/skills/SkillDiffDialog';
+import { SearchableSelect } from '@/components/SearchableSelect';
+import { useMyGroupsPicker } from '@/hooks/use-my-groups-picker';
+import { getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGet } from '@/api/generated/sdk.gen';
+import { totalCountFrom } from '@/api/total-count';
 
 const statusConfig: Record<
   SubAgentStatus,
@@ -158,6 +161,8 @@ export function SubAgentDetailPage() {
 
   // Version viewing state - null means viewing current version
   const [viewingVersionNumber, setViewingVersionNumber] = useState<number | null>(null);
+  // The sidebar row that was clicked — shown until the version's own fetch lands.
+  const [viewingVersionRow, setViewingVersionRow] = useState<SubAgentConfigVersion | null>(null);
 
   // Panel width configuration (persisted in localStorage)
   const [configPanelWidth, setConfigPanelWidth] = useState<'compact' | 'medium' | 'wide'>(() => {
@@ -297,11 +302,27 @@ export function SubAgentDetailPage() {
     enabled: !!id,
   });
 
-  // Fetch version history for all agent types
-  const { data: versionHistoryData } = useQuery({
-    ...getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions({
-      path: { sub_agent_id: parseInt(id || '0', 10) },
-    }),
+  // How many versions there are. The history itself is paged by the version
+  // sidebar; the page only needs the count (and the few versions it shows, which
+  // it fetches by number below). The body is a bare array, so the count is the
+  // `X-Total-Count` header, read off the generated operation.
+  const { data: versionCount = 0 } = useQuery({
+    queryKey: [
+      ...getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetQueryKey({
+        path: { sub_agent_id: parseInt(id || '0', 10) },
+        query: { limit: 1 },
+      }),
+      'count',
+    ] as const,
+    queryFn: async ({ signal }) => {
+      const { data, response } = await getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGet({
+        path: { sub_agent_id: parseInt(id || '0', 10) },
+        query: { limit: 1 },
+        signal,
+        throwOnError: true,
+      });
+      return totalCountFrom(response, data.length);
+    },
     enabled: !!id,
   });
 
@@ -314,9 +335,8 @@ export function SubAgentDetailPage() {
   });
   const myActivations = activationsData?.items ?? [];
 
-  // Fetch user's groups (for group scope activation)
-  const { data: myGroupsData } = useQuery(listMyGroupsApiV1GroupsGetOptions());
-  const myGroups = Array.isArray(myGroupsData) ? myGroupsData : [];
+  // User's groups for the group-scope activation picker, searched on the server
+  const activateGroupPicker = useMyGroupsPicker({ enabled: showActivateSkillDialog });
 
   // Activation mutations
   const invalidateActivations = () => {
@@ -383,17 +403,35 @@ export function SubAgentDetailPage() {
     },
     onError: () => toast.error('Failed to update skill'),
   });
-  // Sort versions in descending order (newest first)
-  const versionHistory: SubAgentConfigVersion[] = (versionHistoryData || [])
-    .slice()
-    .sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
-
-  // Compute viewed version before the chat hook
+  // Compute viewed version before the chat hook. Versions are fetched by number
+  // (the sub-agent endpoint joins any version on request) rather than looked up
+  // in the history, which is paged and may not hold them.
   const currentVersion = subAgent?.current_version || 1;
   const isViewingHistoricalVersion = viewingVersionNumber !== null && viewingVersionNumber !== currentVersion;
-  const viewedVersion = isViewingHistoricalVersion
-    ? versionHistory.find((v: SubAgentConfigVersion) => v.version === viewingVersionNumber)
-    : versionHistory.find((v: SubAgentConfigVersion) => v.version === currentVersion);
+  const { data: viewedSubAgent } = useQuery({
+    ...getSubAgentApiV1SubAgentsSubAgentIdGetOptions({
+      path: { sub_agent_id: parseInt(id || '0', 10) },
+      query: { version: viewingVersionNumber ?? undefined },
+    }),
+    enabled: !!id && isViewingHistoricalVersion,
+  });
+  const viewedVersion: SubAgentConfigVersion | undefined = isViewingHistoricalVersion
+    ? // The clicked sidebar row stands in while that version's own fetch is in flight.
+      (viewedSubAgent?.config_version ??
+      (viewingVersionRow?.version === viewingVersionNumber ? viewingVersionRow : undefined) ??
+      undefined)
+    : (subAgent?.config_version ?? undefined);
+
+  // The live (default) version, for its release label; the same query as the
+  // viewed one when the user is looking at it.
+  const liveVersionNumber = subAgent?.default_version ?? null;
+  const { data: liveSubAgent } = useQuery({
+    ...getSubAgentApiV1SubAgentsSubAgentIdGetOptions({
+      path: { sub_agent_id: parseInt(id || '0', 10) },
+      query: { version: liveVersionNumber ?? undefined },
+    }),
+    enabled: !!id && liveVersionNumber != null && liveVersionNumber !== currentVersion,
+  });
 
   // The playground chat runs on the shared chat stack (see PlaygroundChatPanel),
   // scoped to the version being viewed via its config hash.
@@ -515,7 +553,7 @@ export function SubAgentDetailPage() {
   const subAgentStatus = (subAgent?.config_version?.status ?? 'draft') as SubAgentStatus;
 
   // Get the current version's status (may differ from sub-agent status)
-  const currentVersionData = versionHistory.find((v: SubAgentConfigVersion) => v.version === currentVersion);
+  const currentVersionData = subAgent?.config_version ?? undefined;
   const currentVersionStatus = (currentVersionData?.status ?? subAgentStatus) as SubAgentStatus;
 
   // For header status display, always use current version's status (not the viewed version)
@@ -1175,7 +1213,8 @@ export function SubAgentDetailPage() {
   // Determine if sub-agent is live in production (has a default version)
   const isLive = subAgent.default_version !== null && subAgent.default_version !== undefined;
   const liveVersion = subAgent.default_version;
-  const liveVersionData = versionHistory.find((v: SubAgentConfigVersion) => v.version === liveVersion);
+  const liveVersionData =
+    (liveVersion === currentVersion ? currentVersionData : liveSubAgent?.config_version) ?? undefined;
 
   // Helper function to format version display
   const formatVersionLabel = (version: SubAgentConfigVersion | undefined, fallbackVersion?: number | null): string => {
@@ -1192,13 +1231,6 @@ export function SubAgentDetailPage() {
     }
     // Fallback to version number
     return `v${version.version}`;
-  };
-
-  // Helper to get formatted label for a version number (looks up in history)
-  const getVersionLabel = (versionNum: number | null | undefined): string => {
-    if (versionNum == null) return '';
-    const versionData = versionHistory.find((v: SubAgentConfigVersion) => v.version === versionNum);
-    return formatVersionLabel(versionData, versionNum);
   };
 
   // Show current version status if it differs from the live version
@@ -2773,11 +2805,11 @@ export function SubAgentDetailPage() {
             <PlaygroundChatPanel
               showConversationList={showConversationList}
               onToggleConversationList={() => setShowConversationList(!showConversationList)}
-              versionHistoryLength={versionHistory.length}
+              versionHistoryLength={versionCount}
               versionSidebarCollapsed={versionSidebarCollapsed}
               onShowVersionHistory={() => setVersionSidebarCollapsed(false)}
               onChatFocusChange={setActiveFocusArea}
-              viewedVersionLabel={getVersionLabel(viewedVersion?.version)}
+              viewedVersionLabel={viewedVersion ? formatVersionLabel(viewedVersion) : ''}
               isViewingHistoricalVersion={isViewingHistoricalVersion}
             />
           </NannosChatScope>
@@ -2788,10 +2820,10 @@ export function SubAgentDetailPage() {
         )}
 
         {/* Right Panel - Version History Sidebar */}
-        {versionHistory.length > 0 && (
+        {versionCount > 0 && (
           <VersionSidebar
             subAgent={subAgent}
-            versions={versionHistory}
+            versionCount={versionCount}
             isOwner={isOwner}
             isAdmin={adminMode}
             hasWriteAccess={hasGroupWriteAccess}
@@ -2808,8 +2840,10 @@ export function SubAgentDetailPage() {
             }}
             onRefresh={invalidateSubAgentQuery}
             viewingVersion={viewingVersionNumber}
-            onViewVersion={(version) => {
+            onViewVersion={(row) => {
+              const version = row?.version ?? null;
               setViewingVersionNumber(version);
+              setViewingVersionRow(row);
               // Exit edit mode when switching versions
               if (version !== null) {
                 setIsEditing(false);
@@ -3012,7 +3046,7 @@ export function SubAgentDetailPage() {
               onValueChange={(v) => {
                 setActivateScope(v as 'personal' | 'group');
                 if (v === 'personal') setActivateGroupId(null);
-                else if (myGroups.length > 0) setActivateGroupId(myGroups[0].id);
+                else if (activateGroupPicker.groups.length > 0) setActivateGroupId(activateGroupPicker.groups[0].id);
               }}
             >
               <SelectTrigger className="w-28 h-7 text-xs">
@@ -3024,21 +3058,18 @@ export function SubAgentDetailPage() {
               </SelectContent>
             </Select>
             {activateScope === 'group' && (
-              <Select
+              <SearchableSelect
+                className="flex-1 h-7 text-xs"
                 value={activateGroupId ? String(activateGroupId) : ''}
-                onValueChange={(v) => setActivateGroupId(Number(v))}
-              >
-                <SelectTrigger className="flex-1 h-7 text-xs">
-                  <SelectValue placeholder="Select group" />
-                </SelectTrigger>
-                <SelectContent>
-                  {myGroups.map((g) => (
-                    <SelectItem key={g.id} value={String(g.id)}>
-                      {g.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                onChange={(v) => setActivateGroupId(Number(v))}
+                options={activateGroupPicker.options}
+                onSearchChange={activateGroupPicker.onSearchChange}
+                total={activateGroupPicker.total}
+                isLoading={activateGroupPicker.isLoading}
+                placeholder="Select group"
+                searchPlaceholder="Search groups..."
+                emptyLabel={activateGroupPicker.search ? 'No groups match your search' : 'No groups'}
+              />
             )}
           </div>
         }
