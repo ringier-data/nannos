@@ -3640,6 +3640,15 @@ class SubAgentService:
             sandbox_enabled=sandbox_enabled,
         )
 
+    async def populate_effective_permissions(self, db: AsyncSession, sub_agents: list[SubAgent], user_id: str) -> None:
+        """Set ``effective_permission`` on *sub_agents* as *user_id* sees them.
+
+        The listings do this on their own; a single-agent read has to ask for it, so
+        that what one caller learns about an agent by id agrees with what another
+        learns from the list.
+        """
+        await self._populate_effective_permissions(db, sub_agents, user_id)
+
     async def _populate_effective_permissions(self, db: AsyncSession, sub_agents: list[SubAgent], user_id: str) -> None:
         """Compute and set effective_permission for a list of sub-agents.
 

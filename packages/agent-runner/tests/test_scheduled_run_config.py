@@ -45,6 +45,7 @@ def _record(*, version: int, default_version: int | None, skills: list | None = 
         "name": "digest-writer",
         "current_version": max(version, default_version or 0),
         "default_version": default_version,
+        "effective_permission": "owner",
         "config_version": {
             "id": 100 + version,
             "version": version,
@@ -155,6 +156,8 @@ class TestSkillsAreCarried:
             cfg = await agent_runner._fetch_sub_agent_config(7, "tok")
 
         assert cfg["skills"] == [APPROVED_SKILL]
+        # The console computed this for the token the fetch carried: the run-as user's standing.
+        assert cfg["effective_permission"] == "owner"
 
     def test_the_built_config_carries_them_as_skill_definitions(self):
         """The same field the orchestrator sets (``skills=cv.skills``), from the same wire shape."""
@@ -170,6 +173,7 @@ class TestSkillsAreCarried:
             "enable_thinking": True,
             "thinking_level": "medium",
             "sandbox_enabled": True,
+            "effective_permission": "write",
         }
         config = _local_sub_agent_config(cfg, model_name="claude-sonnet-4.6", message_formatting="slack")
 
@@ -186,6 +190,7 @@ class TestSkillsAreCarried:
         assert config.sandbox_enabled is True
         assert config.interactive is True
         assert config.all_tools is False
+        assert config.effective_permission == "write"
         assert config.system_prompt.startswith("Prompt of v2.")
 
     def test_no_skills_is_an_empty_list_not_a_failure(self):

@@ -85,3 +85,56 @@ async def test_default_on_an_agent_that_was_never_approved_embeds_no_version(
     assert (
         await svc.get_sub_agent_by_id(pg_session, agent.id)
     ).config_version.version == 1
+
+
+@pytest.mark.asyncio
+async def test_a_single_agent_read_can_carry_the_readers_standing(
+    wired, pg_session, test_user_db
+):
+    """The listings compute ``effective_permission`` on their own; the per-id read asks for
+    it, so a scheduled run (which reads one agent by id, as the run-as user) learns the same
+    value a delegation from a conversation would."""
+    svc, _, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "owned")
+    agent = await svc.get_sub_agent_by_id(pg_session, agent_id, version="default")
+    assert (
+        agent.effective_permission is None
+    )  # the raw read says nothing about the reader
+
+    await svc.populate_effective_permissions(pg_session, [agent], test_user_db.id)
+    assert agent.effective_permission == "owner"
+
+    listed, _ = await svc.get_accessible_sub_agents(pg_session, test_user_db.id)
+    assert (
+        next(sa for sa in listed if sa.id == agent_id).effective_permission == "owner"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_returns_the_approved_version_with_the_readers_standing(
+    client_with_db,
+):
+    """End to end as agent-runner reads it: ``?version=default`` embeds the approved version
+    and reports the bearer's own permission, both in one request."""
+    created = await client_with_db.post(
+        "/api/v1/sub-agents",
+        json={
+            "name": "runner-read",
+            "type": "local",
+            "description": "read by id",
+            "model": "gpt-4o",
+            "system_prompt": "short prompt",
+            "mcp_tools": [],
+        },
+    )
+    assert created.status_code == 201, created.text
+    agent_id = created.json()["id"]
+
+    read = await client_with_db.get(
+        f"/api/v1/sub-agents/{agent_id}", params={"version": "default"}
+    )
+    assert read.status_code == 200, read.text
+    body = read.json()
+    assert body["default_version"] == 1
+    assert body["config_version"]["version"] == 1
+    assert body["effective_permission"] == "owner"

@@ -450,11 +450,9 @@ def _local_sub_agent_config(
     (ADR-0012) skills, while a delegation from a conversation had them all. The thinking
     fields pass through untouched for the same reason: the runnable picks its
     response-format strategy from ``thinking_level`` alone, and it must pick the same
-    one for both callers.
-
-    Known gap: ``effective_permission``. The per-agent read does not compute it (only the
-    listing the orchestrator uses does), so the self-improvement guidance in the prompt
-    is the unprivileged variant on a scheduled run.
+    one for both callers. ``effective_permission`` is the run-as user's standing on the
+    agent — the subscriber's, for a shared job — computed by the console for the bearer
+    of the token the fetch carried, exactly as the listing computes it for a delegation.
 
     ``model_name`` is passed rather than read from the record because the caller has
     already validated it against the gateway and possibly substituted the default.
@@ -477,6 +475,7 @@ def _local_sub_agent_config(
         sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
         skills=sub_agent_cfg.get("skills") or [],
         sandbox_enabled=bool(sub_agent_cfg.get("sandbox_enabled", False)),
+        effective_permission=sub_agent_cfg.get("effective_permission"),
     )
 
 
@@ -1394,6 +1393,10 @@ class AgentRunner(BaseAgent):
             # hands the same agent. Dropped here, a scheduled run saw only the running
             # user's personal and group skills from the docstore.
             "skills": cfg_version.get("skills") or [],
+            # The bearer's standing on the agent (owner/write/read), computed by the
+            # console for the token this fetch carried: the run-as user's, so a
+            # subscriber running a shared job gets the subscriber's, not the owner's.
+            "effective_permission": data.get("effective_permission"),
             # Sandbox
             "sandbox_enabled": cfg_version.get("sandbox_enabled", False),
         }

@@ -499,6 +499,10 @@ async def get_sub_agent(
 
         await sub_agent_service.resolve_imported_skills(db, sub_agent)
         await annotate_models(request, db, [sub_agent.config_version])
+        # The bearer's own standing on the agent, as the listings report it. A run that
+        # reads one agent by id (agent-runner, for the subscriber of a scheduled job)
+        # gets the same value a delegation from a conversation would.
+        await sub_agent_service.populate_effective_permissions(db, [sub_agent], user.id)
         embed_service = getattr(request.app.state, "embed_binding_service", None)
         if embed_service is not None:
             sub_agent.embed_binding = await embed_service.get_binding(db, sub_agent_id)
