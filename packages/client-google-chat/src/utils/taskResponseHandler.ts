@@ -202,17 +202,23 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
 }
 
 /**
- * Handle error case - post error message
+ * Handle error case - post error message. When there is a status message, the
+ * error replaces it, so no spinner is left behind.
  */
 export async function handleError(
   chatService: GoogleChatService,
   projectId: string,
   spaceId: string,
   threadId: string,
+  statusMessageId?: string,
   errorMessage: string = 'An error occurred while processing your request. Please try again.'
 ): Promise<void> {
   try {
-    await chatService.sendTextMessage(projectId, spaceId, `❌ ${errorMessage}`, threadId);
+    if (statusMessageId) {
+      await chatService.updateMessage({ projectId, messageName: statusMessageId, text: `❌ ${errorMessage}` });
+    } else {
+      await chatService.sendTextMessage(projectId, spaceId, `❌ ${errorMessage}`, threadId);
+    }
   } catch (err) {
     logger.error(`Failed to send error message: ${err}`);
   }

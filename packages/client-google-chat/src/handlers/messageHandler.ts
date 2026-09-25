@@ -2,22 +2,18 @@ import _ from 'lodash';
 import { randomUUID } from 'crypto';
 
 import { Logger } from '../utils/logger.js';
-import {
-  GoogleChatAttachment,
-  processAttachmentsToS3,
-  getFileProcessingWarnings,
-} from '../utils/fileUtils.js';
+import { GoogleChatAttachment, processAttachmentsToS3, getFileProcessingWarnings } from '../utils/fileUtils.js';
 import type { IUserAuthService } from '../services/userAuthService.js';
 import { A2AGoogleChatBasedRequest } from '../services/a2aClientService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { ContextRecord, IInFlightTaskStore, IPendingRequestStore } from '../storage/types.js';
-import { handleTask, handleError } from '../utils/taskResponseHandler.js';
+import { handleTask, handleError, isInterruptedOrTerminated } from '../utils/taskResponseHandler.js';
 import { HandlerDependencies } from './types.js';
-import { getSpinnerVerb } from '../utils/spinnerVerbs.js';
 import { FileStorageService } from '../services/fileStorageService.js';
 import { Config } from '../config/config.js';
 import { readAuthRequired } from '../utils/inTaskAuth.js';
+import { postUserNote, readUserNote } from '../utils/userNote.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -102,7 +98,8 @@ async function fetchThreadHistory(
       }
     }
 
-    const filteredMessages = messages.slice(startIndex)
+    const filteredMessages = messages
+      .slice(startIndex)
       .filter((msg) => msg.name !== currentMessageId && msg.name !== statusMessageId);
 
     const seenFiles = new Set<string>();
@@ -117,13 +114,13 @@ async function fetchThreadHistory(
         const userName = msg.sender?.displayName || '';
 
         let filesXml = '';
-        const msgFiles = (msg.attachment ?? []).filter((a) => a.source === 'UPLOADED_CONTENT' && a.attachmentDataRef?.resourceName) || [];
+        const msgFiles =
+          (msg.attachment ?? []).filter((a) => a.source === 'UPLOADED_CONTENT' && a.attachmentDataRef?.resourceName) ||
+          [];
         if (msgFiles && msgFiles.length > 0) {
-          const fileElements = msgFiles
-            .map((f) => `<file name="${f.contentName}" type="${f.contentType}" />`)
-            .join('');
+          const fileElements = msgFiles.map((f) => `<file name="${f.contentName}" type="${f.contentType}" />`).join('');
           filesXml = `\n  <attachedFiles>${fileElements}</attachedFiles>`;
-          
+
           for (const f of msgFiles) {
             if (!f.name || seenFiles.has(f.name)) {
               continue;
@@ -150,7 +147,9 @@ async function fetchThreadHistory(
       result.historyXml = `<thread_context>\n${historyMessages.join('\n')}\n</thread_context>`;
     }
 
-    logger.info(`Fetched ${historyMessages.length} messages and ${result.attachments.length} attachments from thread history`);
+    logger.info(
+      `Fetched ${historyMessages.length} messages and ${result.attachments.length} attachments from thread history`
+    );
     return result;
   } catch (error) {
     logger.debug(`Failed to fetch thread history: ${error}`);
@@ -197,22 +196,17 @@ async function sendThinkingStatusMessage(
   chatService: GoogleChatService,
   projectId: string,
   spaceId: string,
-  threadId: string,
+  threadId: string
 ) {
   const statusMessage = {
-    thinking: `🧠 ${getSpinnerVerb() || 'Working'}...`,
+    thinking: `Thinking...`,
     activity: '',
     todos: '',
     statusMessageId: undefined,
   };
 
   try {
-    const immediateStatus = await chatService.sendTextMessage(
-      projectId,
-      spaceId,
-      statusMessage.thinking,
-      threadId,
-    );
+    const immediateStatus = await chatService.sendTextMessage(projectId, spaceId, statusMessage.thinking, threadId);
 
     return {
       ...statusMessage,
@@ -225,36 +219,40 @@ async function sendThinkingStatusMessage(
   return statusMessage;
 }
 
+function formatStatusText(statusMessage: { thinking: string; activity: string; todos: string }): string {
+  return `${statusMessage.thinking}${statusMessage.activity ? ` [${statusMessage.activity}]` : ''}${statusMessage.todos ? `\n${statusMessage.todos}` : ''}`;
+}
+
 async function getRequestText(
   userId: string,
   cleanText: string,
   isInThread: boolean,
   threadHistoryResult: ThreadHistoryResult | undefined,
-  eventAttachments?: GoogleChatAttachment[],
+  eventAttachments?: GoogleChatAttachment[]
 ) {
-    const isoTimestamp = new Date().toISOString();
+  const isoTimestamp = new Date().toISOString();
 
-    let requestText = cleanText;
+  let requestText = cleanText;
 
-    const buildAttachedFilesXml = (attachments: GoogleChatAttachment[]): string => {
-      if (attachments.length === 0) return '';
-      const fileElements = attachments.map((a) => `<file name="${a.contentName}" type="${a.contentType}" />`).join('');
-      return `\n  <attachedFiles>${fileElements}</attachedFiles>`;
-    };
+  const buildAttachedFilesXml = (attachments: GoogleChatAttachment[]): string => {
+    if (attachments.length === 0) return '';
+    const fileElements = attachments.map((a) => `<file name="${a.contentName}" type="${a.contentType}" />`).join('');
+    return `\n  <attachedFiles>${fileElements}</attachedFiles>`;
+  };
 
-    const currentFilesXml = eventAttachments ? buildAttachedFilesXml(eventAttachments) : '';
+  const currentFilesXml = eventAttachments ? buildAttachedFilesXml(eventAttachments) : '';
 
-    if (isInThread) {
-      if (threadHistoryResult?.historyXml) {
-        requestText = `${threadHistoryResult.historyXml}\n<current_request userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</current_request>`;
-      } else {
-        requestText = `<message role="user" userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</message>`;
-      }
+  if (isInThread) {
+    if (threadHistoryResult?.historyXml) {
+      requestText = `${threadHistoryResult.historyXml}\n<current_request userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</current_request>`;
     } else {
       requestText = `<message role="user" userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</message>`;
     }
+  } else {
+    requestText = `<message role="user" userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</message>`;
+  }
 
-    return requestText;
+  return requestText;
 }
 
 async function getOrchestratorAccessToken(
@@ -269,69 +267,69 @@ async function getOrchestratorAccessToken(
   messageId: string,
   userEmail: string,
   source: MessageSource,
-  cleanText: string,
+  cleanText: string
 ): Promise<string | null> {
-    let isAuthorized = false;
-    try {
-      isAuthorized = await userAuthService.isUserAuthorized(userId, projectId);
-    } catch (error: any) {
-      if (error.message?.includes('does not exist')) {
-        logger.error(error, `Storage configuration error: ${error.message}`);
-        await chatService.sendPrivateTextMessage(
-          projectId,
-          spaceId,
-          userId,
-          '⚠️ The system is not properly configured. Please contact your administrator.',
-          threadId
-        );
-        return null;
-      }
-      throw error;
-    }
-
-    if (!isAuthorized) {
-      logger.info(`User ${userId} is not authorized, will prompt for authorization`);
-      await pendingRequestStore.set({
-        visitorId: pendingRequestStore.buildVisitorId(projectId, userId),
-        text: cleanText,
-        spaceId,
-        threadId,
-        messageId,
-        userEmail,
-        source,
-        createdAt: Date.now(),
-      });
-      await sendAuthorizationRequired(chatService, spaceId, userId, projectId, threadId, userAuthService);
-      return null;
-    }
-
-    const accessToken = await userAuthService.getOrchestratorToken(userId, projectId);
-
-    if (!accessToken) {
-      logger.error(`Failed to get access token for user ${userId}`);
+  let isAuthorized = false;
+  try {
+    isAuthorized = await userAuthService.isUserAuthorized(userId, projectId);
+  } catch (error: any) {
+    if (error.message?.includes('does not exist')) {
+      logger.error(error, `Storage configuration error: ${error.message}`);
       await chatService.sendPrivateTextMessage(
         projectId,
         spaceId,
         userId,
-        '❌ Your authorization has expired. Please authorize again.',
+        '⚠️ The system is not properly configured. Please contact your administrator.',
         threadId
       );
-      await pendingRequestStore.set({
-        visitorId: pendingRequestStore.buildVisitorId(projectId, userId),
-        text: cleanText,
-        spaceId,
-        threadId,
-        messageId,
-        userEmail,
-        source,
-        createdAt: Date.now(),
-      });
-      await sendAuthorizationRequired(chatService, spaceId, userId, projectId, threadId, userAuthService);
-      
       return null;
     }
+    throw error;
+  }
 
-    return accessToken;
+  if (!isAuthorized) {
+    logger.info(`User ${userId} is not authorized, will prompt for authorization`);
+    await pendingRequestStore.set({
+      visitorId: pendingRequestStore.buildVisitorId(projectId, userId),
+      text: cleanText,
+      spaceId,
+      threadId,
+      messageId,
+      userEmail,
+      source,
+      createdAt: Date.now(),
+    });
+    await sendAuthorizationRequired(chatService, spaceId, userId, projectId, threadId, userAuthService);
+    return null;
+  }
+
+  const accessToken = await userAuthService.getOrchestratorToken(userId, projectId);
+
+  if (!accessToken) {
+    logger.error(`Failed to get access token for user ${userId}`);
+    await chatService.sendPrivateTextMessage(
+      projectId,
+      spaceId,
+      userId,
+      '❌ Your authorization has expired. Please authorize again.',
+      threadId
+    );
+    await pendingRequestStore.set({
+      visitorId: pendingRequestStore.buildVisitorId(projectId, userId),
+      text: cleanText,
+      spaceId,
+      threadId,
+      messageId,
+      userEmail,
+      source,
+      createdAt: Date.now(),
+    });
+    await sendAuthorizationRequired(chatService, spaceId, userId, projectId, threadId, userAuthService);
+
+    return null;
+  }
+
+  return accessToken;
 }
 
 async function processMessageAttachments(
@@ -345,54 +343,54 @@ async function processMessageAttachments(
   userEmail: string,
   contextKey: string,
   eventAttachments: GoogleChatAttachment[],
-  threadAttachments: GoogleChatAttachment[],
+  threadAttachments: GoogleChatAttachment[]
 ) {
-    const seenAttachmentsNames = new Set<string>();
-    const allAttachments: GoogleChatAttachment[] = [];
+  const seenAttachmentsNames = new Set<string>();
+  const allAttachments: GoogleChatAttachment[] = [];
 
-    for (const attachment of eventAttachments) {
-      if (!seenAttachmentsNames.has(attachment.name)) {
-        seenAttachmentsNames.add(attachment.name);
-        allAttachments.push(attachment);
-      }
+  for (const attachment of eventAttachments) {
+    if (!seenAttachmentsNames.has(attachment.name)) {
+      seenAttachmentsNames.add(attachment.name);
+      allAttachments.push(attachment);
     }
+  }
 
-    for (const attachment of threadAttachments) {
-      if (!seenAttachmentsNames.has(attachment.name)) {
-        seenAttachmentsNames.add(attachment.name);
-        allAttachments.push(attachment);
-      }
+  for (const attachment of threadAttachments) {
+    if (!seenAttachmentsNames.has(attachment.name)) {
+      seenAttachmentsNames.add(attachment.name);
+      allAttachments.push(attachment);
     }
+  }
 
-    let processedFiles: Awaited<ReturnType<typeof processAttachmentsToS3>> = [];
+  let processedFiles: Awaited<ReturnType<typeof processAttachmentsToS3>> = [];
 
-    if (allAttachments && allAttachments.length > 0) {
-      logger.info(`Processing ${allAttachments.length} attachment(s)`);
+  if (allAttachments && allAttachments.length > 0) {
+    logger.info(`Processing ${allAttachments.length} attachment(s)`);
 
-      const warnings = getFileProcessingWarnings(allAttachments);
-      if (warnings.length > 0) {
-        await chatService.sendPrivateTextMessage(
-          projectId,
-          spaceId,
-          userId,
-          `⚠️ Some files could not be processed:\n${warnings.join('\n')}`,
-          threadId
-        );
-      }
-
-      processedFiles = await processAttachmentsToS3(
+    const warnings = getFileProcessingWarnings(allAttachments);
+    if (warnings.length > 0) {
+      await chatService.sendPrivateTextMessage(
         projectId,
-        allAttachments,
-        chatService,
-        fileStorageService,
+        spaceId,
         userId,
-        userEmail,
-        contextKey
+        `⚠️ Some files could not be processed:\n${warnings.join('\n')}`,
+        threadId
       );
-      logger.info(`Successfully processed ${processedFiles.length} of ${allAttachments.length} attachment(s) to S3`);
     }
 
-    return processedFiles;
+    processedFiles = await processAttachmentsToS3(
+      projectId,
+      allAttachments,
+      chatService,
+      fileStorageService,
+      userId,
+      userEmail,
+      contextKey
+    );
+    logger.info(`Successfully processed ${processedFiles.length} of ${allAttachments.length} attachment(s) to S3`);
+  }
+
+  return processedFiles;
 }
 
 /**
@@ -418,7 +416,7 @@ async function processAuthRequiredEvent(
   userId: string,
   accumulatedTask: Task,
   statusEvent: TaskStatusUpdateEvent,
-  config: Config,
+  config: Config
 ): Promise<boolean> {
   const statusMeta = (statusEvent.metadata ?? statusEvent.status.message?.metadata) as
     | Record<string, unknown>
@@ -427,19 +425,13 @@ async function processAuthRequiredEvent(
 
   logger.info(
     { taskId: accumulatedTask.id, tool: prompt.tool, service: prompt.service, hasUrl: !!prompt.authUrl },
-    `Received in-task authorization interrupt`,
+    `Received in-task authorization interrupt`
   );
 
   try {
     const authCard = chatService.buildInTaskAuthCard(config, prompt, { taskId: accumulatedTask.id });
 
-    await chatService.sendPrivateCardMessage(
-      projectId,
-      spaceId,
-      userId,
-      [authCard],
-      threadId,
-    );
+    await chatService.sendPrivateCardMessage(projectId, spaceId, userId, [authCard], threadId);
 
     await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
       logger.error(err, `Failed to update in-flight task for auth interrupt: ${err}`);
@@ -464,7 +456,7 @@ async function processHumanInTheLoopEvent(
   userId: string,
   accumulatedTask: Task,
   statusEvent: TaskStatusUpdateEvent,
-  config: Config,
+  config: Config
 ) {
   logger.info({ taskId: accumulatedTask?.id }, `Received HITL interrupt via extension`);
 
@@ -494,26 +486,29 @@ async function processHumanInTheLoopEvent(
   const toolName = firstAction?.name || 'unknown';
 
   // Determine if edit is allowed for this tool
-  const toolReviewConfig = reviewConfigs?.find(rc => rc.action_name === toolName);
+  const toolReviewConfig = reviewConfigs?.find((rc) => rc.action_name === toolName);
   const allowedDecisions = toolReviewConfig?.allowed_decisions ?? ['approve', 'reject'];
 
   try {
-    const interruptReason = (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || interruptMessage;
+    const interruptReason =
+      (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || interruptMessage;
     // Multiple pending calls → multi-action card (every call shown, per-call
     // decisions). Single call → the rich one-click card.
-    const hitlCard = actionRequests.length > 1
-      ? chatService.buildMultiHitlCard(config, { taskId: accumulatedTask.id }, actionRequests)
-      : chatService.buildHitlCard(config, toolName, interruptReason, { taskId: accumulatedTask.id, toolName }, allowedDecisions, actionRequests);
+    const hitlCard =
+      actionRequests.length > 1
+        ? chatService.buildMultiHitlCard(config, { taskId: accumulatedTask.id }, actionRequests)
+        : chatService.buildHitlCard(
+            config,
+            toolName,
+            interruptReason,
+            { taskId: accumulatedTask.id, toolName },
+            allowedDecisions,
+            actionRequests
+          );
 
     logger.info({ taskId: accumulatedTask?.id, toolNames }, `Posting HITL interrupt card to Google Chat`);
 
-    await chatService.sendPrivateCardMessage(
-      projectId,
-      spaceId,
-      userId,
-      [hitlCard],
-      threadId,
-    );
+    await chatService.sendPrivateCardMessage(projectId, spaceId, userId, [hitlCard], threadId);
 
     // Store the interrupt context
     await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
@@ -541,20 +536,14 @@ async function sendFeedbackCardMessage(
   threadId: string,
   taskId: string,
   contextId: string,
-  config: Config,
+  config: Config
 ) {
   try {
     const subAgents = feedbackRequestData?.sub_agents || [];
 
     const feedbackCard = chatService.buildFeedbackCard(config, taskId, subAgents);
 
-    await chatService.sendPrivateCardMessage(
-      projectId,
-      spaceId,
-      userId,
-      [feedbackCard],
-      threadId,
-    );
+    await chatService.sendPrivateCardMessage(projectId, spaceId, userId, [feedbackCard], threadId);
 
     logger.info(`Sent feedback link card for context=${contextId}`);
   } catch (err) {
@@ -621,7 +610,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       messageId,
       userEmail,
       source,
-      cleanText,
+      cleanText
     );
     if (!accessToken) {
       return;
@@ -693,13 +682,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     }
 
     // Build XML-wrapped request text including thread history if in a thread, and attached file references if there are any attachments in the current message or thread history. The A2A server can use the thread history to get additional context about the conversation, and the file references to know which files to fetch from S3 when processing the request.
-    const requestText = await getRequestText(
-      userId,
-      cleanText,
-      isInThread,
-      threadHistoryResult,
-      eventAttachments,
-    );
+    const requestText = await getRequestText(userId, cleanText, isInThread, threadHistoryResult, eventAttachments);
 
     // Process attachments from the current message and thread history (if in a thread) - upload to S3 and get accessible URLs, which will be included in the A2A request
     const processedFiles = await processMessageAttachments(
@@ -713,7 +696,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       userEmail,
       contextKey,
       eventAttachments || [],
-      threadHistoryResult?.attachments || [],
+      threadHistoryResult?.attachments || []
     );
 
     // ---- Build & send A2A request via streaming ----
@@ -730,7 +713,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       installationId,
       userId,
       projectId,
-      spaceId: source === 'space_message' ? spaceId: undefined,
+      spaceId: source === 'space_message' ? spaceId : undefined,
       threadId: isInThread ? threadId : undefined,
       messageId,
       text: requestText,
@@ -790,6 +773,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           logger.debug(`Received ${_.get(event, 'kind')} before task. Bug in this app or A2A server? Ignoring.`);
         } else if (event.kind === 'status-update') {
           const statusEvent = event as TaskStatusUpdateEvent;
+          let statusPosted = false;
 
           // Update final response state
           accumulatedTask.status = statusEvent.status;
@@ -809,7 +793,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               userId,
               accumulatedTask,
               statusEvent,
-              config,
+              config
             );
           }
 
@@ -824,7 +808,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               userId,
               accumulatedTask,
               statusEvent,
-              config,
+              config
             );
             if (authCardPosted) {
               // Park the public spinner. Updating it in place is the ONLY thing
@@ -859,7 +843,23 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               `Received status update as intermediate-output. Not updating status message details. This is thinking`
             );
           } else if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
-            statusMessage.activity = statusEvent.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+            const note = readUserNote(statusEvent.status.message);
+            if (note) {
+              statusMessage.statusMessageId = await postUserNote({
+                chatService,
+                inFlightTaskStore,
+                projectId,
+                spaceId,
+                threadId,
+                taskId: accumulatedTask.id,
+                note,
+                statusMessageId: statusMessage.statusMessageId,
+                statusText: formatStatusText(statusMessage),
+              });
+              statusPosted = true;
+            } else {
+              statusMessage.activity = statusEvent.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+            }
           } else if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
             const feedbackData = statusEvent.status.message.parts.find((x) => x.kind === 'data')?.data as {
               sub_agents?: string[];
@@ -886,22 +886,26 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             // Only log if it's not an interrupt
             logger.debug(`Received status update without recognized extensions. Not updating status message details.`);
           }
-          const newStatusMessage = `${statusMessage.thinking}${statusMessage.activity ? ` [${statusMessage.activity}]` : ''}${statusMessage.todos ? `\n${statusMessage.todos}` : ''}`;
-          if (statusMessage.statusMessageId) {
-            await chatService.updateMessage({
-              projectId,
-              messageName: statusMessage.statusMessageId,
-              text: newStatusMessage,
-            })
+          // After a note the status message is new and already current.
+          if (statusMessage.statusMessageId && !statusPosted) {
+            // A failed edit (e.g. a rate limit) only loses one progress line. It
+            // must not end the stream, or the answer is lost with it.
+            await chatService
+              .updateMessage({
+                projectId,
+                messageName: statusMessage.statusMessageId,
+                text: formatStatusText(statusMessage),
+              })
+              .catch((err) => {
+                logger.warn(`Failed to update status message for task ${accumulatedTask?.id}: ${err}`);
+              });
           }
         } else if (event.kind === 'artifact-update') {
           // The orchestrator streams BOTH sub-agent reasoning (intermediate-output
           // ext) and the final answer (no ext) as artifact-update events. Keep
           // reasoning OUT of the accumulated artifacts so it never leaks into the
           // final message body rendered by handleTask.
-          const isIntermediate = (event.artifact.extensions || []).includes(
-            'urn:nannos:a2a:intermediate-output:1.0'
-          );
+          const isIntermediate = (event.artifact.extensions || []).includes('urn:nannos:a2a:intermediate-output:1.0');
           if (!isIntermediate) {
             if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
             // Respect A2A artifact-append semantics: `append: true` extends the
@@ -934,9 +938,33 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     // Build the final response
     if (!accumulatedTask) {
-      logger.error(
-        `No task information received from A2A server. Silently failing without sending a response to the user.`
+      // Without a task id there is nothing to recover: replace the spinner with the error.
+      logger.error(`No task information received from A2A server. Showing an error to the user.`);
+      await handleError(chatService, projectId, spaceId, threadId, statusMessage.statusMessageId);
+      return;
+    }
+
+    if (!isInterruptedOrTerminated(accumulatedTask.status?.state)) {
+      // The stream ended before the task did (a dropped connection or an error
+      // above). Keep the in-flight record: task recovery polls the task and puts
+      // the answer into the status message when the task is done.
+      logger.warn(
+        { taskId: accumulatedTask.id },
+        `Stream ended while the task is still ${accumulatedTask.status?.state}. Leaving it to task recovery.`
       );
+      if (statusMessage.statusMessageId) {
+        statusMessage.thinking = '⏳ Still working. The answer will appear here, but it can take a few minutes.';
+        statusMessage.activity = '';
+        await chatService
+          .updateMessage({
+            projectId,
+            messageName: statusMessage.statusMessageId,
+            text: formatStatusText(statusMessage),
+          })
+          .catch((err) => {
+            logger.warn(`Failed to update status message for task ${accumulatedTask?.id}: ${err}`);
+          });
+      }
       return;
     }
 
@@ -971,7 +999,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           threadId,
           accumulatedTask.id,
           accumulatedTask.contextId,
-          config,
+          config
         );
       }
     }
