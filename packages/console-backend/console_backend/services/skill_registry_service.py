@@ -690,6 +690,21 @@ class SkillRegistryService:
                     if extracted:
                         fields["description"] = extracted
 
+        owner_edit = (
+            files is not None
+            and self._owner_edit_hook is not None
+            and entry.scope == "sub-agent"
+            and entry.sub_agent_id is not None
+        )
+        if owner_edit:
+            # Lock order: the owning sub-agent BEFORE the registry row, the order a config
+            # save takes them in (update_sub_agent locks the agent, upsert_agent_skill then
+            # writes the row). The owner-edit hook locks the agent again; taking it only
+            # there, after repo.update, would deadlock against a concurrent config save.
+            await db.execute(
+                text("SELECT id FROM sub_agents WHERE id = :id FOR UPDATE"), {"id": entry.sub_agent_id}
+            )
+
         await self.repo.update(db=db, actor=actor, entity_id=skill_id, fields=fields)
 
         # Save version snapshot if files changed
@@ -705,12 +720,8 @@ class SkillRegistryService:
                 previous_hash=entry.content_hash,
                 actor=actor,
             )
-            if (
-                self._owner_edit_hook
-                and entry.scope == "sub-agent"
-                and entry.sub_agent_id is not None
-                and entry.content_hash != content_hash  # type: ignore[possibly-unbound]
-            ):
+            if owner_edit and entry.content_hash != content_hash:  # type: ignore[possibly-unbound]
+                assert self._owner_edit_hook is not None and entry.sub_agent_id is not None
                 owner_version = await self._owner_edit_hook(
                     db,
                     actor,

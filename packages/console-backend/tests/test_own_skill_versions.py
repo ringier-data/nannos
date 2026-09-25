@@ -190,6 +190,29 @@ async def test_a_local_agent_over_the_limit_gets_a_pending_version_and_keeps_run
 
 
 @pytest.mark.asyncio
+async def test_the_summary_names_the_baselines_hash_not_the_rows(wired, pg_session, test_user_db, prompt_limit):
+    """A second edit while the first owner version is pending changes the skill from the approved hash."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, v1_hash = await _own_skill(svc, pg_session, test_user_db, agent_id, "x" * 20, inline=True)
+    prompt_limit(50)
+    first = await _registry_edit(registry, pg_session, test_user_db, registry_id, "y" * 80)
+    assert first.owner_version is not None and first.owner_version.approved is False
+
+    second = await _registry_edit(registry, pg_session, test_user_db, registry_id, "z" * 80)
+    await pg_session.commit()
+
+    assert second.owner_version is not None
+    summary = (
+        await pg_session.execute(
+            text("SELECT change_summary FROM sub_agent_config_versions WHERE sub_agent_id = :id AND version = :v"),
+            {"id": agent_id, "v": second.owner_version.version},
+        )
+    ).scalar_one()
+    assert summary == f"Edited skill 'kb' {v1_hash[:12]} -> {second.entry.content_hash[:12]}"
+
+
+@pytest.mark.asyncio
 async def test_an_automated_agent_over_the_limit_refuses_the_edit(wired, pg_session, test_user_db, prompt_limit):
     svc, registry, _ = wired
     agent = await svc.create_sub_agent(

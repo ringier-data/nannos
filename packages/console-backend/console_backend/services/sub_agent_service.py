@@ -3463,6 +3463,9 @@ class SubAgentService:
         skills: list[SkillDefinition] = []
         held = False
         slug = ""
+        # The summary names what THIS version changes: the baseline's pinned hash, which
+        # differs from the row's previous hash after a revert or while a version is pending.
+        baseline_hash = previous_hash
         for skill in baseline.skills or []:
             if skill.registry_id == registry_id:
                 if skill.content_hash == new_hash:
@@ -3470,6 +3473,7 @@ class SubAgentService:
                 skills.append(skill.model_copy(update={"content_hash": new_hash}))
                 held = True
                 slug = skill.name
+                baseline_hash = skill.content_hash or previous_hash
             else:
                 skills.append(skill)
         if not held:
@@ -3482,7 +3486,7 @@ class SubAgentService:
         if existing.type == SubAgentType.AUTOMATED:
             _validate_automated_constraints(baseline.system_prompt, baseline.mcp_tools, existing.is_public, inlined_length)
 
-        summary = f"Edited skill '{slug}' {previous_hash[:12]} -> {new_hash[:12]}"
+        summary = f"Edited skill '{slug}' {baseline_hash[:12]} -> {new_hash[:12]}"
         new_version = await self._write_version_with_skills(db, actor, sub_agent_id, baseline, skills, summary)
         approved_now = existing.type == SubAgentType.AUTOMATED or _meets_auto_approve_constraints(
             existing.type, baseline.system_prompt, baseline.mcp_tools, existing.is_public, inlined_length
