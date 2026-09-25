@@ -84,6 +84,7 @@ import {
   modelSelectOptions,
   MODEL_TIER_OPTIONS,
 } from '@/config/models';
+import { config } from '@/config';
 import { ModelStatusText } from '@/components/models/ModelStatusText';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
@@ -222,6 +223,8 @@ export function SubAgentDetailPage() {
   // ADR-0011: the picker may pre-select "follow"; the mode is set through the activations
   // endpoint AFTER the draft is saved (mode never travels in the config-save payload).
   const [importMode, setImportMode] = useState<'pinned' | 'following'>('pinned');
+  // ADR-0012: inline is a config-version property, so it travels in the draft save.
+  const [importInline, setImportInline] = useState(false);
   const pendingFollowRef = useRef<Set<string>>(new Set());
   const [updatingSkillName, setUpdatingSkillName] = useState<string | null>(null);
   const [skillsWithUpdates, setSkillsWithUpdates] = useState<Set<string>>(new Set());
@@ -629,6 +632,10 @@ export function SubAgentDetailPage() {
   // A skill whose registry row this agent does not own (ADR-0011). The server sets `mode`
   // on every such skill on read; a skill just added from the picker carries it client-side.
   const isReferenceSkill = (s: SkillDefinition) => !!s.mode || (!!s.scope && s.scope !== 'sub-agent');
+  // ADR-0012: inlined skill bodies are part of the prompt the model runs with, so they
+  // count toward the auto-approve limit. A skill just imported has no body until saved.
+  const inlinedLength = (skills: SkillDefinition[]) =>
+    skills.filter((s) => s.inline).reduce((n, s) => n + (s.body?.length ?? 0), 0);
   const displayedSandboxEnabled = isViewingHistoricalVersion
     ? (viewedVersion?.sandbox_enabled ?? subAgent?.config_version?.sandbox_enabled ?? false)
     : (subAgent?.config_version?.sandbox_enabled ?? false);
@@ -785,6 +792,8 @@ export function SubAgentDetailPage() {
               source: s.source ?? null,
               content_hash: s.content_hash ?? null,
               scope: s.scope ?? null,
+              // ADR-0012: inline travels in the config save, so a rebuild must carry it
+              inline: s.inline ?? false,
             }))
           : []
       );
@@ -918,6 +927,7 @@ export function SubAgentDetailPage() {
         content_hash: detail.content_hash ?? null,
         scope: (detail.scope as SkillDefinition['scope']) ?? ('standalone' as const),
         mode: 'pinned' as const,
+        inline: importInline,
       };
       // Don't add duplicates
       if (editSkills.some((s) => s.name === newSkill.name)) {
@@ -935,6 +945,7 @@ export function SubAgentDetailPage() {
           : `Imported "${newSkill.name}"`
       );
       setIsSkillImportOpen(false);
+      setImportInline(false);
     } finally {
       setImportingSkillId(null);
     }
@@ -1013,6 +1024,8 @@ export function SubAgentDetailPage() {
               source: s.source ?? null,
               content_hash: s.content_hash ?? null,
               scope: s.scope ?? null,
+              // ADR-0012: inline travels in the config save, so a rebuild must carry it
+              inline: s.inline ?? false,
             }))
           : [];
         const updatedSkills = currentSkills.map((s) =>
@@ -2111,7 +2124,29 @@ export function SubAgentDetailPage() {
                           {/* Skills */}
                           <div className="space-y-2 min-w-0 w-full">
                             <div className="flex items-center justify-between">
-                              <span className="text-xs font-medium text-foreground">Skills</span>
+                              <span className="text-xs font-medium text-foreground">
+                                Skills
+                                {(() => {
+                                  const skills = isEditing ? editSkills : displayedSkills;
+                                  const inlined = inlinedLength(Array.isArray(skills) ? skills : []);
+                                  if (!inlined) return null;
+                                  const limited = subAgent.type === 'local' || subAgent.type === 'automated';
+                                  const prompt = (isEditing ? editSystemPrompt : displayedSystemPrompt) ?? '';
+                                  const effective = prompt.length + inlined;
+                                  const max = config.autoApprove.maxSystemPromptLength;
+                                  return (
+                                    <span
+                                      className={`ml-2 text-[10px] font-normal ${
+                                        limited && effective > max ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'
+                                      }`}
+                                    >
+                                      {limited
+                                        ? `effective prompt ${effective.toLocaleString()} / ${max.toLocaleString()} chars (inlined ${inlined.toLocaleString()})`
+                                        : `inlined ${inlined.toLocaleString()} chars`}
+                                    </span>
+                                  );
+                                })()}
+                              </span>
                               {isEditing && !isEmbedBound && (
                                 <div className="flex gap-1">
                                   <Button
@@ -2219,6 +2254,42 @@ export function SubAgentDetailPage() {
                                             </Tooltip>
                                           );
                                         })()}
+                                      {(skill.inline || (isEditing && !isEmbedBound)) && (
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <button
+                                              type="button"
+                                              disabled={!isEditing || isEmbedBound}
+                                              className={`text-[10px] px-1 rounded shrink-0 ${
+                                                skill.inline
+                                                  ? 'text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950'
+                                                  : 'text-muted-foreground bg-muted'
+                                              } ${isEditing && !isEmbedBound ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
+                                              onClick={() => {
+                                                if (!isEditing || isEmbedBound) return;
+                                                setEditSkills((prev) =>
+                                                  prev.map((s, i) => (i === idx ? { ...s, inline: !s.inline } : s))
+                                                );
+                                                handleFieldChange();
+                                              }}
+                                            >
+                                              {skill.inline ? 'inline' : 'on demand'}
+                                            </button>
+                                          </TooltipTrigger>
+                                          <TooltipContent className="max-w-xs">
+                                            {skill.inline
+                                              ? 'The full skill is in the system prompt on every turn.'
+                                              : 'Loaded with load_skill when the request needs it.'}{' '}
+                                            {isEmbedBound
+                                              ? 'Set by the host.'
+                                              : isEditing
+                                                ? skill.inline
+                                                  ? 'Click to load it on demand instead.'
+                                                  : 'Click to inline it.'
+                                                : ''}
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      )}
                                       {skill.mode === 'following' && skill.bump_error && (
                                         <Tooltip>
                                           <TooltipTrigger asChild>
@@ -2374,6 +2445,22 @@ export function SubAgentDetailPage() {
                                       </span>
                                     </span>
                                   </label>
+                                  <label className="flex items-start gap-2 cursor-pointer pt-1 border-t border-border/40">
+                                    <input
+                                      type="checkbox"
+                                      className="mt-0.5"
+                                      checked={importInline}
+                                      onChange={(e) => setImportInline(e.target.checked)}
+                                    />
+                                    <span>
+                                      <span className="font-medium">Inline</span>
+                                      <span className="text-muted-foreground">
+                                        {' '}
+                                        — the full skill goes into the system prompt on every turn instead of being
+                                        loaded on demand. It counts toward the auto-approve prompt limit.
+                                      </span>
+                                    </span>
+                                  </label>
                                 </div>
                               }
                             />
@@ -2407,6 +2494,7 @@ export function SubAgentDetailPage() {
                                     })),
                                     registry_id: existing?.registry_id ?? null,
                                     scope: existing?.scope ?? null,
+                                    inline: existing?.inline ?? false,
                                   };
                                 });
                                 setEditSkills([...importedSkills, ...customSkills]);

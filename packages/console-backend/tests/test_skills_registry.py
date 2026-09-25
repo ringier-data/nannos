@@ -1107,7 +1107,7 @@ class TestMcpActivateCrossAgent:
         srs = MagicMock()
         srs.get_by_id = AsyncMock(return_value=entry)
         activation = MagicMock()
-        activation.activate = AsyncMock(return_value=None)
+        activation.activate_with_outcome = AsyncMock(return_value=(1, False))
         activation.find_activation_by_registry_id = AsyncMock(return_value=None)
         sub_agents = MagicMock()
         sub_agents.check_user_permission = AsyncMock(return_value=True)
@@ -1144,7 +1144,7 @@ class TestMcpActivateCrossAgent:
         entry = _make_mock_registry_entry(scope="sub-agent", sub_agent_id=1, visibility="public")
         result, activation = await self._activate(entry, sub_agent_id=2)
         assert result.registry_id == entry.id
-        activation.activate.assert_awaited_once()
+        activation.activate_with_outcome.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_private_sub_agent_skill_still_refused(self):

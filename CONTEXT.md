@@ -510,3 +510,21 @@ names the referrers while any referrer exists.
 - "sub-agent scoped skill" was read by the code as "always latest, no update
   signal". That is true only for the *owner*. For a referrer the same row is
   pinned by hash like any imported skill.
+
+## Inlined skills (grilling 2026-09-25, nannos#291)
+
+**Inlined skill**:
+A skill in a sub-agent's config version whose full SKILL.md body is part of the
+agent's system prompt, so the model has it on every turn without calling
+`load_skill`. It is a property of the config version, not of the activation:
+turning it on is a config change (draft, approval), and reverting the agent to
+an older version restores that version's inline choices.
+_Avoid_: embedded skill, preloaded skill, always-on skill
+
+### Relationships
+
+- Any skill in a config version can be **Inlined**: one the agent owns, or one it references as a **Referrer** (pinned or following).
+- Inline and mode are independent: mode moves the content hash, inline decides where the content goes (system prompt or `load_skill`).
+- Inline belongs to the skill's name in the config. A personal or group skill that overrides an **Inlined skill** by name is inlined in its place, so the override's body goes into the prompt. A personal or group activation can't be inlined on its own, because it has no config version.
+- A host marks a skill it publishes as **Inlined** in that skill's SKILL.md frontmatter (`metadata.nannos-inline`), next to `nannos-visibility`. This applies only to the embed-bound agent; another agent that references the published skill makes its own inline choice.
+- For auto-approval, an agent's effective prompt length is its system prompt plus the bodies of all its **Inlined skills**. A **Bump** that would push that length over the auto-approve limit is recorded as a failed bump, not landed. A host sync is exempt.

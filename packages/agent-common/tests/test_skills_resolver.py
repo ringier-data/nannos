@@ -225,3 +225,36 @@ async def test_no_group_ids():
         )
 
     assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_override_of_an_inlined_skill_is_inlined():
+    """ADR-0012: inline belongs to the name in the config, so the override inherits it."""
+    from agent_common.core.playbook_reader import SkillIndexEntry
+
+    defaults = _std_skills()
+    defaults[0].inline = True
+    with patch("agent_common.core.skills_resolver.PlaybookReaderService") as MockReader:
+        reader = MockReader.return_value
+        reader.list_skills = AsyncMock(
+            return_value=[
+                SkillIndexEntry(name="incident-triage", description="My custom triage", scope="personal"),
+                SkillIndexEntry(name="my-custom-workflow", description="A new skill", scope="personal"),
+            ]
+        )
+        reader.read_skill = AsyncMock(return_value="Custom steps.")
+        reader.read_skill_files = AsyncMock(return_value=[])
+
+        result = await resolve_skills_for_agent(
+            store=AsyncMock(),
+            user_id="user-1",
+            agent_name="my-agent",
+            group_ids=[],
+            default_skills=defaults,
+        )
+
+    assert result["incident-triage"].scope == "personal"
+    assert result["incident-triage"].inline is True
+    assert result["weekly-report"].inline is False
+    # a personal-only skill is never inlined
+    assert result["my-custom-workflow"].inline is False

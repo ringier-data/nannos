@@ -12,9 +12,9 @@ skill is written to the Nannos skill registry as a public entry, so every user c
 discover and activate it on other agents. Without it a synced skill stays private to the
 bound sub-agent, as every inline sub-agent skill does.
 
-The optional `x-nannos-agent.skills_inline` list names skills whose body is appended to
-the system prompt, in that order, so the agent has them without a `load_skill` call. They
-stay ordinary synced skills as well.
+A SKILL.md may also carry `metadata: {nannos-inline: "true"}`. The bound sub-agent then
+has that skill inlined (ADR-0012): its full body is in the system prompt on every turn, so
+no `load_skill` call is needed. It stays an ordinary synced skill as well.
 
 Every file the index points at carries a `sha256:` digest over the exact bytes served.
 The `x-nannos-agent` block carries name, description and the prompt; `tools`, `model_tier`,
@@ -46,7 +46,6 @@ import logging
 import re
 import socket
 import time
-from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -72,12 +71,16 @@ AGENT_EXTENSION_KEY = "x-nannos-agent"
 SKILL_TYPE = "skill-md"
 #: SKILL.md frontmatter `metadata` key that asks for a registry visibility.
 SKILL_VISIBILITY_METADATA_KEY = "nannos-visibility"
+
+#: SKILL.md frontmatter `metadata` key that marks the skill inlined on the bound agent (ADR-0012).
+SKILL_INLINE_METADATA_KEY = "nannos-inline"
 DEFAULT_SKILL_VISIBILITY: RegistryVisibility = "private"
 _SKILL_VISIBILITIES: frozenset[str] = frozenset({"private", "public"})
 
-#: Bump when `render_embed_framing` or `render_inlined_skill` changes wording, so bound
-#: sub-agents re-sync a new version even though the host published nothing new.
-FRAMING_TEMPLATE_VERSION = "1"
+#: Bump when `render_embed_framing` changes wording, so bound sub-agents re-sync a new
+#: version even though the host published nothing new. "2" (ADR-0012): the inlined skill
+#: text #290 appended to the prompt is gone; the re-sync turns it into `SkillRef.inline`.
+FRAMING_TEMPLATE_VERSION = "2"
 
 #: `thinking_level` value that disables extended thinking (the enum has no "off").
 THINKING_OFF = "off"
@@ -128,6 +131,10 @@ class WellKnownSkill(BaseModel):
             "`metadata.nannos-visibility`; private when absent"
         ),
     )
+    inline: bool = Field(
+        default=False,
+        description="Frontmatter `metadata.nannos-inline`: inlined on the bound sub-agent (ADR-0012)",
+    )
     url: str
     digest: str
 
@@ -167,10 +174,6 @@ class WellKnownAgent(BaseModel):
     thinking_level: str | None = Field(
         default=None, description="'off' or a ThinkingLevel value"
     )
-    skills_inline: list[str] = Field(
-        default_factory=list,
-        description="Skill names whose body is appended to the system prompt, in this order",
-    )
     url: str
     digest: str
 
@@ -208,8 +211,8 @@ def compute_revision(
     """The 16-hex revision of a fetched definition.
 
     Covers every served byte through the file digests AND the index.json metadata that
-    is published nowhere else: agent name, description, organization, tools, model tier,
-    thinking level and inlined skills, plus each skill's name, description and visibility.
+    is published nowhere else: agent name, description, organization, tools, model tier
+    and thinking level, plus each skill's name, description, visibility and inline flag.
     Without the metadata a host could change its tool list or description and the sync
     would read "same revision" and skip. Skill order does not matter. The framing template version is
     part of it so a wording change in the Nannos-owned prefix re-syncs every bound agent.
@@ -223,8 +226,6 @@ def compute_revision(
             "tools": agent.tools,
             "model_tier": agent.model_tier,
             "thinking_level": agent.thinking_level,
-            # Order matters: it is the order the bodies are appended in.
-            "skills_inline": agent.skills_inline,
             "digest": agent.digest,
         },
         "skills": sorted(
@@ -233,6 +234,7 @@ def compute_revision(
                     "name": s.name,
                     "description": s.description,
                     "visibility": s.visibility,
+                    "inline": s.inline,
                     "digest": s.digest,
                 }
                 for s in skills
@@ -288,32 +290,8 @@ def render_embed_framing(base_url: str, agent: WellKnownAgent, revision: str) ->
     )
 
 
-def render_inlined_skill(skill: WellKnownSkill) -> str:
-    """One `skills_inline` skill as appended to the host prompt.
-
-    The skill is also in the agent's skill list; the note keeps the model from loading it twice.
-    Changing this text must bump FRAMING_TEMPLATE_VERSION.
-    """
-    return (
-        f"The skill `{skill.name}` is loaded in full below. Do not call load_skill for it.\n"
-        "\n"
-        f'<skill name="{skill.name}">\n'
-        f"{skill.body}\n"
-        "</skill>"
-    )
-
-
-def compose_system_prompt(
-    base_url: str,
-    agent: WellKnownAgent,
-    revision: str,
-    skills: Sequence[WellKnownSkill] = (),
-) -> str:
-    """Framing, the host prompt, then each skill named in `agent.skills_inline`, in that order."""
-    by_name = {s.name: s for s in skills}
-    parts = [render_embed_framing(base_url, agent, revision), agent.prompt_body]
-    parts.extend(render_inlined_skill(by_name[name]) for name in agent.skills_inline)
-    return "\n\n".join(parts)
+def compose_system_prompt(base_url: str, agent: WellKnownAgent, revision: str) -> str:
+    return render_embed_framing(base_url, agent, revision) + "\n\n" + agent.prompt_body
 
 
 def thinking_params(
@@ -427,7 +405,7 @@ class WellKnownAgentClient:
                 base_url, skill_url, origin, MAX_SKILL_FILE_SIZE_BYTES, step
             )
             _verify_digest(base_url, step, skill_bytes, entry["digest"])
-            body, visibility = _parse_skill(
+            body, visibility, inline = _parse_skill(
                 base_url, step, skill_bytes, entry["name"], skill_url
             )
             skills.append(
@@ -436,6 +414,7 @@ class WellKnownAgentClient:
                     description=entry["description"],
                     body=body,
                     visibility=visibility,
+                    inline=inline,
                     url=skill_url,
                     digest=entry["digest"],
                 )
@@ -451,7 +430,6 @@ class WellKnownAgentClient:
             else None,
             model_tier=agent_meta.get("model_tier"),
             thinking_level=agent_meta.get("thinking_level"),
-            skills_inline=list(agent_meta.get("skills_inline") or []),
             url=prompt_url,
             digest=agent_meta["prompt"]["digest"],
         )
@@ -720,27 +698,6 @@ def _validate_index(
             astep,
             f"thinking_level {thinking_level!r} is not one of {sorted(allowed_thinking)}",
         )
-    skills_inline = agent.get("skills_inline")
-    if skills_inline is not None:
-        if not isinstance(skills_inline, list):
-            raise WellKnownFetchError(
-                base_url, astep, "'skills_inline' must be a list of skill names"
-            )
-        seen_inline: set[str] = set()
-        for skill_name in skills_inline:
-            if not isinstance(skill_name, str) or skill_name not in seen_names:
-                raise WellKnownFetchError(
-                    base_url,
-                    astep,
-                    f"skills_inline entry {skill_name!r} is not a skill listed in 'skills'",
-                )
-            if skill_name in seen_inline:
-                raise WellKnownFetchError(
-                    base_url,
-                    astep,
-                    f"skills_inline entry '{skill_name}' is listed twice",
-                )
-            seen_inline.add(skill_name)
     return agent, skill_entries
 
 
@@ -770,8 +727,8 @@ def _parse_prompt(base_url: str, data: bytes) -> str:
 
 def _parse_skill(
     base_url: str, step: str, data: bytes, expected_name: str, url: str
-) -> tuple[str, RegistryVisibility]:
-    """Validate one SKILL.md; return (body, registry visibility)."""
+) -> tuple[str, RegistryVisibility, bool]:
+    """Validate one SKILL.md; return (body, registry visibility, inline)."""
     try:
         frontmatter, body = split_frontmatter(_decode(base_url, step, data))
     except ValueError as e:
@@ -803,7 +760,11 @@ def _parse_skill(
         )
     if "{{" in body:
         raise WellKnownFetchError(base_url, step, "SKILL.md body must not contain '{{'")
-    return body, _parse_skill_visibility(base_url, step, frontmatter)
+    return (
+        body,
+        _parse_skill_visibility(base_url, step, frontmatter),
+        _parse_skill_inline(base_url, step, frontmatter),
+    )
 
 
 def _parse_skill_visibility(
@@ -832,3 +793,27 @@ def _parse_skill_visibility(
             f"it must be one of {sorted(_SKILL_VISIBILITIES)}",
         )
     return value  # type: ignore[return-value]
+
+
+def _parse_skill_inline(base_url: str, step: str, frontmatter: dict[str, Any]) -> bool:
+    """`metadata.nannos-inline` from a SKILL.md frontmatter; not inlined when absent (ADR-0012).
+
+    The agentskills.io `metadata` map is string-to-string, so `"true"` is the conforming
+    spelling; a YAML boolean is accepted too. Anything else fails the fetch for that skill.
+    `_parse_skill_visibility` has already checked that `metadata` is a mapping.
+    """
+    metadata = frontmatter.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    value = metadata.get(SKILL_INLINE_METADATA_KEY)
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value in ("true", "false"):
+        return value == "true"
+    raise WellKnownFetchError(
+        base_url,
+        step,
+        f'SKILL.md metadata \'{SKILL_INLINE_METADATA_KEY}\' is {value!r}; it must be "true" or "false"',
+    )

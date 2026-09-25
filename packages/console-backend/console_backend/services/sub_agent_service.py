@@ -41,10 +41,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class PromptLimitError(ValueError):
+    """The effective prompt (system prompt plus inlined skills, ADR-0012) is over the auto-approve limit."""
+
+
 def _validate_automated_constraints(
-    system_prompt: str | None, mcp_tools: list[str] | None, is_public: bool | None
+    system_prompt: str | None, mcp_tools: list[str] | None, is_public: bool | None, inlined_length: int = 0
 ) -> None:
     """Validate that an automated sub-agent meets the required constraints.
+
+    ``inlined_length`` is the total body length of the version's inlined skills
+    (ADR-0012): they are part of the prompt the model runs with, so they count.
 
     Raises ValueError if any constraint is violated.
     """
@@ -52,8 +59,13 @@ def _validate_automated_constraints(
     max_tools = config.auto_approve.max_mcp_tools_count
     system_prompt_len = len(system_prompt or "")
     mcp_tools_count = len(mcp_tools or [])
-    if system_prompt_len > max_prompt:
-        raise ValueError(
+    if system_prompt_len + inlined_length > max_prompt:
+        if inlined_length:
+            raise PromptLimitError(
+                f"Automated sub-agent system_prompt plus inlined skills must be ≤ {max_prompt} characters "
+                f"(got {system_prompt_len} + {inlined_length})."
+            )
+        raise PromptLimitError(
             f"Automated sub-agent system_prompt must be ≤ {max_prompt} characters (got {system_prompt_len})."
         )
     if mcp_tools_count > max_tools:
@@ -63,16 +75,29 @@ def _validate_automated_constraints(
 
 
 def _meets_auto_approve_constraints(
-    sub_agent_type: SubAgentType, system_prompt: str | None, mcp_tools: list[str] | None, is_public: bool | None
+    sub_agent_type: SubAgentType,
+    system_prompt: str | None,
+    mcp_tools: list[str] | None,
+    is_public: bool | None,
+    inlined_length: int = 0,
 ) -> bool:
-    """Check if a sub-agent meets the constraints for auto-approval."""
+    """Check if a sub-agent meets the constraints for auto-approval.
+
+    The prompt limit applies to the effective prompt: ``system_prompt`` plus the
+    inlined skills' bodies (ADR-0012).
+    """
     if sub_agent_type not in {SubAgentType.AUTOMATED, SubAgentType.LOCAL}:
         return False
     return (
-        len(system_prompt or "") <= config.auto_approve.max_system_prompt_length
+        len(system_prompt or "") + inlined_length <= config.auto_approve.max_system_prompt_length
         and len(mcp_tools or []) <= config.auto_approve.max_mcp_tools_count
         and not (is_public if is_public is not None else False)
     )
+
+
+def _left_pending(sub_agent: "SubAgent | None") -> bool:
+    """After update_sub_agent: True when the version it just wrote waits for approval."""
+    return sub_agent is not None and sub_agent.current_version != sub_agent.default_version
 
 
 def _strip_skill_frontmatter(content: str) -> str:
@@ -753,6 +778,7 @@ class SubAgentService:
                         elem_idx,
                         (elem->>'registry_id') AS registry_id,
                         (elem->>'content_hash') AS content_hash,
+                        COALESCE((elem->>'inline')::boolean, false) AS inline,
                         sr.slug AS name,
                         sr.scope,
                         COALESCE(srv.description, sr.description, '') AS description,
@@ -792,6 +818,7 @@ class SubAgentService:
                     registry_id=row["registry_id"],
                     content_hash=row["content_hash"],
                     scope=row["scope"] or "standalone",
+                    inline=row["inline"],
                 )
                 resolved_by_version.setdefault(cv_id, []).append(skill)
 
@@ -807,9 +834,12 @@ class SubAgentService:
         """Create a new sub-agent with initial version."""
         now = datetime.now(timezone.utc)
 
+        # Inlined skills count toward the auto-approve prompt limit (ADR-0012).
+        inlined_length = await self._inlined_skills_length(db, None, data.skills)
+
         # For AUTOMATED agents, validate constraints and enforce private visibility
         if data.type == SubAgentType.AUTOMATED:
-            _validate_automated_constraints(data.system_prompt, data.mcp_tools, data.is_public)
+            _validate_automated_constraints(data.system_prompt, data.mcp_tools, data.is_public, inlined_length)
 
         # For Foundry agents, validate that all required fields are provided
         if data.type == SubAgentType.FOUNDRY:
@@ -895,6 +925,7 @@ class SubAgentService:
             data.system_prompt,
             data.mcp_tools,
             data.is_public,
+            inlined_length,
         )
         if should_auto_approve:
             approval_ctx = ApprovalContext(
@@ -1164,10 +1195,13 @@ class SubAgentService:
                         "All Foundry configuration fields must be provided."
                     )
 
+            # Inlined skills count toward the auto-approve prompt limit (ADR-0012).
+            inlined_length = await self._inlined_skills_length(db, sub_agent_id, version_skills)
+
             # For AUTOMATED agents, validate constraints
             if existing.type == SubAgentType.AUTOMATED:
                 is_public = data.is_public if data.is_public is not None else existing.is_public
-                _validate_automated_constraints(version_system_prompt, version_mcp_tools, is_public)
+                _validate_automated_constraints(version_system_prompt, version_mcp_tools, is_public, inlined_length)
 
             version_description = (
                 data.description
@@ -1225,6 +1259,7 @@ class SubAgentService:
                 version_system_prompt,
                 version_mcp_tools,
                 data.is_public if data.is_public is not None else existing.is_public,
+                inlined_length,
             ):
                 # Get the release number for this version
                 result = await db.execute(
@@ -2119,11 +2154,19 @@ class SubAgentService:
         skill_description: str,
         content_hash: str,
         actor: User,
-    ) -> None:
+        inline: bool | None = None,
+    ) -> bool:
         """Add a registry skill reference to the agent's config by creating a new version.
 
         Appends the skill to the current default config version's skills list,
-        creating a new auto-approved version. Idempotent — skips if already present.
+        creating a new version through the standard update path (auto-approved when the
+        agent meets the auto-approve constraints). Idempotent — skips if already present,
+        unless ``inline`` (ADR-0012) asks for a different value than the config holds;
+        then it writes a version that changes only that flag. ``None`` keeps the value
+        (``False`` for a skill being added).
+
+        Returns True when it wrote a version that was NOT auto-approved (it waits for
+        review), False when it wrote an approved one or nothing at all.
 
         Args:
             db: Database session
@@ -2152,11 +2195,22 @@ class SubAgentService:
 
         # Idempotent: skip if skill already in config (by registry_id reference)
         for s in current_skills:
-            rid = (
-                s.registry_id if hasattr(s, "registry_id") else (s.get("registry_id") if isinstance(s, dict) else None)
-            )
-            if rid == registry_id:
-                return
+            if s.registry_id == registry_id:
+                if inline is None or s.inline == inline:
+                    return False
+                updated = await self.update_sub_agent(
+                    db=db,
+                    sub_agent_id=sub_agent_id,
+                    data=SubAgentUpdate(
+                        skills=[
+                            sk.model_copy(update={"inline": inline}) if sk.registry_id == registry_id else sk
+                            for sk in current_skills
+                        ],
+                        change_summary=f"{'Inlined' if inline else 'Stopped inlining'} skill '{skill_name}'",
+                    ),
+                    actor=actor,
+                )
+                return _left_pending(updated)
 
         # Build the new skill reference
         new_skill = SkillDefinition(
@@ -2166,16 +2220,18 @@ class SubAgentService:
             content_hash=content_hash,
             body="",
             files=[],
+            inline=bool(inline),
         )
         updated_skills = list(current_skills) + [new_skill]
 
         # Create a new version via the standard update path
-        await self.update_sub_agent(
+        updated = await self.update_sub_agent(
             db=db,
             sub_agent_id=sub_agent_id,
             data=SubAgentUpdate(skills=updated_skills),
             actor=actor,
         )
+        return _left_pending(updated)
 
     async def update_skill_hash_in_config(
         self,
@@ -2681,11 +2737,92 @@ class SubAgentService:
                     "registry_id": d["registry_id"],
                     "source": d.get("source"),
                     "content_hash": d.get("content_hash"),
+                    "inline": bool(d.get("inline", False)),
                     "body": "",
                     "files": [],
                 }
             result.append(d)
         return result
+
+    async def _inlined_skills_length(
+        self, db: AsyncSession, sub_agent_id: int | None, skills: list[SkillDefinition] | None
+    ) -> int:
+        """Total SKILL.md body length of the inlined skills in ``skills`` (ADR-0012).
+
+        A skill this agent owns counts with the body it is being saved with, or, when the
+        skills came from a stored version (bare refs, no body), with its registry row's
+        current body, which is what an owned skill resolves to. A skill it does not own
+        always counts with the body stored for its pinned hash, never the body in the
+        payload: a request could otherwise send a short copy of a long skill and pass the
+        auto-approve limit. The count is the body only; the rendered block adds a few
+        dozen characters of wrapper per skill.
+        """
+        inlined = [s for s in skills or [] if s.inline]
+        if not inlined:
+            return 0
+        ref_ids = [s.registry_id for s in inlined if s.registry_id]
+        if sub_agent_id is None:
+            foreign = {str(r) for r in ref_ids}
+        else:
+            foreign = await self._foreign_registry_ids(db, sub_agent_id, ref_ids)
+
+        total = 0
+        pinned: list[tuple[str, str]] = []  # foreign: (registry_id, pinned hash)
+        latest: set[str] = set()  # owned, body not in hand: the row's current body
+        for skill in inlined:
+            if skill.registry_id and skill.registry_id in foreign:
+                if not skill.content_hash:
+                    raise ValueError(f"Inlined skill '{skill.name}' is missing content_hash.")
+                pinned.append((skill.registry_id, skill.content_hash))
+            elif skill.body or not skill.registry_id:
+                total += len(skill.body or "")
+            else:
+                latest.add(skill.registry_id)
+
+        # Only the SKILL.md entry is fetched, not every bundled file.
+        skill_md = (
+            "(SELECT f->>'content' FROM jsonb_array_elements(files) f WHERE f->>'path' = 'SKILL.md' LIMIT 1)"
+        )
+        at_hash: dict[tuple[str, str], int] = {}
+        if pinned:
+            conditions = []
+            params: dict[str, str] = {}
+            for i, (sid, shash) in enumerate(pinned):
+                conditions.append(f"(skill_id = CAST(:sid_{i} AS uuid) AND content_hash = :hash_{i})")
+                params[f"sid_{i}"] = sid
+                params[f"hash_{i}"] = shash
+            result = await db.execute(
+                text(
+                    f"SELECT skill_id::text AS id, content_hash, {skill_md} AS skill_md "
+                    f"FROM skill_registry_versions WHERE {' OR '.join(conditions)}"
+                ),
+                params,
+            )
+            for row in result.mappings().all():
+                at_hash[(row["id"], row["content_hash"])] = len(_strip_skill_frontmatter(row["skill_md"] or ""))
+
+        # A pinned hash with no version snapshot falls back to the row's current body, as
+        # the read path does: an estimate, rather than an agent that can no longer be saved.
+        need_current = latest | {sid for sid, shash in pinned if (sid, shash) not in at_hash}
+        current: dict[str, int] = {}
+        if need_current:
+            result = await db.execute(
+                text(f"SELECT id::text AS id, {skill_md} AS skill_md FROM skill_registry WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                {"ids": list(need_current)},
+            )
+            current = {row["id"]: len(_strip_skill_frontmatter(row["skill_md"] or "")) for row in result.mappings().all()}
+
+        for sid in latest:
+            total += current.get(sid, 0)
+        for key in pinned:
+            if key in at_hash:
+                total += at_hash[key]
+            else:
+                logger.warning(
+                    "Inlined skill %s has no snapshot for pinned hash %s; counting its current body", key[0], key[1][:12]
+                )
+                total += current.get(key[0], 0)
+        return total
 
     @staticmethod
     async def _foreign_registry_ids(db: AsyncSession, sub_agent_id: int, registry_ids: list[str]) -> set[str]:
@@ -2774,6 +2911,7 @@ class SubAgentService:
                 ref = SkillRef(
                     registry_id=skill.registry_id,
                     content_hash=skill.content_hash,
+                    inline=skill.inline,
                 )
             else:
                 # Sub-agent scoped skill — upsert content to registry
@@ -2812,6 +2950,7 @@ class SubAgentService:
                 ref = SkillRef(
                     registry_id=skill_id,
                     content_hash=content_hash,
+                    inline=skill.inline,
                 )
             result.append(ref)
 
@@ -3049,6 +3188,7 @@ class SubAgentService:
             raise ValueError(f"Sub-agent {sub_agent_id} default version {existing.default_version} is unreadable")
 
         updated = False
+        bumped_inline = False
         skills: list[SkillDefinition] = []
         for skill in baseline.skills or []:
             if skill.registry_id == registry_id:
@@ -3056,10 +3196,23 @@ class SubAgentService:
                     return None
                 skills.append(skill.model_copy(update={"content_hash": new_hash}))
                 updated = True
+                bumped_inline = skill.inline
             else:
                 skills.append(skill)
         if not updated:
             return None
+
+        # An automatic version never goes past the auto-approve prompt limit (ADR-0012):
+        # a followed, inlined skill that grew too long stays behind as a failed bump.
+        if bumped_inline and existing.type in (SubAgentType.AUTOMATED, SubAgentType.LOCAL):
+            prompt_length = len(baseline.system_prompt or "")
+            inlined_length = await self._inlined_skills_length(db, sub_agent_id, skills)
+            max_prompt = config.auto_approve.max_system_prompt_length
+            if prompt_length + inlined_length > max_prompt:
+                raise PromptLimitError(
+                    f"inlined skills exceed the auto-approve prompt limit: system prompt {prompt_length} + "
+                    f"inlined skills {inlined_length} > {max_prompt} characters; update it by hand for review"
+                )
 
         max_version_result = await db.execute(
             text(

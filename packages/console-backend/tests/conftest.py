@@ -36,6 +36,7 @@ from console_backend.dependencies import require_auth, require_auth_or_bearer_to
 from console_backend.models.session import StoredSession
 from console_backend.models.user import User, UserRole, UserStatus
 from console_backend.repositories.secrets_repository import SecretsRepository
+from console_backend.repositories.skill_registry_repository import SkillRegistryRepository
 from console_backend.repositories.sub_agent_repository import SubAgentRepository
 from console_backend.repositories.user_group_repository import UserGroupRepository
 from console_backend.repositories.user_repository import UserRepository
@@ -43,6 +44,7 @@ from console_backend.services.audit_service import AuditService
 from console_backend.services.notification_service import NotificationService
 from console_backend.services.oauth_service import OAuthService
 from console_backend.services.secrets_service import SecretsService
+from console_backend.services.skill_activation_service import SkillActivationService
 from console_backend.services.skill_registry_service import SkillRegistryService
 from console_backend.services.sub_agent_service import SubAgentService
 from console_backend.services.user_group_service import UserGroupService
@@ -1175,3 +1177,32 @@ def get_mock_request(client):
         return request
 
     return _create
+
+
+# --- Skill registry wiring shared by the ADR-0011 / ADR-0012 database tests ---
+
+
+@pytest.fixture
+def registry_service() -> SkillRegistryService:
+    repo = SkillRegistryRepository()
+    repo.set_audit_service(AuditService())
+    service = SkillRegistryService()
+    service.set_repository(repo)
+    return service
+
+
+@pytest.fixture
+def wired(
+    sub_agent_service: SubAgentService,
+    registry_service: SkillRegistryService,
+    user_service: UserService,
+) -> tuple[SubAgentService, SkillRegistryService, SkillActivationService]:
+    """The three services wired as service_instances.py wires them, hook included."""
+    sub_agent_service.set_skill_registry_service(registry_service)
+    activation = SkillActivationService()
+    activation.set_sub_agent_service(sub_agent_service)
+    activation.set_user_service(user_service)
+    registry_service.set_content_changed_hook(activation.bump_following_referrers)
+    return sub_agent_service, registry_service, activation
+
+

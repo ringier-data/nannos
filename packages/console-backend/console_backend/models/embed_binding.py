@@ -105,6 +105,10 @@ class WellKnownSkillInfo(BaseModel):
         default="private",
         description="Registry visibility the host asked for in SKILL.md `metadata.nannos-visibility`",
     )
+    inline: bool = Field(
+        default=False,
+        description="Inlined on the bound sub-agent: SKILL.md `metadata.nannos-inline` (ADR-0012)",
+    )
 
 
 class WellKnownAgentInfo(BaseModel):
@@ -118,7 +122,6 @@ class WellKnownAgentInfo(BaseModel):
     tools: list[str] | None = None
     model_tier: str | None = None
     thinking_level: str | None = None
-    skills_inline: list[str] = []
 
 
 class EmbedBinding(BaseModel):

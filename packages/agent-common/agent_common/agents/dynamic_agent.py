@@ -606,20 +606,17 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         Returns:
             Formatted string to append to the system prompt, or empty string if no playbooks
         """
-        if not self.store or not self.user_id:
-            return ""
-
-        from agent_common.core.playbook_reader import PlaybookReaderService
-
-        reader = PlaybookReaderService(self.store)
         parts: List[str] = []
+        group_content = personal_content = None
+        if self.store and self.user_id:
+            from agent_common.core.playbook_reader import PlaybookReaderService
 
-        # Load AGENTS.md from group and personal scopes
-        group_content, personal_content = await reader.read_agents_md(
-            user_id=self.user_id,
-            agent_name=self.name,
-            group_ids=self.group_ids,
-        )
+            # Load AGENTS.md from group and personal scopes
+            group_content, personal_content = await PlaybookReaderService(self.store).read_agents_md(
+                user_id=self.user_id,
+                agent_name=self.name,
+                group_ids=self.group_ids,
+            )
 
         if group_content:
             parts.append(f"<group_playbook>\n{group_content}\n</group_playbook>")
@@ -634,27 +631,13 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 "</playbook_conflict_resolution>"
             )
 
-        # Build Skills System block from resolved skills
+        # Skills System block (and the inlined skills, ADR-0012) from resolved skills.
+        # Its two sections are markdown headings: a blank line keeps "## Inlined skills"
+        # from reading as a continuation of the Available skills list.
         if self._resolved_skills:
-            skill_lines = []
-            for skill in sorted(self._resolved_skills.values(), key=lambda s: s.name):
-                scope_label = skill.scope
-                if skill.overrides:
-                    scope_label += f", overrides {skill.overrides}"
-                skill_lines.append(f"- `{skill.name}` ({scope_label}): {skill.description}")
+            from agent_common.core.load_skill_tool import render_skills_prompt
 
-            parts.append(
-                "## Skills System\n"
-                "You have access to the following skills. Each skill is a directory under /skills/\n"
-                "containing a SKILL.md file (and optionally scripts, references, assets).\n\n"
-                "To use a skill:\n"
-                "1. Match the user's request to a skill description below.\n"
-                "2. Call load_skill(name='<name>'). It returns the COMPLETE SKILL.md in one call — "
-                "do not read it through read_file, grep or eval, and never page it with offset/limit.\n"
-                "3. Follow its instructions. If they refer to a bundled file, read that file with "
-                "read_file('/skills/<name>/<file>').\n\n"
-                "Available skills:\n" + "\n".join(skill_lines)
-            )
+            parts.append("\n\n".join(render_skills_prompt(self._resolved_skills)))
 
         if not parts:
             return ""
@@ -1368,9 +1351,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 existing_names = {t.name for t in tools}
                 tools = tools + [t for t in console_tools if t.name not in existing_names]
 
-        # Pre-resolve skills (default + group + personal) for the virtual filesystem
-        if self.store and self.user_id:
+        # Pre-resolve skills (default + group + personal) for the virtual filesystem.
+        # Without a document store only the config's own skills resolve: an inlined skill
+        # (ADR-0012) must still reach the prompt, as the #290 prompt text always did.
+        if (self.store and self.user_id) or getattr(self.config, "skills", None):
             from agent_common.core.skills_resolver import resolve_skills_for_agent
+            from agent_common.models.skill import ResolvedSkill
             from agent_common.models.skill import SkillDefinition as AgentSkillDef
             from agent_common.models.skill import SkillFile as AgentSkillFile
 
@@ -1389,19 +1375,39 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                         description=s.get("description", ""),
                         body=s.get("body", ""),
                         files=files,
+                        inline=bool(s.get("inline", False)),
                     )
-                return AgentSkillDef(name=s.name, description=s.description, body=s.body, files=s.files)
+                return AgentSkillDef(
+                    name=s.name,
+                    description=s.description,
+                    body=s.body,
+                    files=s.files,
+                    inline=bool(getattr(s, "inline", False)),
+                )
 
             default_skills = []
             if hasattr(self.config, "skills") and self.config.skills:
                 default_skills = [_to_skill_def(s) for s in self.config.skills]
-            self._resolved_skills = await resolve_skills_for_agent(
-                store=self.store,
-                user_id=self.user_id,
-                agent_name=self.name,
-                group_ids=self.group_ids or [],
-                default_skills=default_skills,
-            )
+            if self.store and self.user_id:
+                self._resolved_skills = await resolve_skills_for_agent(
+                    store=self.store,
+                    user_id=self.user_id,
+                    agent_name=self.name,
+                    group_ids=self.group_ids or [],
+                    default_skills=default_skills,
+                )
+            else:
+                self._resolved_skills = {
+                    s.name: ResolvedSkill(
+                        name=s.name,
+                        description=s.description,
+                        body=s.body,
+                        scope="default",
+                        files=s.files,
+                        inline=s.inline,
+                    )
+                    for s in default_skills
+                }
 
         logger.info(f"Creating LangGraph agent '{self.name}' with {len(tools)} tools")
 

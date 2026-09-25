@@ -201,6 +201,14 @@ class SkillDefinition(BaseModel):
         default=None,
         description="Set on read for a following skill whose last bump was skipped; says why it is behind.",
     )
+    inline: bool = Field(
+        default=False,
+        description=(
+            "Inlined skill (ADR-0012): the full SKILL.md goes into the system prompt on every turn "
+            "instead of behind load_skill. A config-version property: saved with the version, "
+            "restored by a revert, and counted toward the auto-approve prompt length."
+        ),
+    )
     provenance: SkillProvenance | None = Field(
         default=None,
         description=(
@@ -252,6 +260,7 @@ class SkillRef(BaseModel):
 
     registry_id: str = Field(..., description="UUID of the skill in skill_registry")
     content_hash: str = Field(..., description="SHA-256 content hash pinning to a specific version")
+    inline: bool = Field(default=False, description="Inlined skill (ADR-0012): body goes into the system prompt")
 
 
 class SkillSummary(BaseModel):
@@ -264,6 +273,7 @@ class SkillSummary(BaseModel):
     update_available: bool = False
     latest_hash: str | None = None
     sandbox_required: bool = False
+    inline: bool = False
 
 
 class SubAgentConfigVersionBase(BaseModel):
@@ -612,6 +622,7 @@ class SubAgentConfigVersionSummary(SubAgentConfigVersionBase):
                 update_available=s.update_available,
                 latest_hash=s.latest_hash,
                 sandbox_required=s.sandbox_required,
+                inline=s.inline,
             )
             for s in cv.skills
         ]

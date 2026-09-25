@@ -23,6 +23,7 @@ from console_backend.models.skills_registry import (
 from console_backend.models.user import User
 from console_backend.services.skill_activation_service import SkillActivationService
 from console_backend.services.skill_registry_service import SkillRegistryService
+from console_backend.services.sub_agent_service import PromptLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,9 @@ async def activate_skill(
     Sub-agent (write access on the agent required): the agent's config gains a REFERENCE
     to the registry row (ADR-0011) in the requested ``mode`` — 'pinned' (default) or
     'following'. Re-activating an already active skill with the other mode switches it.
+    ``inline`` (ADR-0012) is written into the config version; over the auto-approve prompt
+    limit an automated agent is refused with 422 and a local agent's version waits for
+    approval (``pending_approval``).
     """
     if body.scope not in ("personal", "group", "sub-agent"):
         raise HTTPException(status_code=400, detail="scope must be 'personal', 'group' or 'sub-agent'")
@@ -166,6 +170,11 @@ async def activate_skill(
         raise HTTPException(
             status_code=400,
             detail="mode 'following' is only available with scope 'sub-agent'; personal and group activations are pinned",
+        )
+    if body.inline is not None and body.scope != "sub-agent":
+        raise HTTPException(
+            status_code=400,
+            detail="inline is only available with scope 'sub-agent'; personal and group activations are never inlined",
         )
 
     # Verify registry entry exists
@@ -211,7 +220,7 @@ async def activate_skill(
         )
         switched = existing is not None and existing.mode != body.mode
     try:
-        activation_id = await activation_service.activate(
+        activation_id, pending_approval = await activation_service.activate_with_outcome(
             db=db,
             registry_id=body.registry_id,
             sub_agent_id=body.sub_agent_id,
@@ -222,7 +231,10 @@ async def activate_skill(
             activated_by=user.id,
             actor=user if body.scope == "sub-agent" else None,
             mode=body.mode,
+            inline=body.inline,
         )
+    except PromptLimitError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -234,6 +246,8 @@ async def activate_skill(
         "scope": body.scope,
         "mode": body.mode,
         "switched": switched,
+        "inline": body.inline,
+        "pending_approval": pending_approval,
         "activated": True,
     }
 
