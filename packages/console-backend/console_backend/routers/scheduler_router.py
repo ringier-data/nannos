@@ -180,21 +180,6 @@ async def _repair_cel(
     user_query: str,
     payload: Any = None,
     judge_fallback: bool = True,
-) -> dict[str, Any]:
-    """`_repair_cel_with_outcome` without the outcome, for callers that only need the draft."""
-    repaired, _ = await _repair_cel_with_outcome(
-        result, original_prompt, generate, user_query, payload=payload, judge_fallback=judge_fallback
-    )
-    return repaired
-
-
-async def _repair_cel_with_outcome(
-    result: dict[str, Any],
-    original_prompt: str,
-    generate: Callable[[str], Awaitable[dict[str, Any]]],
-    user_query: str,
-    payload: Any = None,
-    judge_fallback: bool = True,
 ) -> tuple[dict[str, Any], bool]:
     """Make sure the generated cel_expr survives verification, correcting it if not.
 
@@ -721,6 +706,13 @@ async def generate_job_draft(
         # Check the generated expression before it reaches the form. Stating the language
         # in the prompt reduces the mistake but does not remove it, and an expression that
         # cannot compile produces a job that looks configured and never fires.
+        # On an edit, only the job type's own fields count. The rest are dropped here, not
+        # at the merge: a broken cel_expr volunteered on a task edit would otherwise go
+        # through repair and refuse the edit over a field the job cannot have.
+        if current is not None:
+            editable = _EDITABLE_DRAFT_FIELDS[_edited_type(current)]
+            result = {key: value for key, value in result.items() if key in editable}
+
         # The sample describes the call it came from. An edit that moves to another tool
         # writes its expression for that tool's response, which the sample is not — so the
         # expression is only compile-checked rather than failed against the wrong shape.
@@ -728,7 +720,7 @@ async def generate_job_draft(
         sample = data.result
         if current is not None and proposed_tool and proposed_tool != current.check_tool:
             sample = None
-        result, expression_survived = await _repair_cel_with_outcome(
+        result, expression_survived = await _repair_cel(
             result, prompt, _generate, data.query, payload=sample, judge_fallback=current is None
         )
         # On an edit, an expression that could not be repaired is not replaced by anything:

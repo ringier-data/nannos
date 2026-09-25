@@ -550,6 +550,19 @@ class TestEditingATaskJob:
         assert resp.status_code == 200
         assert _filled(resp) == {"job_type": "task", "sub_agent_id": 4, "prompt": "Triage yesterday's bug reports"}
 
+    def test_a_broken_expression_volunteered_on_a_task_does_not_refuse_the_edit(
+        self, draft_client, gateway, catalogue
+    ):
+        # cel_expr is no field of a task; a broken one used to go through repair and
+        # refuse the edit with "refine the expression", on a job with none to refine.
+        gateway.return_value = {"prompt": "Summarise all bug reports", "cel_expr": "result.reports.filter(r,"}
+
+        resp = draft_client.post(URL, json={"query": "all of them", "current": self.TASK})
+
+        assert resp.status_code == 200
+        assert gateway.await_count == 1
+        assert _filled(resp)["prompt"] == "Summarise all bug reports"
+
     def test_watch_fields_are_not_added_to_a_task(self, draft_client, gateway, catalogue):
         gateway.return_value = {"prompt": "Summarise all bug reports", "cel_expr": "result.reports"}
 

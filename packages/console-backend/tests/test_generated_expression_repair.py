@@ -92,20 +92,20 @@ class TestCelRepair:
     @pytest.mark.asyncio
     async def test_a_compilable_expression_is_left_alone(self):
         generate = AsyncMock()
-        result = await _repair_cel({"cel_expr": GOOD_CEL}, "p", generate, "q")
+        result, _ = await _repair_cel({"cel_expr": GOOD_CEL}, "p", generate, "q")
         assert result["cel_expr"] == GOOD_CEL
         generate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_expression_needs_no_repair(self):
         generate = AsyncMock()
-        assert await _repair_cel({"check_tool": "t"}, "p", generate, "q") == {"check_tool": "t"}
+        assert await _repair_cel({"check_tool": "t"}, "p", generate, "q") == ({"check_tool": "t"}, True)
         generate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_an_uncompilable_expression_is_retried_with_the_error(self):
         generate = AsyncMock(return_value={"cel_expr": GOOD_CEL})
-        result = await _repair_cel({"cel_expr": BAD_CEL, "check_tool": "t"}, "P", generate, "q")
+        result, _ = await _repair_cel({"cel_expr": BAD_CEL, "check_tool": "t"}, "P", generate, "q")
 
         assert result["cel_expr"] == GOOD_CEL
         assert result["check_tool"] == "t"  # the rest of the generation survives
@@ -117,7 +117,7 @@ class TestCelRepair:
     async def test_a_second_failure_falls_back_to_a_judged_condition(self):
         # Always valid — so the worst case is a working (if pricier) job, not a broken one.
         generate = AsyncMock(return_value={"cel_expr": "still broken ("})
-        result = await _repair_cel(
+        result, _ = await _repair_cel(
             {"cel_expr": BAD_CEL}, "P", generate, "tell me when an outsider is invited"
         )
         assert result["cel_expr"] is None
@@ -138,7 +138,7 @@ class TestCelRepair:
         # expression, so it failed again on the identical error and burnt the remaining
         # retry before reaching the fallback.
         generate = AsyncMock(return_value={"llm_condition": "an outsider is invited"})
-        result = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "q")
+        result, _ = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "q")
 
         assert result["cel_expr"] is None
         assert result["llm_condition"] == "an outsider is invited"
@@ -147,13 +147,13 @@ class TestCelRepair:
     @pytest.mark.asyncio
     async def test_a_generated_llm_condition_is_preferred_over_the_raw_query(self):
         generate = AsyncMock(return_value={"llm_condition": "an external attendee is invited"})
-        result = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "raw query")
+        result, _ = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "raw query")
         assert result["cel_expr"] is None
         assert result["llm_condition"] == "an external attendee is invited"
 
     @pytest.mark.asyncio
     async def test_a_failing_retry_still_yields_a_usable_job(self):
         generate = AsyncMock(side_effect=RuntimeError("gateway down"))
-        result = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "q")
+        result, _ = await _repair_cel({"cel_expr": BAD_CEL}, "P", generate, "q")
         assert result["cel_expr"] is None
         assert result["llm_condition"] == "q"
