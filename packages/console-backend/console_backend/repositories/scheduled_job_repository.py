@@ -579,7 +579,7 @@ class ScheduledJobRepository(AuditedRepository):
     async def list_held_jobs(
         self, db: AsyncSession, user_id: str, codes: Sequence[PauseCode]
     ) -> list[ScheduledJob]:
-        """The user's live subscriptions held for one of *holds*.
+        """The user's live subscriptions switched off with one of *codes*.
 
         Usually none. It runs at every sign-in, so it selects only those rows instead of
         loading every job of the user.

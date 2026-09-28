@@ -898,8 +898,9 @@ What an interruption earns depends on the trigger:
   claim loop's second wake-up reason. `complete_job` only ever *writes* it (COALESCE), because runs
   of one job can complete out of order; the claim consumes it, and pause/resume/PATCH-disable clear
   it. The retry branch ignores `enabled` (a retired `once` job is disabled too) and trusts
-  `paused_reason IS NULL`, so every deliberate stop — pause, auto-pause, PATCH `enabled=false`,
-  an unresolvable timezone — writes a reason.
+  `pause_code IS NULL`, so every deliberate stop — pause, auto-pause, PATCH `enabled=false`,
+  an unresolvable timezone — writes a `PauseCode`. The `paused_reason` a person reads is
+  rendered from the code (`render_pause`) and stored nowhere.
 - `retry` → recovery is exhausted. The run is marked as owing the user a notice (`notice_due_at`,
   written in the same statement as the run's outcome) and no further attempt is scheduled.
 - `manual` → nothing. The user is present and can press again.
