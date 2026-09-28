@@ -153,7 +153,7 @@ orchestrator replica:
   fork-on-adopt provided that the seed does not, and it is unnecessary only
   because a run is adoptable exactly once — `job.delivery_channel_id` is singular
   (one notification per run), adoption is a reply in that notification's thread
-  (one conversation), and `_validate_scheduled_run_origin` re-resolves the job
+  (one conversation), and `_confirmed_conversation_origin` re-resolves the job
   under the authenticated user's token (another user's job 404s). A job that could
   notify several channels would break this and let two conversations interleave
   turns in one sub-agent's memory; `test_delegation_lifecycle_regressions` and the
