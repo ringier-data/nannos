@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 _KMS_KEY_ID = os.environ.get("KMS_VAULT_KEY_ID", "alias/dev-nannos-sensitive-data-kms-key")
 _TOKEN_ENDPOINT_SUFFIX = "/protocol/openid-connect/token"
 
+#: `has_consent` as a SQL expression over a `users u` row, for queries that list people
+#: and report whether each is scheduler-ready in the same round trip.
+HAS_OFFLINE_TOKEN_SQL = "EXISTS (SELECT 1 FROM user_offline_tokens uot WHERE uot.user_id = u.id)"
+
 
 def _get_kms_client():  # type: ignore[no-untyped-def]
     """Return an aiobotocore KMS client (lazy import to avoid heavy startup cost)."""

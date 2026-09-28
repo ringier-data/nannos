@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .sub_agent import SubAgentStatus
-from .user import PaginationMeta
+from .user import PaginationMeta, UserOnboarding
 
 
 class UserGroup(BaseModel):
@@ -45,6 +45,7 @@ class MemberInfo(BaseModel):
     first_name: str
     last_name: str
     group_role: Literal["read", "write", "manager"]
+    onboarding: UserOnboarding
 
 
 class UserGroupWithMembers(UserGroup):

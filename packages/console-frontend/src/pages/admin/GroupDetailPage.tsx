@@ -51,6 +51,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Pagination } from '@/components/admin/Pagination';
+import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
 
 const USER_PAGE_SIZE = 20;
 const ACCESSIBLE_PAGE_SIZE = 20;
@@ -1014,8 +1015,13 @@ export function GroupDetailPage() {
                           }}
                         />
                       </TableCell>
-                      <TableCell className="font-medium">
-                        {member.first_name} {member.last_name}
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">
+                            {member.first_name} {member.last_name}
+                          </span>
+                          <UserOnboardingBadge onboarding={member.onboarding} />
+                        </div>
                       </TableCell>
                       <TableCell>{member.email}</TableCell>
                       <TableCell>

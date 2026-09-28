@@ -108,10 +108,36 @@ class UserGroupMembership(BaseModel):
     group_role: Literal["read", "write", "manager"]
 
 
+class UserOnboarding(BaseModel):
+    """How far a user is from being usable, for administrators. Derived, never stored.
+
+    Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
+    not an error: both flags turn true with the user's first sign-in (ADR-0011).
+    """
+
+    signed_in: bool = Field(
+        description=(
+            "The user has a real identity-provider subject, which only a sign-in supplies. "
+            "False for a user provisioned over SCIM who has not signed in yet."
+        )
+    )
+    scheduler_ready: bool = Field(
+        description=(
+            "An offline token is vaulted, so scheduled jobs can run under the user's account. "
+            "Without one, their subscriptions wait switched off for their first sign-in."
+        )
+    )
+
+    @classmethod
+    def of(cls, sub: str, has_offline_token: bool) -> "UserOnboarding":
+        return cls(signed_in=has_idp_identity(sub), scheduler_ready=has_offline_token)
+
+
 class UserWithGroups(User):
     """User with group memberships."""
 
     groups: list[UserGroupMembership] = Field(default_factory=list)
+    onboarding: UserOnboarding
 
 
 # Request/Response models for API

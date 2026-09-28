@@ -3459,6 +3459,7 @@ export type MemberInfo = {
      */
     last_name: string;
     group_role: RoleEnum;
+    onboarding: UserOnboarding;
 };
 
 /**
@@ -8169,6 +8170,29 @@ export type UserNotification = {
 };
 
 /**
+ * UserOnboarding
+ *
+ * How far a user is from being usable, for administrators. Derived, never stored.
+ *
+ * Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
+ * not an error: both flags turn true with the user's first sign-in (ADR-0011).
+ */
+export type UserOnboarding = {
+    /**
+     * Signed In
+     *
+     * The user has a real identity-provider subject, which only a sign-in supplies. False for a user provisioned over SCIM who has not signed in yet.
+     */
+    signed_in: boolean;
+    /**
+     * Scheduler Ready
+     *
+     * An offline token is vaulted, so scheduled jobs can run under the user's account. Without one, their subscriptions wait switched off for their first sign-in.
+     */
+    scheduler_ready: boolean;
+};
+
+/**
  * UserRole
  *
  * User role enum defining system-wide capabilities.
@@ -8389,6 +8413,7 @@ export type UserWithGroups = {
      * Groups
      */
     groups?: Array<UserGroupMembership>;
+    onboarding: UserOnboarding;
 };
 
 /**

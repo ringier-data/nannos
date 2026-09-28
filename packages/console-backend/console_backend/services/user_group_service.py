@@ -14,7 +14,7 @@ from ..authorization import (
 )
 from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import ActivationSource
-from ..models.user import User, UserStatus, has_idp_identity
+from ..models.user import User, UserOnboarding, UserStatus, has_idp_identity
 from ..models.user_group import (
     BulkDeleteResult,
     MemberInfo,
@@ -27,10 +27,29 @@ from ..repositories.sub_agent_repository import SubAgentRepository
 from ..repositories.user_group_repository import UserGroupRepository
 from ..services.keycloak_admin_service import KeycloakAdminService
 from ..services.notification_service import NotificationService
+from ..services.scheduler_token_service import HAS_OFFLINE_TOKEN_SQL
 from ..services.sub_agent_service import SubAgentService
 from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
+
+#: What every member listing selects, over `user_group_members ugm JOIN users u`. The last
+#: two columns feed `MemberInfo.onboarding`, so a page of members costs no extra query.
+_MEMBER_COLUMNS = (
+    "u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role, "
+    f"u.sub, {HAS_OFFLINE_TOKEN_SQL} AS has_offline_token"
+)
+
+
+def _member_info(row: Any) -> MemberInfo:
+    return MemberInfo(
+        user_id=row["user_id"],
+        email=row["email"],
+        first_name=row["first_name"],
+        last_name=row["last_name"],
+        group_role=row["group_role"],
+        onboarding=UserOnboarding.of(row["sub"], row["has_offline_token"]),
+    )
 
 
 class InactiveUserError(ValueError):
@@ -173,8 +192,8 @@ class UserGroupService:
             return None
 
         # Get member count and member info
-        members_query = text("""
-            SELECT u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
+        members_query = text(f"""
+            SELECT {_MEMBER_COLUMNS}
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             WHERE ugm.user_group_id = :group_id
@@ -185,16 +204,7 @@ class UserGroupService:
         result = await db.execute(members_query, {"group_id": group_id})
         member_rows = result.mappings().all()
 
-        members = [
-            MemberInfo(
-                user_id=row["user_id"],
-                email=row["email"],
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                group_role=row["group_role"],
-            )
-            for row in member_rows
-        ]
+        members = [_member_info(row) for row in member_rows]
 
         return UserGroupWithMembers(
             **group.model_dump(),
@@ -357,8 +367,8 @@ class UserGroupService:
             return []
 
         result = await db.execute(
-            text("""
-                SELECT ugm.user_group_id, u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
+            text(f"""
+                SELECT ugm.user_group_id, {_MEMBER_COLUMNS}
                 FROM user_group_members ugm
                 JOIN users u ON u.id = ugm.user_id
                 WHERE ugm.user_group_id = ANY(:group_ids)
@@ -370,15 +380,7 @@ class UserGroupService:
         )
         members_by_group: dict[int, list[MemberInfo]] = {g.id: [] for g in groups}
         for row in result.mappings().all():
-            members_by_group[row["user_group_id"]].append(
-                MemberInfo(
-                    user_id=row["user_id"],
-                    email=row["email"],
-                    first_name=row["first_name"],
-                    last_name=row["last_name"],
-                    group_role=row["group_role"],
-                )
-            )
+            members_by_group[row["user_group_id"]].append(_member_info(row))
 
         return [
             UserGroupWithMembers(
@@ -897,8 +899,8 @@ class UserGroupService:
                 logger.error(f"Failed to activate default scheduled jobs for new members: {e}")
 
         # Fetch and return added members
-        member_query = text("""
-            SELECT u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
+        member_query = text(f"""
+            SELECT {_MEMBER_COLUMNS}
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             WHERE ugm.user_group_id = :group_id AND ugm.user_id = ANY(:user_ids)
@@ -906,16 +908,7 @@ class UserGroupService:
         member_result = await db.execute(member_query, {"group_id": group_id, "user_ids": user_ids})
         rows = member_result.mappings().all()
 
-        return [
-            MemberInfo(
-                user_id=row["user_id"],
-                email=row["email"],
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                group_role=row["group_role"],
-            )
-            for row in rows
-        ]
+        return [_member_info(row) for row in rows]
 
     async def list_members(
         self,
@@ -961,7 +954,7 @@ class UserGroupService:
         """)
 
         data_query = text(f"""
-            SELECT u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
+            SELECT {_MEMBER_COLUMNS}
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             WHERE ugm.user_group_id = :group_id
@@ -979,16 +972,7 @@ class UserGroupService:
             result = await db.execute(data_query, params)
             rows = result.mappings().all()
 
-            members = [
-                MemberInfo(
-                    user_id=row["user_id"],
-                    email=row["email"],
-                    first_name=row["first_name"],
-                    last_name=row["last_name"],
-                    group_role=row["group_role"],
-                )
-                for row in rows
-            ]
+            members = [_member_info(row) for row in rows]
 
             return members, total
         except Exception as e:
@@ -1109,8 +1093,8 @@ class UserGroupService:
             )
 
             # Fetch updated member info
-            member_query = text("""
-                SELECT u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role
+            member_query = text(f"""
+                SELECT {_MEMBER_COLUMNS}
                 FROM user_group_members ugm
                 JOIN users u ON u.id = ugm.user_id
                 WHERE ugm.user_group_id = :group_id AND ugm.user_id = :user_id
@@ -1143,13 +1127,7 @@ class UserGroupService:
                 logger.error(f"Failed to create role update notification: {e}")
                 # Don't fail the operation if notification fails
 
-            return MemberInfo(
-                user_id=member_row["user_id"],
-                email=member_row["email"],
-                first_name=member_row["first_name"],
-                last_name=member_row["last_name"],
-                group_role=member_row["group_role"],
-            )
+            return _member_info(member_row)
         except Exception as e:
             logger.error(f"Failed to update member role: {e}")
             raise

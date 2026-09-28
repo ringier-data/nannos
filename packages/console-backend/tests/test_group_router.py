@@ -20,7 +20,6 @@ from console_backend.models.user import User, UserRole, UserStatus
 from console_backend.models.user_group import (
     GroupMemberAdd,
     GroupMemberRemove,
-    MemberInfo,
     UserGroupWithMembers,
 )
 from console_backend.routers import group_router
@@ -73,27 +72,6 @@ def mock_groups():
             name="Test Group 2",
             description="Description 2",
             members=[],
-        ),
-    ]
-
-
-@pytest.fixture
-def mock_members():
-    """Mock list of group members."""
-    return [
-        MemberInfo(
-            user_id="user-1",
-            email="user1@test.com",
-            first_name="User",
-            last_name="One",
-            group_role="manager",
-        ),
-        MemberInfo(
-            user_id="user-2",
-            email="user2@test.com",
-            first_name="User",
-            last_name="Two",
-            group_role="write",
         ),
     ]
 
