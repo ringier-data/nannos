@@ -105,7 +105,7 @@ class TestBuildScheduledRunHistory:
         assert tool.additional_kwargs["a2a_metadata"]["state"] == "TASK_STATE_COMPLETED"
         # No context_id in the synthetic tool metadata: conversation adoption
         # goes through the server-validated a2a_tracking seed
-        # (_validate_scheduled_run_origin + _build_adoption_seed), never
+        # (_confirmed_conversation_origin + _build_adoption_seed), never
         # through client-supplied provenance.
         assert "context_id" not in tool.additional_kwargs["a2a_metadata"]
 

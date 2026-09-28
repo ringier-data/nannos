@@ -2,6 +2,7 @@ import { App } from '@slack/bolt';
 import { Logger } from '../../utils/logger.js';
 import { handleIncomingMessage, HandlerDependencies, NormalizedMessage } from '../events/messageHandler.js';
 import { recordDecision } from '../../utils/taskResponseHandler.js';
+import { refuseForeignClick } from '../../utils/interruptOwner.js';
 
 /**
  * Register handlers for generic HITL interrupt widget interactions.
@@ -40,6 +41,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
     try {
       const decodedValue = JSON.parse(Buffer.from(actionValue, 'base64').toString());
       const { taskId, toolName } = decodedValue;
+      if (await refuseForeignClick(client, decodedValue, userId, channelId, threadTs)) return;
 
       logger.info(`HITL rejected by user ${userId} for task ${taskId} tool ${toolName}`);
 
@@ -94,6 +96,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
     try {
       const decodedValue = JSON.parse(Buffer.from(actionValue, 'base64').toString());
       const { taskId, toolName } = decodedValue;
+      if (await refuseForeignClick(client, decodedValue, userId, channelId, threadTs)) return;
 
       logger.info(`HITL approved by user ${userId} for task ${taskId} tool ${toolName}`);
 
@@ -146,6 +149,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
     try {
       const decodedValue = JSON.parse(Buffer.from(actionValue, 'base64').toString());
       const { taskId, toolName } = decodedValue;
+      if (await refuseForeignClick(client, decodedValue, userId, channelId, threadTs)) return;
 
       logger.info(`HITL approve+bypass_tool by user ${userId} for task ${taskId} tool ${toolName}`);
 
@@ -196,6 +200,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
     try {
       const decodedValue = JSON.parse(Buffer.from(actionValue, 'base64').toString());
       const { taskId, toolName } = decodedValue;
+      if (await refuseForeignClick(client, decodedValue, userId, channelId, threadTs)) return;
 
       logger.info(`HITL approve+bypass_pattern by user ${userId} for task ${taskId} tool ${toolName}`);
 
@@ -247,6 +252,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
     try {
       const decodedValue = JSON.parse(Buffer.from(actionValue, 'base64').toString());
       const { taskId, toolName, channelId, threadTs } = decodedValue;
+      if (await refuseForeignClick(client, decodedValue, userId, channelId, threadTs)) return;
 
       logger.info(`HITL request changes clicked by user ${userId} for task ${taskId} tool ${toolName}`);
 
@@ -347,6 +353,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
     try {
       const decoded = JSON.parse(Buffer.from(actionValue, 'base64').toString());
       const { taskId, contextId, channelId, threadTs, calls } = decoded;
+      if (await refuseForeignClick(client, decoded, userId, channelId, threadTs)) return;
       const callList: any[] = Array.isArray(calls) ? calls : [];
 
       const blocks: any[] = [];

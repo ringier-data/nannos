@@ -165,9 +165,9 @@ def _build_scheduled_run_history(
     tool call to the sub-agent, and the run's output as the tool result. This
     gives the model the run's prompt and output as real context; it does NOT
     by itself resume the run's checkpoint. Conversation adoption is seeded
-    separately (_validate_scheduled_run_origin + _build_adoption_seed): a
+    separately (_confirmed_conversation_origin + _build_adoption_seed): a
     follow-up delegation resumes the run's conversation on the executing
-    server for remote sub-agents, or on a fork of the run's checkpoint for
+    server for remote sub-agents, or on the run's own thread for
     local/automated ones.
 
     For a run without a sub-agent (a plain watch notification) there is no
@@ -389,46 +389,38 @@ def _build_origin_history(
 _ADOPTION_LOOKUP_TIMEOUT_S = 3.0
 
 
-async def _validate_scheduled_run_origin(
+async def _resolve_scheduled_run(
     origin: dict[str, Any],
     access_token: str,
     console_backend_url: str,
-) -> dict[str, Any] | None:
-    """Validate a scheduled_run origin server-side and resolve its run conversation.
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The server's view of a scheduled_run origin's job and run, or None.
 
-    Cross-service conversation adoption, step 1 of 2 (see _build_adoption_seed
-    for step 2 and the delegation-path mechanics). The client-forwarded
-    DataPart is treated as an untrusted hint: the job and run are re-resolved
-    from console-backend under the AUTHENTICATED user's token (a job another
-    user owns simply 404s), the sub-agent binding is checked server-side, and
-    the SERVER-stored conversation_id is what adoption uses — the forwarded
-    ``context_id`` plays no part.
+    Resolved under the AUTHENTICATED user's token, so a job another user owns
+    simply 404s: a result here means this user may see the run. Everything a
+    conversation takes from a scheduled-run origin (its synthetic history, its
+    adoption) is gated on this, because the DataPart itself is client-supplied
+    and, in a channel, a reply can come from any member.
 
     Expected failures (backend down/slow, non-2xx, malformed body) degrade to
     None with a warning; programming errors propagate to the caller so they
     stay visible rather than masquerading as pre-adoption behavior.
-
-    Returns ``{"sub_agent_id", "conversation_id", "job_id", "run_id"}`` or
-    None when the origin does not resolve to an owned run with a stored
-    conversation.
     """
     if origin.get("kind") != "scheduled_run":
         return None
 
     job_id = _origin_int(origin.get("scheduled_job_id"))
     run_id = _origin_int(origin.get("scheduled_job_run_id"))
-    sub_agent_id = _origin_int(origin.get("sub_agent_id"))
-    if job_id is None or run_id is None or sub_agent_id is None:
+    if job_id is None or run_id is None:
         return None
 
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
         async with asyncio.timeout(_ADOPTION_LOOKUP_TIMEOUT_S):
             async with httpx.AsyncClient(base_url=console_backend_url) as client:
-                # The binding check post-filters, so both lookups can run
-                # concurrently under the shared deadline. return_exceptions
-                # keeps a second in-flight failure from becoming an
-                # "exception was never retrieved" warning; re-raise the first
+                # Both lookups run concurrently under the shared deadline.
+                # return_exceptions keeps a second in-flight failure from becoming
+                # an "exception was never retrieved" warning; re-raise the first
                 # so the except below handles both lookups uniformly.
                 job_resp, run_resp = await asyncio.gather(
                     client.get(f"/api/v1/scheduler/jobs/{job_id}", headers=headers),
@@ -440,43 +432,81 @@ async def _validate_scheduled_run_origin(
                         raise resp
         if job_resp.status_code != 200:
             logger.info(
-                f"Conversation adoption skipped: job {job_id} not resolvable for this user "
-                f"(HTTP {job_resp.status_code})"
-            )
-            return None
-        job = job_resp.json()
-        if _origin_int(job.get("sub_agent_id")) != sub_agent_id:
-            logger.warning(
-                f"Conversation adoption skipped: origin sub_agent_id {sub_agent_id} does not match "
-                f"job {job_id}'s server-side sub-agent binding"
+                f"Scheduled-run origin: job {job_id} not resolvable for this user (HTTP {job_resp.status_code})"
             )
             return None
         if run_resp.status_code != 200:
             logger.info(
-                f"Conversation adoption skipped: run {run_id} not resolvable on job {job_id} "
-                f"(HTTP {run_resp.status_code})"
+                f"Scheduled-run origin: run {run_id} not resolvable on job {job_id} (HTTP {run_resp.status_code})"
             )
             return None
-        run = run_resp.json()
+        return job_resp.json(), run_resp.json()
     except (httpx.HTTPError, TimeoutError, ValueError):
         # ValueError also covers .json() on a non-JSON 200 (e.g. an auth proxy
         # interposing an HTML page).
-        logger.warning("Conversation adoption lookup failed; continuing without it", exc_info=True)
+        logger.warning("Scheduled-run origin lookup failed; continuing without it", exc_info=True)
+        return None
+
+
+def _adoption_from_resolved(
+    origin: dict[str, Any],
+    resolved: tuple[dict[str, Any], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """The adoption record for a resolved run, or None when it is not adoptable.
+
+    Cross-service conversation adoption, step 1 of 2 (see _build_adoption_seed
+    for step 2 and the delegation-path mechanics). On top of the run being the
+    user's (``_resolve_scheduled_run``), the sub-agent binding is checked
+    server-side, and the SERVER-stored conversation_id is what adoption uses —
+    the forwarded ``context_id`` plays no part. A watch has no sub-agent and is
+    never adoptable, though it still resolves.
+    """
+    job, run = resolved
+    sub_agent_id = _origin_int(origin.get("sub_agent_id"))
+    if sub_agent_id is None:
+        return None
+    if _origin_int(job.get("sub_agent_id")) != sub_agent_id:
+        logger.warning(
+            f"Conversation adoption skipped: origin sub_agent_id {sub_agent_id} does not match "
+            f"job {origin.get('scheduled_job_id')}'s server-side sub-agent binding"
+        )
         return None
     conversation_id = run.get("conversation_id")
     if not isinstance(conversation_id, str) or not conversation_id:
         return None
-
     return {
         "sub_agent_id": sub_agent_id,
         "conversation_id": conversation_id,
-        "job_id": job_id,
-        "run_id": run_id,
+        "job_id": _origin_int(origin.get("scheduled_job_id")),
+        "run_id": _origin_int(origin.get("scheduled_job_run_id")),
         # Why this user receives this job at all (ADR-0010), taken from the SERVER's job
         # view under their own token — never from the DataPart, which is client-supplied.
         # None for a job the user owns, which is the answer for most of them.
         "provenance": _shared_job_provenance(job),
     }
+
+
+async def _confirmed_conversation_origin(
+    origin: dict[str, Any] | None,
+    access_token: str,
+    console_backend_url: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The origin a conversation may use, and its adoption record.
+
+    ``(origin, adoption)``. The origin comes back only when console-backend
+    confirms, under this user's token, that the run is theirs: nothing a client
+    claims about a run this user cannot see may enter the conversation. In a
+    channel anyone can reply under a delivered notification, and the DataPart
+    carries the job's prompt and output. The adoption record is set
+    only when the run is also adoptable (``_adoption_from_resolved``).
+    """
+    if not origin:
+        return None, None
+    resolved = await _resolve_scheduled_run(origin, access_token, console_backend_url)
+    if not resolved:
+        logger.info(f"Conversation origin (kind={origin.get('kind')!r}) not confirmed for this user; ignored")
+        return None, None
+    return origin, _adoption_from_resolved(origin, resolved)
 
 
 def _shared_job_provenance(job: dict[str, Any]) -> dict[str, str] | None:
@@ -703,7 +733,7 @@ class OrchestratorDeepAgent:
             sandbox_pool: Optional SandboxPool for sandbox-enabled sub-agents
             adopted_sub_agent_ids: Console ids of sub-agents this conversation
                 adopted a scheduled run of. Validated server-side on the blank
-                first turn (_validate_scheduled_run_origin), then re-derived on
+                first turn (_confirmed_conversation_origin), then re-derived on
                 every later turn — HITL resumes included — from the a2a_tracking
                 records persisted in the checkpoint
                 (_adopted_sub_agent_ids_from_tracking). Unlocks registration of
@@ -848,7 +878,7 @@ class OrchestratorDeepAgent:
         # Conversation-origin adoption, resolved BEFORE the runtime context is
         # built: an automated (scheduler-only) sub-agent is registered into
         # this conversation only when the origin validated server-side as one
-        # of the user's own runs (see _validate_scheduled_run_origin), so the
+        # of the user's own runs (see _confirmed_conversation_origin), so the
         # adopted ids must be known at registry-build time. The expensive
         # validation runs on the blank first turn only; EVERY turn — including
         # HITL resumes, where the adopted agent's own interrupt is being
@@ -863,15 +893,13 @@ class OrchestratorDeepAgent:
         origin: dict[str, Any] | None = None
         validated_origin: dict[str, Any] | None = None
         if resume is None and not checkpoint_msgs:
-            origin = _extract_conversation_origin(message_parts)
-            if origin:
-                validated_origin = await _validate_scheduled_run_origin(
-                    origin,
-                    user_config.access_token.get_secret_value(),
-                    self.config.CONSOLE_BACKEND_URL or "http://localhost:5001",
-                )
-                if validated_origin:
-                    adopted_ids = (adopted_ids or set()) | {validated_origin["sub_agent_id"]}
+            origin, validated_origin = await _confirmed_conversation_origin(
+                _extract_conversation_origin(message_parts),
+                user_config.access_token.get_secret_value(),
+                self.config.CONSOLE_BACKEND_URL or "http://localhost:5001",
+            )
+            if validated_origin:
+                adopted_ids = (adopted_ids or set()) | {validated_origin["sub_agent_id"]}
 
         # Build GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
         # UserConfig should already have tools/agents discovered by executor via discover_capabilities()
@@ -973,9 +1001,9 @@ class OrchestratorDeepAgent:
                 # Cross-service conversation adoption: seed the a2a_tracking
                 # record so the next delegation to the run's sub-agent
                 # continues the run's own conversation instead of starting
-                # blank — wire-level contextId resume for remote agents,
-                # checkpoint fork for local/automated ones (see
-                # _build_adoption_seed). Only for a server-validated origin.
+                # blank — the run's context id, which remote agents resume on
+                # the wire and local ones as their own thread (see
+                # _build_adoption_seed). Only for an adoptable run.
                 # Resolved BEFORE the synthetic history is built so the
                 # reconstruction renders the dispatchable delegation label.
                 seed = (

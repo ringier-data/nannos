@@ -172,6 +172,8 @@ export interface AuthWidgetData extends AuthPrompt {
   planMessageTs?: string;
   /** Open thinking-steps stream ts, so the resume continues the same widget. */
   streamMessageTs?: string;
+  /** Slack user whose turn raised the interrupt; only they may answer the card. */
+  ownerUserId?: string;
 }
 
 /**
@@ -196,6 +198,7 @@ export function buildAuthRequiredWidget(data: AuthWidgetData): any[] {
     ...(data.tool ? { tool: data.tool } : {}),
     ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
     ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
+    ...(data.ownerUserId ? { ownerUserId: data.ownerUserId } : {}),
   };
   const encodedData = Buffer.from(JSON.stringify(payload)).toString('base64');
 

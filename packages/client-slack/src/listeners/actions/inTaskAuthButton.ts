@@ -2,6 +2,7 @@ import { App } from '@slack/bolt';
 import { Logger } from '../../utils/logger.js';
 import { handleIncomingMessage, HandlerDependencies, NormalizedMessage } from '../events/messageHandler.js';
 import { recordDecision } from '../../utils/taskResponseHandler.js';
+import { refuseForeignClick } from '../../utils/interruptOwner.js';
 import type { ScheduledRunResumeService } from '../../services/scheduledRunResumeService.js';
 import {
   AUTH_ACTION_DECLINE,
@@ -59,6 +60,7 @@ export function registerInTaskAuthActions(
       try {
         const decoded = JSON.parse(Buffer.from(actionValue, 'base64').toString());
         const { taskId, tool, subject, replyTo } = decoded;
+        if (await refuseForeignClick(client, decoded, userId, channelId, threadTs)) return;
 
         logger.info(`In-task auth ${decision} by user ${userId} for task ${taskId}${tool ? ` tool ${tool}` : ''}`);
 

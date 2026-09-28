@@ -2,7 +2,7 @@
 
 One contract, two continuity mechanisms. A conversation opened with a
 scheduled_run origin is validated server-side under the authenticated user's
-token (_validate_scheduled_run_origin), then mapped onto the registered
+token (_confirmed_conversation_origin), then mapped onto the registered
 sub-agent's native continuity mechanism (_build_adoption_seed):
 
 - remote and local/automated agents alike get
@@ -29,7 +29,7 @@ from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from app.core.agent import (
     _adopted_sub_agent_ids_from_tracking,
     _build_adoption_seed,
-    _validate_scheduled_run_origin,
+    _confirmed_conversation_origin,
 )
 
 BACKEND_URL = "http://console-backend.test"
@@ -113,12 +113,14 @@ def _patched_backend(job=JOB, run=RUN, job_status=200, run_status=200):
 
 
 async def _validate(origin=None):
-    return await _validate_scheduled_run_origin(
+    """The adoption record the orchestrator derives for *origin*, or None."""
+    _, adoption = await _confirmed_conversation_origin(
         origin if origin is not None else dict(ORIGIN), "tok", BACKEND_URL
     )
+    return adoption
 
 
-class TestValidateScheduledRunOrigin:
+class TestAdoptionRecord:
     @pytest.mark.asyncio
     async def test_returns_server_side_run_data(self):
         with _patched_backend() as mock_client:
@@ -187,6 +189,72 @@ class TestValidateScheduledRunOrigin:
         origin = dict(ORIGIN)
         del origin["scheduled_job_run_id"]
         assert await _validate(origin) is None
+
+
+class TestConfirmedConversationOrigin:
+    """What a conversation opened under a delivered notification may take from it.
+
+    The origin DataPart is client-supplied and carries the job's prompt and output.
+    In a channel anyone can reply under the notification, so the origin is used
+    only when console-backend confirms, under the replier's own token, that the
+    run is theirs.
+    """
+
+    @staticmethod
+    async def _confirm(origin=None):
+        return await _confirmed_conversation_origin(origin if origin is not None else dict(ORIGIN), "tok", BACKEND_URL)
+
+    @pytest.mark.asyncio
+    async def test_the_subscriber_gets_the_origin_and_its_adoption(self):
+        with _patched_backend():
+            origin, adoption = await self._confirm()
+
+        assert origin == ORIGIN
+        assert adoption == VALIDATED
+
+    @pytest.mark.asyncio
+    async def test_someone_else_replying_gets_nothing_from_the_datapart(self):
+        # Another member replying in the channel: the job 404s under their token, so
+        # the job's prompt and result must not reach their conversation at all.
+        with _patched_backend(job_status=404):
+            assert await self._confirm() == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_backend_drops_the_origin(self):
+        # Unconfirmed is not confirmed: degrading to the client's claim is the leak.
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("backend down"))
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            assert await self._confirm() == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_a_watch_is_confirmed_but_not_adoptable(self):
+        # A watch has no sub-agent: its owner still gets the notification context,
+        # but there is no run conversation to continue.
+        watch = {k: v for k, v in ORIGIN.items() if k not in ("sub_agent_id", "sub_agent_name")}
+        with _patched_backend(job={**JOB, "sub_agent_id": None}):
+            origin, adoption = await self._confirm(watch)
+
+        assert origin == watch
+        assert adoption is None
+
+    @pytest.mark.asyncio
+    async def test_a_spoofed_binding_keeps_the_owners_context_without_adoption(self):
+        # The run is the user's own, so its context is theirs to see; only the
+        # adoption, which trusts the binding, is refused.
+        with _patched_backend(job={**JOB, "sub_agent_id": 8}):
+            origin, adoption = await self._confirm()
+
+        assert origin == ORIGIN
+        assert adoption is None
+
+    @pytest.mark.asyncio
+    async def test_no_origin_asks_nothing_of_the_backend(self):
+        with _patched_backend() as mock_client:
+            assert await self._confirm({}) == (None, None)
+        mock_client.get.assert_not_awaited()
 
 
 class TestBuildAdoptionSeed:
