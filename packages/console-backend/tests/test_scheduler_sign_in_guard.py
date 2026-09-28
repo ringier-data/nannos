@@ -16,7 +16,7 @@ import pytest_asyncio
 from sqlalchemy import text
 
 from console_backend.config import config
-from console_backend.models.scheduled_job import ScheduledJobUpdate, ScheduleKind
+from console_backend.models.scheduled_job import ScheduledJobUpdate, ScheduleKind, SubscriptionHold
 from console_backend.models.sub_agent import SubAgentType
 from console_backend.models.user import UserSettings
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
@@ -236,7 +236,7 @@ class TestTheFirstSignInReleasesTheHold:
         own reason. Signing in again stores a fresh token, and must start it again."""
         svc, db, u = world["service"], world["db"], world["users"]
         job = await svc.create_job(db, _watch_create(), u["writer"])
-        await svc.repo.disable_subscription(db, job.id, _SIGN_IN_EXPIRED_REASON)
+        await svc.repo.disable_subscription(db, job.id, _SIGN_IN_EXPIRED_REASON, SubscriptionHold.SIGN_IN_EXPIRED)
         await db.commit()
 
         assert await svc.release_sign_in_holds(db, u["writer"]) == 1

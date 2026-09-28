@@ -31,6 +31,7 @@ from ..models.scheduled_job import (
     ScheduledJobRun,
     ScheduleKind,
     SharedJobDefinition,
+    SubscriptionHold,
     TriggerDefaults,
     TriggerPolicy,
 )
@@ -104,7 +105,7 @@ _JOB_VIEW_SELECT = """
            (SELECT """ + reachability_sql("s.user_id", "dc.client_id", "dc.installation_id") + """
               FROM delivery_channels dc WHERE dc.id = s.delivery_channel_id)            AS delivery_reachability,
            d.voice_call,
-           s.enabled, d.max_failures, s.consecutive_failures, s.paused_reason,
+           s.enabled, d.max_failures, s.consecutive_failures, s.paused_reason, s.hold,
            d.revision, d.is_public, d.suspended_at, d.suspended_by_user_id, d.suspended_reason,
            s.activated_by, s.activated_by_groups,
            (SELECT COUNT(*) FROM scheduled_job_subscriptions o
@@ -130,6 +131,19 @@ _JOB_VIEW_SELECT = """
     -- join: a deleted owner leaves the job perfectly runnable for its subscribers.
     LEFT JOIN users ou ON ou.id = d.owner_user_id
 """
+
+
+def _with_hold(fields: dict[str, Any]) -> dict[str, Any]:
+    """*fields* of a subscription write, with ``hold`` as the column stores it. A write
+    that switches the subscription on or sets ``paused_reason`` without naming a hold
+    clears it: a hold only ever describes the reason it was written with."""
+    fields = dict(fields)
+    if "hold" in fields:
+        hold = fields["hold"]
+        fields["hold"] = hold.value if isinstance(hold, SubscriptionHold) else hold
+    elif "paused_reason" in fields or fields.get("enabled") is True:
+        fields["hold"] = None
+    return fields
 
 
 def _row_to_scheduled_job(row: Any) -> ScheduledJob:
@@ -179,6 +193,7 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         max_failures=row["max_failures"],
         consecutive_failures=row["consecutive_failures"],
         paused_reason=row["paused_reason"],
+        hold=SubscriptionHold(row["hold"]) if row.get("hold") else None,
         revision=row.get("revision", 1),
         is_public=row.get("is_public", False),
         suspended_at=row.get("suspended_at"),
@@ -443,7 +458,12 @@ class ScheduledJobRepository(AuditedRepository):
     async def update_subscription(
         self, db: AsyncSession, actor: User, subscription_id: int, fields: dict[str, Any]
     ) -> None:
-        """Update subscription fields with audit logging."""
+        """Update subscription fields with audit logging.
+
+        ``hold`` travels with the reason: a write that switches the subscription on or
+        rewrites ``paused_reason`` without naming a hold clears it, so no path can leave a
+        hold behind that a later release would act on."""
+        fields = _with_hold(fields)
         await self._subs.update(db=db, actor=actor, entity_id=subscription_id, fields=fields)
 
     async def delete_subscription(self, db: AsyncSession, actor: User, subscription_id: int) -> None:
@@ -530,10 +550,10 @@ class ScheduledJobRepository(AuditedRepository):
         )
         return jobs, count.scalar() or 0
 
-    async def list_paused_jobs(
-        self, db: AsyncSession, user_id: str, paused_reasons: Sequence[str]
+    async def list_held_jobs(
+        self, db: AsyncSession, user_id: str, holds: Sequence[SubscriptionHold]
     ) -> list[ScheduledJob]:
-        """The user's live subscriptions that are switched off for exactly one of *paused_reasons*.
+        """The user's live subscriptions held for one of *holds*.
 
         Usually none. It runs at every sign-in, so it selects only those rows instead of
         loading every job of the user.
@@ -542,12 +562,12 @@ class ScheduledJobRepository(AuditedRepository):
             text(
                 _JOB_VIEW_SELECT
                 + """
-                WHERE s.user_id = :user_id AND NOT s.enabled AND s.paused_reason = ANY(:paused_reasons)
+                WHERE s.user_id = :user_id AND s.hold = ANY(:holds)
                   AND s.deleted_at IS NULL AND d.deleted_at IS NULL
                 ORDER BY s.id
                 """
             ),
-            {"user_id": user_id, "paused_reasons": list(paused_reasons)},
+            {"user_id": user_id, "holds": [h.value for h in holds]},
         )
         return [_row_to_scheduled_job(r) for r in result.mappings().all()]
 
@@ -649,18 +669,17 @@ class ScheduledJobRepository(AuditedRepository):
         activations: list[dict[str, Any]],
         activated_by: str,
         group_id: int | None,
-        revoked_reason: str | None = None,
         elapsed_once_reason: str | None = None,
     ) -> list[str]:
         """Create a subscription for every user in *activations* who has none yet.
 
         Each entry is ``{"user_id", "next_run_at", "delivery_channel_id", "enabled",
-        "paused_reason"}`` — the first occurrence is computed by the caller in that user's
+        "paused_reason", "hold"}`` — the first occurrence is computed by the caller in that user's
         own timezone (and a one-shot whose time has passed arrives disabled). Idempotent on
         the live (definition, user) pair; a user who already subscribes keeps their row
         and, when *group_id* is given, gains it in ``activated_by_groups`` so a later
-        leave from that group is accounted for. A kept row that was stopped with
-        *revoked_reason* (access withdrawn on an earlier leave) is switched back on: the
+        leave from that group is accounted for. A kept row held ``access_revoked``
+        (access withdrawn on an earlier leave) is switched back on: the
         member is back, and their customisation with them — unless its effective trigger
         is a one-shot that has already fired, which keeps a stop reading
         *elapsed_once_reason* instead of coming back armed. Returns the ids of users whose
@@ -714,9 +733,10 @@ class ScheduledJobRepository(AuditedRepository):
                     },
                 )
                 if entry.get("paused_reason"):
+                    hold = entry.get("hold")
                     await db.execute(
-                        text("UPDATE scheduled_job_subscriptions SET paused_reason = :r WHERE id = :id"),
-                        {"r": entry["paused_reason"], "id": row["id"]},
+                        text("UPDATE scheduled_job_subscriptions SET paused_reason = :r, hold = :h WHERE id = :id"),
+                        {"r": entry["paused_reason"], "h": hold.value if hold else None, "id": row["id"]},
                     )
             elif group_id is not None:
                 # Already subscribed: record that this group also stands behind it, and
@@ -731,7 +751,7 @@ class ScheduledJobRepository(AuditedRepository):
                     text("""
                         WITH before AS (
                             SELECT s.id,
-                                   (s.paused_reason IS NOT NULL AND s.paused_reason = :revoked) AS was_revoked,
+                                   (s.hold IS NOT NULL AND s.hold = 'access_revoked') AS was_revoked,
                                    -- The EFFECTIVE trigger, override first: a one-shot
                                    -- whose moment has passed must not come back armed
                                    -- with its old past next_run_at, which the claim
@@ -760,6 +780,7 @@ class ScheduledJobRepository(AuditedRepository):
                                 paused_reason = CASE WHEN b.was_revoked AND b.elapsed_once THEN :elapsed
                                                      WHEN b.was_revoked THEN NULL
                                                      ELSE s.paused_reason END,
+                                hold          = CASE WHEN b.was_revoked THEN NULL ELSE s.hold END,
                                 updated_at = :now
                             FROM before b
                             WHERE s.id = b.id
@@ -772,7 +793,6 @@ class ScheduledJobRepository(AuditedRepository):
                         "definition_id": definition_id,
                         "user_id": entry["user_id"],
                         "group": json.dumps([group_id]),
-                        "revoked": revoked_reason,
                         "elapsed": elapsed_once_reason,
                         "now": now,
                     },
@@ -1402,6 +1422,7 @@ class ScheduledJobRepository(AuditedRepository):
         paused_reason: str | None = None,
         retry_at: datetime | None = None,
         leave_schedule: bool = False,
+        hold: SubscriptionHold | None = None,
     ) -> tuple[bool, str | None]:
         """Update a subscription after execution: advance schedule, track failures, auto-pause on threshold.
 
@@ -1462,6 +1483,13 @@ class ScheduledJobRepository(AuditedRepository):
                         WHEN CAST(:paused_reason AS text) IS NOT NULL THEN CAST(:paused_reason AS text)
                         ELSE s.paused_reason
                     END,
+                    -- Travels with the reason: an auto-pause is no hold, a given reason
+                    -- brings its own (or none), and an untouched reason keeps it.
+                    hold                 = CASE
+                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures THEN NULL
+                        WHEN CAST(:paused_reason AS text) IS NOT NULL THEN CAST(:hold AS text)
+                        ELSE s.hold
+                    END,
                     last_check_result    = COALESCE(CAST(:last_check_result AS jsonb), s.last_check_result),
                     updated_at           = :now
                 FROM scheduled_job_definitions d
@@ -1477,6 +1505,7 @@ class ScheduledJobRepository(AuditedRepository):
                 "leave_schedule": leave_schedule,
                 "retry_at": retry_at,
                 "paused_reason": paused_reason,
+                "hold": hold.value if hold else None,
                 # `is not None`, not truthiness: `{}` is a real response (a tool with no
                 # content returns one), and mapping it to NULL makes the COALESCE above
                 # keep the previous payload — so `prev` never catches up and a
@@ -1491,18 +1520,24 @@ class ScheduledJobRepository(AuditedRepository):
         return (bool(row["enabled"]), row["paused_reason"]) if row else (True, None)
 
     async def disable_subscription(
-        self, db: AsyncSession, subscription_id: int, reason: str
+        self, db: AsyncSession, subscription_id: int, reason: str, hold: SubscriptionHold | None = None
     ) -> None:
         """A system stop of one subscription (no actor): destroy-after-trigger, an
         agent the subscriber can no longer reach. Writes the reason, as every
-        deliberate stop must, so the retry branch of the claim leaves it alone."""
+        deliberate stop must, so the retry branch of the claim leaves it alone, and the
+        *hold* that goes with it (none clears any)."""
         await db.execute(
             text("""
                 UPDATE scheduled_job_subscriptions
-                SET enabled = FALSE, paused_reason = :reason, retry_at = NULL, updated_at = :now
+                SET enabled = FALSE, paused_reason = :reason, hold = :hold, retry_at = NULL, updated_at = :now
                 WHERE id = :id
             """),
-            {"id": subscription_id, "reason": reason, "now": datetime.now(timezone.utc)},
+            {
+                "id": subscription_id,
+                "reason": reason,
+                "hold": hold.value if hold else None,
+                "now": datetime.now(timezone.utc),
+            },
         )
 
     async def create_run(

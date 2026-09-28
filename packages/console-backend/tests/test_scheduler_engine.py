@@ -23,6 +23,7 @@ from console_backend.models.scheduled_job import (
     ScheduledJob,
     ScheduleKind,
     ScheduledJobRun,
+    SubscriptionHold,
 )
 from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
@@ -536,7 +537,11 @@ class TestDispatchJobNoToken:
         await engine._dispatch_job(job, trigger=trigger)
 
         repo.disable_subscription.assert_awaited_once()
-        assert repo.disable_subscription.await_args.args[1:] == (job.id, _AWAITING_SIGN_IN_REASON)
+        assert repo.disable_subscription.await_args.args[1:] == (
+            job.id,
+            _AWAITING_SIGN_IN_REASON,
+            SubscriptionHold.AWAITING_SIGN_IN,
+        )
         job_kwargs = repo.complete_job.await_args.kwargs
         assert job_kwargs["paused_reason"] == _AWAITING_SIGN_IN_REASON
         # Not a failure of the job: consecutive_failures must not move.
@@ -2514,7 +2519,11 @@ class TestAnExpiredSignInHoldsTheSubscription:
 
         token_service.mark_expired.assert_awaited_once()
         assert token_service.mark_expired.await_args.args[1:] == (job.user_id, STORED_AT)
-        assert repo.disable_subscription.await_args.args[1:] == (job.id, _SIGN_IN_EXPIRED_REASON)
+        assert repo.disable_subscription.await_args.args[1:] == (
+            job.id,
+            _SIGN_IN_EXPIRED_REASON,
+            SubscriptionHold.SIGN_IN_EXPIRED,
+        )
         job_kwargs = repo.complete_job.await_args.kwargs
         assert job_kwargs["paused_reason"] == _SIGN_IN_EXPIRED_REASON
         # Not a failure of the job: consecutive_failures must not move.

@@ -37,6 +37,7 @@ from ..models.scheduled_job import (
     RunTrigger,
     ScheduledJob,
     ScheduledJobRun,
+    SubscriptionHold,
 )
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
@@ -1160,6 +1161,7 @@ class SchedulerEngine:
             error_message=str(error),
             delivered=False,
             paused_reason=_SIGN_IN_EXPIRED_REASON if expired else _AWAITING_SIGN_IN_REASON,
+            hold=SubscriptionHold.SIGN_IN_EXPIRED if expired else SubscriptionHold.AWAITING_SIGN_IN,
             trigger=trigger,
             counts_as_failure=False,
         )
@@ -1551,6 +1553,7 @@ class SchedulerEngine:
         delivered: bool = False,
         last_check_result: dict | None = None,
         paused_reason: str | None = None,
+        hold: SubscriptionHold | None = None,
         condition_evaluation: ConditionEvaluation | None = None,
         trigger: RunTrigger = RunTrigger.SCHEDULED,
         parked_task_id: str | None = None,
@@ -1676,7 +1679,7 @@ class SchedulerEngine:
                 # complete_job only flips enabled on the failure threshold, which this must
                 # never contribute to.
                 if not counts_as_failure and paused_reason:
-                    await self._repo.disable_subscription(db, job.id, paused_reason)
+                    await self._repo.disable_subscription(db, job.id, paused_reason, hold)
 
                 enabled_after, reason_after = await self._repo.complete_job(
                     db=db,
@@ -1686,6 +1689,7 @@ class SchedulerEngine:
                     retry_at=retry_at,
                     last_check_result=last_check_result,
                     paused_reason=paused_reason,
+                    hold=hold,
                     leave_schedule=leave_schedule,
                 )
                 await db.commit()

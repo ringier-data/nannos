@@ -25,11 +25,11 @@ from ..models.scheduled_job import (
     ScheduledJobUpdate,
     ScheduleKind,
     SharedJobDefinition,
+    SubscriptionHold,
     TriggerPolicy,
 )
 from ..config import config
 from ..models.user import User
-from ..repositories.delivery_reachability_repository import UNDELIVERED_HOLD_REASON, UNREACHABLE_HOLD_REASON
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run, first_run_at
 from ..utils.timezones import default_timezone_name, resolve_timezone, validate_timezone_name
 
@@ -73,35 +73,42 @@ assert _DEFINITION_FIELDS | _TRIGGER_FIELDS | _SUBSCRIPTION_FIELDS | {"scope"} =
     ScheduledJobUpdate.model_fields
 ), "ScheduledJobUpdate has a field update_job does not route"
 
-#: What a subscriber whose access was revoked is told on their own (self-made)
-#: subscription. Re-granting access lets them enable it again with their customisation.
+#: What each hold tells the subscriber, as ``paused_reason``. Display text only: the
+#: releases find held rows by ``hold`` (SubscriptionHold), so any of these can be reworded.
+#:
+#: A self-made subscription whose grant was withdrawn. Regaining access lets them enable
+#: it again with their customisation.
 _ACCESS_REVOKED_REASON = "Access to this shared job was revoked"
 #: Why a subscription of an elapsed one-shot is switched off. Two wordings for the same
 #: fact, because arriving at a job that already ran and being moved onto one are
 #: different stories for the person reading the pause reason.
 _ELAPSED_ONCE_ON_SUBSCRIBE = "This one-time job already ran before you subscribed"
 _ELAPSED_ONCE_ON_INHERIT = "This one-time job had already run when this schedule took effect"
-#: Why a subscription is off until its subscriber signs in to Nannos: every run uses the
-#: subscriber's vaulted offline token, which only a sign-in stores. A group default holds
-#: a member's new subscription with it, and the engine holds a subscription whose run
-#: found no token. ``release_sign_in_holds`` switches these on at that sign-in and finds
-#: them by this exact text, as ``_ACCESS_REVOKED_REASON`` is found. The wording is
-#: load-bearing: rows already held keep the old text if it changes.
+#: Off until the subscriber signs in to Nannos: every run uses their vaulted offline
+#: token, which only a sign-in stores. A group default holds a member's new subscription
+#: with it, and the engine holds a subscription whose run found no token;
+#: ``release_sign_in_holds`` switches these on at that sign-in.
 _AWAITING_SIGN_IN_REASON = "Waiting for your first sign-in to Nannos, so it can run under your account"
 #: The same hold for a subscriber who HAD a vaulted token that Keycloak has since refused
-#: (``OfflineTokenExpiredError``). Released by the same sign-in; load-bearing like the above.
+#: (``OfflineTokenExpiredError``). Released by the same sign-in.
 _SIGN_IN_EXPIRED_REASON = "Your sign-in to Nannos has expired; sign in again so it can run under your account"
-#: Every reason ``release_sign_in_holds`` switches back on.
-_SIGN_IN_HOLD_REASONS = (_AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON)
-#: Why a subscription is off because its delivery channel cannot reach its subscriber
-#: (#192). The channel is kept, never switched for them; the job page names it. A sign-in
-#: from that channel switches it on (``release_reachability_holds``).
-_UNREACHABLE_REASON = UNREACHABLE_HOLD_REASON
-#: The hold a client's "no recipient" report puts on a subscriber Nannos cannot judge
-#: (``unknown``): nothing it sees releases it, so the subscriber switches it back on.
-_UNDELIVERED_REASON = UNDELIVERED_HOLD_REASON
+#: Off because the delivery channel cannot reach the subscriber (#192). The channel is
+#: kept, never switched for them; the job page names it. A sign-in from that channel
+#: switches it on (``release_reachability_holds``).
+_UNREACHABLE_REASON = (
+    "Nannos can't reach you on this job's delivery channel. Message Nannos there once to "
+    "activate it, and the job switches back on"
+)
+#: Off after a client reported no recipient for a subscriber Nannos cannot judge
+#: (``unknown``): nothing the backend sees releases it, so the subscriber switches it on.
+_UNDELIVERED_REASON = (
+    "Nannos couldn't reach you on this job's delivery channel. Message Nannos there once, "
+    "then switch the job back on"
+)
+#: Every hold ``release_sign_in_holds`` switches back on.
+_SIGN_IN_HOLDS = (SubscriptionHold.AWAITING_SIGN_IN, SubscriptionHold.SIGN_IN_EXPIRED)
 #: Holds under which the subscriber cannot be sent the chat activation notice.
-_NO_NOTICE_HOLD_REASONS = (*_SIGN_IN_HOLD_REASONS, _UNREACHABLE_REASON, _UNDELIVERED_REASON)
+_NO_NOTICE_HOLDS = (*_SIGN_IN_HOLDS, SubscriptionHold.UNREACHABLE, SubscriptionHold.UNDELIVERED)
 
 
 class SchedulerAccessError(PermissionError):
@@ -1269,7 +1276,7 @@ class SchedulerService:
         its next occurrence from now; a one-shot whose moment passed while it waited stays
         off with the reason that says so. Returns how many were switched on.
         """
-        return await self._switch_on_held(db, user, await self.repo.list_paused_jobs(db, user.id, _SIGN_IN_HOLD_REASONS))
+        return await self._switch_on_held(db, user, await self.repo.list_held_jobs(db, user.id, _SIGN_IN_HOLDS))
 
     async def release_reachability_holds(
         self, db: AsyncSession, user: User, client_id: str, installation_ids: list[str]
@@ -1288,7 +1295,7 @@ class SchedulerService:
         in_scope = await self._reachability.channel_ids(db, client_id, installation_ids)
         held = [
             job
-            for job in await self.repo.list_paused_jobs(db, user.id, (_UNREACHABLE_REASON,))
+            for job in await self.repo.list_held_jobs(db, user.id, (SubscriptionHold.UNREACHABLE,))
             if job.delivery_channel_id in in_scope
         ]
         return await self._switch_on_held(db, user, [job for job in held if job.delivery_reachability == "reachable"])
@@ -1301,7 +1308,9 @@ class SchedulerService:
         if self._reachability is None or not installation_ids:
             return 0
         released = 0
-        for user_id in await self._reachability.users_held_on(db, client_id, installation_ids, _UNREACHABLE_REASON):
+        for user_id in await self._reachability.users_held_on(
+            db, client_id, installation_ids, SubscriptionHold.UNREACHABLE
+        ):
             user = await user_service.get_user(db, user_id)
             if user is not None:
                 released += await self.release_reachability_holds(db, user, client_id, installation_ids)
@@ -1333,12 +1342,16 @@ class SchedulerService:
             except DeliveryUnreachableError:
                 # Signed in, but not from this job's channel: still held, now for the
                 # reason that is true, which a sign-in from that channel releases.
-                if job.paused_reason != _UNREACHABLE_REASON:
+                if job.hold != SubscriptionHold.UNREACHABLE:
                     await self.repo.update_subscription(
                         db=db,
                         actor=user,
                         subscription_id=job.id,
-                        fields={"paused_reason": _UNREACHABLE_REASON, "updated_at": now},
+                        fields={
+                            "paused_reason": _UNREACHABLE_REASON,
+                            "hold": SubscriptionHold.UNREACHABLE,
+                            "updated_at": now,
+                        },
                     )
                     await db.commit()
             except ValueError as exc:
@@ -1607,7 +1620,13 @@ class SchedulerService:
                     db,
                     actor,
                     row["id"],
-                    {"enabled": False, "paused_reason": _ACCESS_REVOKED_REASON, "retry_at": None, "updated_at": now},
+                    {
+                        "enabled": False,
+                        "paused_reason": _ACCESS_REVOKED_REASON,
+                        "hold": SubscriptionHold.ACCESS_REVOKED,
+                        "retry_at": None,
+                        "updated_at": now,
+                    },
                 )
 
     # ------------------------------------------------------------------
@@ -1656,10 +1675,11 @@ class SchedulerService:
         for uid in user_ids:
             tz = self._effective_tz(definition.get("timezone"), tzs.get(uid)) or default_timezone_name()
             next_run_at, enabled, paused_reason = self._first_occurrence(definition, tz, now)
+            hold: SubscriptionHold | None = None
             if enabled and uid not in ready:
-                enabled, paused_reason = False, _AWAITING_SIGN_IN_REASON
+                enabled, paused_reason, hold = False, _AWAITING_SIGN_IN_REASON, SubscriptionHold.AWAITING_SIGN_IN
             elif enabled and uid in unreachable:
-                enabled, paused_reason = False, _UNREACHABLE_REASON
+                enabled, paused_reason, hold = False, _UNREACHABLE_REASON, SubscriptionHold.UNREACHABLE
             activations.append(
                 {
                     "user_id": uid,
@@ -1667,6 +1687,7 @@ class SchedulerService:
                     "next_run_at": next_run_at,
                     "enabled": enabled,
                     "paused_reason": paused_reason,
+                    "hold": hold,
                 }
             )
         created = await self.repo.bulk_subscribe(
@@ -1676,7 +1697,6 @@ class SchedulerService:
             activations,
             "group",
             group_id,
-            revoked_reason=_ACCESS_REVOKED_REASON,
             elapsed_once_reason=_ELAPSED_ONCE_ON_INHERIT,
         )
         # A row this call brought back was frozen at revocation time, so on anything
@@ -1701,6 +1721,9 @@ class SchedulerService:
                     fields={
                         "enabled": False,
                         "paused_reason": _AWAITING_SIGN_IN_REASON if uid not in ready else _UNREACHABLE_REASON,
+                        "hold": (
+                            SubscriptionHold.AWAITING_SIGN_IN if uid not in ready else SubscriptionHold.UNREACHABLE
+                        ),
                         "retry_at": None,
                         "updated_at": now,
                     },
@@ -1782,12 +1805,12 @@ class SchedulerService:
             job = await self.repo.get_subscription_for(db, definition_id, uid)
             if job is None:
                 continue
-            if job.paused_reason in _NO_NOTICE_HOLD_REASONS:
+            if job.hold in _NO_NOTICE_HOLDS:
                 # The notice is dispatched under the subscriber's own vaulted token, which a
                 # member held back for their first sign-in does not have, and to a channel
                 # that cannot reach a member held for that. The console notification is
                 # what reaches them.
-                logger.info("Job %d is held (%s); no activation DM", job.id, job.paused_reason)
+                logger.info("Job %d is held (%s); no activation DM", job.id, job.hold.value)
                 continue
             try:
                 await self._notice_sender(
@@ -1929,7 +1952,10 @@ class SchedulerService:
             )
             released_by_sign_in = states.get(target["user_id"], "unknown") != "unknown"
             await self.repo.disable_subscription(
-                db, target["subscription_id"], _UNREACHABLE_REASON if released_by_sign_in else _UNDELIVERED_REASON
+                db,
+                target["subscription_id"],
+                _UNREACHABLE_REASON if released_by_sign_in else _UNDELIVERED_REASON,
+                SubscriptionHold.UNREACHABLE if released_by_sign_in else SubscriptionHold.UNDELIVERED,
             )
             if self._notification_service is not None:
                 await self._notification_service.create_notification(

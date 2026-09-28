@@ -4709,6 +4709,7 @@ export type ScheduledJob = {
      * Paused Reason
      */
     paused_reason?: string | null;
+    hold?: SubscriptionHold | null;
     /**
      * Revision
      */
@@ -7358,6 +7359,17 @@ export type SubAgentVersionApproval = {
      */
     rejection_reason?: string | null;
 };
+
+/**
+ * SubscriptionHold
+ *
+ * Why the scheduler holds a subscription switched off, as code matches it (#192).
+ *
+ * ``paused_reason`` is the sentence the subscriber reads; this is what releases and
+ * counts find rows by, so the sentence can be reworded freely. Set only on a switched
+ * off subscription, and cleared by every write that switches it on or rewrites its reason.
+ */
+export type SubscriptionHold = 'awaiting_sign_in' | 'sign_in_expired' | 'access_revoked' | 'unreachable' | 'undelivered';
 
 /**
  * SuspendJobRequest

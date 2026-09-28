@@ -86,6 +86,27 @@ class JobRunStatus(str, Enum):
     AUTH_REQUIRED = "auth_required"
 
 
+class SubscriptionHold(str, Enum):
+    """Why the scheduler holds a subscription switched off, as code matches it (#192).
+
+    ``paused_reason`` is the sentence the subscriber reads; this is what releases and
+    counts find rows by, so the sentence can be reworded freely. Set only on a switched
+    off subscription, and cleared by every write that switches it on or rewrites its reason.
+    """
+
+    #: No vaulted offline token yet (ADR-0011 §6). The first sign-in releases it.
+    AWAITING_SIGN_IN = "awaiting_sign_in"
+    #: The vaulted token was refused by Keycloak. The next sign-in releases it.
+    SIGN_IN_EXPIRED = "sign_in_expired"
+    #: The grant behind a self-made subscription was withdrawn; regaining it releases it.
+    ACCESS_REVOKED = "access_revoked"
+    #: The delivery channel cannot reach the subscriber; a sign-in from there releases it.
+    UNREACHABLE = "unreachable"
+    #: A client reported no recipient for a subscriber Nannos cannot judge. Nothing the
+    #: backend sees releases it: the subscriber switches the job back on.
+    UNDELIVERED = "undelivered"
+
+
 class RunTrigger(str, Enum):
     """Why a run was started. Decides what its interruption is worth: a SCHEDULED
     run earns one RETRY, a RETRY earns the user a notice, a MANUAL run earns
@@ -294,6 +315,8 @@ class ScheduledJob(BaseModel):
     max_failures: int
     consecutive_failures: int
     paused_reason: str | None = None
+    #: Why the scheduler holds it off, as a code; None unless held. See SubscriptionHold.
+    hold: SubscriptionHold | None = None
     # --- sharing state of the definition ---
     #: Bumped on every definition-field edit; stamped on each run.
     revision: int = 1

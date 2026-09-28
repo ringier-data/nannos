@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.delivery_channel import DeliveryReachability
+from ..models.scheduled_job import SubscriptionHold
 
 
 def reachability_sql(user_id: str, client_id: str, installation_id: str) -> str:
@@ -55,39 +56,17 @@ def reachability_sql(user_id: str, client_id: str, installation_id: str) -> str:
         END"""
 
 
-#: Why a subscription is off because its delivery channel cannot reach its subscriber
-#: (#192): a group default put a member on the owner's channel, which they have never
-#: signed in from, or the channel's client reported it found no one to deliver to
-#: (#191). Holds are found by this exact text (the release, the onboarding count), so the
-#: wording is load-bearing: rows already held keep the old text if it changes. Defined
-#: here, beside the SQL that reads it; the scheduler writes it.
-UNREACHABLE_HOLD_REASON = (
-    "Nannos can't reach you on this job's delivery channel. Message Nannos there once to "
-    "activate it, and the job switches back on"
-)
-
-
-#: The same hold after a client reported no recipient (#191) for a subscriber Nannos cannot
-#: judge (``unknown``: an old local sign-in, or an unlisted installation). No sign-in the
-#: backend sees will release it, so it asks the subscriber to switch the job back on,
-#: which ``unknown`` never refuses. Load-bearing like the above.
-UNDELIVERED_HOLD_REASON = (
-    "Nannos couldn't reach you on this job's delivery channel. Message Nannos there once, "
-    "then switch the job back on"
-)
-
-
 def unreachable_subscriptions_sql(user_id: str) -> str:
     """A SQL expression counting the live subscriptions of *user_id* (a SQL expression)
-    that cannot reach them: on a channel they are ``unreachable`` on, or held for it. Held
-    covers a client's report on a channel the bindings still call reachable."""
-    reasons = ", ".join("'" + r.replace("'", "''") + "'" for r in (UNREACHABLE_HOLD_REASON, UNDELIVERED_HOLD_REASON))
+    that cannot reach them: on a channel they are ``unreachable`` on, or held for it
+    (``unreachable`` or ``undelivered``). Held covers a client's report on a channel the
+    bindings still call reachable, or cannot judge."""
     return f"""(
         SELECT COUNT(*) FROM scheduled_job_subscriptions us
         JOIN scheduled_job_definitions ud ON ud.id = us.definition_id AND ud.deleted_at IS NULL
         JOIN delivery_channels uc ON uc.id = us.delivery_channel_id
         WHERE us.user_id = {user_id} AND us.deleted_at IS NULL
-          AND ((NOT us.enabled AND us.paused_reason IN ({reasons}))
+          AND (us.hold IN ('unreachable', 'undelivered')
                OR {reachability_sql(user_id, "uc.client_id", "uc.installation_id")} = 'unreachable')
     )"""
 
@@ -141,10 +120,10 @@ class DeliveryReachabilityRepository:
         return set(result.scalars())
 
     async def users_held_on(
-        self, db: AsyncSession, client_id: str, installation_ids: Sequence[str], paused_reason: str
+        self, db: AsyncSession, client_id: str, installation_ids: Sequence[str], hold: SubscriptionHold
     ) -> list[str]:
-        """The users with a live subscription switched off for exactly *paused_reason* on a
-        channel of *client_id* in one of *installation_ids*."""
+        """The users with a live subscription held for *hold* on a channel of *client_id* in
+        one of *installation_ids*."""
         if not installation_ids:
             return []
         result = await db.execute(
@@ -153,10 +132,10 @@ class DeliveryReachabilityRepository:
                 FROM scheduled_job_subscriptions s
                 JOIN scheduled_job_definitions d ON d.id = s.definition_id AND d.deleted_at IS NULL
                 JOIN delivery_channels c ON c.id = s.delivery_channel_id
-                WHERE NOT s.enabled AND s.paused_reason = :reason AND s.deleted_at IS NULL
+                WHERE s.hold = :hold AND s.deleted_at IS NULL
                   AND c.client_id = :client_id AND c.installation_id = ANY(:installation_ids)
                 ORDER BY s.user_id
             """),
-            {"client_id": client_id, "installation_ids": list(installation_ids), "reason": paused_reason},
+            {"client_id": client_id, "installation_ids": list(installation_ids), "hold": hold.value},
         )
         return list(result.scalars())
