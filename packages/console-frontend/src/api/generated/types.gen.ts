@@ -5053,9 +5053,9 @@ export type ScheduledJobRun = {
      */
     delivered: boolean;
     /**
-     * Delivery Error
+     * Delivery Failure
      */
-    delivery_error?: string | null;
+    delivery_failure?: _0Enum3 | null;
     condition_evaluation?: ConditionEvaluation | null;
     /**
      * Last Seen At
@@ -5118,7 +5118,7 @@ export type ScheduledJobUpdate = {
      *
      * Where a schedule change lands when the job has OTHER subscribers: 'mine' changes only your own schedule (an override), 'everyone' changes the job's default schedule for every subscriber who has not customised theirs (needs write permission). Meaningless while you are the only subscriber — both do the same. With other subscribers and no scope, 'mine' is assumed; ask the user which they meant before changing everyone's.
      */
-    scope?: _0Enum3 | null;
+    scope?: _0Enum4 | null;
     /**
      * Definition field: whether subscribers may keep their own schedule ('overridable') or must follow the default ('fixed'). Setting 'fixed' resets every override.
      */
@@ -6012,7 +6012,7 @@ export type SkillDefinition = {
      *
      * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
-    scope?: _0Enum4 | null;
+    scope?: _0Enum5 | null;
     /**
      * Visibility
      *
@@ -7666,11 +7666,11 @@ export type UndeliveredReport = {
      * The installation that received the push, as its delivery channel is registered.
      */
     installation_id: string;
-    reason: ReasonEnum2;
+    reason: _0Enum3;
     /**
      * Detail
      *
-     * What failed, for the run record. Longer than 500 characters is cut, not refused.
+     * What failed, for the backend's log line; not stored. Longer than 500 characters is cut, not refused.
      */
     detail?: string | null;
 };
@@ -9144,26 +9144,21 @@ export type DecisionEnum = 'approved' | 'declined';
  */
 export type EffectivePermissionEnum = 'owner' | 'write' | 'read';
 
-export type _0Enum3 = 'mine' | 'everyone';
+export type _0Enum3 = 'no_recipient' | 'send_failed';
+
+export type _0Enum4 = 'mine' | 'everyone';
 
 /**
  * Op
  */
 export type OpEnum = 'add' | 'remove' | 'replace';
 
-export type _0Enum4 = 'standalone' | 'sub-agent';
+export type _0Enum5 = 'standalone' | 'sub-agent';
 
 /**
  * Reason
  */
 export type ReasonEnum = 'no_card' | 'card_under_other_provider' | 'provider_underivable';
-
-/**
- * Reason
- *
- * 'no_recipient': this installation has no sign-in for the subscriber, which only they can fix (the job is held until they sign in there). 'send_failed': a recipient was found but posting failed; the run is marked undelivered and the job keeps running.
- */
-export type ReasonEnum2 = 'no_recipient' | 'send_failed';
 
 /**
  * Operation

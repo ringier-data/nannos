@@ -11,7 +11,7 @@ from ..services.cel_condition import CEL_SYNTAX_HINT, CelSyntaxError, validate_c
 from pydantic.fields import FieldInfo
 
 from ..utils.timezones import validate_timezone_name as _validate_timezone_name
-from .delivery_channel import DeliveryReachability
+from .delivery_channel import DeliveryFailure, DeliveryReachability
 from .sub_agent import (
     SUB_AGENT_NAME_RULE,
     ModelName,
@@ -238,7 +238,7 @@ class ScheduledJobRun(BaseModel):
     #: Why the notification reached nobody, as the receiving chat client reported it after
     #: acknowledging the push. The run's status stays what the work earned; this is about
     #: the delivery alone.
-    delivery_error: str | None = None
+    delivery_failure: DeliveryFailure | None = None
     condition_evaluation: ConditionEvaluation | None = None
     #: Last heartbeat from the process dispatching this run. The healer sweeps on
     #: staleness of this rather than on age, so a slow-but-healthy run is never

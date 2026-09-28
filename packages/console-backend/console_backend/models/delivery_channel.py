@@ -23,6 +23,12 @@ _FORMATTING_DESCRIPTION = (
 #: client has not published the installation. Only ``unreachable`` refuses anything.
 DeliveryReachability = Literal["reachable", "unreachable", "unknown"]
 
+#: Why a scheduled run's notification reached nobody, as the receiving client reported it
+#: (#191). ``no_recipient``: the client holds no sign-in for the subscriber in that
+#: installation, which only they can fix. ``send_failed``: a recipient was found and
+#: posting failed, which is transient.
+DeliveryFailure = Literal["no_recipient", "send_failed"]
+
 _REACHABILITY_DESCRIPTION = (
     "Whether the user can receive on this channel: 'reachable' (they signed in to Nannos from "
     "there), 'unreachable' (they have not; messaging Nannos there once activates it) or "
@@ -135,7 +141,7 @@ class UndeliveredReport(BaseModel):
         max_length=200,
         description="The installation that received the push, as its delivery channel is registered.",
     )
-    reason: Literal["no_recipient", "send_failed"] = Field(
+    reason: DeliveryFailure = Field(
         description=(
             "'no_recipient': this installation has no sign-in for the subscriber, which only they "
             "can fix (the job is held until they sign in there). 'send_failed': a recipient was "
@@ -143,7 +149,8 @@ class UndeliveredReport(BaseModel):
         )
     )
     detail: str | None = Field(
-        default=None, description="What failed, for the run record. Longer than 500 characters is cut, not refused."
+        default=None,
+        description="What failed, for the backend's log line; not stored. Longer than 500 characters is cut, not refused.",
     )
 
     @field_validator("detail", mode="before")

@@ -349,7 +349,7 @@ class TestAClientReportsWhatReachedNobody:
         run = await svc.repo.get_run(db, job.id, run_id)
         assert run.status == JobRunStatus.SUCCESS, "the work itself succeeded"
         assert run.delivered is False
-        assert "can't reach you on 'Slack Nannos (T1)'" in run.delivery_error
+        assert run.delivery_failure == "no_recipient"
         held = await svc.get_job(db, job.id, u["owner"].id)
         assert (held.enabled, held.pause_code) == (False, PauseCode.UNREACHABLE)
         assert held.delivery_channel_id == world["channels"]["A1"]
@@ -393,7 +393,7 @@ class TestAClientReportsWhatReachedNobody:
         assert report.detail == "x" * 500
 
     @pytest.mark.asyncio
-    async def test_a_failed_send_marks_the_run_but_keeps_the_job_running(self, world):
+    async def test_a_failed_send_marks_the_run_but_keeps_the_job_running(self, world, caplog):
         svc, db, u = world["service"], world["db"], world["users"]
         job, run_id = await self._run(world)
 
@@ -401,7 +401,9 @@ class TestAClientReportsWhatReachedNobody:
         assert await svc.report_undelivered(db, SLACK, report) is True
 
         run = await svc.repo.get_run(db, job.id, run_id)
-        assert run.delivered is False and "rate limited" in run.delivery_error
+        assert (run.delivered, run.delivery_failure) == (False, "send_failed")
+        # What failed in detail is logged with the run's ids, never stored.
+        assert any(f"Run {run_id} of job {job.id}" in r.message and "rate limited" in r.message for r in caplog.records)
         assert (await svc.get_job(db, job.id, u["owner"].id)).enabled is True
 
 

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..authorization import GROUP_ROLE_CAPABILITIES
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.delivery_channel import DeliveryFailure
 from ..models.scheduled_job import (
     ConditionEvaluation,
     JobRunStatus,
@@ -227,7 +228,7 @@ def _row_to_run(row: Any) -> ScheduledJobRun:
         error_message=row["error_message"],
         conversation_id=row.get("conversation_id"),
         delivered=row["delivered"],
-        delivery_error=row.get("delivery_error"),
+        delivery_failure=row.get("delivery_failure"),
         condition_evaluation=row.get("condition_evaluation"),
         last_seen_at=row.get("last_seen_at"),
         trigger=RunTrigger(row.get("trigger", RunTrigger.SCHEDULED.value)),
@@ -1810,7 +1811,7 @@ class ScheduledJobRepository(AuditedRepository):
         one fact, and a run recorded as parked with no way to reach the task would be a
         job stopped with no way to restart it.
 
-        A run the receiving client has already reported undelivered (``delivery_error``)
+        A run the receiving client has already reported undelivered (``delivery_failure``)
         stays undelivered: the report can arrive before the dispatch returns.
         """
         result = await db.execute(
@@ -1822,7 +1823,7 @@ class ScheduledJobRepository(AuditedRepository):
                     result_summary   = :result_summary,
                     error_message    = :error_message,
                     conversation_id  = :conversation_id,
-                    delivered        = :delivered AND delivery_error IS NULL,
+                    delivered        = :delivered AND delivery_failure IS NULL,
                     condition_evaluation = :condition_evaluation,
                     notice_due_at    = COALESCE(CAST(:notice_due_at AS timestamptz), notice_due_at),
                     parked_task_id     = COALESCE(:parked_task_id, parked_task_id),
@@ -1867,26 +1868,26 @@ class ScheduledJobRepository(AuditedRepository):
                 SET delivered = true
                 WHERE id = :run_id
                   AND status = 'auth_required'
-                  AND delivery_error IS NULL
+                  AND delivery_failure IS NULL
             """),
             {"run_id": run_id},
         )
         return result.rowcount > 0
 
-    async def mark_run_undelivered(self, db: AsyncSession, run_id: int, error: str) -> None:
+    async def mark_run_undelivered(self, db: AsyncSession, run_id: int, failure: DeliveryFailure) -> None:
         """Record that the receiving client could not deliver *run_id*'s notification.
 
         Any status: the report may arrive while the run is still ``running`` (the push goes
         out when the agent-runner task ends, before the dispatch here returns), and
-        ``complete_run`` then keeps it undelivered. A repeated report keeps the first error.
+        ``complete_run`` then keeps it undelivered. A repeated report keeps the first failure.
         """
         await db.execute(
             text("""
                 UPDATE scheduled_job_runs
-                SET delivered = false, delivery_error = COALESCE(delivery_error, :error)
+                SET delivered = false, delivery_failure = COALESCE(delivery_failure, :failure)
                 WHERE id = :run_id
             """),
-            {"run_id": run_id, "error": error},
+            {"run_id": run_id, "failure": failure},
         )
 
     async def run_delivery_target(self, db: AsyncSession, run_id: int) -> dict[str, Any] | None:

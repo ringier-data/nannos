@@ -1883,11 +1883,7 @@ class SchedulerService:
         ):
             return False
         channel = target["channel_name"]
-        if report.reason == "no_recipient":
-            error = f"Not delivered: Nannos can't reach you on '{channel}'. Message Nannos there once to activate it."
-        else:
-            error = f"Not delivered: posting to '{channel}' failed" + (f" ({report.detail})" if report.detail else "")
-        await self.repo.mark_run_undelivered(db, report.run_id, error)
+        await self.repo.mark_run_undelivered(db, report.run_id, report.reason)
         held = report.reason == "no_recipient" and target["enabled"]
         if held:
             # A sign-in releases the hold only where the backend can see one: a subscriber
@@ -1921,12 +1917,14 @@ class SchedulerService:
                     metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
                 )
         await db.commit()
+        # The one place what failed in detail is kept: the run stores only the code.
         logger.error(
-            "Run %d of job %d was not delivered on '%s' (%s)%s",
+            "Run %d of job %d was not delivered on '%s' (%s)%s%s",
             report.run_id,
             target["subscription_id"],
             channel,
             report.reason,
+            f": {report.detail}" if report.detail else "",
             "; subscription held" if held else "",
         )
         return True
