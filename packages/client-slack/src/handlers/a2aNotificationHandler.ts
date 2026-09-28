@@ -112,10 +112,17 @@ export async function handleA2ANotification(
 
   const parked = schedulerPayload.scheduler_status === 'auth_required';
   const runRef = `job=${schedulerPayload.scheduled_job_id} run=${schedulerPayload.scheduled_job_run_id}`;
-  // Every way this notification can end without reaching the user is logged at error
-  // level and reported, so the run is not recorded as delivered (#191).
+  // Every way this notification can end without reaching the user is reported, so the run
+  // is not recorded as delivered (#191). A missing recipient is the subscriber's to fix
+  // (the scheduler holds the job and tells them), so it is logged at info; a failed send
+  // is an operational error.
   const undelivered = async (reason: UndeliveredReason, detail: string): Promise<void> => {
-    logger.error(`[A2ACallback] Not delivered (${reason}, ${runRef}, taskId=${task.id}): ${detail}`);
+    const message = `[A2ACallback] Not delivered (${reason}, ${runRef}, taskId=${task.id}): ${detail}`;
+    if (reason === 'no_recipient') {
+      logger.info(message);
+    } else {
+      logger.error(message);
+    }
     const runId = schedulerPayload.scheduled_job_run_id;
     if (reportUndelivered && runId !== undefined) {
       await reportUndelivered({ runId, installationId: botInstallation.appId, reason, detail });

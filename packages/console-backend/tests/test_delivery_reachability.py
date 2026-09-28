@@ -336,7 +336,8 @@ class TestAClientReportsWhatReachedNobody:
         assert await svc.report_undelivered(db, SLACK, report.model_copy(update={"run_id": run_id + 999})) is False
 
     @pytest.mark.asyncio
-    async def test_no_recipient_marks_the_run_undelivered_and_holds_the_subscription(self, world):
+    async def test_no_recipient_marks_the_run_undelivered_and_holds_the_subscription(self, world, caplog):
+        caplog.set_level("INFO", logger="console_backend.services.scheduler_service")
         svc, db, u = world["service"], world["db"], world["users"]
         job, run_id = await self._run(world)
 
@@ -350,6 +351,8 @@ class TestAClientReportsWhatReachedNobody:
         assert run.status == JobRunStatus.SUCCESS, "the work itself succeeded"
         assert run.delivered is False
         assert run.delivery_failure == "no_recipient"
+        [line] = [r for r in caplog.records if f"Run {run_id} of job {job.id}" in r.message]
+        assert line.levelname == "INFO", "the subscriber's to fix, and held and notified: no alert"
         held = await svc.get_job(db, job.id, u["owner"].id)
         assert (held.enabled, held.pause_code) == (False, PauseCode.UNREACHABLE)
         assert held.delivery_channel_id == world["channels"]["A1"]
@@ -403,7 +406,8 @@ class TestAClientReportsWhatReachedNobody:
         run = await svc.repo.get_run(db, job.id, run_id)
         assert (run.delivered, run.delivery_failure) == (False, "send_failed")
         # What failed in detail is logged with the run's ids, never stored.
-        assert any(f"Run {run_id} of job {job.id}" in r.message and "rate limited" in r.message for r in caplog.records)
+        [line] = [r for r in caplog.records if f"Run {run_id} of job {job.id}" in r.message]
+        assert "rate limited" in line.message and line.levelname == "ERROR", "a failed send is an operational error"
         assert (await svc.get_job(db, job.id, u["owner"].id)).enabled is True
 
 

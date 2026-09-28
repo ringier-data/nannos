@@ -1917,8 +1917,11 @@ class SchedulerService:
                     metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
                 )
         await db.commit()
-        # The one place what failed in detail is kept: the run stores only the code.
-        logger.error(
+        # The one place what failed in detail is kept: the run stores only the code. A
+        # missing recipient is the subscriber's to fix, and already held and notified
+        # above, so it is no alert; a failed send is.
+        logger.log(
+            logging.INFO if report.reason == "no_recipient" else logging.ERROR,
             "Run %d of job %d was not delivered on '%s' (%s)%s%s",
             report.run_id,
             target["subscription_id"],
