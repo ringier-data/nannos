@@ -33,7 +33,7 @@ describe('BrokerUserAuthService', () => {
     storage = new MemoryUserAuthStorage();
     broker = {
       authorizeUrl: jest.fn((redirectUri: string, state: string) => `https://console/authorize?r=${redirectUri}&s=${state}`),
-      redeem: jest.fn(async () => ({ user_id: 'u1', sub: 'sub-1', groups: [] })),
+      redeem: jest.fn(async () => ({ user_id: 'u1', sub: 'sub-1', groups: [], binding_secret: 'secret-1' })),
       mint: jest.fn(async (_sub: string, audience: string) => ({
         accessToken: `token-for-${audience}`,
         expiresAt: Date.now() + 3600_000,
@@ -43,7 +43,8 @@ describe('BrokerUserAuthService', () => {
       storage as unknown as IUserAuthStorage,
       broker as unknown as BrokerClient,
       config,
-      { set: jest.fn() } as unknown as IOAuthStateStore
+      { set: jest.fn() } as unknown as IOAuthStateStore,
+      async (teamId: string) => (teamId === 'T1' ? ['A1', 'A2'] : [])
     );
   });
 
@@ -66,8 +67,15 @@ describe('BrokerUserAuthService', () => {
   test('completing the sign-in stores only who the user is', async () => {
     const row = await signIn();
 
-    expect(broker.redeem).toHaveBeenCalledWith('code-1');
-    expect(row).toMatchObject({ userId: 'U1', teamId: 'T1', oidcSub: 'sub-1', authMode: 'broker' });
+    // One sign-in per team covers every app of this client in it.
+    expect(broker.redeem).toHaveBeenCalledWith('code-1', { tenantId: 'T1', installationIds: ['A1', 'A2'] });
+    expect(row).toMatchObject({
+      userId: 'U1',
+      teamId: 'T1',
+      oidcSub: 'sub-1',
+      authMode: 'broker',
+      brokerBindingSecret: 'secret-1',
+    });
     expect(row.accessToken).toBeUndefined();
     expect(row.refreshToken).toBeUndefined();
     expect(await service.isUserAuthorized('U1', 'T1')).toBe(true);
@@ -94,9 +102,16 @@ describe('BrokerUserAuthService', () => {
     expect(await service.getTokenForAudience('U1', 'T1', 'agent-console')).toBe('token-for-agent-console');
 
     expect(broker.mint.mock.calls).toEqual([
-      ['sub-1', 'orchestrator'],
-      ['sub-1', 'agent-console'],
+      ['sub-1', 'orchestrator', 'secret-1'],
+      ['sub-1', 'agent-console', 'secret-1'],
     ]);
+  });
+
+  test('a broker sign-in from before binding secrets still mints, without one', async () => {
+    storage.rows.set('U1:T1', { userId: 'U1', teamId: 'T1', oidcSub: 'sub-1', authMode: 'broker', createdAt: 0, updatedAt: 0 });
+
+    expect(await service.getOrchestratorToken('U1', 'T1')).toBe('token-for-orchestrator');
+    expect(broker.mint).toHaveBeenCalledWith('sub-1', 'orchestrator', null);
   });
 
   test('a token close to its expiry is minted again', async () => {

@@ -529,8 +529,8 @@ export const brokerCallbackApiV1AuthBrokerCallbackGetOptions = (options?: Option
 /**
  * Redeem
  *
- * Trade a one-time code for who signed in. Single use, and only for the client the
- * code was issued to.
+ * Trade a one-time code for who signed in, and the binding secret for their later
+ * /token calls. Single use, and only for the client the code was issued to.
  */
 export const redeemApiV1AuthBrokerRedeemPostMutation = (options?: Partial<Options<RedeemApiV1AuthBrokerRedeemPostData>>): UseMutationOptions<RedeemApiV1AuthBrokerRedeemPostResponse, RedeemApiV1AuthBrokerRedeemPostError, Options<RedeemApiV1AuthBrokerRedeemPostData>> => {
     const mutationOptions: UseMutationOptions<RedeemApiV1AuthBrokerRedeemPostResponse, RedeemApiV1AuthBrokerRedeemPostError, Options<RedeemApiV1AuthBrokerRedeemPostData>> = {

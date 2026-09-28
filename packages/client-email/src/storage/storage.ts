@@ -25,6 +25,7 @@ export interface UserAuthToken {
   idToken?: string;
   oidcSub?: string; // OIDC subject identifier (Keycloak user sub)
   authMode?: UserAuthMode; // Read back as 'local' when unset
+  brokerBindingSecret?: string; // Broker rows: sent on every token request; unset for older sign-ins
   createdAt: number;
   updatedAt: number;
 }
@@ -138,10 +139,11 @@ export class Storage {
   async saveToken(token: Omit<UserAuthToken, 'createdAt' | 'updatedAt'>): Promise<void> {
     const expiresAt = token.expiresAt !== undefined ? new Date(token.expiresAt) : null;
     await this.pool.query(SQL`
-      INSERT INTO user_auth (email, access_token, refresh_token, expires_at, token_type, scope, id_token, oidc_sub, auth_mode)
+      INSERT INTO user_auth (email, access_token, refresh_token, expires_at, token_type, scope, id_token, oidc_sub, auth_mode,
+                             broker_binding_secret)
       VALUES (${token.email}, ${token.accessToken ?? null}, ${token.refreshToken ?? null},
               ${expiresAt}, ${token.tokenType ?? null}, ${token.scope ?? null}, ${token.idToken ?? null},
-              ${token.oidcSub ?? null}, ${token.authMode ?? 'local'})
+              ${token.oidcSub ?? null}, ${token.authMode ?? 'local'}, ${token.brokerBindingSecret ?? null})
       ON CONFLICT (email) DO UPDATE SET
         access_token = EXCLUDED.access_token,
         refresh_token = EXCLUDED.refresh_token,
@@ -150,7 +152,8 @@ export class Storage {
         scope = EXCLUDED.scope,
         id_token = EXCLUDED.id_token,
         oidc_sub = EXCLUDED.oidc_sub,
-        auth_mode = EXCLUDED.auth_mode
+        auth_mode = EXCLUDED.auth_mode,
+        broker_binding_secret = EXCLUDED.broker_binding_secret
     `);
     this.logger.info(`Saved auth token for ${token.email}`);
   }
@@ -158,7 +161,7 @@ export class Storage {
   async getToken(email: string): Promise<UserAuthToken | null> {
     const result = await this.pool.query(SQL`
       SELECT email, access_token, refresh_token, expires_at,
-             token_type, scope, id_token, oidc_sub, auth_mode, created_at, updated_at
+             token_type, scope, id_token, oidc_sub, auth_mode, broker_binding_secret, created_at, updated_at
       FROM user_auth WHERE email = ${email}
     `);
     if (result.rows.length === 0) return null;
@@ -173,6 +176,7 @@ export class Storage {
       idToken: row.id_token ?? undefined,
       oidcSub: row.oidc_sub ?? undefined,
       authMode: row.auth_mode ?? 'local',
+      brokerBindingSecret: row.broker_binding_secret ?? undefined,
       createdAt: new Date(row.created_at).getTime(),
       updatedAt: new Date(row.updated_at).getTime(),
     };

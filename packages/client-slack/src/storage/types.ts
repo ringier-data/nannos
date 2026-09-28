@@ -17,6 +17,7 @@ export interface UserAuthToken {
   idToken?: string; // OIDC ID token
   oidcSub?: string; // OIDC subject identifier
   authMode?: UserAuthMode; // Read back as 'local' when unset
+  brokerBindingSecret?: string; // Broker rows: sent on every token request; unset for older sign-ins
   createdAt: number; // Unix timestamp when token was created
   updatedAt: number; // Unix timestamp when token was last updated
 }

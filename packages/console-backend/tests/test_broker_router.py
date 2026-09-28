@@ -21,7 +21,14 @@ import console_backend.dependencies as dependencies
 import console_backend.routers.broker_router as router
 from console_backend.config import config
 from console_backend.controllers.broker_controller import BrokerController
-from console_backend.models.broker import BrokerClient, BrokerClientCreate
+from console_backend.models.broker import (
+    BrokerClient,
+    BrokerClientCreate,
+    BrokerRedeemRequest,
+    BrokerRedemption,
+    BrokerTokenRequest,
+    BrokerTokenResponse,
+)
 from console_backend.repositories.broker_client_repository import BrokerClientRepository
 from console_backend.repositories.broker_login_request_repository import BrokerLoginRequestRepository
 from console_backend.services.audit_service import AuditService
@@ -38,6 +45,7 @@ def _client(**overrides) -> BrokerClient:
         "name": "Slack",
         "redirect_uris": [SLACK_CALLBACK],
         "enabled": True,
+        "require_binding_secret": False,
         "created_by": "admin-user-id",
         "created_at": NOW,
         "updated_at": NOW,
@@ -312,3 +320,43 @@ class TestBrowserLeg:
         }
         response = await controller.callback(_browser({"state": state}), pg_session)
         assert set(parse_qs(urlsplit(response.headers["location"]).query)) == {"code"}
+
+
+class TestClientLegCarriesTheBinding:
+    """The HTTP layer hands the binding fields to the service untouched: the tenant and
+    installations on /redeem, the secret on /token."""
+
+    @pytest.fixture
+    def service_request(self, monkeypatch):
+        monkeypatch.setattr(config.broker, "enabled", True)
+        service = AsyncMock(spec=BrokerService)
+        return service, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(broker_service=service)))
+
+    @pytest.mark.asyncio
+    async def test_redeem_passes_tenant_and_installations(self, service_request):
+        service, request = service_request
+        service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
+        db = AsyncMock()
+        client = _client()
+
+        result = await router.redeem(
+            BrokerRedeemRequest(code="c", tenant_id="T1", installation_ids=["A1"]), request, db, client
+        )
+
+        assert result.binding_secret == "secret"
+        service.redeem.assert_awaited_once_with(db, client, "c", tenant_id="T1", installation_ids=["A1"])
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_token_passes_the_binding_secret(self, service_request):
+        service, request = service_request
+        service.mint.return_value = BrokerTokenResponse(access_token="at", expires_in=60)
+        db = AsyncMock()
+        client = _client()
+
+        await router.mint_token(
+            BrokerTokenRequest(sub="s1", audience="orchestrator", binding_secret="secret"), request, db, client
+        )
+
+        service.mint.assert_awaited_once_with(db, client, "s1", "orchestrator", "secret")
+

@@ -22,7 +22,7 @@ const logger = Logger.getLogger('UserAuthServiceFactory');
 
 export function createUserAuthService(
   config: Config,
-  storage: Pick<StorageProvider, 'userAuth' | 'oauthState'>,
+  storage: Pick<StorageProvider, 'userAuth' | 'oauthState' | 'botInstallation'>,
   oidcClient: OIDCClient
 ): IUserAuthService {
   const local = new LocalUserAuthService(storage.userAuth, oidcClient, config, storage.oauthState);
@@ -48,7 +48,9 @@ export function createUserAuthService(
       return new CompositeUserAuthService(
         storage.userAuth,
         local,
-        new BrokerUserAuthService(storage.userAuth, broker, config, storage.oauthState)
+        new BrokerUserAuthService(storage.userAuth, broker, config, storage.oauthState, async (teamId) =>
+          (await storage.botInstallation.getByTeamId(teamId)).filter((bot) => bot.isActive).map((bot) => bot.appId)
+        )
       );
     }
 

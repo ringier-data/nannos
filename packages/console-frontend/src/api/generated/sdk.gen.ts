@@ -332,8 +332,8 @@ export const brokerCallbackApiV1AuthBrokerCallbackGet = <ThrowOnError extends bo
 /**
  * Redeem
  *
- * Trade a one-time code for who signed in. Single use, and only for the client the
- * code was issued to.
+ * Trade a one-time code for who signed in, and the binding secret for their later
+ * /token calls. Single use, and only for the client the code was issued to.
  */
 export const redeemApiV1AuthBrokerRedeemPost = <ThrowOnError extends boolean = false>(options: Options<RedeemApiV1AuthBrokerRedeemPostData, ThrowOnError>) => (options.client ?? client).post<RedeemApiV1AuthBrokerRedeemPostResponses, RedeemApiV1AuthBrokerRedeemPostErrors, ThrowOnError>({
     url: '/api/v1/auth/broker/redeem',

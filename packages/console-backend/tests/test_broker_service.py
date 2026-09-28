@@ -209,26 +209,28 @@ class TestCodeAndRedeem:
 
 
 class TestMint:
-    async def _linked(self, broker, pg_session, user) -> None:
+    async def _linked(self, broker, pg_session, user) -> str:
+        """Sign *user* in through Slack; the binding secret the client would keep."""
         _, code = await _signed_in(broker, pg_session, user)
-        await broker.redeem(pg_session, await broker.resolve_client(pg_session, "slack-client"), code)
+        redemption = await broker.redeem(pg_session, await broker.resolve_client(pg_session, "slack-client"), code)
+        return redemption.binding_secret
 
     @pytest.mark.asyncio
     async def test_mints_an_allowed_audience_for_a_linked_user(self, broker, tokens, pg_session, test_user_db):
-        await self._linked(broker, pg_session, test_user_db)
+        secret = await self._linked(broker, pg_session, test_user_db)
         slack = await broker.resolve_client(pg_session, "slack-client")
 
-        minted = await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")
+        minted = await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", secret)
 
         assert (minted.access_token, minted.expires_in, minted.token_type) == ("minted", 7200, "Bearer")
         tokens.get_exchanged_token_response.assert_awaited_once_with(pg_session, test_user_db.id, "orchestrator")
 
     @pytest.mark.asyncio
     async def test_an_audience_the_client_is_not_allowed_is_refused(self, broker, pg_session, test_user_db):
-        await self._linked(broker, pg_session, test_user_db)
+        secret = await self._linked(broker, pg_session, test_user_db)
         slack = await broker.resolve_client(pg_session, "slack-client")
         with pytest.raises(BrokerRefusal) as exc:
-            await broker.mint(pg_session, slack, "test-user-sub", "cockpit-embed")
+            await broker.mint(pg_session, slack, "test-user-sub", "cockpit-embed", secret)
         assert exc.value.status_code == 403
 
     @pytest.mark.asyncio
@@ -240,28 +242,29 @@ class TestMint:
             broker, pg_session, test_user_db, "cockpit-embed", "https://pr-7-riad.d.alloy.ch/nannos-auth-callback.html"
         )
         cockpit = await broker.resolve_client(pg_session, "cockpit-embed")
-        await broker.redeem(pg_session, cockpit, code)
+        secret = (await broker.redeem(pg_session, cockpit, code)).binding_secret
 
         for audience in ("orchestrator", "agent-console", "cockpit-embed"):
-            minted = await broker.mint(pg_session, cockpit, "test-user-sub", audience)
+            minted = await broker.mint(pg_session, cockpit, "test-user-sub", audience, secret)
             assert minted.access_token == "minted"
         with pytest.raises(BrokerRefusal) as exc:
-            await broker.mint(pg_session, cockpit, "test-user-sub", "gatana")
+            await broker.mint(pg_session, cockpit, "test-user-sub", "gatana", secret)
         assert exc.value.status_code == 403
 
     @pytest.mark.asyncio
     async def test_a_client_reaches_only_users_who_signed_in_through_it(
         self, broker, tokens, pg_session, test_user_db
     ):
-        await self._linked(broker, pg_session, test_user_db)  # through Slack
+        secret = await self._linked(broker, pg_session, test_user_db)  # through Slack
         cockpit = await broker.resolve_client(pg_session, "cockpit-embed")
         with pytest.raises(BrokerRefusal) as exc:
-            await broker.mint(pg_session, cockpit, "test-user-sub", "cockpit-embed")
+            # Slack's secret for this user names no binding of the cockpit.
+            await broker.mint(pg_session, cockpit, "test-user-sub", "cockpit-embed", secret)
         assert exc.value.status_code == 409
         # An unknown subject gets the same answer, so the check leaks nothing.
         slack = await broker.resolve_client(pg_session, "slack-client")
         with pytest.raises(BrokerRefusal) as exc:
-            await broker.mint(pg_session, slack, "nobody", "orchestrator")
+            await broker.mint(pg_session, slack, "nobody", "orchestrator", secret)
         assert exc.value.status_code == 409
         tokens.get_exchanged_token_response.assert_not_awaited()
 
@@ -279,26 +282,120 @@ class TestMint:
         ],
     )
     async def test_mint_failures(self, broker, tokens, pg_session, test_user_db, error, status):
-        await self._linked(broker, pg_session, test_user_db)
+        secret = await self._linked(broker, pg_session, test_user_db)
         tokens.get_exchanged_token_response.side_effect = error
         slack = await broker.resolve_client(pg_session, "slack-client")
         with pytest.raises(BrokerRefusal) as exc:
-            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")
+            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", secret)
         assert exc.value.status_code == status
 
     @pytest.mark.asyncio
     async def test_a_dead_token_is_marked_so_the_scheduler_and_console_see_it_too(
         self, broker, tokens, pg_session, test_user_db
     ):
-        await self._linked(broker, pg_session, test_user_db)
+        secret = await self._linked(broker, pg_session, test_user_db)
         stored_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
         tokens.get_exchanged_token_response.side_effect = OfflineTokenExpiredError("refused", stored_at)
         slack = await broker.resolve_client(pg_session, "slack-client")
 
         with pytest.raises(BrokerRefusal):
-            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")
+            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", secret)
 
         tokens.mark_expired.assert_awaited_once_with(pg_session, test_user_db.id, stored_at)
+
+
+async def _binding_rows(pg_session, user_id: str) -> list[dict]:
+    result = await pg_session.execute(
+        text(
+            "SELECT client_id, tenant_id, secret_hash, installation_ids FROM broker_bindings "
+            "WHERE user_id = :u ORDER BY client_id, tenant_id"
+        ),
+        {"u": user_id},
+    )
+    return [dict(r) for r in result.mappings().all()]
+
+
+class TestBindingSecret:
+    """ADR-0011 amendment 1: a leaked client credential alone mints for no one. The secret
+    /redeem returns is the second factor, and the binding it names says where the user
+    can be reached."""
+
+    @pytest.mark.asyncio
+    async def test_redeem_binds_the_sign_in_and_stores_only_a_hash(self, broker, pg_session, test_user_db):
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        slack = await broker.resolve_client(pg_session, "slack-client")
+
+        redemption = await broker.redeem(
+            pg_session, slack, code, tenant_id="T1", installation_ids=["A2", "A1", "A1"]
+        )
+
+        assert redemption.sub == "test-user-sub" and len(redemption.binding_secret) >= 32
+        [row] = await _binding_rows(pg_session, test_user_db.id)
+        assert (row["client_id"], row["tenant_id"], row["installation_ids"]) == ("slack-client", "T1", ["A1", "A2"])
+        assert redemption.binding_secret not in row["secret_hash"]
+
+    @pytest.mark.asyncio
+    async def test_signing_in_again_for_a_tenant_replaces_its_binding(self, broker, pg_session, test_user_db):
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        old = (await broker.redeem(pg_session, slack, code, tenant_id="T1", installation_ids=["A1"])).binding_secret
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        new = (await broker.redeem(pg_session, slack, code, tenant_id="T1", installation_ids=["A3"])).binding_secret
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        other = (await broker.redeem(pg_session, slack, code, tenant_id="T2")).binding_secret
+
+        rows = await _binding_rows(pg_session, test_user_db.id)
+        assert [(r["tenant_id"], r["installation_ids"]) for r in rows] == [("T1", ["A3"]), ("T2", [])]
+        with pytest.raises(BrokerRefusal) as exc:
+            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", old)
+        assert exc.value.status_code == 409
+        for secret in (new, other):
+            assert (await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", secret)).access_token
+
+    @pytest.mark.asyncio
+    async def test_a_client_that_requires_the_secret_refuses_without_it(self, broker, pg_session, test_user_db):
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        await broker.redeem(pg_session, slack, code)
+        assert slack.require_binding_secret, "new registrations require it"
+
+        with pytest.raises(BrokerRefusal) as exc:
+            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")
+        assert exc.value.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_secret_is_refused_even_where_none_is_required(
+        self, broker, client_repo, pg_session, test_user_db, test_admin_user_db
+    ):
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        await client_repo.update_client(
+            pg_session, test_admin_user_db, slack.id, BrokerClientUpdate(require_binding_secret=False)
+        )
+        broker.invalidate_cache()
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        await broker.redeem(pg_session, slack, code)
+
+        # The legacy link still serves a client that sends nothing...
+        assert (await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")).access_token
+        # ...but a secret that is sent is always checked.
+        with pytest.raises(BrokerRefusal) as exc:
+            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", "not-the-secret")
+        assert exc.value.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_one_users_secret_never_mints_for_another(
+        self, broker, pg_session, test_user_db, test_admin_user_db
+    ):
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        secret = (await broker.redeem(pg_session, slack, code)).binding_secret
+        _, code = await _signed_in(broker, pg_session, test_admin_user_db)
+        await broker.redeem(pg_session, slack, code)
+
+        with pytest.raises(BrokerRefusal) as exc:
+            await broker.mint(pg_session, slack, test_admin_user_db.sub, "orchestrator", secret)
+        assert exc.value.status_code == 409
 
 
 class TestClientCache:

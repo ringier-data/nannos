@@ -5,8 +5,8 @@ Browser leg (no authentication — the user signs in at Keycloak):
   GET  /callback    — Keycloak sends the user back; the browser returns to the client
 
 Client leg (the broker client's own client-credentials token):
-  POST /redeem      — trade the one-time code for who signed in
-  POST /token       — mint an access token for a linked user and an allowed audience
+  POST /redeem      — trade the one-time code for who signed in and a binding secret
+  POST /token       — mint an access token for a bound user and an allowed audience
 """
 
 import logging
@@ -20,8 +20,8 @@ from ..db.session import DbSession
 from ..dependencies import _SERVICE_ACCOUNT_USERNAME_PREFIX, get_token_claims_from_request
 from ..models.broker import (
     BrokerClient,
-    BrokerIdentity,
     BrokerRedeemRequest,
+    BrokerRedemption,
     BrokerTokenRequest,
     BrokerTokenResponse,
 )
@@ -131,17 +131,19 @@ async def broker_callback(request: Request, db: DbSession) -> RedirectResponse:
         raise _refused(e) from e
 
 
-@router.post("/redeem", response_model=BrokerIdentity)
+@router.post("/redeem", response_model=BrokerRedemption)
 async def redeem(
     body: BrokerRedeemRequest,
     request: Request,
     db: DbSession,
     client: BrokerClient = Depends(require_broker_client),
-) -> BrokerIdentity:
-    """Trade a one-time code for who signed in. Single use, and only for the client the
-    code was issued to."""
+) -> BrokerRedemption:
+    """Trade a one-time code for who signed in, and the binding secret for their later
+    /token calls. Single use, and only for the client the code was issued to."""
     try:
-        identity = await _get_broker_service(request).redeem(db, client, body.code)
+        identity = await _get_broker_service(request).redeem(
+            db, client, body.code, tenant_id=body.tenant_id, installation_ids=body.installation_ids
+        )
     except BrokerRefusal as e:
         raise _refused(e) from e
     await db.commit()
@@ -158,6 +160,6 @@ async def mint_token(
     """Mint an access token for *audience* on behalf of a user who signed in through this
     client. 409 means the user must sign in again."""
     try:
-        return await _get_broker_service(request).mint(db, client, body.sub, body.audience)
+        return await _get_broker_service(request).mint(db, client, body.sub, body.audience, body.binding_secret)
     except BrokerRefusal as e:
         raise _refused(e) from e

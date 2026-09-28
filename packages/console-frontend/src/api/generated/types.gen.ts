@@ -425,6 +425,12 @@ export type BrokerClient = {
      */
     enabled: boolean;
     /**
+     * Require Binding Secret
+     *
+     * Refuse /token calls that carry no binding secret from /redeem. On for new registrations; turn it on for an existing client once it sends the secret, and its linked users sign in again once.
+     */
+    require_binding_secret: boolean;
+    /**
      * Created By
      */
     created_by: string;
@@ -468,6 +474,12 @@ export type BrokerClientCreate = {
      * Enabled
      */
     enabled?: boolean;
+    /**
+     * Require Binding Secret
+     *
+     * Refuse /token calls that carry no binding secret from /redeem. On for new registrations; turn it on for an existing client once it sends the secret, and its linked users sign in again once.
+     */
+    require_binding_secret?: boolean;
 };
 
 /**
@@ -509,17 +521,40 @@ export type BrokerClientUpdate = {
      * Enabled
      */
     enabled?: boolean | null;
+    /**
+     * Require Binding Secret
+     */
+    require_binding_secret?: boolean | null;
 };
 
 /**
- * BrokerIdentity
- *
- * Who signed in, as ``/redeem`` returns it.
- *
- * The union of the claims any broker client reads today, captured from the ID token
- * (or userinfo) at sign-in. A client that needs fresh values signs the user in again.
+ * BrokerRedeemRequest
  */
-export type BrokerIdentity = {
+export type BrokerRedeemRequest = {
+    /**
+     * Code
+     */
+    code: string;
+    /**
+     * Tenant Id
+     *
+     * The client's own name for the account this sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. A later sign-in for the same tenant replaces this binding.
+     */
+    tenant_id?: string;
+    /**
+     * Installation Ids
+     *
+     * The installations this sign-in covers, as the client registers its delivery channels (`installation_id`). A notification on one of those channels can reach the user. Empty for a client with no delivery channel.
+     */
+    installation_ids?: Array<string>;
+};
+
+/**
+ * BrokerRedemption
+ *
+ * What ``/redeem`` returns: who signed in, and the secret that names this sign-in.
+ */
+export type BrokerRedemption = {
     /**
      * User Id
      *
@@ -570,16 +605,12 @@ export type BrokerIdentity = {
      * Company Name
      */
     company_name?: string | null;
-};
-
-/**
- * BrokerRedeemRequest
- */
-export type BrokerRedeemRequest = {
     /**
-     * Code
+     * Binding Secret
+     *
+     * Returned once and stored by the backend only as a hash. The client keeps it with the user and sends it on every /token call for them.
      */
-    code: string;
+    binding_secret: string;
 };
 
 /**
@@ -596,6 +627,12 @@ export type BrokerTokenRequest = {
      * Audience
      */
     audience: string;
+    /**
+     * Binding Secret
+     *
+     * The secret /redeem returned for this user's sign-in. Required when the client has require_binding_secret; checked whenever it is sent.
+     */
+    binding_secret?: string | null;
 };
 
 /**
@@ -9439,7 +9476,7 @@ export type RedeemApiV1AuthBrokerRedeemPostResponses = {
     /**
      * Successful Response
      */
-    200: BrokerIdentity;
+    200: BrokerRedemption;
 };
 
 export type RedeemApiV1AuthBrokerRedeemPostResponse = RedeemApiV1AuthBrokerRedeemPostResponses[keyof RedeemApiV1AuthBrokerRedeemPostResponses];

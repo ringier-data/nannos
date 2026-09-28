@@ -62,6 +62,7 @@ export function BrokerClientsPage() {
   const [description, setDescription] = useState('');
   const [redirectUris, setRedirectUris] = useState('');
   const [enabled, setEnabled] = useState(true);
+  const [requireBindingSecret, setRequireBindingSecret] = useState(true);
 
   const editing = formDialog.brokerClient;
 
@@ -116,6 +117,7 @@ export function BrokerClientsPage() {
     setDescription(brokerClient?.description ?? '');
     setRedirectUris(brokerClient?.redirect_uris.join('\n') ?? '');
     setEnabled(brokerClient?.enabled ?? true);
+    setRequireBindingSecret(brokerClient?.require_binding_secret ?? true);
     setFormDialog({ open: true, brokerClient });
   };
 
@@ -127,6 +129,7 @@ export function BrokerClientsPage() {
       description: description.trim() || null,
       redirect_uris: splitLines(redirectUris),
       enabled,
+      require_binding_secret: requireBindingSecret,
     } satisfies BrokerClientUpdate;
     if (editing) {
       updateMutation.mutate({ path: { client_pk: editing.id }, body });
@@ -178,6 +181,15 @@ export function BrokerClientsPage() {
                   <TableCell>
                     <div>
                       <span className="font-medium">{brokerClient.name}</span>
+                      {!brokerClient.require_binding_secret && (
+                        <Badge
+                          variant="outline"
+                          className="ml-2 text-muted-foreground"
+                          title="Its token requests are still accepted without the binding secret from sign-in"
+                        >
+                          No binding secret
+                        </Badge>
+                      )}
                       {brokerClient.description && (
                         <p className="text-xs text-muted-foreground mt-0.5">{brokerClient.description}</p>
                       )}
@@ -316,6 +328,21 @@ export function BrokerClientsPage() {
               <p className="text-xs text-muted-foreground">
                 Turning a client off stops its sign-ins and tokens, but keeps its users signed in
                 for when it is on again. A change can take up to a minute to reach every server.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="broker-client-require-binding-secret"
+                  checked={requireBindingSecret}
+                  onCheckedChange={setRequireBindingSecret}
+                />
+                <Label htmlFor="broker-client-require-binding-secret">Require binding secret</Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Token requests must carry the secret the client received when the user signed in,
+                so its credentials alone reach nobody. Turn it on once the client sends the secret:
+                users who signed in through it before then sign in once more.
               </p>
             </div>
           </div>

@@ -24,11 +24,17 @@ export class BrokerUserAuthService implements IUserAuthService {
   /** Key: `${userId}:${teamId}:${audience}` */
   private readonly tokenCache = new Map<string, CachedToken>();
 
+  /**
+   * *installationsOf* names the apps this client runs in a team: the installations its
+   * delivery channels are registered under. A sign-in is per team and a notification is
+   * looked up by team, so one sign-in can be reached through every one of them.
+   */
   constructor(
     private readonly storage: IUserAuthStorage,
     private readonly broker: BrokerClient,
     private readonly config: Config,
-    private readonly oauthStateStore: IOAuthStateStore
+    private readonly oauthStateStore: IOAuthStateStore,
+    private readonly installationsOf: (teamId: string) => Promise<string[]> = async () => []
   ) {}
 
   /** The broker sends the browser back to the same callback the local login uses. */
@@ -62,7 +68,7 @@ export class BrokerUserAuthService implements IUserAuthService {
       return null;
     }
     try {
-      const minted = await this.broker.mint(row.oidcSub, audience);
+      const minted = await this.broker.mint(row.oidcSub, audience, row.brokerBindingSecret ?? null);
       const now = Date.now();
       const margin = Math.min(RENEW_MARGIN_MS, (minted.expiresAt - now) / 2);
       this.tokenCache.set(key, { ...minted, renewAt: minted.expiresAt - margin });
@@ -101,13 +107,17 @@ export class BrokerUserAuthService implements IUserAuthService {
     if (!code) {
       throw new Error('The broker callback carries no code');
     }
-    const identity = await this.broker.redeem(code);
+    const redemption = await this.broker.redeem(code, {
+      tenantId: teamId,
+      installationIds: await this.installationsOf(teamId),
+    });
     const now = Date.now();
     const row: UserAuthToken = {
       userId,
       teamId,
-      oidcSub: identity.sub,
+      oidcSub: redemption.sub,
       authMode: 'broker',
+      brokerBindingSecret: redemption.binding_secret,
       createdAt: now,
       updatedAt: now,
     };

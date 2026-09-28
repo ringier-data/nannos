@@ -143,6 +143,7 @@ class TestMayMintFor:
             name=client_id,
             redirect_uris=["https://x.example/cb"],
             enabled=True,
+            require_binding_secret=True,
             created_by="admin",
             created_at=now,
             updated_at=now,

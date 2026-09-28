@@ -2,9 +2,38 @@
 status: proposed (2026-09-23); implemented in console-backend, the three chat clients, the
   cockpit BFF, the Keycloak provisioning and gitops, pending review. Every chat client
   defaults to its old sign-in until its flag is flipped; the cockpit BFF uses only the broker.
+  Amended 2026-09-28 (Amendment 1: binding secret and reachable installations).
 ---
 
 # console-backend brokers sign-in and holds the only offline token
+
+> **Amendment 1 (2026-09-28) — a sign-in is a binding with a secret and a reach.**
+> Point 2's premise, that a leaked client secret "reaches the people who signed in
+> through that client", was too generous: `/token` needed only the client's credentials
+> and a `sub`, and a `sub` is not secret (the scheduler sends `user_sub` on every push to
+> the client's webhook). So `/redeem` now records a **binding**
+> (`broker_bindings`, migration 108) and returns its `binding_secret` once, kept only as
+> a SHA-256. `/token` mints only when the secret names a binding of the calling client
+> for that very `sub`; every refusal stays the 409 of point 2. A leaked client credential
+> alone now reaches no one; the client's database is needed too (the chat clients store
+> the secret in plain text, like the refresh tokens they held before, so a compromised
+> client pod is not in scope).
+>
+> The same redeem carries where the user can be reached: `installation_ids`, in the
+> vocabulary the client registers its delivery channels under
+> (`delivery_channels.installation_id`, scoped by `client_id`). A Slack sign-in is per
+> team, so it covers every app the client has in that team; Google Chat maps its project
+> number to the project name its channels use; email and the cockpit BFF have no channel
+> and send none. `tenant_id` names the client's own account for the sign-in, and a later
+> sign-in for the same tenant replaces its binding. This is what ringier-data/nannos#192
+> reads to tell whether a subscriber can receive on a channel.
+>
+> Enforcement is per client, because the cockpit BFF ships from another repository:
+> `broker_clients.require_binding_secret`, audited admin data, off for clients registered
+> before the amendment and on by default for new ones. While it is off, a `/token`
+> without a secret falls back to the `broker_client_users` link; a secret that is sent is
+> always checked. Turning it on makes that client's already-linked users sign in once
+> more. Once every client requires it, the fallback and `broker_client_users` go.
 
 ## Context
 

@@ -20,6 +20,7 @@ class MemoryUserAuthStorage {
 const config = {
   baseUrl: 'https://gchat.example',
   oidc: { orchestratorAudience: 'orchestrator' },
+  googleChatConfigs: [{ projectName: 'my-chat-project', projectNumber: 'P1' }],
 } as unknown as Config;
 
 describe('BrokerUserAuthService', () => {
@@ -33,7 +34,7 @@ describe('BrokerUserAuthService', () => {
     storage = new MemoryUserAuthStorage();
     broker = {
       authorizeUrl: jest.fn((redirectUri: string, state: string) => `https://console/authorize?r=${redirectUri}&s=${state}`),
-      redeem: jest.fn(async () => ({ user_id: 'u1', sub: 'sub-1', groups: [] })),
+      redeem: jest.fn(async () => ({ user_id: 'u1', sub: 'sub-1', groups: [], binding_secret: 'secret-1' })),
       mint: jest.fn(async (_sub: string, audience: string) => ({
         accessToken: `token-for-${audience}`,
         expiresAt: Date.now() + 3600_000,
@@ -66,8 +67,15 @@ describe('BrokerUserAuthService', () => {
   test('completing the sign-in stores only who the user is', async () => {
     const row = await signIn();
 
-    expect(broker.redeem).toHaveBeenCalledWith('code-1');
-    expect(row).toMatchObject({ userId: 'U1', projectId: 'P1', oidcSub: 'sub-1', authMode: 'broker' });
+    // Signed in by project number; reachable on the channel registered under its name.
+    expect(broker.redeem).toHaveBeenCalledWith('code-1', { tenantId: 'P1', installationIds: ['my-chat-project'] });
+    expect(row).toMatchObject({
+      userId: 'U1',
+      projectId: 'P1',
+      oidcSub: 'sub-1',
+      authMode: 'broker',
+      brokerBindingSecret: 'secret-1',
+    });
     expect(row.accessToken).toBeUndefined();
     expect(row.refreshToken).toBeUndefined();
     expect(await service.isUserAuthorized('U1', 'P1')).toBe(true);
@@ -94,8 +102,8 @@ describe('BrokerUserAuthService', () => {
     expect(await service.getTokenForAudience('U1', 'P1', 'agent-console')).toBe('token-for-agent-console');
 
     expect(broker.mint.mock.calls).toEqual([
-      ['sub-1', 'orchestrator'],
-      ['sub-1', 'agent-console'],
+      ['sub-1', 'orchestrator', 'secret-1'],
+      ['sub-1', 'agent-console', 'secret-1'],
     ]);
   });
 

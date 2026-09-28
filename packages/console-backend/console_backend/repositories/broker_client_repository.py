@@ -24,6 +24,7 @@ def _row_to_client(row: Any) -> BrokerClient:
         description=row["description"],
         redirect_uris=list(row["redirect_uris"] or []),
         enabled=row["enabled"],
+        require_binding_secret=row["require_binding_secret"],
         created_by=row["created_by"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -45,6 +46,7 @@ class BrokerClientRepository(AuditedRepository):
             "description": data.description,
             "redirect_uris": data.redirect_uris,
             "enabled": data.enabled,
+            "require_binding_secret": data.require_binding_secret,
             "created_by": actor.id,
             "created_at": now,
             "updated_at": now,
@@ -87,7 +89,7 @@ class BrokerClientRepository(AuditedRepository):
         if await self._get_row(db, client_pk) is None:
             return None
         fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
-        for attr in ("name", "redirect_uris", "enabled"):
+        for attr in ("name", "redirect_uris", "enabled", "require_binding_secret"):
             value = getattr(data, attr)
             if value is not None:
                 fields[attr] = value

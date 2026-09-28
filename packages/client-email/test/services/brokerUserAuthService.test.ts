@@ -36,7 +36,7 @@ describe('BrokerUserAuthService (email)', () => {
     storage = new MemoryStorage();
     broker = {
       authorizeUrl: jest.fn((redirectUri: string, state: string) => `https://console/authorize?r=${redirectUri}&s=${state}`),
-      redeem: jest.fn(async () => ({ user_id: 'u1', sub: 'sub-1', groups: [] })),
+      redeem: jest.fn(async () => ({ user_id: 'u1', sub: 'sub-1', groups: [], binding_secret: 'secret-1' })),
       mint: jest.fn(async (_sub: string, audience: string) => ({
         accessToken: `token-for-${audience}`,
         expiresAt: Date.now() + 3600_000,
@@ -61,7 +61,11 @@ describe('BrokerUserAuthService (email)', () => {
   test('completing the sign-in stores only who the sender is', async () => {
     await signIn();
     expect(broker.redeem).toHaveBeenCalledWith('code-1');
-    expect(storage.rows.get('ada@example.com')).toMatchObject({ oidcSub: 'sub-1', authMode: 'broker' });
+    expect(storage.rows.get('ada@example.com')).toMatchObject({
+      oidcSub: 'sub-1',
+      authMode: 'broker',
+      brokerBindingSecret: 'secret-1',
+    });
     expect(storage.rows.get('ada@example.com')?.accessToken).toBeUndefined();
     expect(await service.isUserAuthorized('ada@example.com')).toBe(true);
   });
@@ -71,6 +75,7 @@ describe('BrokerUserAuthService (email)', () => {
     expect(await service.getOrchestratorToken('ada@example.com')).toBe('token-for-orchestrator');
     expect(await service.getOrchestratorToken('ada@example.com')).toBe('token-for-orchestrator');
     expect(broker.mint).toHaveBeenCalledTimes(1);
+    expect(broker.mint).toHaveBeenCalledWith('sub-1', 'orchestrator', 'secret-1');
   });
 
   test('when the broker says sign in again, the sign-in is forgotten', async () => {

@@ -29,6 +29,29 @@ export interface BrokerIdentity {
   company_name?: string | null;
 }
 
+/** What `/redeem` returns: who signed in, and the secret that names this sign-in. */
+export interface BrokerRedemption extends BrokerIdentity {
+  /**
+   * Returned once. Keep it with the user and send it on every `mint` for them: the broker
+   * stores only its hash, and a client that requires it mints for no one without it.
+   */
+  binding_secret: string;
+}
+
+/** What a sign-in covers, told to the broker when it is redeemed. */
+export interface BrokerBinding {
+  /**
+   * This client's own name for the account the sign-in belongs to (a Slack team, a Google
+   * Chat project); empty when it has one. A later sign-in for the same tenant replaces it.
+   */
+  tenantId?: string;
+  /**
+   * The installations the sign-in can be reached on, as this client registers its delivery
+   * channels (`installation_id`). Empty for a client with no delivery channel.
+   */
+  installationIds?: string[];
+}
+
 export interface MintedToken {
   accessToken: string;
   /** Unix time (ms) at which the token expires. */
@@ -93,18 +116,29 @@ export class BrokerClient {
     return url.toString();
   }
 
-  /** Trade the one-time code the browser came back with for who signed in. */
-  async redeem(code: string): Promise<BrokerIdentity> {
-    const response = await this.post('/api/v1/auth/broker/redeem', { code });
+  /** Trade the one-time code the browser came back with for who signed in, binding the sign-in. */
+  async redeem(code: string, binding: BrokerBinding = {}): Promise<BrokerRedemption> {
+    const response = await this.post('/api/v1/auth/broker/redeem', {
+      code,
+      tenant_id: binding.tenantId ?? '',
+      installation_ids: binding.installationIds ?? [],
+    });
     if (!response.ok) {
       throw new BrokerError(`Broker refused the sign-in code: ${await describe(response)}`, response.status);
     }
-    return (await response.json()) as BrokerIdentity;
+    return (await response.json()) as BrokerRedemption;
   }
 
-  /** Mint an access token for *audience* on behalf of the user *sub*. */
-  async mint(sub: string, audience: string): Promise<MintedToken> {
-    const response = await this.post('/api/v1/auth/broker/token', { sub, audience });
+  /**
+   * Mint an access token for *audience* on behalf of the user *sub*. *bindingSecret* is the
+   * one `redeem` returned for their sign-in; null only for a sign-in made before it existed.
+   */
+  async mint(sub: string, audience: string, bindingSecret: string | null): Promise<MintedToken> {
+    const response = await this.post('/api/v1/auth/broker/token', {
+      sub,
+      audience,
+      ...(bindingSecret ? { binding_secret: bindingSecret } : {}),
+    });
     if (response.status === 409) {
       throw new BrokerSignInRequiredError(await describe(response));
     }
