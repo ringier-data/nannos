@@ -319,7 +319,7 @@ export function UserDetailPage() {
           Impersonate User
         </Button>
         <UserStatusBadge status={user.status ?? 'active'} />
-        <UserOnboardingBadge onboarding={user.onboarding} isServiceAccount={user.is_service_account} />
+        <UserOnboardingBadge onboarding={user.onboarding} />
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">

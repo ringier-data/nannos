@@ -3,9 +3,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { UserOnboarding } from '@/api/generated';
 
 interface UserOnboardingBadgeProps {
-  onboarding: UserOnboarding;
-  /** Machine identities never sign in interactively, so onboarding says nothing about them. */
-  isServiceAccount?: boolean;
+  /** Null for a service account, which never signs in interactively. */
+  onboarding: UserOnboarding | null;
 }
 
 /**
@@ -13,8 +12,8 @@ interface UserOnboardingBadgeProps {
  * onboarded, so a healthy list stays quiet. Not-yet-signed-in is the normal state right
  * after SCIM provisioning, so it reads as pending, never as an error.
  */
-export function UserOnboardingBadge({ onboarding, isServiceAccount }: UserOnboardingBadgeProps) {
-  if (isServiceAccount || (onboarding.signed_in && onboarding.scheduler_ready)) {
+export function UserOnboardingBadge({ onboarding }: UserOnboardingBadgeProps) {
+  if (!onboarding || (onboarding.signed_in && onboarding.scheduler_ready)) {
     return null;
   }
   const { label, hint } = !onboarding.signed_in

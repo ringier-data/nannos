@@ -264,7 +264,7 @@ export function UsersPage() {
                   <TableCell>
                     <div className="flex flex-wrap items-center gap-1">
                       <UserStatusBadge status={user.status ?? 'active'} />
-                      <UserOnboardingBadge onboarding={user.onboarding} isServiceAccount={user.is_service_account} />
+                      <UserOnboardingBadge onboarding={user.onboarding} />
                     </div>
                   </TableCell>
                   <TableCell>

@@ -111,3 +111,32 @@ async def test_first_sign_in_flips_scheduler_ready(pg_session, people, group_ser
     assert {m.user_id: m.onboarding for m in members}["chat-only-user"] == UserOnboarding(
         signed_in=True, scheduler_ready=True
     )
+
+
+@pytest.mark.asyncio
+async def test_service_account_has_no_onboarding(pg_session, people, group_service):
+    """A machine identity never signs in interactively, so every listing reports none,
+    whether it is reached through the user pages or as a group member."""
+    await pg_session.execute(
+        text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, role, status, is_service_account,
+                               created_at, updated_at)
+            VALUES ('svc-user', 'service-account-client', 'svc@example.com', 'Svc', 'Account', 'member',
+                    'active', true, NOW(), NOW())
+        """),
+    )
+    await pg_session.execute(
+        text("INSERT INTO user_group_members (user_group_id, user_id, group_role) VALUES (:g, 'svc-user', 'read')"),
+        {"g": GROUP_ID},
+    )
+    await pg_session.commit()
+
+    users, _ = await UserService().list_users(pg_session, group_id=GROUP_ID)
+    detail = await UserService().get_user_with_groups(pg_session, "svc-user")
+    members, _ = await group_service.list_members(pg_session, GROUP_ID)
+    group = await group_service.get_group_with_members(pg_session, GROUP_ID)
+
+    assert {u.id: u.onboarding for u in users}["svc-user"] is None
+    assert detail is not None and detail.onboarding is None
+    assert {m.user_id: m.onboarding for m in members}["svc-user"] is None
+    assert group is not None and {m.user_id: m.onboarding for m in group.members}["svc-user"] is None

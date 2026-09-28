@@ -45,7 +45,8 @@ class MemberInfo(BaseModel):
     first_name: str
     last_name: str
     group_role: Literal["read", "write", "manager"]
-    onboarding: UserOnboarding
+    #: None for a service account (see `UserOnboarding.of`).
+    onboarding: UserOnboarding | None
 
 
 class UserGroupWithMembers(UserGroup):

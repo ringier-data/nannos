@@ -129,7 +129,10 @@ class UserOnboarding(BaseModel):
     )
 
     @classmethod
-    def of(cls, sub: str, has_offline_token: bool) -> "UserOnboarding":
+    def of(cls, sub: str, has_offline_token: bool, is_service_account: bool) -> "UserOnboarding | None":
+        """None for a machine identity: it never signs in interactively, so it has no onboarding."""
+        if is_service_account:
+            return None
         return cls(signed_in=has_idp_identity(sub), scheduler_ready=has_offline_token)
 
 
@@ -137,7 +140,8 @@ class UserWithGroups(User):
     """User with group memberships."""
 
     groups: list[UserGroupMembership] = Field(default_factory=list)
-    onboarding: UserOnboarding
+    #: None for a service account (see `UserOnboarding.of`).
+    onboarding: UserOnboarding | None
 
 
 # Request/Response models for API

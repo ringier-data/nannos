@@ -317,7 +317,7 @@ class UserService:
         return UserWithGroups(
             **user.model_dump(),
             groups=groups,
-            onboarding=UserOnboarding.of(user.sub, bool(has_token)),
+            onboarding=UserOnboarding.of(user.sub, bool(has_token), user.is_service_account),
         )
 
     async def list_users(
@@ -469,7 +469,7 @@ class UserService:
                 UserWithGroups(
                     **user.model_dump(),
                     groups=groups_by_user.get(user.id, []),
-                    onboarding=UserOnboarding.of(user.sub, has_token[user.id]),
+                    onboarding=UserOnboarding.of(user.sub, has_token[user.id], user.is_service_account),
                 )
                 for user in users
             ]

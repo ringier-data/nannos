@@ -3459,7 +3459,7 @@ export type MemberInfo = {
      */
     last_name: string;
     group_role: RoleEnum;
-    onboarding: UserOnboarding;
+    onboarding: UserOnboarding | null;
 };
 
 /**
@@ -8413,7 +8413,7 @@ export type UserWithGroups = {
      * Groups
      */
     groups?: Array<UserGroupMembership>;
-    onboarding: UserOnboarding;
+    onboarding: UserOnboarding | null;
 };
 
 /**
