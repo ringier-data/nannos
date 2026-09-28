@@ -18,7 +18,7 @@ The flow, per login:
 3. The browser lands on the client's callback with ``code`` and the client's ``state``.
    The client ``redeem``\\s the code, authenticated with its own client-credentials token.
    Redeeming links the user to that client and records a **binding**: a secret returned
-   once (stored as a hash) and the tenant it belongs to, whose installations say where
+   once (stored as a hash) and the workspace it belongs to, whose installations say where
    the user can be reached (ADR-0011 amendment 1).
 4. From then on the client asks ``mint`` for tokens for the audiences it is allowed
    (``config.broker.always_granted_audiences`` and its own client id), for users linked
@@ -238,7 +238,7 @@ class BrokerService:
         code: str,
         *,
         account_key: str | None = None,
-        tenant_id: str = "",
+        workspace_id: str = "",
         installation_ids: list[str] | None = None,
     ) -> BrokerRedemption:
         """Trade a one-time code for the identity of who signed in, and bind the sign-in.
@@ -247,7 +247,7 @@ class BrokerService:
         The binding secret is returned here once and kept only as a hash: it is what makes
         a leaked client credential alone useless to ``mint``. *account_key* is the client
         row the binding belongs to (the user, when the client names none). *installation_ids*,
-        when given, refresh the tenant's installations: the client's word for where its
+        when given, refresh the workspace's installations: the client's word for where its
         sign-ins there can be reached, trusted as it is trusted to deliver there.
         """
         now = datetime.now(timezone.utc)
@@ -262,24 +262,24 @@ class BrokerService:
             client_id=client.client_id,
             account_key=account_key or f"user:{identity['user_id']}",
             user_id=identity["user_id"],
-            tenant_id=tenant_id,
+            workspace_id=workspace_id,
             secret_hash=_digest(binding_secret),
             now=now,
         )
         if installation_ids is not None:
-            await self.set_tenant_installations(db, client, tenant_id, installation_ids)
+            await self.set_workspace_installations(db, client, workspace_id, installation_ids)
         return BrokerRedemption(**identity, binding_secret=binding_secret)
 
-    async def set_tenant_installations(
-        self, db: AsyncSession, client: BrokerClient, tenant_id: str, installation_ids: list[str]
+    async def set_workspace_installations(
+        self, db: AsyncSession, client: BrokerClient, workspace_id: str, installation_ids: list[str]
     ) -> None:
-        """Record the installations *client* runs in *tenant_id* now. Every sign-in for the
-        tenant is reachable on each of them, including sign-ins made before an installation
+        """Record the installations *client* runs in *workspace_id* now. Every sign-in for the
+        workspace is reachable on each of them, including sign-ins made before an installation
         was added."""
-        await self._requests.set_tenant_installations(
+        await self._requests.set_workspace_installations(
             db,
             client_id=client.client_id,
-            tenant_id=tenant_id,
+            workspace_id=workspace_id,
             installation_ids=installation_ids,
             now=datetime.now(timezone.utc),
         )

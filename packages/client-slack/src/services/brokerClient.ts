@@ -47,11 +47,11 @@ export interface BrokerBinding {
    */
   accountKey: string;
   /** The account the sign-in belongs to (a Slack team, a Google Chat project); empty when there is one. */
-  tenantId?: string;
+  workspaceId?: string;
   /**
-   * The installations this client runs in that tenant, as it registers its delivery channels
-   * (`installation_id`): where every sign-in for the tenant can be reached. Omitted leaves
-   * what the broker has for the tenant.
+   * The installations this client runs in that workspace, as it registers its delivery channels
+   * (`installation_id`): where every sign-in for the workspace can be reached. Omitted leaves
+   * what the broker has for the workspace.
    */
   installationIds?: string[];
 }
@@ -125,7 +125,7 @@ export class BrokerClient {
     const response = await this.post('/api/v1/auth/broker/redeem', {
       code,
       account_key: binding.accountKey,
-      tenant_id: binding.tenantId ?? '',
+      workspace_id: binding.workspaceId ?? '',
       ...(binding.installationIds ? { installation_ids: binding.installationIds } : {}),
     });
     if (!response.ok) {
@@ -155,15 +155,15 @@ export class BrokerClient {
   }
 
   /**
-   * Tell the broker the installations this client runs in *tenantId* now, so every sign-in
+   * Tell the broker the installations this client runs in *workspaceId* now, so every sign-in
    * there is reachable on each, including one installed after the user signed in.
    */
-  async setTenantInstallations(tenantId: string, installationIds: string[]): Promise<void> {
-    const response = await this.send('PUT', `/api/v1/auth/broker/tenants/${encodeURIComponent(tenantId)}`, {
+  async setWorkspaceInstallations(workspaceId: string, installationIds: string[]): Promise<void> {
+    const response = await this.send('PUT', `/api/v1/auth/broker/workspaces/${encodeURIComponent(workspaceId)}`, {
       installation_ids: installationIds,
     });
     if (!response.ok) {
-      throw new BrokerError(`Broker refused the installations of ${tenantId}: ${await describe(response)}`, response.status);
+      throw new BrokerError(`Broker refused the installations of ${workspaceId}: ${await describe(response)}`, response.status);
     }
   }
 

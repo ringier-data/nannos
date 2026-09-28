@@ -112,7 +112,7 @@ export class BrokerUserAuthService implements IUserAuthService {
     }
     const redemption = await this.broker.redeem(code, {
       accountKey: `${projectId}:${userId}`,
-      tenantId: projectId,
+      workspaceId: projectId,
       installationIds: this.installationsOf(projectId),
     });
     const now = Date.now();

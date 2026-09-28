@@ -66,7 +66,7 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
   }
 
   if (deps.broker) {
-    await publishTenantInstallations(deps.broker, installations);
+    await publishWorkspaceInstallations(deps.broker, installations);
   }
 
   const active = installations.filter((b) => b.isActive);
@@ -98,14 +98,14 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
  * deactivated is sent with none, so its sign-ins stop counting as reachable. Per-team
  * isolation, like the channels: one refusal does not stop the rest.
  */
-async function publishTenantInstallations(broker: BrokerClient, installations: BotInstallation[]): Promise<void> {
+async function publishWorkspaceInstallations(broker: BrokerClient, installations: BotInstallation[]): Promise<void> {
   const teams = new Map<string, BotInstallation[]>();
   for (const bot of installations) {
     teams.set(bot.teamId, [...(teams.get(bot.teamId) ?? []), bot]);
   }
   for (const [teamId, bots] of teams) {
     try {
-      await broker.setTenantInstallations(teamId, activeAppIds(bots));
+      await broker.setWorkspaceInstallations(teamId, activeAppIds(bots));
     } catch (error) {
       logger.error(error, `Failed to publish the installations of team ${teamId}: ${error}`);
     }

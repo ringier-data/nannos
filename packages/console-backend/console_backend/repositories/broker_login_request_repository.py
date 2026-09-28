@@ -157,7 +157,7 @@ class BrokerLoginRequestRepository:
         client_id: str,
         account_key: str,
         user_id: str,
-        tenant_id: str,
+        workspace_id: str,
         secret_hash: str,
         now: datetime,
     ) -> None:
@@ -167,11 +167,11 @@ class BrokerLoginRequestRepository:
         await db.execute(
             text("""
                 INSERT INTO broker_bindings
-                    (client_id, account_key, user_id, tenant_id, secret_hash, created_at, updated_at)
-                VALUES (:client_id, :account_key, :user_id, :tenant_id, :secret_hash, :now, :now)
+                    (client_id, account_key, user_id, workspace_id, secret_hash, created_at, updated_at)
+                VALUES (:client_id, :account_key, :user_id, :workspace_id, :secret_hash, :now, :now)
                 ON CONFLICT (client_id, account_key) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
-                    tenant_id = EXCLUDED.tenant_id,
+                    workspace_id = EXCLUDED.workspace_id,
                     secret_hash = EXCLUDED.secret_hash,
                     updated_at = EXCLUDED.updated_at
             """),
@@ -179,27 +179,27 @@ class BrokerLoginRequestRepository:
                 "client_id": client_id,
                 "account_key": account_key,
                 "user_id": user_id,
-                "tenant_id": tenant_id,
+                "workspace_id": workspace_id,
                 "secret_hash": secret_hash,
                 "now": now,
             },
         )
 
-    async def set_tenant_installations(
-        self, db: AsyncSession, *, client_id: str, tenant_id: str, installation_ids: list[str], now: datetime
+    async def set_workspace_installations(
+        self, db: AsyncSession, *, client_id: str, workspace_id: str, installation_ids: list[str], now: datetime
     ) -> None:
-        """Replace the installations *client_id* runs in *tenant_id*."""
+        """Replace the installations *client_id* runs in *workspace_id*."""
         await db.execute(
             text("""
-                INSERT INTO broker_tenants (client_id, tenant_id, installation_ids, updated_at)
-                VALUES (:client_id, :tenant_id, :installation_ids, :now)
-                ON CONFLICT (client_id, tenant_id) DO UPDATE SET
+                INSERT INTO broker_workspaces (client_id, workspace_id, installation_ids, updated_at)
+                VALUES (:client_id, :workspace_id, :installation_ids, :now)
+                ON CONFLICT (client_id, workspace_id) DO UPDATE SET
                     installation_ids = EXCLUDED.installation_ids,
                     updated_at = EXCLUDED.updated_at
             """),
             {
                 "client_id": client_id,
-                "tenant_id": tenant_id,
+                "workspace_id": workspace_id,
                 "installation_ids": sorted(set(installation_ids)),
                 "now": now,
             },

@@ -14,7 +14,7 @@
 --   its secret; two rows of one user never evict each other. A client that sends none is
 --   keyed by the user.
 --
--- * tenant_id: the client's account the sign-in belongs to (a Slack team, a Google Chat
+-- * workspace_id: the client's account the sign-in belongs to (a Slack team, a Google Chat
 --   project; '' for a client with one), which says where the user can be reached below.
 ALTER TABLE broker_clients ADD COLUMN require_binding_secret BOOLEAN NOT NULL DEFAULT FALSE;
 
@@ -23,7 +23,7 @@ CREATE TABLE broker_bindings (
     client_id    TEXT NOT NULL REFERENCES broker_clients(client_id) ON DELETE CASCADE ON UPDATE CASCADE,
     account_key  TEXT NOT NULL,
     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    tenant_id    TEXT NOT NULL DEFAULT '',
+    workspace_id TEXT NOT NULL DEFAULT '',
     secret_hash  TEXT NOT NULL UNIQUE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -31,23 +31,23 @@ CREATE TABLE broker_bindings (
 );
 CREATE INDEX idx_broker_bindings_user ON broker_bindings(user_id);
 
--- Where a tenant's sign-ins can be reached: the installations its client runs there, in
+-- Where a workspace's sign-ins can be reached: the installations its client runs there, in
 -- the vocabulary its delivery channels are registered under (delivery_channels
--- .installation_id, scoped by client_id). Once per tenant, not per binding, because a
+-- .installation_id, scoped by client_id). Once per workspace, not per binding, because a
 -- Slack sign-in is per team and reaches every app the client has in it, including one
 -- installed after the user signed in. The client keeps it current: at each redeem, and
 -- (Slack) whenever it registers its delivery channels. This is what tells the scheduler
 -- whether a subscriber can receive on a channel (#192).
-CREATE TABLE broker_tenants (
+CREATE TABLE broker_workspaces (
     client_id         TEXT NOT NULL REFERENCES broker_clients(client_id) ON DELETE CASCADE ON UPDATE CASCADE,
-    tenant_id         TEXT NOT NULL,
+    workspace_id      TEXT NOT NULL,
     installation_ids  TEXT[] NOT NULL DEFAULT '{}',
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (client_id, tenant_id)
+    PRIMARY KEY (client_id, workspace_id)
 );
-CREATE INDEX idx_broker_tenants_installations ON broker_tenants USING GIN (installation_ids);
+CREATE INDEX idx_broker_workspaces_installations ON broker_workspaces USING GIN (installation_ids);
 
 -- rambler down
-DROP TABLE IF EXISTS broker_tenants;
+DROP TABLE IF EXISTS broker_workspaces;
 DROP TABLE IF EXISTS broker_bindings;
 ALTER TABLE broker_clients DROP COLUMN IF EXISTS require_binding_secret;

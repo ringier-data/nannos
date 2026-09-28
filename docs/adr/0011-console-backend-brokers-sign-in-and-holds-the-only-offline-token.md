@@ -23,12 +23,18 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > in a team, an email address; the user when a client names none), so a sign-in into the
 > same row replaces it and two rows of one person never evict each other.
 >
-> The same redeem carries where the user can be reached, and it lives on the **tenant**,
-> not the binding (`broker_tenants`): `installation_ids`, in the vocabulary the client
+> A **workspace** is the unit a chat client shares one sign-in across: a Slack team, a
+> Google Chat project, or the one account of a client without either. It is deliberately
+> not called a tenant: the chat clients already use "tenant" for an *installation* (a Slack
+> app, the key its delivery channels and secrets are registered under), and a Slack
+> workspace can hold several of those.
+>
+> The same redeem carries where the user can be reached, and it lives on the **workspace**,
+> not the binding (`broker_workspaces`): `installation_ids`, in the vocabulary the client
 > registers its delivery channels under (`delivery_channels.installation_id`, scoped by
 > `client_id`). A Slack sign-in is per team and a push is looked up by team, so it reaches
 > every app the client has there, including one installed after the user signed in; Slack
-> therefore also publishes each team's active apps (`PUT /tenants/{tenant_id}`) whenever it
+> therefore also publishes each team's active apps (`PUT /workspaces/{workspace_id}`) whenever it
 > registers its channels. Google Chat maps its project number to the project name its
 > channels use; email and the cockpit BFF have no channel and send none. This is what
 > ringier-data/nannos#192 reads to tell whether a subscriber can receive on a channel.

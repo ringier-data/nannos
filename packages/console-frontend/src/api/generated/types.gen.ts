@@ -542,15 +542,15 @@ export type BrokerRedeemRequest = {
      */
     account_key?: string | null;
     /**
-     * Tenant Id
+     * Workspace Id
      *
      * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one.
      */
-    tenant_id?: string;
+    workspace_id?: string;
     /**
      * Installation Ids
      *
-     * The installations the client runs in the tenant, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the tenant. Omitted: the tenant's installations are left as they are.
+     * The installations the client runs in the workspace, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the workspace. Omitted: the workspace's installations are left as they are.
      */
     installation_ids?: Array<string> | null;
 };
@@ -620,20 +620,6 @@ export type BrokerRedemption = {
 };
 
 /**
- * BrokerTenantInstallations
- *
- * ``PUT /tenants/{tenant_id}``: the client's current installations in one tenant.
- */
-export type BrokerTenantInstallations = {
-    /**
-     * Installation Ids
-     *
-     * The installations the client runs in the tenant, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the tenant.
-     */
-    installation_ids: Array<string>;
-};
-
-/**
  * BrokerTokenRequest
  */
 export type BrokerTokenRequest = {
@@ -671,6 +657,20 @@ export type BrokerTokenResponse = {
      * Token Type
      */
     token_type?: string;
+};
+
+/**
+ * BrokerWorkspaceInstallations
+ *
+ * ``PUT /workspaces/{workspace_id}``: the client's current installations in one workspace.
+ */
+export type BrokerWorkspaceInstallations = {
+    /**
+     * Installation Ids
+     *
+     * The installations the client runs in the workspace, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the workspace.
+     */
+    installation_ids: Array<string>;
 };
 
 /**
@@ -9526,35 +9526,35 @@ export type MintTokenApiV1AuthBrokerTokenPostResponses = {
 
 export type MintTokenApiV1AuthBrokerTokenPostResponse = MintTokenApiV1AuthBrokerTokenPostResponses[keyof MintTokenApiV1AuthBrokerTokenPostResponses];
 
-export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutData = {
-    body: BrokerTenantInstallations;
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutData = {
+    body: BrokerWorkspaceInstallations;
     path: {
         /**
-         * Tenant Id
+         * Workspace Id
          */
-        tenant_id: string;
+        workspace_id: string;
     };
     query?: never;
-    url: '/api/v1/auth/broker/tenants/{tenant_id}';
+    url: '/api/v1/auth/broker/workspaces/{workspace_id}';
 };
 
-export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutErrors = {
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutError = SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutErrors[keyof SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutErrors];
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutError = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors];
 
-export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponses = {
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses = {
     /**
      * Successful Response
      */
     204: void;
 };
 
-export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponse = SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponses[keyof SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponses];
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponse = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses];
 
 export type ListBrokerClientsApiV1AdminBrokerClientsGetData = {
     body?: never;

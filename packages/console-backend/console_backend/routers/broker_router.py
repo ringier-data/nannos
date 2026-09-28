@@ -7,7 +7,7 @@ Browser leg (no authentication — the user signs in at Keycloak):
 Client leg (the broker client's own client-credentials token):
   POST /redeem      — trade the one-time code for who signed in and a binding secret
   POST /token       — mint an access token for a bound user and an allowed audience
-  PUT  /tenants/{id} — the installations the client runs in one of its tenants
+  PUT  /workspaces/{id} — the installations the client runs in one of its workspaces
 """
 
 import logging
@@ -23,7 +23,7 @@ from ..models.broker import (
     BrokerClient,
     BrokerRedeemRequest,
     BrokerRedemption,
-    BrokerTenantInstallations,
+    BrokerWorkspaceInstallations,
     BrokerTokenRequest,
     BrokerTokenResponse,
 )
@@ -148,7 +148,7 @@ async def redeem(
             client,
             body.code,
             account_key=body.account_key,
-            tenant_id=body.tenant_id,
+            workspace_id=body.workspace_id,
             installation_ids=body.installation_ids,
         )
     except BrokerRefusal as e:
@@ -172,19 +172,19 @@ async def mint_token(
         raise _refused(e) from e
 
 
-@router.put("/tenants/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def set_tenant_installations(
-    tenant_id: str,
-    body: BrokerTenantInstallations,
+@router.put("/workspaces/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def set_workspace_installations(
+    workspace_id: str,
+    body: BrokerWorkspaceInstallations,
     request: Request,
     db: DbSession,
     client: BrokerClient = Depends(require_broker_client),
 ) -> None:
-    """Replace the installations this client runs in *tenant_id*: where every sign-in
-    for that tenant can be reached. Called whenever the client (re)registers its delivery
+    """Replace the installations this client runs in *workspace_id*: where every sign-in
+    for that workspace can be reached. Called whenever the client (re)registers its delivery
     channels, so an installation added after a user signed in reaches them too."""
-    if len(tenant_id) > 200:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is too long")
-    await _get_broker_service(request).set_tenant_installations(db, client, tenant_id, body.installation_ids)
+    if len(workspace_id) > 200:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="workspace_id is too long")
+    await _get_broker_service(request).set_workspace_installations(db, client, workspace_id, body.installation_ids)
     await db.commit()
 

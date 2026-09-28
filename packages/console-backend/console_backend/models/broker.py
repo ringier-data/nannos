@@ -244,14 +244,14 @@ class BrokerIdentity(BaseModel):
     company_name: str | None = None
 
 
-_TENANT_ID_DESCRIPTION = (
+_WORKSPACE_ID_DESCRIPTION = (
     "The client's account the sign-in belongs to (a Slack team, a Google Chat project); "
     "empty for a client with only one."
 )
 _INSTALLATION_IDS_DESCRIPTION = (
-    "The installations the client runs in the tenant, as it registers its delivery channels "
+    "The installations the client runs in the workspace, as it registers its delivery channels "
     "(`installation_id`). A notification on one of those channels can reach every user "
-    "signed in for the tenant."
+    "signed in for the workspace."
 )
 
 
@@ -267,16 +267,16 @@ class BrokerRedeemRequest(BaseModel):
             "secret. Omitted: one binding per user."
         ),
     )
-    tenant_id: str = Field(default="", max_length=200, description=_TENANT_ID_DESCRIPTION)
+    workspace_id: str = Field(default="", max_length=200, description=_WORKSPACE_ID_DESCRIPTION)
     installation_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] | None = Field(
         default=None,
         max_length=100,
-        description=_INSTALLATION_IDS_DESCRIPTION + " Omitted: the tenant's installations are left as they are.",
+        description=_INSTALLATION_IDS_DESCRIPTION + " Omitted: the workspace's installations are left as they are.",
     )
 
 
-class BrokerTenantInstallations(BaseModel):
-    """``PUT /tenants/{tenant_id}``: the client's current installations in one tenant."""
+class BrokerWorkspaceInstallations(BaseModel):
+    """``PUT /workspaces/{workspace_id}``: the client's current installations in one workspace."""
 
     installation_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(max_length=100, description=_INSTALLATION_IDS_DESCRIPTION)
 

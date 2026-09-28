@@ -66,8 +66,8 @@ describe('BrokerClient', () => {
     const [call] = calls();
     expect(call.url).toBe('http://console:8080/api/v1/auth/broker/redeem');
     expect(call.init.headers.Authorization).toBe('Bearer svc-1');
-    // Installations omitted: the broker leaves the tenant's as they are.
-    expect(JSON.parse(call.init.body)).toEqual({ code: 'code-1', account_key: 'acct-1', tenant_id: '' });
+    // Installations omitted: the broker leaves the workspace's as they are.
+    expect(JSON.parse(call.init.body)).toEqual({ code: 'code-1', account_key: 'acct-1', workspace_id: '' });
     expect(credentials).toHaveBeenCalledWith('agent-console');
   });
 
@@ -76,24 +76,24 @@ describe('BrokerClient', () => {
       response(200, { user_id: 'u1', sub: 'sub-1', groups: [], binding_secret: 'secret-1' })
     );
 
-    const redemption = await broker.redeem('code-1', { accountKey: 'T1:U1', tenantId: 'T1', installationIds: ['A1', 'A2'] });
+    const redemption = await broker.redeem('code-1', { accountKey: 'T1:U1', workspaceId: 'T1', installationIds: ['A1', 'A2'] });
 
     expect(redemption.binding_secret).toBe('secret-1');
     expect(JSON.parse(calls()[0].init.body)).toEqual({
       code: 'code-1',
       account_key: 'T1:U1',
-      tenant_id: 'T1',
+      workspace_id: 'T1',
       installation_ids: ['A1', 'A2'],
     });
   });
 
-  test('sets a tenant\'s installations with a PUT as the client', async () => {
+  test('sets a workspace\'s installations with a PUT as the client', async () => {
     fetchMock.mockImplementation(async () => response(204, {}));
 
-    await broker.setTenantInstallations('T 1', ['A1']);
+    await broker.setWorkspaceInstallations('T 1', ['A1']);
 
     const [call] = calls();
-    expect(call.url).toBe('http://console:8080/api/v1/auth/broker/tenants/T%201');
+    expect(call.url).toBe('http://console:8080/api/v1/auth/broker/workspaces/T%201');
     expect(call.init.method).toBe('PUT');
     expect(call.init.headers.Authorization).toBe('Bearer svc-1');
     expect(JSON.parse(call.init.body)).toEqual({ installation_ids: ['A1'] });

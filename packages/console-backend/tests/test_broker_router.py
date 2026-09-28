@@ -26,7 +26,7 @@ from console_backend.models.broker import (
     BrokerClientCreate,
     BrokerRedeemRequest,
     BrokerRedemption,
-    BrokerTenantInstallations,
+    BrokerWorkspaceInstallations,
     BrokerTokenRequest,
     BrokerTokenResponse,
 )
@@ -326,7 +326,7 @@ class TestBrowserLeg:
 
 
 class TestClientLegCarriesTheBinding:
-    """The HTTP layer hands the binding fields to the service untouched: the tenant and
+    """The HTTP layer hands the binding fields to the service untouched: the workspace and
     installations on /redeem, the secret on /token."""
 
     @pytest.fixture
@@ -336,14 +336,14 @@ class TestClientLegCarriesTheBinding:
         return service, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(broker_service=service)))
 
     @pytest.mark.asyncio
-    async def test_redeem_passes_account_tenant_and_installations(self, service_request):
+    async def test_redeem_passes_account_workspace_and_installations(self, service_request):
         service, request = service_request
         service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
         db = AsyncMock()
         client = _client()
 
         result = await router.redeem(
-            BrokerRedeemRequest(code="c", account_key="T1:U1", tenant_id="T1", installation_ids=["A1"]),
+            BrokerRedeemRequest(code="c", account_key="T1:U1", workspace_id="T1", installation_ids=["A1"]),
             request,
             db,
             client,
@@ -351,21 +351,21 @@ class TestClientLegCarriesTheBinding:
 
         assert result.binding_secret == "secret"
         service.redeem.assert_awaited_once_with(
-            db, client, "c", account_key="T1:U1", tenant_id="T1", installation_ids=["A1"]
+            db, client, "c", account_key="T1:U1", workspace_id="T1", installation_ids=["A1"]
         )
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_a_client_sets_its_tenants_installations(self, service_request):
+    async def test_a_client_sets_its_workspaces_installations(self, service_request):
         service, request = service_request
         db = AsyncMock()
         client = _client()
 
-        await router.set_tenant_installations(
-            "T1", BrokerTenantInstallations(installation_ids=["A1", "A2"]), request, db, client
+        await router.set_workspace_installations(
+            "T1", BrokerWorkspaceInstallations(installation_ids=["A1", "A2"]), request, db, client
         )
 
-        service.set_tenant_installations.assert_awaited_once_with(db, client, "T1", ["A1", "A2"])
+        service.set_workspace_installations.assert_awaited_once_with(db, client, "T1", ["A1", "A2"])
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
