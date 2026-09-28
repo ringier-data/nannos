@@ -401,6 +401,11 @@ class TestAClientReportsWhatReachedNobody:
         assert count == 1, "the onboarding badge counts it"
         assert await svc.resume_job(db, job.id, u["member"]) is True
 
+    def test_an_overlong_detail_is_cut_not_refused(self):
+        """A 422 over a diagnostic string would drop the report, and the run would stay delivered."""
+        report = UndeliveredReport(run_id=1, installation_id="A1", reason="send_failed", detail="x" * 2000)
+        assert report.detail == "x" * 500
+
     @pytest.mark.asyncio
     async def test_a_failed_send_marks_the_run_but_keeps_the_job_running(self, world):
         svc, db, u = world["service"], world["db"], world["users"]

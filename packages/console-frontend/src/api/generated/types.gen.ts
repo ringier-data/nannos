@@ -7652,7 +7652,7 @@ export type UndeliveredReport = {
     /**
      * Detail
      *
-     * What failed, for the run record.
+     * What failed, for the run record. Longer than 500 characters is cut, not refused.
      */
     detail?: string | null;
 };

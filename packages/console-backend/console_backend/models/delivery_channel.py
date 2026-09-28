@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 # The one definition of a channel format, shared with every writer through the SDK.
 from ringier_a2a_sdk.message_formatting import DEFAULT_MESSAGE_FORMATTING, MessageFormatting
 
@@ -107,6 +107,10 @@ class DeliveryChannelListResponse(BaseModel):
     total: int = 0
 
 
+#: How much of a client's failure detail the run record keeps.
+_DETAIL_MAX = 500
+
+
 class UndeliveredReport(BaseModel):
     """A chat client's report that it could not deliver a scheduled run's notification.
 
@@ -127,4 +131,13 @@ class UndeliveredReport(BaseModel):
             "found but posting failed; the run is marked undelivered and the job keeps running."
         )
     )
-    detail: str | None = Field(default=None, max_length=500, description="What failed, for the run record.")
+    detail: str | None = Field(
+        default=None, description="What failed, for the run record. Longer than 500 characters is cut, not refused."
+    )
+
+    @field_validator("detail", mode="before")
+    @classmethod
+    def _cut_detail(cls, value: object) -> object:
+        """Cut, never refuse: a 422 over a diagnostic string would drop the report itself,
+        leaving the run counted as delivered, which is the silent failure it exists for."""
+        return value[:_DETAIL_MAX] if isinstance(value, str) else value
