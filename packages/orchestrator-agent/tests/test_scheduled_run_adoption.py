@@ -2,7 +2,7 @@
 
 One contract, two continuity mechanisms. A conversation opened with a
 scheduled_run origin is validated server-side under the authenticated user's
-token (_validate_scheduled_run_origin), then mapped onto the registered
+token (_confirmed_conversation_origin), then mapped onto the registered
 sub-agent's native continuity mechanism (_build_adoption_seed):
 
 - remote and local/automated agents alike get
@@ -30,7 +30,6 @@ from app.core.agent import (
     _adopted_sub_agent_ids_from_tracking,
     _build_adoption_seed,
     _confirmed_conversation_origin,
-    _validate_scheduled_run_origin,
 )
 
 BACKEND_URL = "http://console-backend.test"
@@ -114,12 +113,14 @@ def _patched_backend(job=JOB, run=RUN, job_status=200, run_status=200):
 
 
 async def _validate(origin=None):
-    return await _validate_scheduled_run_origin(
+    """The adoption record the orchestrator derives for *origin*, or None."""
+    _, adoption = await _confirmed_conversation_origin(
         origin if origin is not None else dict(ORIGIN), "tok", BACKEND_URL
     )
+    return adoption
 
 
-class TestValidateScheduledRunOrigin:
+class TestAdoptionRecord:
     @pytest.mark.asyncio
     async def test_returns_server_side_run_data(self):
         with _patched_backend() as mock_client:

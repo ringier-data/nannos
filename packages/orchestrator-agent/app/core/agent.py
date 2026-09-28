@@ -165,9 +165,9 @@ def _build_scheduled_run_history(
     tool call to the sub-agent, and the run's output as the tool result. This
     gives the model the run's prompt and output as real context; it does NOT
     by itself resume the run's checkpoint. Conversation adoption is seeded
-    separately (_validate_scheduled_run_origin + _build_adoption_seed): a
+    separately (_confirmed_conversation_origin + _build_adoption_seed): a
     follow-up delegation resumes the run's conversation on the executing
-    server for remote sub-agents, or on a fork of the run's checkpoint for
+    server for remote sub-agents, or on the run's own thread for
     local/automated ones.
 
     For a run without a sub-agent (a plain watch notification) there is no
@@ -486,23 +486,6 @@ def _adoption_from_resolved(
     }
 
 
-async def _validate_scheduled_run_origin(
-    origin: dict[str, Any],
-    access_token: str,
-    console_backend_url: str,
-) -> dict[str, Any] | None:
-    """Resolve a scheduled_run origin and return its adoption record, or None.
-
-    Returns ``{"sub_agent_id", "conversation_id", "job_id", "run_id", "provenance"}``
-    or None when the origin does not resolve to an owned, adoptable run with a
-    stored conversation.
-    """
-    if _origin_int(origin.get("sub_agent_id")) is None:
-        return None
-    resolved = await _resolve_scheduled_run(origin, access_token, console_backend_url)
-    return _adoption_from_resolved(origin, resolved) if resolved else None
-
-
 async def _confirmed_conversation_origin(
     origin: dict[str, Any] | None,
     access_token: str,
@@ -524,6 +507,7 @@ async def _confirmed_conversation_origin(
         logger.info(f"Conversation origin (kind={origin.get('kind')!r}) not confirmed for this user; ignored")
         return None, None
     return origin, _adoption_from_resolved(origin, resolved)
+
 
 def _shared_job_provenance(job: dict[str, Any]) -> dict[str, str] | None:
     """The "why do I get this" facts of a shared scheduled job, or None if it is the
@@ -749,7 +733,7 @@ class OrchestratorDeepAgent:
             sandbox_pool: Optional SandboxPool for sandbox-enabled sub-agents
             adopted_sub_agent_ids: Console ids of sub-agents this conversation
                 adopted a scheduled run of. Validated server-side on the blank
-                first turn (_validate_scheduled_run_origin), then re-derived on
+                first turn (_confirmed_conversation_origin), then re-derived on
                 every later turn — HITL resumes included — from the a2a_tracking
                 records persisted in the checkpoint
                 (_adopted_sub_agent_ids_from_tracking). Unlocks registration of
@@ -894,7 +878,7 @@ class OrchestratorDeepAgent:
         # Conversation-origin adoption, resolved BEFORE the runtime context is
         # built: an automated (scheduler-only) sub-agent is registered into
         # this conversation only when the origin validated server-side as one
-        # of the user's own runs (see _validate_scheduled_run_origin), so the
+        # of the user's own runs (see _confirmed_conversation_origin), so the
         # adopted ids must be known at registry-build time. The expensive
         # validation runs on the blank first turn only; EVERY turn — including
         # HITL resumes, where the adopted agent's own interrupt is being

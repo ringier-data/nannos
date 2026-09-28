@@ -94,7 +94,7 @@ def test_adoption_puts_every_conversation_on_the_runs_own_thread():
     1. ``job.delivery_channel_id`` is singular — one notification per run;
     2. adoption happens by replying in that notification's thread, and a thread
        maps to one conversation;
-    3. ``_validate_scheduled_run_origin`` re-resolves the job under the
+    3. ``_confirmed_conversation_origin`` re-resolves the job under the
        authenticated user's token, so another user's job 404s.
 
     Break any of them — a job gaining several delivery channels is the likely one
