@@ -2374,6 +2374,12 @@ class TestSubscriberAgentAccessIsCheckedAtDispatch:
         repo.disable_subscription.assert_not_awaited()
 
 
+def _assert_left_for_the_healer(repo: AsyncMock) -> None:
+    """Neither a completed nor a minimally closed run: a running run blocks the claim."""
+    repo.complete_run.assert_not_awaited()
+    repo.close_run_minimally.assert_not_awaited()
+
+
 def _complete_job_failing_once() -> AsyncMock:
     """complete_job that raises on its first call, like a transient database error, and
     behaves normally after — so a second, counted finalize would be visible."""
@@ -2381,10 +2387,14 @@ def _complete_job_failing_once() -> AsyncMock:
 
 
 class TestAFailureToRecordAnOutcomeIsNotAFailureOfTheJob:
-    """#266: when _finalize cannot advance the job, the run keeps the outcome it was meant
-    to have and nothing is counted. The generic handler used to re-finalise it as a
-    counted FAILED carrying the raw database error, so a blip on a quiet poll or a park
-    moved consecutive_failures, and enough of them auto-paused the job."""
+    """#266: when _finalize cannot advance the job, nothing is counted. The generic handler
+    used to re-finalise the run as a counted FAILED carrying the raw database error, so a
+    blip on a quiet poll or a park moved consecutive_failures, and enough of them
+    auto-paused the job.
+
+    The run is left running for the healer, which sweeps it as INTERRUPTED (no count).
+    Closing it here instead would make the job claimable on the next tick with nothing
+    counting, so a persistent write failure would re-run and re-deliver it every tick."""
 
     @staticmethod
     def _watch_job() -> ScheduledJob:
@@ -2406,10 +2416,9 @@ class TestAFailureToRecordAnOutcomeIsNotAFailureOfTheJob:
         ):
             await engine._dispatch_job(self._watch_job())
 
-        # One attempt to advance, never a second (counted) one.
+        # One attempt to advance, never a second (counted) one; the run is the healer's.
         repo.complete_job.assert_awaited_once()
-        repo.complete_run.assert_awaited_once()
-        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.CONDITION_NOT_MET
+        _assert_left_for_the_healer(repo)
 
     @pytest.mark.asyncio
     async def test_a_hold_until_sign_in_is_not_turned_into_a_failure(self):
@@ -2423,8 +2432,7 @@ class TestAFailureToRecordAnOutcomeIsNotAFailureOfTheJob:
         await engine._dispatch_job(make_job())
 
         repo.complete_job.assert_awaited_once()
-        repo.complete_run.assert_awaited_once()
-        assert "No offline token" in repo.complete_run.await_args.kwargs["error_message"]
+        _assert_left_for_the_healer(repo)
 
     @pytest.mark.asyncio
     async def test_a_delivered_success_is_not_rewritten_as_failed(self):
@@ -2441,8 +2449,7 @@ class TestAFailureToRecordAnOutcomeIsNotAFailureOfTheJob:
             await engine._dispatch_job(make_job())
 
         repo.complete_job.assert_awaited_once()
-        repo.complete_run.assert_awaited_once()
-        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.SUCCESS
+        _assert_left_for_the_healer(repo)
 
     @pytest.mark.asyncio
     async def test_a_resumed_run_is_not_rewritten_as_failed(self):
@@ -2468,8 +2475,7 @@ class TestAFailureToRecordAnOutcomeIsNotAFailureOfTheJob:
 
         assert returned == 21
         repo.complete_job.assert_awaited_once()
-        repo.complete_run.assert_awaited_once()
-        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.SUCCESS
+        _assert_left_for_the_healer(repo)
 
     @pytest.mark.asyncio
     async def test_a_run_whose_outcome_could_not_be_advanced_does_not_report_the_job_paused(self):
@@ -2482,7 +2488,10 @@ class TestAFailureToRecordAnOutcomeIsNotAFailureOfTheJob:
             await engine._finalize(run_id=5, job=make_job(), status=JobRunStatus.SUCCESS)
 
         engine._notify_job_paused.assert_not_awaited()
-        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.SUCCESS
+        _assert_left_for_the_healer(repo)
+
+
+STORED_AT = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
 class TestAnExpiredSignInHoldsTheSubscription:
@@ -2497,14 +2506,14 @@ class TestAnExpiredSignInHoldsTheSubscription:
         repo.create_run.return_value = 1
         repo.complete_job = AsyncMock(return_value=(False, _SIGN_IN_EXPIRED_REASON))
         token_service = AsyncMock(spec=SchedulerTokenService)
-        token_service.get_access_token.side_effect = OfflineTokenExpiredError("refused (invalid_grant)")
+        token_service.get_access_token.side_effect = OfflineTokenExpiredError("refused (invalid_grant)", STORED_AT)
         engine = _make_engine(repo=repo, token_service=token_service)
         job = make_job()
 
         await engine._dispatch_job(job)
 
         token_service.mark_expired.assert_awaited_once()
-        assert token_service.mark_expired.await_args.args[1] == job.user_id
+        assert token_service.mark_expired.await_args.args[1:] == (job.user_id, STORED_AT)
         assert repo.disable_subscription.await_args.args[1:] == (job.id, _SIGN_IN_EXPIRED_REASON)
         job_kwargs = repo.complete_job.await_args.kwargs
         assert job_kwargs["paused_reason"] == _SIGN_IN_EXPIRED_REASON
@@ -2516,7 +2525,7 @@ class TestAnExpiredSignInHoldsTheSubscription:
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run.return_value = 1
         token_service = AsyncMock(spec=SchedulerTokenService)
-        token_service.get_access_token.side_effect = OfflineTokenExpiredError("refused (invalid_grant)")
+        token_service.get_access_token.side_effect = OfflineTokenExpiredError("refused (invalid_grant)", STORED_AT)
         token_service.mark_expired.side_effect = RuntimeError("database gone")
         engine = _make_engine(repo=repo, token_service=token_service)
 

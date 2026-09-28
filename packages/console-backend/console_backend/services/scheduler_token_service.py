@@ -66,8 +66,16 @@ class OfflineTokenExpiredError(NoOfflineTokenError):
 
     A ``NoOfflineTokenError`` because the remedy is the same, a sign-in, and every caller
     that handles a missing token must handle this one the same way. A caller that acts on
-    it persists it with ``mark_expired``, so the token counts as absent from then on.
+    it persists it with ``mark_expired(db, user_id, error.stored_at)``, so the token counts
+    as absent from then on.
+
+    *stored_at* is the refused row's ``updated_at``: it names the token that was refused,
+    so a sign-in that stored a fresh one in the meantime is not marked with it.
     """
+
+    def __init__(self, message: str, stored_at: datetime) -> None:
+        super().__init__(message)
+        self.stored_at = stored_at
 
 
 def _is_invalid_grant(exc: httpx.HTTPStatusError) -> bool:
@@ -134,16 +142,19 @@ class SchedulerTokenService:
         await db.commit()
         logger.info("Revoked offline token for user %s", user_id)
 
-    async def mark_expired(self, db: AsyncSession, user_id: str) -> None:
+    async def mark_expired(self, db: AsyncSession, user_id: str, stored_at: datetime) -> None:
         """Record that Keycloak refused *user_id*'s vaulted token (see
         ``OfflineTokenExpiredError``). Kept, not deleted, so an expired sign-in stays
-        distinguishable from none; the next ``store_offline_token`` clears it."""
+        distinguishable from none; the next ``store_offline_token`` clears it.
+
+        Only the token stored at *stored_at* is marked: one the user stored by signing in
+        between the refusal and this call is live, and must stay so."""
         await db.execute(
             text("""
                 UPDATE user_offline_tokens SET expired_at = :now
-                WHERE user_id = :user_id AND expired_at IS NULL
+                WHERE user_id = :user_id AND updated_at = :stored_at AND expired_at IS NULL
             """),
-            {"user_id": user_id, "now": datetime.now(timezone.utc)},
+            {"user_id": user_id, "stored_at": stored_at, "now": datetime.now(timezone.utc)},
         )
         await db.commit()
         logger.info("Marked the offline token of user %s expired", user_id)
@@ -162,19 +173,21 @@ class SchedulerTokenService:
         )
         return {row[0] for row in result.all()}
 
-    async def _load_encrypted_blob(self, db: AsyncSession, user_id: str) -> bytes:
-        """The user's live vaulted token. Raises ``NoOfflineTokenError`` when none is stored,
-        ``OfflineTokenExpiredError`` when the stored one was already refused."""
+    async def _load_encrypted_blob(self, db: AsyncSession, user_id: str) -> tuple[bytes, datetime]:
+        """The user's live vaulted token and when it was stored. Raises ``NoOfflineTokenError``
+        when none is stored, ``OfflineTokenExpiredError`` when the stored one was already refused."""
         result = await db.execute(
-            text("SELECT encrypted_token, expired_at FROM user_offline_tokens WHERE user_id = :user_id"),
+            text("SELECT encrypted_token, expired_at, updated_at FROM user_offline_tokens WHERE user_id = :user_id"),
             {"user_id": user_id},
         )
         row = result.mappings().first()
         if row is None:
             raise NoOfflineTokenError(f"No offline token stored for user {user_id}. User must grant consent first.")
         if row["expired_at"] is not None:
-            raise OfflineTokenExpiredError(f"The offline token of user {user_id} has expired; they must sign in again.")
-        return bytes(row["encrypted_token"])
+            raise OfflineTokenExpiredError(
+                f"The offline token of user {user_id} has expired; they must sign in again.", row["updated_at"]
+            )
+        return bytes(row["encrypted_token"]), row["updated_at"]
 
     async def _decrypt_blob(self, blob: bytes) -> str:
         """Decrypt the stored KMS-envelope blob and return the plaintext refresh token."""
@@ -197,7 +210,7 @@ class SchedulerTokenService:
         caller persists with ``mark_expired``. Raises httpx.HTTPStatusError on any other
         Keycloak error: that says nothing about the token.
         """
-        blob = await self._load_encrypted_blob(db, user_id)
+        blob, stored_at = await self._load_encrypted_blob(db, user_id)
 
         refresh_token = await self._decrypt_blob(blob)
 
@@ -218,7 +231,8 @@ class SchedulerTokenService:
                 if _is_invalid_grant(exc):
                     raise OfflineTokenExpiredError(
                         f"Keycloak refused the offline token of user {user_id} (invalid_grant); "
-                        "they must sign in again."
+                        "they must sign in again.",
+                        stored_at,
                     ) from exc
                 raise
             data = resp.json()

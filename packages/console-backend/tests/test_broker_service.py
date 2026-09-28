@@ -270,7 +270,7 @@ class TestMint:
         ("error", "status"),
         [
             (NoOfflineTokenError("No offline token stored"), 409),  # never vaulted
-            (OfflineTokenExpiredError("refused (invalid_grant)"), 409),  # vaulted token is dead
+            (OfflineTokenExpiredError("refused (invalid_grant)", datetime.now(timezone.utc)), 409),  # vaulted token is dead
             (ValueError("Expecting value"), 502),  # e.g. a non-JSON Keycloak reply: our fault, not a sign-in cue
             (_keycloak_error(400, "invalid_grant"), 409),  # refused at the exchange step
             (_keycloak_error(403, "access_denied"), 502),  # exchange not permitted: config
@@ -291,13 +291,14 @@ class TestMint:
         self, broker, tokens, pg_session, test_user_db
     ):
         await self._linked(broker, pg_session, test_user_db)
-        tokens.get_exchanged_token_response.side_effect = OfflineTokenExpiredError("refused (invalid_grant)")
+        stored_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        tokens.get_exchanged_token_response.side_effect = OfflineTokenExpiredError("refused", stored_at)
         slack = await broker.resolve_client(pg_session, "slack-client")
 
         with pytest.raises(BrokerRefusal):
             await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")
 
-        tokens.mark_expired.assert_awaited_once_with(pg_session, test_user_db.id)
+        tokens.mark_expired.assert_awaited_once_with(pg_session, test_user_db.id, stored_at)
 
 
 class TestClientCache:

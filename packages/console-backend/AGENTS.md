@@ -878,10 +878,12 @@ through the a2a SDK's wrapping — and `_dispatch_job` classifies on that except
 or database error on the way to the dispatch is a failure of the run, with two exceptions that are
 evidence about neither the job nor the runtime (#266):
 
-- **A failure to *record* an outcome.** When `_finalize` cannot advance the job, it still closes the
-  run with its real status and raises `OutcomeNotRecordedError`; both dispatch paths catch that
-  before their generic handler, which would otherwise re-finalise a quiet poll, a park or a
-  delivered success as a counted `FAILED`. The job is left where it stood and claimed again.
+- **A failure to *record* an outcome.** When `_finalize` cannot advance the job it writes nothing
+  else and raises `OutcomeNotRecordedError`; both dispatch paths catch that before their generic
+  handler, which would otherwise re-finalise a quiet poll, a park or a delivered success as a
+  counted `FAILED`. The run stays `running`, which keeps the job from being claimed, until the
+  healer sweeps it as `INTERRUPTED`. Do not close the run there: that makes the job claimable on
+  the next tick with nothing counting, so a persistent write failure loops every tick.
 - **A dead vaulted token.** Keycloak's `invalid_grant` on the refresh becomes
   `OfflineTokenExpiredError`, a `NoOfflineTokenError`, so it takes the sign-in hold rather than the
   generic handler. The row is marked (`user_offline_tokens.expired_at`, migration 107), not deleted:

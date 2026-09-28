@@ -98,11 +98,16 @@ NOTICE_GIVE_UP_AFTER_SECONDS = 3600
 class OutcomeNotRecordedError(Exception):
     """``_finalize`` could not advance the job for a run whose outcome it was given.
 
-    A failure to *record* an outcome is not a failure of the job (#266). The run is still
-    closed with the status it was meant to have, and the job is left where it stood: no
-    failure counted, the schedule not advanced, so the next tick claims it again. A
-    dispatch path that catches this must not re-finalise the run as FAILED, which is
-    what turned a database blip on a quiet poll or a park into a counted failure.
+    A failure to *record* an outcome is not a failure of the job (#266). Nothing is
+    written: the run stays ``running`` and the job where it stood, so the job is not
+    claimable (a running run blocks the claim) until the healer sweeps the run as
+    INTERRUPTED, which counts nothing and earns the usual retry. A dispatch path that
+    catches this must not re-finalise the run as FAILED, which is what turned a
+    database blip on a quiet poll or a park into a counted failure.
+
+    Closing the run instead would make the job claimable on the very next tick with
+    nothing counting, so a persistent write failure (a column the deployed schema
+    lacks) would re-run the agent and re-deliver its result every tick, forever.
     """
 
     def __init__(self, run_id: int, status: JobRunStatus) -> None:
@@ -632,7 +637,7 @@ class SchedulerEngine:
             return run_id
 
         except OutcomeNotRecordedError as e:
-            # Already closed with its real outcome; re-finalising would count a failure.
+            # Left running for the healer, which counts nothing; re-finalising would.
             logger.error("Resumed run %s of job %d: %s; the job did not advance", e.run_id, job.id, e)
             return run_id
         except Exception as e:
@@ -922,7 +927,7 @@ class SchedulerEngine:
             )
 
         except OutcomeNotRecordedError as e:
-            # Already closed with its real outcome; re-finalising would count a failure.
+            # Left running for the healer, which counts nothing; re-finalising would.
             logger.error("Run %s of job %d: %s; the job did not advance", e.run_id, job.id, e)
         except Exception as e:
             # Only the dispatch itself can say the agent died: dispatch_streaming raises
@@ -1145,7 +1150,7 @@ class SchedulerEngine:
         if expired:
             try:
                 async with self._db_session_factory() as db:
-                    await self._token_service.mark_expired(db, job.user_id)
+                    await self._token_service.mark_expired(db, job.user_id, error.stored_at)
             except Exception:
                 logger.exception("Could not mark the offline token of user %s expired", job.user_id)
         await self._finalize(
@@ -1646,15 +1651,15 @@ class SchedulerEngine:
         # leaves a run stuck in 'running' for the healer to sweep, while the job itself
         # carries on correctly. The other order risks a tight loop, which is far worse.
         #
-        # When the advance itself fails, the run is still recorded with its real outcome
-        # and the caller gets OutcomeNotRecordedError, never a counted FAILED (#266).
+        # When the advance itself fails, nothing else is written and the caller gets
+        # OutcomeNotRecordedError, never a counted FAILED (#266); the run stays running
+        # for the healer, which is what keeps a persistent failure from looping.
         #
         # Disable watch job if destroy_after_trigger is True and condition was
         # successfully met. Belongs with the job update: both are job state.
         should_disable = (
             job.job_type == JobType.WATCH and job.destroy_after_trigger and status == JobRunStatus.SUCCESS
         )
-        advanced = False
         try:
             async with self._db_session_factory() as db:
                 if should_disable:
@@ -1684,12 +1689,9 @@ class SchedulerEngine:
                     leave_schedule=leave_schedule,
                 )
                 await db.commit()
-            advanced = True
-        except Exception:
-            # Nothing moved: no failure counted, the schedule where it was, so the next
-            # tick claims the job again. That is the at-least-once end of the trade the
-            # split above makes, and a far cheaper one than a counted failure.
+        except Exception as exc:
             logger.exception("Job %d: failed to advance after run %d (%s)", job.id, run_id, status.value)
+            raise OutcomeNotRecordedError(run_id, status) from exc
 
         # A job that stopped itself has to say so. Auto-pause is decided inside
         # complete_job from consecutive_failures against max_failures, and until now it
@@ -1698,7 +1700,7 @@ class SchedulerEngine:
         # it is optional, and a job without one is exactly the job whose silence goes
         # unnoticed — so the notice is a durable console notification, which also
         # survives the owner being offline in a way the WebSocket push does not.
-        if advanced and job.enabled and not enabled_after and not should_disable:
+        if job.enabled and not enabled_after and not should_disable:
             await self._notify_job_paused(job, reason_after, run_id)
 
         try:
@@ -1729,9 +1731,6 @@ class SchedulerEngine:
                     await db.commit()
             except Exception:
                 logger.exception("Job %d: could not close run %d at all; the healer will sweep it", job.id, run_id)
-
-        if not advanced:
-            raise OutcomeNotRecordedError(run_id, status)
 
         logger.info(
             "Job %d run %d finished: status=%s delivered=%s",

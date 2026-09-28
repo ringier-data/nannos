@@ -240,12 +240,12 @@ class BrokerService:
             raise BrokerRefusal(409, "The user has not signed in through this client")
         try:
             data = await self._tokens.get_exchanged_token_response(db, user.id, audience)
-        except OfflineTokenExpiredError:
+        except OfflineTokenExpiredError as exc:
             # The vaulted token is dead (30 days idle, revoked, or its offline session
             # ended). Marked, so the scheduler and the console see it as absent too; the
             # next sign-in replaces it. The client's cue is the same 409.
             logger.info("Broker mint: vaulted offline token of user %s is no longer valid", user.id)
-            await self._tokens.mark_expired(db, user.id)
+            await self._tokens.mark_expired(db, user.id, exc.stored_at)
             raise BrokerRefusal(409, "The user's Nannos sign-in has expired; they must sign in again") from None
         except NoOfflineTokenError:
             # Signed in somewhere, but never through a flow that vaults the offline token.

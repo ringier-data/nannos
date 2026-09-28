@@ -105,6 +105,23 @@ async def _vault(pg_session, user_id: str, *, expired: bool = False) -> None:
     await pg_session.commit()
 
 
+async def _stored_at(pg_session, user_id: str):
+    return (
+        await pg_session.execute(text("SELECT updated_at FROM user_offline_tokens WHERE user_id = :u"), {"u": user_id})
+    ).scalar_one()
+
+
+class _Kms:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def generate_data_key(self, **_):
+        return {"Plaintext": b"k" * 32, "CiphertextBlob": b"wrapped-dek"}
+
+
 class TestADeadTokenCountsAsAbsent:
     """A token Keycloak refused used to stay in the vault reading as "has consent", so the
     console called its owner ready while every run under it failed."""
@@ -124,21 +141,24 @@ class TestADeadTokenCountsAsAbsent:
     ):
         await _vault(pg_session, "u1")
 
-        await service.mark_expired(pg_session, "u1")
+        await service.mark_expired(pg_session, "u1", await _stored_at(pg_session, "u1"))
         assert not await service.has_consent(pg_session, "u1")
-
-        class _Kms:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            async def generate_data_key(self, **_):
-                return {"Plaintext": b"k" * 32, "CiphertextBlob": b"wrapped-dek"}
 
         monkeypatch.setattr(token_module, "_get_kms_client", lambda: _Kms())
         await service.store_offline_token(pg_session, "u1", "fresh-refresh-token")
+
+        assert await service.has_consent(pg_session, "u1")
+
+    @pytest.mark.asyncio
+    async def test_a_token_stored_after_the_refusal_is_not_marked(self, service, pg_session, monkeypatch):
+        """The user signs in between the refused refresh and the mark: the fresh token
+        must stay live, or they would have to sign in a second time."""
+        await _vault(pg_session, "u1")
+        refused = await _stored_at(pg_session, "u1")
+        monkeypatch.setattr(token_module, "_get_kms_client", lambda: _Kms())
+        await service.store_offline_token(pg_session, "u1", "fresh-refresh-token")
+
+        await service.mark_expired(pg_session, "u1", refused)
 
         assert await service.has_consent(pg_session, "u1")
 
@@ -158,8 +178,10 @@ class TestRefreshTellsADeadTokenFromAnOutage:
                     400, json={"error": "invalid_grant", "error_description": "Offline session not active"}
                 )
             )
-            with pytest.raises(OfflineTokenExpiredError):
+            with pytest.raises(OfflineTokenExpiredError) as exc_info:
                 await service.get_access_token(pg_session, "u1")
+        # Names the refused token, so mark_expired cannot hit a fresher one.
+        assert exc_info.value.stored_at == await _stored_at(pg_session, "u1")
 
     @pytest.mark.asyncio
     async def test_any_other_keycloak_error_says_nothing_about_the_token(self, service, pg_session, vaulted):
@@ -172,7 +194,7 @@ class TestRefreshTellsADeadTokenFromAnOutage:
     @pytest.mark.asyncio
     async def test_a_token_already_marked_is_not_refreshed_again(self, service, pg_session, vaulted):
         await vaulted
-        await service.mark_expired(pg_session, "u1")
+        await service.mark_expired(pg_session, "u1", await _stored_at(pg_session, "u1"))
         with respx.mock(assert_all_called=False) as router:
             route = router.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "x"}))
             with pytest.raises(OfflineTokenExpiredError):
