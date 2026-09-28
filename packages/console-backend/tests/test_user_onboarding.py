@@ -1,8 +1,9 @@
 """Tests for the onboarding state administrators see on users and group members (#258).
 
-Three people cover the states that matter: provisioned over SCIM and never signed in,
-signed in but with no vaulted offline token, and fully onboarded. Every listing that
-shows people to an administrator must report the same two flags for each.
+Four people cover the states that matter: provisioned over SCIM and never signed in,
+signed in but with no vaulted offline token, signed in with a token Keycloak has since
+refused, and fully onboarded. Every listing that shows people to an administrator must
+report the same flags for each.
 """
 
 from unittest.mock import AsyncMock
@@ -18,9 +19,10 @@ from sqlalchemy import text
 GROUP_ID = 1
 
 EXPECTED = {
-    "scim-user": UserOnboarding(signed_in=False, scheduler_ready=False),
-    "chat-only-user": UserOnboarding(signed_in=True, scheduler_ready=False),
-    "ready-user": UserOnboarding(signed_in=True, scheduler_ready=True),
+    "scim-user": UserOnboarding(signed_in=False, scheduler_ready=False, sign_in_expired=False),
+    "chat-only-user": UserOnboarding(signed_in=True, scheduler_ready=False, sign_in_expired=False),
+    "expired-user": UserOnboarding(signed_in=True, scheduler_ready=False, sign_in_expired=True),
+    "ready-user": UserOnboarding(signed_in=True, scheduler_ready=True, sign_in_expired=False),
 }
 
 
@@ -36,6 +38,7 @@ async def people(pg_session):
     for user_id, sub in [
         ("scim-user", placeholder_sub("scim-user")),
         ("chat-only-user", "idp-sub-chat"),
+        ("expired-user", "idp-sub-expired"),
         ("ready-user", "idp-sub-ready"),
     ]:
         await pg_session.execute(
@@ -51,6 +54,13 @@ async def people(pg_session):
         )
     await pg_session.execute(
         text("INSERT INTO user_offline_tokens (user_id, encrypted_token) VALUES ('ready-user', '\\x00')"),
+    )
+    # Marked the way SchedulerTokenService.mark_expired marks a token Keycloak refused.
+    await pg_session.execute(
+        text(
+            "INSERT INTO user_offline_tokens (user_id, encrypted_token, expired_at) "
+            "VALUES ('expired-user', '\\x00', NOW())"
+        ),
     )
     await pg_session.commit()
 
@@ -86,7 +96,7 @@ async def test_user_detail_reports_onboarding(pg_session, people, user_id):
 async def test_group_members_report_onboarding(pg_session, people, group_service):
     members, total = await group_service.list_members(pg_session, GROUP_ID)
 
-    assert total == 3
+    assert total == 4
     assert {m.user_id: m.onboarding for m in members} == EXPECTED
 
 
@@ -108,9 +118,7 @@ async def test_first_sign_in_flips_scheduler_ready(pg_session, people, group_ser
 
     members, _ = await group_service.list_members(pg_session, GROUP_ID)
 
-    assert {m.user_id: m.onboarding for m in members}["chat-only-user"] == UserOnboarding(
-        signed_in=True, scheduler_ready=True
-    )
+    assert {m.user_id: m.onboarding for m in members}["chat-only-user"] == EXPECTED["ready-user"]
 
 
 @pytest.mark.asyncio

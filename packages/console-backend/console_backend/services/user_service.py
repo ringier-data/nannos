@@ -25,7 +25,7 @@ from ..models.user import (
 from ..repositories.user_repository import UserRepository
 from ..services.audit_service import AuditService
 from ..services.keycloak_admin_service import KeycloakAdminService
-from ..services.scheduler_token_service import HAS_OFFLINE_TOKEN_SQL
+from ..services.scheduler_token_service import OFFLINE_TOKEN_STATE_SQL
 from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
@@ -310,14 +310,14 @@ class UserService:
             for row in group_rows
         ]
 
-        has_token = await db.scalar(
-            text(f"SELECT {HAS_OFFLINE_TOKEN_SQL} FROM users u WHERE u.id = :user_id"), {"user_id": user_id}
+        offline_token = await db.scalar(
+            text(f"SELECT {OFFLINE_TOKEN_STATE_SQL} FROM users u WHERE u.id = :user_id"), {"user_id": user_id}
         )
 
         return UserWithGroups(
             **user.model_dump(),
             groups=groups,
-            onboarding=UserOnboarding.of(user.sub, bool(has_token), user.is_service_account),
+            onboarding=UserOnboarding.of(user.sub, offline_token, user.is_service_account),
         )
 
     async def list_users(
@@ -401,7 +401,7 @@ class UserService:
                    u.is_administrator, u.is_service_account, u.role, u.status,
                    u.phone_number_idp, u.scim_attributes, u.deleted_at,
                    u.created_at, u.updated_at,
-                   {HAS_OFFLINE_TOKEN_SQL} AS has_offline_token
+                   {OFFLINE_TOKEN_STATE_SQL} AS offline_token
             FROM users u
             {where_clause}
             ORDER BY u.created_at DESC, u.id DESC
@@ -418,7 +418,7 @@ class UserService:
             user_rows = result.mappings().all()
 
             users: list[User] = []
-            has_token = {row["id"]: row["has_offline_token"] for row in user_rows}
+            offline_token = {row["id"]: row["offline_token"] for row in user_rows}
             for row in user_rows:
                 user = User(
                     id=row["id"],
@@ -469,7 +469,7 @@ class UserService:
                 UserWithGroups(
                     **user.model_dump(),
                     groups=groups_by_user.get(user.id, []),
-                    onboarding=UserOnboarding.of(user.sub, has_token[user.id], user.is_service_account),
+                    onboarding=UserOnboarding.of(user.sub, offline_token[user.id], user.is_service_account),
                 )
                 for user in users
             ]

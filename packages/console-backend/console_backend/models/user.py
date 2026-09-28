@@ -109,10 +109,14 @@ class UserGroupMembership(BaseModel):
 
 
 class UserOnboarding(BaseModel):
-    """How far a user is from being usable, for administrators. Derived, never stored.
+    """How far a user is from being able to run scheduled jobs, for administrators.
+    Derived, never stored.
 
     Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
     not an error: both flags turn true with the user's first sign-in (ADR-0011).
+
+    It says nothing about delivery: whether a job's notification can reach the user on a
+    chat channel is not known here yet (#192).
     """
 
     signed_in: bool = Field(
@@ -123,17 +127,28 @@ class UserOnboarding(BaseModel):
     )
     scheduler_ready: bool = Field(
         description=(
-            "An offline token is vaulted, so scheduled jobs can run under the user's account. "
-            "Without one, their subscriptions wait switched off for their first sign-in."
+            "A live offline token is vaulted, so scheduled jobs can run under the user's account. "
+            "Without one, their subscriptions wait switched off for their next sign-in."
+        )
+    )
+    sign_in_expired: bool = Field(
+        description=(
+            "The user had a vaulted offline token that Keycloak has since refused (unused for "
+            "30 days, revoked, or its session ended). Implies scheduler_ready is false."
         )
     )
 
     @classmethod
-    def of(cls, sub: str, has_offline_token: bool, is_service_account: bool) -> "UserOnboarding | None":
-        """None for a machine identity: it never signs in interactively, so it has no onboarding."""
+    def of(cls, sub: str, offline_token: str | None, is_service_account: bool) -> "UserOnboarding | None":
+        """*offline_token* is the `OFFLINE_TOKEN_STATE_SQL` column. None for a machine
+        identity: it never signs in interactively, so it has no onboarding."""
         if is_service_account:
             return None
-        return cls(signed_in=has_idp_identity(sub), scheduler_ready=has_offline_token)
+        return cls(
+            signed_in=has_idp_identity(sub),
+            scheduler_ready=offline_token == "live",
+            sign_in_expired=offline_token == "expired",
+        )
 
 
 class UserWithGroups(User):

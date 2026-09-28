@@ -27,7 +27,7 @@ from ..repositories.sub_agent_repository import SubAgentRepository
 from ..repositories.user_group_repository import UserGroupRepository
 from ..services.keycloak_admin_service import KeycloakAdminService
 from ..services.notification_service import NotificationService
-from ..services.scheduler_token_service import HAS_OFFLINE_TOKEN_SQL
+from ..services.scheduler_token_service import OFFLINE_TOKEN_STATE_SQL
 from ..services.sub_agent_service import SubAgentService
 from ..utils.sql_search import like_clause, like_contains
 
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 #: three columns feed `MemberInfo.onboarding`, so a page of members costs no extra query.
 _MEMBER_COLUMNS = (
     "u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role, "
-    f"u.sub, u.is_service_account, {HAS_OFFLINE_TOKEN_SQL} AS has_offline_token"
+    f"u.sub, u.is_service_account, {OFFLINE_TOKEN_STATE_SQL} AS offline_token"
 )
 
 
@@ -48,7 +48,7 @@ def _member_info(row: Any) -> MemberInfo:
         first_name=row["first_name"],
         last_name=row["last_name"],
         group_role=row["group_role"],
-        onboarding=UserOnboarding.of(row["sub"], row["has_offline_token"], row["is_service_account"]),
+        onboarding=UserOnboarding.of(row["sub"], row["offline_token"], row["is_service_account"]),
     )
 
 
