@@ -53,20 +53,21 @@ describe('BrokerClient', () => {
 
     // The client's own calls stay on the in-cluster URL.
     fetchMock.mockImplementation(async () => response(200, { user_id: 'u1', sub: 'sub-1', groups: [] }));
-    await publicBroker.redeem('code-1');
+    await publicBroker.redeem('code-1', { accountKey: 'acct-1' });
     expect(calls()[0].url).toBe('http://console:8080/api/v1/auth/broker/redeem');
   });
 
   test('redeems a code as the client itself', async () => {
     fetchMock.mockImplementation(async () => response(200, { user_id: 'u1', sub: 'sub-1', groups: [] }));
 
-    const identity = await broker.redeem('code-1');
+    const identity = await broker.redeem('code-1', { accountKey: 'acct-1' });
 
     expect(identity.sub).toBe('sub-1');
     const [call] = calls();
     expect(call.url).toBe('http://console:8080/api/v1/auth/broker/redeem');
     expect(call.init.headers.Authorization).toBe('Bearer svc-1');
-    expect(JSON.parse(call.init.body)).toEqual({ code: 'code-1', tenant_id: '', installation_ids: [] });
+    // Installations omitted: the broker leaves the tenant's as they are.
+    expect(JSON.parse(call.init.body)).toEqual({ code: 'code-1', account_key: 'acct-1', tenant_id: '' });
     expect(credentials).toHaveBeenCalledWith('agent-console');
   });
 
@@ -75,10 +76,27 @@ describe('BrokerClient', () => {
       response(200, { user_id: 'u1', sub: 'sub-1', groups: [], binding_secret: 'secret-1' })
     );
 
-    const redemption = await broker.redeem('code-1', { tenantId: 'T1', installationIds: ['A1', 'A2'] });
+    const redemption = await broker.redeem('code-1', { accountKey: 'T1:U1', tenantId: 'T1', installationIds: ['A1', 'A2'] });
 
     expect(redemption.binding_secret).toBe('secret-1');
-    expect(JSON.parse(calls()[0].init.body)).toEqual({ code: 'code-1', tenant_id: 'T1', installation_ids: ['A1', 'A2'] });
+    expect(JSON.parse(calls()[0].init.body)).toEqual({
+      code: 'code-1',
+      account_key: 'T1:U1',
+      tenant_id: 'T1',
+      installation_ids: ['A1', 'A2'],
+    });
+  });
+
+  test('sets a tenant\'s installations with a PUT as the client', async () => {
+    fetchMock.mockImplementation(async () => response(204, {}));
+
+    await broker.setTenantInstallations('T 1', ['A1']);
+
+    const [call] = calls();
+    expect(call.url).toBe('http://console:8080/api/v1/auth/broker/tenants/T%201');
+    expect(call.init.method).toBe('PUT');
+    expect(call.init.headers.Authorization).toBe('Bearer svc-1');
+    expect(JSON.parse(call.init.body)).toEqual({ installation_ids: ['A1'] });
   });
 
   test('mint sends the binding secret when there is one', async () => {
@@ -95,7 +113,7 @@ describe('BrokerClient', () => {
 
   test('a refused code is a BrokerError', async () => {
     fetchMock.mockImplementation(async () => response(400, { detail: 'invalid_grant' }));
-    await expect(broker.redeem('used')).rejects.toBeInstanceOf(BrokerError);
+    await expect(broker.redeem('used', { accountKey: 'acct-1' })).rejects.toBeInstanceOf(BrokerError);
   });
 
   test('mints a token and turns expires_in into an expiry time', async () => {

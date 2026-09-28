@@ -93,8 +93,8 @@ export class BrokerUserAuthService implements IUserAuthService {
     if (!code) {
       throw new Error('The broker callback carries no code');
     }
-    // One account per address, and no delivery channel to be reached on.
-    const redemption = await this.broker.redeem(code);
+    // One row per address; no delivery channel to be reached on.
+    const redemption = await this.broker.redeem(code, { accountKey: email });
     // Replaces every column: a user who signed in locally before leaves no tokens behind.
     await this.storage.saveToken({
       email,

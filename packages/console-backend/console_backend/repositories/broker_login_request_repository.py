@@ -155,30 +155,51 @@ class BrokerLoginRequestRepository:
         db: AsyncSession,
         *,
         client_id: str,
+        account_key: str,
         user_id: str,
         tenant_id: str,
         secret_hash: str,
-        installation_ids: list[str],
         now: datetime,
     ) -> None:
-        """Record a redeemed sign-in as a binding. A later sign-in of the same user for the
-        same tenant of the same client replaces it: the old secret stops working and the
-        installations are the ones this sign-in covers."""
+        """Record a redeemed sign-in as a binding. A later sign-in into the same client row
+        (*account_key*) replaces it, whoever signs in: the row holds one sign-in, and the old
+        secret stops working."""
         await db.execute(
             text("""
                 INSERT INTO broker_bindings
-                    (client_id, user_id, tenant_id, secret_hash, installation_ids, created_at, updated_at)
-                VALUES (:client_id, :user_id, :tenant_id, :secret_hash, :installation_ids, :now, :now)
-                ON CONFLICT (client_id, user_id, tenant_id) DO UPDATE SET
+                    (client_id, account_key, user_id, tenant_id, secret_hash, created_at, updated_at)
+                VALUES (:client_id, :account_key, :user_id, :tenant_id, :secret_hash, :now, :now)
+                ON CONFLICT (client_id, account_key) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    tenant_id = EXCLUDED.tenant_id,
                     secret_hash = EXCLUDED.secret_hash,
+                    updated_at = EXCLUDED.updated_at
+            """),
+            {
+                "client_id": client_id,
+                "account_key": account_key,
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "secret_hash": secret_hash,
+                "now": now,
+            },
+        )
+
+    async def set_tenant_installations(
+        self, db: AsyncSession, *, client_id: str, tenant_id: str, installation_ids: list[str], now: datetime
+    ) -> None:
+        """Replace the installations *client_id* runs in *tenant_id*."""
+        await db.execute(
+            text("""
+                INSERT INTO broker_tenants (client_id, tenant_id, installation_ids, updated_at)
+                VALUES (:client_id, :tenant_id, :installation_ids, :now)
+                ON CONFLICT (client_id, tenant_id) DO UPDATE SET
                     installation_ids = EXCLUDED.installation_ids,
                     updated_at = EXCLUDED.updated_at
             """),
             {
                 "client_id": client_id,
-                "user_id": user_id,
                 "tenant_id": tenant_id,
-                "secret_hash": secret_hash,
                 "installation_ids": sorted(set(installation_ids)),
                 "now": now,
             },

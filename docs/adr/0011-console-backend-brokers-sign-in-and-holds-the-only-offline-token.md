@@ -19,14 +19,19 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > the secret in plain text, like the refresh tokens they held before, so a compromised
 > client pod is not in scope).
 >
-> The same redeem carries where the user can be reached: `installation_ids`, in the
-> vocabulary the client registers its delivery channels under
-> (`delivery_channels.installation_id`, scoped by `client_id`). A Slack sign-in is per
-> team, so it covers every app the client has in that team; Google Chat maps its project
-> number to the project name its channels use; email and the cockpit BFF have no channel
-> and send none. `tenant_id` names the client's own account for the sign-in, and a later
-> sign-in for the same tenant replaces its binding. This is what ringier-data/nannos#192
-> reads to tell whether a subscriber can receive on a channel.
+> A binding is keyed by the client's own row for the sign-in (`account_key`: a Slack user
+> in a team, an email address; the user when a client names none), so a sign-in into the
+> same row replaces it and two rows of one person never evict each other.
+>
+> The same redeem carries where the user can be reached, and it lives on the **tenant**,
+> not the binding (`broker_tenants`): `installation_ids`, in the vocabulary the client
+> registers its delivery channels under (`delivery_channels.installation_id`, scoped by
+> `client_id`). A Slack sign-in is per team and a push is looked up by team, so it reaches
+> every app the client has there, including one installed after the user signed in; Slack
+> therefore also publishes each team's active apps (`PUT /tenants/{tenant_id}`) whenever it
+> registers its channels. Google Chat maps its project number to the project name its
+> channels use; email and the cockpit BFF have no channel and send none. This is what
+> ringier-data/nannos#192 reads to tell whether a subscriber can receive on a channel.
 >
 > Enforcement is per client, because the cockpit BFF ships from another repository:
 > `broker_clients.require_binding_secret`, audited admin data, off for clients registered

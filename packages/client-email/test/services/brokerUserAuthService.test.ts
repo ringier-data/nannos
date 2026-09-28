@@ -60,7 +60,8 @@ describe('BrokerUserAuthService (email)', () => {
 
   test('completing the sign-in stores only who the sender is', async () => {
     await signIn();
-    expect(broker.redeem).toHaveBeenCalledWith('code-1');
+    // Keyed by the address: two addresses of one person are two bindings.
+    expect(broker.redeem).toHaveBeenCalledWith('code-1', { accountKey: 'ada@example.com' });
     expect(storage.rows.get('ada@example.com')).toMatchObject({
       oidcSub: 'sub-1',
       authMode: 'broker',

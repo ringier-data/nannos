@@ -38,16 +38,20 @@ export interface BrokerRedemption extends BrokerIdentity {
   binding_secret: string;
 }
 
-/** What a sign-in covers, told to the broker when it is redeemed. */
+/** What a sign-in belongs to, told to the broker when it is redeemed. */
 export interface BrokerBinding {
   /**
-   * This client's own name for the account the sign-in belongs to (a Slack team, a Google
-   * Chat project); empty when it has one. A later sign-in for the same tenant replaces it.
+   * This client's own key for the row that keeps the sign-in (e.g. a Slack user in a team,
+   * an email address). A later sign-in into the same row replaces the binding; two rows of
+   * one user never evict each other.
    */
+  accountKey: string;
+  /** The account the sign-in belongs to (a Slack team, a Google Chat project); empty when there is one. */
   tenantId?: string;
   /**
-   * The installations the sign-in can be reached on, as this client registers its delivery
-   * channels (`installation_id`). Empty for a client with no delivery channel.
+   * The installations this client runs in that tenant, as it registers its delivery channels
+   * (`installation_id`): where every sign-in for the tenant can be reached. Omitted leaves
+   * what the broker has for the tenant.
    */
   installationIds?: string[];
 }
@@ -117,11 +121,12 @@ export class BrokerClient {
   }
 
   /** Trade the one-time code the browser came back with for who signed in, binding the sign-in. */
-  async redeem(code: string, binding: BrokerBinding = {}): Promise<BrokerRedemption> {
+  async redeem(code: string, binding: BrokerBinding): Promise<BrokerRedemption> {
     const response = await this.post('/api/v1/auth/broker/redeem', {
       code,
+      account_key: binding.accountKey,
       tenant_id: binding.tenantId ?? '',
-      installation_ids: binding.installationIds ?? [],
+      ...(binding.installationIds ? { installation_ids: binding.installationIds } : {}),
     });
     if (!response.ok) {
       throw new BrokerError(`Broker refused the sign-in code: ${await describe(response)}`, response.status);
@@ -149,24 +154,41 @@ export class BrokerClient {
     return { accessToken: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
   }
 
+  /**
+   * Tell the broker the installations this client runs in *tenantId* now, so every sign-in
+   * there is reachable on each, including one installed after the user signed in.
+   */
+  async setTenantInstallations(tenantId: string, installationIds: string[]): Promise<void> {
+    const response = await this.send('PUT', `/api/v1/auth/broker/tenants/${encodeURIComponent(tenantId)}`, {
+      installation_ids: installationIds,
+    });
+    if (!response.ok) {
+      throw new BrokerError(`Broker refused the installations of ${tenantId}: ${await describe(response)}`, response.status);
+    }
+  }
+
   private endpoint(path: string): string {
     return `${this.options.baseUrl.replace(/\/+$/, '')}${path}`;
   }
 
-  /** POST as this client. A 401 means the cached service token went stale: renew once. */
-  private async post(path: string, body: unknown): Promise<Response> {
-    const send = async (token: string) =>
+  private post(path: string, body: unknown): Promise<Response> {
+    return this.send('POST', path, body);
+  }
+
+  /** Call as this client. A 401 means the cached service token went stale: renew once. */
+  private async send(method: 'POST' | 'PUT', path: string, body: unknown): Promise<Response> {
+    const attempt = async (token: string) =>
       fetch(this.endpoint(path), {
-        method: 'POST',
+        method,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       });
-    const response = await send(await this.getServiceToken());
+    const response = await attempt(await this.getServiceToken());
     if (response.status !== 401) {
       return response;
     }
     this.serviceToken = null;
-    return send(await this.getServiceToken());
+    return attempt(await this.getServiceToken());
   }
 
   private async getServiceToken(): Promise<string> {

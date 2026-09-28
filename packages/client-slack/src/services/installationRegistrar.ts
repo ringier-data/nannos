@@ -16,7 +16,9 @@
 import { Config } from '../config/config.js';
 import { OIDCClient } from './oidcClient.js';
 import { InstallationSecretService } from './installationSecretService.js';
-import { IBotInstallationStore } from '../storage/types.js';
+import { BotInstallation, IBotInstallationStore } from '../storage/types.js';
+import type { BrokerClient } from './brokerClient.js';
+import { activeAppIds } from './userAuthServiceFactory.js';
 import { Logger } from '../utils/logger.js';
 
 const logger = Logger.getLogger('InstallationRegistrar');
@@ -40,6 +42,11 @@ export interface InstallationRegistrarDeps {
   oidcClient: OIDCClient;
   botInstallationStore: IBotInstallationStore;
   installationSecretService: InstallationSecretService;
+  /**
+   * The token broker, in broker mode. Registration then also tells it which apps are active
+   * in each team, which is where that team's sign-ins can be reached (ADR-0011 amendment 1).
+   */
+  broker?: BrokerClient;
 }
 
 export async function registerInstallations(deps: InstallationRegistrarDeps): Promise<void> {
@@ -56,6 +63,10 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
   } catch (error) {
     logger.error(error, `Failed to list bot installations: ${error}`);
     return;
+  }
+
+  if (deps.broker) {
+    await publishTenantInstallations(deps.broker, installations);
   }
 
   const active = installations.filter((b) => b.isActive);
@@ -78,6 +89,25 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
     } catch (error) {
       // Per-installation isolation — keep going.
       logger.error(error, `Failed to register delivery channel for appId=${bot.appId}: ${error}`);
+    }
+  }
+}
+
+/**
+ * Every team this client knows, with the apps active in it. A team whose apps were all
+ * deactivated is sent with none, so its sign-ins stop counting as reachable. Per-team
+ * isolation, like the channels: one refusal does not stop the rest.
+ */
+async function publishTenantInstallations(broker: BrokerClient, installations: BotInstallation[]): Promise<void> {
+  const teams = new Map<string, BotInstallation[]>();
+  for (const bot of installations) {
+    teams.set(bot.teamId, [...(teams.get(bot.teamId) ?? []), bot]);
+  }
+  for (const [teamId, bots] of teams) {
+    try {
+      await broker.setTenantInstallations(teamId, activeAppIds(bots));
+    } catch (error) {
+      logger.error(error, `Failed to publish the installations of team ${teamId}: ${error}`);
     }
   }
 }

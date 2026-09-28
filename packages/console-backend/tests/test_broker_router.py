@@ -26,6 +26,7 @@ from console_backend.models.broker import (
     BrokerClientCreate,
     BrokerRedeemRequest,
     BrokerRedemption,
+    BrokerTenantInstallations,
     BrokerTokenRequest,
     BrokerTokenResponse,
 )
@@ -211,7 +212,11 @@ class TestBrowserLeg:
     async def test_authorize_refuses_an_unregistered_redirect_uri(self, controller, pg_session):
         with pytest.raises(BrokerRefusal) as exc:
             await controller.authorize(
-                _browser(), pg_session, client_id="slack-client", redirect_uri="https://evil.example/cb", client_state=None
+                _browser(),
+                pg_session,
+                client_id="slack-client",
+                redirect_uri="https://evil.example/cb",
+                client_state=None,
             )
         assert exc.value.status_code == 400
 
@@ -245,9 +250,7 @@ class TestBrowserLeg:
         assert user_row.scalar() == identity.user_id
 
     @pytest.mark.asyncio
-    async def test_a_failure_at_keycloak_goes_back_to_the_client_as_an_error(
-        self, controller, mock_oauth, pg_session
-    ):
+    async def test_a_failure_at_keycloak_goes_back_to_the_client_as_an_error(self, controller, mock_oauth, pg_session):
         state = await _authorize(controller, mock_oauth, pg_session)
         mock_oauth.authorize_access_token.side_effect = OAuthError(error="access_denied", description="User cancelled")
 
@@ -333,18 +336,36 @@ class TestClientLegCarriesTheBinding:
         return service, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(broker_service=service)))
 
     @pytest.mark.asyncio
-    async def test_redeem_passes_tenant_and_installations(self, service_request):
+    async def test_redeem_passes_account_tenant_and_installations(self, service_request):
         service, request = service_request
         service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
         db = AsyncMock()
         client = _client()
 
         result = await router.redeem(
-            BrokerRedeemRequest(code="c", tenant_id="T1", installation_ids=["A1"]), request, db, client
+            BrokerRedeemRequest(code="c", account_key="T1:U1", tenant_id="T1", installation_ids=["A1"]),
+            request,
+            db,
+            client,
         )
 
         assert result.binding_secret == "secret"
-        service.redeem.assert_awaited_once_with(db, client, "c", tenant_id="T1", installation_ids=["A1"])
+        service.redeem.assert_awaited_once_with(
+            db, client, "c", account_key="T1:U1", tenant_id="T1", installation_ids=["A1"]
+        )
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_client_sets_its_tenants_installations(self, service_request):
+        service, request = service_request
+        db = AsyncMock()
+        client = _client()
+
+        await router.set_tenant_installations(
+            "T1", BrokerTenantInstallations(installation_ids=["A1", "A2"]), request, db, client
+        )
+
+        service.set_tenant_installations.assert_awaited_once_with(db, client, "T1", ["A1", "A2"])
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -359,4 +380,3 @@ class TestClientLegCarriesTheBinding:
         )
 
         service.mint.assert_awaited_once_with(db, client, "s1", "orchestrator", "secret")
-

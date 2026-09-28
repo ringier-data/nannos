@@ -7,6 +7,7 @@ Browser leg (no authentication — the user signs in at Keycloak):
 Client leg (the broker client's own client-credentials token):
   POST /redeem      — trade the one-time code for who signed in and a binding secret
   POST /token       — mint an access token for a bound user and an allowed audience
+  PUT  /tenants/{id} — the installations the client runs in one of its tenants
 """
 
 import logging
@@ -22,6 +23,7 @@ from ..models.broker import (
     BrokerClient,
     BrokerRedeemRequest,
     BrokerRedemption,
+    BrokerTenantInstallations,
     BrokerTokenRequest,
     BrokerTokenResponse,
 )
@@ -142,7 +144,12 @@ async def redeem(
     /token calls. Single use, and only for the client the code was issued to."""
     try:
         identity = await _get_broker_service(request).redeem(
-            db, client, body.code, tenant_id=body.tenant_id, installation_ids=body.installation_ids
+            db,
+            client,
+            body.code,
+            account_key=body.account_key,
+            tenant_id=body.tenant_id,
+            installation_ids=body.installation_ids,
         )
     except BrokerRefusal as e:
         raise _refused(e) from e
@@ -163,3 +170,21 @@ async def mint_token(
         return await _get_broker_service(request).mint(db, client, body.sub, body.audience, body.binding_secret)
     except BrokerRefusal as e:
         raise _refused(e) from e
+
+
+@router.put("/tenants/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def set_tenant_installations(
+    tenant_id: str,
+    body: BrokerTenantInstallations,
+    request: Request,
+    db: DbSession,
+    client: BrokerClient = Depends(require_broker_client),
+) -> None:
+    """Replace the installations this client runs in *tenant_id*: where every sign-in
+    for that tenant can be reached. Called whenever the client (re)registers its delivery
+    channels, so an installation added after a user signed in reaches them too."""
+    if len(tenant_id) > 200:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is too long")
+    await _get_broker_service(request).set_tenant_installations(db, client, tenant_id, body.installation_ids)
+    await db.commit()
+

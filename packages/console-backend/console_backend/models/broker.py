@@ -244,26 +244,41 @@ class BrokerIdentity(BaseModel):
     company_name: str | None = None
 
 
+_TENANT_ID_DESCRIPTION = (
+    "The client's account the sign-in belongs to (a Slack team, a Google Chat project); "
+    "empty for a client with only one."
+)
+_INSTALLATION_IDS_DESCRIPTION = (
+    "The installations the client runs in the tenant, as it registers its delivery channels "
+    "(`installation_id`). A notification on one of those channels can reach every user "
+    "signed in for the tenant."
+)
+
+
 class BrokerRedeemRequest(BaseModel):
     code: str = Field(min_length=1, max_length=512)
-    tenant_id: str = Field(
-        default="",
-        max_length=200,
+    account_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=400,
         description=(
-            "The client's own name for the account this sign-in belongs to (a Slack team, a "
-            "Google Chat project); empty for a client with only one. A later sign-in for the "
-            "same tenant replaces this binding."
+            "The client's own key for where it keeps this sign-in (e.g. a Slack user in a team, "
+            "an email address). A later sign-in with the same key replaces the binding and its "
+            "secret. Omitted: one binding per user."
         ),
     )
-    installation_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
-        default_factory=list,
+    tenant_id: str = Field(default="", max_length=200, description=_TENANT_ID_DESCRIPTION)
+    installation_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] | None = Field(
+        default=None,
         max_length=100,
-        description=(
-            "The installations this sign-in covers, as the client registers its delivery "
-            "channels (`installation_id`). A notification on one of those channels can reach "
-            "the user. Empty for a client with no delivery channel."
-        ),
+        description=_INSTALLATION_IDS_DESCRIPTION + " Omitted: the tenant's installations are left as they are.",
     )
+
+
+class BrokerTenantInstallations(BaseModel):
+    """``PUT /tenants/{tenant_id}``: the client's current installations in one tenant."""
+
+    installation_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(max_length=100, description=_INSTALLATION_IDS_DESCRIPTION)
 
 
 class BrokerRedemption(BrokerIdentity):

@@ -68,7 +68,11 @@ describe('BrokerUserAuthService', () => {
     const row = await signIn();
 
     // Signed in by project number; reachable on the channel registered under its name.
-    expect(broker.redeem).toHaveBeenCalledWith('code-1', { tenantId: 'P1', installationIds: ['my-chat-project'] });
+    expect(broker.redeem).toHaveBeenCalledWith('code-1', {
+      accountKey: 'P1:U1',
+      tenantId: 'P1',
+      installationIds: ['my-chat-project'],
+    });
     expect(row).toMatchObject({
       userId: 'U1',
       projectId: 'P1',

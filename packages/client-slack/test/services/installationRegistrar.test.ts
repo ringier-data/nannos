@@ -4,6 +4,7 @@ import { Config } from '../../src/config/config.js';
 import { OIDCClient } from '../../src/services/oidcClient.js';
 import { InstallationSecretService } from '../../src/services/installationSecretService.js';
 import { IBotInstallationStore } from '../../src/storage/types.js';
+import type { BrokerClient } from '../../src/services/brokerClient.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -110,5 +111,42 @@ describe('registerInstallations', () => {
     ]);
     await expect(registerInstallations(d)).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('in broker mode it tells the broker which apps are active in each team', async () => {
+    const inactive = { ...installation('A00000000CC', 'T000000BB', 'Old'), isActive: false };
+    const setTenantInstallations = jest.fn<(tenantId: string, ids: string[]) => Promise<void>>().mockResolvedValue();
+    const d = {
+      ...deps([
+        installation('A00000000AA', 'T000000AA', 'Nannos'),
+        installation('A00000000AB', 'T000000AA', 'Nannos Dev'),
+        inactive,
+      ]),
+      broker: { setTenantInstallations } as unknown as BrokerClient,
+    };
+
+    await registerInstallations(d);
+
+    // A team with nothing active is sent empty, so its sign-ins stop counting as reachable.
+    expect(setTenantInstallations.mock.calls).toEqual([
+      ['T000000AA', ['A00000000AA', 'A00000000AB']],
+      ['T000000BB', []],
+    ]);
+  });
+
+  test('a broker refusal for one team does not stop the channels or the other teams', async () => {
+    const setTenantInstallations = jest
+      .fn<(tenantId: string, ids: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('403'))
+      .mockResolvedValue();
+    const d = {
+      ...deps([installation('A00000000AA', 'T000000AA', 'Nannos'), installation('A00000000BB', 'T000000BB', 'Two')]),
+      broker: { setTenantInstallations } as unknown as BrokerClient,
+    };
+
+    await registerInstallations(d);
+
+    expect(setTenantInstallations).toHaveBeenCalledTimes(2);
+    expect(bodiesFrom(fetchMock).map((b) => b.installation_id)).toEqual(['A00000000AA', 'A00000000BB']);
   });
 });

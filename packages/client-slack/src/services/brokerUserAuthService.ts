@@ -108,6 +108,7 @@ export class BrokerUserAuthService implements IUserAuthService {
       throw new Error('The broker callback carries no code');
     }
     const redemption = await this.broker.redeem(code, {
+      accountKey: `${teamId}:${userId}`,
       tenantId: teamId,
       installationIds: await this.installationsOf(teamId),
     });

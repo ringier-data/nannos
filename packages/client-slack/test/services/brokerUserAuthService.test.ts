@@ -68,7 +68,11 @@ describe('BrokerUserAuthService', () => {
     const row = await signIn();
 
     // One sign-in per team covers every app of this client in it.
-    expect(broker.redeem).toHaveBeenCalledWith('code-1', { tenantId: 'T1', installationIds: ['A1', 'A2'] });
+    expect(broker.redeem).toHaveBeenCalledWith('code-1', {
+      accountKey: 'T1:U1',
+      tenantId: 'T1',
+      installationIds: ['A1', 'A2'],
+    });
     expect(row).toMatchObject({
       userId: 'U1',
       teamId: 'T1',

@@ -536,17 +536,23 @@ export type BrokerRedeemRequest = {
      */
     code: string;
     /**
+     * Account Key
+     *
+     * The client's own key for where it keeps this sign-in (e.g. a Slack user in a team, an email address). A later sign-in with the same key replaces the binding and its secret. Omitted: one binding per user.
+     */
+    account_key?: string | null;
+    /**
      * Tenant Id
      *
-     * The client's own name for the account this sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. A later sign-in for the same tenant replaces this binding.
+     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one.
      */
     tenant_id?: string;
     /**
      * Installation Ids
      *
-     * The installations this sign-in covers, as the client registers its delivery channels (`installation_id`). A notification on one of those channels can reach the user. Empty for a client with no delivery channel.
+     * The installations the client runs in the tenant, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the tenant. Omitted: the tenant's installations are left as they are.
      */
-    installation_ids?: Array<string>;
+    installation_ids?: Array<string> | null;
 };
 
 /**
@@ -611,6 +617,20 @@ export type BrokerRedemption = {
      * Returned once and stored by the backend only as a hash. The client keeps it with the user and sends it on every /token call for them.
      */
     binding_secret: string;
+};
+
+/**
+ * BrokerTenantInstallations
+ *
+ * ``PUT /tenants/{tenant_id}``: the client's current installations in one tenant.
+ */
+export type BrokerTenantInstallations = {
+    /**
+     * Installation Ids
+     *
+     * The installations the client runs in the tenant, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the tenant.
+     */
+    installation_ids: Array<string>;
 };
 
 /**
@@ -9505,6 +9525,36 @@ export type MintTokenApiV1AuthBrokerTokenPostResponses = {
 };
 
 export type MintTokenApiV1AuthBrokerTokenPostResponse = MintTokenApiV1AuthBrokerTokenPostResponses[keyof MintTokenApiV1AuthBrokerTokenPostResponses];
+
+export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutData = {
+    body: BrokerTenantInstallations;
+    path: {
+        /**
+         * Tenant Id
+         */
+        tenant_id: string;
+    };
+    query?: never;
+    url: '/api/v1/auth/broker/tenants/{tenant_id}';
+};
+
+export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutError = SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutErrors[keyof SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutErrors];
+
+export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponse = SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponses[keyof SetTenantInstallationsApiV1AuthBrokerTenantsTenantIdPutResponses];
 
 export type ListBrokerClientsApiV1AdminBrokerClientsGetData = {
     body?: never;

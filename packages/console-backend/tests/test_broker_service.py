@@ -307,18 +307,26 @@ class TestMint:
 async def _binding_rows(pg_session, user_id: str) -> list[dict]:
     result = await pg_session.execute(
         text(
-            "SELECT client_id, tenant_id, secret_hash, installation_ids FROM broker_bindings "
-            "WHERE user_id = :u ORDER BY client_id, tenant_id"
+            "SELECT client_id, account_key, tenant_id, secret_hash FROM broker_bindings "
+            "WHERE user_id = :u ORDER BY client_id, account_key"
         ),
         {"u": user_id},
     )
     return [dict(r) for r in result.mappings().all()]
 
 
+async def _tenant_installations(pg_session, client_id: str, tenant_id: str) -> list[str] | None:
+    result = await pg_session.execute(
+        text("SELECT installation_ids FROM broker_tenants WHERE client_id = :c AND tenant_id = :t"),
+        {"c": client_id, "t": tenant_id},
+    )
+    return result.scalar_one_or_none()
+
+
 class TestBindingSecret:
     """ADR-0011 amendment 1: a leaked client credential alone mints for no one. The secret
-    /redeem returns is the second factor, and the binding it names says where the user
-    can be reached."""
+    /redeem returns is the second factor; the binding is keyed by the client row that
+    keeps it, and its tenant's installations say where the user can be reached."""
 
     @pytest.mark.asyncio
     async def test_redeem_binds_the_sign_in_and_stores_only_a_hash(self, broker, pg_session, test_user_db):
@@ -326,31 +334,70 @@ class TestBindingSecret:
         slack = await broker.resolve_client(pg_session, "slack-client")
 
         redemption = await broker.redeem(
-            pg_session, slack, code, tenant_id="T1", installation_ids=["A2", "A1", "A1"]
+            pg_session, slack, code, account_key="T1:U1", tenant_id="T1", installation_ids=["A2", "A1", "A1"]
         )
 
         assert redemption.sub == "test-user-sub" and len(redemption.binding_secret) >= 32
         [row] = await _binding_rows(pg_session, test_user_db.id)
-        assert (row["client_id"], row["tenant_id"], row["installation_ids"]) == ("slack-client", "T1", ["A1", "A2"])
+        assert (row["client_id"], row["account_key"], row["tenant_id"]) == ("slack-client", "T1:U1", "T1")
         assert redemption.binding_secret not in row["secret_hash"]
+        assert await _tenant_installations(pg_session, "slack-client", "T1") == ["A1", "A2"]
 
     @pytest.mark.asyncio
-    async def test_signing_in_again_for_a_tenant_replaces_its_binding(self, broker, pg_session, test_user_db):
+    async def test_signing_in_again_into_a_row_replaces_its_binding(self, broker, pg_session, test_user_db):
         slack = await broker.resolve_client(pg_session, "slack-client")
         _, code = await _signed_in(broker, pg_session, test_user_db)
-        old = (await broker.redeem(pg_session, slack, code, tenant_id="T1", installation_ids=["A1"])).binding_secret
+        old = (await broker.redeem(pg_session, slack, code, account_key="T1:U1", tenant_id="T1")).binding_secret
         _, code = await _signed_in(broker, pg_session, test_user_db)
-        new = (await broker.redeem(pg_session, slack, code, tenant_id="T1", installation_ids=["A3"])).binding_secret
-        _, code = await _signed_in(broker, pg_session, test_user_db)
-        other = (await broker.redeem(pg_session, slack, code, tenant_id="T2")).binding_secret
+        new = (await broker.redeem(pg_session, slack, code, account_key="T1:U1", tenant_id="T1")).binding_secret
 
-        rows = await _binding_rows(pg_session, test_user_db.id)
-        assert [(r["tenant_id"], r["installation_ids"]) for r in rows] == [("T1", ["A3"]), ("T2", [])]
+        assert [r["account_key"] for r in await _binding_rows(pg_session, test_user_db.id)] == ["T1:U1"]
         with pytest.raises(BrokerRefusal) as exc:
             await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", old)
         assert exc.value.status_code == 409
-        for secret in (new, other):
+        assert (await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", new)).access_token
+
+    @pytest.mark.asyncio
+    async def test_two_rows_of_one_user_never_evict_each_other(self, broker, pg_session, test_user_db):
+        """One person, two addresses (or two Slack accounts in a team): two client rows,
+        two bindings, both secrets live."""
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        secrets = []
+        for key in ("ada@example.com", "ada.lovelace@example.com"):
+            _, code = await _signed_in(broker, pg_session, test_user_db)
+            secrets.append((await broker.redeem(pg_session, slack, code, account_key=key)).binding_secret)
+
+        assert len(await _binding_rows(pg_session, test_user_db.id)) == 2
+        for secret in secrets:
             assert (await broker.mint(pg_session, slack, "test-user-sub", "orchestrator", secret)).access_token
+
+    @pytest.mark.asyncio
+    async def test_without_an_account_key_there_is_one_binding_per_user(self, broker, pg_session, test_user_db):
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        for _ in range(2):
+            _, code = await _signed_in(broker, pg_session, test_user_db)
+            await broker.redeem(pg_session, slack, code)
+
+        [row] = await _binding_rows(pg_session, test_user_db.id)
+        assert row["account_key"] == f"user:{test_user_db.id}"
+
+    @pytest.mark.asyncio
+    async def test_a_tenants_installations_follow_the_client_not_the_sign_in(self, broker, pg_session, test_user_db):
+        """An app installed after the user signed in reaches them too: installations live
+        on the tenant, which the client keeps current, and a redeem without any leaves them."""
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        await broker.redeem(pg_session, slack, code, account_key="T1:U1", tenant_id="T1", installation_ids=["A1"])
+
+        await broker.set_tenant_installations(pg_session, slack, "T1", ["A1", "A2"])
+        assert await _tenant_installations(pg_session, "slack-client", "T1") == ["A1", "A2"]
+
+        _, code = await _signed_in(broker, pg_session, test_user_db)
+        await broker.redeem(pg_session, slack, code, account_key="T1:U1", tenant_id="T1")
+        assert await _tenant_installations(pg_session, "slack-client", "T1") == ["A1", "A2"]
+
+        await broker.set_tenant_installations(pg_session, slack, "T1", ["A2"])
+        assert await _tenant_installations(pg_session, "slack-client", "T1") == ["A2"]
 
     @pytest.mark.asyncio
     async def test_a_client_that_requires_the_secret_refuses_without_it(self, broker, pg_session, test_user_db):
