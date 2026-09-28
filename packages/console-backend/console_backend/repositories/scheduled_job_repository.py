@@ -335,6 +335,27 @@ class _SubscriptionRepository(AuditedRepository):
             table_name="scheduled_job_subscriptions",
         )
 
+    async def update(
+        self,
+        db: AsyncSession,
+        actor: User,
+        entity_id: str | int,
+        fields: dict[str, Any],
+        fetch_before: bool = True,
+        custom_action: AuditAction | None = None,
+    ) -> None:
+        """Every audited subscription write, with ``hold`` kept to its reason
+        (``_with_hold``). Here rather than at each caller, so no write can leave a hold
+        behind: a reset, a toggle and a resume all pass through."""
+        await super().update(
+            db=db,
+            actor=actor,
+            entity_id=entity_id,
+            fields=_with_hold(fields),
+            fetch_before=fetch_before,
+            custom_action=custom_action,
+        )
+
 
 class ScheduledJobRepository(AuditedRepository):
     """Repository for scheduled jobs with claim-based execution and run history.
@@ -458,12 +479,8 @@ class ScheduledJobRepository(AuditedRepository):
     async def update_subscription(
         self, db: AsyncSession, actor: User, subscription_id: int, fields: dict[str, Any]
     ) -> None:
-        """Update subscription fields with audit logging.
-
-        ``hold`` travels with the reason: a write that switches the subscription on or
-        rewrites ``paused_reason`` without naming a hold clears it, so no path can leave a
-        hold behind that a later release would act on."""
-        fields = _with_hold(fields)
+        """Update subscription fields with audit logging. ``hold`` travels with the reason
+        (see ``_SubscriptionRepository.update``)."""
         await self._subs.update(db=db, actor=actor, entity_id=subscription_id, fields=fields)
 
     async def delete_subscription(self, db: AsyncSession, actor: User, subscription_id: int) -> None:

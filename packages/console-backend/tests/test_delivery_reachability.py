@@ -495,3 +495,26 @@ class TestAHoldIsACodeNotItsWording:
                 text("UPDATE scheduled_job_subscriptions SET enabled = TRUE WHERE id = :id"), {"id": writers.id}
             )
         await db.rollback()
+
+    @pytest.mark.asyncio
+    async def test_an_override_reset_that_rewrites_the_reason_clears_the_hold(self, world):
+        """Found in review: the resets wrote the elapsed one-shot's reason past the hold."""
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await _shared_on(world, "A1")
+        await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
+        writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
+        assert writers.hold == SubscriptionHold.UNREACHABLE
+        elapsed = {"enabled": False, "paused_reason": "This one-time job had already run", "retry_at": None}
+
+        await svc.repo.clear_trigger_override(db, u["writer"], writers.id, elapsed)
+        assert (await svc.repo.get_job(db, writers.id)).hold is None
+
+        await svc.repo.update_subscription(
+            db, u["writer"], writers.id, {"hold": SubscriptionHold.UNREACHABLE, "paused_reason": "held"}
+        )
+        await db.execute(
+            text("UPDATE scheduled_job_subscriptions SET schedule_kind = 'cron', cron_expr = '0 8 * * *' WHERE id = :id"),
+            {"id": writers.id},
+        )
+        await svc.repo.clear_trigger_overrides(db, u["owner"], job.definition_id, {writers.id: elapsed})
+        assert (await svc.repo.get_job(db, writers.id)).hold is None
