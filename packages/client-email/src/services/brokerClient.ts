@@ -46,14 +46,11 @@ export interface BrokerBinding {
    * one user never evict each other.
    */
   accountKey: string;
-  /** The account the sign-in belongs to (a Slack team, a Google Chat project); empty when there is one. */
-  workspaceId?: string;
   /**
-   * The installations this client runs in that workspace, as it registers its delivery channels
-   * (`installation_id`): where every sign-in for the workspace can be reached. Omitted leaves
-   * what the broker has for the workspace.
+   * The workspace the sign-in belongs to (a Slack team, a Google Chat project); empty when there
+   * is one. Where a workspace can be reached is published separately, with `setWorkspaceInstallations`.
    */
-  installationIds?: string[];
+  workspaceId?: string;
 }
 
 export interface MintedToken {
@@ -126,7 +123,6 @@ export class BrokerClient {
       code,
       account_key: binding.accountKey,
       workspace_id: binding.workspaceId ?? '',
-      ...(binding.installationIds ? { installation_ids: binding.installationIds } : {}),
     });
     if (!response.ok) {
       throw new BrokerError(`Broker refused the sign-in code: ${await describe(response)}`, response.status);

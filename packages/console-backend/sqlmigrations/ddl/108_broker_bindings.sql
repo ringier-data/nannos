@@ -35,8 +35,9 @@ CREATE INDEX idx_broker_bindings_user ON broker_bindings(user_id);
 -- the vocabulary its delivery channels are registered under (delivery_channels
 -- .installation_id, scoped by client_id). Once per workspace, not per binding, because a
 -- Slack sign-in is per team and reaches every app the client has in it, including one
--- installed after the user signed in. The client keeps it current: at each redeem, and
--- (Slack) whenever it registers its delivery channels. This is what tells the scheduler
+-- installed after the user signed in. The client is its only writer: it publishes each
+-- workspace whenever it registers its delivery channels (PUT /workspaces/{id}), so the list
+-- is exactly as current as the channels. This is what tells the scheduler
 -- whether a subscriber can receive on a channel (#192).
 CREATE TABLE broker_workspaces (
     client_id         TEXT NOT NULL REFERENCES broker_clients(client_id) ON DELETE CASCADE ON UPDATE CASCADE,

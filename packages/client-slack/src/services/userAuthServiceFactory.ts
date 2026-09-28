@@ -11,7 +11,6 @@
 
 import type { Config } from '../config/config.js';
 import type { StorageProvider } from '../storage/index.js';
-import type { BotInstallation } from '../storage/types.js';
 import { BrokerClient } from './brokerClient.js';
 import { BrokerUserAuthService } from './brokerUserAuthService.js';
 import { CompositeUserAuthService } from './compositeUserAuthService.js';
@@ -23,7 +22,7 @@ const logger = Logger.getLogger('UserAuthServiceFactory');
 
 export function createUserAuthService(
   config: Config,
-  storage: Pick<StorageProvider, 'userAuth' | 'oauthState' | 'botInstallation'>,
+  storage: Pick<StorageProvider, 'userAuth' | 'oauthState'>,
   oidcClient: OIDCClient
 ): IUserAuthService {
   const local = new LocalUserAuthService(storage.userAuth, oidcClient, config, storage.oauthState);
@@ -43,9 +42,7 @@ export function createUserAuthService(
       return new CompositeUserAuthService(
         storage.userAuth,
         local,
-        new BrokerUserAuthService(storage.userAuth, broker, config, storage.oauthState, async (teamId) =>
-          activeAppIds(await storage.botInstallation.getByTeamId(teamId))
-        )
+        new BrokerUserAuthService(storage.userAuth, broker, config, storage.oauthState)
       );
     }
 
@@ -66,13 +63,5 @@ export function createBrokerClient(config: Config, oidcClient: OIDCClient): Brok
     serviceAudience: config.consoleBackend.audience,
     getServiceCredentials: (audience) => oidcClient.getServiceCredentials(audience),
   });
-}
-
-/**
- * The installations a team's sign-ins can be reached on: the apps active there. A sign-in is
- * per team and a notification is looked up by team, so every one of them reaches the user.
- */
-export function activeAppIds(bots: BotInstallation[]): string[] {
-  return bots.filter((bot) => bot.isActive).map((bot) => bot.appId);
 }
 

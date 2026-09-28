@@ -20,7 +20,6 @@ class MemoryUserAuthStorage {
 const config = {
   baseUrl: 'https://gchat.example',
   oidc: { orchestratorAudience: 'orchestrator' },
-  googleChatConfigs: [{ projectName: 'my-chat-project', projectNumber: 'P1' }],
 } as unknown as Config;
 
 describe('BrokerUserAuthService', () => {
@@ -67,12 +66,8 @@ describe('BrokerUserAuthService', () => {
   test('completing the sign-in stores only who the user is', async () => {
     const row = await signIn();
 
-    // Signed in by project number; reachable on the channel registered under its name.
-    expect(broker.redeem).toHaveBeenCalledWith('code-1', {
-      accountKey: 'P1:U1',
-      workspaceId: 'P1',
-      installationIds: ['my-chat-project'],
-    });
+    // Signed in by project number; which channel reaches it is the registrar's to publish.
+    expect(broker.redeem).toHaveBeenCalledWith('code-1', { accountKey: 'P1:U1', workspaceId: 'P1' });
     expect(row).toMatchObject({
       userId: 'U1',
       projectId: 'P1',

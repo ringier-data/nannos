@@ -31,15 +31,6 @@ export class BrokerUserAuthService implements IUserAuthService {
     private readonly oauthStateStore: IOAuthStateStore
   ) {}
 
-  /**
-   * The installation a sign-in in *projectId* can be reached on. A sign-in is keyed by the
-   * project NUMBER, while delivery channels are registered under the project NAME.
-   */
-  private installationsOf(projectId: string): string[] {
-    const project = this.config.googleChatConfigs.find((c) => c.projectNumber === projectId);
-    return project ? [project.projectName] : [];
-  }
-
   /** The broker sends the browser back to the same callback the local login uses. */
   private callbackUrl(): string {
     return new URL('/api/v1/oauth/callback', this.config.baseUrl).toString();
@@ -110,11 +101,8 @@ export class BrokerUserAuthService implements IUserAuthService {
     if (!code) {
       throw new Error('The broker callback carries no code');
     }
-    const redemption = await this.broker.redeem(code, {
-      accountKey: `${projectId}:${userId}`,
-      workspaceId: projectId,
-      installationIds: this.installationsOf(projectId),
-    });
+    // Where the project can be reached is published by the registrar, not by a sign-in.
+    const redemption = await this.broker.redeem(code, { accountKey: `${projectId}:${userId}`, workspaceId: projectId });
     const now = Date.now();
     const row: UserAuthToken = {
       userId,

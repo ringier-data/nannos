@@ -239,16 +239,15 @@ class BrokerService:
         *,
         account_key: str | None = None,
         workspace_id: str = "",
-        installation_ids: list[str] | None = None,
     ) -> BrokerRedemption:
         """Trade a one-time code for the identity of who signed in, and bind the sign-in.
         Single use.
 
         The binding secret is returned here once and kept only as a hash: it is what makes
         a leaked client credential alone useless to ``mint``. *account_key* is the client
-        row the binding belongs to (the user, when the client names none). *installation_ids*,
-        when given, refresh the workspace's installations: the client's word for where its
-        sign-ins there can be reached, trusted as it is trusted to deliver there.
+        row the binding belongs to (the user, when the client names none). Where the
+        workspace can be reached is not a sign-in's business: the client publishes it with
+        ``set_workspace_installations`` when it registers its delivery channels.
         """
         now = datetime.now(timezone.utc)
         identity = await self._requests.redeem(db, code_hash=_digest(code), client_id=client.client_id, now=now)
@@ -266,16 +265,15 @@ class BrokerService:
             secret_hash=_digest(binding_secret),
             now=now,
         )
-        if installation_ids is not None:
-            await self.set_workspace_installations(db, client, workspace_id, installation_ids)
         return BrokerRedemption(**identity, binding_secret=binding_secret)
 
     async def set_workspace_installations(
         self, db: AsyncSession, client: BrokerClient, workspace_id: str, installation_ids: list[str]
     ) -> None:
-        """Record the installations *client* runs in *workspace_id* now. Every sign-in for the
-        workspace is reachable on each of them, including sign-ins made before an installation
-        was added."""
+        """Record the installations *client* runs in *workspace_id* now: the client's word for
+        where every sign-in for the workspace can be reached, trusted as it is trusted to
+        deliver there. The only writer, so the list follows the client's registrations, and a
+        sign-in made before an installation was added reaches it too."""
         await self._requests.set_workspace_installations(
             db,
             client_id=client.client_id,

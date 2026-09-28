@@ -18,7 +18,6 @@ import { OIDCClient } from './oidcClient.js';
 import { InstallationSecretService } from './installationSecretService.js';
 import { BotInstallation, IBotInstallationStore } from '../storage/types.js';
 import type { BrokerClient } from './brokerClient.js';
-import { activeAppIds } from './userAuthServiceFactory.js';
 import { Logger } from '../utils/logger.js';
 
 const logger = Logger.getLogger('InstallationRegistrar');
@@ -47,6 +46,8 @@ export interface InstallationRegistrarDeps {
    * in each team, which is where that team's sign-ins can be reached (ADR-0011 amendment 1).
    */
   broker?: BrokerClient;
+  /** Waits before each retry of that publication; the default spreads them over ~12 minutes. */
+  publishRetryDelaysMs?: number[];
 }
 
 export async function registerInstallations(deps: InstallationRegistrarDeps): Promise<void> {
@@ -65,14 +66,9 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
     return;
   }
 
-  if (deps.broker) {
-    await publishWorkspaceInstallations(deps.broker, installations);
-  }
-
   const active = installations.filter((b) => b.isActive);
   if (active.length === 0) {
-    logger.info('No active bot installations — nothing to register');
-    return;
+    logger.info('No active bot installations — no delivery channel to register');
   }
 
   for (const bot of active) {
@@ -91,24 +87,63 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
       logger.error(error, `Failed to register delivery channel for appId=${bot.appId}: ${error}`);
     }
   }
+
+  if (deps.broker) {
+    await publishWorkspaceInstallations(deps.broker, workspacesOf(installations), deps.publishRetryDelaysMs);
+  }
 }
 
 /**
- * Every team this client knows, with the apps active in it. A team whose apps were all
- * deactivated is sent with none, so its sign-ins stop counting as reachable. Per-team
- * isolation, like the channels: one refusal does not stop the rest.
+ * Every team this client knows, with the apps active in it. A sign-in is per team and a
+ * notification is looked up by team, so each of them reaches it. A team whose apps were all
+ * deactivated maps to none, so its sign-ins stop counting as reachable.
  */
-async function publishWorkspaceInstallations(broker: BrokerClient, installations: BotInstallation[]): Promise<void> {
-  const teams = new Map<string, BotInstallation[]>();
+function workspacesOf(installations: BotInstallation[]): Map<string, string[]> {
+  const workspaces = new Map<string, string[]>();
   for (const bot of installations) {
-    teams.set(bot.teamId, [...(teams.get(bot.teamId) ?? []), bot]);
+    const appIds = workspaces.get(bot.teamId) ?? [];
+    workspaces.set(bot.teamId, bot.isActive ? [...appIds, bot.appId] : appIds);
   }
-  for (const [teamId, bots] of teams) {
-    try {
-      await broker.setWorkspaceInstallations(teamId, activeAppIds(bots));
-    } catch (error) {
-      logger.error(error, `Failed to publish the installations of team ${teamId}: ${error}`);
+  return workspaces;
+}
+
+/** Waits before each retry of a workspace publication that failed. */
+const PUBLISH_RETRY_DELAYS_MS = [30_000, 120_000, 600_000];
+
+/**
+ * Tell the broker the installations this client runs in each workspace: where every sign-in
+ * there can be reached (ADR-0011 amendment 1). This is the only writer of that list, so a
+ * failure is retried rather than left for a restart. Per-workspace isolation, like the
+ * channels: one refusal does not hold up the rest. After the last retry the next restart
+ * publishes again.
+ */
+export async function publishWorkspaceInstallations(
+  broker: BrokerClient,
+  workspaces: Map<string, string[]>,
+  retryDelaysMs: number[] = PUBLISH_RETRY_DELAYS_MS
+): Promise<void> {
+  let pending = [...workspaces];
+  for (let attempt = 0; ; attempt++) {
+    const failed: [string, string[]][] = [];
+    for (const [workspaceId, installationIds] of pending) {
+      try {
+        await broker.setWorkspaceInstallations(workspaceId, installationIds);
+      } catch (error) {
+        logger.warn(`Failed to publish the installations of workspace ${workspaceId}: ${error}`);
+        failed.push([workspaceId, installationIds]);
+      }
     }
+    if (failed.length === 0) {
+      return;
+    }
+    if (attempt >= retryDelaysMs.length) {
+      logger.error(
+        `Gave up publishing the installations of ${failed.map(([id]) => id).join(', ')}; the next restart publishes them again`
+      );
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
+    pending = failed;
   }
 }
 

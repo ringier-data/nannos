@@ -333,15 +333,14 @@ class TestBindingSecret:
         _, code = await _signed_in(broker, pg_session, test_user_db)
         slack = await broker.resolve_client(pg_session, "slack-client")
 
-        redemption = await broker.redeem(
-            pg_session, slack, code, account_key="T1:U1", workspace_id="T1", installation_ids=["A2", "A1", "A1"]
-        )
+        redemption = await broker.redeem(pg_session, slack, code, account_key="T1:U1", workspace_id="T1")
 
         assert redemption.sub == "test-user-sub" and len(redemption.binding_secret) >= 32
         [row] = await _binding_rows(pg_session, test_user_db.id)
         assert (row["client_id"], row["account_key"], row["workspace_id"]) == ("slack-client", "T1:U1", "T1")
         assert redemption.binding_secret not in row["secret_hash"]
-        assert await _workspace_installations(pg_session, "slack-client", "T1") == ["A1", "A2"]
+        # Where the workspace can be reached is the registration's business, not a sign-in's.
+        assert await _workspace_installations(pg_session, "slack-client", "T1") is None
 
     @pytest.mark.asyncio
     async def test_signing_in_again_into_a_row_replaces_its_binding(self, broker, pg_session, test_user_db):
@@ -384,12 +383,11 @@ class TestBindingSecret:
     @pytest.mark.asyncio
     async def test_a_workspaces_installations_follow_the_client_not_the_sign_in(self, broker, pg_session, test_user_db):
         """An app installed after the user signed in reaches them too: installations live
-        on the workspace, which the client keeps current, and a redeem without any leaves them."""
+        on the workspace, which only the client's registration writes, and a sign-in leaves them."""
         slack = await broker.resolve_client(pg_session, "slack-client")
+        await broker.set_workspace_installations(pg_session, slack, "T1", ["A2", "A1", "A1"])
         _, code = await _signed_in(broker, pg_session, test_user_db)
-        await broker.redeem(pg_session, slack, code, account_key="T1:U1", workspace_id="T1", installation_ids=["A1"])
-
-        await broker.set_workspace_installations(pg_session, slack, "T1", ["A1", "A2"])
+        await broker.redeem(pg_session, slack, code, account_key="T1:U1", workspace_id="T1")
         assert await _workspace_installations(pg_session, "slack-client", "T1") == ["A1", "A2"]
 
         _, code = await _signed_in(broker, pg_session, test_user_db)

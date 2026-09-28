@@ -29,14 +29,16 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > app, the key its delivery channels and secrets are registered under), and a Slack
 > workspace can hold several of those.
 >
-> The same redeem carries where the user can be reached, and it lives on the **workspace**,
-> not the binding (`broker_workspaces`): `installation_ids`, in the vocabulary the client
-> registers its delivery channels under (`delivery_channels.installation_id`, scoped by
-> `client_id`). A Slack sign-in is per team and a push is looked up by team, so it reaches
-> every app the client has there, including one installed after the user signed in; Slack
-> therefore also publishes each team's active apps (`PUT /workspaces/{workspace_id}`) whenever it
-> registers its channels. Google Chat maps its project number to the project name its
-> channels use; email and the cockpit BFF have no channel and send none. This is what
+> Where a sign-in can be reached lives on the **workspace**, not the binding
+> (`broker_workspaces`): `installation_ids`, in the vocabulary the client registers its
+> delivery channels under (`delivery_channels.installation_id`, scoped by `client_id`). A
+> Slack sign-in is per team and a push is looked up by team, so it reaches every app the
+> client has there, including one installed after the user signed in. The client is the
+> list's only writer: whenever it registers its delivery channels it publishes each
+> workspace (`PUT /workspaces/{workspace_id}`), retrying a failure, so the list is exactly
+> as current as the channels. Slack sends each team's active apps; Google Chat maps its
+> project number to the project name its channel uses; email and the cockpit BFF have no
+> channel and publish nothing. A sign-in never writes it. This is what
 > ringier-data/nannos#192 reads to tell whether a subscriber can receive on a channel.
 >
 > Enforcement is per client, because the cockpit BFF ships from another repository:

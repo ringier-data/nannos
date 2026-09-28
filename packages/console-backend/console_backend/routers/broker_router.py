@@ -149,7 +149,6 @@ async def redeem(
             body.code,
             account_key=body.account_key,
             workspace_id=body.workspace_id,
-            installation_ids=body.installation_ids,
         )
     except BrokerRefusal as e:
         raise _refused(e) from e

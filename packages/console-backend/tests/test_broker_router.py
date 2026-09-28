@@ -336,14 +336,14 @@ class TestClientLegCarriesTheBinding:
         return service, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(broker_service=service)))
 
     @pytest.mark.asyncio
-    async def test_redeem_passes_account_workspace_and_installations(self, service_request):
+    async def test_redeem_passes_account_and_workspace(self, service_request):
         service, request = service_request
         service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
         db = AsyncMock()
         client = _client()
 
         result = await router.redeem(
-            BrokerRedeemRequest(code="c", account_key="T1:U1", workspace_id="T1", installation_ids=["A1"]),
+            BrokerRedeemRequest(code="c", account_key="T1:U1", workspace_id="T1"),
             request,
             db,
             client,
@@ -351,7 +351,7 @@ class TestClientLegCarriesTheBinding:
 
         assert result.binding_secret == "secret"
         service.redeem.assert_awaited_once_with(
-            db, client, "c", account_key="T1:U1", workspace_id="T1", installation_ids=["A1"]
+            db, client, "c", account_key="T1:U1", workspace_id="T1"
         )
         db.commit.assert_awaited_once()
 

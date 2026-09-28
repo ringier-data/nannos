@@ -544,15 +544,9 @@ export type BrokerRedeemRequest = {
     /**
      * Workspace Id
      *
-     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one.
+     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. Where the workspace can be reached is published separately (PUT /workspaces/{workspace_id}).
      */
     workspace_id?: string;
-    /**
-     * Installation Ids
-     *
-     * The installations the client runs in the workspace, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the workspace. Omitted: the workspace's installations are left as they are.
-     */
-    installation_ids?: Array<string> | null;
 };
 
 /**

@@ -43,8 +43,7 @@ describe('BrokerUserAuthService', () => {
       storage as unknown as IUserAuthStorage,
       broker as unknown as BrokerClient,
       config,
-      { set: jest.fn() } as unknown as IOAuthStateStore,
-      async (teamId: string) => (teamId === 'T1' ? ['A1', 'A2'] : [])
+      { set: jest.fn() } as unknown as IOAuthStateStore
     );
   });
 
@@ -67,12 +66,8 @@ describe('BrokerUserAuthService', () => {
   test('completing the sign-in stores only who the user is', async () => {
     const row = await signIn();
 
-    // One sign-in per team covers every app of this client in it.
-    expect(broker.redeem).toHaveBeenCalledWith('code-1', {
-      accountKey: 'T1:U1',
-      workspaceId: 'T1',
-      installationIds: ['A1', 'A2'],
-    });
+    // One sign-in per team; which apps the team reaches is the registrar's to publish.
+    expect(broker.redeem).toHaveBeenCalledWith('code-1', { accountKey: 'T1:U1', workspaceId: 'T1' });
     expect(row).toMatchObject({
       userId: 'U1',
       teamId: 'T1',

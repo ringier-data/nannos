@@ -24,17 +24,11 @@ export class BrokerUserAuthService implements IUserAuthService {
   /** Key: `${userId}:${teamId}:${audience}` */
   private readonly tokenCache = new Map<string, CachedToken>();
 
-  /**
-   * *installationsOf* names the apps this client runs in a team: the installations its
-   * delivery channels are registered under. A sign-in is per team and a notification is
-   * looked up by team, so one sign-in can be reached through every one of them.
-   */
   constructor(
     private readonly storage: IUserAuthStorage,
     private readonly broker: BrokerClient,
     private readonly config: Config,
-    private readonly oauthStateStore: IOAuthStateStore,
-    private readonly installationsOf: (teamId: string) => Promise<string[]> = async () => []
+    private readonly oauthStateStore: IOAuthStateStore
   ) {}
 
   /** The broker sends the browser back to the same callback the local login uses. */
@@ -107,11 +101,8 @@ export class BrokerUserAuthService implements IUserAuthService {
     if (!code) {
       throw new Error('The broker callback carries no code');
     }
-    const redemption = await this.broker.redeem(code, {
-      accountKey: `${teamId}:${userId}`,
-      workspaceId: teamId,
-      installationIds: await this.installationsOf(teamId),
-    });
+    // Where the team can be reached is published by the registrar, not by a sign-in.
+    const redemption = await this.broker.redeem(code, { accountKey: `${teamId}:${userId}`, workspaceId: teamId });
     const now = Date.now();
     const row: UserAuthToken = {
       userId,

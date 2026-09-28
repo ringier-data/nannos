@@ -267,11 +267,11 @@ class BrokerRedeemRequest(BaseModel):
             "secret. Omitted: one binding per user."
         ),
     )
-    workspace_id: str = Field(default="", max_length=200, description=_WORKSPACE_ID_DESCRIPTION)
-    installation_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] | None = Field(
-        default=None,
-        max_length=100,
-        description=_INSTALLATION_IDS_DESCRIPTION + " Omitted: the workspace's installations are left as they are.",
+    workspace_id: str = Field(
+        default="",
+        max_length=200,
+        description=_WORKSPACE_ID_DESCRIPTION
+        + " Where the workspace can be reached is published separately (PUT /workspaces/{workspace_id}).",
     )
 
 
