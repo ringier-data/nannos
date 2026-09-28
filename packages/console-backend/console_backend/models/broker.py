@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import Annotated
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
@@ -140,6 +141,14 @@ class BrokerClientCreate(BaseModel):
         ),
     )
     enabled: bool = True
+    require_binding_secret: bool = Field(
+        default=True,
+        description=(
+            "Refuse /token calls that carry no binding secret from /redeem. On for new "
+            "registrations; turn it on for an existing client once it sends the secret, and its "
+            "linked users sign in again once."
+        ),
+    )
 
     @field_validator("client_id")
     @classmethod
@@ -163,6 +172,7 @@ class BrokerClientUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     redirect_uris: list[str] | None = Field(default=None, min_length=1)
     enabled: bool | None = None
+    require_binding_secret: bool | None = None
 
     @field_validator("redirect_uris")
     @classmethod
@@ -179,6 +189,13 @@ class BrokerClient(BaseModel):
     description: str | None = None
     redirect_uris: list[str]
     enabled: bool
+    require_binding_secret: bool = Field(
+        description=(
+            "Refuse /token calls that carry no binding secret from /redeem. On for new "
+            "registrations; turn it on for an existing client once it sends the secret, and its "
+            "linked users sign in again once."
+        )
+    )
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -227,8 +244,52 @@ class BrokerIdentity(BaseModel):
     company_name: str | None = None
 
 
+_WORKSPACE_ID_DESCRIPTION = (
+    "The client's account the sign-in belongs to (a Slack team, a Google Chat project); "
+    "empty for a client with only one."
+)
+_INSTALLATION_IDS_DESCRIPTION = (
+    "The installations the client runs in the workspace, as it registers its delivery channels "
+    "(`installation_id`). A notification on one of those channels can reach every user "
+    "signed in for the workspace."
+)
+
+
 class BrokerRedeemRequest(BaseModel):
     code: str = Field(min_length=1, max_length=512)
+    account_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=400,
+        description=(
+            "The client's own key for where it keeps this sign-in (e.g. a Slack user in a team, "
+            "an email address). A later sign-in with the same key replaces the binding and its "
+            "secret. Omitted: one binding per user."
+        ),
+    )
+    workspace_id: str = Field(
+        default="",
+        max_length=200,
+        description=_WORKSPACE_ID_DESCRIPTION
+        + " Where the workspace can be reached is published separately (PUT /workspaces/{workspace_id}).",
+    )
+
+
+class BrokerWorkspaceInstallations(BaseModel):
+    """``PUT /workspaces/{workspace_id}``: the client's current installations in one workspace."""
+
+    installation_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(max_length=100, description=_INSTALLATION_IDS_DESCRIPTION)
+
+
+class BrokerRedemption(BrokerIdentity):
+    """What ``/redeem`` returns: who signed in, and the secret that names this sign-in."""
+
+    binding_secret: str = Field(
+        description=(
+            "Returned once and stored by the backend only as a hash. The client keeps it with "
+            "the user and sends it on every /token call for them."
+        )
+    )
 
 
 class BrokerTokenRequest(BaseModel):
@@ -238,6 +299,15 @@ class BrokerTokenRequest(BaseModel):
         description="The user's OIDC subject, from /redeem.",
     )
     audience: str = Field(min_length=1, max_length=255)
+    binding_secret: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description=(
+            "The secret /redeem returned for this user's sign-in. Required when the client "
+            "has require_binding_secret; checked whenever it is sent."
+        ),
+    )
 
 
 class BrokerTokenResponse(BaseModel):

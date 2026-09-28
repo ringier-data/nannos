@@ -425,6 +425,12 @@ export type BrokerClient = {
      */
     enabled: boolean;
     /**
+     * Require Binding Secret
+     *
+     * Refuse /token calls that carry no binding secret from /redeem. On for new registrations; turn it on for an existing client once it sends the secret, and its linked users sign in again once.
+     */
+    require_binding_secret: boolean;
+    /**
      * Created By
      */
     created_by: string;
@@ -468,6 +474,12 @@ export type BrokerClientCreate = {
      * Enabled
      */
     enabled?: boolean;
+    /**
+     * Require Binding Secret
+     *
+     * Refuse /token calls that carry no binding secret from /redeem. On for new registrations; turn it on for an existing client once it sends the secret, and its linked users sign in again once.
+     */
+    require_binding_secret?: boolean;
 };
 
 /**
@@ -509,17 +521,40 @@ export type BrokerClientUpdate = {
      * Enabled
      */
     enabled?: boolean | null;
+    /**
+     * Require Binding Secret
+     */
+    require_binding_secret?: boolean | null;
 };
 
 /**
- * BrokerIdentity
- *
- * Who signed in, as ``/redeem`` returns it.
- *
- * The union of the claims any broker client reads today, captured from the ID token
- * (or userinfo) at sign-in. A client that needs fresh values signs the user in again.
+ * BrokerRedeemRequest
  */
-export type BrokerIdentity = {
+export type BrokerRedeemRequest = {
+    /**
+     * Code
+     */
+    code: string;
+    /**
+     * Account Key
+     *
+     * The client's own key for where it keeps this sign-in (e.g. a Slack user in a team, an email address). A later sign-in with the same key replaces the binding and its secret. Omitted: one binding per user.
+     */
+    account_key?: string | null;
+    /**
+     * Workspace Id
+     *
+     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. Where the workspace can be reached is published separately (PUT /workspaces/{workspace_id}).
+     */
+    workspace_id?: string;
+};
+
+/**
+ * BrokerRedemption
+ *
+ * What ``/redeem`` returns: who signed in, and the secret that names this sign-in.
+ */
+export type BrokerRedemption = {
     /**
      * User Id
      *
@@ -570,16 +605,12 @@ export type BrokerIdentity = {
      * Company Name
      */
     company_name?: string | null;
-};
-
-/**
- * BrokerRedeemRequest
- */
-export type BrokerRedeemRequest = {
     /**
-     * Code
+     * Binding Secret
+     *
+     * Returned once and stored by the backend only as a hash. The client keeps it with the user and sends it on every /token call for them.
      */
-    code: string;
+    binding_secret: string;
 };
 
 /**
@@ -596,6 +627,12 @@ export type BrokerTokenRequest = {
      * Audience
      */
     audience: string;
+    /**
+     * Binding Secret
+     *
+     * The secret /redeem returned for this user's sign-in. Required when the client has require_binding_secret; checked whenever it is sent.
+     */
+    binding_secret?: string | null;
 };
 
 /**
@@ -614,6 +651,20 @@ export type BrokerTokenResponse = {
      * Token Type
      */
     token_type?: string;
+};
+
+/**
+ * BrokerWorkspaceInstallations
+ *
+ * ``PUT /workspaces/{workspace_id}``: the client's current installations in one workspace.
+ */
+export type BrokerWorkspaceInstallations = {
+    /**
+     * Installation Ids
+     *
+     * The installations the client runs in the workspace, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the workspace.
+     */
+    installation_ids: Array<string>;
 };
 
 /**
@@ -9439,7 +9490,7 @@ export type RedeemApiV1AuthBrokerRedeemPostResponses = {
     /**
      * Successful Response
      */
-    200: BrokerIdentity;
+    200: BrokerRedemption;
 };
 
 export type RedeemApiV1AuthBrokerRedeemPostResponse = RedeemApiV1AuthBrokerRedeemPostResponses[keyof RedeemApiV1AuthBrokerRedeemPostResponses];
@@ -9468,6 +9519,36 @@ export type MintTokenApiV1AuthBrokerTokenPostResponses = {
 };
 
 export type MintTokenApiV1AuthBrokerTokenPostResponse = MintTokenApiV1AuthBrokerTokenPostResponses[keyof MintTokenApiV1AuthBrokerTokenPostResponses];
+
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutData = {
+    body: BrokerWorkspaceInstallations;
+    path: {
+        /**
+         * Workspace Id
+         */
+        workspace_id: string;
+    };
+    query?: never;
+    url: '/api/v1/auth/broker/workspaces/{workspace_id}';
+};
+
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutError = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors];
+
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponse = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses];
 
 export type ListBrokerClientsApiV1AdminBrokerClientsGetData = {
     body?: never;

@@ -60,7 +60,7 @@ export class BrokerUserAuthService implements IUserAuthService {
       return null;
     }
     try {
-      const minted = await this.broker.mint(row.oidcSub, audience);
+      const minted = await this.broker.mint(row.oidcSub, audience, row.brokerBindingSecret ?? null);
       const now = Date.now();
       const margin = Math.min(RENEW_MARGIN_MS, (minted.expiresAt - now) / 2);
       this.tokenCache.set(key, { ...minted, renewAt: minted.expiresAt - margin });
@@ -93,9 +93,15 @@ export class BrokerUserAuthService implements IUserAuthService {
     if (!code) {
       throw new Error('The broker callback carries no code');
     }
-    const identity = await this.broker.redeem(code);
+    // One row per address; no delivery channel to be reached on.
+    const redemption = await this.broker.redeem(code, { accountKey: email });
     // Replaces every column: a user who signed in locally before leaves no tokens behind.
-    await this.storage.saveToken({ email, oidcSub: identity.sub, authMode: 'broker' });
+    await this.storage.saveToken({
+      email,
+      oidcSub: redemption.sub,
+      authMode: 'broker',
+      brokerBindingSecret: redemption.binding_secret,
+    });
     this.clearCache(email);
     this.logger.info(`${email} signed in through the broker`);
   }

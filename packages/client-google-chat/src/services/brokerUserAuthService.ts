@@ -62,7 +62,7 @@ export class BrokerUserAuthService implements IUserAuthService {
       return null;
     }
     try {
-      const minted = await this.broker.mint(row.oidcSub, audience);
+      const minted = await this.broker.mint(row.oidcSub, audience, row.brokerBindingSecret ?? null);
       const now = Date.now();
       const margin = Math.min(RENEW_MARGIN_MS, (minted.expiresAt - now) / 2);
       this.tokenCache.set(key, { ...minted, renewAt: minted.expiresAt - margin });
@@ -101,13 +101,15 @@ export class BrokerUserAuthService implements IUserAuthService {
     if (!code) {
       throw new Error('The broker callback carries no code');
     }
-    const identity = await this.broker.redeem(code);
+    // Where the project can be reached is published by the registrar, not by a sign-in.
+    const redemption = await this.broker.redeem(code, { accountKey: `${projectId}:${userId}`, workspaceId: projectId });
     const now = Date.now();
     const row: UserAuthToken = {
       userId,
       projectId,
-      oidcSub: identity.sub,
+      oidcSub: redemption.sub,
       authMode: 'broker',
+      brokerBindingSecret: redemption.binding_secret,
       createdAt: now,
       updatedAt: now,
     };

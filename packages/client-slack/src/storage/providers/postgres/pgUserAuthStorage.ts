@@ -19,6 +19,7 @@ function rowToToken(row: any): UserAuthToken {
     idToken: row.id_token ?? undefined,
     oidcSub: row.oidc_sub ?? undefined,
     authMode: row.auth_mode ?? 'local',
+    brokerBindingSecret: row.broker_binding_secret ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
     updatedAt: new Date(row.updated_at).getTime(),
   };
@@ -45,11 +46,11 @@ export class PgUserAuthStorage {
       await this.pool.query(SQL`
         INSERT INTO user_auth (
           user_id, team_id, access_token, refresh_token, expires_at,
-          token_type, scope, id_token, oidc_sub, auth_mode
+          token_type, scope, id_token, oidc_sub, auth_mode, broker_binding_secret
         ) VALUES (
           ${token.userId}, ${token.teamId}, ${token.accessToken ?? null}, ${token.refreshToken ?? null},
           ${expiresAt}, ${token.tokenType ?? null}, ${token.scope ?? null}, ${token.idToken ?? null},
-          ${token.oidcSub ?? null}, ${token.authMode ?? 'local'}
+          ${token.oidcSub ?? null}, ${token.authMode ?? 'local'}, ${token.brokerBindingSecret ?? null}
         )
         ON CONFLICT (user_id, team_id) DO UPDATE SET
           access_token = EXCLUDED.access_token,
@@ -59,7 +60,8 @@ export class PgUserAuthStorage {
           scope = EXCLUDED.scope,
           id_token = EXCLUDED.id_token,
           oidc_sub = EXCLUDED.oidc_sub,
-          auth_mode = EXCLUDED.auth_mode
+          auth_mode = EXCLUDED.auth_mode,
+          broker_binding_secret = EXCLUDED.broker_binding_secret
       `);
       this.logger.info(`Saved auth token for user ${token.userId} in team ${token.teamId}`);
     } catch (error) {
@@ -75,7 +77,7 @@ export class PgUserAuthStorage {
     try {
       const result = await this.pool.query(SQL`
         SELECT user_id, team_id, access_token, refresh_token, expires_at,
-               token_type, scope, id_token, oidc_sub, auth_mode, created_at, updated_at
+               token_type, scope, id_token, oidc_sub, auth_mode, broker_binding_secret, created_at, updated_at
         FROM user_auth
         WHERE user_id = ${userId} AND team_id = ${teamId}
       `);
@@ -189,7 +191,7 @@ export class PgUserAuthStorage {
     try {
       const result = await this.pool.query(SQL`
         SELECT user_id, team_id, access_token, refresh_token, expires_at,
-               token_type, scope, id_token, oidc_sub, auth_mode, created_at, updated_at
+               token_type, scope, id_token, oidc_sub, auth_mode, broker_binding_secret, created_at, updated_at
         FROM user_auth
         WHERE oidc_sub = ${oidcSub} AND team_id = ${teamId}
         LIMIT 1

@@ -21,7 +21,15 @@ import console_backend.dependencies as dependencies
 import console_backend.routers.broker_router as router
 from console_backend.config import config
 from console_backend.controllers.broker_controller import BrokerController
-from console_backend.models.broker import BrokerClient, BrokerClientCreate
+from console_backend.models.broker import (
+    BrokerClient,
+    BrokerClientCreate,
+    BrokerRedeemRequest,
+    BrokerRedemption,
+    BrokerWorkspaceInstallations,
+    BrokerTokenRequest,
+    BrokerTokenResponse,
+)
 from console_backend.repositories.broker_client_repository import BrokerClientRepository
 from console_backend.repositories.broker_login_request_repository import BrokerLoginRequestRepository
 from console_backend.services.audit_service import AuditService
@@ -38,6 +46,7 @@ def _client(**overrides) -> BrokerClient:
         "name": "Slack",
         "redirect_uris": [SLACK_CALLBACK],
         "enabled": True,
+        "require_binding_secret": False,
         "created_by": "admin-user-id",
         "created_at": NOW,
         "updated_at": NOW,
@@ -203,7 +212,11 @@ class TestBrowserLeg:
     async def test_authorize_refuses_an_unregistered_redirect_uri(self, controller, pg_session):
         with pytest.raises(BrokerRefusal) as exc:
             await controller.authorize(
-                _browser(), pg_session, client_id="slack-client", redirect_uri="https://evil.example/cb", client_state=None
+                _browser(),
+                pg_session,
+                client_id="slack-client",
+                redirect_uri="https://evil.example/cb",
+                client_state=None,
             )
         assert exc.value.status_code == 400
 
@@ -237,9 +250,7 @@ class TestBrowserLeg:
         assert user_row.scalar() == identity.user_id
 
     @pytest.mark.asyncio
-    async def test_a_failure_at_keycloak_goes_back_to_the_client_as_an_error(
-        self, controller, mock_oauth, pg_session
-    ):
+    async def test_a_failure_at_keycloak_goes_back_to_the_client_as_an_error(self, controller, mock_oauth, pg_session):
         state = await _authorize(controller, mock_oauth, pg_session)
         mock_oauth.authorize_access_token.side_effect = OAuthError(error="access_denied", description="User cancelled")
 
@@ -312,3 +323,60 @@ class TestBrowserLeg:
         }
         response = await controller.callback(_browser({"state": state}), pg_session)
         assert set(parse_qs(urlsplit(response.headers["location"]).query)) == {"code"}
+
+
+class TestClientLegCarriesTheBinding:
+    """The HTTP layer hands the binding fields to the service untouched: the workspace and
+    installations on /redeem, the secret on /token."""
+
+    @pytest.fixture
+    def service_request(self, monkeypatch):
+        monkeypatch.setattr(config.broker, "enabled", True)
+        service = AsyncMock(spec=BrokerService)
+        return service, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(broker_service=service)))
+
+    @pytest.mark.asyncio
+    async def test_redeem_passes_account_and_workspace(self, service_request):
+        service, request = service_request
+        service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
+        db = AsyncMock()
+        client = _client()
+
+        result = await router.redeem(
+            BrokerRedeemRequest(code="c", account_key="T1:U1", workspace_id="T1"),
+            request,
+            db,
+            client,
+        )
+
+        assert result.binding_secret == "secret"
+        service.redeem.assert_awaited_once_with(
+            db, client, "c", account_key="T1:U1", workspace_id="T1"
+        )
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_client_sets_its_workspaces_installations(self, service_request):
+        service, request = service_request
+        db = AsyncMock()
+        client = _client()
+
+        await router.set_workspace_installations(
+            "T1", BrokerWorkspaceInstallations(installation_ids=["A1", "A2"]), request, db, client
+        )
+
+        service.set_workspace_installations.assert_awaited_once_with(db, client, "T1", ["A1", "A2"])
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_token_passes_the_binding_secret(self, service_request):
+        service, request = service_request
+        service.mint.return_value = BrokerTokenResponse(access_token="at", expires_in=60)
+        db = AsyncMock()
+        client = _client()
+
+        await router.mint_token(
+            BrokerTokenRequest(sub="s1", audience="orchestrator", binding_secret="secret"), request, db, client
+        )
+
+        service.mint.assert_awaited_once_with(db, client, "s1", "orchestrator", "secret")

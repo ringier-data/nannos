@@ -38,13 +38,7 @@ export function createUserAuthService(
       }
       // Sign-in links go to the browser, so they need the public URL.
       logger.info(`Broker sign-in links point at ${config.consoleBackend.publicUrl}`);
-      const broker = new BrokerClient({
-        baseUrl: config.consoleBackend.url,
-        publicBaseUrl: config.consoleBackend.publicUrl,
-        clientId: config.oidc.clientId,
-        serviceAudience: config.consoleBackend.audience,
-        getServiceCredentials: (audience) => oidcClient.getServiceCredentials(audience),
-      });
+      const broker = createBrokerClient(config, oidcClient);
       return new CompositeUserAuthService(
         storage.userAuth,
         local,
@@ -56,3 +50,18 @@ export function createUserAuthService(
       throw new Error(`Unknown user auth mode: ${config.userAuthMode}`);
   }
 }
+
+/** The token broker client, as this client itself calls console-backend. Broker mode only. */
+export function createBrokerClient(config: Config, oidcClient: OIDCClient): BrokerClient {
+  if (!config.consoleBackend) {
+    throw new Error('USER_AUTH_MODE=broker requires CONSOLE_BACKEND_URL');
+  }
+  return new BrokerClient({
+    baseUrl: config.consoleBackend.url,
+    publicBaseUrl: config.consoleBackend.publicUrl,
+    clientId: config.oidc.clientId,
+    serviceAudience: config.consoleBackend.audience,
+    getServiceCredentials: (audience) => oidcClient.getServiceCredentials(audience),
+  });
+}
+

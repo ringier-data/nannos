@@ -4,6 +4,7 @@ import { Config } from '../../src/config/config.js';
 import { OIDCClient } from '../../src/services/oidcClient.js';
 import { InstallationSecretService } from '../../src/services/installationSecretService.js';
 import { IBotInstallationStore } from '../../src/storage/types.js';
+import type { BrokerClient } from '../../src/services/brokerClient.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -110,5 +111,70 @@ describe('registerInstallations', () => {
     ]);
     await expect(registerInstallations(d)).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('in broker mode it tells the broker which apps are active in each team', async () => {
+    const inactive = { ...installation('A00000000CC', 'T000000BB', 'Old'), isActive: false };
+    const setWorkspaceInstallations = jest.fn<(workspaceId: string, ids: string[]) => Promise<void>>().mockResolvedValue();
+    const d = {
+      ...deps([
+        installation('A00000000AA', 'T000000AA', 'Nannos'),
+        installation('A00000000AB', 'T000000AA', 'Nannos Dev'),
+        inactive,
+      ]),
+      broker: { setWorkspaceInstallations } as unknown as BrokerClient,
+    };
+
+    await registerInstallations(d);
+
+    // A team with nothing active is sent empty, so its sign-ins stop counting as reachable.
+    expect(setWorkspaceInstallations.mock.calls).toEqual([
+      ['T000000AA', ['A00000000AA', 'A00000000AB']],
+      ['T000000BB', []],
+    ]);
+  });
+
+  test('a refusal for one team is retried, without holding up the channels or the other teams', async () => {
+    const setWorkspaceInstallations = jest
+      .fn<(workspaceId: string, ids: string[]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('403'))
+      .mockResolvedValue();
+    const d = {
+      ...deps([installation('A00000000AA', 'T000000AA', 'Nannos'), installation('A00000000BB', 'T000000BB', 'Two')]),
+      broker: { setWorkspaceInstallations } as unknown as BrokerClient,
+      publishRetryDelaysMs: [0],
+    };
+
+    await registerInstallations(d);
+
+    expect(setWorkspaceInstallations.mock.calls.map(([id]) => id)).toEqual(['T000000AA', 'T000000BB', 'T000000AA']);
+    expect(bodiesFrom(fetchMock).map((b) => b.installation_id)).toEqual(['A00000000AA', 'A00000000BB']);
+  });
+
+  test('after the last retry it gives up until the next restart', async () => {
+    const setWorkspaceInstallations = jest
+      .fn<(workspaceId: string, ids: string[]) => Promise<void>>()
+      .mockRejectedValue(new Error('down'));
+    const d = {
+      ...deps([installation('A00000000AA', 'T000000AA', 'Nannos')]),
+      broker: { setWorkspaceInstallations } as unknown as BrokerClient,
+      publishRetryDelaysMs: [0, 0],
+    };
+
+    await expect(registerInstallations(d)).resolves.toBeUndefined();
+    expect(setWorkspaceInstallations).toHaveBeenCalledTimes(3);
+  });
+
+  test('a team with nothing active is published even though no channel is registered', async () => {
+    const setWorkspaceInstallations = jest.fn<(workspaceId: string, ids: string[]) => Promise<void>>().mockResolvedValue();
+    const d = {
+      ...deps([{ ...installation('A00000000AA', 'T000000AA', 'Nannos'), isActive: false }]),
+      broker: { setWorkspaceInstallations } as unknown as BrokerClient,
+    };
+
+    await registerInstallations(d);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(setWorkspaceInstallations.mock.calls).toEqual([['T000000AA', []]]);
   });
 });

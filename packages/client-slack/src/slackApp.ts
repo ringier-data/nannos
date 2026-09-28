@@ -5,7 +5,7 @@ import { Logger, SlackBoltLogger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
 import { OIDCClient } from './services/oidcClient.js';
 import type { IUserAuthService } from './services/userAuthService.js';
-import { createUserAuthService } from './services/userAuthServiceFactory.js';
+import { createBrokerClient, createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { FeedbackService } from './services/feedbackService.js';
@@ -461,6 +461,7 @@ export async function startSlackApp(config: Config) {
       oidcClient,
       botInstallationStore: storage.botInstallation,
       installationSecretService,
+      broker: config.userAuthMode === 'broker' ? createBrokerClient(config, oidcClient) : undefined,
     }).catch((error) => {
         logger.error(error, `Delivery-channel self-registration failed: ${error}`);
     });

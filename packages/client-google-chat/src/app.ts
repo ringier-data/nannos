@@ -6,7 +6,7 @@ import { createStorageProvider, type StorageProvider } from './storage/index.js'
 import { OIDCClient } from './services/oidcClient.js';
 import { registerInstallations } from './services/installationRegistrar.js';
 import { createInstallationSecretService } from './services/installationSecretServiceFactory.js';
-import { createUserAuthService } from './services/userAuthServiceFactory.js';
+import { createBrokerClient, createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { GoogleChatService } from './services/googleChatService.js';
@@ -529,7 +529,12 @@ function setupServerTimeouts(server: Server, config: Config) {
 
     // Self-register each Google Chat project as a delivery channel with console-backend.
     // Failures are isolated and never block startup.
-    registerInstallations({ config, oidcClient, installationSecretService }).catch((error) => {
+    registerInstallations({
+      config,
+      oidcClient,
+      installationSecretService,
+      broker: config.userAuthMode === 'broker' ? createBrokerClient(config, oidcClient) : undefined,
+    }).catch((error) => {
       logger.error(error, `Delivery-channel self-registration failed: ${error}`);
     });
 

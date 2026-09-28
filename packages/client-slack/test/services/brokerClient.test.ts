@@ -53,33 +53,68 @@ describe('BrokerClient', () => {
 
     // The client's own calls stay on the in-cluster URL.
     fetchMock.mockImplementation(async () => response(200, { user_id: 'u1', sub: 'sub-1', groups: [] }));
-    await publicBroker.redeem('code-1');
+    await publicBroker.redeem('code-1', { accountKey: 'acct-1' });
     expect(calls()[0].url).toBe('http://console:8080/api/v1/auth/broker/redeem');
   });
 
   test('redeems a code as the client itself', async () => {
     fetchMock.mockImplementation(async () => response(200, { user_id: 'u1', sub: 'sub-1', groups: [] }));
 
-    const identity = await broker.redeem('code-1');
+    const identity = await broker.redeem('code-1', { accountKey: 'acct-1' });
 
     expect(identity.sub).toBe('sub-1');
     const [call] = calls();
     expect(call.url).toBe('http://console:8080/api/v1/auth/broker/redeem');
     expect(call.init.headers.Authorization).toBe('Bearer svc-1');
-    expect(JSON.parse(call.init.body)).toEqual({ code: 'code-1' });
+    expect(JSON.parse(call.init.body)).toEqual({ code: 'code-1', account_key: 'acct-1', workspace_id: '' });
     expect(credentials).toHaveBeenCalledWith('agent-console');
+  });
+
+  test('redeem tells the broker which row and workspace the sign-in is and returns its binding secret', async () => {
+    fetchMock.mockImplementation(async () =>
+      response(200, { user_id: 'u1', sub: 'sub-1', groups: [], binding_secret: 'secret-1' })
+    );
+
+    const redemption = await broker.redeem('code-1', { accountKey: 'T1:U1', workspaceId: 'T1' });
+
+    expect(redemption.binding_secret).toBe('secret-1');
+    expect(JSON.parse(calls()[0].init.body)).toEqual({ code: 'code-1', account_key: 'T1:U1', workspace_id: 'T1' });
+  });
+
+  test('sets a workspace\'s installations with a PUT as the client', async () => {
+    fetchMock.mockImplementation(async () => response(204, {}));
+
+    await broker.setWorkspaceInstallations('T 1', ['A1']);
+
+    const [call] = calls();
+    expect(call.url).toBe('http://console:8080/api/v1/auth/broker/workspaces/T%201');
+    expect(call.init.method).toBe('PUT');
+    expect(call.init.headers.Authorization).toBe('Bearer svc-1');
+    expect(JSON.parse(call.init.body)).toEqual({ installation_ids: ['A1'] });
+  });
+
+  test('mint sends the binding secret when there is one', async () => {
+    fetchMock.mockImplementation(async () => response(200, { access_token: 'at-1', expires_in: 600 }));
+
+    await broker.mint('sub-1', 'orchestrator', 'secret-1');
+
+    expect(JSON.parse(calls()[0].init.body)).toEqual({
+      sub: 'sub-1',
+      audience: 'orchestrator',
+      binding_secret: 'secret-1',
+    });
   });
 
   test('a refused code is a BrokerError', async () => {
     fetchMock.mockImplementation(async () => response(400, { detail: 'invalid_grant' }));
-    await expect(broker.redeem('used')).rejects.toBeInstanceOf(BrokerError);
+    await expect(broker.redeem('used', { accountKey: 'acct-1' })).rejects.toBeInstanceOf(BrokerError);
   });
 
   test('mints a token and turns expires_in into an expiry time', async () => {
     fetchMock.mockImplementation(async () => response(200, { access_token: 'at-1', expires_in: 600 }));
     const before = Date.now();
 
-    const minted = await broker.mint('sub-1', 'orchestrator');
+    const minted = await broker.mint('sub-1', 'orchestrator', null);
 
     expect(minted.accessToken).toBe('at-1');
     expect(minted.expiresAt).toBeGreaterThanOrEqual(before + 600_000);
@@ -88,18 +123,18 @@ describe('BrokerClient', () => {
 
   test('409 means the user must sign in again', async () => {
     fetchMock.mockImplementation(async () => response(409, { detail: 'The user has not signed in through this client' }));
-    await expect(broker.mint('sub-1', 'orchestrator')).rejects.toBeInstanceOf(BrokerSignInRequiredError);
+    await expect(broker.mint('sub-1', 'orchestrator', null)).rejects.toBeInstanceOf(BrokerSignInRequiredError);
   });
 
   test('other mint failures are a BrokerError with the status', async () => {
     fetchMock.mockImplementation(async () => response(502, { detail: 'Keycloak is unreachable' }));
-    await expect(broker.mint('sub-1', 'orchestrator')).rejects.toMatchObject({ status: 502 });
+    await expect(broker.mint('sub-1', 'orchestrator', null)).rejects.toMatchObject({ status: 502 });
   });
 
   test('the service token is fetched once and reused', async () => {
     fetchMock.mockImplementation(async () => response(200, { access_token: 'at', expires_in: 600 }));
-    await Promise.all([broker.mint('a', 'orchestrator'), broker.mint('b', 'orchestrator')]);
-    await broker.mint('c', 'orchestrator');
+    await Promise.all([broker.mint('a', 'orchestrator', null), broker.mint('b', 'orchestrator', null)]);
+    await broker.mint('c', 'orchestrator', null);
     expect(credentials).toHaveBeenCalledTimes(1);
   });
 
@@ -111,7 +146,7 @@ describe('BrokerClient', () => {
       .mockImplementationOnce(async () => response(401, {}))
       .mockImplementationOnce(async () => response(200, { access_token: 'at', expires_in: 600 }));
 
-    await broker.mint('sub-1', 'orchestrator');
+    await broker.mint('sub-1', 'orchestrator', null);
 
     expect(calls().map((c) => c.init.headers.Authorization)).toEqual(['Bearer stale', 'Bearer fresh']);
   });

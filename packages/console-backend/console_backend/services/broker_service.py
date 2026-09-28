@@ -17,10 +17,13 @@ The flow, per login:
    one-time code and a snapshot of who signed in.
 3. The browser lands on the client's callback with ``code`` and the client's ``state``.
    The client ``redeem``\\s the code, authenticated with its own client-credentials token.
-   Redeeming also links the user to that client.
+   Redeeming links the user to that client and records a **binding**: a secret returned
+   once (stored as a hash) and the workspace it belongs to, whose installations say where
+   the user can be reached (ADR-0011 amendment 1).
 4. From then on the client asks ``mint`` for tokens for the audiences it is allowed
    (``config.broker.always_granted_audiences`` and its own client id), for users linked
-   to it.
+   to it, presenting the binding secret: required for a client with
+   ``require_binding_secret``, checked whenever it is sent.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import config
-from ..models.broker import BrokerClient, BrokerIdentity, BrokerTokenResponse, validate_redirect_uri
+from ..models.broker import BrokerClient, BrokerIdentity, BrokerRedemption, BrokerTokenResponse, validate_redirect_uri
 from ..models.user import User
 from ..repositories.broker_client_repository import BrokerClientRepository
 from ..repositories.broker_login_request_repository import BrokerLoginRequest, BrokerLoginRequestRepository
@@ -96,6 +99,21 @@ class BrokerService:
         # client_id -> (monotonic expiry, client). Registered clients only: the ids come
         # from callers, and ``/authorize`` takes them unauthenticated.
         self._client_cache: dict[str, tuple[float, BrokerClient]] = {}
+
+    async def _may_act_for(
+        self, db: AsyncSession, client: BrokerClient, user_id: str, binding_secret: str | None
+    ) -> bool:
+        """Whether *client* may have tokens minted for *user_id*.
+
+        A secret that is sent must name a binding of this client for this very user: one
+        user's secret never mints for another. Without one, only a client that does not
+        yet require it falls back to the link every redeem has always written.
+        """
+        if binding_secret is not None:
+            return await self._requests.binding_user(db, client.client_id, _digest(binding_secret)) == user_id
+        if client.require_binding_secret:
+            return False
+        return await self._requests.is_linked(db, client.client_id, user_id)
 
     # ---------------------------------------------------------------- clients
 
@@ -213,18 +231,65 @@ class BrokerService:
 
     # --------------------------------------------------------- client calls
 
-    async def redeem(self, db: AsyncSession, client: BrokerClient, code: str) -> BrokerIdentity:
-        """Trade a one-time code for the identity of who signed in. Single use."""
-        identity = await self._requests.redeem(
-            db, code_hash=_digest(code), client_id=client.client_id, now=datetime.now(timezone.utc)
-        )
+    async def redeem(
+        self,
+        db: AsyncSession,
+        client: BrokerClient,
+        code: str,
+        *,
+        account_key: str | None = None,
+        workspace_id: str = "",
+    ) -> BrokerRedemption:
+        """Trade a one-time code for the identity of who signed in, and bind the sign-in.
+        Single use.
+
+        The binding secret is returned here once and kept only as a hash: it is what makes
+        a leaked client credential alone useless to ``mint``. *account_key* is the client
+        row the binding belongs to (the user, when the client names none). Where the
+        workspace can be reached is not a sign-in's business: the client publishes it with
+        ``set_workspace_installations`` when it registers its delivery channels.
+        """
+        now = datetime.now(timezone.utc)
+        identity = await self._requests.redeem(db, code_hash=_digest(code), client_id=client.client_id, now=now)
         if identity is None:
             # Unknown, expired, reused, or issued to another client: one answer for all.
             logger.warning("Broker redeem refused for client %s", client.client_id)
             raise BrokerRefusal(400, "invalid_grant")
-        return BrokerIdentity(**identity)
+        binding_secret = secrets.token_urlsafe(32)
+        await self._requests.bind(
+            db,
+            client_id=client.client_id,
+            account_key=account_key or f"user:{identity['user_id']}",
+            user_id=identity["user_id"],
+            workspace_id=workspace_id,
+            secret_hash=_digest(binding_secret),
+            now=now,
+        )
+        return BrokerRedemption(**identity, binding_secret=binding_secret)
 
-    async def mint(self, db: AsyncSession, client: BrokerClient, sub: str, audience: str) -> BrokerTokenResponse:
+    async def set_workspace_installations(
+        self, db: AsyncSession, client: BrokerClient, workspace_id: str, installation_ids: list[str]
+    ) -> None:
+        """Record the installations *client* runs in *workspace_id* now: the client's word for
+        where every sign-in for the workspace can be reached, trusted as it is trusted to
+        deliver there. The only writer, so the list follows the client's registrations, and a
+        sign-in made before an installation was added reaches it too."""
+        await self._requests.set_workspace_installations(
+            db,
+            client_id=client.client_id,
+            workspace_id=workspace_id,
+            installation_ids=installation_ids,
+            now=datetime.now(timezone.utc),
+        )
+
+    async def mint(
+        self,
+        db: AsyncSession,
+        client: BrokerClient,
+        sub: str,
+        audience: str,
+        binding_secret: str | None = None,
+    ) -> BrokerTokenResponse:
         """An access token for *audience* on behalf of the user *sub*, from their vaulted
         offline token (refresh, then RFC 8693 exchange).
 
@@ -236,7 +301,7 @@ class BrokerService:
         user = await self._users.get_user_by_sub(db, sub)
         # A client reaches only the users who signed in through it. An unknown subject
         # gets the same answer, so the check does not tell a client who exists.
-        if user is None or not await self._requests.is_linked(db, client.client_id, user.id):
+        if user is None or not await self._may_act_for(db, client, user.id, binding_secret):
             raise BrokerRefusal(409, "The user has not signed in through this client")
         try:
             data = await self._tokens.get_exchanged_token_response(db, user.id, audience)
