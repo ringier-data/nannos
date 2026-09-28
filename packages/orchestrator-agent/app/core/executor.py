@@ -77,6 +77,7 @@ from .discovery_cache import (
     get_user_cache,
     resolve_entitlement_version,
 )
+from .interrupt_owner import foreign_interrupt_message, interrupt_owner
 from .registry import RegistryService, User
 from .turn_state import TurnState, count_tool_messages
 from .steering_state import (
@@ -275,6 +276,31 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if len(hitl_decisions) == 1 and n > 1:
             return hitl_decisions * n
         return hitl_decisions
+
+    @staticmethod
+    async def _refuse_foreign_interrupt(state: Any, user_id: str, updater: TaskUpdater, task: Any) -> bool:
+        """Answer, and report True, when *user_id* writes into someone else's pending interrupt.
+
+        A pending interrupt belongs to the speaker whose turn raised it. In a
+        channel conversation anyone can write next, and reading their message (or
+        button click) as the answer would let them approve another speaker's call
+        and resume it under their own token. The graph is left untouched, so the
+        interrupt stays pending for its speaker.
+        """
+        if not getattr(state, "interrupts", None):
+            return False
+        owner = interrupt_owner(state)
+        if owner is None or owner.user_id == user_id:
+            return False
+        logger.info(
+            f"[INTERRUPT-OWNER] user_id={user_id} wrote while an interrupt raised by "
+            f"user_id={owner.user_id} is pending on context {task.context_id}; refused"
+        )
+        await updater.update_status(
+            TaskState.TASK_STATE_COMPLETED,
+            new_text_message(foreign_interrupt_message(owner.user_name), context_id=task.context_id, task_id=task.id),
+        )
+        return True
 
     @classmethod
     def _build_interrupt_resume_map(
@@ -1083,6 +1109,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 config["metadata"]["page_context"] = page_context
 
             current_state = await graph.aget_state(config)  # type: ignore
+
+            if await self._refuse_foreign_interrupt(current_state, user.id, updater, task):
+                return
 
             # Check if the graph is currently interrupted and this might be a resume request
             resume_value = None  # Initialize resume_value

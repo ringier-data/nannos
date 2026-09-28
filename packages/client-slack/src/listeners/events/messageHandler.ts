@@ -903,6 +903,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                     // Carry the open thinking-steps stream ts so the resume
                     // continues the same widget rather than opening a new one.
                     streamMessageTs: streamer.ts,
+                    ownerUserId: userId,
                   };
                   hitlWidget = actionRequests.length > 1
                     ? buildMultiHitlInterruptWidget(widgetData)
@@ -981,6 +982,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                 threadTs,
                 planMessageTs: streamer.planTs,
                 streamMessageTs: streamer.ts,
+                ownerUserId: userId,
               });
 
               // PAUSE the streamed timeline (don't stop it): the turn resumes on

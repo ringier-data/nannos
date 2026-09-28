@@ -589,6 +589,7 @@ export interface HitlInterruptWidgetData {
   reviewConfigs?: Array<{ action_name: string; allowed_decisions: string[] }>;
   planMessageTs?: string; // Existing plan-widget ts, carried through the HITL resume
   streamMessageTs?: string; // Open thinking-steps stream ts, carried through the HITL resume
+  ownerUserId?: string; // Slack user whose turn raised the interrupt; only they may answer it
 }
 
 export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
@@ -631,6 +632,7 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
     summary: decisionSummary,
     ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
     ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
+    ...(data.ownerUserId ? { ownerUserId: data.ownerUserId } : {}),
     ...(isRiskScored && riskMeta?.matched_pattern ? { matchedPattern: riskMeta.matched_pattern } : {}),
   };
   const encodedData = Buffer.from(JSON.stringify(payload)).toString('base64');
@@ -858,6 +860,7 @@ export function buildMultiHitlInterruptWidget(data: HitlInterruptWidgetData): an
     summary: decisionSummary,
     ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
     ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
+    ...(data.ownerUserId ? { ownerUserId: data.ownerUserId } : {}),
   };
   const blanketValue = Buffer.from(JSON.stringify(base)).toString('base64');
   const reviewValue = Buffer.from(JSON.stringify({ ...base, calls })).toString('base64');

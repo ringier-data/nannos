@@ -182,6 +182,10 @@ Three decisions worth keeping:
 
 Local sub-agents get the tool only when `client_action_enabled` (the embedded execute-only entrypoint, `dynamic_agent.py`), because there the sub-agent IS the top-level agent talking to the user; a delegated sub-agent is already narrated by the orchestrator's delegation lines. Notes are never the answer — that stays in `FinalResponseSchema` / `SubAgentResponseSchema`, and the prompt (`<keep_the_user_informed>`) says so explicitly, since a note carrying the answer shows the same text twice.
 
+### A Pending Interrupt Belongs to Its Speaker
+
+In a channel thread one checkpoint serves every participant, so the next message on a paused thread can come from anyone. `_refuse_foreign_interrupt` (`core/executor.py`) answers anyone but the speaker whose turn raised the interrupt with a short refusal and leaves the graph untouched, before the resume map is built. The owner needs no bookkeeping: LangGraph copies the run config's scalar `metadata` (which carries `user_id`/`user_name`) into every checkpoint it writes, so the interrupted checkpoint already names its turn's user (`core/interrupt_owner.py`). A checkpoint without a `user_id` is let through rather than locked. Slack also records the owner on the card itself, so a stranger's click does not strip the owner's buttons before this refusal arrives; Google Chat sends interrupt cards privately, so only a typed reply can reach this check there.
+
 ### Error Classification for Sub-Agent Failures
 
 `ErrorClassificationMiddleware` classifies errors from sub-agent execution (auth failures, tool errors, etc.) to provide actionable feedback to the orchestrator's planning loop.
