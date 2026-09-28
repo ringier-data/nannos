@@ -875,7 +875,21 @@ it died. It is *not* a failure: `complete_job` leaves `consecutive_failures` unt
 churn can never trip `max_failures`. Only `dispatch_streaming` can say the agent died — it raises
 `AgentUnreachable` for a transport error, a dropped or timed-out stream, or a 502/503/504, looking
 through the a2a SDK's wrapping — and `_dispatch_job` classifies on that exception alone. A Keycloak
-or database error on the way to the dispatch is a failure of the run.
+or database error on the way to the dispatch is a failure of the run, with two exceptions that are
+evidence about neither the job nor the runtime (#266):
+
+- **A failure to *record* an outcome.** When `_finalize` cannot advance the job it writes nothing
+  else and raises `OutcomeNotRecordedError`; both dispatch paths catch that before their generic
+  handler, which would otherwise re-finalise a quiet poll, a park or a delivered success as a
+  counted `FAILED`. The run stays `running`, which keeps the job from being claimed, until the
+  healer sweeps it as `INTERRUPTED`. Do not close the run there: that makes the job claimable on
+  the next tick with nothing counting, so a persistent write failure loops every tick.
+- **A dead vaulted token.** Keycloak's `invalid_grant` on the refresh becomes
+  `OfflineTokenExpiredError`, a `NoOfflineTokenError`, so it takes the sign-in hold rather than the
+  generic handler. The row is marked (`user_offline_tokens.expired_at`, migration 107), not deleted:
+  it then counts as absent to `has_consent` and `users_with_consent`, the hold carries
+  `_SIGN_IN_EXPIRED_REASON`, and the next `store_offline_token` clears the mark, so
+  `release_sign_in_holds` releases both reasons.
 
 What an interruption earns depends on the trigger:
 

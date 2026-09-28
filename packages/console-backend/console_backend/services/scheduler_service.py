@@ -85,6 +85,11 @@ _ELAPSED_ONCE_ON_INHERIT = "This one-time job had already run when this schedule
 #: them by this exact text, as ``_ACCESS_REVOKED_REASON`` is found. The wording is
 #: load-bearing: rows already held keep the old text if it changes.
 _AWAITING_SIGN_IN_REASON = "Waiting for your first sign-in to Nannos, so it can run under your account"
+#: The same hold for a subscriber who HAD a vaulted token that Keycloak has since refused
+#: (``OfflineTokenExpiredError``). Released by the same sign-in; load-bearing like the above.
+_SIGN_IN_EXPIRED_REASON = "Your sign-in to Nannos has expired; sign in again so it can run under your account"
+#: Every reason ``release_sign_in_holds`` switches back on.
+_SIGN_IN_HOLD_REASONS = (_AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON)
 
 
 class SchedulerAccessError(PermissionError):
@@ -1199,7 +1204,7 @@ class SchedulerService:
         off with the reason that says so. Returns how many were switched on.
         """
         released = 0
-        for job in await self.repo.list_paused_jobs(db, user.id, _AWAITING_SIGN_IN_REASON):
+        for job in await self.repo.list_paused_jobs(db, user.id, _SIGN_IN_HOLD_REASONS):
             now = datetime.now(timezone.utc)
             if job.schedule_kind == ScheduleKind.ONCE:
                 moment = job.run_at or job.next_run_at
@@ -1641,7 +1646,7 @@ class SchedulerService:
             job = await self.repo.get_subscription_for(db, definition_id, uid)
             if job is None:
                 continue
-            if job.paused_reason == _AWAITING_SIGN_IN_REASON:
+            if job.paused_reason in _SIGN_IN_HOLD_REASONS:
                 # The notice is dispatched under the subscriber's own vaulted token, which a
                 # member held back for their first sign-in does not have. The console
                 # notification, with the sign-in link, is what reaches them.

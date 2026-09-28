@@ -25,6 +25,7 @@ from console_backend.services.notification_service import NotificationService
 from console_backend.services.scheduler_service import (
     _AWAITING_SIGN_IN_REASON,
     _ELAPSED_ONCE_ON_INHERIT,
+    _SIGN_IN_EXPIRED_REASON,
     SchedulerNotReadyError,
     SchedulerService,
 )
@@ -228,6 +229,20 @@ class TestTheFirstSignInReleasesTheHold:
         paused = await svc.repo.get_job(db, mine.id)
         assert paused.enabled is False and paused.paused_reason == "Manually paused"
         assert await svc.release_sign_in_holds(db, u["member"]) == 0  # idempotent
+
+    @pytest.mark.asyncio
+    async def test_a_sign_in_also_releases_a_hold_on_an_expired_token(self, world):
+        """The engine holds a subscription whose vaulted token Keycloak refused with its
+        own reason. Signing in again stores a fresh token, and must start it again."""
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(db, _watch_create(), u["writer"])
+        await svc.repo.disable_subscription(db, job.id, _SIGN_IN_EXPIRED_REASON)
+        await db.commit()
+
+        assert await svc.release_sign_in_holds(db, u["writer"]) == 1
+
+        back = await svc.repo.get_job(db, job.id)
+        assert back.enabled is True and back.paused_reason is None
 
     @pytest.mark.asyncio
     async def test_a_one_shot_that_elapsed_while_it_waited_stays_off_and_says_why(self, world):

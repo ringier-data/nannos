@@ -40,8 +40,8 @@ from ..models.scheduled_job import (
 )
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
-from ..services.scheduler_service import _AWAITING_SIGN_IN_REASON
-from ..services.scheduler_token_service import NoOfflineTokenError, SchedulerTokenService
+from ..services.scheduler_service import _AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON
+from ..services.scheduler_token_service import NoOfflineTokenError, OfflineTokenExpiredError, SchedulerTokenService
 from ..services.socket_notification_manager import SocketNotificationManager
 from ..utils.a2a_dispatch import AgentUnreachable, dispatch_streaming
 
@@ -93,6 +93,27 @@ NOTIFY_TIMEOUT_SECONDS = 20.0
 NOTICE_FIRST_ATTEMPT_SECONDS = 90
 NOTICE_RETRY_INTERVAL_SECONDS = 300
 NOTICE_GIVE_UP_AFTER_SECONDS = 3600
+
+
+class OutcomeNotRecordedError(Exception):
+    """``_finalize`` could not advance the job for a run whose outcome it was given.
+
+    A failure to *record* an outcome is not a failure of the job (#266). Nothing is
+    written: the run stays ``running`` and the job where it stood, so the job is not
+    claimable (a running run blocks the claim) until the healer sweeps the run as
+    INTERRUPTED, which counts nothing and earns the usual retry. A dispatch path that
+    catches this must not re-finalise the run as FAILED, which is what turned a
+    database blip on a quiet poll or a park into a counted failure.
+
+    Closing the run instead would make the job claimable on the very next tick with
+    nothing counting, so a persistent write failure (a column the deployed schema
+    lacks) would re-run the agent and re-deliver its result every tick, forever.
+    """
+
+    def __init__(self, run_id: int, status: JobRunStatus) -> None:
+        super().__init__(f"Could not record outcome {status.value} of run {run_id}")
+        self.run_id = run_id
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -615,6 +636,10 @@ class SchedulerEngine:
             )
             return run_id
 
+        except OutcomeNotRecordedError as e:
+            # Left running for the healer, which counts nothing; re-finalising would.
+            logger.error("Resumed run %s of job %d: %s; the job did not advance", e.run_id, job.id, e)
+            return run_id
         except Exception as e:
             if run_id is None:
                 raise
@@ -901,6 +926,9 @@ class SchedulerEngine:
                 condition_evaluation=watch_outcome.evaluation if watch_outcome else None,
             )
 
+        except OutcomeNotRecordedError as e:
+            # Left running for the healer, which counts nothing; re-finalising would.
+            logger.error("Run %s of job %d: %s; the job did not advance", e.run_id, job.id, e)
         except Exception as e:
             # Only the dispatch itself can say the agent died: dispatch_streaming raises
             # AgentUnreachable for that and nothing else does, so a Keycloak or database
@@ -1102,22 +1130,36 @@ class SchedulerEngine:
         )
         return False
 
-    async def _hold_until_sign_in(self, run_id: int, job: ScheduledJob, error: Exception, trigger: RunTrigger) -> None:
-        """Finalise a run that found no vaulted offline token for its subscriber.
+    async def _hold_until_sign_in(
+        self, run_id: int, job: ScheduledJob, error: NoOfflineTokenError, trigger: RunTrigger
+    ) -> None:
+        """Finalise a run that found no live vaulted offline token for its subscriber.
 
         No retry and no failure count can produce a token; only a sign-in stores one. So
         the subscription is switched off with the reason a group default uses for a
         member who has not signed in (ADR-0011), and the subscriber's next sign-in
         switches it on (``release_sign_in_holds``). As for an agent the subscriber can no
         longer reach: a durable notice, no failure count.
+
+        A token Keycloak refused (``OfflineTokenExpiredError``) is the same hold with its
+        own reason, and is marked expired first so every later check sees it as absent
+        instead of refreshing a dead token again. That mark is best effort: the hold
+        does not depend on it, and a next run would find and mark the token again.
         """
+        expired = isinstance(error, OfflineTokenExpiredError)
+        if expired:
+            try:
+                async with self._db_session_factory() as db:
+                    await self._token_service.mark_expired(db, job.user_id, error.stored_at)
+            except Exception:
+                logger.exception("Could not mark the offline token of user %s expired", job.user_id)
         await self._finalize(
             run_id=run_id,
             job=job,
             status=JobRunStatus.FAILED,
             error_message=str(error),
             delivered=False,
-            paused_reason=_AWAITING_SIGN_IN_REASON,
+            paused_reason=_SIGN_IN_EXPIRED_REASON if expired else _AWAITING_SIGN_IN_REASON,
             trigger=trigger,
             counts_as_failure=False,
         )
@@ -1608,40 +1650,48 @@ class SchedulerEngine:
         # Splitting them costs atomicity in one direction only: a crash between the two
         # leaves a run stuck in 'running' for the healer to sweep, while the job itself
         # carries on correctly. The other order risks a tight loop, which is far worse.
-        async with self._db_session_factory() as db:
-            # Disable watch job if destroy_after_trigger is True and condition was
-            # successfully met. Belongs with the job update: both are job state.
-            should_disable = (
-                job.job_type == JobType.WATCH and job.destroy_after_trigger and status == JobRunStatus.SUCCESS
-            )
+        #
+        # When the advance itself fails, nothing else is written and the caller gets
+        # OutcomeNotRecordedError, never a counted FAILED (#266); the run stays running
+        # for the healer, which is what keeps a persistent failure from looping.
+        #
+        # Disable watch job if destroy_after_trigger is True and condition was
+        # successfully met. Belongs with the job update: both are job state.
+        should_disable = (
+            job.job_type == JobType.WATCH and job.destroy_after_trigger and status == JobRunStatus.SUCCESS
+        )
+        try:
+            async with self._db_session_factory() as db:
+                if should_disable:
+                    logger.info(
+                        "Job %d: Disabling watch job after successful trigger (destroy_after_trigger=True)",
+                        job.id,
+                    )
+                    # A system action, no user actor. Per SUBSCRIPTION: the watch fired for
+                    # this subscriber, so this subscriber's job is done; nobody else's is.
+                    await self._repo.disable_subscription(db, job.id, "Watch condition met (one-time trigger)")
 
-            if should_disable:
-                logger.info(
-                    "Job %d: Disabling watch job after successful trigger (destroy_after_trigger=True)",
-                    job.id,
+                # A stop that is about the subscriber's standing, not the job: written as a
+                # real pause (enabled = FALSE + reason) so the claim loop leaves it alone —
+                # complete_job only flips enabled on the failure threshold, which this must
+                # never contribute to.
+                if not counts_as_failure and paused_reason:
+                    await self._repo.disable_subscription(db, job.id, paused_reason)
+
+                enabled_after, reason_after = await self._repo.complete_job(
+                    db=db,
+                    subscription_id=job.id,
+                    status=status if counts_as_failure else JobRunStatus.INTERRUPTED,
+                    next_run_at=next_run_at,
+                    retry_at=retry_at,
+                    last_check_result=last_check_result,
+                    paused_reason=paused_reason,
+                    leave_schedule=leave_schedule,
                 )
-                # A system action, no user actor. Per SUBSCRIPTION: the watch fired for
-                # this subscriber, so this subscriber's job is done; nobody else's is.
-                await self._repo.disable_subscription(db, job.id, "Watch condition met (one-time trigger)")
-
-            # A stop that is about the subscriber's standing, not the job: written as a
-            # real pause (enabled = FALSE + reason) so the claim loop leaves it alone —
-            # complete_job only flips enabled on the failure threshold, which this must
-            # never contribute to.
-            if not counts_as_failure and paused_reason:
-                await self._repo.disable_subscription(db, job.id, paused_reason)
-
-            enabled_after, reason_after = await self._repo.complete_job(
-                db=db,
-                subscription_id=job.id,
-                status=status if counts_as_failure else JobRunStatus.INTERRUPTED,
-                next_run_at=next_run_at,
-                retry_at=retry_at,
-                last_check_result=last_check_result,
-                paused_reason=paused_reason,
-                leave_schedule=leave_schedule,
-            )
-            await db.commit()
+                await db.commit()
+        except Exception as exc:
+            logger.exception("Job %d: failed to advance after run %d (%s)", job.id, run_id, status.value)
+            raise OutcomeNotRecordedError(run_id, status) from exc
 
         # A job that stopped itself has to say so. Auto-pause is decided inside
         # complete_job from consecutive_failures against max_failures, and until now it
