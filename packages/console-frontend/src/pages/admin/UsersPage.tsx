@@ -25,6 +25,7 @@ import {
 import { Checkbox } from '@/components/ui/checkbox';
 import { Pagination } from '@/components/admin/Pagination';
 import { UserStatusBadge } from '@/components/admin/UserStatusBadge';
+import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 
 export function UsersPage() {
@@ -261,7 +262,10 @@ export function UsersPage() {
                   </TableCell>
                   <TableCell>{user.email}</TableCell>
                   <TableCell>
-                    <UserStatusBadge status={user.status ?? 'active'} />
+                    <div className="flex flex-wrap items-center gap-1">
+                      <UserStatusBadge status={user.status ?? 'active'} />
+                      <UserOnboardingBadge onboarding={user.onboarding} />
+                    </div>
                   </TableCell>
                   <TableCell>
                     <span className="text-sm capitalize">{user.role ?? 'member'}</span>

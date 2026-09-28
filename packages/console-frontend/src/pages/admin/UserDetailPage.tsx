@@ -40,6 +40,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { UserStatusBadge } from '@/components/admin/UserStatusBadge';
+import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -318,6 +319,7 @@ export function UserDetailPage() {
           Impersonate User
         </Button>
         <UserStatusBadge status={user.status ?? 'active'} />
+        <UserOnboardingBadge onboarding={user.onboarding} />
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">

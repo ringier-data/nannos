@@ -3459,6 +3459,7 @@ export type MemberInfo = {
      */
     last_name: string;
     group_role: RoleEnum;
+    onboarding: UserOnboarding | null;
 };
 
 /**
@@ -8169,6 +8170,39 @@ export type UserNotification = {
 };
 
 /**
+ * UserOnboarding
+ *
+ * How far a user is from being able to run scheduled jobs, for administrators.
+ * Derived, never stored.
+ *
+ * Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
+ * not an error: both flags turn true with the user's first sign-in (ADR-0011).
+ *
+ * It says nothing about delivery: whether a job's notification can reach the user on a
+ * chat channel is not known here yet (#192).
+ */
+export type UserOnboarding = {
+    /**
+     * Signed In
+     *
+     * The user has a real identity-provider subject, which only a sign-in supplies. False for a user provisioned over SCIM who has not signed in yet.
+     */
+    signed_in: boolean;
+    /**
+     * Scheduler Ready
+     *
+     * A live offline token is vaulted, so scheduled jobs can run under the user's account. Without one, their subscriptions wait switched off for their next sign-in.
+     */
+    scheduler_ready: boolean;
+    /**
+     * Sign In Expired
+     *
+     * The user had a vaulted offline token that Keycloak has since refused (unused for 30 days, revoked, or its session ended). Implies scheduler_ready is false.
+     */
+    sign_in_expired: boolean;
+};
+
+/**
  * UserRole
  *
  * User role enum defining system-wide capabilities.
@@ -8389,6 +8423,7 @@ export type UserWithGroups = {
      * Groups
      */
     groups?: Array<UserGroupMembership>;
+    onboarding: UserOnboarding | null;
 };
 
 /**
