@@ -18,7 +18,7 @@ from console_backend.models.broker import BrokerClientCreate, BrokerClientUpdate
 from console_backend.repositories.broker_client_repository import BrokerClientRepository
 from console_backend.repositories.broker_login_request_repository import BrokerLoginRequestRepository
 from console_backend.services.audit_service import AuditService
-from console_backend.services.scheduler_token_service import NoOfflineTokenError
+from console_backend.services.scheduler_token_service import NoOfflineTokenError, OfflineTokenExpiredError
 from console_backend.services.broker_service import BrokerRefusal, BrokerService
 
 SLACK_CALLBACK = "https://slack.nannos.ringier.ch/api/v1/oauth/callback"
@@ -72,6 +72,7 @@ async def client_repo(pg_session, test_admin_user_db) -> BrokerClientRepository:
 def tokens() -> MagicMock:
     service = MagicMock()
     service.get_exchanged_token_response = AsyncMock(return_value={"access_token": "minted", "expires_in": 7200})
+    service.mark_expired = AsyncMock()
     return service
 
 
@@ -269,8 +270,9 @@ class TestMint:
         ("error", "status"),
         [
             (NoOfflineTokenError("No offline token stored"), 409),  # never vaulted
+            (OfflineTokenExpiredError("refused (invalid_grant)"), 409),  # vaulted token is dead
             (ValueError("Expecting value"), 502),  # e.g. a non-JSON Keycloak reply: our fault, not a sign-in cue
-            (_keycloak_error(400, "invalid_grant"), 409),  # vaulted token is dead
+            (_keycloak_error(400, "invalid_grant"), 409),  # refused at the exchange step
             (_keycloak_error(403, "access_denied"), 502),  # exchange not permitted: config
             (httpx.ConnectError("down"), 502),
             (RuntimeError("kms"), 502),
@@ -283,6 +285,19 @@ class TestMint:
         with pytest.raises(BrokerRefusal) as exc:
             await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")
         assert exc.value.status_code == status
+
+    @pytest.mark.asyncio
+    async def test_a_dead_token_is_marked_so_the_scheduler_and_console_see_it_too(
+        self, broker, tokens, pg_session, test_user_db
+    ):
+        await self._linked(broker, pg_session, test_user_db)
+        tokens.get_exchanged_token_response.side_effect = OfflineTokenExpiredError("refused (invalid_grant)")
+        slack = await broker.resolve_client(pg_session, "slack-client")
+
+        with pytest.raises(BrokerRefusal):
+            await broker.mint(pg_session, slack, "test-user-sub", "orchestrator")
+
+        tokens.mark_expired.assert_awaited_once_with(pg_session, test_user_db.id)
 
 
 class TestClientCache:

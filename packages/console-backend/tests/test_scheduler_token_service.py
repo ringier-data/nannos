@@ -10,7 +10,12 @@ import pytest
 import respx
 from sqlalchemy import text
 
-from console_backend.services.scheduler_token_service import SchedulerTokenService
+from console_backend.services import scheduler_token_service as token_module
+from console_backend.services.scheduler_token_service import (
+    NoOfflineTokenError,
+    OfflineTokenExpiredError,
+    SchedulerTokenService,
+)
 
 ISSUER = "https://login.test/realms/nannos"
 TOKEN_URL = ISSUER + "/protocol/openid-connect/token"
@@ -80,3 +85,102 @@ async def test_users_with_consent_is_one_lookup_for_a_list(service, pg_session):
 
     assert await service.users_with_consent(pg_session, ["ready", "not-ready", "unknown"]) == {"ready"}
     assert await service.users_with_consent(pg_session, []) == set()
+
+
+async def _vault(pg_session, user_id: str, *, expired: bool = False) -> None:
+    await pg_session.execute(
+        text(
+            "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status) "
+            "VALUES (:id, :id, :email, 'T', 'U', false, 'member', 'active')"
+        ),
+        {"id": user_id, "email": f"{user_id}@example.com"},
+    )
+    await pg_session.execute(
+        text(
+            "INSERT INTO user_offline_tokens (user_id, encrypted_token, expired_at) "
+            "VALUES (:id, :blob, CASE WHEN :expired THEN NOW() END)"
+        ),
+        {"id": user_id, "blob": b"\x00\x01", "expired": expired},
+    )
+    await pg_session.commit()
+
+
+class TestADeadTokenCountsAsAbsent:
+    """A token Keycloak refused used to stay in the vault reading as "has consent", so the
+    console called its owner ready while every run under it failed."""
+
+    @pytest.mark.asyncio
+    async def test_an_expired_token_is_no_consent(self, service, pg_session):
+        await _vault(pg_session, "live")
+        await _vault(pg_session, "dead", expired=True)
+
+        assert await service.users_with_consent(pg_session, ["live", "dead"]) == {"live"}
+        assert await service.has_consent(pg_session, "live")
+        assert not await service.has_consent(pg_session, "dead")
+
+    @pytest.mark.asyncio
+    async def test_mark_expired_takes_consent_away_and_a_new_token_gives_it_back(
+        self, service, pg_session, monkeypatch
+    ):
+        await _vault(pg_session, "u1")
+
+        await service.mark_expired(pg_session, "u1")
+        assert not await service.has_consent(pg_session, "u1")
+
+        class _Kms:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def generate_data_key(self, **_):
+                return {"Plaintext": b"k" * 32, "CiphertextBlob": b"wrapped-dek"}
+
+        monkeypatch.setattr(token_module, "_get_kms_client", lambda: _Kms())
+        await service.store_offline_token(pg_session, "u1", "fresh-refresh-token")
+
+        assert await service.has_consent(pg_session, "u1")
+
+
+class TestRefreshTellsADeadTokenFromAnOutage:
+    @pytest.fixture
+    def vaulted(self, service, pg_session, monkeypatch):
+        monkeypatch.setattr(service, "_decrypt_blob", AsyncMock(return_value="refresh-token"))
+        return _vault(pg_session, "u1")
+
+    @pytest.mark.asyncio
+    async def test_invalid_grant_is_an_expired_token(self, service, pg_session, vaulted):
+        await vaulted
+        with respx.mock() as router:
+            router.post(TOKEN_URL).mock(
+                return_value=httpx.Response(
+                    400, json={"error": "invalid_grant", "error_description": "Offline session not active"}
+                )
+            )
+            with pytest.raises(OfflineTokenExpiredError):
+                await service.get_access_token(pg_session, "u1")
+
+    @pytest.mark.asyncio
+    async def test_any_other_keycloak_error_says_nothing_about_the_token(self, service, pg_session, vaulted):
+        await vaulted
+        with respx.mock() as router:
+            router.post(TOKEN_URL).mock(return_value=httpx.Response(503, text="unavailable"))
+            with pytest.raises(httpx.HTTPStatusError):
+                await service.get_access_token(pg_session, "u1")
+
+    @pytest.mark.asyncio
+    async def test_a_token_already_marked_is_not_refreshed_again(self, service, pg_session, vaulted):
+        await vaulted
+        await service.mark_expired(pg_session, "u1")
+        with respx.mock(assert_all_called=False) as router:
+            route = router.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "x"}))
+            with pytest.raises(OfflineTokenExpiredError):
+                await service.get_access_token(pg_session, "u1")
+        assert not route.called
+
+    @pytest.mark.asyncio
+    async def test_no_token_at_all_is_still_the_plain_error(self, service, pg_session):
+        with pytest.raises(NoOfflineTokenError) as exc_info:
+            await service.get_access_token(pg_session, "nobody")
+        assert not isinstance(exc_info.value, OfflineTokenExpiredError)

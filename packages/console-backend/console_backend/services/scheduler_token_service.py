@@ -60,6 +60,26 @@ class NoOfflineTokenError(ValueError):
     that stores one. A ``ValueError`` so existing callers keep working."""
 
 
+class OfflineTokenExpiredError(NoOfflineTokenError):
+    """The vaulted offline token is dead: Keycloak refused it (``invalid_grant``: 30 days
+    idle, revoked, or its offline session ended), now or on an earlier attempt.
+
+    A ``NoOfflineTokenError`` because the remedy is the same, a sign-in, and every caller
+    that handles a missing token must handle this one the same way. A caller that acts on
+    it persists it with ``mark_expired``, so the token counts as absent from then on.
+    """
+
+
+def _is_invalid_grant(exc: httpx.HTTPStatusError) -> bool:
+    """Keycloak's answer for a refresh token that will never work again."""
+    if exc.response.status_code != 400:
+        return False
+    try:
+        return exc.response.json().get("error") == "invalid_grant"
+    except ValueError:
+        return False
+
+
 class SchedulerTokenService:
     """Manages Keycloak offline refresh tokens encrypted via AWS KMS envelope encryption."""
 
@@ -97,6 +117,7 @@ class SchedulerTokenService:
                 DO UPDATE SET
                     encrypted_token = EXCLUDED.encrypted_token,
                     token_expiry    = EXCLUDED.token_expiry,
+                    expired_at      = NULL,
                     updated_at      = EXCLUDED.updated_at
             """),
             {"user_id": user_id, "blob": blob, "token_expiry": token_expiry, "now": now},
@@ -113,28 +134,47 @@ class SchedulerTokenService:
         await db.commit()
         logger.info("Revoked offline token for user %s", user_id)
 
+    async def mark_expired(self, db: AsyncSession, user_id: str) -> None:
+        """Record that Keycloak refused *user_id*'s vaulted token (see
+        ``OfflineTokenExpiredError``). Kept, not deleted, so an expired sign-in stays
+        distinguishable from none; the next ``store_offline_token`` clears it."""
+        await db.execute(
+            text("""
+                UPDATE user_offline_tokens SET expired_at = :now
+                WHERE user_id = :user_id AND expired_at IS NULL
+            """),
+            {"user_id": user_id, "now": datetime.now(timezone.utc)},
+        )
+        await db.commit()
+        logger.info("Marked the offline token of user %s expired", user_id)
+
     async def has_consent(self, db: AsyncSession, user_id: str) -> bool:
-        """Return True if an offline token has been stored for *user_id*."""
-        blob = await self._load_encrypted_blob(db, user_id)
-        return blob is not None
+        """Return True if *user_id* has a live offline token: stored and not expired."""
+        return bool(await self.users_with_consent(db, [user_id]))
 
     async def users_with_consent(self, db: AsyncSession, user_ids: list[str]) -> set[str]:
-        """The subset of *user_ids* that have an offline token stored. One query for a list."""
+        """The subset of *user_ids* that have a live offline token. One query for a list."""
         if not user_ids:
             return set()
         result = await db.execute(
-            text("SELECT user_id FROM user_offline_tokens WHERE user_id = ANY(:ids)"),
+            text("SELECT user_id FROM user_offline_tokens WHERE user_id = ANY(:ids) AND expired_at IS NULL"),
             {"ids": list(user_ids)},
         )
         return {row[0] for row in result.all()}
 
-    async def _load_encrypted_blob(self, db: AsyncSession, user_id: str) -> bytes | None:
+    async def _load_encrypted_blob(self, db: AsyncSession, user_id: str) -> bytes:
+        """The user's live vaulted token. Raises ``NoOfflineTokenError`` when none is stored,
+        ``OfflineTokenExpiredError`` when the stored one was already refused."""
         result = await db.execute(
-            text("SELECT encrypted_token FROM user_offline_tokens WHERE user_id = :user_id"),
+            text("SELECT encrypted_token, expired_at FROM user_offline_tokens WHERE user_id = :user_id"),
             {"user_id": user_id},
         )
         row = result.mappings().first()
-        return bytes(row["encrypted_token"]) if row else None
+        if row is None:
+            raise NoOfflineTokenError(f"No offline token stored for user {user_id}. User must grant consent first.")
+        if row["expired_at"] is not None:
+            raise OfflineTokenExpiredError(f"The offline token of user {user_id} has expired; they must sign in again.")
+        return bytes(row["encrypted_token"])
 
     async def _decrypt_blob(self, blob: bytes) -> str:
         """Decrypt the stored KMS-envelope blob and return the plaintext refresh token."""
@@ -152,12 +192,12 @@ class SchedulerTokenService:
     async def _refresh_access_token(self, db: AsyncSession, user_id: str) -> str:
         """Refresh the user's stored offline token into a fresh Keycloak access token.
 
-        Raises NoOfflineTokenError if no token is stored for the user.
-        Raises httpx.HTTPStatusError on Keycloak errors.
+        Raises NoOfflineTokenError if no token is stored for the user, and its subclass
+        OfflineTokenExpiredError if Keycloak refuses it (``invalid_grant``), which the
+        caller persists with ``mark_expired``. Raises httpx.HTTPStatusError on any other
+        Keycloak error: that says nothing about the token.
         """
         blob = await self._load_encrypted_blob(db, user_id)
-        if blob is None:
-            raise NoOfflineTokenError(f"No offline token stored for user {user_id}. User must grant consent first.")
 
         refresh_token = await self._decrypt_blob(blob)
 
@@ -172,7 +212,15 @@ class SchedulerTokenService:
                     "scope": "openid profile email offline_access",
                 },
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if _is_invalid_grant(exc):
+                    raise OfflineTokenExpiredError(
+                        f"Keycloak refused the offline token of user {user_id} (invalid_grant); "
+                        "they must sign in again."
+                    ) from exc
+                raise
             data = resp.json()
 
         logger.debug("Refreshed access token for user %s", user_id)

@@ -30,8 +30,12 @@ from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
 
 from console_backend.services.watch_evaluator import WatchOutcome
 from console_backend.services.scheduler_engine import NOTIFY_TIMEOUT_SECONDS, SchedulerEngine
-from console_backend.services.scheduler_service import _AWAITING_SIGN_IN_REASON
-from console_backend.services.scheduler_token_service import NoOfflineTokenError, SchedulerTokenService
+from console_backend.services.scheduler_service import _AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON
+from console_backend.services.scheduler_token_service import (
+    NoOfflineTokenError,
+    OfflineTokenExpiredError,
+    SchedulerTokenService,
+)
 from console_backend.utils.a2a_dispatch import AgentUnreachable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2368,3 +2372,154 @@ class TestSubscriberAgentAccessIsCheckedAtDispatch:
 
         dispatch.assert_called_once()
         repo.disable_subscription.assert_not_awaited()
+
+
+def _complete_job_failing_once() -> AsyncMock:
+    """complete_job that raises on its first call, like a transient database error, and
+    behaves normally after — so a second, counted finalize would be visible."""
+    return AsyncMock(side_effect=[RuntimeError("connection reset"), (True, None)])
+
+
+class TestAFailureToRecordAnOutcomeIsNotAFailureOfTheJob:
+    """#266: when _finalize cannot advance the job, the run keeps the outcome it was meant
+    to have and nothing is counted. The generic handler used to re-finalise it as a
+    counted FAILED carrying the raw database error, so a blip on a quiet poll or a park
+    moved consecutive_failures, and enough of them auto-paused the job."""
+
+    @staticmethod
+    def _watch_job() -> ScheduledJob:
+        return make_job(job_type=JobType.WATCH, sub_agent_id=None).model_copy(
+            update={"check_tool": "naonous_get_campaign", "cel_expr": "eq_ci(result.status, 'FAILED')"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_poll_stays_quiet(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 7
+        repo.complete_job = _complete_job_failing_once()
+        engine = _make_engine(repo=repo)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(return_value=WatchOutcome(condition_met=False, check_result={"status": "OK"})),
+        ):
+            await engine._dispatch_job(self._watch_job())
+
+        # One attempt to advance, never a second (counted) one.
+        repo.complete_job.assert_awaited_once()
+        repo.complete_run.assert_awaited_once()
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.CONDITION_NOT_MET
+
+    @pytest.mark.asyncio
+    async def test_a_hold_until_sign_in_is_not_turned_into_a_failure(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 1
+        repo.complete_job = _complete_job_failing_once()
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.side_effect = NoOfflineTokenError("No offline token stored for user u")
+        engine = _make_engine(repo=repo, token_service=token_service)
+
+        await engine._dispatch_job(make_job())
+
+        repo.complete_job.assert_awaited_once()
+        repo.complete_run.assert_awaited_once()
+        assert "No offline token" in repo.complete_run.await_args.kwargs["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_success_is_not_rewritten_as_failed(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 9
+        repo.complete_job = _complete_job_failing_once()
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+        meta = {"scheduler_status": "success", "agent_message": "Report sent."}
+        result = {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+        with patch("console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(return_value=result)):
+            await engine._dispatch_job(make_job())
+
+        repo.complete_job.assert_awaited_once()
+        repo.complete_run.assert_awaited_once()
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_run_is_not_rewritten_as_failed(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.complete_job = _complete_job_failing_once()
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.return_value = "token"
+        engine = _make_engine(repo=repo, token_service=token_service)
+        parked = ScheduledJobRun(
+            id=20,
+            job_id=1,
+            started_at=datetime.now(timezone.utc),
+            status=JobRunStatus.AUTH_REQUIRED,
+            delivered=False,
+            parked_task_id="task-20",
+            conversation_id="ctx-20",
+        )
+        meta = {"scheduler_status": "success", "agent_message": "Done."}
+        result = {"result": {"kind": "task", "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(meta)}]}]}}
+
+        with patch("console_backend.services.scheduler_engine.dispatch_streaming", AsyncMock(return_value=result)):
+            returned = await engine.resume_parked_run(make_job(), parked, "approved", run_id=21)
+
+        assert returned == 21
+        repo.complete_job.assert_awaited_once()
+        repo.complete_run.assert_awaited_once()
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_a_run_whose_outcome_could_not_be_advanced_does_not_report_the_job_paused(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.complete_job = AsyncMock(side_effect=RuntimeError("connection reset"))
+        engine = _make_engine(repo=repo)
+        engine._notify_job_paused = AsyncMock()
+
+        with pytest.raises(Exception, match="Could not record outcome success of run 5"):
+            await engine._finalize(run_id=5, job=make_job(), status=JobRunStatus.SUCCESS)
+
+        engine._notify_job_paused.assert_not_awaited()
+        assert repo.complete_run.await_args.kwargs["status"] == JobRunStatus.SUCCESS
+
+
+class TestAnExpiredSignInHoldsTheSubscription:
+    """A vaulted token Keycloak refused (invalid_grant) used to surface as an
+    httpx.HTTPStatusError, which the generic handler logged as an agent-runner error and
+    counted towards auto-pause. It is a missing credential: the subscription waits for the
+    next sign-in, and the token is marked so every later check sees it as absent."""
+
+    @pytest.mark.asyncio
+    async def test_the_run_is_held_with_its_own_reason_and_the_token_is_marked(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 1
+        repo.complete_job = AsyncMock(return_value=(False, _SIGN_IN_EXPIRED_REASON))
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.side_effect = OfflineTokenExpiredError("refused (invalid_grant)")
+        engine = _make_engine(repo=repo, token_service=token_service)
+        job = make_job()
+
+        await engine._dispatch_job(job)
+
+        token_service.mark_expired.assert_awaited_once()
+        assert token_service.mark_expired.await_args.args[1] == job.user_id
+        assert repo.disable_subscription.await_args.args[1:] == (job.id, _SIGN_IN_EXPIRED_REASON)
+        job_kwargs = repo.complete_job.await_args.kwargs
+        assert job_kwargs["paused_reason"] == _SIGN_IN_EXPIRED_REASON
+        # Not a failure of the job: consecutive_failures must not move.
+        assert job_kwargs["status"] == JobRunStatus.INTERRUPTED
+
+    @pytest.mark.asyncio
+    async def test_the_hold_does_not_depend_on_marking_the_token(self):
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 1
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token.side_effect = OfflineTokenExpiredError("refused (invalid_grant)")
+        token_service.mark_expired.side_effect = RuntimeError("database gone")
+        engine = _make_engine(repo=repo, token_service=token_service)
+
+        await engine._dispatch_job(make_job())
+
+        assert repo.complete_job.await_args.kwargs["paused_reason"] == _SIGN_IN_EXPIRED_REASON
