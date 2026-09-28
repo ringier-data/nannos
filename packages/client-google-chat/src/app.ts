@@ -517,7 +517,7 @@ function setupServerTimeouts(server: Server, config: Config) {
         // Respond immediately to acknowledge receipt
         res.status(200).json({ acknowledged: true });
 
-        await handleA2ANotification(task, projectId, handlerDeps);
+        await handleA2ANotification(task, projectId, handlerDeps, res.locals.projectName as string);
       }
     );
 

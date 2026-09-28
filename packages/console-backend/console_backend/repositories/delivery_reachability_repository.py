@@ -67,17 +67,27 @@ UNREACHABLE_HOLD_REASON = (
 )
 
 
+#: The same hold after a client reported no recipient (#191) for a subscriber Nannos cannot
+#: judge (``unknown``: an old local sign-in, or an unlisted installation). No sign-in the
+#: backend sees will release it, so it asks the subscriber to switch the job back on,
+#: which ``unknown`` never refuses. Load-bearing like the above.
+UNDELIVERED_HOLD_REASON = (
+    "Nannos couldn't reach you on this job's delivery channel. Message Nannos there once, "
+    "then switch the job back on"
+)
+
+
 def unreachable_subscriptions_sql(user_id: str) -> str:
     """A SQL expression counting the live subscriptions of *user_id* (a SQL expression)
     that cannot reach them: on a channel they are ``unreachable`` on, or held for it. Held
     covers a client's report on a channel the bindings still call reachable."""
-    reason = UNREACHABLE_HOLD_REASON.replace("'", "''")
+    reasons = ", ".join("'" + r.replace("'", "''") + "'" for r in (UNREACHABLE_HOLD_REASON, UNDELIVERED_HOLD_REASON))
     return f"""(
         SELECT COUNT(*) FROM scheduled_job_subscriptions us
         JOIN scheduled_job_definitions ud ON ud.id = us.definition_id AND ud.deleted_at IS NULL
         JOIN delivery_channels uc ON uc.id = us.delivery_channel_id
         WHERE us.user_id = {user_id} AND us.deleted_at IS NULL
-          AND ((NOT us.enabled AND us.paused_reason = '{reason}')
+          AND ((NOT us.enabled AND us.paused_reason IN ({reasons}))
                OR {reachability_sql(user_id, "uc.client_id", "uc.installation_id")} = 'unreachable')
     )"""
 

@@ -227,8 +227,6 @@ describe('a notification that reaches nobody is reported (#191)', () => {
         userAuthStorage: {
           findByOidcSub: jest.fn<() => Promise<unknown>>().mockResolvedValue(found ? { userId: 'users/123' } : null),
         },
-        // The push names the project NUMBER; the channel is registered under its name.
-        config: { googleChatConfigs: [{ projectNumber: PROJECT_ID, projectName: 'projects/nannos' }] },
         reportUndelivered,
       } as unknown as HandlerDependencies,
     };
@@ -237,7 +235,9 @@ describe('a notification that reaches nobody is reported (#191)', () => {
   test('no sign-in in this project is reported as no_recipient under the channel installation', async () => {
     const { deps: d, reportUndelivered, chatService } = deps(false);
 
-    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
+    // The installation the notification token identified, not one looked up by number:
+    // several projects may share a number.
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d, 'projects/nannos');
 
     expect(chatService.sendTextMessage).not.toHaveBeenCalled();
     expect(reportUndelivered).toHaveBeenCalledWith(
@@ -251,8 +251,8 @@ describe('a notification that reaches nobody is reported (#191)', () => {
     chatService.sendTextMessage.mockRejectedValueOnce(new Error('quota'));
     const { deps: d, reportUndelivered } = deps(true, chatService);
 
-    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
-    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d, 'projects/nannos');
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d, 'projects/nannos');
 
     expect(reportUndelivered.mock.calls.map(([r]) => (r as { reason: string }).reason)).toEqual([
       'send_failed',

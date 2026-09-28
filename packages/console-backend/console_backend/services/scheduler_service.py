@@ -29,7 +29,7 @@ from ..models.scheduled_job import (
 )
 from ..config import config
 from ..models.user import User
-from ..repositories.delivery_reachability_repository import UNREACHABLE_HOLD_REASON
+from ..repositories.delivery_reachability_repository import UNDELIVERED_HOLD_REASON, UNREACHABLE_HOLD_REASON
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run, first_run_at
 from ..utils.timezones import default_timezone_name, resolve_timezone, validate_timezone_name
 
@@ -97,8 +97,11 @@ _SIGN_IN_HOLD_REASONS = (_AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON)
 #: (#192). The channel is kept, never switched for them; the job page names it. A sign-in
 #: from that channel switches it on (``release_reachability_holds``).
 _UNREACHABLE_REASON = UNREACHABLE_HOLD_REASON
+#: The hold a client's "no recipient" report puts on a subscriber Nannos cannot judge
+#: (``unknown``): nothing it sees releases it, so the subscriber switches it back on.
+_UNDELIVERED_REASON = UNDELIVERED_HOLD_REASON
 #: Holds under which the subscriber cannot be sent the chat activation notice.
-_NO_NOTICE_HOLD_REASONS = (*_SIGN_IN_HOLD_REASONS, _UNREACHABLE_REASON)
+_NO_NOTICE_HOLD_REASONS = (*_SIGN_IN_HOLD_REASONS, _UNREACHABLE_REASON, _UNDELIVERED_REASON)
 
 
 class SchedulerAccessError(PermissionError):
@@ -1917,7 +1920,17 @@ class SchedulerService:
         await self.repo.mark_run_undelivered(db, report.run_id, error)
         held = report.reason == "no_recipient" and target["enabled"]
         if held:
-            await self.repo.disable_subscription(db, target["subscription_id"], _UNREACHABLE_REASON)
+            # A sign-in releases the hold only where the backend can see one: a subscriber
+            # with no binding there (an old local sign-in) is asked to switch it on again.
+            states = (
+                await self._reachability.for_channel(db, target["channel_id"], [target["user_id"]])
+                if self._reachability is not None
+                else {}
+            )
+            released_by_sign_in = states.get(target["user_id"], "unknown") != "unknown"
+            await self.repo.disable_subscription(
+                db, target["subscription_id"], _UNREACHABLE_REASON if released_by_sign_in else _UNDELIVERED_REASON
+            )
             if self._notification_service is not None:
                 await self._notification_service.create_notification(
                     db=db,
@@ -1926,8 +1939,12 @@ class SchedulerService:
                     title=f"Scheduled job paused: {target['job_name']}",
                     message=(
                         f"'{target['job_name']}' ran, but its result reached nobody: Nannos can't reach you "
-                        f"on '{channel}'. Message Nannos there once and the job switches back on, or "
-                        "change its delivery."
+                        f"on '{channel}'. "
+                        + (
+                            "Message Nannos there once and the job switches back on, or change its delivery."
+                            if released_by_sign_in
+                            else "Message Nannos there once, then switch the job back on, or change its delivery."
+                        )
                     ),
                     metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
                 )

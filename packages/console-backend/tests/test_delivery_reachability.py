@@ -32,6 +32,7 @@ from console_backend.services.audit_service import AuditService
 from console_backend.services.notification_service import NotificationService
 from console_backend.services.scheduler_service import (
     _AWAITING_SIGN_IN_REASON,
+    _UNDELIVERED_REASON,
     _UNREACHABLE_REASON,
     DeliveryUnreachableError,
     SchedulerService,
@@ -376,6 +377,29 @@ class TestAClientReportsWhatReachedNobody:
 
         # Re-signing in from that workspace switches it back on.
         assert await svc.release_reachability_holds(db, u["owner"], SLACK, ["A1", "A2"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_subscriber_nannos_cannot_judge_is_asked_to_switch_it_back_on(self, world):
+        """No binding there (an old local sign-in): no sign-in the backend sees will
+        release the hold, so it says so, and switching the job on is not refused."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["member"])
+        run_id = await svc.repo.create_run(db, job.id)
+        await db.commit()
+
+        report = UndeliveredReport(run_id=run_id, installation_id="A1", reason="no_recipient")
+        assert await svc.report_undelivered(db, SLACK, report) is True
+
+        held = await svc.get_job(db, job.id, u["member"].id)
+        assert (held.enabled, held.paused_reason) == (False, _UNDELIVERED_REASON)
+        count = (
+            await db.execute(
+                text(f"SELECT {unreachable_subscriptions_sql('u.id')} FROM users u WHERE u.id = :id"),
+                {"id": u["member"].id},
+            )
+        ).scalar_one()
+        assert count == 1, "the onboarding badge counts it"
+        assert await svc.resume_job(db, job.id, u["member"]) is True
 
     @pytest.mark.asyncio
     async def test_a_failed_send_marks_the_run_but_keeps_the_job_running(self, world):

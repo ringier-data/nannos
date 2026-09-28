@@ -13,7 +13,9 @@ const logger = Logger.getLogger('A2ANotificationAuth');
  * project, keyed by `projectName`, matching InstallationRegistrar. Keying these
  * on `botName` gave two projects that share a display name one secret, so this
  * loop returned whichever was configured first and routed the notification to
- * the wrong project. On success, sets `res.locals.projectNumber`.
+ * the wrong project. On success, sets `res.locals.projectNumber`, and
+ * `res.locals.projectName`: the installation this push's channel is registered under.
+ * Several projects may share a number, so the name cannot be recovered from it.
  */
 export function createA2ANotificationAuthMiddleware(
   googleChatConfigs: Config['googleChatConfigs'],
@@ -32,6 +34,7 @@ export function createA2ANotificationAuthMiddleware(
         const secret = await installationSecretService.get(project.projectName);
         if (secret && secret === notificationToken) {
           res.locals.projectNumber = project.projectNumber;
+          res.locals.projectName = project.projectName;
           next();
           return;
         }

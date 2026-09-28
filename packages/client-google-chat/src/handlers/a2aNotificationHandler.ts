@@ -80,6 +80,12 @@ export async function handleA2ANotification(
   task: Task,
   projectId: string,
   deps: HandlerDependencies,
+  /**
+   * The installation whose channel the push came through (its project name), as the
+   * notification token identified it. Reported with an undelivered run (#191); not
+   * derivable from `projectId`, which several projects may share.
+   */
+  installationId?: string,
 ): Promise<void> {
   const { chatService, userAuthStorage, scheduledRunStore } = deps;
 
@@ -97,12 +103,10 @@ export async function handleA2ANotification(
   const parked = schedulerPayload.scheduler_status === 'auth_required';
   const runRef = `job=${schedulerPayload.scheduled_job_id} run=${schedulerPayload.scheduled_job_run_id}`;
   // Every way this notification can end without reaching the user is logged at error
-  // level and reported, so the run is not recorded as delivered (#191). The channel is
-  // registered under the project NAME; the push arrives with the project number.
+  // level and reported, so the run is not recorded as delivered (#191).
   const undelivered = async (reason: UndeliveredReason, detail: string): Promise<void> => {
     logger.error(`[A2ACallback] Not delivered (${reason}, ${runRef}, taskId=${task.id}): ${detail}`);
     const runId = schedulerPayload.scheduled_job_run_id;
-    const installationId = deps.config.googleChatConfigs.find((p) => p.projectNumber === projectId)?.projectName;
     if (deps.reportUndelivered && runId !== undefined && installationId) {
       await deps.reportUndelivered({ runId, installationId, reason, detail });
     }

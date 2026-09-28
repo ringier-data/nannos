@@ -66,8 +66,10 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > it lasts only until old sign-ins drain. Because the webhook acknowledges a push before it
 > looks the recipient up, a chat client that finds no one reports it separately, as itself
 > (`POST /api/v1/delivery-channels/undelivered`). The run keeps its status and is marked
-> undelivered; "no recipient" also holds the subscription with the same reason. The binding
-> is left alone, since it also mints the subscriber's tokens.
+> undelivered; "no recipient" also holds the subscription with the same reason, or, for a
+> subscriber who is unknown there (whose sign-in no release would ever see), with one that
+> asks them to switch it back on. The binding is left alone, since it also mints the
+> subscriber's tokens.
 
 ## Context
 
