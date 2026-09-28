@@ -70,11 +70,11 @@ class TestFailureAccounting:
         await pg_session.commit()
 
         r = await pg_session.execute(
-            text("SELECT enabled, paused_reason FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
+            text("SELECT enabled, pause_code FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
         )
         row = r.mappings().first()
         assert row["enabled"] is True
-        assert row["paused_reason"] is None
+        assert row["pause_code"] is None
 
 
 class TestRetryMarkerSurvivesOtherCompletions:
@@ -188,13 +188,13 @@ class TestRetryClaiming:
 
     @pytest.mark.asyncio
     async def test_retry_does_not_resurrect_a_deliberately_stopped_job(self, pg_session: AsyncSession):
-        """paused_reason separates one-shot retirement from somebody stopping the job."""
+        """pause_code separates one-shot retirement from somebody stopping the job."""
         repo = ScheduledJobRepository()
         job_id = await seed_job(
             pg_session,
             "paused",
             enabled="false",
-            paused_reason="Manually paused",
+            pause_code="manually_paused",
             retry_at="NOW() - INTERVAL '1 minute'",
         )
         await pg_session.commit()

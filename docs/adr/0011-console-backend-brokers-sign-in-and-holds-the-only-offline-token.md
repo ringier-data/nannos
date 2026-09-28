@@ -71,10 +71,11 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > undelivered; "no recipient" also holds the subscription with the same reason, or, for a
 > subscriber who is unknown there (whose sign-in no release would ever see), with one that
 > asks them to switch it back on. The binding is left alone, since it also mints the
-> subscriber's tokens. Every hold, the sign-in holds of point 6 included, is recorded as a
-> code (`scheduled_job_subscriptions.hold`, migration 110) that releases and counts match;
-> `paused_reason` is only the sentence the subscriber reads. A held subscription is always
-> switched off, which the database enforces.
+> subscriber's tokens. Every stop of a subscription, the holds of point 6 included, is
+> recorded as a code (`scheduled_job_subscriptions.pause_code`, with `pause_detail` for the
+> values a sentence names; migration 110). Releases, counts and the claim's retry branch
+> match the code, and `paused_reason` is only rendered from it for people to read, stored
+> nowhere. A subscription with a code is always switched off, which the database enforces.
 
 ## Context
 

@@ -26,14 +26,15 @@ from ..models.scheduled_job import (
     ConditionEvaluation,
     JobRunStatus,
     JobType,
+    PauseCode,
     RunTrigger,
     ScheduledJob,
     ScheduledJobRun,
     ScheduleKind,
     SharedJobDefinition,
-    SubscriptionHold,
     TriggerDefaults,
     TriggerPolicy,
+    render_pause,
 )
 from ..models.user import User
 from ..utils.timezones import resolve_timezone
@@ -105,7 +106,7 @@ _JOB_VIEW_SELECT = """
            CASE WHEN dc.id IS NOT NULL THEN """ + reachability_sql("s.user_id", "dc.client_id", "dc.workspace_id") + """
            END                                                                          AS delivery_reachability,
            d.voice_call,
-           s.enabled, d.max_failures, s.consecutive_failures, s.paused_reason, s.hold,
+           s.enabled, d.max_failures, s.consecutive_failures, s.pause_code, s.pause_detail,
            d.revision, d.is_public, d.suspended_at, d.suspended_by_user_id, d.suspended_reason,
            s.activated_by, s.activated_by_groups,
            (SELECT COUNT(*) FROM scheduled_job_subscriptions o
@@ -135,16 +136,20 @@ _JOB_VIEW_SELECT = """
 """
 
 
-def _with_hold(fields: dict[str, Any]) -> dict[str, Any]:
-    """*fields* of a subscription write, with ``hold`` as the column stores it. A write
-    that switches the subscription on or sets ``paused_reason`` without naming a hold
-    clears it: a hold only ever describes the reason it was written with."""
+def _pause_fields(fields: dict[str, Any], *, clear_on_enable: bool = True) -> dict[str, Any]:
+    """*fields* of a subscription write, with ``pause_code`` and ``pause_detail`` as the
+    columns store them. A code written without a detail clears the old detail, and a write
+    that switches the subscription on clears both: a code only ever describes a stop."""
+    assert "paused_reason" not in fields, "paused_reason is rendered from pause_code, never written"
     fields = dict(fields)
-    if "hold" in fields:
-        hold = fields["hold"]
-        fields["hold"] = hold.value if isinstance(hold, SubscriptionHold) else hold
-    elif "paused_reason" in fields or fields.get("enabled") is True:
-        fields["hold"] = None
+    if "pause_code" in fields:
+        code = fields["pause_code"]
+        fields["pause_code"] = code.value if isinstance(code, PauseCode) else code
+        detail = fields.get("pause_detail")
+        fields["pause_detail"] = json.dumps(detail) if detail is not None else None
+    elif clear_on_enable and fields.get("enabled") is True:
+        fields["pause_code"] = None
+        fields["pause_detail"] = None
     return fields
 
 
@@ -194,8 +199,8 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         enabled=row["enabled"],
         max_failures=row["max_failures"],
         consecutive_failures=row["consecutive_failures"],
-        paused_reason=row["paused_reason"],
-        hold=SubscriptionHold(row["hold"]) if row.get("hold") else None,
+        pause_code=PauseCode(row["pause_code"]) if row.get("pause_code") else None,
+        paused_reason=render_pause(row.get("pause_code"), row.get("pause_detail")),
         revision=row.get("revision", 1),
         is_public=row.get("is_public", False),
         suspended_at=row.get("suspended_at"),
@@ -346,14 +351,14 @@ class _SubscriptionRepository(AuditedRepository):
         fetch_before: bool = True,
         custom_action: AuditAction | None = None,
     ) -> None:
-        """Every audited subscription write, with ``hold`` kept to its reason
-        (``_with_hold``). Here rather than at each caller, so no write can leave a hold
-        behind: a reset, a toggle and a resume all pass through."""
+        """Every audited subscription write, with its pause code kept to the stop it
+        describes (``_pause_fields``). Here rather than at each caller, so no write can
+        leave a code behind: a reset, a toggle and a resume all pass through."""
         await super().update(
             db=db,
             actor=actor,
             entity_id=entity_id,
-            fields=_with_hold(fields),
+            fields=_pause_fields(fields),
             fetch_before=fetch_before,
             custom_action=custom_action,
         )
@@ -476,13 +481,15 @@ class ScheduledJobRepository(AuditedRepository):
 
     async def create_subscription(self, db: AsyncSession, actor: User, fields: dict[str, Any]) -> int:
         """Insert one subscription. Returns its id (the user-facing job id)."""
-        return await self._subs.create(db=db, actor=actor, fields=fields, returning="id")
+        return await self._subs.create(
+            db=db, actor=actor, fields=_pause_fields(fields, clear_on_enable=False), returning="id"
+        )
 
     async def update_subscription(
         self, db: AsyncSession, actor: User, subscription_id: int, fields: dict[str, Any]
     ) -> None:
-        """Update subscription fields with audit logging. ``hold`` travels with the reason
-        (see ``_SubscriptionRepository.update``)."""
+        """Update subscription fields with audit logging. The pause code travels with
+        ``enabled`` (see ``_SubscriptionRepository.update``)."""
         await self._subs.update(db=db, actor=actor, entity_id=subscription_id, fields=fields)
 
     async def delete_subscription(self, db: AsyncSession, actor: User, subscription_id: int) -> None:
@@ -570,7 +577,7 @@ class ScheduledJobRepository(AuditedRepository):
         return jobs, count.scalar() or 0
 
     async def list_held_jobs(
-        self, db: AsyncSession, user_id: str, holds: Sequence[SubscriptionHold]
+        self, db: AsyncSession, user_id: str, codes: Sequence[PauseCode]
     ) -> list[ScheduledJob]:
         """The user's live subscriptions held for one of *holds*.
 
@@ -581,12 +588,12 @@ class ScheduledJobRepository(AuditedRepository):
             text(
                 _JOB_VIEW_SELECT
                 + """
-                WHERE s.user_id = :user_id AND s.hold = ANY(:holds)
+                WHERE s.user_id = :user_id AND s.pause_code = ANY(:codes)
                   AND s.deleted_at IS NULL AND d.deleted_at IS NULL
                 ORDER BY s.id
                 """
             ),
-            {"user_id": user_id, "holds": [h.value for h in holds]},
+            {"user_id": user_id, "codes": [c.value for c in codes]},
         )
         return [_row_to_scheduled_job(r) for r in result.mappings().all()]
 
@@ -688,12 +695,12 @@ class ScheduledJobRepository(AuditedRepository):
         activations: list[dict[str, Any]],
         activated_by: str,
         group_id: int | None,
-        elapsed_once_reason: str | None = None,
+        elapsed_once_code: PauseCode | None = None,
     ) -> list[str]:
         """Create a subscription for every user in *activations* who has none yet.
 
         Each entry is ``{"user_id", "next_run_at", "delivery_channel_id", "enabled",
-        "paused_reason", "hold"}`` — the first occurrence is computed by the caller in that user's
+        "pause_code"}`` — the first occurrence is computed by the caller in that user's
         own timezone (and a one-shot whose time has passed arrives disabled). Idempotent on
         the live (definition, user) pair; a user who already subscribes keeps their row
         and, when *group_id* is given, gains it in ``activated_by_groups`` so a later
@@ -701,7 +708,7 @@ class ScheduledJobRepository(AuditedRepository):
         (access withdrawn on an earlier leave) is switched back on: the
         member is back, and their customisation with them — unless its effective trigger
         is a one-shot that has already fired, which keeps a stop reading
-        *elapsed_once_reason* instead of coming back armed. Returns the ids of users whose
+        *elapsed_once_code* instead of coming back armed. Returns the ids of users whose
         subscription was created or re-enabled — the ones owed the consent notice, judged
         on the row's state BEFORE this call.
         """
@@ -747,15 +754,14 @@ class ScheduledJobRepository(AuditedRepository):
                             "user_id": entry["user_id"],
                             "activated_by": activated_by,
                             "group_id": group_id,
-                            "paused_reason": entry.get("paused_reason"),
+                            "pause_code": entry["pause_code"].value if entry.get("pause_code") else None,
                         }
                     },
                 )
-                if entry.get("paused_reason"):
-                    hold = entry.get("hold")
+                if entry.get("pause_code"):
                     await db.execute(
-                        text("UPDATE scheduled_job_subscriptions SET paused_reason = :r, hold = :h WHERE id = :id"),
-                        {"r": entry["paused_reason"], "h": hold.value if hold else None, "id": row["id"]},
+                        text("UPDATE scheduled_job_subscriptions SET pause_code = :c WHERE id = :id"),
+                        {"c": entry["pause_code"].value, "id": row["id"]},
                     )
             elif group_id is not None:
                 # Already subscribed: record that this group also stands behind it, and
@@ -770,7 +776,7 @@ class ScheduledJobRepository(AuditedRepository):
                     text("""
                         WITH before AS (
                             SELECT s.id,
-                                   (s.hold IS NOT NULL AND s.hold = 'access_revoked') AS was_revoked,
+                                   (s.pause_code IS NOT NULL AND s.pause_code = 'access_revoked') AS was_revoked,
                                    -- The EFFECTIVE trigger, override first: a one-shot
                                    -- whose moment has passed must not come back armed
                                    -- with its old past next_run_at, which the claim
@@ -796,10 +802,10 @@ class ScheduledJobRepository(AuditedRepository):
                                 -- Access is theirs again either way, so the revoked
                                 -- reason is stale; an elapsed one-shot keeps a stop, but
                                 -- one that says why it will not run.
-                                paused_reason = CASE WHEN b.was_revoked AND b.elapsed_once THEN :elapsed
+                                pause_code    = CASE WHEN b.was_revoked AND b.elapsed_once THEN CAST(:elapsed AS text)
                                                      WHEN b.was_revoked THEN NULL
-                                                     ELSE s.paused_reason END,
-                                hold          = CASE WHEN b.was_revoked THEN NULL ELSE s.hold END,
+                                                     ELSE s.pause_code END,
+                                pause_detail  = CASE WHEN b.was_revoked THEN NULL ELSE s.pause_detail END,
                                 updated_at = :now
                             FROM before b
                             WHERE s.id = b.id
@@ -812,7 +818,7 @@ class ScheduledJobRepository(AuditedRepository):
                         "definition_id": definition_id,
                         "user_id": entry["user_id"],
                         "group": json.dumps([group_id]),
-                        "elapsed": elapsed_once_reason,
+                        "elapsed": elapsed_once_code.value if elapsed_once_code else None,
                         "now": now,
                     },
                 )
@@ -1352,8 +1358,8 @@ class ScheduledJobRepository(AuditedRepository):
         The retry branch does not require ``enabled``: a ``once`` job is retired by
         ``complete_job`` the moment its occurrence is recorded, so requiring
         ``enabled`` would discard the very attempt the interruption earned.
-        ``paused_reason IS NULL`` is what keeps that from resurrecting a job somebody
-        stopped on purpose — every deliberate stop writes a reason, one-shot
+        ``pause_code IS NULL`` is what keeps that from resurrecting a job somebody
+        stopped on purpose — every deliberate stop writes a code, one-shot
         retirement does not.
 
         A subscription with a run still ``running`` is not claimable on either branch.
@@ -1386,7 +1392,7 @@ class ScheduledJobRepository(AuditedRepository):
                       AND d.suspended_at IS NULL
                       AND (
                             (s.enabled = TRUE AND s.next_run_at <= :now)
-                         OR (s.retry_at IS NOT NULL AND s.retry_at <= :now AND s.paused_reason IS NULL)
+                         OR (s.retry_at IS NOT NULL AND s.retry_at <= :now AND s.pause_code IS NULL)
                       )
                       AND NOT EXISTS (
                             SELECT 1 FROM scheduled_job_runs r
@@ -1438,14 +1444,16 @@ class ScheduledJobRepository(AuditedRepository):
         status: JobRunStatus,
         next_run_at: datetime | None,
         last_check_result: dict[str, Any] | None = None,
-        paused_reason: str | None = None,
+        pause_code: PauseCode | None = None,
         retry_at: datetime | None = None,
         leave_schedule: bool = False,
-        hold: SubscriptionHold | None = None,
+        pause_detail: dict[str, Any] | None = None,
     ) -> tuple[bool, str | None]:
         """Update a subscription after execution: advance schedule, track failures, auto-pause on threshold.
 
-        Returns ``(enabled, paused_reason)`` as this write left them. The caller compares
+        Returns ``(enabled, paused_reason)`` as this write left them, the reason rendered
+        from the pause code. *pause_code* is recorded only on a row this write leaves
+        switched off: a code only ever describes a stop. The caller compares
         against the state it already held to tell "this run stopped the job" from "it was
         already off" — which it needs in order to tell the subscriber, and which it cannot
         learn by re-reading: the auto-pause decision is made inside this statement, from
@@ -1496,24 +1504,30 @@ class ScheduledJobRepository(AuditedRepository):
                         WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures      THEN FALSE
                         ELSE s.enabled
                     END,
-                    paused_reason        = CASE
-                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures
-                            THEN 'Auto-paused after ' || d.max_failures || ' consecutive failures'
-                        WHEN CAST(:paused_reason AS text) IS NOT NULL THEN CAST(:paused_reason AS text)
-                        ELSE s.paused_reason
+                    -- The same three cases as ``enabled`` (every expression here reads the
+                    -- row as it was): an auto-pause records its own code, a given code is
+                    -- recorded only where this write leaves the row switched off, and
+                    -- anything else keeps what the row had.
+                    pause_code           = CASE
+                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures THEN 'auto_paused'
+                        WHEN CAST(:pause_code AS text) IS NOT NULL
+                             AND ((:next_run_at IS NULL AND NOT :leave_schedule) OR NOT s.enabled)
+                            THEN CAST(:pause_code AS text)
+                        ELSE s.pause_code
                     END,
-                    -- Travels with the reason: an auto-pause is no hold, a given reason
-                    -- brings its own (or none), and an untouched reason keeps it.
-                    hold                 = CASE
-                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures THEN NULL
-                        WHEN CAST(:paused_reason AS text) IS NOT NULL THEN CAST(:hold AS text)
-                        ELSE s.hold
+                    pause_detail         = CASE
+                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures
+                            THEN jsonb_build_object('max_failures', d.max_failures)
+                        WHEN CAST(:pause_code AS text) IS NOT NULL
+                             AND ((:next_run_at IS NULL AND NOT :leave_schedule) OR NOT s.enabled)
+                            THEN CAST(:pause_detail AS jsonb)
+                        ELSE s.pause_detail
                     END,
                     last_check_result    = COALESCE(CAST(:last_check_result AS jsonb), s.last_check_result),
                     updated_at           = :now
                 FROM scheduled_job_definitions d
                 WHERE s.id = :subscription_id AND d.id = s.definition_id
-                RETURNING s.enabled, s.paused_reason
+                RETURNING s.enabled, s.pause_code, s.pause_detail
             """),
             {
                 "subscription_id": subscription_id,
@@ -1523,8 +1537,8 @@ class ScheduledJobRepository(AuditedRepository):
                 "next_run_at": next_run_at,
                 "leave_schedule": leave_schedule,
                 "retry_at": retry_at,
-                "paused_reason": paused_reason,
-                "hold": hold.value if hold else None,
+                "pause_code": pause_code.value if pause_code else None,
+                "pause_detail": json.dumps(pause_detail) if pause_detail is not None else None,
                 # `is not None`, not truthiness: `{}` is a real response (a tool with no
                 # content returns one), and mapping it to NULL makes the COALESCE above
                 # keep the previous payload — so `prev` never catches up and a
@@ -1536,25 +1550,32 @@ class ScheduledJobRepository(AuditedRepository):
             },
         )
         row = result.mappings().first()
-        return (bool(row["enabled"]), row["paused_reason"]) if row else (True, None)
+        if row is None:
+            return True, None
+        return bool(row["enabled"]), render_pause(row["pause_code"], row["pause_detail"])
 
     async def disable_subscription(
-        self, db: AsyncSession, subscription_id: int, reason: str, hold: SubscriptionHold | None = None
+        self,
+        db: AsyncSession,
+        subscription_id: int,
+        code: PauseCode,
+        detail: dict[str, Any] | None = None,
     ) -> None:
         """A system stop of one subscription (no actor): destroy-after-trigger, an
-        agent the subscriber can no longer reach. Writes the reason, as every
-        deliberate stop must, so the retry branch of the claim leaves it alone, and the
-        *hold* that goes with it (none clears any)."""
+        agent the subscriber can no longer reach. Writes the code, as every deliberate stop
+        must, so the retry branch of the claim leaves it alone, and the *detail* that goes
+        with it."""
         await db.execute(
             text("""
                 UPDATE scheduled_job_subscriptions
-                SET enabled = FALSE, paused_reason = :reason, hold = :hold, retry_at = NULL, updated_at = :now
+                SET enabled = FALSE, pause_code = :code, pause_detail = CAST(:detail AS jsonb),
+                    retry_at = NULL, updated_at = :now
                 WHERE id = :id
             """),
             {
                 "id": subscription_id,
-                "reason": reason,
-                "hold": hold.value if hold else None,
+                "code": code.value,
+                "detail": json.dumps(detail) if detail is not None else None,
                 "now": datetime.now(timezone.utc),
             },
         )
@@ -1702,7 +1723,7 @@ class ScheduledJobRepository(AuditedRepository):
         process's own and are never touched.
 
         Each interrupted ``scheduled`` run earns its job one fresh attempt at
-        *retry_at*, unless the job carries a ``paused_reason`` — those were stopped on
+        *retry_at*, unless the job carries a ``pause_code`` — those were stopped on
         purpose and are not quietly resumed. A stale ``retry`` run has exhausted
         recovery, so it is marked as owing the user a notice at *notice_due_at*
         instead. A ``manual`` run earns neither: the user was present.
@@ -1742,7 +1763,7 @@ class ScheduledJobRepository(AuditedRepository):
                     WHERE j.id = stale.subscription_id
                       AND stale.trigger IN ('scheduled', 'resumed')
                       AND j.deleted_at IS NULL
-                      AND j.paused_reason IS NULL
+                      AND j.pause_code IS NULL
                     RETURNING j.id
                 )
                 SELECT id FROM stale

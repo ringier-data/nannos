@@ -34,14 +34,13 @@ from ..models.scheduled_job import (
     ConditionEvaluation,
     JobRunStatus,
     JobType,
+    PauseCode,
     RunTrigger,
     ScheduledJob,
     ScheduledJobRun,
-    SubscriptionHold,
 )
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
-from ..services.scheduler_service import _AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON
 from ..services.scheduler_token_service import NoOfflineTokenError, OfflineTokenExpiredError, SchedulerTokenService
 from ..services.socket_notification_manager import SocketNotificationManager
 from ..utils.a2a_dispatch import AgentUnreachable, dispatch_streaming
@@ -582,7 +581,7 @@ class SchedulerEngine:
                         error_message=str(e),
                         delivered=False,
                         trigger=RunTrigger.RESUMED,
-                        paused_reason="No offline token stored. User must re-grant scheduler consent.",
+                        pause_code=PauseCode.NO_OFFLINE_TOKEN,
                     )
                     return run_id
 
@@ -808,7 +807,7 @@ class SchedulerEngine:
                         status=JobRunStatus.FAILED,
                         error_message=str(e),
                         delivered=False,
-                        paused_reason="No offline token stored. User must re-grant scheduler consent.",
+                        pause_code=PauseCode.NO_OFFLINE_TOKEN,
                         trigger=trigger,
                     )
                     return
@@ -1125,7 +1124,7 @@ class SchedulerEngine:
             status=JobRunStatus.FAILED,
             error_message="You no longer have access to the sub-agent this job runs.",
             delivered=False,
-            paused_reason="Agent not accessible: you no longer have access to the sub-agent this job runs.",
+            pause_code=PauseCode.AGENT_INACCESSIBLE,
             trigger=trigger,
             counts_as_failure=False,
         )
@@ -1160,8 +1159,7 @@ class SchedulerEngine:
             status=JobRunStatus.FAILED,
             error_message=str(error),
             delivered=False,
-            paused_reason=_SIGN_IN_EXPIRED_REASON if expired else _AWAITING_SIGN_IN_REASON,
-            hold=SubscriptionHold.SIGN_IN_EXPIRED if expired else SubscriptionHold.AWAITING_SIGN_IN,
+            pause_code=PauseCode.SIGN_IN_EXPIRED if expired else PauseCode.AWAITING_SIGN_IN,
             trigger=trigger,
             counts_as_failure=False,
         )
@@ -1552,8 +1550,8 @@ class SchedulerEngine:
         conversation_id: str | None = None,
         delivered: bool = False,
         last_check_result: dict | None = None,
-        paused_reason: str | None = None,
-        hold: SubscriptionHold | None = None,
+        pause_code: PauseCode | None = None,
+        pause_detail: dict[str, Any] | None = None,
         condition_evaluation: ConditionEvaluation | None = None,
         trigger: RunTrigger = RunTrigger.SCHEDULED,
         parked_task_id: str | None = None,
@@ -1639,8 +1637,8 @@ class SchedulerEngine:
             # re-claim and re-execute the job on every tick, forever.
             logger.error("Job %d has an unresolvable timezone %r; pausing it: %s", job.id, job.timezone, e)
             next_run_at = None
-            if paused_reason is None:
-                paused_reason = f"Invalid timezone {job.timezone!r} — fix the job's timezone and resume it."
+            if pause_code is None:
+                pause_code, pause_detail = PauseCode.INVALID_TIMEZONE, {"timezone": job.timezone}
 
         # Advance the job first, in its own transaction, and record the run second.
         #
@@ -1672,14 +1670,14 @@ class SchedulerEngine:
                     )
                     # A system action, no user actor. Per SUBSCRIPTION: the watch fired for
                     # this subscriber, so this subscriber's job is done; nobody else's is.
-                    await self._repo.disable_subscription(db, job.id, "Watch condition met (one-time trigger)")
+                    await self._repo.disable_subscription(db, job.id, PauseCode.CONDITION_MET_ONCE)
 
                 # A stop that is about the subscriber's standing, not the job: written as a
                 # real pause (enabled = FALSE + reason) so the claim loop leaves it alone —
                 # complete_job only flips enabled on the failure threshold, which this must
                 # never contribute to.
-                if not counts_as_failure and paused_reason:
-                    await self._repo.disable_subscription(db, job.id, paused_reason, hold)
+                if not counts_as_failure and pause_code:
+                    await self._repo.disable_subscription(db, job.id, pause_code, pause_detail)
 
                 enabled_after, reason_after = await self._repo.complete_job(
                     db=db,
@@ -1688,8 +1686,8 @@ class SchedulerEngine:
                     next_run_at=next_run_at,
                     retry_at=retry_at,
                     last_check_result=last_check_result,
-                    paused_reason=paused_reason,
-                    hold=hold,
+                    pause_code=pause_code,
+                    pause_detail=pause_detail,
                     leave_schedule=leave_schedule,
                 )
                 await db.commit()

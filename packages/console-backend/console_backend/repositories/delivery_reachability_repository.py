@@ -55,7 +55,7 @@ def unreachable_subscriptions_sql(user_id: str) -> str:
         JOIN scheduled_job_definitions ud ON ud.id = us.definition_id AND ud.deleted_at IS NULL
         JOIN delivery_channels uc ON uc.id = us.delivery_channel_id
         WHERE us.user_id = {user_id} AND us.deleted_at IS NULL
-          AND (us.hold IN ('unreachable', 'undelivered')
+          AND (us.pause_code IN ('unreachable', 'undelivered')
                OR {reachability_sql(user_id, "uc.client_id", "uc.workspace_id")} = 'unreachable')
     )"""
 

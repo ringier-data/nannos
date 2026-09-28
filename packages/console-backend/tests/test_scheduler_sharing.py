@@ -826,7 +826,7 @@ class TestInheritingAnElapsedOneShotDoesNotArmIt:
             actor=u["member"],
         )
         await svc.repo.update_subscription(
-            db=db, actor=u["member"], subscription_id=mine.id, fields={"enabled": True, "paused_reason": None}
+            db=db, actor=u["member"], subscription_id=mine.id, fields={"enabled": True}
         )
 
         back = await svc.follow_default_schedule(db, mine.id, u["member"])
@@ -847,7 +847,7 @@ class TestInheritingAnElapsedOneShotDoesNotArmIt:
             actor=u["member"],
         )
         await svc.repo.update_subscription(
-            db=db, actor=u["member"], subscription_id=mine.id, fields={"enabled": True, "paused_reason": None}
+            db=db, actor=u["member"], subscription_id=mine.id, fields={"enabled": True}
         )
 
         await svc.reset_overrides(db, job.definition_id, u["owner"])

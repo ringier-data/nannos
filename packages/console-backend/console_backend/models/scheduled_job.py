@@ -86,17 +86,37 @@ class JobRunStatus(str, Enum):
     AUTH_REQUIRED = "auth_required"
 
 
-class SubscriptionHold(str, Enum):
-    """Why the scheduler holds a subscription switched off, as code matches it (#192).
+class PauseCode(str, Enum):
+    """Why a subscription is switched off, as code reads it (#192).
 
-    ``paused_reason`` is the sentence the subscriber reads; this is what releases and
-    counts find rows by, so the sentence can be reworded freely. Set only on a switched
-    off subscription, and cleared by every write that switches it on or rewrites its reason.
+    The one record of a stop: releases and counts match the code, the claim's retry branch
+    reads "no code" as "nobody stopped it", and what a person reads (``paused_reason``) is
+    rendered from it by ``render_pause``, so wording is free to change. A switched-on
+    subscription never has one. A subscription switched off with none was retired by its
+    own schedule (a one-shot that ran).
     """
 
-    #: No vaulted offline token yet (ADR-0011 §6). The first sign-in releases it.
+    #: The subscriber switched it off.
+    DISABLED_BY_USER = "disabled_by_user"
+    #: The subscriber paused it (the pause endpoint).
+    MANUALLY_PAUSED = "manually_paused"
+    #: ``max_failures`` failed runs in a row (detail: ``max_failures``).
+    AUTO_PAUSED = "auto_paused"
+    #: A one-shot whose moment had passed when the user subscribed.
+    ELAPSED_ON_SUBSCRIBE = "elapsed_on_subscribe"
+    #: A one-shot whose moment had passed when a schedule took effect on it.
+    ELAPSED_ON_INHERIT = "elapsed_on_inherit"
+    #: The subscriber can no longer reach the sub-agent the job runs.
+    AGENT_INACCESSIBLE = "agent_inaccessible"
+    #: The stored timezone no longer resolves (detail: ``timezone``).
+    INVALID_TIMEZONE = "invalid_timezone"
+    #: A watch that fires once did.
+    CONDITION_MET_ONCE = "condition_met_once"
+    #: A resumed run found no offline token (an older path than the sign-in holds).
+    NO_OFFLINE_TOKEN = "no_offline_token"
+    #: Held until the first sign-in (ADR-0011 §6); the sign-in releases it.
     AWAITING_SIGN_IN = "awaiting_sign_in"
-    #: The vaulted token was refused by Keycloak. The next sign-in releases it.
+    #: Held after Keycloak refused the vaulted token; the next sign-in releases it.
     SIGN_IN_EXPIRED = "sign_in_expired"
     #: The grant behind a self-made subscription was withdrawn; regaining it releases it.
     ACCESS_REVOKED = "access_revoked"
@@ -105,6 +125,50 @@ class SubscriptionHold(str, Enum):
     #: A client reported no recipient for a subscriber Nannos cannot judge. Nothing the
     #: backend sees releases it: the subscriber switches the job back on.
     UNDELIVERED = "undelivered"
+    #: A reason written as free text before codes existed (detail: ``text``).
+    LEGACY = "legacy"
+
+
+#: What the subscriber reads for each code. ``{name}`` fields come from the detail.
+_PAUSE_TEXT: dict[PauseCode, str] = {
+    PauseCode.DISABLED_BY_USER: "Disabled by user",
+    PauseCode.MANUALLY_PAUSED: "Manually paused",
+    PauseCode.AUTO_PAUSED: "Auto-paused after {max_failures} consecutive failures",
+    PauseCode.ELAPSED_ON_SUBSCRIBE: "This one-time job already ran before you subscribed",
+    PauseCode.ELAPSED_ON_INHERIT: "This one-time job had already run when this schedule took effect",
+    PauseCode.AGENT_INACCESSIBLE: "Agent not accessible: you no longer have access to the sub-agent this job runs.",
+    PauseCode.INVALID_TIMEZONE: "Invalid timezone '{timezone}' — fix the job's timezone and resume it.",
+    PauseCode.CONDITION_MET_ONCE: "Watch condition met (one-time trigger)",
+    PauseCode.NO_OFFLINE_TOKEN: "No offline token stored. User must re-grant scheduler consent.",
+    PauseCode.AWAITING_SIGN_IN: "Waiting for your first sign-in to Nannos, so it can run under your account",
+    PauseCode.SIGN_IN_EXPIRED: "Your sign-in to Nannos has expired; sign in again so it can run under your account",
+    PauseCode.ACCESS_REVOKED: "Access to this shared job was revoked",
+    PauseCode.UNREACHABLE: (
+        "Nannos can't reach you on this job's delivery channel. Message Nannos there once to "
+        "activate it, and the job switches back on"
+    ),
+    PauseCode.UNDELIVERED: (
+        "Nannos couldn't reach you on this job's delivery channel. Message Nannos there once, "
+        "then switch the job back on"
+    ),
+    PauseCode.LEGACY: "{text}",
+}
+
+
+class _MissingAsQuestionMark(dict):
+    def __missing__(self, key: str) -> str:
+        return "?"
+
+
+def render_pause(code: PauseCode | str | None, detail: dict[str, Any] | str | None = None) -> str | None:
+    """The sentence a person reads for a stop. *detail* may be the JSONB column as the
+    driver returns it (a string). A detail field that is missing renders as '?' rather
+    than failing a whole job listing over one row."""
+    if code is None:
+        return None
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    return _PAUSE_TEXT[PauseCode(code)].format_map(_MissingAsQuestionMark(detail or {}))
 
 
 class RunTrigger(str, Enum):
@@ -314,9 +378,10 @@ class ScheduledJob(BaseModel):
     enabled: bool
     max_failures: int
     consecutive_failures: int
+    #: Why it is switched off, as a code; None when it is on (or retired by its schedule).
+    pause_code: PauseCode | None = None
+    #: What a person reads for ``pause_code``, rendered from it; never stored.
     paused_reason: str | None = None
-    #: Why the scheduler holds it off, as a code; None unless held. See SubscriptionHold.
-    hold: SubscriptionHold | None = None
     # --- sharing state of the definition ---
     #: Bumped on every definition-field edit; stamped on each run.
     revision: int = 1

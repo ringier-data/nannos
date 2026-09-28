@@ -4043,6 +4043,19 @@ export type PaginationMeta = {
 };
 
 /**
+ * PauseCode
+ *
+ * Why a subscription is switched off, as code reads it (#192).
+ *
+ * The one record of a stop: releases and counts match the code, the claim's retry branch
+ * reads "no code" as "nobody stopped it", and what a person reads (``paused_reason``) is
+ * rendered from it by ``render_pause``, so wording is free to change. A switched-on
+ * subscription never has one. A subscription switched off with none was retired by its
+ * own schedule (a one-shot that ran).
+ */
+export type PauseCode = 'disabled_by_user' | 'manually_paused' | 'auto_paused' | 'elapsed_on_subscribe' | 'elapsed_on_inherit' | 'agent_inaccessible' | 'invalid_timezone' | 'condition_met_once' | 'no_offline_token' | 'awaiting_sign_in' | 'sign_in_expired' | 'access_revoked' | 'unreachable' | 'undelivered' | 'legacy';
+
+/**
  * PhoneVerificationCheckRequest
  *
  * Request to verify a phone verification code.
@@ -4709,11 +4722,11 @@ export type ScheduledJob = {
      * Consecutive Failures
      */
     consecutive_failures: number;
+    pause_code?: PauseCode | null;
     /**
      * Paused Reason
      */
     paused_reason?: string | null;
-    hold?: SubscriptionHold | null;
     /**
      * Revision
      */
@@ -7363,17 +7376,6 @@ export type SubAgentVersionApproval = {
      */
     rejection_reason?: string | null;
 };
-
-/**
- * SubscriptionHold
- *
- * Why the scheduler holds a subscription switched off, as code matches it (#192).
- *
- * ``paused_reason`` is the sentence the subscriber reads; this is what releases and
- * counts find rows by, so the sentence can be reworded freely. Set only on a switched
- * off subscription, and cleared by every write that switches it on or rewrites its reason.
- */
-export type SubscriptionHold = 'awaiting_sign_in' | 'sign_in_expired' | 'access_revoked' | 'unreachable' | 'undelivered';
 
 /**
  * SuspendJobRequest

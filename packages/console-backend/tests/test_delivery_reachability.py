@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from console_backend.models.delivery_channel import UndeliveredReport
 from console_backend.models.notification import NotificationType
-from console_backend.models.scheduled_job import JobRunStatus, ScheduledJobUpdate, SubscriptionHold
+from console_backend.models.scheduled_job import JobRunStatus, PauseCode, ScheduledJobUpdate, render_pause
 from console_backend.models.sub_agent import SubAgentType
 from console_backend.models.user import UserSettings
 from console_backend.repositories.delivery_reachability_repository import (
@@ -32,9 +32,6 @@ from console_backend.repositories.scheduled_job_repository import ScheduledJobRe
 from console_backend.services.audit_service import AuditService
 from console_backend.services.notification_service import NotificationService
 from console_backend.services.scheduler_service import (
-    _AWAITING_SIGN_IN_REASON,
-    _UNDELIVERED_REASON,
-    _UNREACHABLE_REASON,
     DeliveryUnreachableError,
     SchedulerService,
 )
@@ -276,12 +273,8 @@ class TestAnInheritedSubscriptionIsHeldNotMoved:
         writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
         members = await svc.repo.get_subscription_for(db, job.definition_id, u["member"].id)
         assert writers.delivery_channel_id == ch["A1"], "never switched for them"
-        assert (writers.enabled, writers.paused_reason, writers.hold) == (
-            False,
-            _UNREACHABLE_REASON,
-            SubscriptionHold.UNREACHABLE,
-        )
-        assert (members.enabled, members.paused_reason, members.hold) == (True, None, None), "unknown is not held"
+        assert (writers.enabled, writers.pause_code) == (False, PauseCode.UNREACHABLE)
+        assert (members.enabled, members.pause_code) == (True, None), "unknown is not held"
         # The chat notice goes only to the member it can reach.
         assert [c.args[0].user_id for c in sender.await_args_list] == [u["member"].id]
         note = (
@@ -315,17 +308,13 @@ class TestAnInheritedSubscriptionIsHeldNotMoved:
         job = await _shared_on(world, "A1")
         await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
         writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
-        assert writers.paused_reason == _AWAITING_SIGN_IN_REASON
+        assert writers.pause_code == PauseCode.AWAITING_SIGN_IN
 
         world["ready"].add(u["writer"].id)
         assert await svc.release_sign_in_holds(db, u["writer"]) == 0
 
         writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
-        assert (writers.enabled, writers.paused_reason, writers.hold) == (
-            False,
-            _UNREACHABLE_REASON,
-            SubscriptionHold.UNREACHABLE,
-        )
+        assert (writers.enabled, writers.pause_code) == (False, PauseCode.UNREACHABLE)
 
 
 class TestAClientReportsWhatReachedNobody:
@@ -362,7 +351,7 @@ class TestAClientReportsWhatReachedNobody:
         assert run.delivered is False
         assert "can't reach you on 'Slack Nannos (T1)'" in run.delivery_error
         held = await svc.get_job(db, job.id, u["owner"].id)
-        assert (held.enabled, held.paused_reason, held.hold) == (False, _UNREACHABLE_REASON, SubscriptionHold.UNREACHABLE)
+        assert (held.enabled, held.pause_code) == (False, PauseCode.UNREACHABLE)
         assert held.delivery_channel_id == world["channels"]["A1"]
         assert (
             await db.execute(
@@ -388,7 +377,7 @@ class TestAClientReportsWhatReachedNobody:
         assert await svc.report_undelivered(db, SLACK, report) is True
 
         held = await svc.get_job(db, job.id, u["member"].id)
-        assert (held.enabled, held.paused_reason, held.hold) == (False, _UNDELIVERED_REASON, SubscriptionHold.UNDELIVERED)
+        assert (held.enabled, held.pause_code) == (False, PauseCode.UNDELIVERED)
         count = (
             await db.execute(
                 text(f"SELECT {unreachable_subscriptions_sql('u.id')} FROM users u WHERE u.id = :id"),
@@ -436,29 +425,28 @@ class TestOnboardingCountsSubscriptionsThatCannotReach:
         assert await count(u["owner"]) == 0
 
 
-class TestAHoldIsACodeNotItsWording:
-    """Releases and counts find held rows by ``hold``; ``paused_reason`` is what the
-    subscriber reads, and can be reworded without stranding a row already held."""
+class TestAStopIsACodeAndItsSentenceIsRendered:
+    """Releases, counts and the claim read ``pause_code``; ``paused_reason`` is rendered
+    from it on every read and stored nowhere, so its wording can change freely."""
 
     @pytest.mark.asyncio
-    async def test_a_reworded_hold_is_still_released(self, world):
+    async def test_the_reason_a_person_reads_is_rendered_from_the_code(self, world):
         svc, db, u = world["service"], world["db"], world["users"]
         job = await _shared_on(world, "A1")
         await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
         writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
-        assert writers.hold == SubscriptionHold.UNREACHABLE
-        await db.execute(
-            text("UPDATE scheduled_job_subscriptions SET paused_reason = 'An older wording' WHERE id = :id"),
-            {"id": writers.id},
-        )
-        await _bind(db, u["writer"].id, SLACK, "T1")
 
-        assert await svc.release_reachability_holds(db, u["writer"], SLACK, "T1") == 1
-        back = await svc.repo.get_job(db, writers.id)
-        assert (back.enabled, back.paused_reason, back.hold) == (True, None, None)
+        assert writers.paused_reason == render_pause(PauseCode.UNREACHABLE)
+        columns = await db.execute(
+            text("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'scheduled_job_subscriptions' AND column_name IN ('paused_reason', 'hold')
+            """)
+        )
+        assert columns.all() == [], "no stored sentence to drift from the code"
 
     @pytest.mark.asyncio
-    async def test_any_other_reason_or_switching_on_clears_the_hold(self, world):
+    async def test_any_other_stop_replaces_the_hold(self, world):
         svc, db, u = world["service"], world["db"], world["users"]
         job = await _shared_on(world, "A1")
         await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
@@ -466,12 +454,24 @@ class TestAHoldIsACodeNotItsWording:
 
         await svc.pause_job(db, writers.id, u["writer"])
         paused = await svc.repo.get_job(db, writers.id)
-        assert (paused.paused_reason, paused.hold) == ("Manually paused", None), "no longer releasable"
-        assert await svc.release_reachability_holds(db, u["writer"], SLACK, "T1") == 0
+        assert (paused.pause_code, paused.paused_reason) == (PauseCode.MANUALLY_PAUSED, "Manually paused")
+        await _bind(db, u["writer"].id, SLACK, "T1")
+        assert await svc.release_reachability_holds(db, u["writer"], SLACK, "T1") == 0, "no longer releasable"
 
     @pytest.mark.asyncio
-    async def test_a_held_subscription_cannot_be_switched_on(self, world):
-        """The database backs the rule up: a write that forgets the hold fails loudly."""
+    async def test_switching_on_clears_the_code(self, world):
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=world["channels"]["A1"]), u["owner"])
+        await svc.pause_job(db, job.id, u["owner"])
+
+        await svc.repo.update_subscription(db, u["owner"], job.id, {"enabled": True})
+
+        back = await svc.repo.get_job(db, job.id)
+        assert (back.enabled, back.pause_code, back.paused_reason) == (True, None, None)
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_subscription_cannot_be_switched_on_with_its_code(self, world):
+        """The database backs the rule up: a write that forgets the code fails loudly."""
         from sqlalchemy.exc import IntegrityError
 
         svc, db, u = world["service"], world["db"], world["users"]
@@ -486,24 +486,14 @@ class TestAHoldIsACodeNotItsWording:
         await db.rollback()
 
     @pytest.mark.asyncio
-    async def test_an_override_reset_that_rewrites_the_reason_clears_the_hold(self, world):
-        """Found in review: the resets wrote the elapsed one-shot's reason past the hold."""
+    async def test_an_override_reset_records_its_own_stop(self, world):
+        """Found in review, when the code and the sentence were two columns: a reset wrote
+        the elapsed one-shot's sentence past the hold. One column cannot disagree."""
         svc, db, u = world["service"], world["db"], world["users"]
         job = await _shared_on(world, "A1")
         await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
         writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
-        assert writers.hold == SubscriptionHold.UNREACHABLE
-        elapsed = {"enabled": False, "paused_reason": "This one-time job had already run", "retry_at": None}
+        elapsed = {"enabled": False, "pause_code": PauseCode.ELAPSED_ON_INHERIT, "retry_at": None}
 
         await svc.repo.clear_trigger_override(db, u["writer"], writers.id, elapsed)
-        assert (await svc.repo.get_job(db, writers.id)).hold is None
-
-        await svc.repo.update_subscription(
-            db, u["writer"], writers.id, {"hold": SubscriptionHold.UNREACHABLE, "paused_reason": "held"}
-        )
-        await db.execute(
-            text("UPDATE scheduled_job_subscriptions SET schedule_kind = 'cron', cron_expr = '0 8 * * *' WHERE id = :id"),
-            {"id": writers.id},
-        )
-        await svc.repo.clear_trigger_overrides(db, u["owner"], job.definition_id, {writers.id: elapsed})
-        assert (await svc.repo.get_job(db, writers.id)).hold is None
+        assert (await svc.repo.get_job(db, writers.id)).pause_code == PauseCode.ELAPSED_ON_INHERIT

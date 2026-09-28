@@ -82,7 +82,7 @@ async def seed_job(
     next_run_at: str = "NOW() + INTERVAL '1 hour'",
     enabled: str = "true",
     consecutive_failures: int = 0,
-    paused_reason: str | None = None,
+    pause_code: str | None = None,
     retry_at: str | None = None,
 ) -> int:
     """Insert a user and one scheduled job; return the job id.
@@ -126,9 +126,9 @@ async def seed_job(
         text(f"""
             INSERT INTO scheduled_job_subscriptions
                 (id, definition_id, user_id, next_run_at, enabled, consecutive_failures,
-                 paused_reason, retry_at)
+                 pause_code, retry_at)
             VALUES
-                (:id, :definition_id, :uid, {next_run_at}, {enabled}, :cf, :paused_reason, {retry_at or "NULL"})
+                (:id, :definition_id, :uid, {next_run_at}, {enabled}, :cf, :pause_code, {retry_at or "NULL"})
             RETURNING id
         """),
         {
@@ -136,7 +136,7 @@ async def seed_job(
             "definition_id": definition_id,
             "uid": user_id,
             "cf": consecutive_failures,
-            "paused_reason": paused_reason,
+            "pause_code": pause_code,
         },
     )
     job_id = result.mappings().first()["id"]
