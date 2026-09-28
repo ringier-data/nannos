@@ -97,6 +97,12 @@ export function formatApiError(error: unknown): string {
 // Delivery channels
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether the signed-in user can receive on a channel (#192): 'unreachable' means they
+ * never signed in to Nannos from there, 'unknown' that Nannos can't tell (an older sign-in).
+ */
+export type DeliveryReachability = 'reachable' | 'unreachable' | 'unknown';
+
 export interface DeliveryChannel {
   id: number;
   name: string;
@@ -105,6 +111,8 @@ export interface DeliveryChannel {
   client_id: string;
   registered_by: string;
   installation_id?: string | null;
+  /** The caller's own, on the console's list; absent for a machine client. */
+  reachability?: DeliveryReachability | null;
   created_at: string;
   updated_at: string;
 }

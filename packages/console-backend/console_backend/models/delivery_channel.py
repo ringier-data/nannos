@@ -1,6 +1,8 @@
 """Pydantic models for delivery channels."""
 
 from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, Field
 # The one definition of a channel format, shared with every writer through the SDK.
 from ringier_a2a_sdk.message_formatting import DEFAULT_MESSAGE_FORMATTING, MessageFormatting
@@ -10,6 +12,21 @@ _FORMATTING_DESCRIPTION = (
     "way out, so the writer is told these rules up front: 'slack' for Slack mrkdwn, "
     "'google-chat' for Google Chat markup, 'plain' for no markup, 'markdown' (default) "
     "for standard Markdown as the web console renders it."
+)
+
+#: Whether a user can receive on a delivery channel (#192, ADR-0011 amendment 1).
+#: ``reachable``: a brokered sign-in of theirs through the channel's client is in a
+#: workspace that lists the channel's installation. ``unreachable``: they have signed in
+#: through that client, the installation belongs to a workspace the client has published,
+#: and none of their sign-ins is in it. ``unknown``: nothing to go on, because they have no
+#: brokered sign-in with that client (an old local sign-in looks the same as none) or the
+#: client has not published the installation. Only ``unreachable`` refuses anything.
+DeliveryReachability = Literal["reachable", "unreachable", "unknown"]
+
+_REACHABILITY_DESCRIPTION = (
+    "Whether the user can receive on this channel: 'reachable' (they signed in to Nannos from "
+    "there), 'unreachable' (they have not; messaging Nannos there once activates it) or "
+    "'unknown' (Nannos cannot tell yet, e.g. an older sign-in). Null where it was not asked."
 )
 
 
@@ -77,6 +94,7 @@ class DeliveryChannelResponse(BaseModel):
         default=None,
         description="Stable client-supplied identifier (set when the channel was self-registered).",
     )
+    reachability: DeliveryReachability | None = Field(default=None, description=_REACHABILITY_DESCRIPTION)
     created_at: datetime
     updated_at: datetime
 
@@ -87,3 +105,26 @@ class DeliveryChannelListResponse(BaseModel):
     channels: list[DeliveryChannelResponse]
     # Total matching channels, which exceeds len(channels) when a page was asked for.
     total: int = 0
+
+
+class UndeliveredReport(BaseModel):
+    """A chat client's report that it could not deliver a scheduled run's notification.
+
+    The push was already acknowledged (the webhook answers before it looks the recipient
+    up), so this is the only way the scheduler learns the run reached nobody.
+    """
+
+    run_id: int = Field(description="``scheduled_job_run_id`` from the scheduler payload.")
+    installation_id: str = Field(
+        min_length=1,
+        max_length=200,
+        description="The installation that received the push, as its delivery channel is registered.",
+    )
+    reason: Literal["no_recipient", "send_failed"] = Field(
+        description=(
+            "'no_recipient': this installation has no sign-in for the subscriber, which only they "
+            "can fix (the job is held until they sign in there). 'send_failed': a recipient was "
+            "found but posting failed; the run is marked undelivered and the job keeps running."
+        )
+    )
+    detail: str | None = Field(default=None, max_length=500, description="What failed, for the run record.")

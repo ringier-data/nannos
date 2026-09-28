@@ -37,6 +37,7 @@ from ..models.scheduled_job import (
 from ..models.user import User
 from ..utils.timezones import resolve_timezone
 from .base import AuditedRepository
+from .delivery_reachability_repository import reachability_sql
 from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,8 @@ _JOB_VIEW_SELECT = """
            d.destroy_after_trigger,
            s.last_check_result,
            s.delivery_channel_id,
+           (SELECT """ + reachability_sql("s.user_id", "dc.client_id", "dc.installation_id") + """
+              FROM delivery_channels dc WHERE dc.id = s.delivery_channel_id)            AS delivery_reachability,
            d.voice_call,
            s.enabled, d.max_failures, s.consecutive_failures, s.paused_reason,
            d.revision, d.is_public, d.suspended_at, d.suspended_by_user_id, d.suspended_reason,
@@ -170,6 +173,7 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         destroy_after_trigger=row.get("destroy_after_trigger", True),
         last_check_result=row["last_check_result"],
         delivery_channel_id=row["delivery_channel_id"],
+        delivery_reachability=row.get("delivery_reachability"),
         voice_call=row.get("voice_call", False),
         enabled=row["enabled"],
         max_failures=row["max_failures"],
@@ -201,6 +205,7 @@ def _row_to_run(row: Any) -> ScheduledJobRun:
         error_message=row["error_message"],
         conversation_id=row.get("conversation_id"),
         delivered=row["delivered"],
+        delivery_error=row.get("delivery_error"),
         condition_evaluation=row.get("condition_evaluation"),
         last_seen_at=row.get("last_seen_at"),
         trigger=RunTrigger(row.get("trigger", RunTrigger.SCHEDULED.value)),
@@ -1729,6 +1734,9 @@ class ScheduledJobRepository(AuditedRepository):
         update for the same reason as the notice: the run and the reason it stopped are
         one fact, and a run recorded as parked with no way to reach the task would be a
         job stopped with no way to restart it.
+
+        A run the receiving client has already reported undelivered (``delivery_error``)
+        stays undelivered: the report can arrive before the dispatch returns.
         """
         result = await db.execute(
             text("""
@@ -1739,7 +1747,7 @@ class ScheduledJobRepository(AuditedRepository):
                     result_summary   = :result_summary,
                     error_message    = :error_message,
                     conversation_id  = :conversation_id,
-                    delivered        = :delivered,
+                    delivered        = :delivered AND delivery_error IS NULL,
                     condition_evaluation = :condition_evaluation,
                     notice_due_at    = COALESCE(CAST(:notice_due_at AS timestamptz), notice_due_at),
                     parked_task_id     = COALESCE(:parked_task_id, parked_task_id),
@@ -1775,7 +1783,8 @@ class ScheduledJobRepository(AuditedRepository):
         card is answerable the moment it lands, so the run it answers must already exist as
         parked. ``delivered`` is the one column that cannot be known until afterwards, and
         it is the only one this touches. Scoped to ``auth_required`` so a late delivery
-        result can never flip the flag on a run that has since been answered and closed.
+        result can never flip the flag on a run that has since been answered and closed,
+        and to a run no client has reported undelivered (the report can come first).
         """
         result = await db.execute(
             text("""
@@ -1783,10 +1792,49 @@ class ScheduledJobRepository(AuditedRepository):
                 SET delivered = true
                 WHERE id = :run_id
                   AND status = 'auth_required'
+                  AND delivery_error IS NULL
             """),
             {"run_id": run_id},
         )
         return result.rowcount > 0
+
+    async def mark_run_undelivered(self, db: AsyncSession, run_id: int, error: str) -> None:
+        """Record that the receiving client could not deliver *run_id*'s notification.
+
+        Any status: the report may arrive while the run is still ``running`` (the push goes
+        out when the agent-runner task ends, before the dispatch here returns), and
+        ``complete_run`` then keeps it undelivered. A repeated report keeps the first error.
+        """
+        await db.execute(
+            text("""
+                UPDATE scheduled_job_runs
+                SET delivered = false, delivery_error = COALESCE(delivery_error, :error)
+                WHERE id = :run_id
+            """),
+            {"run_id": run_id, "error": error},
+        )
+
+    async def run_delivery_target(self, db: AsyncSession, run_id: int) -> dict[str, Any] | None:
+        """The subscription a run belongs to and the channel it notifies NOW, or None.
+
+        Keys: ``subscription_id``, ``user_id``, ``enabled``, ``channel_id``, ``client_id``,
+        ``installation_id``, ``channel_name``, ``job_name``. A subscription with no channel
+        has none of the channel keys set.
+        """
+        result = await db.execute(
+            text("""
+                SELECT r.subscription_id, s.user_id, s.enabled, d.name AS job_name,
+                       c.id AS channel_id, c.client_id, c.installation_id, c.name AS channel_name
+                FROM scheduled_job_runs r
+                JOIN scheduled_job_subscriptions s ON s.id = r.subscription_id AND s.deleted_at IS NULL
+                JOIN scheduled_job_definitions d ON d.id = s.definition_id AND d.deleted_at IS NULL
+                LEFT JOIN delivery_channels c ON c.id = s.delivery_channel_id
+                WHERE r.id = :run_id
+            """),
+            {"run_id": run_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
 
     async def close_run_minimally(
         self,

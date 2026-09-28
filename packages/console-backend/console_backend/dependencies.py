@@ -176,6 +176,21 @@ def token_is_service_account(payload: dict) -> bool:
     return username.startswith(_SERVICE_ACCOUNT_USERNAME_PREFIX)
 
 
+def is_own_client_credentials(claims: dict, client_id: str | None) -> bool:
+    """Whether *claims* are a client-credentials token that *client_id* got for itself.
+
+    Keycloak opens no user session for the client-credentials grant, so its tokens carry
+    no ``sid``, while every token of a signed-in user does. The issuer writes that claim
+    and nothing a user controls changes it, so it is the gate. The subject must also be
+    that client's own service account (``service-account-<client id>``). The username
+    alone is not enough: usernames come from the identity provider.
+    """
+    if not client_id or "sid" in claims:
+        return False
+    username = str(claims.get("preferred_username") or "").lower()
+    return username == f"{_SERVICE_ACCOUNT_USERNAME_PREFIX}{client_id}".lower()
+
+
 async def get_token_claims_from_request(request: Request) -> dict | None:
     """The validated claims of the request's Bearer JWT, or None.
 

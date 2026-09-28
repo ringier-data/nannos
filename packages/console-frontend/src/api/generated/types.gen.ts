@@ -1911,6 +1911,12 @@ export type DeliveryChannelResponse = {
      */
     installation_id?: string | null;
     /**
+     * Reachability
+     *
+     * Whether the user can receive on this channel: 'reachable' (they signed in to Nannos from there), 'unreachable' (they have not; messaging Nannos there once activates it) or 'unknown' (Nannos cannot tell yet, e.g. an older sign-in). Null where it was not asked.
+     */
+    reachability?: _0Enum2 | null;
+    /**
      * Created At
      */
     created_at: string;
@@ -4680,6 +4686,10 @@ export type ScheduledJob = {
      */
     delivery_channel_id?: number | null;
     /**
+     * Delivery Reachability
+     */
+    delivery_reachability?: _0Enum2 | null;
+    /**
      * Voice Call
      */
     voice_call?: boolean;
@@ -5024,6 +5034,10 @@ export type ScheduledJobRun = {
      * Delivered
      */
     delivered: boolean;
+    /**
+     * Delivery Error
+     */
+    delivery_error?: string | null;
     condition_evaluation?: ConditionEvaluation | null;
     /**
      * Last Seen At
@@ -5086,7 +5100,7 @@ export type ScheduledJobUpdate = {
      *
      * Where a schedule change lands when the job has OTHER subscribers: 'mine' changes only your own schedule (an override), 'everyone' changes the job's default schedule for every subscriber who has not customised theirs (needs write permission). Meaningless while you are the only subscriber — both do the same. With other subscribers and no scope, 'mine' is assumed; ask the user which they meant before changing everyone's.
      */
-    scope?: _0Enum2 | null;
+    scope?: _0Enum3 | null;
     /**
      * Definition field: whether subscribers may keep their own schedule ('overridable') or must follow the default ('fixed'). Setting 'fixed' resets every override.
      */
@@ -5980,7 +5994,7 @@ export type SkillDefinition = {
      *
      * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
-    scope?: _0Enum3 | null;
+    scope?: _0Enum4 | null;
     /**
      * Visibility
      *
@@ -7614,6 +7628,36 @@ export type UnbillableDeployment = {
 };
 
 /**
+ * UndeliveredReport
+ *
+ * A chat client's report that it could not deliver a scheduled run's notification.
+ *
+ * The push was already acknowledged (the webhook answers before it looks the recipient
+ * up), so this is the only way the scheduler learns the run reached nobody.
+ */
+export type UndeliveredReport = {
+    /**
+     * Run Id
+     *
+     * ``scheduled_job_run_id`` from the scheduler payload.
+     */
+    run_id: number;
+    /**
+     * Installation Id
+     *
+     * The installation that received the push, as its delivery channel is registered.
+     */
+    installation_id: string;
+    reason: ReasonEnum2;
+    /**
+     * Detail
+     *
+     * What failed, for the run record.
+     */
+    detail?: string | null;
+};
+
+/**
  * UnreadCountResponse
  *
  * Response model for unread notification count.
@@ -8229,8 +8273,8 @@ export type UserNotification = {
  * Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
  * not an error: both flags turn true with the user's first sign-in (ADR-0011).
  *
- * It says nothing about delivery: whether a job's notification can reach the user on a
- * chat channel is not known here yet (#192).
+ * ``unreachable_subscriptions`` is the delivery side (#192): how many of the user's
+ * subscriptions notify a channel that cannot reach them.
  */
 export type UserOnboarding = {
     /**
@@ -8251,6 +8295,12 @@ export type UserOnboarding = {
      * The user had a vaulted offline token that Keycloak has since refused (unused for 30 days, revoked, or its session ended). Implies scheduler_ready is false.
      */
     sign_in_expired: boolean;
+    /**
+     * Unreachable Subscriptions
+     *
+     * How many of the user's scheduled-job subscriptions deliver to a chat channel that cannot reach them, because they have not signed in to Nannos from there. Those are held until they do. Channels Nannos cannot judge (older sign-ins) are not counted.
+     */
+    unreachable_subscriptions?: number;
 };
 
 /**
@@ -9026,6 +9076,8 @@ export type ModeEnum = 'judge' | 'cel' | 'cel+judge';
 
 export type _0Enum = 'markdown' | 'slack' | 'google-chat' | 'plain';
 
+export type _0Enum2 = 'reachable' | 'unreachable' | 'unknown';
+
 /**
  * Role
  */
@@ -9074,19 +9126,26 @@ export type DecisionEnum = 'approved' | 'declined';
  */
 export type EffectivePermissionEnum = 'owner' | 'write' | 'read';
 
-export type _0Enum2 = 'mine' | 'everyone';
+export type _0Enum3 = 'mine' | 'everyone';
 
 /**
  * Op
  */
 export type OpEnum = 'add' | 'remove' | 'replace';
 
-export type _0Enum3 = 'standalone' | 'sub-agent';
+export type _0Enum4 = 'standalone' | 'sub-agent';
 
 /**
  * Reason
  */
 export type ReasonEnum = 'no_card' | 'card_under_other_provider' | 'provider_underivable';
+
+/**
+ * Reason
+ *
+ * 'no_recipient': this installation has no sign-in for the subscriber, which only they can fix (the job is held until they sign in there). 'send_failed': a recipient was found but posting failed; the run is marked undelivered and the job keeps running.
+ */
+export type ReasonEnum2 = 'no_recipient' | 'send_failed';
 
 /**
  * Operation
@@ -14830,6 +14889,31 @@ export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses = {
 };
 
 export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponse = UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses[keyof UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses];
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostData = {
+    body: UndeliveredReport;
+    path?: never;
+    query?: never;
+    url: '/api/v1/delivery-channels/undelivered';
+};
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostError = ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostErrors[keyof ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostErrors];
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponse = ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponses[keyof ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponses];
 
 export type ListCatalogsData = {
     body?: never;

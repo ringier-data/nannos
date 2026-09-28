@@ -18,7 +18,7 @@ from fastapi.responses import RedirectResponse
 from ..config import config
 from ..controllers.broker_controller import BrokerController
 from ..db.session import DbSession
-from ..dependencies import _SERVICE_ACCOUNT_USERNAME_PREFIX, get_token_claims_from_request
+from ..dependencies import get_token_claims_from_request, is_own_client_credentials
 from ..models.broker import (
     BrokerClient,
     BrokerRedeemRequest,
@@ -57,26 +57,11 @@ def _refused(e: BrokerRefusal) -> HTTPException:
     return HTTPException(status_code=e.status_code, detail=e.detail)
 
 
-def _is_own_client_credentials(claims: dict, client_id: str | None) -> bool:
-    """Whether *claims* are a client-credentials token that *client_id* got for itself.
-
-    Keycloak opens no user session for the client-credentials grant, so its tokens carry
-    no ``sid``, while every token of a signed-in user does. The issuer writes that claim
-    and nothing a user controls changes it, so it is the gate. The subject must also be
-    that client's own service account (``service-account-<client id>``). The username
-    alone is not enough: usernames come from the identity provider.
-    """
-    if not client_id or "sid" in claims:
-        return False
-    username = str(claims.get("preferred_username") or "").lower()
-    return username == f"{_SERVICE_ACCOUNT_USERNAME_PREFIX}{client_id}".lower()
-
-
 async def require_broker_client(request: Request, db: DbSession) -> BrokerClient:
     """Accept only a registered, enabled broker client calling as itself.
 
     The bearer must be the client's own client-credentials token
-    (``_is_own_client_credentials``) whose audience includes this backend. A user's access
+    (``is_own_client_credentials``) whose audience includes this backend. A user's access
     token issued to the same client is refused — ``/token`` mints for any user linked to
     the client, which only the client itself may ask for.
     """
@@ -93,7 +78,7 @@ async def require_broker_client(request: Request, db: DbSession) -> BrokerClient
     audiences = claims.get("aud") or []
     if isinstance(audiences, str):
         audiences = [audiences]
-    if not _is_own_client_credentials(claims, client_id) or config.oidc.client_id not in audiences:
+    if not is_own_client_credentials(claims, client_id) or config.oidc.client_id not in audiences:
         logger.warning("Broker call refused: not a service-account token for this backend (azp=%s)", client_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -153,7 +138,29 @@ async def redeem(
     except BrokerRefusal as e:
         raise _refused(e) from e
     await db.commit()
+    await _release_reachability_holds(request, db, client, identity.user_id, body.workspace_id)
     return identity
+
+
+async def _release_reachability_holds(
+    request: Request, db: DbSession, client: BrokerClient, user_id: str, workspace_id: str
+) -> None:
+    """A bound sign-in reaches every installation of its workspace: switch on the user's
+    subscriptions held on those channels (#192). Best effort, after the sign-in is
+    committed: a failure here leaves them held, which the next sign-in retries."""
+    scheduler = getattr(request.app.state, "scheduler_service", None)
+    if scheduler is None:
+        return
+    try:
+        installations = await _get_broker_service(request).workspace_installations(db, client, workspace_id)
+        user = await request.app.state.user_service.get_user(db, user_id)
+        if user is not None and installations:
+            released = await scheduler.release_reachability_holds(db, user, client.client_id, installations)
+            if released:
+                logger.info("Switched on %d subscription(s) of user %s reachable again", released, user_id)
+    except Exception:  # noqa: BLE001 — the sign-in itself has succeeded
+        await db.rollback()
+        logger.warning("Could not release reachability holds of user %s", user_id, exc_info=True)
 
 
 @router.post("/token", response_model=BrokerTokenResponse)
@@ -184,6 +191,17 @@ async def set_workspace_installations(
     channels, so an installation added after a user signed in reaches them too."""
     if len(workspace_id) > 200:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="workspace_id is too long")
-    await _get_broker_service(request).set_workspace_installations(db, client, workspace_id, body.installation_ids)
+    added = await _get_broker_service(request).set_workspace_installations(
+        db, client, workspace_id, body.installation_ids
+    )
     await db.commit()
+    scheduler = getattr(request.app.state, "scheduler_service", None)
+    if added and scheduler is not None:
+        # A newly listed installation reaches every sign-in of the workspace, including
+        # members held on its channel (#192). Best effort: the list is recorded either way.
+        try:
+            await scheduler.release_reachability_holds_on(db, request.app.state.user_service, client.client_id, added)
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            logger.warning("Could not release reachability holds on %s of %s", added, client.client_id, exc_info=True)
 

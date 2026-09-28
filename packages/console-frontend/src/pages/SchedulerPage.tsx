@@ -87,6 +87,7 @@ import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
 import { toast } from 'sonner';
+import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -896,18 +897,13 @@ function CreateJobDialog({
                 <SelectItem value="_none">
                   <span className="text-muted-foreground">None (in-app only)</span>
                 </SelectItem>
-                {channels.map((ch) => (
-                  <SelectItem key={ch.id} value={String(ch.id)}>
-                    {ch.name}
-                    {ch.description && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        — {ch.description}
-                      </span>
-                    )}
-                  </SelectItem>
-                ))}
+                <DeliveryChannelOptions channels={channels} selected={form.delivery_channel} />
               </SelectContent>
             </Select>
+            {(() => {
+              const chosen = channels.find((ch) => String(ch.id) === form.delivery_channel);
+              return <DeliveryReachabilityNote reachability={chosen?.reachability} channelName={chosen?.name} />;
+            })()}
           </div>
         </div>
 

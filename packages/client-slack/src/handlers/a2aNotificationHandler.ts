@@ -15,6 +15,7 @@ import { Logger } from '../utils/logger.js';
 import type { IUserAuthStorage, IScheduledRunStore, BotInstallation } from '../storage/types.js';
 import { authPromptFromPayload, buildAuthRequiredWidget } from '../utils/inTaskAuth.js';
 import type { ReplyTo } from '../services/scheduledRunResumeService.js';
+import type { DeliveryReporter, UndeliveredReason } from '../services/deliveryReport.js';
 
 const logger = Logger.getLogger('a2aNotificationHandler');
 
@@ -81,6 +82,11 @@ export interface A2ANotificationDeps {
   scheduledRunStore?: IScheduledRunStore;
   /** Test seam: build the Slack client for a bot token (defaults to `new WebClient(token)`). */
   slackClientFactory?: (botToken: string) => WebClient;
+  /**
+   * Tells console-backend a run reached nobody (#191). The push was acknowledged before
+   * the recipient was looked up, so without this the run counts as delivered.
+   */
+  reportUndelivered?: DeliveryReporter;
 }
 
 /**
@@ -91,7 +97,7 @@ export async function handleA2ANotification(
   botInstallation: BotInstallation,
   deps: A2ANotificationDeps,
 ): Promise<void> {
-  const { userAuthStorage, scheduledRunStore, slackClientFactory } = deps;
+  const { userAuthStorage, scheduledRunStore, slackClientFactory, reportUndelivered } = deps;
 
   const schedulerPayload = getSchedulerPayload(task);
   if (!schedulerPayload) {
@@ -105,6 +111,16 @@ export async function handleA2ANotification(
   }
 
   const parked = schedulerPayload.scheduler_status === 'auth_required';
+  const runRef = `job=${schedulerPayload.scheduled_job_id} run=${schedulerPayload.scheduled_job_run_id}`;
+  // Every way this notification can end without reaching the user is logged at error
+  // level and reported, so the run is not recorded as delivered (#191).
+  const undelivered = async (reason: UndeliveredReason, detail: string): Promise<void> => {
+    logger.error(`[A2ACallback] Not delivered (${reason}, ${runRef}, taskId=${task.id}): ${detail}`);
+    const runId = schedulerPayload.scheduled_job_run_id;
+    if (reportUndelivered && runId !== undefined) {
+      await reportUndelivered({ runId, installationId: botInstallation.appId, reason, detail });
+    }
+  };
 
   // Look up the Slack user by OIDC sub scoped to the authenticated team
   const userAuth = await userAuthStorage.findByOidcSubAndTeam(
@@ -112,16 +128,17 @@ export async function handleA2ANotification(
     botInstallation.teamId
   );
   if (!userAuth) {
-    logger.warn(
-      `[A2ACallback] No Slack user found for oidcSub=${schedulerPayload.user_sub} in team=${botInstallation.teamId}`
+    // The subscriber never signed in to this team through this client. Only they can
+    // fix that; the scheduler holds the job until they do.
+    await undelivered(
+      'no_recipient',
+      `no Slack user found for oidcSub=${schedulerPayload.user_sub} in team=${botInstallation.teamId}`
     );
     return;
   }
 
   if (!botInstallation.botToken) {
-    logger.warn(
-      `[A2ACallback] Bot installation ${botInstallation.botName} (team=${botInstallation.teamId}) has no botToken`
-    );
+    await undelivered('send_failed', `bot installation ${botInstallation.botName} has no bot token`);
     return;
   }
 
@@ -133,9 +150,7 @@ export async function handleA2ANotification(
 
     const dmResult = await slackClient.conversations.open({ users: userAuth.userId });
     if (!dmResult.ok || !dmResult.channel?.id) {
-      logger.warn(
-        `[A2ACallback] Could not open DM with user ${userAuth.userId} in team ${botInstallation.teamId}`
-      );
+      await undelivered('send_failed', `could not open a DM with user ${userAuth.userId}`);
       return;
     }
 
@@ -224,6 +239,6 @@ export async function handleA2ANotification(
       }
     }
   } catch (error) {
-    logger.error(error, `[A2ACallback] Failed to send DM notification: ${error}`);
+    await undelivered('send_failed', `posting the DM failed: ${error}`);
   }
 }

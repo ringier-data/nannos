@@ -10,12 +10,19 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from ..db.session import DbSession
-from ..dependencies import get_client_id_from_request, is_admin_mode, require_auth_or_bearer_token
+from ..dependencies import (
+    get_client_id_from_request,
+    get_token_claims_from_request,
+    is_admin_mode,
+    is_own_client_credentials,
+    require_auth_or_bearer_token,
+)
 from ..models.delivery_channel import (
     DeliveryChannelCreate,
     DeliveryChannelListResponse,
     DeliveryChannelResponse,
     DeliveryChannelUpdate,
+    UndeliveredReport,
 )
 from ..models.user import User
 from ..services.forwarded_attribution import forwarded_installation
@@ -77,7 +84,8 @@ async def register_channel(
     description=(
         "For A2A clients (Bearer token with ``azp`` claim): returns only the channels "
         "registered by that client.\n\n"
-        "For session-authenticated console users: returns all channels."
+        "For session-authenticated console users: returns all channels, each with the "
+        "caller's own ``reachability`` on it."
     ),
 )
 async def list_channels(
@@ -103,6 +111,11 @@ async def list_channels(
         channels, total = await repo.list_all_channels(
             db=db, search=search, page=page, limit=limit
         )
+        # What the channel picker greys out (#192): the caller's own, never anyone else's.
+        states = await request.app.state.delivery_reachability_repository.for_user(
+            db, current_user.id, [c.id for c in channels]
+        )
+        channels = [c.model_copy(update={"reachability": states.get(c.id)}) for c in channels]
 
     return DeliveryChannelListResponse(channels=channels, total=total)
 
@@ -235,3 +248,36 @@ async def _require_channel_write_access(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="You do not have permission to modify this delivery channel.",
     )
+
+
+@router.post(
+    "/undelivered",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Report that a scheduled run's notification could not be delivered.",
+    description=(
+        "Called by the chat client that received a scheduled run's push and could not deliver "
+        "it: it found no sign-in for the subscriber in that installation, or posting failed. "
+        "The push was already acknowledged, so this is how the scheduler learns the run reached "
+        "nobody. The run keeps its status and is marked undelivered; 'no_recipient' also holds "
+        "the subscription until the subscriber signs in from that channel.\n\n"
+        "Only the client that owns the run's delivery channel may report it, with its own "
+        "client-credentials token. 404 for any run that is not on one of its channels."
+    ),
+)
+async def report_undelivered(report: UndeliveredReport, request: Request, db: DbSession) -> None:
+    """Record a client's report that a run reached nobody (#191)."""
+    claims = await get_token_claims_from_request(request)
+    if claims is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    client_id = claims.get("azp") or claims.get("client_id")
+    if not is_own_client_credentials(claims, client_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A delivery report must come from the channel's client, with its own client-credentials token",
+        )
+    if not await request.app.state.scheduler_service.report_undelivered(db, client_id, report):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")

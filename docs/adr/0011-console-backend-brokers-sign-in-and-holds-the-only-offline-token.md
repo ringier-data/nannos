@@ -2,7 +2,8 @@
 status: proposed (2026-09-23); implemented in console-backend, the three chat clients, the
   cockpit BFF, the Keycloak provisioning and gitops, pending review. Every chat client
   defaults to its old sign-in until its flag is flipped; the cockpit BFF uses only the broker.
-  Amended 2026-09-28 (Amendment 1: binding secret and reachable installations).
+  Amended 2026-09-28 (Amendment 1: binding secret and reachable installations; Amendment 2:
+  a subscription on a channel that cannot reach its subscriber).
 ---
 
 # console-backend brokers sign-in and holds the only offline token
@@ -47,6 +48,26 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > without a secret falls back to the `broker_client_users` link; a secret that is sent is
 > always checked. Turning it on makes that client's already-linked users sign in once
 > more. Once every client requires it, the fallback and `broker_client_users` go.
+
+> **Amendment 2 (2026-09-28) — a channel that cannot reach its subscriber is held, like a
+> missing sign-in (ringier-data/nannos#192, #191).** Amendment 1's tables give three answers
+> for a user on a delivery channel. **Reachable**: a binding of theirs with the channel's
+> client is in a workspace that lists the channel's installation. **Unreachable**: they have
+> a binding with that client and the installation is listed in one of its workspaces, but
+> none of their bindings is in it. **Unknown**: no binding with the client at all (an old
+> local sign-in looks exactly like none) or an installation no workspace lists. Only
+> unreachable changes anything, following point 6. What a user starts themselves (create,
+> subscribe, copy, change channel, switch on) is refused with "message Nannos on <channel>
+> once to activate it". A group default keeps the owner's channel and creates the member's
+> subscription switched off with a fixed reason; it is never moved to another channel on
+> their behalf. A bound sign-in, or an installation a client newly lists, switches those on.
+> Unknown only warns in the console. A user still served in a workspace from an old local
+> sign-in while holding a brokered one elsewhere reads as unreachable there; accepted, since
+> it lasts only until old sign-ins drain. Because the webhook acknowledges a push before it
+> looks the recipient up, a chat client that finds no one reports it separately, as itself
+> (`POST /api/v1/delivery-channels/undelivered`). The run keeps its status and is marked
+> undelivered; "no recipient" also holds the subscription with the same reason. The binding
+> is left alone, since it also mints the subscriber's tokens.
 
 ## Context
 

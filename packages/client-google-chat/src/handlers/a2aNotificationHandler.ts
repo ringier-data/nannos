@@ -14,6 +14,7 @@ import { authPromptFromPayload } from '../utils/inTaskAuth.js';
 import type { ReplyTo } from '../services/scheduledRunResumeService.js';
 import { HandlerDependencies } from './types.js';
 import { Task } from '@a2a-js/sdk';
+import type { UndeliveredReason } from '../services/deliveryReport.js';
 
 const logger = Logger.getLogger('a2aNotificationHandler');
 
@@ -94,12 +95,27 @@ export async function handleA2ANotification(
   }
 
   const parked = schedulerPayload.scheduler_status === 'auth_required';
+  const runRef = `job=${schedulerPayload.scheduled_job_id} run=${schedulerPayload.scheduled_job_run_id}`;
+  // Every way this notification can end without reaching the user is logged at error
+  // level and reported, so the run is not recorded as delivered (#191). The channel is
+  // registered under the project NAME; the push arrives with the project number.
+  const undelivered = async (reason: UndeliveredReason, detail: string): Promise<void> => {
+    logger.error(`[A2ACallback] Not delivered (${reason}, ${runRef}, taskId=${task.id}): ${detail}`);
+    const runId = schedulerPayload.scheduled_job_run_id;
+    const installationId = deps.config.googleChatConfigs.find((p) => p.projectNumber === projectId)?.projectName;
+    if (deps.reportUndelivered && runId !== undefined && installationId) {
+      await deps.reportUndelivered({ runId, installationId, reason, detail });
+    }
+  };
 
   // Look up the Google Chat user by their OIDC sub for this project
   const userAuth = await userAuthStorage.findByOidcSub(schedulerPayload.user_sub, projectId);
   if (!userAuth) {
-    logger.warn(
-      `[A2ACallback] No Google Chat user found for oidcSub=${schedulerPayload.user_sub} in project=${projectId}`
+    // The subscriber never signed in through this project. Only they can fix that; the
+    // scheduler holds the job until they do.
+    await undelivered(
+      'no_recipient',
+      `no Google Chat user found for oidcSub=${schedulerPayload.user_sub} in project=${projectId}`
     );
     return;
   }
@@ -108,9 +124,7 @@ export async function handleA2ANotification(
   try {
     const dmSpace = await chatService.findDirectMessage(projectId, userAuth.userId);
     if (!dmSpace?.name) {
-      logger.warn(
-        `[A2ACallback] No DM space found for user ${userAuth.userId} in project ${projectId}`
-      );
+      await undelivered('send_failed', `no DM space found for user ${userAuth.userId}`);
       return;
     }
 
@@ -192,6 +206,6 @@ export async function handleA2ANotification(
       }
     }
   } catch (error) {
-    logger.error(error, `[A2ACallback] Failed to send DM notification: ${error}`);
+    await undelivered('send_failed', `posting the DM failed: ${error}`);
   }
 }

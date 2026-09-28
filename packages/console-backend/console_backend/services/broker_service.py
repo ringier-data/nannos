@@ -269,11 +269,17 @@ class BrokerService:
 
     async def set_workspace_installations(
         self, db: AsyncSession, client: BrokerClient, workspace_id: str, installation_ids: list[str]
-    ) -> None:
+    ) -> list[str]:
         """Record the installations *client* runs in *workspace_id* now: the client's word for
         where every sign-in for the workspace can be reached, trusted as it is trusted to
         deliver there. The only writer, so the list follows the client's registrations, and a
-        sign-in made before an installation was added reaches it too."""
+        sign-in made before an installation was added reaches it too.
+
+        Returns the installations it did not list before, the only news in a publication
+        that is otherwise repeated at every client boot."""
+        before = set(
+            await self._requests.workspace_installations(db, client_id=client.client_id, workspace_id=workspace_id)
+        )
         await self._requests.set_workspace_installations(
             db,
             client_id=client.client_id,
@@ -281,6 +287,11 @@ class BrokerService:
             installation_ids=installation_ids,
             now=datetime.now(timezone.utc),
         )
+        return sorted(set(installation_ids) - before)
+
+    async def workspace_installations(self, db: AsyncSession, client: BrokerClient, workspace_id: str) -> list[str]:
+        """The installations *client* last published for *workspace_id*."""
+        return await self._requests.workspace_installations(db, client_id=client.client_id, workspace_id=workspace_id)
 
     async def mint(
         self,

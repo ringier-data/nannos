@@ -9,6 +9,7 @@ import type { BotInstallation, IScheduledRunStore, IUserAuthStorage, ScheduledRu
 // ---------------------------------------------------------------------------
 
 const botInstallation = {
+  appId: 'A1',
   teamId: 'T1',
   botName: 'nannos',
   botToken: 'xoxb-token',
@@ -287,5 +288,66 @@ describe('what the ask says and where its answer lands', () => {
 
     const posted = (slackClient.chat.postMessage as jest.Mock).mock.calls[0][0] as { thread_ts?: string };
     expect(posted.thread_ts).toBeUndefined();
+  });
+});
+
+describe('a notification that reaches nobody is reported (#191)', () => {
+  function reporter() {
+    return jest.fn<(r: unknown) => Promise<void>>().mockResolvedValue(undefined);
+  }
+
+  test('no sign-in in this team is reported as no_recipient for this installation', async () => {
+    const reportUndelivered = reporter();
+    const slackClient = mockSlackClient();
+
+    await handleA2ANotification(makeTask(schedulerPayload), botInstallation, {
+      userAuthStorage: mockUserAuthStorage(false),
+      slackClientFactory: () => slackClient as unknown as WebClient,
+      reportUndelivered,
+    });
+
+    expect(slackClient.chat.postMessage).not.toHaveBeenCalled();
+    expect(reportUndelivered).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 42, installationId: 'A1', reason: 'no_recipient' })
+    );
+  });
+
+  test('a DM that cannot be opened, or a post that throws, is send_failed', async () => {
+    const reportUndelivered = reporter();
+    const slackClient = mockSlackClient();
+    slackClient.conversations.open.mockResolvedValue({ ok: false });
+
+    await handleA2ANotification(makeTask(schedulerPayload), botInstallation, {
+      userAuthStorage: mockUserAuthStorage(),
+      slackClientFactory: () => slackClient as unknown as WebClient,
+      reportUndelivered,
+    });
+    slackClient.conversations.open.mockResolvedValue({ ok: true, channel: { id: 'D1' } });
+    slackClient.chat.postMessage.mockRejectedValue(new Error('rate_limited'));
+    await handleA2ANotification(makeTask(schedulerPayload), botInstallation, {
+      userAuthStorage: mockUserAuthStorage(),
+      slackClientFactory: () => slackClient as unknown as WebClient,
+      reportUndelivered,
+    });
+
+    expect(reportUndelivered.mock.calls.map(([r]) => (r as { reason: string }).reason)).toEqual([
+      'send_failed',
+      'send_failed',
+    ]);
+    expect(reportUndelivered).toHaveBeenLastCalledWith(
+      expect.objectContaining({ detail: expect.stringContaining('rate_limited') })
+    );
+  });
+
+  test('a delivered notification reports nothing', async () => {
+    const reportUndelivered = reporter();
+
+    await handleA2ANotification(makeTask(schedulerPayload), botInstallation, {
+      userAuthStorage: mockUserAuthStorage(),
+      slackClientFactory: () => mockSlackClient() as unknown as WebClient,
+      reportUndelivered,
+    });
+
+    expect(reportUndelivered).not.toHaveBeenCalled();
   });
 });

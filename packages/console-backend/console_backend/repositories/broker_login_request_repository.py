@@ -205,6 +205,17 @@ class BrokerLoginRequestRepository:
             },
         )
 
+    async def workspace_installations(self, db: AsyncSession, *, client_id: str, workspace_id: str) -> list[str]:
+        """The installations *client_id* last published for *workspace_id*; none when it never did."""
+        result = await db.execute(
+            text("""
+                SELECT installation_ids FROM broker_workspaces
+                WHERE client_id = :client_id AND workspace_id = :workspace_id
+            """),
+            {"client_id": client_id, "workspace_id": workspace_id},
+        )
+        return list(result.scalar_one_or_none() or [])
+
     async def binding_user(self, db: AsyncSession, client_id: str, secret_hash: str) -> str | None:
         """The user a binding secret of *client_id* names, or None when it names none."""
         result = await db.execute(

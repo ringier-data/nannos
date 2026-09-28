@@ -88,6 +88,7 @@ import { describeCron } from '@/lib/cron';
 import { DetailSkeleton } from '@/components/skeletons';
 import { io } from 'socket.io-client';
 import { toast } from 'sonner';
+import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
 
 interface SchedulerNotification {
   job_id: number;
@@ -1319,15 +1320,22 @@ function EditForm({
                   {channels.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-muted-foreground">No delivery channels registered</div>
                   ) : (
-                    channels.map((ch) => (
-                      <SelectItem key={ch.id} value={String(ch.id)}>
-                        {ch.name}
-                        {ch.description && <span className="ml-2 text-xs text-muted-foreground">— {ch.description}</span>}
-                      </SelectItem>
-                    ))
+                    <DeliveryChannelOptions channels={channels} selected={deliveryChannel} />
                   )}
                 </SelectContent>
               </Select>
+              {(() => {
+                // The subscriber's own reachability: the job's as saved, the list's for a
+                // channel picked but not saved yet. Both are computed for the viewer.
+                const chosen = channels.find((ch) => String(ch.id) === deliveryChannel);
+                const saved = String(job.delivery_channel_id ?? '') === deliveryChannel;
+                return (
+                  <DeliveryReachabilityNote
+                    reachability={saved ? job.delivery_reachability : chosen?.reachability}
+                    channelName={chosen?.name}
+                  />
+                );
+              })()}
             </div>
           </CardContent>
         </Card>

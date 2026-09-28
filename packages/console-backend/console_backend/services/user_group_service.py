@@ -27,6 +27,7 @@ from ..repositories.sub_agent_repository import SubAgentRepository
 from ..repositories.user_group_repository import UserGroupRepository
 from ..services.keycloak_admin_service import KeycloakAdminService
 from ..services.notification_service import NotificationService
+from ..repositories.delivery_reachability_repository import unreachable_subscriptions_sql
 from ..services.scheduler_token_service import OFFLINE_TOKEN_STATE_SQL
 from ..services.sub_agent_service import SubAgentService
 from ..utils.sql_search import like_clause, like_contains
@@ -34,10 +35,11 @@ from ..utils.sql_search import like_clause, like_contains
 logger = logging.getLogger(__name__)
 
 #: What every member listing selects, over `user_group_members ugm JOIN users u`. The last
-#: three columns feed `MemberInfo.onboarding`, so a page of members costs no extra query.
+#: four columns feed `MemberInfo.onboarding`, so a page of members costs no extra query.
 _MEMBER_COLUMNS = (
     "u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role, "
-    f"u.sub, u.is_service_account, {OFFLINE_TOKEN_STATE_SQL} AS offline_token"
+    f"u.sub, u.is_service_account, {OFFLINE_TOKEN_STATE_SQL} AS offline_token, "
+    f"{unreachable_subscriptions_sql('u.id')} AS unreachable"
 )
 
 
@@ -48,7 +50,9 @@ def _member_info(row: Any) -> MemberInfo:
         first_name=row["first_name"],
         last_name=row["last_name"],
         group_role=row["group_role"],
-        onboarding=UserOnboarding.of(row["sub"], row["offline_token"], row["is_service_account"]),
+        onboarding=UserOnboarding.of(
+            row["sub"], row["offline_token"], row["is_service_account"], row.get("unreachable") or 0
+        ),
     )
 
 

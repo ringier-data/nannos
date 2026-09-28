@@ -214,3 +214,57 @@ describe('a resumed run threads under the ask that unblocked it', () => {
     );
   });
 });
+
+describe('a notification that reaches nobody is reported (#191)', () => {
+  function deps(found: boolean, chatService = mockChatService()) {
+    const reportUndelivered = jest.fn<(r: unknown) => Promise<void>>().mockResolvedValue(undefined);
+    return {
+      reportUndelivered,
+      chatService,
+      deps: {
+        chatService,
+        scheduledRunStore: mockScheduledRunStore(),
+        userAuthStorage: {
+          findByOidcSub: jest.fn<() => Promise<unknown>>().mockResolvedValue(found ? { userId: 'users/123' } : null),
+        },
+        // The push names the project NUMBER; the channel is registered under its name.
+        config: { googleChatConfigs: [{ projectNumber: PROJECT_ID, projectName: 'projects/nannos' }] },
+        reportUndelivered,
+      } as unknown as HandlerDependencies,
+    };
+  }
+
+  test('no sign-in in this project is reported as no_recipient under the channel installation', async () => {
+    const { deps: d, reportUndelivered, chatService } = deps(false);
+
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
+
+    expect(chatService.sendTextMessage).not.toHaveBeenCalled();
+    expect(reportUndelivered).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 42, installationId: 'projects/nannos', reason: 'no_recipient' })
+    );
+  });
+
+  test('a missing DM space or a failed post is send_failed', async () => {
+    const chatService = mockChatService();
+    chatService.findDirectMessage.mockResolvedValueOnce(null);
+    chatService.sendTextMessage.mockRejectedValueOnce(new Error('quota'));
+    const { deps: d, reportUndelivered } = deps(true, chatService);
+
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
+
+    expect(reportUndelivered.mock.calls.map(([r]) => (r as { reason: string }).reason)).toEqual([
+      'send_failed',
+      'send_failed',
+    ]);
+  });
+
+  test('a delivered notification reports nothing', async () => {
+    const { deps: d, reportUndelivered } = deps(true);
+
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
+
+    expect(reportUndelivered).not.toHaveBeenCalled();
+  });
+});

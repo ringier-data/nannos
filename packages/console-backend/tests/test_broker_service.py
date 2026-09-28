@@ -398,6 +398,15 @@ class TestBindingSecret:
         assert await _workspace_installations(pg_session, "slack-client", "T1") == ["A2"]
 
     @pytest.mark.asyncio
+    async def test_a_publication_returns_only_the_installations_it_adds(self, broker, pg_session):
+        """What releases reachability holds (#192): a boot's unchanged republication adds none."""
+        slack = await broker.resolve_client(pg_session, "slack-client")
+        assert await broker.set_workspace_installations(pg_session, slack, "T1", ["A1"]) == ["A1"]
+        assert await broker.set_workspace_installations(pg_session, slack, "T1", ["A1"]) == []
+        assert await broker.set_workspace_installations(pg_session, slack, "T1", ["A2", "A1"]) == ["A2"]
+        assert await broker.workspace_installations(pg_session, slack, "T1") == ["A1", "A2"]
+
+    @pytest.mark.asyncio
     async def test_a_client_that_requires_the_secret_refuses_without_it(self, broker, pg_session, test_user_db):
         _, code = await _signed_in(broker, pg_session, test_user_db)
         slack = await broker.resolve_client(pg_session, "slack-client")

@@ -380,3 +380,70 @@ class TestClientLegCarriesTheBinding:
         )
 
         service.mint.assert_awaited_once_with(db, client, "s1", "orchestrator", "secret")
+
+
+class TestASignInReleasesReachabilityHolds:
+    """A bound sign-in, and a newly listed installation, switch on the subscriptions held
+    because their channel could not reach the subscriber (#192)."""
+
+    @pytest.fixture
+    def app(self, monkeypatch):
+        monkeypatch.setattr(config.broker, "enabled", True)
+        service = AsyncMock(spec=BrokerService)
+        scheduler = SimpleNamespace(
+            release_reachability_holds=AsyncMock(return_value=1),
+            release_reachability_holds_on=AsyncMock(return_value=1),
+        )
+        users = SimpleNamespace(get_user=AsyncMock(return_value=SimpleNamespace(id="u1")))
+        state = SimpleNamespace(broker_service=service, scheduler_service=scheduler, user_service=users)
+        return service, scheduler, users, SimpleNamespace(app=SimpleNamespace(state=state))
+
+    @pytest.mark.asyncio
+    async def test_redeem_releases_the_users_holds_on_its_workspaces_installations(self, app):
+        service, scheduler, users, request = app
+        service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
+        service.workspace_installations.return_value = ["A1", "A2"]
+        client = _client()
+
+        await router.redeem(BrokerRedeemRequest(code="c", account_key="T1:U1", workspace_id="T1"), request, AsyncMock(), client)
+
+        service.workspace_installations.assert_awaited_once()
+        assert service.workspace_installations.await_args.args[1:] == (client, "T1")
+        scheduler.release_reachability_holds.assert_awaited_once()
+        assert scheduler.release_reachability_holds.await_args.args[1:] == (
+            users.get_user.return_value,
+            client.client_id,
+            ["A1", "A2"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_release_does_not_fail_the_sign_in(self, app):
+        service, scheduler, _, request = app
+        service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
+        service.workspace_installations.return_value = ["A1"]
+        scheduler.release_reachability_holds.side_effect = RuntimeError("db gone")
+        db = AsyncMock()
+
+        result = await router.redeem(BrokerRedeemRequest(code="c", workspace_id="T1"), request, db, _client())
+
+        assert result.binding_secret == "secret"
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_only_newly_listed_installations_release_anything(self, app):
+        """The client republishes every workspace at every boot: an unchanged list is no news."""
+        service, scheduler, users, request = app
+        client = _client()
+
+        service.set_workspace_installations.return_value = []
+        await router.set_workspace_installations(
+            "T1", BrokerWorkspaceInstallations(installation_ids=["A1"]), request, AsyncMock(), client
+        )
+        scheduler.release_reachability_holds_on.assert_not_awaited()
+
+        service.set_workspace_installations.return_value = ["A2"]
+        await router.set_workspace_installations(
+            "T1", BrokerWorkspaceInstallations(installation_ids=["A1", "A2"]), request, AsyncMock(), client
+        )
+        scheduler.release_reachability_holds_on.assert_awaited_once()
+        assert scheduler.release_reachability_holds_on.await_args.args[1:] == (users, client.client_id, ["A2"])

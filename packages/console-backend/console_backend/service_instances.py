@@ -21,6 +21,7 @@ from .repositories.broker_login_request_repository import BrokerLoginRequestRepo
 from .repositories.bug_report_repository import BugReportRepository
 from .repositories.catalog_repository import CatalogRepository
 from .repositories.delivery_channel_repository import DeliveryChannelRepository
+from .repositories.delivery_reachability_repository import DeliveryReachabilityRepository
 from .repositories.embed_binding_repository import EmbedBindingRepository
 from .repositories.feedback_repository import FeedbackRepository
 from .repositories.budget_settings_repository import BudgetSettingsRepository
@@ -358,6 +359,8 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.scheduler_service.set_repository(app.state.scheduled_job_repository)
     app.state.scheduler_service.set_sub_agent_service(app.state.sub_agent_service)
     app.state.scheduler_service.set_delivery_channel_repository(app.state.delivery_channel_repository)
+    app.state.delivery_reachability_repository = DeliveryReachabilityRepository()
+    app.state.scheduler_service.set_reachability_repository(app.state.delivery_reachability_repository)
     app.state.scheduler_service.set_user_settings_service(app.state.user_settings_service)
     app.state.scheduler_service.set_notification_service(app.state.notification_service)
     # A subscription runs under its subscriber's vaulted offline token; the service holds

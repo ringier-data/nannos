@@ -18,6 +18,7 @@ import console_backend.routers.delivery_channel_router as router
 def _request_with_repo(repo) -> MagicMock:
     req = MagicMock()
     req.app.state.delivery_channel_repository = repo
+    req.app.state.delivery_reachability_repository = SimpleNamespace(for_user=AsyncMock(return_value={}))
     return req
 
 
@@ -147,3 +148,69 @@ async def test_session_user_without_admin_is_forbidden(monkeypatch):
             request=MagicMock(), owner_client_id="client-a", current_user=MagicMock()
         )
     assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+
+
+class TestUndeliveredReport:
+    """A chat client reports a run it could not deliver (#191): only as itself."""
+
+    _REPORT = router.UndeliveredReport(run_id=7, installation_id="A1", reason="no_recipient")
+
+    def _request(self, recorded: bool) -> MagicMock:
+        req = MagicMock()
+        req.app.state.scheduler_service = SimpleNamespace(report_undelivered=AsyncMock(return_value=recorded))
+        return req
+
+    @pytest.mark.asyncio
+    async def test_the_clients_own_service_account_is_heard(self, monkeypatch):
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client"}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+        req, db = self._request(True), MagicMock()
+
+        await router.report_undelivered(self._REPORT, req, db)
+
+        req.app.state.scheduler_service.report_undelivered.assert_awaited_once_with(db, "slack-client", self._REPORT)
+
+    @pytest.mark.asyncio
+    async def test_a_users_token_of_the_same_client_is_refused(self, monkeypatch):
+        claims = {"azp": "slack-client", "sid": "session", "preferred_username": "service-account-slack-client"}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+        req = self._request(True)
+
+        with pytest.raises(HTTPException) as exc:
+            await router.report_undelivered(self._REPORT, req, MagicMock())
+
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        req.app.state.scheduler_service.report_undelivered.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_run_not_on_the_clients_channels_is_a_404(self, monkeypatch):
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client"}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+
+        with pytest.raises(HTTPException) as exc:
+            await router.report_undelivered(self._REPORT, self._request(False), MagicMock())
+
+        assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_the_console_lists_channels_with_the_callers_own_reachability(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from console_backend.models.delivery_channel import DeliveryChannelResponse
+
+        now = datetime.now(timezone.utc)
+        channel = DeliveryChannelResponse(
+            id=3, name="Slack", webhook_url="https://x", client_id="c", registered_by="s", created_at=now, updated_at=now
+        )
+        repo = SimpleNamespace(list_all_channels=AsyncMock(return_value=([channel], 1)))
+        monkeypatch.setattr(router, "get_client_id_from_request", AsyncMock(return_value=None))
+        req = _request_with_repo(repo)
+        req.app.state.delivery_reachability_repository.for_user = AsyncMock(return_value={3: "unreachable"})
+
+        result = await router.list_channels(
+            request=req, db=MagicMock(), current_user=SimpleNamespace(id="u1"), page=1, limit=None, search=None
+        )
+
+        assert result.channels[0].reachability == "unreachable"
+        req.app.state.delivery_reachability_repository.for_user.assert_awaited_once()
+        assert req.app.state.delivery_reachability_repository.for_user.await_args.args[1:] == ("u1", [3])

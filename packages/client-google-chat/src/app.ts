@@ -25,6 +25,7 @@ import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClic
 import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
 import { patchGaxiosToUseNativeFetch } from './utils/gaxiosNativeFetch.js';
 import { parseA2APushEvent } from './utils/a2aPushPayload.js';
+import { createDeliveryReporter } from './services/deliveryReport.js';
 
 // Initialize logger early
 const logger = Logger.getLogger('app');
@@ -207,6 +208,13 @@ function setupServerTimeouts(server: Server, config: Config) {
       fileStorageService,
       feedbackService,
       scheduledRunResumeService,
+      reportUndelivered: config.consoleBackend
+        ? createDeliveryReporter({
+            baseUrl: config.consoleBackend.url,
+            audience: config.consoleBackend.audience,
+            getServiceToken: (audience) => oidcClient.getServiceToken(audience),
+          })
+        : undefined,
       config,
     };
 
