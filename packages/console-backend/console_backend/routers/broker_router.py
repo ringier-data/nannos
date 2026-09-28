@@ -7,7 +7,6 @@ Browser leg (no authentication — the user signs in at Keycloak):
 Client leg (the broker client's own client-credentials token):
   POST /redeem      — trade the one-time code for who signed in and a binding secret
   POST /token       — mint an access token for a bound user and an allowed audience
-  PUT  /workspaces/{id} — the installations the client runs in one of its workspaces
 """
 
 import logging
@@ -23,7 +22,6 @@ from ..models.broker import (
     BrokerClient,
     BrokerRedeemRequest,
     BrokerRedemption,
-    BrokerWorkspaceInstallations,
     BrokerTokenRequest,
     BrokerTokenResponse,
 )
@@ -145,17 +143,16 @@ async def redeem(
 async def _release_reachability_holds(
     request: Request, db: DbSession, client: BrokerClient, user_id: str, workspace_id: str
 ) -> None:
-    """A bound sign-in reaches every installation of its workspace: switch on the user's
+    """A bound sign-in reaches every channel of its workspace: switch on the user's
     subscriptions held on those channels (#192). Best effort, after the sign-in is
     committed: a failure here leaves them held, which the next sign-in retries."""
     scheduler = getattr(request.app.state, "scheduler_service", None)
-    if scheduler is None:
+    if scheduler is None or not workspace_id:
         return
     try:
-        installations = await _get_broker_service(request).workspace_installations(db, client, workspace_id)
         user = await request.app.state.user_service.get_user(db, user_id)
-        if user is not None and installations:
-            released = await scheduler.release_reachability_holds(db, user, client.client_id, installations)
+        if user is not None:
+            released = await scheduler.release_reachability_holds(db, user, client.client_id, workspace_id)
             if released:
                 logger.info("Switched on %d subscription(s) of user %s reachable again", released, user_id)
     except Exception:  # noqa: BLE001 — the sign-in itself has succeeded
@@ -176,32 +173,3 @@ async def mint_token(
         return await _get_broker_service(request).mint(db, client, body.sub, body.audience, body.binding_secret)
     except BrokerRefusal as e:
         raise _refused(e) from e
-
-
-@router.put("/workspaces/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def set_workspace_installations(
-    workspace_id: str,
-    body: BrokerWorkspaceInstallations,
-    request: Request,
-    db: DbSession,
-    client: BrokerClient = Depends(require_broker_client),
-) -> None:
-    """Replace the installations this client runs in *workspace_id*: where every sign-in
-    for that workspace can be reached. Called whenever the client (re)registers its delivery
-    channels, so an installation added after a user signed in reaches them too."""
-    if len(workspace_id) > 200:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="workspace_id is too long")
-    added = await _get_broker_service(request).set_workspace_installations(
-        db, client, workspace_id, body.installation_ids
-    )
-    await db.commit()
-    scheduler = getattr(request.app.state, "scheduler_service", None)
-    if added and scheduler is not None:
-        # A newly listed installation reaches every sign-in of the workspace, including
-        # members held on its channel (#192). Best effort: the list is recorded either way.
-        try:
-            await scheduler.release_reachability_holds_on(db, request.app.state.user_service, client.client_id, added)
-        except Exception:  # noqa: BLE001
-            await db.rollback()
-            logger.warning("Could not release reachability holds on %s of %s", added, client.client_id, exc_info=True)
-

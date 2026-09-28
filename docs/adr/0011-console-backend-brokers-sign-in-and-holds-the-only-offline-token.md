@@ -2,7 +2,7 @@
 status: proposed (2026-09-23); implemented in console-backend, the three chat clients, the
   cockpit BFF, the Keycloak provisioning and gitops, pending review. Every chat client
   defaults to its old sign-in until its flag is flipped; the cockpit BFF uses only the broker.
-  Amended 2026-09-28 (Amendment 1: binding secret and reachable installations; Amendment 2:
+  Amended 2026-09-28 (Amendment 1: binding secret and reachable workspaces; Amendment 2:
   a subscription on a channel that cannot reach its subscriber).
 ---
 
@@ -30,17 +30,18 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > app, the key its delivery channels and secrets are registered under), and a Slack
 > workspace can hold several of those.
 >
-> Where a sign-in can be reached lives on the **workspace**, not the binding
-> (`broker_workspaces`): `installation_ids`, in the vocabulary the client registers its
-> delivery channels under (`delivery_channels.installation_id`, scoped by `client_id`). A
+> Where a sign-in can be reached follows from the **workspace**, not the binding: a
+> delivery channel names the workspace its installation belongs to
+> (`delivery_channels.workspace_id`), and a sign-in bound to that workspace reaches it. A
 > Slack sign-in is per team and a push is looked up by team, so it reaches every app the
-> client has there, including one installed after the user signed in. The client is the
-> list's only writer: whenever it registers its delivery channels it publishes each
-> workspace (`PUT /workspaces/{workspace_id}`), retrying a failure, so the list is exactly
-> as current as the channels. Slack sends each team's active apps; Google Chat maps its
-> project number to the project name its channel uses; email and the cockpit BFF have no
-> channel and publish nothing. A sign-in never writes it. This is what
+> client has there, including one installed after the user signed in. The client names the
+> workspace whenever it registers the channel, so it is exactly as current as the channels:
+> Slack sends the app's team, Google Chat the project number its sign-ins are keyed by.
+> Email and the cockpit BFF have no channel. A sign-in never writes it. This is what
 > ringier-data/nannos#192 reads to tell whether a subscriber can receive on a channel.
+> (First stored the other way round, as a table of each workspace's installations published
+> separately; moved onto the channel by Amendment 2, since an installation belongs to
+> exactly one workspace.)
 >
 > Enforcement is per client, because the cockpit BFF ships from another repository:
 > `broker_clients.require_binding_secret`, audited admin data, off for clients registered
@@ -50,17 +51,18 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > more. Once every client requires it, the fallback and `broker_client_users` go.
 
 > **Amendment 2 (2026-09-28) — a channel that cannot reach its subscriber is held, like a
-> missing sign-in (ringier-data/nannos#192, #191).** Amendment 1's tables give three answers
-> for a user on a delivery channel. **Reachable**: a binding of theirs with the channel's
-> client is in a workspace that lists the channel's installation. **Unreachable**: they have
-> a binding with that client and the installation is listed in one of its workspaces, but
-> none of their bindings is in it. **Unknown**: no binding with the client at all (an old
-> local sign-in looks exactly like none) or an installation no workspace lists. Only
+> missing sign-in (ringier-data/nannos#192, #191).** Amendment 1's bindings and each channel's
+> workspace give three answers for a user on a delivery channel. **Reachable**: a binding of
+> theirs with the channel's client is in the channel's workspace. **Unreachable**: the
+> channel's workspace is known and they have bindings with that client, none in it.
+> **Unknown**: no binding with the client at all (an old local sign-in looks exactly like
+> none) or a channel whose client has not named its workspace. It is one probe of the
+> user's bindings, derived on every read. Only
 > unreachable changes anything, following point 6. What a user starts themselves (create,
 > subscribe, copy, change channel, switch on) is refused with "message Nannos on <channel>
 > once to activate it". A group default keeps the owner's channel and creates the member's
 > subscription switched off with a fixed reason; it is never moved to another channel on
-> their behalf. A bound sign-in, or an installation a client newly lists, switches those on.
+> their behalf. A sign-in bound to that channel's workspace switches those on.
 > Unknown only warns in the console. A user still served in a workspace from an old local
 > sign-in while holding a brokered one elsewhere reads as unreachable there; accepted, since
 > it lasts only until old sign-ins drain. Because the webhook acknowledges a push before it

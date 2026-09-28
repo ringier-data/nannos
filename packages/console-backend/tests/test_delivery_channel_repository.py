@@ -311,3 +311,19 @@ async def test_list_channels_for_client_respects_search_and_scope(
     assert [c.name for c in narrowed] == ["acme-slack"]
     assert total == 1
     assert narrowed[0].id == a.id
+
+
+@pytest.mark.asyncio
+async def test_a_registration_names_its_workspace_and_omitting_it_keeps_it(
+    repo, pg_session: AsyncSession, test_user_db: User
+):
+    """The workspace is what a sign-in reaches the channel through (#192). A client that
+    was not taught the field must not erase it on every boot."""
+    data = _channel("slack", "A1").model_copy(update={"workspace_id": "T1"})
+    channel, _ = await repo.upsert_channel_by_installation(pg_session, test_user_db, "client-a", data)
+    assert channel.workspace_id == "T1"
+
+    again, created = await repo.upsert_channel_by_installation(
+        pg_session, test_user_db, "client-a", _channel("slack", "A1")
+    )
+    assert (created, again.workspace_id) == (False, "T1")

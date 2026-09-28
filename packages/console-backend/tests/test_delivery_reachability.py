@@ -1,8 +1,9 @@
 """A scheduled job's notification reaches its subscriber only on a channel whose client holds
-a sign-in of theirs in that installation's workspace (#192, ADR-0011 amendment 1). These
+a sign-in of theirs in that channel's workspace (#192, ADR-0011 amendments 1 and 2). These
 tests pin:
 
-- the rule: reachable, unreachable, unknown, derived from broker bindings and workspaces;
+- the rule: reachable, unreachable, unknown, derived from broker bindings and each
+  channel's workspace;
 - what the user starts themselves on an unreachable channel is refused with the way to
   activate it, before anything is written; ``unknown`` is never refused;
 - an inherited subscription keeps the owner's channel and is held, visibly, until the
@@ -43,27 +44,18 @@ SLACK = "slack-client"
 GCHAT = "google-chat-client"
 
 
-async def _channel(db, client_id: str, installation_id: str, name: str) -> int:
+async def _channel(db, client_id: str, installation_id: str, name: str, workspace_id: str | None) -> int:
     return (
         await db.execute(
             text("""
-                INSERT INTO delivery_channels (name, webhook_url, secret, client_id, registered_by, installation_id)
-                VALUES (:name, 'https://client.test/cb', 's', :client_id, 'sa', :installation_id)
+                INSERT INTO delivery_channels
+                    (name, webhook_url, secret, client_id, registered_by, installation_id, workspace_id)
+                VALUES (:name, 'https://client.test/cb', 's', :client_id, 'sa', :installation_id, :workspace_id)
                 RETURNING id
             """),
-            {"name": name, "client_id": client_id, "installation_id": installation_id},
+            {"name": name, "client_id": client_id, "installation_id": installation_id, "workspace_id": workspace_id},
         )
     ).scalar_one()
-
-
-async def _workspace(db, client_id: str, workspace_id: str, installation_ids: list[str]) -> None:
-    await db.execute(
-        text("""
-            INSERT INTO broker_workspaces (client_id, workspace_id, installation_ids) VALUES (:c, :w, :i)
-            ON CONFLICT (client_id, workspace_id) DO UPDATE SET installation_ids = EXCLUDED.installation_ids
-        """),
-        {"c": client_id, "w": workspace_id, "i": installation_ids},
-    )
 
 
 async def _bind(db, user_id: str, client_id: str, workspace_id: str) -> None:
@@ -78,8 +70,8 @@ async def _bind(db, user_id: str, client_id: str, workspace_id: str) -> None:
 
 @pytest_asyncio.fixture
 async def world(pg_session):
-    """Slack workspaces T1 (apps A1, A2) and T2 (app B1); a Google Chat client that has
-    published nothing. The owner signed in from T1, the writer from T2, the member only
+    """Slack workspaces T1 (app A1) and T2 (app B1); a Google Chat channel whose client
+    never said which workspace it is in. The owner signed in from T1, the writer from T2, the member only
     the old way (no binding at all)."""
     db = pg_session
     users = await _seed_users(db)
@@ -90,12 +82,10 @@ async def world(pg_session):
             {"c": client_id, "u": users["owner"].id},
         )
     channels = {
-        "A1": await _channel(db, SLACK, "A1", "Slack Nannos (T1)"),
-        "B1": await _channel(db, SLACK, "B1", "Slack Nannos (T2)"),
-        "P1": await _channel(db, GCHAT, "projects/p1", "Google Chat"),
+        "A1": await _channel(db, SLACK, "A1", "Slack Nannos (T1)", "T1"),
+        "B1": await _channel(db, SLACK, "B1", "Slack Nannos (T2)", "T2"),
+        "P1": await _channel(db, GCHAT, "projects/p1", "Google Chat", None),
     }
-    await _workspace(db, SLACK, "T1", ["A1", "A2"])
-    await _workspace(db, SLACK, "T2", ["B1"])
     await _bind(db, users["owner"].id, SLACK, "T1")
     await _bind(db, users["writer"].id, SLACK, "T2")
     await db.commit()
@@ -163,20 +153,31 @@ class TestTheRule:
         }
 
     @pytest.mark.asyncio
-    async def test_an_installation_no_workspace_lists_is_unknown(self, world):
+    async def test_a_channel_with_no_known_workspace_is_unknown(self, world):
         db, u, ch = world["db"], world["users"], world["channels"]
-        await _bind(db, u["owner"].id, GCHAT, "p1")  # a binding, but the client published nothing
+        await _bind(db, u["owner"].id, GCHAT, "p1")  # a binding, but the channel names no workspace
 
         assert await world["reachability"].for_channel(db, ch["P1"], [u["owner"].id]) == {u["owner"].id: "unknown"}
 
     @pytest.mark.asyncio
-    async def test_a_binding_in_an_unpublished_workspace_does_not_reach_a_listed_installation(self, world):
+    async def test_a_binding_in_another_workspace_does_not_reach_the_channel(self, world):
         db, u, ch = world["db"], world["users"], world["channels"]
         await _bind(db, u["outsider"].id, SLACK, "T9")
 
         assert await world["reachability"].for_channel(db, ch["A1"], [u["outsider"].id]) == {
             u["outsider"].id: "unreachable"
         }
+
+    @pytest.mark.asyncio
+    async def test_the_channel_list_carries_the_callers_own_answer_in_one_query(self, world):
+        from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
+
+        u, ch = world["users"], world["channels"]
+        channels, _ = await DeliveryChannelRepository().list_all_channels(
+            world["db"], reachability_for=u["writer"].id
+        )
+        by_id = {c.id: c.reachability for c in channels}
+        assert by_id == {ch["A1"]: "unreachable", ch["B1"]: "reachable", ch["P1"]: "unknown"}
 
     @pytest.mark.asyncio
     async def test_the_job_view_carries_the_subscribers_own_answer(self, world):
@@ -222,8 +223,8 @@ class TestWhatTheUserStartsIsRefused:
         """The console resends the whole form, channel included: only a change is checked."""
         svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
         job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
-        await _workspace(db, SLACK, "T1", ["A2"])
-        await _workspace(db, SLACK, "T3", ["A1"])  # A1 moved to a workspace the owner never signed in to
+        # A1 is re-registered in a workspace the owner never signed in to.
+        await db.execute(text("UPDATE delivery_channels SET workspace_id = 'T3' WHERE id = :id"), {"id": ch["A1"]})
 
         updated = await svc.update_job(
             db, job.id, ScheduledJobUpdate(), u["owner"], name="Renamed", delivery_channel_id=ch["A1"]
@@ -298,24 +299,12 @@ class TestAnInheritedSubscriptionIsHeldNotMoved:
         await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
 
         # A sign-in elsewhere is not news about this channel.
-        assert await svc.release_reachability_holds(db, u["writer"], SLACK, ["B1"]) == 0
+        assert await svc.release_reachability_holds(db, u["writer"], SLACK, "T2") == 0
         await _bind(db, u["writer"].id, SLACK, "T1")
-        assert await svc.release_reachability_holds(db, u["writer"], SLACK, ["A1", "A2"]) == 1
+        assert await svc.release_reachability_holds(db, u["writer"], SLACK, "T1") == 1
 
         writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
         assert (writers.enabled, writers.paused_reason) == (True, None)
-
-    @pytest.mark.asyncio
-    async def test_a_newly_listed_installation_switches_on_everyone_it_now_reaches(self, world):
-        svc, db, u = world["service"], world["db"], world["users"]
-        job = await _shared_on(world, "A1")
-        await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
-        await _workspace(db, SLACK, "T2", ["B1", "A1"])  # the client now lists A1 in the writer's workspace
-        users = MagicMock()
-        users.get_user = AsyncMock(side_effect=lambda db, uid: next(x for x in u.values() if x.id == uid))
-
-        assert await svc.release_reachability_holds_on(db, users, SLACK, ["A1"]) == 1
-        assert (await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)).enabled is True
 
     @pytest.mark.asyncio
     async def test_a_sign_in_that_does_not_reach_the_channel_re_holds_it_for_that(self, world):
@@ -384,7 +373,7 @@ class TestAClientReportsWhatReachedNobody:
         assert await _count(db, "broker_bindings") == 2, "the binding is left alone"
 
         # Re-signing in from that workspace switches it back on.
-        assert await svc.release_reachability_holds(db, u["owner"], SLACK, ["A1", "A2"]) == 1
+        assert await svc.release_reachability_holds(db, u["owner"], SLACK, "T1") == 1
 
     @pytest.mark.asyncio
     async def test_a_subscriber_nannos_cannot_judge_is_asked_to_switch_it_back_on(self, world):
@@ -464,7 +453,7 @@ class TestAHoldIsACodeNotItsWording:
         )
         await _bind(db, u["writer"].id, SLACK, "T1")
 
-        assert await svc.release_reachability_holds(db, u["writer"], SLACK, ["A1"]) == 1
+        assert await svc.release_reachability_holds(db, u["writer"], SLACK, "T1") == 1
         back = await svc.repo.get_job(db, writers.id)
         assert (back.enabled, back.paused_reason, back.hold) == (True, None, None)
 
@@ -478,7 +467,7 @@ class TestAHoldIsACodeNotItsWording:
         await svc.pause_job(db, writers.id, u["writer"])
         paused = await svc.repo.get_job(db, writers.id)
         assert (paused.paused_reason, paused.hold) == ("Manually paused", None), "no longer releasable"
-        assert await svc.release_reachability_holds(db, u["writer"], SLACK, ["A1", "A2"]) == 0
+        assert await svc.release_reachability_holds(db, u["writer"], SLACK, "T1") == 0
 
     @pytest.mark.asyncio
     async def test_a_held_subscription_cannot_be_switched_on(self, world):

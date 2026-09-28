@@ -18,7 +18,6 @@ import console_backend.routers.delivery_channel_router as router
 def _request_with_repo(repo) -> MagicMock:
     req = MagicMock()
     req.app.state.delivery_channel_repository = repo
-    req.app.state.delivery_reachability_repository = SimpleNamespace(for_user=AsyncMock(return_value={}))
     return req
 
 
@@ -194,23 +193,17 @@ class TestUndeliveredReport:
 
     @pytest.mark.asyncio
     async def test_the_console_lists_channels_with_the_callers_own_reachability(self, monkeypatch):
-        from datetime import datetime, timezone
-
-        from console_backend.models.delivery_channel import DeliveryChannelResponse
-
-        now = datetime.now(timezone.utc)
-        channel = DeliveryChannelResponse(
-            id=3, name="Slack", webhook_url="https://x", client_id="c", registered_by="s", created_at=now, updated_at=now
-        )
-        repo = SimpleNamespace(list_all_channels=AsyncMock(return_value=([channel], 1)))
+        """One query: the repository computes the caller's reachability on each channel."""
+        repo = SimpleNamespace(list_all_channels=AsyncMock(return_value=([], 0)))
         monkeypatch.setattr(router, "get_client_id_from_request", AsyncMock(return_value=None))
-        req = _request_with_repo(repo)
-        req.app.state.delivery_reachability_repository.for_user = AsyncMock(return_value={3: "unreachable"})
 
-        result = await router.list_channels(
-            request=req, db=MagicMock(), current_user=SimpleNamespace(id="u1"), page=1, limit=None, search=None
+        await router.list_channels(
+            request=_request_with_repo(repo),
+            db=MagicMock(),
+            current_user=SimpleNamespace(id="u1"),
+            page=1,
+            limit=None,
+            search=None,
         )
 
-        assert result.channels[0].reachability == "unreachable"
-        req.app.state.delivery_reachability_repository.for_user.assert_awaited_once()
-        assert req.app.state.delivery_reachability_repository.for_user.await_args.args[1:] == ("u1", [3])
+        assert repo.list_all_channels.await_args.kwargs["reachability_for"] == "u1"

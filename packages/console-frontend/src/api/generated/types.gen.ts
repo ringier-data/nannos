@@ -544,7 +544,7 @@ export type BrokerRedeemRequest = {
     /**
      * Workspace Id
      *
-     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. Where the workspace can be reached is published separately (PUT /workspaces/{workspace_id}).
+     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. Every delivery channel the client registers with the same workspace_id reaches the user.
      */
     workspace_id?: string;
 };
@@ -651,20 +651,6 @@ export type BrokerTokenResponse = {
      * Token Type
      */
     token_type?: string;
-};
-
-/**
- * BrokerWorkspaceInstallations
- *
- * ``PUT /workspaces/{workspace_id}``: the client's current installations in one workspace.
- */
-export type BrokerWorkspaceInstallations = {
-    /**
-     * Installation Ids
-     *
-     * The installations the client runs in the workspace, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the workspace.
-     */
-    installation_ids: Array<string>;
 };
 
 /**
@@ -1846,6 +1832,12 @@ export type DeliveryChannelCreate = {
      */
     installation_id: string;
     /**
+     * Workspace Id
+     *
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     */
+    workspace_id?: string | null;
+    /**
      * Message Formatting
      *
      * How this channel renders delivered text. Nothing rewrites an agent's output on the way out, so the writer is told these rules up front: 'slack' for Slack mrkdwn, 'google-chat' for Google Chat markup, 'plain' for no markup, 'markdown' (default) for standard Markdown as the web console renders it. Omitted means 'unchanged': a client that does not declare a format leaves the stored value alone, so re-registration on every boot cannot reset a channel that was set elsewhere. A new channel falls back to the column default.
@@ -1911,6 +1903,12 @@ export type DeliveryChannelResponse = {
      */
     installation_id?: string | null;
     /**
+     * Workspace Id
+     *
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     */
+    workspace_id?: string | null;
+    /**
      * Reachability
      *
      * Whether the user can receive on this channel: 'reachable' (they signed in to Nannos from there), 'unreachable' (they have not; messaging Nannos there once activates it) or 'unknown' (Nannos cannot tell yet, e.g. an older sign-in). Null where it was not asked.
@@ -1948,6 +1946,12 @@ export type DeliveryChannelUpdate = {
      * Secret
      */
     secret?: string | null;
+    /**
+     * Workspace Id
+     *
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     */
+    workspace_id?: string | null;
     /**
      * Message Formatting
      *
@@ -9590,36 +9594,6 @@ export type MintTokenApiV1AuthBrokerTokenPostResponses = {
 };
 
 export type MintTokenApiV1AuthBrokerTokenPostResponse = MintTokenApiV1AuthBrokerTokenPostResponses[keyof MintTokenApiV1AuthBrokerTokenPostResponses];
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutData = {
-    body: BrokerWorkspaceInstallations;
-    path: {
-        /**
-         * Workspace Id
-         */
-        workspace_id: string;
-    };
-    query?: never;
-    url: '/api/v1/auth/broker/workspaces/{workspace_id}';
-};
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutError = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors];
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses = {
-    /**
-     * Successful Response
-     */
-    204: void;
-};
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponse = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses];
 
 export type ListBrokerClientsApiV1AdminBrokerClientsGetData = {
     body?: never;

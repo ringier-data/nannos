@@ -315,18 +315,10 @@ async def _binding_rows(pg_session, user_id: str) -> list[dict]:
     return [dict(r) for r in result.mappings().all()]
 
 
-async def _workspace_installations(pg_session, client_id: str, workspace_id: str) -> list[str] | None:
-    result = await pg_session.execute(
-        text("SELECT installation_ids FROM broker_workspaces WHERE client_id = :c AND workspace_id = :t"),
-        {"c": client_id, "t": workspace_id},
-    )
-    return result.scalar_one_or_none()
-
-
 class TestBindingSecret:
     """ADR-0011 amendment 1: a leaked client credential alone mints for no one. The secret
     /redeem returns is the second factor; the binding is keyed by the client row that
-    keeps it, and its workspace's installations say where the user can be reached."""
+    keeps it, and the workspace it belongs to."""
 
     @pytest.mark.asyncio
     async def test_redeem_binds_the_sign_in_and_stores_only_a_hash(self, broker, pg_session, test_user_db):
@@ -339,8 +331,6 @@ class TestBindingSecret:
         [row] = await _binding_rows(pg_session, test_user_db.id)
         assert (row["client_id"], row["account_key"], row["workspace_id"]) == ("slack-client", "T1:U1", "T1")
         assert redemption.binding_secret not in row["secret_hash"]
-        # Where the workspace can be reached is the registration's business, not a sign-in's.
-        assert await _workspace_installations(pg_session, "slack-client", "T1") is None
 
     @pytest.mark.asyncio
     async def test_signing_in_again_into_a_row_replaces_its_binding(self, broker, pg_session, test_user_db):
@@ -379,32 +369,6 @@ class TestBindingSecret:
 
         [row] = await _binding_rows(pg_session, test_user_db.id)
         assert row["account_key"] == f"user:{test_user_db.id}"
-
-    @pytest.mark.asyncio
-    async def test_a_workspaces_installations_follow_the_client_not_the_sign_in(self, broker, pg_session, test_user_db):
-        """An app installed after the user signed in reaches them too: installations live
-        on the workspace, which only the client's registration writes, and a sign-in leaves them."""
-        slack = await broker.resolve_client(pg_session, "slack-client")
-        await broker.set_workspace_installations(pg_session, slack, "T1", ["A2", "A1", "A1"])
-        _, code = await _signed_in(broker, pg_session, test_user_db)
-        await broker.redeem(pg_session, slack, code, account_key="T1:U1", workspace_id="T1")
-        assert await _workspace_installations(pg_session, "slack-client", "T1") == ["A1", "A2"]
-
-        _, code = await _signed_in(broker, pg_session, test_user_db)
-        await broker.redeem(pg_session, slack, code, account_key="T1:U1", workspace_id="T1")
-        assert await _workspace_installations(pg_session, "slack-client", "T1") == ["A1", "A2"]
-
-        await broker.set_workspace_installations(pg_session, slack, "T1", ["A2"])
-        assert await _workspace_installations(pg_session, "slack-client", "T1") == ["A2"]
-
-    @pytest.mark.asyncio
-    async def test_a_publication_returns_only_the_installations_it_adds(self, broker, pg_session):
-        """What releases reachability holds (#192): a boot's unchanged republication adds none."""
-        slack = await broker.resolve_client(pg_session, "slack-client")
-        assert await broker.set_workspace_installations(pg_session, slack, "T1", ["A1"]) == ["A1"]
-        assert await broker.set_workspace_installations(pg_session, slack, "T1", ["A1"]) == []
-        assert await broker.set_workspace_installations(pg_session, slack, "T1", ["A2", "A1"]) == ["A2"]
-        assert await broker.workspace_installations(pg_session, slack, "T1") == ["A1", "A2"]
 
     @pytest.mark.asyncio
     async def test_a_client_that_requires_the_secret_refuses_without_it(self, broker, pg_session, test_user_db):

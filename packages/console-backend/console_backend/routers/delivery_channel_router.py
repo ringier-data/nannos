@@ -108,14 +108,11 @@ async def list_channels(
         )
     else:
         # Human console user — all channels (no group scoping).
+        # With the caller's own reachability on each, never anyone else's: what the
+        # channel picker greys out (#192).
         channels, total = await repo.list_all_channels(
-            db=db, search=search, page=page, limit=limit
+            db=db, search=search, page=page, limit=limit, reachability_for=current_user.id
         )
-        # What the channel picker greys out (#192): the caller's own, never anyone else's.
-        states = await request.app.state.delivery_reachability_repository.for_user(
-            db, current_user.id, [c.id for c in channels]
-        )
-        channels = [c.model_copy(update={"reachability": states.get(c.id)}) for c in channels]
 
     return DeliveryChannelListResponse(channels=channels, total=total)
 

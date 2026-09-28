@@ -1279,42 +1279,25 @@ class SchedulerService:
         return await self._switch_on_held(db, user, await self.repo.list_held_jobs(db, user.id, _SIGN_IN_HOLDS))
 
     async def release_reachability_holds(
-        self, db: AsyncSession, user: User, client_id: str, installation_ids: list[str]
+        self, db: AsyncSession, user: User, client_id: str, workspace_id: str
     ) -> int:
         """Switch on *user*'s subscriptions held because their channel could not reach
-        them, for the channels of *client_id* in *installation_ids* that now can.
+        them, for the channels of *client_id* in *workspace_id* that now can.
 
-        Called when a sign-in is bound (the installations of its workspace) and when a
-        client lists installations it did not list before. Scoped to those channels,
-        because a hold that followed a client's report (#191) can sit on a channel the
-        bindings still call reachable: only a sign-in there, or a newly listed
-        installation, is news about it. Returns how many were switched on.
+        Called when a sign-in is bound there. Scoped to that workspace's channels, because
+        a hold that followed a client's report (#191) can sit on a channel the bindings
+        still call reachable: only a sign-in there is news about it. Returns how many
+        were switched on.
         """
-        if self._reachability is None or not installation_ids:
+        if self._reachability is None:
             return 0
-        in_scope = await self._reachability.channel_ids(db, client_id, installation_ids)
+        in_scope = await self._reachability.channel_ids_in(db, client_id, workspace_id)
         held = [
             job
             for job in await self.repo.list_held_jobs(db, user.id, (SubscriptionHold.UNREACHABLE,))
             if job.delivery_channel_id in in_scope
         ]
         return await self._switch_on_held(db, user, [job for job in held if job.delivery_reachability == "reachable"])
-
-    async def release_reachability_holds_on(
-        self, db: AsyncSession, user_service: Any, client_id: str, installation_ids: list[str]
-    ) -> int:
-        """``release_reachability_holds`` for every user held on those channels: the
-        client's newly listed installations are news for all of them at once."""
-        if self._reachability is None or not installation_ids:
-            return 0
-        released = 0
-        for user_id in await self._reachability.users_held_on(
-            db, client_id, installation_ids, SubscriptionHold.UNREACHABLE
-        ):
-            user = await user_service.get_user(db, user_id)
-            if user is not None:
-                released += await self.release_reachability_holds(db, user, client_id, installation_ids)
-        return released
 
     async def _switch_on_held(self, db: AsyncSession, user: User, jobs: list[ScheduledJob]) -> int:
         """Resume each of *user*'s held *jobs* as ``resume_job`` would. A one-shot whose

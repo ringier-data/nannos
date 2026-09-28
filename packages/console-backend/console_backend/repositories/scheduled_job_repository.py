@@ -102,8 +102,8 @@ _JOB_VIEW_SELECT = """
            d.destroy_after_trigger,
            s.last_check_result,
            s.delivery_channel_id,
-           (SELECT """ + reachability_sql("s.user_id", "dc.client_id", "dc.installation_id") + """
-              FROM delivery_channels dc WHERE dc.id = s.delivery_channel_id)            AS delivery_reachability,
+           CASE WHEN dc.id IS NOT NULL THEN """ + reachability_sql("s.user_id", "dc.client_id", "dc.workspace_id") + """
+           END                                                                          AS delivery_reachability,
            d.voice_call,
            s.enabled, d.max_failures, s.consecutive_failures, s.paused_reason, s.hold,
            d.revision, d.is_public, d.suspended_at, d.suspended_by_user_id, d.suspended_reason,
@@ -130,6 +130,8 @@ _JOB_VIEW_SELECT = """
     -- Who to name when a run of a shared job arrives ("shared with you by …"). A LEFT
     -- join: a deleted owner leaves the job perfectly runnable for its subscribers.
     LEFT JOIN users ou ON ou.id = d.owner_user_id
+    -- Whether the subscriber can receive on their channel (#192).
+    LEFT JOIN delivery_channels dc ON dc.id = s.delivery_channel_id
 """
 
 

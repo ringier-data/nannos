@@ -30,6 +30,14 @@ _REACHABILITY_DESCRIPTION = (
 )
 
 
+_WORKSPACE_DESCRIPTION = (
+    "The workspace this installation belongs to, in the vocabulary the client binds sign-ins "
+    "under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace "
+    "reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it "
+    "reaches, so it warns rather than refuses."
+)
+
+
 class DeliveryChannelCreate(BaseModel):
     """Request body for registering a new delivery channel (A2A client → backend)."""
 
@@ -56,6 +64,7 @@ class DeliveryChannelCreate(BaseModel):
             "every channel resolves by (client_id, installation_id)."
         ),
     )
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=200, description=_WORKSPACE_DESCRIPTION)
     message_formatting: MessageFormatting | None = Field(
         default=None,
         description=(
@@ -74,6 +83,7 @@ class DeliveryChannelUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     webhook_url: str | None = None
     secret: str | None = Field(default=None, min_length=1)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=200, description=_WORKSPACE_DESCRIPTION)
     message_formatting: MessageFormatting | None = Field(default=None, description=_FORMATTING_DESCRIPTION)
 
 
@@ -94,6 +104,7 @@ class DeliveryChannelResponse(BaseModel):
         default=None,
         description="Stable client-supplied identifier (set when the channel was self-registered).",
     )
+    workspace_id: str | None = Field(default=None, description=_WORKSPACE_DESCRIPTION)
     reachability: DeliveryReachability | None = Field(default=None, description=_REACHABILITY_DESCRIPTION)
     created_at: datetime
     updated_at: datetime

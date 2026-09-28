@@ -48,7 +48,7 @@ export interface BrokerBinding {
   accountKey: string;
   /**
    * The workspace the sign-in belongs to (a Slack team, a Google Chat project); empty when there
-   * is one. Where a workspace can be reached is published separately, with `setWorkspaceInstallations`.
+   * is one. Every delivery channel this client registers with the same `workspace_id` reaches it.
    */
   workspaceId?: string;
 }
@@ -150,19 +150,6 @@ export class BrokerClient {
     return { accessToken: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
   }
 
-  /**
-   * Tell the broker the installations this client runs in *workspaceId* now, so every sign-in
-   * there is reachable on each, including one installed after the user signed in.
-   */
-  async setWorkspaceInstallations(workspaceId: string, installationIds: string[]): Promise<void> {
-    const response = await this.send('PUT', `/api/v1/auth/broker/workspaces/${encodeURIComponent(workspaceId)}`, {
-      installation_ids: installationIds,
-    });
-    if (!response.ok) {
-      throw new BrokerError(`Broker refused the installations of ${workspaceId}: ${await describe(response)}`, response.status);
-    }
-  }
-
   private endpoint(path: string): string {
     return `${this.options.baseUrl.replace(/\/+$/, '')}${path}`;
   }
@@ -172,7 +159,7 @@ export class BrokerClient {
   }
 
   /** Call as this client. A 401 means the cached service token went stale: renew once. */
-  private async send(method: 'POST' | 'PUT', path: string, body: unknown): Promise<Response> {
+  private async send(method: 'POST', path: string, body: unknown): Promise<Response> {
     const attempt = async (token: string) =>
       fetch(this.endpoint(path), {
         method,

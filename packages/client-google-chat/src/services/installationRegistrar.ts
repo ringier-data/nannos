@@ -15,7 +15,6 @@
 import { Config } from '../config/config.js';
 import { OIDCClient } from './oidcClient.js';
 import { InstallationSecretService } from './installationSecretService.js';
-import type { BrokerClient } from './brokerClient.js';
 import { Logger } from '../utils/logger.js';
 
 const logger = Logger.getLogger('InstallationRegistrar');
@@ -26,6 +25,12 @@ interface DeliveryChannelCreateBody {
   webhook_url: string;
   secret: string;
   installation_id: string;
+  /**
+   * The project NUMBER: the workspace a brokered sign-in is bound to, while the channel is
+   * keyed by the project name. A sign-in in that project reaches this channel (ADR-0011
+   * amendment 2).
+   */
+  workspace_id: string;
   /**
    * How this channel renders delivered text. The scheduler sends it to the run that
    * writes a notification, so scheduled messages arrive formatted for this client
@@ -38,14 +43,6 @@ export interface InstallationRegistrarDeps {
   config: Config;
   oidcClient: OIDCClient;
   installationSecretService: InstallationSecretService;
-  /**
-   * The token broker, in broker mode. Registration then also tells it which installation
-   * each project is, which is where that project's sign-ins can be reached (ADR-0011
-   * amendment 1).
-   */
-  broker?: BrokerClient;
-  /** Waits before each retry of that publication; the default spreads them over ~12 minutes. */
-  publishRetryDelaysMs?: number[];
 }
 
 export async function registerInstallations(deps: InstallationRegistrarDeps): Promise<void> {
@@ -67,6 +64,7 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
         // The GCP project name identifies the tenant; bot_name is a display string two
         // projects may legitimately share, which collapsed them onto one channel and secret.
         installationId: project.projectName,
+        workspaceId: project.projectNumber,
         name: `Google Chat ${project.botName} (${project.projectName})`,
         description: `Google Chat project ${project.projectName} via ${project.botName}`,
       });
@@ -74,60 +72,11 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
       logger.error(error, `Failed to register delivery channel for project=${project.projectName}: ${error}`);
     }
   }
-
-  if (deps.broker) {
-    // A sign-in is keyed by the project NUMBER; its channel is registered under the NAME.
-    const workspaces = new Map<string, string[]>();
-    for (const project of config.googleChatConfigs) {
-      workspaces.set(project.projectNumber, [...(workspaces.get(project.projectNumber) ?? []), project.projectName]);
-    }
-    await publishWorkspaceInstallations(deps.broker, workspaces, deps.publishRetryDelaysMs);
-  }
-}
-
-/** Waits before each retry of a workspace publication that failed. */
-const PUBLISH_RETRY_DELAYS_MS = [30_000, 120_000, 600_000];
-
-/**
- * Tell the broker the installations this client runs in each workspace: where every sign-in
- * there can be reached (ADR-0011 amendment 1). This is the only writer of that list, so a
- * failure is retried rather than left for a restart. Per-workspace isolation, like the
- * channels: one refusal does not hold up the rest. After the last retry the next restart
- * publishes again.
- */
-export async function publishWorkspaceInstallations(
-  broker: BrokerClient,
-  workspaces: Map<string, string[]>,
-  retryDelaysMs: number[] = PUBLISH_RETRY_DELAYS_MS
-): Promise<void> {
-  let pending = [...workspaces];
-  for (let attempt = 0; ; attempt++) {
-    const failed: [string, string[]][] = [];
-    for (const [workspaceId, installationIds] of pending) {
-      try {
-        await broker.setWorkspaceInstallations(workspaceId, installationIds);
-      } catch (error) {
-        logger.warn(`Failed to publish the installations of workspace ${workspaceId}: ${error}`);
-        failed.push([workspaceId, installationIds]);
-      }
-    }
-    if (failed.length === 0) {
-      return;
-    }
-    if (attempt >= retryDelaysMs.length) {
-      logger.error(
-        `Gave up publishing the installations of ${failed.map(([id]) => id).join(', ')}; the next restart publishes them again`
-      );
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
-    pending = failed;
-  }
 }
 
 export async function registerOne(
   deps: InstallationRegistrarDeps,
-  opts: { installationId: string; name: string; description?: string }
+  opts: { installationId: string; workspaceId: string; name: string; description?: string }
 ): Promise<void> {
   const { config, oidcClient, installationSecretService } = deps;
   if (!config.consoleBackend) return;
@@ -142,6 +91,7 @@ export async function registerOne(
     webhook_url: webhookUrl,
     secret,
     installation_id: opts.installationId,
+    workspace_id: opts.workspaceId,
     message_formatting: 'google-chat',
   };
 

@@ -6,7 +6,7 @@ import { createStorageProvider, type StorageProvider } from './storage/index.js'
 import { OIDCClient } from './services/oidcClient.js';
 import { registerInstallations } from './services/installationRegistrar.js';
 import { createInstallationSecretService } from './services/installationSecretServiceFactory.js';
-import { createBrokerClient, createUserAuthService } from './services/userAuthServiceFactory.js';
+import { createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { GoogleChatService } from './services/googleChatService.js';
@@ -541,7 +541,6 @@ function setupServerTimeouts(server: Server, config: Config) {
       config,
       oidcClient,
       installationSecretService,
-      broker: config.userAuthMode === 'broker' ? createBrokerClient(config, oidcClient) : undefined,
     }).catch((error) => {
       logger.error(error, `Delivery-channel self-registration failed: ${error}`);
     });

@@ -16,8 +16,7 @@
 import { Config } from '../config/config.js';
 import { OIDCClient } from './oidcClient.js';
 import { InstallationSecretService } from './installationSecretService.js';
-import { BotInstallation, IBotInstallationStore } from '../storage/types.js';
-import type { BrokerClient } from './brokerClient.js';
+import { IBotInstallationStore } from '../storage/types.js';
 import { Logger } from '../utils/logger.js';
 
 const logger = Logger.getLogger('InstallationRegistrar');
@@ -28,6 +27,11 @@ interface DeliveryChannelCreateBody {
   webhook_url: string;
   secret: string;
   installation_id: string;
+  /**
+   * The Slack team the app is installed in: the workspace a brokered sign-in is bound to.
+   * A sign-in in that team reaches this channel (ADR-0011 amendment 2).
+   */
+  workspace_id: string;
   /**
    * How this channel renders delivered text. The scheduler sends it to the run that
    * writes a notification, so scheduled messages arrive formatted for this client
@@ -41,13 +45,6 @@ export interface InstallationRegistrarDeps {
   oidcClient: OIDCClient;
   botInstallationStore: IBotInstallationStore;
   installationSecretService: InstallationSecretService;
-  /**
-   * The token broker, in broker mode. Registration then also tells it which apps are active
-   * in each team, which is where that team's sign-ins can be reached (ADR-0011 amendment 1).
-   */
-  broker?: BrokerClient;
-  /** Waits before each retry of that publication; the default spreads them over ~12 minutes. */
-  publishRetryDelaysMs?: number[];
 }
 
 export async function registerInstallations(deps: InstallationRegistrarDeps): Promise<void> {
@@ -79,6 +76,7 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
         // is a display string — two workspaces may legitimately both call their bot "Nannos",
         // and keying on it silently collapsed them onto one channel and one secret.
         installationId: bot.appId,
+        workspaceId: bot.teamId,
         name: `Slack ${bot.botName} (${bot.teamId})`,
         description: `Slack workspace ${bot.teamId} via ${bot.botName} (${bot.slashCommand})`,
       });
@@ -87,69 +85,11 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
       logger.error(error, `Failed to register delivery channel for appId=${bot.appId}: ${error}`);
     }
   }
-
-  if (deps.broker) {
-    await publishWorkspaceInstallations(deps.broker, workspacesOf(installations), deps.publishRetryDelaysMs);
-  }
-}
-
-/**
- * Every team this client knows, with the apps active in it. A sign-in is per team and a
- * notification is looked up by team, so each of them reaches it. A team whose apps were all
- * deactivated maps to none, so its sign-ins stop counting as reachable.
- */
-function workspacesOf(installations: BotInstallation[]): Map<string, string[]> {
-  const workspaces = new Map<string, string[]>();
-  for (const bot of installations) {
-    const appIds = workspaces.get(bot.teamId) ?? [];
-    workspaces.set(bot.teamId, bot.isActive ? [...appIds, bot.appId] : appIds);
-  }
-  return workspaces;
-}
-
-/** Waits before each retry of a workspace publication that failed. */
-const PUBLISH_RETRY_DELAYS_MS = [30_000, 120_000, 600_000];
-
-/**
- * Tell the broker the installations this client runs in each workspace: where every sign-in
- * there can be reached (ADR-0011 amendment 1). This is the only writer of that list, so a
- * failure is retried rather than left for a restart. Per-workspace isolation, like the
- * channels: one refusal does not hold up the rest. After the last retry the next restart
- * publishes again.
- */
-export async function publishWorkspaceInstallations(
-  broker: BrokerClient,
-  workspaces: Map<string, string[]>,
-  retryDelaysMs: number[] = PUBLISH_RETRY_DELAYS_MS
-): Promise<void> {
-  let pending = [...workspaces];
-  for (let attempt = 0; ; attempt++) {
-    const failed: [string, string[]][] = [];
-    for (const [workspaceId, installationIds] of pending) {
-      try {
-        await broker.setWorkspaceInstallations(workspaceId, installationIds);
-      } catch (error) {
-        logger.warn(`Failed to publish the installations of workspace ${workspaceId}: ${error}`);
-        failed.push([workspaceId, installationIds]);
-      }
-    }
-    if (failed.length === 0) {
-      return;
-    }
-    if (attempt >= retryDelaysMs.length) {
-      logger.error(
-        `Gave up publishing the installations of ${failed.map(([id]) => id).join(', ')}; the next restart publishes them again`
-      );
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
-    pending = failed;
-  }
 }
 
 export async function registerOne(
   deps: InstallationRegistrarDeps,
-  opts: { installationId: string; name: string; description?: string }
+  opts: { installationId: string; workspaceId: string; name: string; description?: string }
 ): Promise<void> {
   const { config, oidcClient, installationSecretService } = deps;
   if (!config.consoleBackend) return;
@@ -164,6 +104,7 @@ export async function registerOne(
     webhook_url: webhookUrl,
     secret,
     installation_id: opts.installationId,
+    workspace_id: opts.workspaceId,
     message_formatting: 'slack',
   };
 

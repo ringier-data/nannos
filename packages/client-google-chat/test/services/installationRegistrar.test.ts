@@ -3,7 +3,6 @@ import { registerInstallations } from '../../src/services/installationRegistrar.
 import { Config } from '../../src/config/config.js';
 import { OIDCClient } from '../../src/services/oidcClient.js';
 import { InstallationSecretService } from '../../src/services/installationSecretService.js';
-import type { BrokerClient } from '../../src/services/brokerClient.js';
 
 /** Secrets keyed by whatever installation id the registrar asks for. */
 class FakeSecretService extends InstallationSecretService {
@@ -15,7 +14,7 @@ class FakeSecretService extends InstallationSecretService {
   }
 }
 
-function deps(broker?: BrokerClient, publishRetryDelaysMs?: number[]) {
+function deps() {
   return {
     config: {
       consoleBackend: { url: 'https://console.example.com', audience: 'console-aud' },
@@ -29,8 +28,6 @@ function deps(broker?: BrokerClient, publishRetryDelaysMs?: number[]) {
       getServiceToken: jest.fn<(a: string) => Promise<string>>().mockResolvedValue('svc-token'),
     } as unknown as OIDCClient,
     installationSecretService: new FakeSecretService(),
-    broker,
-    publishRetryDelaysMs,
   };
 }
 
@@ -42,31 +39,14 @@ describe('registerInstallations', () => {
     (globalThis as unknown as { fetch: unknown }).fetch = fetchMock;
   });
 
-  test('without the broker it registers the channels and publishes nothing', async () => {
+  test('each channel names its project number as the workspace a sign-in reaches it through', async () => {
     await registerInstallations(deps());
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
 
-  test('in broker mode each project number is published with the name its channel is registered under', async () => {
-    const setWorkspaceInstallations = jest.fn<(workspaceId: string, ids: string[]) => Promise<void>>().mockResolvedValue();
-
-    await registerInstallations(deps({ setWorkspaceInstallations } as unknown as BrokerClient));
-
-    // A sign-in is keyed by the project number; its delivery channel by the project name.
-    expect(setWorkspaceInstallations.mock.calls).toEqual([
-      ['111', ['chat-project']],
-      ['222', ['other-project']],
+    // A sign-in is keyed by the project number; the channel by the project name.
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse((call[1] as { body: string }).body));
+    expect(bodies.map((b) => [b.installation_id, b.workspace_id])).toEqual([
+      ['chat-project', '111'],
+      ['other-project', '222'],
     ]);
-  });
-
-  test('a refused project is retried without holding up the other', async () => {
-    const setWorkspaceInstallations = jest
-      .fn<(workspaceId: string, ids: string[]) => Promise<void>>()
-      .mockRejectedValueOnce(new Error('403'))
-      .mockResolvedValue();
-
-    await registerInstallations(deps({ setWorkspaceInstallations } as unknown as BrokerClient, [0]));
-
-    expect(setWorkspaceInstallations.mock.calls.map(([id]) => id)).toEqual(['111', '222', '111']);
   });
 });
