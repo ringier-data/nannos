@@ -799,22 +799,19 @@ function EditForm({
       } catch (e) {
         // The edit is already persisted; only the resume failed — a one-time job that
         // has already run refuses to resume. Reporting this as a failed save would be
-        // a lie, and the user would try again on changes that are already stored.
-        throw new Error(
-          `Changes saved, but the job could not be resumed: ${e instanceof Error ? e.message : String(e)}`
-        );
+        // a lie, and the user would try again on changes that are already stored. A
+        // toast, not the form's error: a saved trigger change remounts the form.
+        toast.error('Changes saved, but the job could not be resumed', {
+          description: e instanceof Error ? e.message : String(e),
+        });
       }
     },
-    // On failure too: the edit may be saved and only the resume refused, and a page left
-    // on the old values would compute the next save from them.
-    onSettled: () => {
+    onSuccess: () => {
       qc.invalidateQueries({
         queryKey: ['scheduler-job', job.id],
       });
       // Resuming changes the job's status, which the list renders too.
       qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
-    },
-    onSuccess: () => {
       setDirty(false);
       setEditing(false);
     },

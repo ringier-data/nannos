@@ -98,6 +98,10 @@ class DeliveryUnreachableError(ValueError):
     it with a 400 whose detail, including how to activate the channel, is relayed."""
 
 
+class OneShotElapsedError(ValueError):
+    """A one-time job whose moment has passed cannot be switched on again."""
+
+
 class SchedulerNotReadyError(ValueError):
     """The caller has no vaulted offline token, so a job running under their account
     could not run. A ValueError, so every router answers it with a 400 whose detail —
@@ -1032,13 +1036,7 @@ class SchedulerService:
                 await db.rollback()
                 # The move stands, so the reachability code no longer describes the stop:
                 # record the one that does, which also makes the right event release it.
-                code = (
-                    PauseCode.SIGN_IN_EXPIRED
-                    if isinstance(exc, SchedulerNotReadyError)
-                    else PauseCode.ELAPSED_WHILE_HELD
-                    if job.schedule_kind == ScheduleKind.ONCE
-                    else None
-                )
+                code = self._code_for_refusal(exc)
                 if code is not None and await self.repo.recode_stop(db, actor, job_id, code):
                     await db.commit()
                 logger.info("Job %d moved but not switched on: %s", job_id, exc)
@@ -1266,8 +1264,12 @@ class SchedulerService:
         if job.schedule_kind == ScheduleKind.ONCE:
             ref = job.run_at or job.next_run_at
             if ref is None or ref <= datetime.now(timezone.utc):
-                raise ValueError(
-                    "This one-time job has already run; create a new job instead of resuming it."
+                # A job that was held when its moment came never ran: say so, as its
+                # status does, rather than that it ran.
+                raise OneShotElapsedError(
+                    f"{render_pause(PauseCode.ELAPSED_WHILE_HELD)}."
+                    if job.pause_code == PauseCode.ELAPSED_WHILE_HELD
+                    else "This one-time job has already run; create a new job instead of resuming it."
                 )
         next_run_at = compute_next_run(
             job.schedule_kind, job.cron_expr, job.interval_seconds, job.run_at, tz=job.timezone
@@ -1319,6 +1321,18 @@ class SchedulerService:
         in_scope = await self._reachability.channel_ids_in(db, client_id, workspace_id)
         return await self._switch_on_held(db, user, [job for job in held if job.delivery_channel_id in in_scope])
 
+    @staticmethod
+    def _code_for_refusal(exc: ValueError) -> PauseCode | None:
+        """The stop a refused ``resume_job`` leaves true, by the refusal itself; None when
+        no code says it better than the one the job has."""
+        if isinstance(exc, DeliveryUnreachableError):
+            return PauseCode.UNREACHABLE
+        if isinstance(exc, SchedulerNotReadyError):
+            return PauseCode.SIGN_IN_EXPIRED
+        if isinstance(exc, OneShotElapsedError):
+            return PauseCode.ELAPSED_WHILE_HELD
+        return None
+
     async def _switch_on_held(self, db: AsyncSession, user: User, jobs: list[ScheduledJob]) -> int:
         """Resume each of *user*'s held *jobs* as ``resume_job`` would. A one-shot whose
         moment passed while it waited stays off with the reason that says so; one whose
@@ -1337,15 +1351,16 @@ class SchedulerService:
             try:
                 if await self.resume_job(db, job.id, user):
                     released += 1
-            except DeliveryUnreachableError:
-                # Signed in, but not from this job's channel: still held, now for the
-                # reason that is true, which a sign-in from that channel releases.
-                if job.pause_code != PauseCode.UNREACHABLE:
-                    await self.repo.recode_stop(db, user, job.id, PauseCode.UNREACHABLE)
-                    await db.commit()
             except ValueError as exc:
-                # E.g. a stored timezone that no longer resolves: leave it held and visible.
-                logger.warning("Could not switch on held job %d for user %s: %s", job.id, user.id, exc)
+                # Still held, now for the reason that is true, which the matching event
+                # releases (a sign-in from that channel, a sign-in at all). Anything else,
+                # e.g. a stored timezone that no longer resolves, stays held and visible.
+                code = self._code_for_refusal(exc)
+                if code is not None and code != job.pause_code:
+                    if await self.repo.recode_stop(db, user, job.id, code):
+                        await db.commit()
+                elif code is None:
+                    logger.warning("Could not switch on held job %d for user %s: %s", job.id, user.id, exc)
         return released
 
     # ------------------------------------------------------------------
@@ -1936,7 +1951,6 @@ class SchedulerService:
         channel = target["channel_name"]
         await self.repo.mark_run_undelivered(db, report.run_id, report.reason)
         held: PauseCode | None = None
-        finished = False
         # A run dispatched before the job moved says nothing about the channel it uses now.
         if report.reason == "no_recipient" and target["live"] and target["current_channel_id"] == target["channel_id"]:
             # A sign-in releases the hold only where the backend can see one: a subscriber
@@ -1944,12 +1958,6 @@ class SchedulerService:
             code = PauseCode.UNREACHABLE if target["reachability"] != "unknown" else PauseCode.UNDELIVERED
             if await self.repo.disable_subscription(db, target["subscription_id"], code, only_if_enabled=True):
                 held = code
-            else:
-                # Already off. If that is because the job is done (a one-shot retired, a
-                # one-time watch fired), nothing is left to hold, but its last result
-                # reached nobody and nothing else says so.
-                enabled, stop = await self.repo.subscription_state(db, target["subscription_id"])
-                finished = not enabled and stop in (None, PauseCode.CONDITION_MET_ONCE)
         await db.commit()
         # The one place what failed in detail is kept: the run stores only the code. A
         # missing recipient is the subscriber's to fix, and held and notified below, so it
@@ -1964,22 +1972,6 @@ class SchedulerService:
             f": {report.detail}" if report.detail else "",
             "; subscription held" if held else "",
         )
-        if finished:
-            await self._notify(
-                db,
-                [
-                    NotificationData(
-                        user_id=target["user_id"],
-                        notification_type=NotificationType.SCHEDULED_JOB_PAUSED,
-                        title=f"Scheduled job result not delivered: {target['job_name']}",
-                        message=(
-                            f"'{target['job_name']}' ran for the last time, but its result reached nobody on "
-                            f"'{channel}'. Its run history has it."
-                        ),
-                        metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
-                    )
-                ],
-            )
         if held is not None:
             # After the commit and best effort, like every scheduler notification: the hold
             # and the undelivered mark are the record, and must not roll back with it.

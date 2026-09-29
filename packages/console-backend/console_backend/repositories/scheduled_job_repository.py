@@ -1542,18 +1542,12 @@ class ScheduledJobRepository(AuditedRepository):
                     -- was in flight) keeps the stop it has, and the release that stop
                     -- promises.
                     pause_code           = CASE
-                        -- A reachability hold on a job that is now done promises a release
-                        -- that cannot happen: it goes with the job (the caller says so).
-                        WHEN :retires AND NOT s.enabled AND s.pause_code IN ('unreachable', 'undelivered')
-                            THEN CAST(:pause_code AS text)
                         WHEN :failed AND s.enabled AND (s.consecutive_failures + 1) >= d.max_failures THEN 'auto_paused'
                         WHEN CAST(:pause_code AS text) IS NOT NULL AND (:retires OR NOT s.enabled)
                             THEN CAST(:pause_code AS text)
                         ELSE s.pause_code
                     END,
                     pause_detail         = CASE
-                        WHEN :retires AND NOT s.enabled AND s.pause_code IN ('unreachable', 'undelivered')
-                            THEN CAST(:pause_detail AS jsonb)
                         WHEN :failed AND s.enabled AND (s.consecutive_failures + 1) >= d.max_failures
                             THEN jsonb_build_object('max_failures', d.max_failures)
                         WHEN CAST(:pause_code AS text) IS NOT NULL AND (:retires OR NOT s.enabled)

@@ -577,7 +577,7 @@ class TestMovingAHeldJobReleasesIt:
         assert (moved.enabled, moved.pause_code, moved.delivery_channel_id) == (
             False, PauseCode.ELAPSED_WHILE_HELD, ch["B1"]
         )
-        with pytest.raises(ValueError, match="already run"):
+        with pytest.raises(ValueError, match="did not run; set a new time"):
             await svc.resume_job(db, writers.id, u["writer"])
 
     @pytest.mark.asyncio
@@ -749,41 +749,3 @@ class TestARehold:
 
         assert await svc.repo.recode_stop(db, u["owner"], job.id, PauseCode.UNREACHABLE) is False
         assert (await svc.repo.get_job(db, job.id)).enabled is True
-
-
-class TestAHoldOnAJobThatIsDone:
-    @pytest.mark.asyncio
-    async def test_a_one_shot_that_retires_while_held_drops_the_hold(self, world):
-        """The report held it mid-run; the run then retired it. Its release can no longer
-        happen, so the code goes with the job."""
-        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
-        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
-        await svc.repo.disable_subscription(db, job.id, PauseCode.UNREACHABLE)
-
-        enabled, reason = await svc.repo.complete_job(db, job.id, JobRunStatus.SUCCESS, next_run_at=None)
-        await db.commit()
-
-        assert (enabled, reason) == (False, None)
-        assert (await svc.repo.get_job(db, job.id)).pause_code is None
-
-    @pytest.mark.asyncio
-    async def test_a_report_on_a_job_that_is_done_says_its_last_result_was_lost(self, world):
-        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
-        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
-        run_id = await svc.repo.create_run(db, job.id, delivery_channel_id=ch["A1"])
-        # The one-time watch fired and finished before the client's report arrived.
-        await svc.repo.disable_subscription(db, job.id, PauseCode.CONDITION_MET_ONCE)
-        await db.commit()
-
-        report = UndeliveredReport(run_id=run_id, installation_id="A1", reason="no_recipient")
-        assert await svc.report_undelivered(db, SLACK, report) is True
-
-        assert (await svc.repo.get_job(db, job.id)).pause_code == PauseCode.CONDITION_MET_ONCE
-        message = (
-            await db.execute(
-                text("SELECT message FROM user_notifications WHERE user_id = :u AND type = :t"),
-                {"u": u["owner"].id, "t": NotificationType.SCHEDULED_JOB_PAUSED.value},
-            )
-        ).scalar_one()
-        assert "ran for the last time, but its result reached nobody" in message
-
