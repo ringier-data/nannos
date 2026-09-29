@@ -569,6 +569,17 @@ async def test_a_hold_on_a_deleted_channel_needs_a_resume(pg_session, people, co
 
 
 @pytest.mark.asyncio
+async def test_a_hold_on_a_deleted_channel_without_a_token_waits_on_the_sign_in(pg_session, people):
+    """Switching it back on is refused without a live token, so the sign-in comes first."""
+    job = await _hold(pg_session, "chat-only-user", "Orphaned", PauseCode.UNREACHABLE.value, channel=None)
+
+    user = await UserService().get_user_with_groups(pg_session, "chat-only-user")
+
+    assert user is not None and user.onboarding is not None
+    assert user.onboarding.issues == [_issue(K.SCHEDULER_NOT_READY, S.BLOCKING, [(job, "Orphaned")])]
+
+
+@pytest.mark.asyncio
 async def test_group_lists_carry_no_onboarding(pg_session, people, group_service):
     """Plain members read the group lists (`GET /groups`); they must not learn co-members'
     job and channel names. Only the member listings a manager reads carry it."""

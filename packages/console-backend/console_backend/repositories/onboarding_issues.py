@@ -124,6 +124,9 @@ def onboarding_issues_sql(user_id: str, group_id: str | None = None) -> str:
                            THEN '{OnboardingIssueKind.NEEDS_RESUME.value}'
                        -- A delivery hold whose channel was deleted has no client to sign in
                        -- to; it stays off until the member switches it back on or moves it.
+                       -- ...unless it cannot be switched back on without a sign-in either.
+                       WHEN os.pause_code IN ({delivery_holds}) AND oc.id IS NULL
+                            AND who.token IS DISTINCT FROM 'live' THEN 'sign_in'
                        WHEN os.pause_code IN ({delivery_holds}) AND oc.id IS NULL
                            THEN '{OnboardingIssueKind.NEEDS_RESUME.value}'
                        WHEN os.pause_code IN ({job_holds}) THEN os.pause_code

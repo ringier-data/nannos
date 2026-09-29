@@ -67,7 +67,7 @@ export function issueHint(issue: OnboardingIssue): string {
     case 'agent_inaccessible':
       return `They lost access to ${issue.agent_name ?? 'the agent'}, so ${jobsPhrase(n)} running it wait switched off. Sharing the agent with one of their groups again, then resuming the job, fixes it.`;
     case 'needs_resume':
-      return `${n === 1 ? 'One scheduled job was' : `${n} scheduled jobs were`} switched off and stay${n === 1 ? 's' : ''} off until they switch ${n === 1 ? 'it' : 'them'} back on from their Scheduler page (after a sign-in that didn't switch ${n === 1 ? 'it' : 'them'} back on, or a delivery channel that was removed). Only they can; if it's refused, the job page says why.`;
+      return `${n === 1 ? 'One scheduled job was' : `${n} scheduled jobs were`} switched off (a failed token refresh, a sign-in that didn't switch ${n === 1 ? 'it' : 'them'} back on, or a delivery channel that was removed). Signing in again, switching ${n === 1 ? 'it' : 'them'} back on from their Scheduler page, or moving ${n === 1 ? 'it' : 'them'} to another channel fixes it; only they can.`;
     case 'access_revoked':
       return `The share behind ${jobsPhrase(n)} was withdrawn, so they wait switched off. Sharing the job with them again restores it.`;
     case 'unknown_reachability':

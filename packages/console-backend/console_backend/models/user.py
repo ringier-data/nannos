@@ -127,8 +127,9 @@ class OnboardingIssueKind(str, Enum):
     #: The grant behind a job the user subscribed to was withdrawn.
     ACCESS_REVOKED = "access_revoked"
     #: Switched off with nothing left to release it but the member: a sign-in hold that
-    #: outlived their sign-in, or a delivery hold whose channel was deleted. They switch it
-    #: back on (or move it) from their Scheduler page; an administrator cannot.
+    #: outlived their sign-in (a failed token refresh, or a release that did not run), or a
+    #: delivery hold whose channel was deleted. Signing in again, switching it back on from
+    #: their Scheduler page, or moving it to another channel fixes it; an administrator cannot.
     NEEDS_RESUME = "needs_resume"
     #: Jobs deliver to a channel Nannos cannot judge: no brokered sign-in with that client
     #: (an older local sign-in looks the same), or a channel with no known workspace.
