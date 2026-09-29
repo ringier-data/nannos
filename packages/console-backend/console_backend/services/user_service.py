@@ -15,9 +15,13 @@ from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import (
     BulkOperationResult,
     BulkUserOperation,
+    IssueSeverity,
+    OnboardingIssueKind,
+    OnboardingSummary,
     User,
     UserGroupMembership,
     UserOnboarding,
+    UserSort,
     UserStatus,
     UserWithGroups,
     has_idp_identity,
@@ -25,8 +29,13 @@ from ..models.user import (
 from ..repositories.user_repository import UserRepository
 from ..services.audit_service import AuditService
 from ..services.keycloak_admin_service import KeycloakAdminService
-from ..repositories.delivery_reachability_repository import unreachable_subscriptions_sql
-from ..services.scheduler_token_service import OFFLINE_TOKEN_STATE_SQL
+from ..repositories.onboarding_issues import (
+    ONBOARDING_SORT,
+    onboarding_column_sql,
+    onboarding_conditions,
+    onboarding_sql,
+    summarize_onboarding,
+)
 from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
@@ -311,54 +320,30 @@ class UserService:
             for row in group_rows
         ]
 
-        state = (
+        onboarding = (
             await db.execute(
-                text(
-                    f"SELECT {OFFLINE_TOKEN_STATE_SQL} AS offline_token, "
-                    f"{unreachable_subscriptions_sql('u.id')} AS unreachable FROM users u WHERE u.id = :user_id"
-                ),
+                text(f"SELECT {onboarding_column_sql('u.id')} FROM users u WHERE u.id = :user_id"),
                 {"user_id": user_id},
             )
-        ).one()
+        ).scalar_one()
 
         return UserWithGroups(
             **user.model_dump(),
             groups=groups,
-            onboarding=UserOnboarding.of(user.sub, state.offline_token, user.is_service_account, state.unreachable),
+            onboarding=UserOnboarding.of(user.is_service_account, onboarding),
         )
 
-    async def list_users(
-        self,
-        db: AsyncSession,
-        page: int = 1,
-        limit: int = 20,
-        search: str | None = None,
-        group_id: int | None = None,
-        exclude_group_id: int | None = None,
-        status: UserStatus | None = None,
-        include_deleted: bool = False,
-    ) -> tuple[list[UserWithGroups], int]:
-        """List users with pagination and filtering.
-
-        Args:
-            db: Database session
-            page: Page number (1-indexed)
-            limit: Items per page
-            search: Search term for name/email
-            group_id: Filter by group membership
-            exclude_group_id: Drop users who are already members of this group
-            status: Keep only users in this status
-            include_deleted: Whether to include deleted users
-
-        Returns:
-            Tuple of (users with groups, total count)
-        """
-        # Build WHERE clauses
-        conditions = []
-        params: dict[str, Any] = {
-            "limit": limit,
-            "offset": (page - 1) * limit,
-        }
+    @staticmethod
+    def _user_conditions(
+        search: str | None,
+        group_id: int | None,
+        exclude_group_id: int | None,
+        status: UserStatus | None,
+        include_deleted: bool,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """The WHERE conditions over ``users u`` shared by the list and its onboarding summary."""
+        conditions: list[str] = []
+        params: dict[str, Any] = {}
 
         if not include_deleted:
             conditions.append("u.status != 'deleted'")
@@ -393,12 +378,68 @@ class UserService:
             conditions.append("u.status = :status")
             params["status"] = status.value if isinstance(status, UserStatus) else status
 
-        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        return conditions, params
 
-        # Count query
+    async def list_users(
+        self,
+        db: AsyncSession,
+        page: int = 1,
+        limit: int = 20,
+        search: str | None = None,
+        group_id: int | None = None,
+        exclude_group_id: int | None = None,
+        status: UserStatus | None = None,
+        include_deleted: bool = False,
+        severity: list[IssueSeverity] | None = None,
+        issue: list[OnboardingIssueKind] | None = None,
+        client_id: str | None = None,
+        sort: UserSort = UserSort.CREATED,
+    ) -> tuple[list[UserWithGroups], int]:
+        """List users with pagination and filtering.
+
+        Args:
+            db: Database session
+            page: Page number (1-indexed)
+            limit: Items per page
+            search: Search term for name/email
+            group_id: Filter by group membership
+            exclude_group_id: Drop users who are already members of this group
+            status: Keep only users in this status
+            include_deleted: Whether to include deleted users
+            severity: Keep only users whose worst onboarding issue is one of these
+                (``info`` never is: it does not count towards a user's severity)
+            issue: Keep only users with an onboarding issue of one of these kinds
+            client_id: Keep only users with an onboarding issue on this chat client; with
+                *issue*, the same issue has to match both
+            sort: ``severity`` puts the worst first, then the most jobs stopped
+
+        Returns:
+            Tuple of (users with groups, total count)
+        """
+        conditions, params = self._user_conditions(search, group_id, exclude_group_id, status, include_deleted)
+        params |= {"limit": limit, "offset": (page - 1) * limit}
+
+        # The onboarding is derived once per user, in the lateral join, and every
+        # onboarding filter and the sort read that one row.
+        onboarding_join = f"CROSS JOIN LATERAL ({onboarding_sql('u.id')}) ob"
+        onboarding_filters, onboarding_params = onboarding_conditions(severity, issue, client_id)
+        conditions += onboarding_filters
+        params |= onboarding_params
+        onboarding_filtered = bool(onboarding_filters)
+
+        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        order_by = "u.created_at DESC, u.id DESC"
+        if sort == UserSort.NAME:
+            order_by = "u.first_name, u.last_name, u.id"
+        elif sort == UserSort.SEVERITY:
+            order_by = f"{ONBOARDING_SORT}, {order_by}"
+
+        # Count query: the onboarding join only when a filter needs it, since it is the
+        # expensive part and the count otherwise touches users alone.
         count_query = text(f"""
             SELECT COUNT(*) as total
             FROM users u
+            {onboarding_join if onboarding_filtered else ""}
             {where_clause}
         """)
 
@@ -408,11 +449,11 @@ class UserService:
                    u.is_administrator, u.is_service_account, u.role, u.status,
                    u.phone_number_idp, u.scim_attributes, u.deleted_at,
                    u.created_at, u.updated_at,
-                   {OFFLINE_TOKEN_STATE_SQL} AS offline_token,
-                   {unreachable_subscriptions_sql("u.id")} AS unreachable
+                   to_jsonb(ob) AS onboarding
             FROM users u
+            {onboarding_join}
             {where_clause}
-            ORDER BY u.created_at DESC, u.id DESC
+            ORDER BY {order_by}
             LIMIT :limit OFFSET :offset
         """)
 
@@ -426,8 +467,7 @@ class UserService:
             user_rows = result.mappings().all()
 
             users: list[User] = []
-            offline_token = {row["id"]: row["offline_token"] for row in user_rows}
-            unreachable = {row["id"]: row["unreachable"] for row in user_rows}
+            onboarding = {row["id"]: row["onboarding"] for row in user_rows}
             for row in user_rows:
                 user = User(
                     id=row["id"],
@@ -478,9 +518,7 @@ class UserService:
                 UserWithGroups(
                     **user.model_dump(),
                     groups=groups_by_user.get(user.id, []),
-                    onboarding=UserOnboarding.of(
-                        user.sub, offline_token[user.id], user.is_service_account, unreachable[user.id]
-                    ),
+                    onboarding=UserOnboarding.of(user.is_service_account, onboarding[user.id]),
                 )
                 for user in users
             ]
@@ -489,6 +527,19 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to list users: {e}")
             raise
+
+    async def onboarding_summary(
+        self,
+        db: AsyncSession,
+        search: str | None = None,
+        group_id: int | None = None,
+        status: UserStatus | None = None,
+    ) -> OnboardingSummary:
+        """How many users (among those the list's own filters keep) have each severity, and
+        each issue per client, for the Users page's filters."""
+        conditions, params = self._user_conditions(search, group_id, None, status, include_deleted=False)
+        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        return await summarize_onboarding(db, where_clause, params)
 
     async def update_user_status(self, db: AsyncSession, user_id: str, actor: User, status: UserStatus) -> User | None:
         """Update a user's status and optionally soft delete.

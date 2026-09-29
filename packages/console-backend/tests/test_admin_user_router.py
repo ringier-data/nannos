@@ -249,3 +249,40 @@ class TestAdminUserPatchAuthorization:
         )
 
         assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+class TestAdminUserOnboardingFilters:
+    """The Users page's onboarding filters over HTTP (#311). The derivation itself is
+    pinned in test_user_onboarding.py; this covers the wire: repeated query params,
+    enum validation, and a summary route that `/{user_id}` must not swallow."""
+
+    async def test_summary_is_its_own_route(self, admin_client, inserted_user):
+        response = await admin_client.get("/api/v1/admin/users/onboarding-summary")
+
+        assert response.status_code == 200
+        # Every user here signed in the old way (a real sub, no vaulted token): the two
+        # seeded ones, plus whatever the app seeds itself.
+        summary = response.json()["data"]
+        [entry] = summary["issues"]
+        assert entry["kind"] == "scheduler_not_ready" and entry["users"] >= 2
+        assert (summary["blocking"], summary["pending"]) == (0, entry["users"])
+
+    async def test_list_takes_repeated_filters_and_sorts(self, admin_client, inserted_user):
+        response = await admin_client.get(
+            "/api/v1/admin/users",
+            params=[("severity", "blocking"), ("severity", "pending"), ("issue", "scheduler_not_ready"),
+                    ("sort", "severity")],
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert {"admin-user-id", "non-admin-user-id"} <= {u["id"] for u in body["data"]}
+        assert body["meta"]["total"] == len(body["data"])
+        assert {u["onboarding"]["severity"] for u in body["data"]} == {"pending"}
+        assert body["data"][0]["onboarding"]["issues"][0]["kind"] == "scheduler_not_ready"
+
+    async def test_an_unknown_issue_kind_is_refused(self, admin_client, inserted_user):
+        response = await admin_client.get("/api/v1/admin/users", params={"issue": "sleepy"})
+
+        assert response.status_code == 422

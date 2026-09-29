@@ -8,6 +8,7 @@ import {
   listUsersApiV1AdminUsersGetOptions,
   bulkUpdateUsersApiV1AdminUsersBulkPostMutation,
   listGroupsApiV1AdminGroupsGetOptions,
+  getOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { UserWithGroups, ActionEnum } from '@/api/generated';
 import { Input } from '@/components/ui/input';
@@ -26,6 +27,13 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Pagination } from '@/components/admin/Pagination';
 import { UserStatusBadge } from '@/components/admin/UserStatusBadge';
 import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
+import { OnboardingFilters } from '@/components/admin/OnboardingFilters';
+import {
+  NO_ONBOARDING_FILTER,
+  isOnboardingFiltered,
+  onboardingQuery,
+  type OnboardingFilterValue,
+} from '@/components/admin/onboarding';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 
 export function UsersPage() {
@@ -34,6 +42,7 @@ export function UsersPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
+  const [onboardingFilter, setOnboardingFilter] = useState<OnboardingFilterValue>(NO_ONBOARDING_FILTER);
   const [selectedUsers, setSelectedUsers] = useState<Set<string>>(new Set());
   const [confirmDialog, setConfirmDialog] = useState<{
     open: boolean;
@@ -52,9 +61,21 @@ export function UsersPage() {
         limit,
         search: search || undefined,
         group_id: groupFilter !== 'all' ? parseInt(groupFilter) : undefined,
+        ...onboardingQuery(onboardingFilter),
       },
     }),
   });
+
+  // The filter options' counts, over the same search and group as the list.
+  const { data: onboardingSummary } = useQuery({
+    ...getOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetOptions({
+      query: {
+        search: search || undefined,
+        group_id: groupFilter !== 'all' ? parseInt(groupFilter) : undefined,
+      },
+    }),
+  });
+  const attentionCount = onboardingSummary ? onboardingSummary.data.blocking + onboardingSummary.data.pending : 0;
 
   const { data: groupsData } = useQuery({
     ...listGroupsApiV1AdminGroupsGetOptions({
@@ -170,9 +191,21 @@ export function UsersPage() {
           <h1 className="text-2xl font-bold tracking-tight">Users</h1>
           <p className="text-muted-foreground">Manage user accounts and permissions</p>
         </div>
+        {attentionCount > 0 && onboardingFilter.attention !== 'attention' && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setOnboardingFilter({ ...onboardingFilter, attention: 'attention' });
+              setPage(1);
+            }}
+          >
+            {attentionCount === 1 ? '1 user needs attention' : `${attentionCount} users need attention`}
+          </Button>
+        )}
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -204,6 +237,14 @@ export function UsersPage() {
             ))}
           </SelectContent>
         </Select>
+        <OnboardingFilters
+          value={onboardingFilter}
+          summary={onboardingSummary?.data}
+          onChange={(value) => {
+            setOnboardingFilter(value);
+            setPage(1);
+          }}
+        />
       </div>
 
       {someSelected && (
@@ -244,7 +285,12 @@ export function UsersPage() {
             {isLoading ? (
               <TableRowsSkeleton columns={7} />
             ) : users.length === 0 ? (
-              <TableEmptyRow colSpan={7} title="No users found" />
+              <TableEmptyRow
+                colSpan={7}
+                title={
+                  isOnboardingFiltered(onboardingFilter) ? 'No users match these onboarding filters' : 'No users found'
+                }
+              />
             ) : (
               users.map((user) => (
                 <TableRow key={user.id}>

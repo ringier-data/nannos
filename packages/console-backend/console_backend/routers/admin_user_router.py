@@ -13,6 +13,9 @@ from ..models.user import (
     BulkUserOperationRequest,
     BulkUserOperationResponse,
     ImpersonateStartRequest,
+    IssueSeverity,
+    OnboardingIssueKind,
+    OnboardingSummaryResponse,
     PaginationMeta,
     User,
     UserAdminUpdate,
@@ -21,6 +24,7 @@ from ..models.user import (
     UserGroupsUpdate,
     UserListResponse,
     UserRoleUpdate,
+    UserSort,
     UserStatus,
     UserStatusUpdate,
 )
@@ -64,6 +68,16 @@ async def list_users(
     ),
     # Aliased: the wire name is "status", but that is fastapi.status in this module.
     user_status: UserStatus | None = Query(None, alias="status", description="Filter by user status"),
+    severity: list[IssueSeverity] | None = Query(
+        None, description="Keep users whose worst onboarding issue is one of these (info never is)"
+    ),
+    issue: list[OnboardingIssueKind] | None = Query(
+        None, description="Keep users with an onboarding issue of one of these kinds"
+    ),
+    client_id: str | None = Query(
+        None, description="Keep users with an onboarding issue on this chat client (the same issue as `issue`)"
+    ),
+    sort: UserSort = Query(UserSort.CREATED, description="created (newest first) or severity (worst first)"),
 ) -> UserListResponse:
     """List all users with pagination and filtering.
 
@@ -78,12 +92,36 @@ async def list_users(
         group_id=group_id,
         exclude_group_id=exclude_group_id,
         status=user_status,
+        severity=severity,
+        issue=issue,
+        client_id=client_id,
+        sort=sort,
     )
 
     return UserListResponse(
         data=users,
         meta=PaginationMeta(page=page, limit=limit, total=total),
     )
+
+
+@router.get("/onboarding-summary", response_model=OnboardingSummaryResponse)
+async def get_onboarding_summary(
+    request: Request,
+    db: DbSession,
+    _: User = Depends(require_admin),
+    search: str | None = Query(None, description="Search by name or email"),
+    group_id: int | None = Query(None, description="Filter by group membership"),
+    user_status: UserStatus | None = Query(None, alias="status", description="Filter by user status"),
+) -> OnboardingSummaryResponse:
+    """How many users need attention, by severity and by onboarding issue (per client for
+    delivery issues), over the users the list's search, group and status filters keep.
+
+    Admin only endpoint.
+    """
+    summary = await get_user_service(request).onboarding_summary(
+        db, search=search, group_id=group_id, status=user_status
+    )
+    return OnboardingSummaryResponse(data=summary)
 
 
 @router.get("/{user_id}", response_model=UserDetailResponse)

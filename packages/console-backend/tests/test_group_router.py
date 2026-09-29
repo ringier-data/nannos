@@ -16,7 +16,7 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
 import pytest_asyncio
-from console_backend.models.user import User, UserRole, UserStatus
+from console_backend.models.user import User, UserRole, UserSort, UserStatus
 from console_backend.models.user_group import (
     GroupMemberAdd,
     GroupMemberRemove,
@@ -25,6 +25,11 @@ from console_backend.models.user_group import (
 from console_backend.routers import group_router
 from fastapi import HTTPException, Response
 from sqlalchemy import text
+
+
+#: Called directly, a router function gets `Query(...)` objects for the parameters a test
+#: leaves out, so the onboarding filters (#311) are passed as their defaults.
+_NO_ONBOARDING_FILTER = {"severity": None, "issue": None, "client_id": None, "sort": UserSort.NAME}
 
 
 @pytest.fixture
@@ -480,7 +485,7 @@ class TestGroupMembersEndpoint:
         """Test that list_members returns all group members."""
         # mock_user is manager of group 1
         mock_request = get_mock_request(user=mock_user)
-        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=20, search=None)
+        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=20, search=None, **_NO_ONBOARDING_FILTER)
         assert result.meta.total == 1
         assert len(result.data) == 1
         assert result.data[0].user_id == mock_user.id
@@ -496,7 +501,7 @@ class TestGroupMembersEndpoint:
     ):
         """Test pagination for member list (trivial with 1 member)."""
         mock_request = get_mock_request(user=mock_user)
-        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=1, search=None)
+        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=1, search=None, **_NO_ONBOARDING_FILTER)
         assert result.meta.page == 1
         assert result.meta.limit == 1
         assert len(result.data) == 1
@@ -515,7 +520,7 @@ class TestGroupMembersEndpoint:
 
         for term in ("Test", "User", "user@test.com", "TEST.COM"):
             result = await group_router.list_members(
-                1, mock_request, pg_session, mock_user, page=1, limit=20, search=term
+                1, mock_request, pg_session, mock_user, page=1, limit=20, search=term, **_NO_ONBOARDING_FILTER
             )
             assert result.meta.total == 1, f"expected {term!r} to match"
             assert result.data[0].user_id == mock_user.id
@@ -532,7 +537,7 @@ class TestGroupMembersEndpoint:
         """A term nobody matches returns an empty page, and total agrees with it."""
         mock_request = get_mock_request(user=mock_user)
         result = await group_router.list_members(
-            1, mock_request, pg_session, mock_user, page=1, limit=20, search="nobodyhere"
+            1, mock_request, pg_session, mock_user, page=1, limit=20, search="nobodyhere", **_NO_ONBOARDING_FILTER
         )
         assert result.meta.total == 0
         assert result.data == []
