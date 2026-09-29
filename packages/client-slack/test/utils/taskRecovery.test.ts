@@ -22,6 +22,7 @@ const slackClient = {
     delete: jest.fn(async () => ({ ok: true }) as any),
   },
 } as unknown as WebClient;
+const slackClientFactory = jest.fn((_botToken: string) => slackClient);
 
 const THIRTY_ONE_MIN = 31 * 60 * 1000;
 
@@ -67,7 +68,7 @@ function harness(task: any, record: any, lastProcessedTs?: string) {
       } as any,
       'xoxb-fallback',
       0,
-      () => slackClient
+      slackClientFactory
     );
   return { store, run };
 }
@@ -75,6 +76,7 @@ function harness(task: any, record: any, lastProcessedTs?: string) {
 describe('recoverOrphanedTasks', () => {
   beforeEach(() => {
     postMessageMock.mockClear();
+    slackClientFactory.mockClear();
   });
 
   test('keeps the in-flight record when the task is still non-terminal', async () => {
@@ -123,6 +125,10 @@ describe('recoverOrphanedTasks', () => {
     expect(String((postMessageMock.mock.calls[0] as any[])[0].markdown_text)).toContain('the answer');
     expect(store.records.has('task-1')).toBe(false);
     expect(stats.recovered).toBe(1);
+    // The installation's own token, not the fallback: posting with the fallback
+    // would answer through a different bot.
+    expect(slackClientFactory).toHaveBeenCalledWith('xoxb-test');
+    expect(slackClientFactory).not.toHaveBeenCalledWith('xoxb-fallback');
   });
 
   test('stays silent when the user already moved past the failure', async () => {

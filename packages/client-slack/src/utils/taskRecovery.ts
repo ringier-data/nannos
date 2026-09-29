@@ -22,7 +22,7 @@ const logger = Logger.getLogger('taskRecovery');
 const MAX_RECOVERY_AGE_MS = 30 * 60 * 1000;
 
 /** Builds the Slack client for a bot token. */
-export type SlackClientFactory = (botToken: string) => WebClient;
+type SlackClientFactory = (botToken: string) => WebClient;
 
 const defaultSlackClientFactory: SlackClientFactory = (botToken) => new WebClient(botToken);
 
@@ -171,7 +171,7 @@ export async function recoverOrphanedTasks(
   contextStore: IContextStore,
   fallbackBotToken?: string,
   minAgeMs: number = 10 * 60 * 1000, // Default: 10 minutes
-  // Test seam, as in handleA2ANotification.
+  // Test seam: builds the Slack client for the resolved bot token.
   slackClientFactory: SlackClientFactory = defaultSlackClientFactory
 ): Promise<{ recovered: number; failed: number; inProgress: number }> {
   logger.info('Starting orphaned task recovery...');
