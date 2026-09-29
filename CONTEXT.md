@@ -537,8 +537,7 @@ _Avoid_: self-bump (a **Bump** is system-signed and follower-side; this is the e
 ### Relationships
 
 - Every content change of an **Own skill** writes exactly one version of the owner: the config save writes it itself, an **Out-of-config edit** writes the **Owner version**. A host sync writes its own (ADR-0006) and is exempt.
-- A revert restores own-skill content, because the owner is pinned. The row keeps its latest content and the agent shows "update available" until a save or edit moves the hash.
-- A config save resends own-skill bodies, so after a revert the next save moves the row back to the reverted content. The row is the content of the last write.
+- A revert restores own-skill content: the owner is pinned, and the revert writes the own rows back to the pinned content, like a config save. The row is the content of the last write, so later edits build on the reverted content, and following referrers are bumped.
 
 ## Inlined skills (grilling 2026-09-25, nannos#291)
 

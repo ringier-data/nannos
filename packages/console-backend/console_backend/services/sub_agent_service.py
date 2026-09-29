@@ -2567,9 +2567,57 @@ class SubAgentService:
             sub_agent_id=sub_agent_id,
             version=new_version,
         )
+        await self._restore_own_skill_rows(db, actor, sub_agent_id, target.config_version.skills or [])
 
         await db.commit()
         return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def _restore_own_skill_rows(
+        self, db: AsyncSession, actor: User, sub_agent_id: int, skills: list[SkillDefinition]
+    ) -> None:
+        """A revert restores the agent's OWN skill rows to the content the target version pins (ADR-0013).
+
+        Otherwise the row keeps the newer content, and the next edit outside a config
+        save (MCP file tools, registry UI) builds on it and silently brings the
+        reverted content back. Written the way a config save writes the row, so a
+        revert is an edit of the skill: following referrers are bumped, pinned ones
+        see "update available". References to rows the agent does not own are pinned
+        already and are not touched.
+        """
+        pins = {s.registry_id: s.content_hash for s in skills if s.registry_id and s.content_hash}
+        if not pins:
+            return
+        assert self._skill_registry_service is not None
+        registry = self._skill_registry_service
+        rows = await db.execute(
+            text(
+                "SELECT id::text AS id, name, content_hash FROM skill_registry "
+                "WHERE sub_agent_id = :sub_agent_id AND scope = 'sub-agent' AND id::text = ANY(:ids)"
+            ),
+            {"sub_agent_id": sub_agent_id, "ids": list(pins)},
+        )
+        for row in rows.mappings().all():
+            pinned = pins[row["id"]]
+            if row["content_hash"] == pinned:
+                continue
+            snapshot = await registry.get_version(db, row["id"], pinned)
+            if snapshot is None:
+                logger.warning(
+                    "Revert of sub-agent %s: no snapshot of skill %s at %s; the row keeps its content",
+                    sub_agent_id,
+                    row["id"],
+                    pinned[:12],
+                )
+                continue
+            await registry.upsert_agent_skill(
+                db=db,
+                actor=actor,
+                sub_agent_id=sub_agent_id,
+                name=row["name"],
+                description=snapshot.description or "",
+                files=list(snapshot.files),
+                registry_id=row["id"],
+            )
 
     async def update_permissions(
         self,

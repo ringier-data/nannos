@@ -64,7 +64,16 @@ change goes through.
    previous content until it is approved. The MCP tools say so in their reply,
    and the registry `PUT` and the single-file write and delete return
    `owner_version {sub_agent_id, version, approved}`.
-5. **Migration 114 re-points existing owned refs once, in every version**, to
+5. **A revert writes the agent's own skill rows back** to the content the target
+   version pins (`_restore_own_skill_rows`), the way a config save writes them.
+   Without it the row keeps the newer content, and the next edit outside a config
+   save (MCP file tools, registry UI) builds on it and brings the reverted content
+   back with no warning. A revert is therefore an edit of the skill: following
+   referrers are bumped to the reverted content, pinned ones see "update
+   available". Chosen over building out-of-config edits from the approved
+   version's pinned content, which would leave the row and the agent disagreeing
+   and make every edit path resolve the pin first.
+6. **Migration 114 re-points existing owned refs once, in every version**, to
    the row's current hash. Before this ADR every version served the row's latest
    content for an own skill, so that is what each of them actually ran with; the
    audit trail starts at the migration. Re-pointing only the approved default
@@ -98,14 +107,13 @@ change goes through.
 
 - One version per own-skill edit. Agents that self-improve often get a longer
   history; the summary names the skill and hashes so it reads as "edited X".
-- A config save resends own skill bodies, and `upsert_agent_skill` writes them:
-  after a revert, the next config save moves the row back to the reverted
-  content, as any edit would. The row is the content of the last write, and a
-  config save is a write. Referrers pinned to the newer hash then see "update
-  available" for content they already have; following referrers get a bump.
-- An own skill can now show "update available" on the agent page: after a
-  revert, while an owner version is pending, or when the edited skill was not in
-  the approved default. The console shows the badge and the diff, but the
+- A config save resends own skill bodies, and `upsert_agent_skill` writes them;
+  a revert writes them too (decision 5). The row is the content of the last
+  write. Referrers pinned to the newer hash then see "update available";
+  following referrers get a bump.
+- An own skill can now show "update available" on the agent page: while an
+  owner version is pending, or when the edited skill was not in the approved
+  default. The console shows the badge and the diff, but the
   "update" action stays reference-only: for an own skill the way forward is to
   edit or save the agent, whose config save carries the body.
 - `SkillRegistryService.update_skill` returns `SkillUpdateResult` (`entry`,

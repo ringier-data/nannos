@@ -139,15 +139,37 @@ async def test_the_owner_is_pinned_so_a_revert_restores_skill_content(wired, pg_
     reverted = await svc.revert_to_version(pg_session, agent_id, v1_version, actor=test_user_db)
     assert reverted and reverted.config_version
 
-    # The reverted version serves v1, even though the registry row still holds v2, and it
-    # says that the row has moved on.
+    # The reverted version serves v1, and the row is back at v1 too: a revert is an edit
+    # of the agent's own skill, so nothing built on the row later brings v2 back.
     skill = await _resolved_at(svc, pg_session, agent_id, reverted.config_version.version)
     assert skill.body == "v1"
     assert skill.content_hash == v1_hash
-    assert skill.update_available is True
-    assert skill.latest_hash == v2_hash
+    assert skill.update_available is False
     assert skill.mode is None
-    assert await _row_hash(pg_session, registry_id) == v2_hash
+    assert await _row_hash(pg_session, registry_id) == v1_hash
+    assert v2_hash != v1_hash
+
+
+@pytest.mark.asyncio
+async def test_a_file_edit_after_a_revert_builds_on_the_reverted_content(wired, pg_session, test_user_db):
+    """The MCP file tools build on the row; before a revert moved the row, this brought v2 back."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, _ = await _own_skill(svc, pg_session, test_user_db, agent_id, "v1")
+    v1_version = (await svc.get_sub_agent_by_id(pg_session, agent_id)).default_version
+    await _registry_edit(registry, pg_session, test_user_db, registry_id, "v2")
+    await pg_session.commit()
+    await svc.revert_to_version(pg_session, agent_id, v1_version, actor=test_user_db)
+
+    result = await registry.update_skill(
+        pg_session, test_user_db, registry_id, edit_files=_with_file("notes.md", "n")
+    )
+    await pg_session.commit()
+
+    files = {f.path: f.content for f in result.entry.files}
+    assert files["SKILL.md"].rstrip().endswith("v1") and files["notes.md"] == "n"
+    assert result.owner_version is not None
+    assert (await _resolved_at(svc, pg_session, agent_id, result.owner_version.version)).body == "v1"
 
 
 @pytest.mark.asyncio
