@@ -12,9 +12,10 @@
 # Credentials/regions are referenced as os.environ/* and supplied via .env — never inline
 # secrets here.
 #
-# Azure note: a deployment name that isn't a known model (e.g. a deployment called
-# "chatgpt-4o") breaks LiteLLM cost tracking + max-tokens. Map it with
-# model_info.base_model: azure/<known-model> (see gpt-4o below).
+# Azure note: `model` is the deployment name on the Nannos AI Foundry resource; endpoint and
+# key come from AZURE_API_BASE / AZURE_OPENAI_API_KEY (start-local.sh sets both). A deployment
+# name that isn't a known model breaks LiteLLM cost tracking + max-tokens; map it with
+# model_info.base_model: azure/<known-model> (see gpt-6-sol below).
 
 model_list:
   # --- Chat (Bedrock) ---
@@ -23,11 +24,12 @@ model_list:
   - model_name: claude-haiku-4-5
     litellm_params: {model: bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
 
-  # --- Chat (Azure OpenAI) ---
-  # `model` is your Azure *deployment* name; base_model maps it to a known model for cost/metadata.
-  - model_name: gpt-4o
-    model_info: {base_model: azure/gpt-4o}
-    litellm_params: {model: azure/<your-gpt-4o-deployment>, api_base: os.environ/AZURE_API_BASE, api_key: os.environ/AZURE_OPENAI_API_KEY, api_version: "2024-08-01-preview", max_retries: 0}
+  # --- Chat (Azure AI Foundry) ---
+  # The azure/ route (not azure_ai/): only it bridges tool calls with reasoning on to the
+  # Responses API, which gpt-6 requires. base_model is the EU data-zone price.
+  - model_name: gpt-6-sol
+    model_info: {base_model: azure/eu/gpt-6-sol}
+    litellm_params: {model: azure/gpt-6-sol, api_base: os.environ/AZURE_API_BASE, api_key: os.environ/AZURE_OPENAI_API_KEY, max_retries: 0}
 
   # --- Chat (Vertex AI) ---
   - model_name: gemini-3.1-pro-preview
