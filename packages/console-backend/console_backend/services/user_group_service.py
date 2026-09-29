@@ -48,14 +48,14 @@ from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
-#: What every member listing selects, over `user_group_members ugm JOIN users u`. The last
-#: two columns feed `MemberInfo.onboarding`, so a page of members costs no extra query. The
-#: onboarding is scoped to the group: a member list shows what this group enabled, never
-#: the member's jobs from elsewhere (a group manager reads it).
-_MEMBER_COLUMNS = (
-    "u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role, "
-    f"u.is_service_account, {onboarding_column_sql('u.id', 'ugm.user_group_id')} AS onboarding"
-)
+#: Who a member is, over `user_group_members ugm JOIN users u`.
+_MEMBER_IDENTITY = "u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role, u.is_service_account"
+
+#: What a member listing that shows onboarding selects: the identity, plus the onboarding
+#: scoped to the group. A member list shows what this group enabled, never the member's jobs
+#: from elsewhere (a group manager reads it). Only the listings a group manager or an
+#: administrator reaches select it; the group lists (`_with_members`) do not.
+_MEMBER_COLUMNS = f"{_MEMBER_IDENTITY}, {onboarding_column_sql('u.id', 'ugm.user_group_id')} AS onboarding"
 
 
 def _member_info(row: Any) -> MemberInfo:
@@ -65,7 +65,9 @@ def _member_info(row: Any) -> MemberInfo:
         first_name=row["first_name"],
         last_name=row["last_name"],
         group_role=row["group_role"],
-        onboarding=UserOnboarding.of(row["is_service_account"], row["onboarding"]),
+        onboarding=(
+            UserOnboarding.of(row["is_service_account"], row["onboarding"]) if "onboarding" in row else None
+        ),
     )
 
 
@@ -379,13 +381,17 @@ class UserGroupService:
 
         Hydrating group by group cost two round trips per row, which a search box
         re-running the list on every keystroke turns into real latency.
+
+        Members carry no onboarding here: plain members reach this list (`GET /groups`),
+        and it would name co-members' jobs and channels to them. The member listings a
+        manager reads carry it.
         """
         if not groups:
             return []
 
         result = await db.execute(
             text(f"""
-                SELECT ugm.user_group_id, {_MEMBER_COLUMNS}
+                SELECT ugm.user_group_id, {_MEMBER_IDENTITY}
                 FROM user_group_members ugm
                 JOIN users u ON u.id = ugm.user_id
                 WHERE ugm.user_group_id = ANY(:group_ids)
@@ -992,8 +998,11 @@ class UserGroupService:
             {search_clause}{onboarding_clause}
         """)
 
+        # With the lateral join in place the row already has its onboarding; selecting the
+        # member column as well would derive it a second time.
+        member_columns = f"{_MEMBER_IDENTITY}, to_jsonb(ob) AS onboarding" if onboarding_join else _MEMBER_COLUMNS
         data_query = text(f"""
-            SELECT {_MEMBER_COLUMNS}
+            SELECT {member_columns}
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             {onboarding_join}

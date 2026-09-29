@@ -6,6 +6,8 @@ import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   listUsersApiV1AdminUsersGetOptions,
+  listUsersApiV1AdminUsersGetQueryKey,
+  getOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetQueryKey,
   bulkUpdateUsersApiV1AdminUsersBulkPostMutation,
   listGroupsApiV1AdminGroupsGetOptions,
   getOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetOptions,
@@ -25,6 +27,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Pagination } from '@/components/admin/Pagination';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { UserStatusBadge } from '@/components/admin/UserStatusBadge';
 import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
 import { OnboardingFilters } from '@/components/admin/OnboardingFilters';
@@ -41,6 +44,9 @@ export function UsersPage() {
   const { adminMode, startImpersonation } = useAuth();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  // Both the list and its onboarding summary search on the server; one request per pause
+  // in typing, not per keystroke.
+  const debouncedSearch = useDebouncedValue(search);
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [onboardingFilter, setOnboardingFilter] = useState<OnboardingFilterValue>(NO_ONBOARDING_FILTER);
   const [selectedUsers, setSelectedUsers] = useState<Set<string>>(new Set());
@@ -59,7 +65,7 @@ export function UsersPage() {
       query: {
         page,
         limit,
-        search: search || undefined,
+        search: debouncedSearch || undefined,
         group_id: groupFilter !== 'all' ? parseInt(groupFilter) : undefined,
         ...onboardingQuery(onboardingFilter),
       },
@@ -70,7 +76,7 @@ export function UsersPage() {
   const { data: onboardingSummary } = useQuery({
     ...getOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetOptions({
       query: {
-        search: search || undefined,
+        search: debouncedSearch || undefined,
         group_id: groupFilter !== 'all' ? parseInt(groupFilter) : undefined,
       },
     }),
@@ -94,7 +100,9 @@ export function UsersPage() {
         toast.warning(`Updated ${successCount} user(s), ${failCount} failed`);
       }
       setSelectedUsers(new Set());
-      queryClient.invalidateQueries({ queryKey: ['listUsersApiV1AdminUsersGet'] });
+      // Generated keys are objects, so a bare string key matches none of them.
+      queryClient.invalidateQueries({ queryKey: listUsersApiV1AdminUsersGetQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetQueryKey() });
     },
     onError: () => {
       toast.error('Failed to update users');

@@ -501,3 +501,77 @@ async def test_service_account_has_no_onboarding(pg_session, people, group_servi
     assert {m.user_id: m.onboarding for m in members}["svc-user"] is None
     assert group is not None and {m.user_id: m.onboarding for m in group.members}["svc-user"] is None
     assert "svc-user" not in {u.id for u in attention}
+
+
+async def _hold(db, user_id: str, job: str, code: str, channel=None) -> int:
+    definition = (
+        await db.execute(
+            text("""
+                INSERT INTO scheduled_job_definitions
+                    (owner_user_id, name, job_type, prompt, sub_agent_id, schedule_kind, cron_expr, trigger_policy)
+                SELECT 'ready-user', :name, 'task', 'p', id, 'cron', '0 8 * * *', 'overridable'
+                FROM sub_agents WHERE name = 'Forecaster'
+                RETURNING id
+            """),
+            {"name": job},
+        )
+    ).scalar_one()
+    await db.execute(
+        text("""
+            INSERT INTO scheduled_job_subscriptions (definition_id, user_id, next_run_at, enabled, pause_code, delivery_channel_id)
+            VALUES (:d, :u, NOW(), false, :code, :channel)
+        """),
+        {"d": definition, "u": user_id, "code": code, "channel": channel},
+    )
+    await db.commit()
+    return definition
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED, PauseCode.NO_OFFLINE_TOKEN])
+async def test_a_hold_nothing_releases_needs_a_resume(pg_session, people, code):
+    """A sign-in hold that outlived the sign-in, and a failed token refresh, stay off with a
+    live token; they must still show, as a blocking issue of their own."""
+    job = await _hold(pg_session, "ready-user", "Stuck", code.value)
+
+    user = await UserService().get_user_with_groups(pg_session, "ready-user")
+
+    assert user is not None and user.onboarding is not None
+    assert user.onboarding.severity == S.BLOCKING
+    assert _issue(K.NEEDS_RESUME, S.BLOCKING, [(job, "Stuck")]) in user.onboarding.issues
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_is_not_a_sign_in_issue(pg_session, people):
+    """Signing in never releases ``no_offline_token``, so it must not be listed as a job the
+    sign-in would fix."""
+    job = await _hold(pg_session, "chat-only-user", "Refresh failed", PauseCode.NO_OFFLINE_TOKEN.value)
+
+    user = await UserService().get_user_with_groups(pg_session, "chat-only-user")
+
+    assert user is not None and user.onboarding is not None
+    assert user.onboarding.issues == [
+        _issue(K.NEEDS_RESUME, S.BLOCKING, [(job, "Refresh failed")]),
+        _issue(K.SCHEDULER_NOT_READY, S.PENDING, []),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_hold_on_a_deleted_channel_still_shows(pg_session, people):
+    """The channel is ``ON DELETE SET NULL``: the hold stays, so the issue does, with no client."""
+    job = await _hold(pg_session, "ready-user", "Orphaned", PauseCode.UNREACHABLE.value, channel=None)
+
+    user = await UserService().get_user_with_groups(pg_session, "ready-user")
+
+    assert user is not None and user.onboarding is not None
+    assert _issue(K.UNREACHABLE, S.BLOCKING, [(job, "Orphaned")]) in user.onboarding.issues
+
+
+@pytest.mark.asyncio
+async def test_group_lists_carry_no_onboarding(pg_session, people, group_service):
+    """Plain members read the group lists (`GET /groups`); they must not learn co-members'
+    job and channel names. Only the member listings a manager reads carry it."""
+    groups, _ = await group_service.search_user_groups(pg_session, user_id="scim-user")
+    [sales] = [g for g in groups if g.id == GROUP_ID]
+
+    assert sales.members and all(m.onboarding is None for m in sales.members)

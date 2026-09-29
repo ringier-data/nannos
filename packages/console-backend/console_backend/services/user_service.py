@@ -419,13 +419,20 @@ class UserService:
         conditions, params = self._user_conditions(search, group_id, exclude_group_id, status, include_deleted)
         params |= {"limit": limit, "offset": (page - 1) * limit}
 
-        # The onboarding is derived once per user, in the lateral join, and every
-        # onboarding filter and the sort read that one row.
-        onboarding_join = f"CROSS JOIN LATERAL ({onboarding_sql('u.id')}) ob"
+        # A filter or the severity sort needs the onboarding as a row, so it is derived once
+        # per candidate in a lateral join. Otherwise it is a target-list column, which
+        # Postgres evaluates after Sort and Limit: only for the page. In the FROM
+        # unconditionally, it derived every user for a page of 20.
         onboarding_filters, onboarding_params = onboarding_conditions(severity, issue, client_id)
         conditions += onboarding_filters
         params |= onboarding_params
         onboarding_filtered = bool(onboarding_filters)
+        onboarding_join = (
+            f"CROSS JOIN LATERAL ({onboarding_sql('u.id')}) ob"
+            if onboarding_filtered or sort == UserSort.SEVERITY
+            else ""
+        )
+        onboarding_column = "to_jsonb(ob)" if onboarding_join else onboarding_column_sql("u.id")
 
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
         order_by = "u.created_at DESC, u.id DESC"
@@ -449,7 +456,7 @@ class UserService:
                    u.is_administrator, u.is_service_account, u.role, u.status,
                    u.phone_number_idp, u.scim_attributes, u.deleted_at,
                    u.created_at, u.updated_at,
-                   to_jsonb(ob) AS onboarding
+                   {onboarding_column} AS onboarding
             FROM users u
             {onboarding_join}
             {where_clause}

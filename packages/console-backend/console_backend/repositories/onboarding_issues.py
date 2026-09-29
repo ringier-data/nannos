@@ -18,10 +18,12 @@ their group.
 
 A subscription contributes to at most one issue, the first that applies:
 
-1. held for a sign-in (``awaiting_sign_in``, ``sign_in_expired``, ``no_offline_token``),
-   or switched on while the user has no live token: counted under the user's sign-in issue;
-2. held ``unreachable`` / ``undelivered`` / ``agent_inaccessible`` / ``access_revoked``;
-3. switched on over a channel `reachability_sql` calls ``unreachable`` or ``unknown``.
+1. held for a sign-in (``awaiting_sign_in``, ``sign_in_expired``) while the user has no
+   live token, or switched on while they have none: counted under the user's sign-in issue;
+2. held with nothing to release it on its own (``no_offline_token``, or a sign-in hold that
+   outlived the sign-in): ``needs_resume``;
+3. held ``unreachable`` / ``undelivered`` / ``agent_inaccessible`` / ``access_revoked``;
+4. switched on over a channel `reachability_sql` calls ``unreachable`` or ``unknown``.
 
 Anything else that is off (paused by the user, auto-paused, a one-shot that ran) would not
 run anyway, and is not an onboarding matter; nor is any job whose definition is suspended
@@ -68,11 +70,11 @@ _DELIVERY_KINDS = _values(
 )
 
 
-def _holds() -> tuple[str, str]:
-    """The pause codes that are sign-in holds, and those that are job holds. Imported at
-    call time: `models.scheduled_job` loads the services package, which imports this
-    module, so a module-level import breaks whenever this module is imported first."""
-    from ..models.scheduled_job import PauseCode
+def _holds() -> tuple[str, str, str]:
+    """The pause codes that are sign-in holds, job holds, and holds only a resume clears.
+    Imported at call time: `models.scheduled_job` loads the services package, which imports
+    this module, so a module-level import breaks whenever this module is imported first."""
+    from ..models.scheduled_job import SIGN_IN_HOLD_CODES, PauseCode
 
     job_holds = (
         PauseCode.UNREACHABLE,
@@ -85,12 +87,9 @@ def _holds() -> tuple[str, str]:
         kind.value for kind in OnboardingIssueKind
     }
     return (
-        _values(
-            PauseCode.AWAITING_SIGN_IN,
-            PauseCode.SIGN_IN_EXPIRED,
-            PauseCode.NO_OFFLINE_TOKEN,
-        ),
+        _values(*SIGN_IN_HOLD_CODES),
         _values(*job_holds),
+        _values(PauseCode.NO_OFFLINE_TOKEN),
     )
 
 
@@ -103,7 +102,7 @@ def onboarding_issues_sql(user_id: str, group_id: str | None = None) -> str:
     only the subscriptions that group activated count.
 
     Its aliases all start with ``o`` so *user_id* can name an outer ``u``."""
-    sign_in_holds, job_holds = _holds()
+    sign_in_holds, job_holds, resume_holds = _holds()
     in_scope = (
         ""
         if group_id is None
@@ -118,7 +117,11 @@ def onboarding_issues_sql(user_id: str, group_id: str | None = None) -> str:
             SELECT od.id AS job_id, od.name AS job_name, od.sub_agent_id,
                    oc.client_id, oc.workspace_id, oc.name AS channel_name,
                    CASE
-                       WHEN os.pause_code IN ({sign_in_holds}) THEN 'sign_in'
+                       -- A sign-in releases these, so they are the sign-in issue's jobs
+                       -- until there is a live token; one that outlived it needs a resume.
+                       WHEN os.pause_code IN ({sign_in_holds}) AND who.token IS DISTINCT FROM 'live' THEN 'sign_in'
+                       WHEN os.pause_code IN ({sign_in_holds}) OR os.pause_code IN ({resume_holds})
+                           THEN '{OnboardingIssueKind.NEEDS_RESUME.value}'
                        WHEN os.pause_code IN ({job_holds}) THEN os.pause_code
                        WHEN NOT os.enabled THEN NULL
                        WHEN who.token IS DISTINCT FROM 'live' THEN 'sign_in'

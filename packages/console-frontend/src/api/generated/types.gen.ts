@@ -3786,7 +3786,7 @@ export type OnboardingIssueJob = {
  *
  * What stands between a user and scheduled jobs that run and reach them (#311).
  */
-export type OnboardingIssueKind = 'not_signed_in' | 'sign_in_expired' | 'scheduler_not_ready' | 'unreachable' | 'undelivered' | 'agent_inaccessible' | 'access_revoked' | 'unknown_reachability';
+export type OnboardingIssueKind = 'not_signed_in' | 'sign_in_expired' | 'scheduler_not_ready' | 'unreachable' | 'undelivered' | 'agent_inaccessible' | 'access_revoked' | 'needs_resume' | 'unknown_reachability';
 
 /**
  * OnboardingSummary

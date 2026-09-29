@@ -28,14 +28,17 @@ export function issueLabel(issue: OnboardingIssue): string {
       return 'Sign-in expired';
     case 'scheduler_not_ready':
       return 'Scheduled jobs not ready';
+    // A hold whose channel was since deleted has no client to name.
     case 'unreachable':
-      return `Can't be reached on ${where}`;
+      return where ? `Can't be reached on ${where}` : "Can't be reached: channel removed";
     case 'undelivered':
-      return `Not delivered on ${where}`;
+      return where ? `Not delivered on ${where}` : 'Not delivered: channel removed';
     case 'agent_inaccessible':
       return issue.agent_name ? `No access to ${issue.agent_name}` : 'No access to an agent';
     case 'access_revoked':
       return 'Job access revoked';
+    case 'needs_resume':
+      return 'Switched off, needs resuming';
     case 'unknown_reachability':
       return `Delivery unverified on ${where}`;
   }
@@ -59,11 +62,19 @@ export function issueHint(issue: OnboardingIssue): string {
         ? `Has used Nannos, but never signed in through the console or a client using the sign-in broker, so ${jobsPhrase(n)} can't run under their account. Signing in to the console once fixes it.`
         : 'Has used Nannos, but never signed in through the console or a client using the sign-in broker, so no scheduled job can run under their account yet.';
     case 'unreachable':
+      if (!issue.client_id) {
+        return `The delivery channel of ${jobsPhrase(n)} was removed, so they stay switched off. Moving the job to another channel fixes it.`;
+      }
       return `${n === 1 ? 'One scheduled job delivers' : `${n} scheduled jobs deliver`} to ${where}, where they haven't signed in to Nannos, so the results don't arrive. Messaging Nannos there once, or moving the job to another channel, fixes it.`;
     case 'undelivered':
+      if (!issue.client_id) {
+        return `The delivery channel of ${jobsPhrase(n)} was removed, so they stay switched off. Moving the job to another channel fixes it.`;
+      }
       return `${where} found no one to deliver ${jobsPhrase(n)} to, so they were switched off. Messaging Nannos there once, then switching the job back on, fixes it.`;
     case 'agent_inaccessible':
       return `They lost access to ${issue.agent_name ?? 'the agent'}, so ${jobsPhrase(n)} running it wait switched off. Sharing the agent with one of their groups again, then resuming the job, fixes it.`;
+    case 'needs_resume':
+      return `${jobsPhrase(n)[0].toUpperCase()}${jobsPhrase(n).slice(1)} ${n === 1 ? 'was' : 'were'} switched off by an error Nannos doesn't clear on its own (a failed token refresh, or a hold that outlived their sign-in). Resuming the job switches it back on.`;
     case 'access_revoked':
       return `The share behind ${jobsPhrase(n)} was withdrawn, so they wait switched off. Sharing the job with them again restores it.`;
     case 'unknown_reachability':
@@ -97,6 +108,7 @@ const KIND_LABEL: Record<OnboardingIssueKind, string> = {
   undelivered: 'Not delivered',
   agent_inaccessible: 'No access to an agent',
   access_revoked: 'Job access revoked',
+  needs_resume: 'Switched off, needs resuming',
   unknown_reachability: 'Delivery unverified',
 };
 
@@ -131,7 +143,14 @@ export function onboardingQuery(value: OnboardingFilterValue): {
       : value.attention === 'all'
         ? undefined
         : [value.attention];
-  const [kind, clientId] = value.issue === 'all' ? [undefined, undefined] : value.issue.split('|');
+  // Split on the first '|' only: a client id may itself contain one.
+  const separator = value.issue.indexOf('|');
+  const [kind, clientId] =
+    value.issue === 'all'
+      ? [undefined, undefined]
+      : separator < 0
+        ? [value.issue, undefined]
+        : [value.issue.slice(0, separator), value.issue.slice(separator + 1)];
   return {
     severity,
     issue: kind ? [kind as OnboardingIssueKind] : undefined,

@@ -126,6 +126,10 @@ class OnboardingIssueKind(str, Enum):
     AGENT_INACCESSIBLE = "agent_inaccessible"
     #: The grant behind a job the user subscribed to was withdrawn.
     ACCESS_REVOKED = "access_revoked"
+    #: Switched off by something nothing releases on its own: a failed token refresh
+    #: (``no_offline_token``), or a sign-in hold that outlived the sign-in. Only a resume
+    #: switches it back on.
+    NEEDS_RESUME = "needs_resume"
     #: Jobs deliver to a channel Nannos cannot judge: no brokered sign-in with that client
     #: (an older local sign-in looks the same), or a channel with no known workspace.
     UNKNOWN_REACHABILITY = "unknown_reachability"

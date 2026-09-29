@@ -131,6 +131,12 @@ class PauseCode(str, Enum):
     LEGACY = "legacy"
 
 
+#: The holds a sign-in releases (`SchedulerService.release_sign_in_holds`): each waits for a
+#: live offline token. ``NO_OFFLINE_TOKEN`` is not one: it records a failed token refresh,
+#: and only a resume switches it back on.
+SIGN_IN_HOLD_CODES = (PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED)
+
+
 #: What the subscriber reads for each code. ``{name}`` fields come from the detail.
 _PAUSE_TEXT: dict[PauseCode, str] = {
     PauseCode.DISABLED_BY_USER: "Disabled by user",

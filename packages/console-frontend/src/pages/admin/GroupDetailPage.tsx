@@ -296,6 +296,20 @@ export function GroupDetailPage() {
     },
   });
 
+  // Every paged, searched and filtered variant of the member list and its onboarding
+  // summary: `{path}`-only keys match them all by prefix. The members' onboarding is
+  // scoped to the group's default jobs, so default-job changes invalidate it too.
+  const invalidateMembers = () => {
+    queryClient.invalidateQueries({
+      queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({ path: { group_id: groupId } }).queryKey,
+    });
+    queryClient.invalidateQueries({
+      queryKey: getMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetOptions({
+        path: { group_id: groupId },
+      }).queryKey,
+    });
+  };
+
   const addMembersMutation = useMutation({
     ...addMembersApiV1GroupsGroupIdMembersPostMutation(),
     onSuccess: () => {
@@ -304,14 +318,7 @@ export function GroupDetailPage() {
       setSelectedUsersToAdd(new Set());
       setUserSearch('');
       setUserPage(1);
-      queryClient.invalidateQueries({
-        queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({ path: { group_id: groupId } }).queryKey,
-      });
-      queryClient.invalidateQueries({
-        queryKey: getMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetOptions({
-          path: { group_id: groupId },
-        }).queryKey,
-      });
+      invalidateMembers();
       queryClient.invalidateQueries({
         queryKey: getGroupApiV1AdminGroupsGroupIdGetOptions({
           path: { group_id: groupId },
@@ -329,14 +336,7 @@ export function GroupDetailPage() {
     onSuccess: () => {
       toast.success(`Removed ${selectedMembersToRemove.size} member(s)`);
       setSelectedMembersToRemove(new Set());
-      queryClient.invalidateQueries({
-        queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({ path: { group_id: groupId } }).queryKey,
-      });
-      queryClient.invalidateQueries({
-        queryKey: getMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetOptions({
-          path: { group_id: groupId },
-        }).queryKey,
-      });
+      invalidateMembers();
       queryClient.invalidateQueries({
         queryKey: getGroupApiV1AdminGroupsGroupIdGetOptions({
           path: { group_id: groupId },
@@ -359,14 +359,7 @@ export function GroupDetailPage() {
     ...updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation(),
     onSuccess: () => {
       toast.success('Member role updated');
-      queryClient.invalidateQueries({
-        queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({ path: { group_id: groupId } }).queryKey,
-      });
-      queryClient.invalidateQueries({
-        queryKey: getMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetOptions({
-          path: { group_id: groupId },
-        }).queryKey,
-      });
+      invalidateMembers();
     },
     onError: (error: any) => {
       const message = error?.detail || error?.response?.data?.detail || 'Failed to update role';
@@ -534,6 +527,7 @@ export function GroupDetailPage() {
     ...schedulerAddGroupDefaultJobMutation(),
     onSuccess: () => {
       invalidateAccessibleJobs();
+      invalidateMembers();
       toast.success('Default jobs updated');
     },
     onError: (err) => toast.error('Could not update default jobs', { description: String(err) }),
@@ -542,6 +536,7 @@ export function GroupDetailPage() {
     ...schedulerRemoveGroupDefaultJobMutation(),
     onSuccess: () => {
       invalidateAccessibleJobs();
+      invalidateMembers();
       toast.success('Default jobs updated');
     },
     onError: (err) => toast.error('Could not update default jobs', { description: String(err) }),
