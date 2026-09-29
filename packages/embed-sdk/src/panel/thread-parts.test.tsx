@@ -754,3 +754,30 @@ describe('a pending approval, inline', () => {
     expect(screen.getByText('2 approvals needed')).toBeTruthy();
   });
 });
+
+/**
+ * Streamdown's default link prompt portals to document.body, outside the
+ * panel's shadow root: unstyled and out of sight, so a click did nothing.
+ */
+describe('links in an answer', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  });
+
+  afterEach(cleanup);
+
+  it('renders a plain link that opens in a new tab', () => {
+    mountThread([
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'See [the campaign](https://cockpit.example/campaigns/140).' }],
+      },
+    ]);
+
+    const link = screen.getByRole('link', { name: 'the campaign' });
+    expect(link.getAttribute('href')).toBe('https://cockpit.example/campaigns/140');
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toContain('noreferrer');
+  });
+});

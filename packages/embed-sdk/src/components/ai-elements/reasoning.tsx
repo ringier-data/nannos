@@ -206,6 +206,9 @@ export type ReasoningContentProps = ComponentProps<
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
+// Local patch: plain <a> links. Streamdown's link prompt portals to document.body, outside the shadow root, so links looked dead.
+const plainLinks = { enabled: false };
+
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => (
     <CollapsibleContent
@@ -216,7 +219,7 @@ export const ReasoningContent = memo(
       )}
       {...props}
     >
-      <Streamdown plugins={streamdownPlugins}>{children}</Streamdown>
+      <Streamdown linkSafety={plainLinks} plugins={streamdownPlugins}>{children}</Streamdown>
     </CollapsibleContent>
   )
 );

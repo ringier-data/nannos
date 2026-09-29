@@ -323,6 +323,9 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
+// Local patch: plain <a> links. Streamdown's link prompt portals to document.body, outside the shadow root, so links looked dead.
+const plainLinks = { enabled: false };
+
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
@@ -344,6 +347,7 @@ export const MessageResponse = memo(
       // the thread scrolls it like any other message content. (The wrapper
       // keeps `overflow-x-auto`, so a WIDE table still scrolls sideways.)
       tableMaxHeight={0}
+      linkSafety={plainLinks}
       {...props}
     />
   ),
