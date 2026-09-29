@@ -2,9 +2,11 @@ import type { CatalogModel } from '@/api/generated';
 
 // Cost-map values are USD per token (or per query / image); the form edits USD per million.
 // Rounded to 10 significant digits so float noise (2e-7 × 1e6 = 0.19999999999999998) never
-// reaches the field, and so never reaches the saved rate card.
-const perMillion = (v?: number | null): string | undefined =>
+// reaches the field, and so never reaches the saved rate card. Also what the pickers display, so
+// a regional tier's uplift on a cheap model ($0.022 vs $0.02) stays visible.
+export const pricePerMillion = (v?: number | null): string | undefined =>
   v && v > 0 ? String(Number((v * 1_000_000).toPrecision(10))) : undefined;
+const perMillion = pricePerMillion;
 
 /** The form's price fields (billing unit → USD per million) seeded from one catalog entry. */
 export function pricesFromCatalogEntry(entry: CatalogModel): Record<string, string> {
@@ -32,15 +34,19 @@ export const hasWebSearchFee = (entry: CatalogModel): boolean => {
   return !!(s?.search_context_size_medium ?? s?.search_context_size_low ?? s?.search_context_size_high);
 };
 
-const routeOf = (modelId: string): string => (modelId.includes('/') ? modelId.slice(0, modelId.indexOf('/')) : '');
+/** The provider route of a gateway model id: the part before the first "/" ("" when unprefixed). */
+export const routeOf = (modelId: string): string =>
+  modelId.includes('/') ? modelId.slice(0, modelId.indexOf('/')) : '';
 
 // The underlying model a catalog id names, without its route, region or date: the last path
-// segment, minus a trailing release date. "azure/eu/gpt-6-sol", "azure/us/gpt-6-sol" and
-// "azure/gpt-6-sol-2026-09-22" all name "gpt-6-sol"; "azure/gpt-6-sol-pro" does not.
+// segment, minus a trailing release date (YYYY-MM-DD, or the older 4-digit MMDD form Azure used,
+// as in gpt-35-turbo-1106). "azure/eu/gpt-6-sol", "azure/us/gpt-6-sol" and
+// "azure/gpt-6-sol-2026-09-22" all name "gpt-6-sol"; "azure/gpt-6-sol-pro" does not, and neither
+// does gpt-4-1106-preview (the suffix is only stripped at the end of the name).
 const underlyingModel = (modelId: string): string =>
   modelId
     .slice(modelId.lastIndexOf('/') + 1)
-    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/-(\d{4}-\d{2}-\d{2}|\d{4})$/, '')
     .toLowerCase();
 
 /**

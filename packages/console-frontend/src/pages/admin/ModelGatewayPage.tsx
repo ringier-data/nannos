@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
@@ -49,7 +49,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
 import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
-import { compatibleBaseModels, hasWebSearchFee, pricesFromCatalogEntry } from '@/lib/catalogPricing';
+import {
+  compatibleBaseModels,
+  hasWebSearchFee,
+  pricePerMillion,
+  pricesFromCatalogEntry,
+  routeOf,
+} from '@/lib/catalogPricing';
 import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
@@ -195,9 +201,9 @@ function deriveAlias(modelId: string): string {
 // server's own resolution — the display only, never a submitted value.
 // Empty when the id has no prefix (the norm for Bedrock cost-map ids): the catalog entry's
 // server-resolved `family` answers those, and the server re-derives it the same way on save.
-function deriveProvider(modelId: string): string {
-  return modelId.includes('/') ? modelId.slice(0, modelId.indexOf('/')) : '';
-}
+// One definition (`routeOf`), shared with the base-model compatibility filter so the two can
+// never parse a route differently.
+const deriveProvider = routeOf;
 
 const CATALOG_LIMIT = 50; // cap the rendered match list; the rest surface as you keep typing
 
@@ -245,6 +251,13 @@ export function ModelGatewayPage() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [basePickerOpen, setBasePickerOpen] = useState(false);
+  // The base-model list filters only on text typed since the field was focused: a value already
+  // in place (picked, or loaded on edit) must not hide the other tiers of the same model.
+  const [baseTyped, setBaseTyped] = useState(false);
+  // The base model as it was on focus. Leaving the field with a DIFFERENT compatible catalog id
+  // (pasted, or edited to another tier) re-seeds the prices; typing through an id or retyping the
+  // same one does not, so stored rates in edit mode are only replaced by a deliberate change.
+  const baseOnFocus = useRef('');
   // Provider credential overrides (region/project) are hidden by default — the gateway's
   // env defaults are the norm; only collapse-open them when overriding per model.
   const [credsOpen, setCredsOpen] = useState(false);
@@ -298,10 +311,9 @@ export function ModelGatewayPage() {
 
   // Base-model picker: only entries compatible with the gateway id (same route; the same model's
   // region/date variants when the id names a known model), substring-filtered on what's typed.
-  const bq = form.base_model.trim().toLowerCase();
-  const baseMatches = compatibleBaseModels(catalog, form.litellm_model.trim(), form.mode).filter(
-    (c) => bq === '' || c.model_id.toLowerCase().includes(bq),
-  );
+  const compatibleBases = compatibleBaseModels(catalog, form.litellm_model.trim(), form.mode);
+  const bq = baseTyped ? form.base_model.trim().toLowerCase() : '';
+  const baseMatches = compatibleBases.filter((c) => bq === '' || c.model_id.toLowerCase().includes(bq));
   const visibleBaseMatches = baseMatches.slice(0, CATALOG_LIMIT);
 
   // Selecting a catalog model pre-fills the gateway id, provider, input modes and cost.
@@ -330,7 +342,12 @@ export function ModelGatewayPage() {
         // Capabilities from the catalog entry; a listed per-query search fee also counts as
         // "can search" (some entries carry the fee without the boolean). Editable after.
         supports_reasoning: !isEmbedding && !!entry.supports_reasoning,
-        supports_web_search: !isEmbedding && (!!entry.supports_web_search || hasWebSearchFee(entry)),
+        // Same entry as the prices, so a web-search fee and the capability can't disagree.
+        supports_web_search: !isEmbedding && (!!pricedBy.supports_web_search || hasWebSearchFee(pricedBy)),
+        // A catalog base model that no longer fits the new id is dropped rather than submitted:
+        // the gateway would read max-tokens and cost metadata off a different model. Off-catalog
+        // free text is kept; nothing here can tell whether it fits.
+        base_model: base && pricedBy !== base ? '' : f.base_model,
         // Replace (not merge): selecting a different model must not leave a prior model's prices —
         // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
         prices: pricesFromCatalogEntry(pricedBy),
@@ -457,7 +474,9 @@ export function ModelGatewayPage() {
       const { pricing } = await getCostPrefill(m.model_name);
       const prices: Record<string, string> = {};
       for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(entry.price_per_million);
-      setForm((f) => ({ ...f, prices }));
+      // The dialog is already open while this loads: if the admin picked a base model (or typed
+      // a price) in the meantime, those prices are newer than the stored ones and win.
+      setForm((f) => (Object.keys(f.prices).length ? f : { ...f, prices }));
     } catch {
       /* no seed — admin enters rates */
     }
@@ -1001,21 +1020,30 @@ export function ModelGatewayPage() {
             {isAzureProvider(effectiveProvider) && (
               <div className="grid gap-1.5">
                 <Label>
-                  Base model (Azure){baseMatches.length > 0 ? ' — compatible catalog models, type to filter' : ''}
+                  Base model (Azure){compatibleBases.length > 0 ? ' — compatible catalog models, type to filter' : ''}
                 </Label>
                 <div className="relative">
                   <Input
                     placeholder="azure/eu/gpt-6-sol"
                     value={form.base_model}
                     autoComplete="off"
-                    onFocus={() => setBasePickerOpen(true)}
-                    onBlur={() => setTimeout(() => setBasePickerOpen(false), 150)}
+                    onFocus={() => {
+                      baseOnFocus.current = form.base_model.trim();
+                      setBaseTyped(false);
+                      setBasePickerOpen(true);
+                    }}
+                    onBlur={(e) => {
+                      setTimeout(() => setBasePickerOpen(false), 150);
+                      // A pasted or edited value that names a different compatible tier re-prices
+                      // the deployment; looked up in the unfiltered list, not the typed-filtered one.
+                      const v = e.target.value.trim();
+                      const entry = compatibleBases.find((c) => c.model_id === v);
+                      if (entry && v !== baseOnFocus.current) applyBaseModelEntry(entry);
+                    }}
                     onChange={(e) => {
                       setBasePickerOpen(true);
-                      const v = e.target.value;
-                      const entry = baseMatches.find((c) => c.model_id === v);
-                      if (entry) applyBaseModelEntry(entry);
-                      else setForm({ ...form, base_model: v });
+                      setBaseTyped(true);
+                      setForm({ ...form, base_model: e.target.value });
                     }}
                   />
                   {basePickerOpen && visibleBaseMatches.length > 0 && (
@@ -1028,13 +1056,24 @@ export function ModelGatewayPage() {
                           onMouseDown={(e) => {
                             e.preventDefault(); // keep focus / beat onBlur so the click registers
                             applyBaseModelEntry(c);
+                            // The pick is the change: blur must not re-apply it, and the list
+                            // reopens unfiltered.
+                            baseOnFocus.current = c.model_id;
+                            setBaseTyped(false);
                             setBasePickerOpen(false);
                           }}
                         >
                           <span className="font-mono text-xs">{c.model_id}</span>
                           <span className="text-muted-foreground text-[11px]">
-                            {perMillion(c.input_cost_per_token) ?? 'no input price'} in ·{' '}
-                            {perMillion(c.output_cost_per_token) ?? 'no output price'} out
+                            {/* The precision the price fields get, so a regional uplift stays visible. */}
+                            {pricePerMillion(c.input_cost_per_token)
+                              ? `$${pricePerMillion(c.input_cost_per_token)}/M`
+                              : 'no input price'}{' '}
+                            in ·{' '}
+                            {pricePerMillion(c.output_cost_per_token)
+                              ? `$${pricePerMillion(c.output_cost_per_token)}/M`
+                              : 'no output price'}{' '}
+                            out
                           </span>
                         </button>
                       ))}
