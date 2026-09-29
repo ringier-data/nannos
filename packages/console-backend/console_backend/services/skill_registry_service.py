@@ -53,8 +53,8 @@ class OwnerVersion:
     Normally the version the edit wrote; for an edit back to the approved default's hash
     while a version is pending, the approved default it returned to.
 
-    ``approved`` is False when the version waits for approval: the agent keeps running
-    the previous content until then.
+    ``approved`` is False when the version is a draft that must be submitted for approval:
+    the agent keeps running the previous content until it is approved.
     """
 
     sub_agent_id: int
@@ -640,11 +640,17 @@ class SkillRegistryService:
         name: str | None = None,
         sandbox_required: bool | None = None,
         visibility: RegistryVisibility | None = None,
+        edit_files: Callable[[list[SkillFile]], list[SkillFile]] | None = None,
     ) -> SkillUpdateResult:
         """Update a skill in the registry. Returns the entry with its new content_hash.
 
         Only updates fields that are provided (non-None).
         Recomputes content_hash if files change.
+
+        ``files`` replaces the whole file set. ``edit_files`` instead derives the new set
+        from the files the row holds when this write has it locked, for a single-file
+        write or delete: the caller's own read may be stale by then, and building from it
+        would drop a concurrent write.
 
         This is the one write path for an edit made OUTSIDE a config save (registry UI,
         MCP skill tools); a config save and a host sync go through
@@ -654,29 +660,37 @@ class SkillRegistryService:
         ``owner_version``. The hook may refuse the edit (an AUTOMATED agent over the
         auto-approve prompt limit): the error propagates and nothing is committed.
         """
+        if files is not None and edit_files is not None:
+            raise ValueError("Pass files or edit_files, not both")
         entry = await self.get_by_id(db, skill_id)
         if not entry:
             raise ValueError(f"Registry entry not found: {skill_id}")
 
+        changes_files = files is not None or edit_files is not None
         owner_edit = (
-            files is not None
+            changes_files
             and self._owner_edit_hook is not None
             and entry.scope == "sub-agent"
             and entry.sub_agent_id is not None
         )
-        if owner_edit:
-            assert entry.sub_agent_id is not None
-            # Lock order: the owning sub-agent BEFORE the registry row, the order a config
-            # save and a host sync take them in (see SubAgentRepository.lock_for_update).
-            # Taking it only in the owner-edit hook, after repo.update, would deadlock
-            # against a concurrent config save. Held on an edit that turns out to change
-            # nothing too: whether it does is only known from the read below.
-            await SubAgentRepository.lock_for_update(db, entry.sub_agent_id)
-            # Read the row again under the lock: a config save we waited behind may have
-            # moved it, and the hash gate and previous_hash must see where it is now.
+        if changes_files:
+            if owner_edit:
+                assert entry.sub_agent_id is not None
+                # Lock order: the owning sub-agent BEFORE the registry row, the order a
+                # config save and a host sync take them in (see
+                # SubAgentRepository.lock_for_update). Taking it only in the owner-edit
+                # hook, after repo.update, would deadlock against a concurrent config save.
+                # Held on an edit that turns out to change nothing too: whether it does is
+                # only known from the read below.
+                await SubAgentRepository.lock_for_update(db, entry.sub_agent_id)
+            await db.execute(text("SELECT id FROM skill_registry WHERE id = :id FOR UPDATE"), {"id": skill_id})
+            # Read the row again under the lock: a write we waited behind may have moved it,
+            # and the hash gate, previous_hash and edit_files must see where it is now.
             entry = await self.get_by_id(db, skill_id)
             if not entry:
                 raise ValueError(f"Registry entry not found: {skill_id}")
+            if edit_files is not None:
+                files = edit_files(list(entry.files))
 
         fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
 

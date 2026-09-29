@@ -39,7 +39,7 @@ import {
   createRegistrySkillApiV1SkillsRegistryPost,
   updateRegistrySkillApiV1SkillsRegistrySkillIdPut,
 } from '@/api/generated/sdk.gen';
-import type { SkillSearchResult } from '@/api/generated/types.gen';
+import type { OwnerVersionResponse, SkillSearchResult } from '@/api/generated/types.gen';
 import { client } from '@/api/generated/client.gen';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -78,6 +78,18 @@ import { describeSkillReferencedConflict } from '@/lib/skillConflict';
 import { SkillImportPanel } from '@/components/skills/SkillImportPanel';
 
 // --- Helpers for SKILL.md structured editing ---
+
+// ADR-0013: an own-skill edit writes the owning agent's config version; say when it is a
+// draft, since the agent keeps running the previous content until it is approved.
+function toastSkillWrite(done: string, ownerVersion: OwnerVersionResponse | null | undefined) {
+  if (ownerVersion && !ownerVersion.approved) {
+    toast.success(
+      `${done}. Config version ${ownerVersion.version} of the owning agent is a draft: submit it for approval; the agent runs the previous content until then.`
+    );
+  } else {
+    toast.success(done);
+  }
+}
 
 function parseSkillMd(raw: string): { description: string; body: string } {
   const trimmed = raw.trim();
@@ -444,17 +456,7 @@ export function SkillRegistryPage() {
           } as any,
           throwOnError: true,
         });
-        // ADR-0013: an own-skill edit writes the owning agent's config version; say when it waits.
-        const ownerVersion = (
-          res as { data?: { owner_version?: { sub_agent_id: number; version: number; approved: boolean } | null } }
-        ).data?.owner_version;
-        if (ownerVersion && !ownerVersion.approved) {
-          toast.success(
-            `Skill saved. Config version ${ownerVersion.version} of the owning agent waits for approval; the agent runs the previous content until then.`
-          );
-        } else {
-          toast.success('Skill saved');
-        }
+        toastSkillWrite('Skill saved', res.data.owner_version);
         setDraftSkill(null);
         setEditedContent(null);
         setEditedDescription(null);
@@ -524,12 +526,12 @@ export function SkillRegistryPage() {
     if (!detail?.id) return;
     setSaving(true);
     try {
-      await writeRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPut({
+      const res = await writeRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPut({
         path: { skill_id: detail.id, file_path: path },
         body: { content: '' },
         throwOnError: true,
       });
-      toast.success(`File "${path}" created`);
+      toastSkillWrite(`File "${path}" created`, res.data.owner_version);
       setAddingFile(false);
       setNewFilePath('');
       invalidateDetail();
@@ -560,11 +562,11 @@ export function SkillRegistryPage() {
     if (!detail?.id) return;
     setSaving(true);
     try {
-      await deleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDelete({
+      const res = await deleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDelete({
         path: { skill_id: detail.id, file_path: deletingFile },
         throwOnError: true,
       });
-      toast.success(`File "${deletingFile}" deleted`);
+      toastSkillWrite(`File "${deletingFile}" deleted`, res.data.owner_version);
       if (activeFile === deletingFile) setActiveFile('SKILL.md');
       setDeletingFile(null);
       invalidateDetail();
@@ -605,11 +607,11 @@ export function SkillRegistryPage() {
         body: { content: oldContent },
         throwOnError: true,
       });
-      await deleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDelete({
+      const res = await deleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDelete({
         path: { skill_id: detail.id, file_path: oldPath },
         throwOnError: true,
       });
-      toast.success(`Renamed "${oldPath}" → "${newPath}"`);
+      toastSkillWrite(`Renamed "${oldPath}" → "${newPath}"`, res.data.owner_version);
       setRenamingFile(null);
       if (activeFile === oldPath) setActiveFile(newPath);
       invalidateDetail();
@@ -753,18 +755,18 @@ export function SkillRegistryPage() {
     if (!detail?.id || !selectedVersion) return;
     setRestoringVersion(true);
     try {
-      await updateRegistrySkillApiV1SkillsRegistrySkillIdPut({
+      const res = await updateRegistrySkillApiV1SkillsRegistrySkillIdPut({
         path: { skill_id: detail.id },
         body: { files: selectedVersion.files } as any,
         throwOnError: true,
       });
-      toast.success('Version restored');
+      toastSkillWrite('Version restored', res.data.owner_version);
       setShowHistory(false);
       setSelectedVersion(null);
       invalidateDetail();
       invalidateSearch();
-    } catch {
-      toast.error('Failed to restore version');
+    } catch (err) {
+      toast.error('Failed to restore version', { description: getErrorMessage(err) });
     } finally {
       setRestoringVersion(false);
     }

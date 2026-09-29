@@ -35,6 +35,17 @@ WHERE EXISTS (
       AND sr.content_hash IS DISTINCT FROM s.skill->>'content_hash'
 );
 
+-- backfill:snapshot-current-content
+-- A pinned ref resolves through the snapshot of its hash, and falls back to the row's
+-- latest files when there is none. Rows written before snapshots were taken on every write
+-- have no snapshot of their current content, so once they are edited a version pinned to
+-- that content would be served the edit instead (bypassing a pending approval). Snapshot
+-- every row's current content once; from here on each write snapshots what it writes.
+INSERT INTO skill_registry_versions (skill_id, content_hash, files, description, created_by)
+SELECT id, content_hash, files, description, created_by
+FROM skill_registry
+ON CONFLICT (skill_id, content_hash) DO NOTHING;
+
 -- rambler down
 -- The previous hashes are not recoverable; before this migration they were never what
 -- the agent ran with, so there is nothing to restore.

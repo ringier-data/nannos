@@ -50,21 +50,29 @@ change goes through.
    decision 3: this is the editor's own action, so the editor signs it, and the
    change summary reads `Edited skill '<slug>' <old> -> <new>`. An agent with no
    approved default yet builds from its current version (the same content, so
-   the same verdict). An embed-bound agent is skipped: the host owns its versions
-   and the next sync re-points the hash (ADR-0006).
+   the same verdict). An own skill that only a pending draft holds (added in the
+   draft) gets a draft built from that draft instead, never approved by the
+   edit: left at the old hash, the draft's next config save would write the old
+   body back over the edit. An embed-bound agent's own-skill edit is refused:
+   the host owns its skills (ADR-0006), the edit would never run, and the next
+   sync would overwrite it.
 4. **The normal auto-approve rules decide.** `_meets_auto_approve_constraints`
    with the inlined length the new skills produce. An AUTOMATED agent over a
    limit **refuses the edit**: `PromptLimitError` propagates out of `update_skill`
    and the registry write rolls back with it. Any other agent's version is left
-   pending, and the agent keeps running the previous content until it is
-   approved. The MCP tools say so in their reply, and the registry `PUT` returns
+   pending as a draft to submit for approval, and the agent keeps running the
+   previous content until it is approved. The MCP tools say so in their reply,
+   and the registry `PUT` and the single-file write and delete return
    `owner_version {sub_agent_id, version, approved}`.
-5. **Migration 107 re-points existing owned refs once, in every version**, to
+5. **Migration 114 re-points existing owned refs once, in every version**, to
    the row's current hash. Before this ADR every version served the row's latest
    content for an own skill, so that is what each of them actually ran with; the
    audit trail starts at the migration. Re-pointing only the approved default
    would leave old versions holding hashes that never ran, and a revert to one
-   would restore content the agent never had.
+   would restore content the agent never had. It also snapshots every row's
+   current content: a pinned ref resolves through the snapshot of its hash, and
+   rows written before every write was snapshotted would otherwise fall back to
+   the row's newer content once edited.
 
 ## Considered options
 
@@ -102,9 +110,13 @@ change goes through.
   edit or save the agent, whose config save carries the body.
 - `SkillRegistryService.update_skill` returns `SkillUpdateResult` (`entry`,
   `owner_version`) instead of the bare entry.
-- `update_skill_hash_in_config` (the MCP `self_update` path) is a no-op when the
-  hash is already in place, so the owner hook and a sub-agent-scope activation of
-  one's own row compose into one version instead of two.
+- The MCP `self_update` writes no version for the agent's own row: the owner
+  hook has decided it, so the hook and a sub-agent-scope activation of one's own
+  row compose into one version instead of two, and a pending draft is not
+  approved behind the hook's back.
+- A single-file write or delete (`update_skill(edit_files=...)`) derives the new
+  file set from the row as read under its lock, so it cannot drop a concurrent
+  write's content.
 - ADR-0011 decision 1 is amended: resolution still branches on ownership, but
   only for what is reported, not for which content is served. ADR-0012's known
   gap is closed.

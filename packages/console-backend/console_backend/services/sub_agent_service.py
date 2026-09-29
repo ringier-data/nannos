@@ -2396,8 +2396,7 @@ class SubAgentService:
             if rid == registry_id:
                 current_hash = skill.content_hash if hasattr(skill, "content_hash") else skill.get("content_hash")
                 if current_hash == new_hash:
-                    # Already there: the owner-edit hook (ADR-0013) wrote this hash in the
-                    # same transaction, and a second identical version would say nothing.
+                    # Already there: a second identical version would say nothing.
                     updated_skills.append(skill)
                     continue
                 # Clone with updated hash
@@ -3413,8 +3412,13 @@ class SubAgentService:
                 )
 
         new_version = await self._write_version_with_skills(db, actor, sub_agent_id, baseline, skills, change_summary)
+        release_number = await self.repo.get_next_release_number(db, sub_agent_id)
         await self.repo.approve_version(
-            db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
+            db,
+            actor,
+            ApprovalContext(
+                sub_agent_id=sub_agent_id, version=new_version, action="approve", release_number=release_number
+            ),
         )
         return new_version
 
@@ -3442,19 +3446,27 @@ class SubAgentService:
         and the agent keeps running the previous content until it is approved. Signed by
         the editor: unlike a following bump, this is the actor's own change.
 
-        Returns None without writing when the baseline does not hold the skill, or when a
-        host publishes the agent's versions (ADR-0006: the next sync re-points the hash).
-        An edit back to the hash the baseline already pins writes nothing either, but a
-        pending current version that pins other content for the skill stops being current:
-        ``current_version`` returns to the baseline, and that is what is returned.
+        An own skill that only a pending current version holds (added in a draft) gets
+        a DRAFT version built from that version instead, never approved here: approving
+        it would promote the draft's unreviewed changes. Left pinned at the old hash, the
+        next config save of the draft would write the old body back over the edit.
+
+        Returns None without writing when no version holds the skill. An edit back to the
+        hash the baseline already pins writes nothing either, but a pending current version
+        that pins other content for the skill stops being current: ``current_version``
+        returns to the baseline, and that is what is returned.
+
+        Raises ``ValueError`` for an embed-bound agent: its host publishes its skills
+        (ADR-0006), the edit would never run, and the next sync would overwrite it.
         """
         await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if existing is None or existing.deleted_at is not None:
             return None
         if await self.is_embed_bound(db, sub_agent_id):
-            logger.info("Sub-agent %s is embed-bound; own-skill edit of %s leaves versioning to the host", sub_agent_id, registry_id)
-            return None
+            raise ValueError(
+                f"Sub-agent {sub_agent_id} is embed-bound: its skills are published by its host, edit them there"
+            )
 
         baseline = existing.config_version
         if existing.default_version is not None and (baseline is None or baseline.version != existing.default_version):
@@ -3476,7 +3488,7 @@ class SubAgentService:
                     if current is None or current.version == baseline.version:
                         return None
                     current_pin = next((c.content_hash for c in current.skills or [] if c.registry_id == registry_id), None)
-                    if current_pin == new_hash:
+                    if current_pin is None or current_pin == new_hash:
                         return None
                     # The pending current version pins content the row no longer holds; left
                     # current, approving it would bring that content back.
@@ -3489,10 +3501,9 @@ class SubAgentService:
             else:
                 skills.append(skill)
         if not held:
-            return None
+            return await self._bump_own_skill_in_draft(db, actor, existing, registry_id, previous_hash, new_hash)
         if not slug:
-            row = await db.execute(text("SELECT slug FROM skill_registry WHERE id = CAST(:id AS uuid)"), {"id": registry_id})
-            slug = row.scalar_one_or_none() or registry_id
+            slug = await self._skill_slug(db, registry_id)
 
         inlined_length = await self._inlined_skills_length(db, sub_agent_id, skills)
         if existing.type == SubAgentType.AUTOMATED:
@@ -3504,10 +3515,55 @@ class SubAgentService:
             existing.type, baseline.system_prompt, baseline.mcp_tools, existing.is_public, inlined_length
         )
         if approved_now:
+            release_number = await self.repo.get_next_release_number(db, sub_agent_id)
             await self.repo.approve_version(
-                db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
+                db,
+                actor,
+                ApprovalContext(
+                    sub_agent_id=sub_agent_id, version=new_version, action="approve", release_number=release_number
+                ),
             )
         return OwnerVersion(sub_agent_id=sub_agent_id, version=new_version, approved=approved_now)
+
+    async def _bump_own_skill_in_draft(
+        self,
+        db: AsyncSession,
+        actor: User,
+        existing: SubAgent,
+        registry_id: str,
+        previous_hash: str,
+        new_hash: str,
+    ) -> OwnerVersion | None:
+        """The owner-edit hook's case of an own skill that only the pending current version holds.
+
+        Writes a DRAFT that is the current version with the new hash, and never approves
+        it: that would promote the draft's other, unreviewed changes.
+        """
+        current = existing.config_version
+        if current is None or current.version == existing.default_version:
+            return None
+        skills: list[SkillDefinition] = []
+        old_hash: str | None = None
+        slug = ""
+        for skill in current.skills or []:
+            if skill.registry_id == registry_id:
+                if skill.content_hash == new_hash:
+                    return None
+                old_hash = skill.content_hash or previous_hash
+                slug = skill.name
+                skills.append(skill.model_copy(update={"content_hash": new_hash}))
+            else:
+                skills.append(skill)
+        if old_hash is None:
+            return None
+        slug = slug or await self._skill_slug(db, registry_id)
+        summary = f"Edited skill '{slug}' {old_hash[:12]} -> {new_hash[:12]}"
+        new_version = await self._write_version_with_skills(db, actor, existing.id, current, skills, summary)
+        return OwnerVersion(sub_agent_id=existing.id, version=new_version, approved=False)
+
+    async def _skill_slug(self, db: AsyncSession, registry_id: str) -> str:
+        row = await db.execute(text("SELECT slug FROM skill_registry WHERE id = CAST(:id AS uuid)"), {"id": registry_id})
+        return row.scalar_one_or_none() or registry_id
 
     async def _write_version_with_skills(
         self,
@@ -3675,8 +3731,13 @@ class SubAgentService:
             prune_mirrored=True,
         )
         await self.repo.update_current_version(db, actor, sub_agent_id, new_version)
+        release_number = await self.repo.get_next_release_number(db, sub_agent_id)
         await self.repo.approve_version(
-            db, actor, ApprovalContext(sub_agent_id=sub_agent_id, version=new_version, action="approve")
+            db,
+            actor,
+            ApprovalContext(
+                sub_agent_id=sub_agent_id, version=new_version, action="approve", release_number=release_number
+            ),
         )
         return new_version
 

@@ -4,6 +4,7 @@ restores skill content, and the version goes through the auto-approve rules.
 """
 
 import asyncio
+import json
 import os
 
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
@@ -26,11 +27,12 @@ from console_backend.models.sub_agent import (
 )
 from console_backend.models.user import User
 from console_backend.repositories.sub_agent_repository import SubAgentRepository
-from console_backend.services.skill_registry_service import SkillRegistryService
+from console_backend.routers.skills_registry_router import _with_file
+from console_backend.services.skill_registry_service import SkillRegistryService, _compute_content_hash
 from console_backend.services.sub_agent_service import PromptLimitError, SubAgentService
 from tests.test_skill_reference_modes import _agent, _default_version, _publish_skill, _resolved_skill
 
-MIGRATION = Path(__file__).parent.parent / "sqlmigrations" / "ddl" / "107_pin_owned_skill_refs.sql"
+MIGRATION = Path(__file__).parent.parent / "sqlmigrations" / "ddl" / "114_pin_owned_skill_refs.sql"
 
 
 @pytest.fixture
@@ -109,6 +111,13 @@ async def test_a_registry_edit_writes_the_owners_version_signed_by_the_editor(wi
     assert default["status"] == "approved"
     assert default["approved_by_user_id"] == test_user_db.id
     assert default["change_summary"].startswith("Edited skill 'kb'")
+    release = (
+        await pg_session.execute(
+            text("SELECT release_number FROM sub_agent_config_versions WHERE sub_agent_id = :id AND version = :v"),
+            {"id": agent_id, "v": result.owner_version.version},
+        )
+    ).scalar_one()
+    assert release is not None
 
     own = await _resolved_skill(svc, pg_session, agent_id)
     assert own.body == "v2"
@@ -240,6 +249,63 @@ async def test_an_edit_back_to_the_approved_hash_while_a_version_is_pending_make
     agent = await svc.get_sub_agent_by_id(pg_session, agent_id)
     assert agent.current_version == approved and agent.default_version == approved
     assert await _version_count(pg_session, agent_id) == versions  # the pending version survives, not current
+
+
+@pytest.mark.asyncio
+async def test_an_edit_back_to_the_approved_hash_leaves_a_draft_that_dropped_the_skill_current(
+    wired, pg_session, test_user_db, prompt_limit
+):
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, _ = await _own_skill(svc, pg_session, test_user_db, agent_id, "v1")
+    v1_files = (await registry.get_by_id(pg_session, registry_id)).files
+    # The row has moved on while the approved default still pins v1.
+    await pg_session.execute(
+        text("UPDATE skill_registry SET content_hash = 'elsewhere' WHERE id = CAST(:id AS uuid)"), {"id": registry_id}
+    )
+    prompt_limit(20)
+    await svc.update_sub_agent(
+        pg_session, agent_id, SubAgentUpdate(system_prompt="p" * 100, skills=[]), test_user_db
+    )  # a pending draft without the skill
+    draft = (await svc.get_sub_agent_by_id(pg_session, agent_id)).current_version
+
+    back = await registry.update_skill(pg_session, test_user_db, registry_id, files=v1_files)
+    await pg_session.commit()
+
+    assert back.owner_version is None
+    assert (await svc.get_sub_agent_by_id(pg_session, agent_id)).current_version == draft
+
+
+@pytest.mark.asyncio
+async def test_an_own_skill_only_a_pending_draft_holds_gets_a_draft_version_with_the_edit(
+    wired, pg_session, test_user_db, prompt_limit
+):
+    """Left pinned at the old hash, the draft's next config save would write the old body back over the edit."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    approved = (await svc.get_sub_agent_by_id(pg_session, agent_id)).default_version
+    prompt_limit(20)
+    await svc.update_sub_agent(
+        pg_session,
+        agent_id,
+        SubAgentUpdate(
+            system_prompt="p" * 100, skills=[SkillDefinition(name="kb", description="knowledge", body="v1")]
+        ),
+        test_user_db,
+    )
+    agent = await svc.get_sub_agent_by_id(pg_session, agent_id)
+    registry_id = agent.config_version.skills[0].registry_id
+    assert agent.current_version != approved
+
+    result = await _registry_edit(registry, pg_session, test_user_db, registry_id, "v2")
+    await pg_session.commit()
+
+    assert result.owner_version is not None and result.owner_version.approved is False
+    agent = await svc.get_sub_agent_by_id(pg_session, agent_id)
+    assert agent.default_version == approved  # the draft is not promoted
+    assert agent.current_version == result.owner_version.version
+    assert agent.config_version.system_prompt == "p" * 100  # built from the draft
+    assert (await _resolved_at(svc, pg_session, agent_id, agent.current_version)).body == "v2"
 
 
 @pytest.mark.asyncio
@@ -430,10 +496,53 @@ async def test_an_edit_takes_the_owner_before_the_row_and_reads_the_row_again_un
 
 
 @pytest.mark.asyncio
-async def test_an_embed_bound_agent_is_left_to_the_host_sync(wired, pg_session, test_user_db):
+async def test_a_single_file_write_keeps_a_concurrent_config_saves_body(
+    wired, pg_session, test_user_db, postgres_with_migrations
+):
+    """The file set is derived under the row lock, not from the caller's read before it."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, _ = await _own_skill(svc, pg_session, test_user_db, agent_id, "v1")
+    await pg_session.commit()
+
+    v2_files = [SkillFile(path="SKILL.md", content="---\nname: kb\ndescription: knowledge\n---\nv2\n")]
+
+    async with _other_session(postgres_with_migrations) as saver, _other_session(postgres_with_migrations) as probe:
+        # A config save's write of the row, still uncommitted: owner locked, then the row.
+        await SubAgentRepository.lock_for_update(saver, agent_id)
+        await saver.execute(
+            text(
+                "UPDATE skill_registry SET files = CAST(:files AS jsonb), content_hash = :hash "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {
+                "files": json.dumps([f.model_dump() for f in v2_files]),
+                "hash": _compute_content_hash(v2_files),
+                "id": registry_id,
+            },
+        )
+        write = asyncio.create_task(
+            registry.update_skill(pg_session, test_user_db, registry_id, edit_files=_with_file("notes.md", "n"))
+        )
+        try:
+            await _wait_until_blocked(probe)
+            await saver.commit()
+            result = await asyncio.wait_for(write, timeout=10)
+        finally:
+            if not write.done():
+                write.cancel()
+    await pg_session.commit()
+
+    files = {f.path: f.content for f in result.entry.files}
+    assert files["SKILL.md"] == v2_files[0].content and files["notes.md"] == "n"
+
+
+@pytest.mark.asyncio
+async def test_an_embed_bound_agents_own_skill_edit_is_refused(wired, pg_session, test_user_db):
+    """The host publishes its skills: the edit would never run and the next sync would overwrite it."""
     svc, registry, _ = wired
     agent_id = await _agent(svc, pg_session, test_user_db, "kb-bound")
-    registry_id, _ = await _own_skill(svc, pg_session, test_user_db, agent_id, "v1")
+    registry_id, v1_hash = await _own_skill(svc, pg_session, test_user_db, agent_id, "v1")
     await pg_session.execute(
         text(
             "INSERT INTO sub_agent_embed_bindings (sub_agent_id, base_url, created_by) "
@@ -441,27 +550,56 @@ async def test_an_embed_bound_agent_is_left_to_the_host_sync(wired, pg_session, 
         ),
         {"id": agent_id, "user": test_user_db.id},
     )
+    await pg_session.commit()
     before = await _version_count(pg_session, agent_id)
 
-    result = await _registry_edit(registry, pg_session, test_user_db, registry_id, "v2")
-    await pg_session.commit()
+    with pytest.raises(ValueError, match="embed-bound"):
+        await _registry_edit(registry, pg_session, test_user_db, registry_id, "v2")
+    await pg_session.rollback()
 
-    assert result.owner_version is None
+    assert await _row_hash(pg_session, registry_id) == v1_hash
     assert await _version_count(pg_session, agent_id) == before
 
 
-# --- Migration 107: existing owned refs are re-pointed to what the version actually served ---
+# --- Migration 114: existing owned refs are re-pointed to what the version actually served ---
 
 
-def _backfill_statement() -> str:
-    body = MIGRATION.read_text().split("-- backfill:pin-owned-skill-refs", 1)[1]
-    statement = body.split(";", 1)[0].strip()
-    assert statement.upper().startswith("UPDATE SUB_AGENT_CONFIG_VERSIONS"), statement
+def _backfill_statement(marker: str = "pin-owned-skill-refs", starts: str = "UPDATE SUB_AGENT_CONFIG_VERSIONS") -> str:
+    body = MIGRATION.read_text().split(f"-- backfill:{marker}", 1)[1]
+    code = "\n".join(line for line in body.splitlines() if not line.startswith("--"))
+    statement = code.split(";", 1)[0].strip()
+    assert statement.upper().startswith(starts), statement
     return statement
 
 
-def test_the_migration_marker_is_still_there():
+def test_the_migration_markers_are_still_there():
     assert "-- backfill:pin-owned-skill-refs" in MIGRATION.read_text()
+    assert "-- backfill:snapshot-current-content" in MIGRATION.read_text()
+
+
+@pytest.mark.asyncio
+async def test_migration_snapshots_current_content_so_a_pinned_version_keeps_it_after_an_edit(
+    wired, pg_session, test_user_db, prompt_limit
+):
+    """A row with no snapshot of its content: after the backfill a pending edit does not leak into the default."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, v1_hash = await _own_skill(svc, pg_session, test_user_db, agent_id, "x" * 20, inline=True)
+    approved = (await svc.get_sub_agent_by_id(pg_session, agent_id)).default_version
+    # Pre-snapshot data: the row has no snapshot of its current content.
+    await pg_session.execute(
+        text("DELETE FROM skill_registry_versions WHERE skill_id = CAST(:id AS uuid)"), {"id": registry_id}
+    )
+    await pg_session.execute(text(_backfill_statement("snapshot-current-content", "INSERT INTO SKILL_REGISTRY_VERSIONS")))
+    await pg_session.commit()
+
+    prompt_limit(50)
+    result = await _registry_edit(registry, pg_session, test_user_db, registry_id, "y" * 80)
+    await pg_session.commit()
+
+    assert result.owner_version is not None and result.owner_version.approved is False
+    running = await _resolved_at(svc, pg_session, agent_id, approved)
+    assert running.body == "x" * 20 and running.content_hash == v1_hash
 
 
 @pytest.mark.asyncio
