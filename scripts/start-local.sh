@@ -33,6 +33,9 @@ set -euo pipefail
 #   OIDC_ISSUER              - External OIDC issuer URL (skips local Keycloak)
 #   MCP_GATEWAY_URL          - MCP gateway URL (optional, tools disabled if unset)
 #   MCP_GATEWAY_CLIENT_ID    - MCP gateway client ID (defaults to "gatana")
+#   AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH - auto-approve prompt limit (defaults to 500;
+#                              set it low to exercise the pending-approval paths)
+#   AUTO_APPROVE_MAX_MCP_TOOLS_COUNT      - auto-approve MCP tool limit (defaults to 3)
 #
 # Cloud LLM providers (fetched from SSM when AWS_PROFILE is set):
 #   AZURE_OPENAI_API_KEY     - Azure OpenAI API key
@@ -1116,8 +1119,8 @@ procs:
       TWILIO_VERIFY_SERVICE_SID: "$TWILIO_VERIFY_SERVICE_SID"
       TWILIO_VERIFY_API_KEY: "$TWILIO_VERIFY_API_KEY"
       TWILIO_VERIFY_API_SECRET: "$TWILIO_VERIFY_API_SECRET"
-      AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH: "500"
-      AUTO_APPROVE_MAX_MCP_TOOLS_COUNT: "3"
+      AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH: "${AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH:-500}"
+      AUTO_APPROVE_MAX_MCP_TOOLS_COUNT: "${AUTO_APPROVE_MAX_MCP_TOOLS_COUNT:-3}"
       LANGSMITH_ORGANIZATION_ID: "${LANGSMITH_ORGANIZATION_ID:-}"
       LANGSMITH_PROJECT_ID: "${LANGSMITH_PROJECT_ID:-}"
       DOCSTORE_HOST: "localhost"
