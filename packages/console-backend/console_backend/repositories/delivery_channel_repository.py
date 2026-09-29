@@ -16,6 +16,7 @@ from ..models.delivery_channel import (
 )
 from ..models.user import User
 from .base import AuditedRepository
+from .delivery_reachability_repository import reachability_sql
 from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,8 @@ def _row_to_response(row: Any) -> DeliveryChannelResponse:
         client_id=row["client_id"],
         registered_by=row["registered_by"],
         installation_id=row["installation_id"],
+        workspace_id=row.get("workspace_id"),
+        reachability=row.get("reachability"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -64,6 +67,7 @@ class DeliveryChannelRepository(AuditedRepository):
             "client_id": client_id,
             "registered_by": actor.sub,
             "installation_id": data.installation_id,
+            "workspace_id": data.workspace_id,
             "created_at": now,
             "updated_at": now,
         }
@@ -130,8 +134,10 @@ class DeliveryChannelRepository(AuditedRepository):
         search: str | None = None,
         page: int = 1,
         limit: int | None = None,
+        reachability_for: str | None = None,
     ) -> tuple[list[DeliveryChannelResponse], int]:
-        """Return all delivery channels.
+        """Return all delivery channels, each with *reachability_for*'s own reachability
+        on it when given (what the console's channel picker greys out, #192).
 
         Channel visibility is no longer scoped by user groups: every authenticated
         console user can see all channels (the web-console is a secondary interface;
@@ -145,7 +151,9 @@ class DeliveryChannelRepository(AuditedRepository):
         installation/client_id) because the agent/MCP-layer installation filter
         protects only the agent path, not a direct console GET.
         """
-        return await self._list_channels(db, where="", params={}, search=search, page=page, limit=limit)
+        return await self._list_channels(
+            db, where="", params={}, search=search, page=page, limit=limit, reachability_for=reachability_for
+        )
 
     async def list_channels_for_client(
         self,
@@ -173,6 +181,7 @@ class DeliveryChannelRepository(AuditedRepository):
         search: str | None,
         page: int,
         limit: int | None,
+        reachability_for: str | None = None,
     ) -> tuple[list[DeliveryChannelResponse], int]:
         """Shared listing: optional search, optional page, always an honest total.
 
@@ -192,8 +201,14 @@ class DeliveryChannelRepository(AuditedRepository):
             query_params["limit"] = limit
             query_params["offset"] = (page - 1) * limit
 
+        columns = "dc.*"
+        if reachability_for is not None:
+            # Qualified: bare names inside the bindings subquery would resolve to its own
+            # columns and compare each binding with itself.
+            columns = f"dc.*, {reachability_sql(':reachability_for', 'dc.client_id', 'dc.workspace_id')} AS reachability"
+            query_params["reachability_for"] = reachability_for
         result = await db.execute(
-            text(f"SELECT * FROM delivery_channels {where_clause} ORDER BY name, id {pagination}"),
+            text(f"SELECT {columns} FROM delivery_channels dc {where_clause} ORDER BY name, id {pagination}"),
             query_params,
         )
         channels = [_row_to_response(row) for row in result.mappings().all()]
@@ -201,7 +216,7 @@ class DeliveryChannelRepository(AuditedRepository):
         if limit is None:
             return channels, len(channels)
 
-        count_params = {k: v for k, v in query_params.items() if k not in ("limit", "offset")}
+        count_params = {k: v for k, v in query_params.items() if k not in ("limit", "offset", "reachability_for")}
         count = await db.execute(
             text(f"SELECT COUNT(*) FROM delivery_channels {where_clause}"), count_params
         )
@@ -242,6 +257,10 @@ class DeliveryChannelRepository(AuditedRepository):
             val = getattr(data, attr)
             if val is not None:
                 fields[attr] = val
+        # The one field an explicit null writes: a client clears it for an installation
+        # that no longer runs, which then reaches nobody through a sign-in there.
+        if "workspace_id" in data.model_fields_set:
+            fields["workspace_id"] = data.workspace_id
 
         if len(fields) > 1:  # more than just updated_at
             await self.update(db=db, actor=actor, entity_id=channel_id, fields=fields)
@@ -329,6 +348,8 @@ class DeliveryChannelRepository(AuditedRepository):
             webhook_url=data.webhook_url,
             secret=data.secret,
             message_formatting=data.message_formatting,
+            # Passed only when sent: an explicit null clears it, an omitted one keeps it.
+            **({"workspace_id": data.workspace_id} if "workspace_id" in data.model_fields_set else {}),
         )
         updated = await self.update_channel(db=db, actor=actor, channel_id=existing.id, data=update)
         if updated is None:

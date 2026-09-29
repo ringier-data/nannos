@@ -25,6 +25,7 @@ from ..models.user import (
 from ..repositories.user_repository import UserRepository
 from ..services.audit_service import AuditService
 from ..services.keycloak_admin_service import KeycloakAdminService
+from ..repositories.delivery_reachability_repository import unreachable_subscriptions_sql
 from ..services.scheduler_token_service import OFFLINE_TOKEN_STATE_SQL
 from ..utils.sql_search import like_clause, like_contains
 
@@ -310,14 +311,20 @@ class UserService:
             for row in group_rows
         ]
 
-        offline_token = await db.scalar(
-            text(f"SELECT {OFFLINE_TOKEN_STATE_SQL} FROM users u WHERE u.id = :user_id"), {"user_id": user_id}
-        )
+        state = (
+            await db.execute(
+                text(
+                    f"SELECT {OFFLINE_TOKEN_STATE_SQL} AS offline_token, "
+                    f"{unreachable_subscriptions_sql('u.id')} AS unreachable FROM users u WHERE u.id = :user_id"
+                ),
+                {"user_id": user_id},
+            )
+        ).one()
 
         return UserWithGroups(
             **user.model_dump(),
             groups=groups,
-            onboarding=UserOnboarding.of(user.sub, offline_token, user.is_service_account),
+            onboarding=UserOnboarding.of(user.sub, state.offline_token, user.is_service_account, state.unreachable),
         )
 
     async def list_users(
@@ -401,7 +408,8 @@ class UserService:
                    u.is_administrator, u.is_service_account, u.role, u.status,
                    u.phone_number_idp, u.scim_attributes, u.deleted_at,
                    u.created_at, u.updated_at,
-                   {OFFLINE_TOKEN_STATE_SQL} AS offline_token
+                   {OFFLINE_TOKEN_STATE_SQL} AS offline_token,
+                   {unreachable_subscriptions_sql("u.id")} AS unreachable
             FROM users u
             {where_clause}
             ORDER BY u.created_at DESC, u.id DESC
@@ -419,6 +427,7 @@ class UserService:
 
             users: list[User] = []
             offline_token = {row["id"]: row["offline_token"] for row in user_rows}
+            unreachable = {row["id"]: row["unreachable"] for row in user_rows}
             for row in user_rows:
                 user = User(
                     id=row["id"],
@@ -469,7 +478,9 @@ class UserService:
                 UserWithGroups(
                     **user.model_dump(),
                     groups=groups_by_user.get(user.id, []),
-                    onboarding=UserOnboarding.of(user.sub, offline_token[user.id], user.is_service_account),
+                    onboarding=UserOnboarding.of(
+                        user.sub, offline_token[user.id], user.is_service_account, unreachable[user.id]
+                    ),
                 )
                 for user in users
             ]

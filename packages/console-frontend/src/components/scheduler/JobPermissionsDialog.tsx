@@ -345,7 +345,8 @@ function JobPermissionsBody({
               of{' '}
               {newDefaults.map((id) => grantFor(id)?.name ?? `group ${id}`).join(', ')}
               , each under their own account and using their own credentials. They will be told,
-              and can turn it off.
+              and can turn it off. A member who hasn't signed in to Nannos yet, or can't receive on
+              the job's delivery channel, gets it switched off until they can.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

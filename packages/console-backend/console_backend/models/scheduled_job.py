@@ -11,6 +11,7 @@ from ..services.cel_condition import CEL_SYNTAX_HINT, CelSyntaxError, validate_c
 from pydantic.fields import FieldInfo
 
 from ..utils.timezones import validate_timezone_name as _validate_timezone_name
+from .delivery_channel import DeliveryFailure, DeliveryReachability
 from .sub_agent import (
     SUB_AGENT_NAME_RULE,
     ModelName,
@@ -85,6 +86,94 @@ class JobRunStatus(str, Enum):
     AUTH_REQUIRED = "auth_required"
 
 
+class PauseCode(str, Enum):
+    """Why a subscription is switched off, as code reads it (#192).
+
+    The one record of a stop: releases and counts match the code, the claim's retry branch
+    reads "no code" as "nobody stopped it", and what a person reads (``paused_reason``) is
+    rendered from it by ``render_pause``, so wording is free to change. A switched-on
+    subscription never has one. A subscription switched off with none was retired by its
+    own schedule (a one-shot that ran).
+    """
+
+    #: The subscriber switched it off.
+    DISABLED_BY_USER = "disabled_by_user"
+    #: The subscriber paused it (the pause endpoint).
+    MANUALLY_PAUSED = "manually_paused"
+    #: ``max_failures`` failed runs in a row (detail: ``max_failures``).
+    AUTO_PAUSED = "auto_paused"
+    #: A one-shot whose moment had passed when the user subscribed.
+    ELAPSED_ON_SUBSCRIBE = "elapsed_on_subscribe"
+    #: A one-shot whose moment had passed when a schedule took effect on it.
+    ELAPSED_ON_INHERIT = "elapsed_on_inherit"
+    #: A held one-shot whose moment passed before it could be switched back on: it never ran.
+    ELAPSED_WHILE_HELD = "elapsed_while_held"
+    #: The subscriber can no longer reach the sub-agent the job runs.
+    AGENT_INACCESSIBLE = "agent_inaccessible"
+    #: The stored timezone no longer resolves (detail: ``timezone``).
+    INVALID_TIMEZONE = "invalid_timezone"
+    #: A watch that fires once did.
+    CONDITION_MET_ONCE = "condition_met_once"
+    #: A resumed run found no offline token (an older path than the sign-in holds).
+    NO_OFFLINE_TOKEN = "no_offline_token"
+    #: Held until the first sign-in (ADR-0011 §6); the sign-in releases it.
+    AWAITING_SIGN_IN = "awaiting_sign_in"
+    #: Held after Keycloak refused the vaulted token; the next sign-in releases it.
+    SIGN_IN_EXPIRED = "sign_in_expired"
+    #: The grant behind a self-made subscription was withdrawn; regaining it releases it.
+    ACCESS_REVOKED = "access_revoked"
+    #: The delivery channel cannot reach the subscriber; a sign-in from there releases it.
+    UNREACHABLE = "unreachable"
+    #: A client reported no recipient for a subscriber Nannos cannot judge. Nothing the
+    #: backend sees releases it: the subscriber switches the job back on.
+    UNDELIVERED = "undelivered"
+    #: A reason written as free text before codes existed (detail: ``text``).
+    LEGACY = "legacy"
+
+
+#: What the subscriber reads for each code. ``{name}`` fields come from the detail.
+_PAUSE_TEXT: dict[PauseCode, str] = {
+    PauseCode.DISABLED_BY_USER: "Disabled by user",
+    PauseCode.MANUALLY_PAUSED: "Manually paused",
+    PauseCode.AUTO_PAUSED: "Auto-paused after {max_failures} consecutive failures",
+    PauseCode.ELAPSED_ON_SUBSCRIBE: "This one-time job already ran before you subscribed",
+    PauseCode.ELAPSED_ON_INHERIT: "This one-time job had already run when this schedule took effect",
+    PauseCode.ELAPSED_WHILE_HELD: "This one-time job's time passed while it was held, so it did not run; set a new time to run it",
+    PauseCode.AGENT_INACCESSIBLE: "Agent not accessible: you no longer have access to the sub-agent this job runs.",
+    PauseCode.INVALID_TIMEZONE: "Invalid timezone '{timezone}' — fix the job's timezone and resume it.",
+    PauseCode.CONDITION_MET_ONCE: "Watch condition met (one-time trigger)",
+    PauseCode.NO_OFFLINE_TOKEN: "No offline token stored. User must re-grant scheduler consent.",
+    PauseCode.AWAITING_SIGN_IN: "Waiting for your first sign-in to Nannos, so it can run under your account",
+    PauseCode.SIGN_IN_EXPIRED: "Your sign-in to Nannos has expired; sign in again so it can run under your account",
+    PauseCode.ACCESS_REVOKED: "Access to this shared job was revoked",
+    PauseCode.UNREACHABLE: (
+        "Nannos can't reach you on this job's delivery channel. Message Nannos there once to "
+        "activate it, or change the job's delivery, and the job switches back on"
+    ),
+    PauseCode.UNDELIVERED: (
+        "Nannos couldn't reach you on this job's delivery channel. Message Nannos there once, "
+        "then switch the job back on, or change the job's delivery"
+    ),
+    PauseCode.LEGACY: "{text}",
+}
+
+
+class _MissingAsQuestionMark(dict):
+    def __missing__(self, key: str) -> str:
+        return "?"
+
+
+def render_pause(code: PauseCode | str | None, detail: dict[str, Any] | str | None = None) -> str | None:
+    """The sentence a person reads for a stop. *detail* may be the JSONB column as the
+    driver returns it (a string). A detail field that is missing renders as '?' rather
+    than failing a whole job listing over one row."""
+    if code is None:
+        return None
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    return _PAUSE_TEXT[PauseCode(code)].format_map(_MissingAsQuestionMark(detail or {}))
+
+
 class RunTrigger(str, Enum):
     """Why a run was started. Decides what its interruption is worth: a SCHEDULED
     run earns one RETRY, a RETRY earns the user a notice, a MANUAL run earns
@@ -149,6 +238,10 @@ class ScheduledJobRun(BaseModel):
     error_message: str | None = None
     conversation_id: str | None = None
     delivered: bool
+    #: Why the notification reached nobody, as the receiving chat client reported it after
+    #: acknowledging the push. The run's status stays what the work earned; this is about
+    #: the delivery alone.
+    delivery_failure: DeliveryFailure | None = None
     condition_evaluation: ConditionEvaluation | None = None
     #: Last heartbeat from the process dispatching this run. The healer sweeps on
     #: staleness of this rather than on age, so a slow-but-healthy run is never
@@ -279,12 +372,18 @@ class ScheduledJob(BaseModel):
     last_check_result: dict[str, Any] | None = None
     # Delivery — references a registered delivery channel
     delivery_channel_id: int | None = None
+    #: Whether the SUBSCRIBER can receive on that channel; None without a channel. See
+    #: DeliveryReachability.
+    delivery_reachability: DeliveryReachability | None = None
     # Voice call flag
     voice_call: bool = False
     # Control
     enabled: bool
     max_failures: int
     consecutive_failures: int
+    #: Why it is switched off, as a code; None when it is on (or retired by its schedule).
+    pause_code: PauseCode | None = None
+    #: What a person reads for ``pause_code``, rendered from it; never stored.
     paused_reason: str | None = None
     # --- sharing state of the definition ---
     #: Bumped on every definition-field edit; stamped on each run.

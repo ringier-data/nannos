@@ -831,7 +831,7 @@ export function GroupDetailPage() {
         title="Activate this job for everyone in the group?"
         description={`"${pendingDefaultJob?.name}" will start running for ${
           groupMemberCount === 1 ? 'the 1 member' : `all ${groupMemberCount} members`
-        } of ${group?.name}, each under their own account and using their own credentials. They will be told, and can turn it off.`}
+        } of ${group?.name}, each under their own account and using their own credentials. They will be told, and can turn it off. A member who hasn't signed in to Nannos yet, or can't receive on the job's delivery channel, gets it switched off until they can.`}
         confirmLabel="Activate"
         onConfirm={() => {
           if (pendingDefaultJob) {

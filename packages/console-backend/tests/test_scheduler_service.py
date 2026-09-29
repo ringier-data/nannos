@@ -11,6 +11,7 @@ import pytest
 from console_backend.models.scheduled_job import (
     AutomatedSubAgentConfig,
     JobType,
+    PauseCode,
     ScheduledJob,
     ScheduledJobCreate,
     ScheduledJobUpdate,
@@ -1080,9 +1081,9 @@ class TestGetRun:
 
 
 class TestEnabledToggleIsADeliberateStop:
-    """The scheduler tells a deliberate stop from one-shot retirement by paused_reason,
+    """The scheduler tells a deliberate stop from one-shot retirement by pause_code,
     and the retry branch of claim_due_jobs trusts that rather than `enabled`. So a
-    PATCH that flips `enabled` must write the reason — and drop any pending retry."""
+    PATCH that flips `enabled` must write the code — and drop any pending retry."""
 
     @pytest.mark.asyncio
     async def test_disabling_writes_a_reason_and_drops_the_retry(
@@ -1094,7 +1095,7 @@ class TestEnabledToggleIsADeliberateStop:
 
         fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["enabled"] is False
-        assert fields["paused_reason"], "without a reason a retry would resurrect the disabled job"
+        assert fields["pause_code"] == PauseCode.DISABLED_BY_USER, "without a code a retry would resurrect it"
         assert fields["retry_at"] is None
 
     @pytest.mark.asyncio
@@ -1103,14 +1104,14 @@ class TestEnabledToggleIsADeliberateStop:
     ):
         job = make_job(user_id=actor.id)
         job.enabled = False
-        job.paused_reason = "Disabled by user"
+        job.pause_code = PauseCode.DISABLED_BY_USER
         mock_repo.get_job.return_value = job
 
         await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(enabled=True), actor=actor)
 
         fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["enabled"] is True
-        assert fields["paused_reason"] is None
+        assert fields["pause_code"] is None
         assert fields["retry_at"] is None
 
     @pytest.mark.asyncio
@@ -1122,7 +1123,7 @@ class TestEnabledToggleIsADeliberateStop:
         await service.update_job(db=AsyncMock(), job_id=1, data=ScheduledJobUpdate(), actor=actor, name="Renamed")
 
         fields = mock_repo.update_definition.call_args[1]["fields"]
-        assert "paused_reason" not in fields
+        assert "pause_code" not in fields
         assert "retry_at" not in fields
 
 
@@ -1137,13 +1138,13 @@ class TestPauseAndResumeDropThePendingRetry:
 
         fields = mock_repo.update_subscription.call_args[1]["fields"]
         assert fields["retry_at"] is None
-        assert fields["paused_reason"]
+        assert fields["pause_code"] == PauseCode.MANUALLY_PAUSED
 
     @pytest.mark.asyncio
     async def test_resume_clears_retry_at(self, service: SchedulerService, mock_repo: AsyncMock, actor: User):
         job = make_job(user_id=actor.id)
         job.enabled = False
-        job.paused_reason = "Manually paused"
+        job.pause_code = PauseCode.MANUALLY_PAUSED
         mock_repo.get_job.return_value = job
 
         assert await service.resume_job(db=AsyncMock(), job_id=1, actor=actor) is True

@@ -18,8 +18,8 @@ The flow, per login:
 3. The browser lands on the client's callback with ``code`` and the client's ``state``.
    The client ``redeem``\\s the code, authenticated with its own client-credentials token.
    Redeeming links the user to that client and records a **binding**: a secret returned
-   once (stored as a hash) and the workspace it belongs to, whose installations say where
-   the user can be reached (ADR-0011 amendment 1).
+   once (stored as a hash) and the workspace it belongs to; every delivery channel of that
+   client in the same workspace reaches the user (ADR-0011 amendments 1 and 2).
 4. From then on the client asks ``mint`` for tokens for the audiences it is allowed
    (``config.broker.always_granted_audiences`` and its own client id), for users linked
    to it, presenting the binding secret: required for a client with
@@ -245,9 +245,9 @@ class BrokerService:
 
         The binding secret is returned here once and kept only as a hash: it is what makes
         a leaked client credential alone useless to ``mint``. *account_key* is the client
-        row the binding belongs to (the user, when the client names none). Where the
-        workspace can be reached is not a sign-in's business: the client publishes it with
-        ``set_workspace_installations`` when it registers its delivery channels.
+        row the binding belongs to (the user, when the client names none). Which channels
+        the workspace has is not a sign-in's business: the client names each channel's
+        workspace when it registers the channel.
         """
         now = datetime.now(timezone.utc)
         identity = await self._requests.redeem(db, code_hash=_digest(code), client_id=client.client_id, now=now)
@@ -266,21 +266,6 @@ class BrokerService:
             now=now,
         )
         return BrokerRedemption(**identity, binding_secret=binding_secret)
-
-    async def set_workspace_installations(
-        self, db: AsyncSession, client: BrokerClient, workspace_id: str, installation_ids: list[str]
-    ) -> None:
-        """Record the installations *client* runs in *workspace_id* now: the client's word for
-        where every sign-in for the workspace can be reached, trusted as it is trusted to
-        deliver there. The only writer, so the list follows the client's registrations, and a
-        sign-in made before an installation was added reaches it too."""
-        await self._requests.set_workspace_installations(
-            db,
-            client_id=client.client_id,
-            workspace_id=workspace_id,
-            installation_ids=installation_ids,
-            now=datetime.now(timezone.utc),
-        )
 
     async def mint(
         self,

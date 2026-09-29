@@ -23,6 +23,7 @@ from console_backend.models.scheduled_job import (
     ScheduledJob,
     ScheduleKind,
     ScheduledJobRun,
+    PauseCode,
 )
 from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
@@ -30,7 +31,6 @@ from ringier_a2a_sdk.cost_tracking.attribution import current_attribution
 
 from console_backend.services.watch_evaluator import WatchOutcome
 from console_backend.services.scheduler_engine import NOTIFY_TIMEOUT_SECONDS, SchedulerEngine
-from console_backend.services.scheduler_service import _AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON
 from console_backend.services.scheduler_token_service import (
     NoOfflineTokenError,
     OfflineTokenExpiredError,
@@ -58,6 +58,11 @@ def _make_engine(
         repo.complete_job.return_value, tuple
     ):
         repo.complete_job.return_value = (True, None)
+    # The same for the row _finalize locks before it writes: on, no stop in place.
+    if isinstance(repo.subscription_state, unittest.mock.NonCallableMock | unittest.mock.Mock) and not isinstance(
+        repo.subscription_state.return_value, tuple
+    ):
+        repo.subscription_state.return_value = (True, None)
     token_service = token_service or AsyncMock(spec=SchedulerTokenService)
     delivery_channel_repo = AsyncMock(spec=DeliveryChannelRepository)
     delivery_channel_repo.get_channel_for_dispatch.return_value = None
@@ -512,13 +517,10 @@ class TestDispatchJobNoToken:
         call_kwargs = repo.complete_run.call_args[1]
         assert call_kwargs["status"] == JobRunStatus.FAILED
 
-        # complete_job called with paused_reason explaining missing token
+        # complete_job called with the code that explains the missing token
         repo.complete_job.assert_awaited_once()
         call_kwargs = repo.complete_job.call_args[1]
-        assert call_kwargs["paused_reason"] is not None
-        assert "offline token" in (call_kwargs["paused_reason"] or "").lower() or "No offline token" in (
-            call_kwargs["paused_reason"] or ""
-        )
+        assert call_kwargs["pause_code"] == PauseCode.NO_OFFLINE_TOKEN
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("trigger", [RunTrigger.SCHEDULED, RunTrigger.RETRY])
@@ -527,7 +529,7 @@ class TestDispatchJobNoToken:
         group default's reason, so the subscriber's next sign-in switches it on."""
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run.return_value = 1
-        repo.complete_job = AsyncMock(return_value=(False, _AWAITING_SIGN_IN_REASON))
+        repo.complete_job = AsyncMock(return_value=(False, "held"))
         token_service = AsyncMock(spec=SchedulerTokenService)
         token_service.get_access_token.side_effect = NoOfflineTokenError("No offline token stored for user u")
         engine = _make_engine(repo=repo, token_service=token_service)
@@ -536,9 +538,9 @@ class TestDispatchJobNoToken:
         await engine._dispatch_job(job, trigger=trigger)
 
         repo.disable_subscription.assert_awaited_once()
-        assert repo.disable_subscription.await_args.args[1:] == (job.id, _AWAITING_SIGN_IN_REASON)
+        assert repo.disable_subscription.await_args.args[1:] == (job.id, PauseCode.AWAITING_SIGN_IN, None)
         job_kwargs = repo.complete_job.await_args.kwargs
-        assert job_kwargs["paused_reason"] == _AWAITING_SIGN_IN_REASON
+        assert job_kwargs["pause_code"] == PauseCode.AWAITING_SIGN_IN
         # Not a failure of the job: consecutive_failures must not move.
         assert job_kwargs["status"] == JobRunStatus.INTERRUPTED
         assert job_kwargs["retry_at"] is None
@@ -684,16 +686,15 @@ class TestFinalizeJobState:
         engine = _make_engine(repo=repo)
         interval_job = make_job()
 
-        reason = "No offline token stored. User must re-grant scheduler consent."
         await engine._finalize(
             run_id=7,
             job=interval_job,
             status=JobRunStatus.FAILED,
-            paused_reason=reason,
+            pause_code=PauseCode.NO_OFFLINE_TOKEN,
         )
 
         kwargs = repo.complete_job.call_args[1]
-        assert kwargs["paused_reason"] == reason
+        assert kwargs["pause_code"] == PauseCode.NO_OFFLINE_TOKEN
 
     @pytest.mark.asyncio
     async def test_websocket_notification_sent_when_manager_present(self):
@@ -872,8 +873,8 @@ class TestFinalizeInvalidTimezone:
         kwargs = repo.complete_job.call_args[1]
         # next_run_at=None disables the job; the reason tells the user how to recover.
         assert kwargs["next_run_at"] is None
-        assert "Invalid timezone" in kwargs["paused_reason"]
-        assert "Zurich" in kwargs["paused_reason"]
+        assert kwargs["pause_code"] == PauseCode.INVALID_TIMEZONE
+        assert kwargs["pause_detail"] == {"timezone": "Zurich"}
 
 
 
@@ -2187,8 +2188,13 @@ class TestAutoPauseIsNotSilent:
             delivered=False,
         )
 
-    async def _finalize(self, repo_result, job):
+    async def _finalize(self, repo_result, job, row_enabled: bool | None = None):
         engine = _make_engine()
+        # The row as _finalize finds it; the claim's snapshot (``job``) unless a test says
+        # something switched it off in flight.
+        engine._repo.subscription_state = AsyncMock(
+            return_value=(job.enabled if row_enabled is None else row_enabled, None)
+        )
         engine._repo.complete_job = AsyncMock(return_value=repo_result)
         engine._repo.complete_run = AsyncMock(return_value=True)
         engine._notification_service = AsyncMock()
@@ -2216,6 +2222,15 @@ class TestAutoPauseIsNotSilent:
     @pytest.mark.asyncio
     async def test_a_job_that_was_already_paused_is_not_announced_again(self):
         notifications = await self._finalize((False, "Auto-paused after 3 consecutive failures"), self._job(enabled=False))
+        notifications.create_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_job_held_while_its_run_was_in_flight_is_not_announced_again(self):
+        """The claim saw it on; a client's delivery report switched it off (and told the
+        subscriber) before the run finished. Judged on the row, the run stopped nothing."""
+        notifications = await self._finalize(
+            (False, "Nannos can't reach you on this job's delivery channel"), self._job(), row_enabled=False
+        )
         notifications.create_notification.assert_not_awaited()
 
 
@@ -2314,7 +2329,7 @@ class TestSubscriberAgentAccessIsCheckedAtDispatch:
         assert access_check.call_args.args[1:] == ("subscriber", 42)
         # A real pause: enabled off with the reason, written before the bookkeeping.
         repo.disable_subscription.assert_awaited_once()
-        assert "not accessible" in repo.disable_subscription.call_args.args[2].lower()
+        assert repo.disable_subscription.call_args.args[2] == PauseCode.AGENT_INACCESSIBLE
         # Recorded as FAILED on the run, but neutral on the subscription's failure counter.
         assert repo.complete_run.call_args[1]["status"] == JobRunStatus.FAILED
         assert repo.complete_job.call_args[1]["status"] == JobRunStatus.INTERRUPTED
@@ -2504,7 +2519,7 @@ class TestAnExpiredSignInHoldsTheSubscription:
     async def test_the_run_is_held_with_its_own_reason_and_the_token_is_marked(self):
         repo = AsyncMock(spec=ScheduledJobRepository)
         repo.create_run.return_value = 1
-        repo.complete_job = AsyncMock(return_value=(False, _SIGN_IN_EXPIRED_REASON))
+        repo.complete_job = AsyncMock(return_value=(False, "held"))
         token_service = AsyncMock(spec=SchedulerTokenService)
         token_service.get_access_token.side_effect = OfflineTokenExpiredError("refused (invalid_grant)", STORED_AT)
         engine = _make_engine(repo=repo, token_service=token_service)
@@ -2514,9 +2529,9 @@ class TestAnExpiredSignInHoldsTheSubscription:
 
         token_service.mark_expired.assert_awaited_once()
         assert token_service.mark_expired.await_args.args[1:] == (job.user_id, STORED_AT)
-        assert repo.disable_subscription.await_args.args[1:] == (job.id, _SIGN_IN_EXPIRED_REASON)
+        assert repo.disable_subscription.await_args.args[1:] == (job.id, PauseCode.SIGN_IN_EXPIRED, None)
         job_kwargs = repo.complete_job.await_args.kwargs
-        assert job_kwargs["paused_reason"] == _SIGN_IN_EXPIRED_REASON
+        assert job_kwargs["pause_code"] == PauseCode.SIGN_IN_EXPIRED
         # Not a failure of the job: consecutive_failures must not move.
         assert job_kwargs["status"] == JobRunStatus.INTERRUPTED
 
@@ -2531,4 +2546,72 @@ class TestAnExpiredSignInHoldsTheSubscription:
 
         await engine._dispatch_job(make_job())
 
-        assert repo.complete_job.await_args.kwargs["paused_reason"] == _SIGN_IN_EXPIRED_REASON
+        assert repo.complete_job.await_args.kwargs["pause_code"] == PauseCode.SIGN_IN_EXPIRED
+
+
+class TestARunDoesNotOverwriteAStopAlreadyInPlace:
+    """A client's report can hold the job while its run is in flight (#191); the run's own
+    outcome must then leave that stop, and the release it promises, alone."""
+
+    @pytest.mark.asyncio
+    async def test_a_standing_stop_is_not_written_over_a_stop_in_place(self):
+        engine = _make_engine()
+        engine._repo.subscription_state = AsyncMock(return_value=(False, PauseCode.UNREACHABLE))
+        engine._repo.complete_job = AsyncMock(return_value=(False, "held"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+
+        await engine._finalize(
+            run_id=9, job=make_job(), status=JobRunStatus.FAILED,
+            pause_code=PauseCode.AWAITING_SIGN_IN, counts_as_failure=False,
+        )
+
+        engine._repo.disable_subscription.assert_not_awaited()
+        assert engine._repo.complete_job.await_args.kwargs["pause_code"] is None
+        engine._notification_service.create_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_fired_one_shot_watch_that_replaces_a_hold_says_so(self):
+        """The watch is done, so its stop must replace the hold; the hold's notice promised
+        a sign-in would switch it back on, so the subscriber is told the real reason."""
+        engine = _make_engine()
+        engine._repo.subscription_state = AsyncMock(return_value=(False, PauseCode.UNREACHABLE))
+        engine._repo.complete_job = AsyncMock(return_value=(False, "Watch condition met (one-time trigger)"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+        watch = make_job(job_type=JobType.WATCH, destroy_after_trigger=True)
+
+        await engine._finalize(run_id=9, job=watch, status=JobRunStatus.SUCCESS)
+
+        engine._repo.disable_subscription.assert_awaited_once()
+        engine._notification_service.create_notification.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_fired_one_shot_watch_on_a_live_job_says_nothing_extra(self):
+        """Its delivered result is the notice, as before."""
+        engine = _make_engine()
+        engine._repo.complete_job = AsyncMock(return_value=(False, "Watch condition met (one-time trigger)"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+
+        await engine._finalize(run_id=9, job=make_job(job_type=JobType.WATCH, destroy_after_trigger=True), status=JobRunStatus.SUCCESS)
+
+        engine._notification_service.create_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_retired_one_shot_with_no_stop_gets_the_runs_own(self):
+        """Off, but with no stop to keep (its retry after it retired): the run's code is
+        recorded, so the row does not read as a one-shot that simply completed."""
+        engine = _make_engine()
+        engine._repo.subscription_state = AsyncMock(return_value=(False, None))
+        engine._repo.complete_job = AsyncMock(return_value=(False, "held"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+
+        await engine._finalize(
+            run_id=9, job=make_job(), status=JobRunStatus.FAILED,
+            pause_code=PauseCode.SIGN_IN_EXPIRED, counts_as_failure=False,
+        )
+
+        assert engine._repo.complete_job.await_args.kwargs["pause_code"] == PauseCode.SIGN_IN_EXPIRED
+

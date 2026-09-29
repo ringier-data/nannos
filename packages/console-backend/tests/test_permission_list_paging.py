@@ -226,7 +226,7 @@ async def test_run_history_search_matches_summary_and_error(pg_session: AsyncSes
     owner = await _seed_user(pg_session, "runs-search-owner")
     _, job_id = await _seed_definition(pg_session, owner)
     repo = ScheduledJobRepository()
-    run_ids = [await repo.create_run(pg_session, job_id) for _ in range(4)]
+    run_ids = [await repo.create_run(pg_session, job_id, delivery_channel_id=None) for _ in range(4)]
     updates = [
         ("Posted the 100% digest", None),
         ("Nothing new", None),

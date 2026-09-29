@@ -199,7 +199,7 @@ async def test_run_history_pages_past_the_old_fifty_cap(repo, pg_session: AsyncS
     user_id = await _seed_user(pg_session, "runs-user")
     job_id = await _seed_job(pg_session, user_id, "Busy job")
     for _ in range(55):
-        await repo.create_run(pg_session, job_id)
+        await repo.create_run(pg_session, job_id, delivery_channel_id=None)
     await pg_session.commit()
 
     first, total = await repo.list_runs(pg_session, job_id)
@@ -217,7 +217,7 @@ async def test_run_history_status_filter(repo, pg_session: AsyncSession):
     """The status facet narrows rows and total together."""
     user_id = await _seed_user(pg_session, "runs-status-user")
     job_id = await _seed_job(pg_session, user_id, "Mixed job")
-    run_ids = [await repo.create_run(pg_session, job_id) for _ in range(4)]
+    run_ids = [await repo.create_run(pg_session, job_id, delivery_channel_id=None) for _ in range(4)]
     await pg_session.execute(
         text("UPDATE scheduled_job_runs SET status = 'failed' WHERE id = ANY(:ids)"),
         {"ids": run_ids[:1]},

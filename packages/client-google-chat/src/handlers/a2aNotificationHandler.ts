@@ -14,6 +14,7 @@ import { authPromptFromPayload } from '../utils/inTaskAuth.js';
 import type { ReplyTo } from '../services/scheduledRunResumeService.js';
 import { HandlerDependencies } from './types.js';
 import { Task } from '@a2a-js/sdk';
+import type { UndeliveredReason } from '../services/deliveryReport.js';
 
 const logger = Logger.getLogger('a2aNotificationHandler');
 
@@ -39,7 +40,8 @@ interface SchedulerPayload {
   // Correlation fields echoed by agent-runner so thread replies under the
   // delivered notification can be linked back to the job/run/sub-agent.
   scheduled_job_id?: number;
-  scheduled_job_run_id?: number;
+  /** Null on a notice that belongs to no run (agent-runner sends `run_id or None`). */
+  scheduled_job_run_id?: number | null;
   sub_agent_id?: number;
   sub_agent_name?: string;
   prompt?: string;
@@ -79,6 +81,12 @@ export async function handleA2ANotification(
   task: Task,
   projectId: string,
   deps: HandlerDependencies,
+  /**
+   * The installation whose channel the push came through (its project name), as the
+   * notification token identified it. Reported with an undelivered run (#191); not
+   * derivable from `projectId`, which several projects may share.
+   */
+  installationId?: string,
 ): Promise<void> {
   const { chatService, userAuthStorage, scheduledRunStore } = deps;
 
@@ -94,12 +102,34 @@ export async function handleA2ANotification(
   }
 
   const parked = schedulerPayload.scheduler_status === 'auth_required';
+  const runRef = `job=${schedulerPayload.scheduled_job_id} run=${schedulerPayload.scheduled_job_run_id}`;
+  // Every way this notification can end without reaching the user is reported, so the run
+  // is not recorded as delivered (#191). A missing recipient is the subscriber's to fix
+  // (the scheduler holds the job and tells them), so it is logged at info; a failed send
+  // is an operational error.
+  const undelivered = async (reason: UndeliveredReason, detail: string): Promise<void> => {
+    const message = `[A2ACallback] Not delivered (${reason}, ${runRef}, taskId=${task.id}): ${detail}`;
+    if (reason === 'no_recipient') {
+      logger.info(message);
+    } else {
+      logger.error(message);
+    }
+    // A notice that belongs to no run (an activation or recovery notice) arrives with
+    // `null`: nothing to mark, and the backend would refuse it.
+    const runId = schedulerPayload.scheduled_job_run_id;
+    if (deps.reportUndelivered && typeof runId === 'number' && installationId) {
+      await deps.reportUndelivered({ runId, installationId, reason, detail });
+    }
+  };
 
   // Look up the Google Chat user by their OIDC sub for this project
   const userAuth = await userAuthStorage.findByOidcSub(schedulerPayload.user_sub, projectId);
   if (!userAuth) {
-    logger.warn(
-      `[A2ACallback] No Google Chat user found for oidcSub=${schedulerPayload.user_sub} in project=${projectId}`
+    // The subscriber never signed in through this project. Only they can fix that; the
+    // scheduler holds the job until they do.
+    await undelivered(
+      'no_recipient',
+      `no Google Chat user found for oidcSub=${schedulerPayload.user_sub} in project=${projectId}`
     );
     return;
   }
@@ -108,9 +138,7 @@ export async function handleA2ANotification(
   try {
     const dmSpace = await chatService.findDirectMessage(projectId, userAuth.userId);
     if (!dmSpace?.name) {
-      logger.warn(
-        `[A2ACallback] No DM space found for user ${userAuth.userId} in project ${projectId}`
-      );
+      await undelivered('send_failed', `no DM space found for user ${userAuth.userId}`);
       return;
     }
 
@@ -174,7 +202,7 @@ export async function handleA2ANotification(
           contextKey: scheduledRunStore.buildKey(threadName),
           contextId: task.contextId,
           scheduledJobId: schedulerPayload.scheduled_job_id,
-          scheduledJobRunId: schedulerPayload.scheduled_job_run_id,
+          scheduledJobRunId: schedulerPayload.scheduled_job_run_id ?? undefined,
           subAgentId: schedulerPayload.sub_agent_id,
           subAgentName: schedulerPayload.sub_agent_name,
           prompt: schedulerPayload.prompt,
@@ -192,6 +220,6 @@ export async function handleA2ANotification(
       }
     }
   } catch (error) {
-    logger.error(error, `[A2ACallback] Failed to send DM notification: ${error}`);
+    await undelivered('send_failed', `posting the DM failed: ${error}`);
   }
 }

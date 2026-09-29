@@ -81,18 +81,6 @@ describe('BrokerClient', () => {
     expect(JSON.parse(calls()[0].init.body)).toEqual({ code: 'code-1', account_key: 'T1:U1', workspace_id: 'T1' });
   });
 
-  test('sets a workspace\'s installations with a PUT as the client', async () => {
-    fetchMock.mockImplementation(async () => response(204, {}));
-
-    await broker.setWorkspaceInstallations('T 1', ['A1']);
-
-    const [call] = calls();
-    expect(call.url).toBe('http://console:8080/api/v1/auth/broker/workspaces/T%201');
-    expect(call.init.method).toBe('PUT');
-    expect(call.init.headers.Authorization).toBe('Bearer svc-1');
-    expect(JSON.parse(call.init.body)).toEqual({ installation_ids: ['A1'] });
-  });
-
   test('mint sends the binding secret when there is one', async () => {
     fetchMock.mockImplementation(async () => response(200, { access_token: 'at-1', expires_in: 600 }));
 

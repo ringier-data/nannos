@@ -34,13 +34,13 @@ from ..models.scheduled_job import (
     ConditionEvaluation,
     JobRunStatus,
     JobType,
+    PauseCode,
     RunTrigger,
     ScheduledJob,
     ScheduledJobRun,
 )
 from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
-from ..services.scheduler_service import _AWAITING_SIGN_IN_REASON, _SIGN_IN_EXPIRED_REASON
 from ..services.scheduler_token_service import NoOfflineTokenError, OfflineTokenExpiredError, SchedulerTokenService
 from ..services.socket_notification_manager import SocketNotificationManager
 from ..utils.a2a_dispatch import AgentUnreachable, dispatch_streaming
@@ -552,7 +552,9 @@ class SchedulerEngine:
         try:
             if run_id is None:
                 async with self._db_session_factory() as db:
-                    run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
+                    run_id = await self._repo.create_run(
+                        db, job.id, trigger=RunTrigger.RESUMED, delivery_channel_id=job.delivery_channel_id
+                    )
                     await db.commit()
 
             logger.info(
@@ -581,7 +583,7 @@ class SchedulerEngine:
                         error_message=str(e),
                         delivered=False,
                         trigger=RunTrigger.RESUMED,
-                        paused_reason="No offline token stored. User must re-grant scheduler consent.",
+                        pause_code=PauseCode.NO_OFFLINE_TOKEN,
                     )
                     return run_id
 
@@ -702,7 +704,9 @@ class SchedulerEngine:
         """
         if run_id is None:
             async with self._db_session_factory() as db:
-                run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
+                run_id = await self._repo.create_run(
+                    db, job.id, trigger=RunTrigger.RESUMED, delivery_channel_id=job.delivery_channel_id
+                )
                 await db.commit()
 
         logger.info(
@@ -782,7 +786,9 @@ class SchedulerEngine:
         """
         if run_id is None:
             async with self._db_session_factory() as db:
-                run_id = await self._repo.create_run(db, job.id, trigger=trigger)
+                run_id = await self._repo.create_run(
+                    db, job.id, trigger=trigger, delivery_channel_id=job.delivery_channel_id
+                )
                 await db.commit()
 
         logger.info("Dispatching job %d (run %d, %s) to agent-runner", job.id, run_id, trigger.value)
@@ -807,7 +813,7 @@ class SchedulerEngine:
                         status=JobRunStatus.FAILED,
                         error_message=str(e),
                         delivered=False,
-                        paused_reason="No offline token stored. User must re-grant scheduler consent.",
+                        pause_code=PauseCode.NO_OFFLINE_TOKEN,
                         trigger=trigger,
                     )
                     return
@@ -1124,7 +1130,7 @@ class SchedulerEngine:
             status=JobRunStatus.FAILED,
             error_message="You no longer have access to the sub-agent this job runs.",
             delivered=False,
-            paused_reason="Agent not accessible: you no longer have access to the sub-agent this job runs.",
+            pause_code=PauseCode.AGENT_INACCESSIBLE,
             trigger=trigger,
             counts_as_failure=False,
         )
@@ -1159,7 +1165,7 @@ class SchedulerEngine:
             status=JobRunStatus.FAILED,
             error_message=str(error),
             delivered=False,
-            paused_reason=_SIGN_IN_EXPIRED_REASON if expired else _AWAITING_SIGN_IN_REASON,
+            pause_code=PauseCode.SIGN_IN_EXPIRED if expired else PauseCode.AWAITING_SIGN_IN,
             trigger=trigger,
             counts_as_failure=False,
         )
@@ -1550,7 +1556,8 @@ class SchedulerEngine:
         conversation_id: str | None = None,
         delivered: bool = False,
         last_check_result: dict | None = None,
-        paused_reason: str | None = None,
+        pause_code: PauseCode | None = None,
+        pause_detail: dict[str, Any] | None = None,
         condition_evaluation: ConditionEvaluation | None = None,
         trigger: RunTrigger = RunTrigger.SCHEDULED,
         parked_task_id: str | None = None,
@@ -1636,8 +1643,8 @@ class SchedulerEngine:
             # re-claim and re-execute the job on every tick, forever.
             logger.error("Job %d has an unresolvable timezone %r; pausing it: %s", job.id, job.timezone, e)
             next_run_at = None
-            if paused_reason is None:
-                paused_reason = f"Invalid timezone {job.timezone!r} — fix the job's timezone and resume it."
+            if pause_code is None:
+                pause_code, pause_detail = PauseCode.INVALID_TIMEZONE, {"timezone": job.timezone}
 
         # Advance the job first, in its own transaction, and record the run second.
         #
@@ -1662,6 +1669,10 @@ class SchedulerEngine:
         )
         try:
             async with self._db_session_factory() as db:
+                # As the row stands now, not as the claim saw it: a client's delivery
+                # report can switch it off while the run is in flight, and has told the
+                # subscriber itself. Locked, so such a report waits for this outcome.
+                was_enabled, prior_code = await self._repo.subscription_state(db, job.id)
                 if should_disable:
                     logger.info(
                         "Job %d: Disabling watch job after successful trigger (destroy_after_trigger=True)",
@@ -1669,14 +1680,22 @@ class SchedulerEngine:
                     )
                     # A system action, no user actor. Per SUBSCRIPTION: the watch fired for
                     # this subscriber, so this subscriber's job is done; nobody else's is.
-                    await self._repo.disable_subscription(db, job.id, "Watch condition met (one-time trigger)")
+                    await self._repo.disable_subscription(db, job.id, PauseCode.CONDITION_MET_ONCE)
 
                 # A stop that is about the subscriber's standing, not the job: written as a
                 # real pause (enabled = FALSE + reason) so the claim loop leaves it alone —
                 # complete_job only flips enabled on the failure threshold, which this must
                 # never contribute to.
-                if not counts_as_failure and paused_reason:
-                    await self._repo.disable_subscription(db, job.id, paused_reason)
+                #
+                # Not over a stop already in place (paused, or held by a client's report
+                # while the run was in flight): that keeps its code, and the release it
+                # promises. A row off with no stop (a retired one-shot's retry) gets the
+                # run's own. An invalid timezone always wins: it is a defect of the job
+                # that makes every release fail.
+                if not was_enabled and prior_code is not None and pause_code != PauseCode.INVALID_TIMEZONE:
+                    pause_code = pause_detail = None
+                if not counts_as_failure and pause_code:
+                    await self._repo.disable_subscription(db, job.id, pause_code, pause_detail)
 
                 enabled_after, reason_after = await self._repo.complete_job(
                     db=db,
@@ -1685,7 +1704,8 @@ class SchedulerEngine:
                     next_run_at=next_run_at,
                     retry_at=retry_at,
                     last_check_result=last_check_result,
-                    paused_reason=paused_reason,
+                    pause_code=pause_code,
+                    pause_detail=pause_detail,
                     leave_schedule=leave_schedule,
                 )
                 await db.commit()
@@ -1700,7 +1720,16 @@ class SchedulerEngine:
         # it is optional, and a job without one is exactly the job whose silence goes
         # unnoticed — so the notice is a durable console notification, which also
         # survives the owner being offline in a way the WebSocket push does not.
-        if job.enabled and not enabled_after and not should_disable:
+        #
+        # A fired one-shot watch is the other stop that must replace one already in place,
+        # since the job is done. Replacing a reachability hold breaks the promise the
+        # hold's notice made (a sign-in there switches it back on), so it says so too.
+        replaced_hold = should_disable and not was_enabled and prior_code in (PauseCode.UNREACHABLE, PauseCode.UNDELIVERED)
+        if replaced_hold and not enabled_after:
+            await self._notify_job_paused(
+                job, f"{(reason_after or '').rstrip('.')}. Its result reached nobody on its delivery channel.", run_id
+            )
+        elif was_enabled and not should_disable and not enabled_after:
             await self._notify_job_paused(job, reason_after, run_id)
 
         try:

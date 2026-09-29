@@ -544,7 +544,7 @@ export type BrokerRedeemRequest = {
     /**
      * Workspace Id
      *
-     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. Where the workspace can be reached is published separately (PUT /workspaces/{workspace_id}).
+     * The client's account the sign-in belongs to (a Slack team, a Google Chat project); empty for a client with only one. Every delivery channel the client registers with the same workspace_id reaches the user.
      */
     workspace_id?: string;
 };
@@ -651,20 +651,6 @@ export type BrokerTokenResponse = {
      * Token Type
      */
     token_type?: string;
-};
-
-/**
- * BrokerWorkspaceInstallations
- *
- * ``PUT /workspaces/{workspace_id}``: the client's current installations in one workspace.
- */
-export type BrokerWorkspaceInstallations = {
-    /**
-     * Installation Ids
-     *
-     * The installations the client runs in the workspace, as it registers its delivery channels (`installation_id`). A notification on one of those channels can reach every user signed in for the workspace.
-     */
-    installation_ids: Array<string>;
 };
 
 /**
@@ -1846,6 +1832,12 @@ export type DeliveryChannelCreate = {
      */
     installation_id: string;
     /**
+     * Workspace Id
+     *
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; null clears it, for an installation that no longer runs. Unset means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     */
+    workspace_id?: string | null;
+    /**
      * Message Formatting
      *
      * How this channel renders delivered text. Nothing rewrites an agent's output on the way out, so the writer is told these rules up front: 'slack' for Slack mrkdwn, 'google-chat' for Google Chat markup, 'plain' for no markup, 'markdown' (default) for standard Markdown as the web console renders it. Omitted means 'unchanged': a client that does not declare a format leaves the stored value alone, so re-registration on every boot cannot reset a channel that was set elsewhere. A new channel falls back to the column default.
@@ -1911,6 +1903,18 @@ export type DeliveryChannelResponse = {
      */
     installation_id?: string | null;
     /**
+     * Workspace Id
+     *
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; null clears it, for an installation that no longer runs. Unset means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     */
+    workspace_id?: string | null;
+    /**
+     * Reachability
+     *
+     * Whether the user can receive on this channel: 'reachable' (they signed in to Nannos from there), 'unreachable' (they have not; messaging Nannos there once activates it) or 'unknown' (Nannos cannot tell yet, e.g. an older sign-in). Null where it was not asked.
+     */
+    reachability?: _0Enum2 | null;
+    /**
      * Created At
      */
     created_at: string;
@@ -1942,6 +1946,12 @@ export type DeliveryChannelUpdate = {
      * Secret
      */
     secret?: string | null;
+    /**
+     * Workspace Id
+     *
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; null clears it, for an installation that no longer runs. Unset means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     */
+    workspace_id?: string | null;
     /**
      * Message Formatting
      *
@@ -4033,6 +4043,19 @@ export type PaginationMeta = {
 };
 
 /**
+ * PauseCode
+ *
+ * Why a subscription is switched off, as code reads it (#192).
+ *
+ * The one record of a stop: releases and counts match the code, the claim's retry branch
+ * reads "no code" as "nobody stopped it", and what a person reads (``paused_reason``) is
+ * rendered from it by ``render_pause``, so wording is free to change. A switched-on
+ * subscription never has one. A subscription switched off with none was retired by its
+ * own schedule (a one-shot that ran).
+ */
+export type PauseCode = 'disabled_by_user' | 'manually_paused' | 'auto_paused' | 'elapsed_on_subscribe' | 'elapsed_on_inherit' | 'elapsed_while_held' | 'agent_inaccessible' | 'invalid_timezone' | 'condition_met_once' | 'no_offline_token' | 'awaiting_sign_in' | 'sign_in_expired' | 'access_revoked' | 'unreachable' | 'undelivered' | 'legacy';
+
+/**
  * PhoneVerificationCheckRequest
  *
  * Request to verify a phone verification code.
@@ -4680,6 +4703,10 @@ export type ScheduledJob = {
      */
     delivery_channel_id?: number | null;
     /**
+     * Delivery Reachability
+     */
+    delivery_reachability?: _0Enum2 | null;
+    /**
      * Voice Call
      */
     voice_call?: boolean;
@@ -4695,6 +4722,7 @@ export type ScheduledJob = {
      * Consecutive Failures
      */
     consecutive_failures: number;
+    pause_code?: PauseCode | null;
     /**
      * Paused Reason
      */
@@ -5024,6 +5052,10 @@ export type ScheduledJobRun = {
      * Delivered
      */
     delivered: boolean;
+    /**
+     * Delivery Failure
+     */
+    delivery_failure?: _0Enum3 | null;
     condition_evaluation?: ConditionEvaluation | null;
     /**
      * Last Seen At
@@ -5086,7 +5118,7 @@ export type ScheduledJobUpdate = {
      *
      * Where a schedule change lands when the job has OTHER subscribers: 'mine' changes only your own schedule (an override), 'everyone' changes the job's default schedule for every subscriber who has not customised theirs (needs write permission). Meaningless while you are the only subscriber — both do the same. With other subscribers and no scope, 'mine' is assumed; ask the user which they meant before changing everyone's.
      */
-    scope?: _0Enum2 | null;
+    scope?: _0Enum4 | null;
     /**
      * Definition field: whether subscribers may keep their own schedule ('overridable') or must follow the default ('fixed'). Setting 'fixed' resets every override.
      */
@@ -5980,7 +6012,7 @@ export type SkillDefinition = {
      *
      * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
-    scope?: _0Enum3 | null;
+    scope?: _0Enum5 | null;
     /**
      * Visibility
      *
@@ -7614,6 +7646,36 @@ export type UnbillableDeployment = {
 };
 
 /**
+ * UndeliveredReport
+ *
+ * A chat client's report that it could not deliver a scheduled run's notification.
+ *
+ * The push was already acknowledged (the webhook answers before it looks the recipient
+ * up), so this is the only way the scheduler learns the run reached nobody.
+ */
+export type UndeliveredReport = {
+    /**
+     * Run Id
+     *
+     * ``scheduled_job_run_id`` from the scheduler payload.
+     */
+    run_id: number;
+    /**
+     * Installation Id
+     *
+     * The installation that received the push, as its delivery channel is registered.
+     */
+    installation_id: string;
+    reason: _0Enum3;
+    /**
+     * Detail
+     *
+     * What failed, for the backend's log line; not stored. Longer than 500 characters is cut, not refused.
+     */
+    detail?: string | null;
+};
+
+/**
  * UnreadCountResponse
  *
  * Response model for unread notification count.
@@ -8229,8 +8291,8 @@ export type UserNotification = {
  * Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
  * not an error: both flags turn true with the user's first sign-in (ADR-0011).
  *
- * It says nothing about delivery: whether a job's notification can reach the user on a
- * chat channel is not known here yet (#192).
+ * ``unreachable_subscriptions`` is the delivery side (#192): how many of the user's
+ * subscriptions notify a channel that cannot reach them.
  */
 export type UserOnboarding = {
     /**
@@ -8251,6 +8313,12 @@ export type UserOnboarding = {
      * The user had a vaulted offline token that Keycloak has since refused (unused for 30 days, revoked, or its session ended). Implies scheduler_ready is false.
      */
     sign_in_expired: boolean;
+    /**
+     * Unreachable Subscriptions
+     *
+     * How many of the user's scheduled-job subscriptions deliver to a chat channel that cannot reach them, because they have not signed in to Nannos from there. Those are held until they do. Channels Nannos cannot judge (older sign-ins) are not counted.
+     */
+    unreachable_subscriptions?: number;
 };
 
 /**
@@ -9026,6 +9094,8 @@ export type ModeEnum = 'judge' | 'cel' | 'cel+judge';
 
 export type _0Enum = 'markdown' | 'slack' | 'google-chat' | 'plain';
 
+export type _0Enum2 = 'reachable' | 'unreachable' | 'unknown';
+
 /**
  * Role
  */
@@ -9074,14 +9144,16 @@ export type DecisionEnum = 'approved' | 'declined';
  */
 export type EffectivePermissionEnum = 'owner' | 'write' | 'read';
 
-export type _0Enum2 = 'mine' | 'everyone';
+export type _0Enum3 = 'no_recipient' | 'send_failed';
+
+export type _0Enum4 = 'mine' | 'everyone';
 
 /**
  * Op
  */
 export type OpEnum = 'add' | 'remove' | 'replace';
 
-export type _0Enum3 = 'standalone' | 'sub-agent';
+export type _0Enum5 = 'standalone' | 'sub-agent';
 
 /**
  * Reason
@@ -9519,36 +9591,6 @@ export type MintTokenApiV1AuthBrokerTokenPostResponses = {
 };
 
 export type MintTokenApiV1AuthBrokerTokenPostResponse = MintTokenApiV1AuthBrokerTokenPostResponses[keyof MintTokenApiV1AuthBrokerTokenPostResponses];
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutData = {
-    body: BrokerWorkspaceInstallations;
-    path: {
-        /**
-         * Workspace Id
-         */
-        workspace_id: string;
-    };
-    query?: never;
-    url: '/api/v1/auth/broker/workspaces/{workspace_id}';
-};
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutError = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutErrors];
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses = {
-    /**
-     * Successful Response
-     */
-    204: void;
-};
-
-export type SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponse = SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses[keyof SetWorkspaceInstallationsApiV1AuthBrokerWorkspacesWorkspaceIdPutResponses];
 
 export type ListBrokerClientsApiV1AdminBrokerClientsGetData = {
     body?: never;
@@ -14830,6 +14872,31 @@ export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses = {
 };
 
 export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponse = UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses[keyof UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses];
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostData = {
+    body: UndeliveredReport;
+    path?: never;
+    query?: never;
+    url: '/api/v1/delivery-channels/undelivered';
+};
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostError = ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostErrors[keyof ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostErrors];
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponse = ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponses[keyof ReportUndeliveredApiV1DeliveryChannelsUndeliveredPostResponses];
 
 export type ListCatalogsData = {
     body?: never;

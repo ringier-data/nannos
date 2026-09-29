@@ -6,7 +6,7 @@ import { createStorageProvider, type StorageProvider } from './storage/index.js'
 import { OIDCClient } from './services/oidcClient.js';
 import { registerInstallations } from './services/installationRegistrar.js';
 import { createInstallationSecretService } from './services/installationSecretServiceFactory.js';
-import { createBrokerClient, createUserAuthService } from './services/userAuthServiceFactory.js';
+import { createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { GoogleChatService } from './services/googleChatService.js';
@@ -25,6 +25,7 @@ import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClic
 import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
 import { patchGaxiosToUseNativeFetch } from './utils/gaxiosNativeFetch.js';
 import { parseA2APushEvent } from './utils/a2aPushPayload.js';
+import { createDeliveryReporter } from './services/deliveryReport.js';
 
 // Initialize logger early
 const logger = Logger.getLogger('app');
@@ -207,6 +208,13 @@ function setupServerTimeouts(server: Server, config: Config) {
       fileStorageService,
       feedbackService,
       scheduledRunResumeService,
+      reportUndelivered: config.consoleBackend
+        ? createDeliveryReporter({
+            baseUrl: config.consoleBackend.url,
+            audience: config.consoleBackend.audience,
+            getServiceToken: (audience) => oidcClient.getServiceToken(audience),
+          })
+        : undefined,
       config,
     };
 
@@ -509,7 +517,7 @@ function setupServerTimeouts(server: Server, config: Config) {
         // Respond immediately to acknowledge receipt
         res.status(200).json({ acknowledged: true });
 
-        await handleA2ANotification(task, projectId, handlerDeps);
+        await handleA2ANotification(task, projectId, handlerDeps, res.locals.projectName as string);
       }
     );
 
@@ -533,7 +541,6 @@ function setupServerTimeouts(server: Server, config: Config) {
       config,
       oidcClient,
       installationSecretService,
-      broker: config.userAuthMode === 'broker' ? createBrokerClient(config, oidcClient) : undefined,
     }).catch((error) => {
       logger.error(error, `Delivery-channel self-registration failed: ${error}`);
     });

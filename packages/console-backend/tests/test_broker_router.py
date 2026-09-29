@@ -26,7 +26,6 @@ from console_backend.models.broker import (
     BrokerClientCreate,
     BrokerRedeemRequest,
     BrokerRedemption,
-    BrokerWorkspaceInstallations,
     BrokerTokenRequest,
     BrokerTokenResponse,
 )
@@ -356,19 +355,6 @@ class TestClientLegCarriesTheBinding:
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_a_client_sets_its_workspaces_installations(self, service_request):
-        service, request = service_request
-        db = AsyncMock()
-        client = _client()
-
-        await router.set_workspace_installations(
-            "T1", BrokerWorkspaceInstallations(installation_ids=["A1", "A2"]), request, db, client
-        )
-
-        service.set_workspace_installations.assert_awaited_once_with(db, client, "T1", ["A1", "A2"])
-        db.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_token_passes_the_binding_secret(self, service_request):
         service, request = service_request
         service.mint.return_value = BrokerTokenResponse(access_token="at", expires_in=60)
@@ -380,3 +366,51 @@ class TestClientLegCarriesTheBinding:
         )
 
         service.mint.assert_awaited_once_with(db, client, "s1", "orchestrator", "secret")
+
+
+class TestASignInReleasesReachabilityHolds:
+    """A bound sign-in switches on the subscriptions held because their channel could not
+    reach the subscriber, on the channels of its workspace (#192)."""
+
+    @pytest.fixture
+    def app(self, monkeypatch):
+        monkeypatch.setattr(config.broker, "enabled", True)
+        service = AsyncMock(spec=BrokerService)
+        service.redeem.return_value = BrokerRedemption(user_id="u1", sub="s1", binding_secret="secret")
+        scheduler = SimpleNamespace(release_reachability_holds=AsyncMock(return_value=1))
+        users = SimpleNamespace(get_user=AsyncMock(return_value=SimpleNamespace(id="u1")))
+        state = SimpleNamespace(broker_service=service, scheduler_service=scheduler, user_service=users)
+        return scheduler, users, SimpleNamespace(app=SimpleNamespace(state=state))
+
+    @pytest.mark.asyncio
+    async def test_redeem_releases_the_users_holds_in_its_workspace(self, app):
+        scheduler, users, request = app
+        client = _client()
+
+        await router.redeem(BrokerRedeemRequest(code="c", account_key="T1:U1", workspace_id="T1"), request, AsyncMock(), client)
+
+        scheduler.release_reachability_holds.assert_awaited_once()
+        assert scheduler.release_reachability_holds.await_args.args[1:] == (
+            users.get_user.return_value,
+            client.client_id,
+            "T1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_sign_in_that_names_no_workspace_releases_nothing(self, app):
+        scheduler, _, request = app
+
+        await router.redeem(BrokerRedeemRequest(code="c"), request, AsyncMock(), _client())
+
+        scheduler.release_reachability_holds.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_release_does_not_fail_the_sign_in(self, app):
+        scheduler, _, request = app
+        scheduler.release_reachability_holds.side_effect = RuntimeError("db gone")
+        db = AsyncMock()
+
+        result = await router.redeem(BrokerRedeemRequest(code="c", workspace_id="T1"), request, db, _client())
+
+        assert result.binding_secret == "secret"
+        db.rollback.assert_awaited_once()

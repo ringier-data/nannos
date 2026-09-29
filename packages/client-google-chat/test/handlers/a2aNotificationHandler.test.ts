@@ -214,3 +214,65 @@ describe('a resumed run threads under the ask that unblocked it', () => {
     );
   });
 });
+
+describe('a notification that reaches nobody is reported (#191)', () => {
+  function deps(found: boolean, chatService = mockChatService()) {
+    const reportUndelivered = jest.fn<(r: unknown) => Promise<void>>().mockResolvedValue(undefined);
+    return {
+      reportUndelivered,
+      chatService,
+      deps: {
+        chatService,
+        scheduledRunStore: mockScheduledRunStore(),
+        userAuthStorage: {
+          findByOidcSub: jest.fn<() => Promise<unknown>>().mockResolvedValue(found ? { userId: 'users/123' } : null),
+        },
+        reportUndelivered,
+      } as unknown as HandlerDependencies,
+    };
+  }
+
+  test('no sign-in in this project is reported as no_recipient under the channel installation', async () => {
+    const { deps: d, reportUndelivered, chatService } = deps(false);
+
+    // The installation the notification token identified, not one looked up by number:
+    // several projects may share a number.
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d, 'projects/nannos');
+
+    expect(chatService.sendTextMessage).not.toHaveBeenCalled();
+    expect(reportUndelivered).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 42, installationId: 'projects/nannos', reason: 'no_recipient' })
+    );
+  });
+
+  test('a missing DM space or a failed post is send_failed', async () => {
+    const chatService = mockChatService();
+    chatService.findDirectMessage.mockResolvedValueOnce(null);
+    chatService.sendTextMessage.mockRejectedValueOnce(new Error('quota'));
+    const { deps: d, reportUndelivered } = deps(true, chatService);
+
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d, 'projects/nannos');
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d, 'projects/nannos');
+
+    expect(reportUndelivered.mock.calls.map(([r]) => (r as { reason: string }).reason)).toEqual([
+      'send_failed',
+      'send_failed',
+    ]);
+  });
+
+  test('a notice that belongs to no run (run id null) is not reported', async () => {
+    const { deps: d, reportUndelivered } = deps(false);
+
+    await handleA2ANotification(makeTask({ ...schedulerPayload, scheduled_job_run_id: null }), PROJECT_ID, d);
+
+    expect(reportUndelivered).not.toHaveBeenCalled();
+  });
+
+  test('a delivered notification reports nothing', async () => {
+    const { deps: d, reportUndelivered } = deps(true);
+
+    await handleA2ANotification(makeTask(schedulerPayload), PROJECT_ID, d);
+
+    expect(reportUndelivered).not.toHaveBeenCalled();
+  });
+});

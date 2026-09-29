@@ -36,6 +36,8 @@ def _make_engine(*, channel: dict | None) -> SchedulerEngine:
     # complete_job reports the job state it left behind so _finalize can tell "this run
     # stopped the job" from "it was already off"; a bare AsyncMock will not unpack.
     repo.complete_job.return_value = (True, None)
+    # And the row _finalize locks first: on, no stop in place.
+    repo.subscription_state.return_value = (True, None)
 
     return SchedulerEngine(
         agent_access_check=AsyncMock(return_value=True),

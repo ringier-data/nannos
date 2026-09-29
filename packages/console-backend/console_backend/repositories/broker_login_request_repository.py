@@ -185,26 +185,6 @@ class BrokerLoginRequestRepository:
             },
         )
 
-    async def set_workspace_installations(
-        self, db: AsyncSession, *, client_id: str, workspace_id: str, installation_ids: list[str], now: datetime
-    ) -> None:
-        """Replace the installations *client_id* runs in *workspace_id*."""
-        await db.execute(
-            text("""
-                INSERT INTO broker_workspaces (client_id, workspace_id, installation_ids, updated_at)
-                VALUES (:client_id, :workspace_id, :installation_ids, :now)
-                ON CONFLICT (client_id, workspace_id) DO UPDATE SET
-                    installation_ids = EXCLUDED.installation_ids,
-                    updated_at = EXCLUDED.updated_at
-            """),
-            {
-                "client_id": client_id,
-                "workspace_id": workspace_id,
-                "installation_ids": sorted(set(installation_ids)),
-                "now": now,
-            },
-        )
-
     async def binding_user(self, db: AsyncSession, client_id: str, secret_hash: str) -> str | None:
         """The user a binding secret of *client_id* names, or None when it names none."""
         result = await db.execute(

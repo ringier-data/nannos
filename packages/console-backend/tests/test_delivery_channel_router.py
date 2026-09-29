@@ -13,6 +13,7 @@ import pytest
 from fastapi import HTTPException, status
 
 import console_backend.routers.delivery_channel_router as router
+from console_backend.config import config
 
 
 def _request_with_repo(repo) -> MagicMock:
@@ -147,3 +148,77 @@ async def test_session_user_without_admin_is_forbidden(monkeypatch):
             request=MagicMock(), owner_client_id="client-a", current_user=MagicMock()
         )
     assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+
+
+class TestUndeliveredReport:
+    """A chat client reports a run it could not deliver (#191): only as itself."""
+
+    _REPORT = router.UndeliveredReport(run_id=7, installation_id="A1", reason="no_recipient")
+
+    def _request(self, recorded: bool) -> MagicMock:
+        req = MagicMock()
+        req.app.state.scheduler_service = SimpleNamespace(report_undelivered=AsyncMock(return_value=recorded))
+        return req
+
+    @pytest.mark.asyncio
+    async def test_the_clients_own_service_account_is_heard(self, monkeypatch):
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client", "aud": [config.oidc.client_id]}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+        req, db = self._request(True), MagicMock()
+
+        await router.report_undelivered(self._REPORT, req, db)
+
+        req.app.state.scheduler_service.report_undelivered.assert_awaited_once_with(db, "slack-client", self._REPORT)
+
+    @pytest.mark.asyncio
+    async def test_a_users_token_of_the_same_client_is_refused(self, monkeypatch):
+        claims = {"azp": "slack-client", "sid": "session", "preferred_username": "service-account-slack-client"}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+        req = self._request(True)
+
+        with pytest.raises(HTTPException) as exc:
+            await router.report_undelivered(self._REPORT, req, MagicMock())
+
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        req.app.state.scheduler_service.report_undelivered.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_token_the_client_got_for_another_service_is_refused(self, monkeypatch):
+        """Its own client-credentials token, but minted for the orchestrator: the same
+        audience rule as the token broker, since this endpoint switches jobs off."""
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client", "aud": ["orchestrator"]}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+        req = self._request(True)
+
+        with pytest.raises(HTTPException) as exc:
+            await router.report_undelivered(self._REPORT, req, MagicMock())
+
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        req.app.state.scheduler_service.report_undelivered.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_run_not_on_the_clients_channels_is_a_404(self, monkeypatch):
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client", "aud": config.oidc.client_id}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+
+        with pytest.raises(HTTPException) as exc:
+            await router.report_undelivered(self._REPORT, self._request(False), MagicMock())
+
+        assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_the_console_lists_channels_with_the_callers_own_reachability(self, monkeypatch):
+        """One query: the repository computes the caller's reachability on each channel."""
+        repo = SimpleNamespace(list_all_channels=AsyncMock(return_value=([], 0)))
+        monkeypatch.setattr(router, "get_client_id_from_request", AsyncMock(return_value=None))
+
+        await router.list_channels(
+            request=_request_with_repo(repo),
+            db=MagicMock(),
+            current_user=SimpleNamespace(id="u1"),
+            page=1,
+            limit=None,
+            search=None,
+        )
+
+        assert repo.list_all_channels.await_args.kwargs["reachability_for"] == "u1"

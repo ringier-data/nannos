@@ -70,11 +70,11 @@ class TestFailureAccounting:
         await pg_session.commit()
 
         r = await pg_session.execute(
-            text("SELECT enabled, paused_reason FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
+            text("SELECT enabled, pause_code FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
         )
         row = r.mappings().first()
         assert row["enabled"] is True
-        assert row["paused_reason"] is None
+        assert row["pause_code"] is None
 
 
 class TestRetryMarkerSurvivesOtherCompletions:
@@ -188,13 +188,13 @@ class TestRetryClaiming:
 
     @pytest.mark.asyncio
     async def test_retry_does_not_resurrect_a_deliberately_stopped_job(self, pg_session: AsyncSession):
-        """paused_reason separates one-shot retirement from somebody stopping the job."""
+        """pause_code separates one-shot retirement from somebody stopping the job."""
         repo = ScheduledJobRepository()
         job_id = await seed_job(
             pg_session,
             "paused",
             enabled="false",
-            paused_reason="Manually paused",
+            pause_code="manually_paused",
             retry_at="NOW() - INTERVAL '1 minute'",
         )
         await pg_session.commit()
@@ -212,7 +212,7 @@ class TestHeartbeat:
     async def test_touch_run_refreshes_liveness(self, pg_session: AsyncSession):
         repo = ScheduledJobRepository()
         job_id = await seed_job(pg_session, "beat")
-        run_id = await repo.create_run(pg_session, job_id)
+        run_id = await repo.create_run(pg_session, job_id, delivery_channel_id=None)
         await pg_session.execute(
             text("UPDATE scheduled_job_runs SET last_seen_at = NOW() - INTERVAL '1 hour' WHERE id = :id"),
             {"id": run_id},
@@ -233,8 +233,8 @@ class TestHeartbeat:
         """A run must never be stale before its first heartbeat."""
         repo = ScheduledJobRepository()
         job_id = await seed_job(pg_session, "fresh")
-        run_id = await repo.create_run(pg_session, job_id)
-        manual_id = await repo.create_run(pg_session, job_id, trigger=RunTrigger.MANUAL)
+        run_id = await repo.create_run(pg_session, job_id, delivery_channel_id=None)
+        manual_id = await repo.create_run(pg_session, job_id, trigger=RunTrigger.MANUAL, delivery_channel_id=None)
         await pg_session.commit()
 
         r = await pg_session.execute(
@@ -251,7 +251,7 @@ class TestHeartbeat:
     async def test_complete_run_records_the_notice_in_the_same_write(self, pg_session: AsyncSession):
         repo = ScheduledJobRepository()
         job_id = await seed_job(pg_session, "notice")
-        run_id = await repo.create_run(pg_session, job_id, trigger=RunTrigger.RETRY)
+        run_id = await repo.create_run(pg_session, job_id, trigger=RunTrigger.RETRY, delivery_channel_id=None)
         await pg_session.commit()
 
         due = datetime.now(timezone.utc) + timedelta(seconds=90)

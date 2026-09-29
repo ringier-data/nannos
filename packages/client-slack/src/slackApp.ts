@@ -5,7 +5,7 @@ import { Logger, SlackBoltLogger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
 import { OIDCClient } from './services/oidcClient.js';
 import type { IUserAuthService } from './services/userAuthService.js';
-import { createBrokerClient, createUserAuthService } from './services/userAuthServiceFactory.js';
+import { createUserAuthService } from './services/userAuthServiceFactory.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { FeedbackService } from './services/feedbackService.js';
@@ -16,6 +16,7 @@ import { processPendingRequest } from './utils/processPendingRequest.js';
 import { recoverOrphanedTasks } from './utils/taskRecovery.js';
 import { MultiTenantHTTPReceiver } from './receivers/MultiTenantHTTPReceiver.js';
 import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
+import { createDeliveryReporter, type DeliveryReporter } from './services/deliveryReport.js';
 import { registerInstallations } from './services/installationRegistrar.js';
 import { createInstallationSecretService } from './services/installationSecretServiceFactory.js';
 import { parseA2APushEvent } from './utils/a2aPushPayload.js';
@@ -23,6 +24,8 @@ import { ParamsIncomingMessage } from '@slack/bolt/dist/receivers/ParamsIncoming
 import { ServerResponse } from 'node:http';
 let userAuthService: IUserAuthService;
 let a2aClientService: A2AClientService;
+/** Reports a scheduled run that reached nobody (#191); unset without a console-backend. */
+let deliveryReporter: DeliveryReporter | undefined;
 let fileStorageService: FileStorageService;
 let feedbackService: FeedbackService | undefined;
 let scheduledRunResumeService: ScheduledRunResumeService | undefined;
@@ -321,6 +324,7 @@ export async function startSlackApp(config: Config) {
           handleA2ANotification(task, botInstallation, {
             userAuthStorage: storage.userAuth,
             scheduledRunStore: storage.scheduledRun,
+            reportUndelivered: deliveryReporter,
           }).catch((error) => {
             logger.error(error, `[A2ACallback] Error handling notification: ${error}`);
           });
@@ -378,6 +382,13 @@ export async function startSlackApp(config: Config) {
 
     // OIDC client
     const oidcClient = new OIDCClient(config);
+    if (config.consoleBackend) {
+      deliveryReporter = createDeliveryReporter({
+        baseUrl: config.consoleBackend.url,
+        audience: config.consoleBackend.audience,
+        getServiceToken: (audience) => oidcClient.getServiceToken(audience),
+      });
+    }
 
     // User auth service (assign to module-level variable for OAuth callback).
     // USER_AUTH_MODE picks the client's own login or console-backend's token broker.
@@ -461,7 +472,6 @@ export async function startSlackApp(config: Config) {
       oidcClient,
       botInstallationStore: storage.botInstallation,
       installationSecretService,
-      broker: config.userAuthMode === 'broker' ? createBrokerClient(config, oidcClient) : undefined,
     }).catch((error) => {
         logger.error(error, `Delivery-channel self-registration failed: ${error}`);
     });

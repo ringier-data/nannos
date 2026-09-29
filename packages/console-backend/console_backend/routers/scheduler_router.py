@@ -1325,7 +1325,9 @@ async def run_job_now(
 
     # Recorded as MANUAL so that, should it be interrupted, neither _finalize nor the
     # healer treats a test press as a scheduled occurrence owed a retry.
-    run_id: int = await engine._repo.create_run(db, job_id, trigger=RunTrigger.MANUAL)
+    run_id: int = await engine._repo.create_run(
+        db, job_id, trigger=RunTrigger.MANUAL, delivery_channel_id=job.delivery_channel_id
+    )
     await db.commit()
     background_tasks.add_task(engine.run_job_now, job, run_id)
     return RunNowResponse(job_id=job_id, run_id=run_id)
@@ -1493,7 +1495,9 @@ async def resume_parked_run(
     # nothing swept it, because the healer only looks at ``running`` rows. Writing the row
     # here means a death in that window leaves exactly such a row, and a ``resumed`` run
     # earns the fresh attempt ADR-0007 gives any interrupted one.
-    resumed_run_id = await engine._repo.create_run(db, job_id, trigger=RunTrigger.RESUMED)
+    resumed_run_id = await engine._repo.create_run(
+        db, job_id, trigger=RunTrigger.RESUMED, delivery_channel_id=job.delivery_channel_id
+    )
     await db.commit()
 
     background_tasks.add_task(

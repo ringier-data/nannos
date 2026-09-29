@@ -16,16 +16,13 @@ import pytest_asyncio
 from sqlalchemy import text
 
 from console_backend.config import config
-from console_backend.models.scheduled_job import ScheduledJobUpdate, ScheduleKind
+from console_backend.models.scheduled_job import PauseCode, ScheduledJobUpdate, ScheduleKind
 from console_backend.models.sub_agent import SubAgentType
 from console_backend.models.user import UserSettings
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
 from console_backend.services.audit_service import AuditService
 from console_backend.services.notification_service import NotificationService
 from console_backend.services.scheduler_service import (
-    _AWAITING_SIGN_IN_REASON,
-    _ELAPSED_ONCE_ON_INHERIT,
-    _SIGN_IN_EXPIRED_REASON,
     SchedulerNotReadyError,
     SchedulerService,
 )
@@ -163,7 +160,7 @@ class TestAGroupDefaultHoldsBackMembersWhoHaveNotSignedIn:
 
         member = await svc.repo.get_subscription_for(db, job.definition_id, u["member"].id)
         writer = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
-        assert (member.enabled, member.paused_reason) == (False, _AWAITING_SIGN_IN_REASON)
+        assert (member.enabled, member.pause_code) == (False, PauseCode.AWAITING_SIGN_IN)
         assert writer.enabled is True and writer.paused_reason is None
 
         messages = dict(
@@ -204,7 +201,7 @@ class TestAGroupDefaultHoldsBackMembersWhoHaveNotSignedIn:
         await db.commit()
 
         back = await svc.repo.get_subscription_for(db, job.definition_id, u["member"].id)
-        assert (back.enabled, back.paused_reason) == (False, _AWAITING_SIGN_IN_REASON)
+        assert (back.enabled, back.pause_code) == (False, PauseCode.AWAITING_SIGN_IN)
 
 
 class TestTheFirstSignInReleasesTheHold:
@@ -236,7 +233,7 @@ class TestTheFirstSignInReleasesTheHold:
         own reason. Signing in again stores a fresh token, and must start it again."""
         svc, db, u = world["service"], world["db"], world["users"]
         job = await svc.create_job(db, _watch_create(), u["writer"])
-        await svc.repo.disable_subscription(db, job.id, _SIGN_IN_EXPIRED_REASON)
+        await svc.repo.disable_subscription(db, job.id, PauseCode.SIGN_IN_EXPIRED)
         await db.commit()
 
         assert await svc.release_sign_in_holds(db, u["writer"]) == 1
@@ -266,4 +263,4 @@ class TestTheFirstSignInReleasesTheHold:
         assert await svc.release_sign_in_holds(db, u["member"]) == 0
 
         held = await svc.repo.get_subscription_for(db, job.definition_id, u["member"].id)
-        assert (held.enabled, held.paused_reason) == (False, _ELAPSED_ONCE_ON_INHERIT)
+        assert (held.enabled, held.pause_code) == (False, PauseCode.ELAPSED_WHILE_HELD)

@@ -88,6 +88,7 @@ import { describeCron } from '@/lib/cron';
 import { DetailSkeleton } from '@/components/skeletons';
 import { io } from 'socket.io-client';
 import { toast } from 'sonner';
+import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
 
 interface SchedulerNotification {
   job_id: number;
@@ -798,10 +799,11 @@ function EditForm({
       } catch (e) {
         // The edit is already persisted; only the resume failed — a one-time job that
         // has already run refuses to resume. Reporting this as a failed save would be
-        // a lie, and the user would try again on changes that are already stored.
-        throw new Error(
-          `Changes saved, but the job could not be resumed: ${e instanceof Error ? e.message : String(e)}`
-        );
+        // a lie, and the user would try again on changes that are already stored. A
+        // toast, not the form's error: a saved trigger change remounts the form.
+        toast.error('Changes saved, but the job could not be resumed', {
+          description: e instanceof Error ? e.message : String(e),
+        });
       }
     },
     onSuccess: () => {
@@ -925,7 +927,17 @@ function EditForm({
 
     // A paused job does not run whatever you save, and nothing on the way out says so:
     // the fix you just made looks applied while the scheduler keeps skipping the job.
-    // Ask, rather than saving into a job that will not act on it.
+    // Ask, rather than saving into a job that will not act on it. Except a job held
+    // because its channel can't reach the user, moved to another: the move is the fix,
+    // so it is saved and resumed, and a refusal (a one-time job whose moment passed, a
+    // lapsed sign-in) is shown as "saved, but could not be resumed".
+    const releasesHold =
+      (job.pause_code === 'unreachable' || job.pause_code === 'undelivered') &&
+      deliveryChannel !== String(job.delivery_channel_id ?? '');
+    if (releasesHold) {
+      mutation.mutate({ body, resume: true });
+      return;
+    }
     if (!job.enabled) {
       setPendingSave(body);
       return;
@@ -1319,15 +1331,26 @@ function EditForm({
                   {channels.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-muted-foreground">No delivery channels registered</div>
                   ) : (
-                    channels.map((ch) => (
-                      <SelectItem key={ch.id} value={String(ch.id)}>
-                        {ch.name}
-                        {ch.description && <span className="ml-2 text-xs text-muted-foreground">— {ch.description}</span>}
-                      </SelectItem>
-                    ))
+                    <DeliveryChannelOptions
+                      channels={channels}
+                      selected={deliveryChannel}
+                      saved={String(job.delivery_channel_id ?? '')}
+                    />
                   )}
                 </SelectContent>
               </Select>
+              {(() => {
+                // The subscriber's own reachability: the job's as saved, the list's for a
+                // channel picked but not saved yet. Both are computed for the viewer.
+                const chosen = channels.find((ch) => String(ch.id) === deliveryChannel);
+                const saved = String(job.delivery_channel_id ?? '') === deliveryChannel;
+                return (
+                  <DeliveryReachabilityNote
+                    reachability={saved ? job.delivery_reachability : chosen?.reachability}
+                    channelName={chosen?.name}
+                  />
+                );
+              })()}
             </div>
           </CardContent>
         </Card>
@@ -1477,6 +1500,11 @@ function ParkedRunNotice({ jobId, run }: { jobId: number; run: ScheduledJobRun }
 // Run history table
 // ---------------------------------------------------------------------------
 
+const UNDELIVERED_TEXT: Record<NonNullable<ScheduledJobRun['delivery_failure']>, string> = {
+  no_recipient: "Not delivered: the channel had no sign-in for the subscriber, so it reached nobody",
+  send_failed: 'Not delivered: the channel found the subscriber, but sending the message failed',
+};
+
 function RunHistoryTable({ runs, filtered }: { runs: ScheduledJobRun[]; filtered: boolean }) {
   const { isAdmin } = useAuth();
 
@@ -1531,7 +1559,17 @@ function RunHistoryTable({ runs, filtered }: { runs: ScheduledJobRun[]; filtered
                 )}
               </td>
               <td className="px-4 py-3 text-center">
-                {run.delivered ? (
+                {run.delivery_failure ? (
+                  // The channel's client reported the drop (#191): not the same as "no webhook".
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div>
+                        <AlertCircle className="mx-auto h-4 w-4 text-destructive" />
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>{UNDELIVERED_TEXT[run.delivery_failure]}</TooltipContent>
+                  </Tooltip>
+                ) : run.delivered ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <div>
@@ -1714,6 +1752,9 @@ export function SchedulerJobDetailPage() {
   const resumeMutation = useMutation({
     mutationFn: () => resumeJob(jobId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scheduler-job', jobId] }),
+    // A refusal (unreachable channel, lapsed sign-in, elapsed one-time job) says how to fix it.
+    onError: (e: unknown) =>
+      toast.error('The job could not be resumed', { description: e instanceof Error ? e.message : String(e) }),
   });
 
   const deleteMutation = useMutation({

@@ -115,8 +115,8 @@ class UserOnboarding(BaseModel):
     Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
     not an error: both flags turn true with the user's first sign-in (ADR-0011).
 
-    It says nothing about delivery: whether a job's notification can reach the user on a
-    chat channel is not known here yet (#192).
+    ``unreachable_subscriptions`` is the delivery side (#192): how many of the user's
+    subscriptions notify a channel that cannot reach them.
     """
 
     signed_in: bool = Field(
@@ -137,17 +137,29 @@ class UserOnboarding(BaseModel):
             "30 days, revoked, or its session ended). Implies scheduler_ready is false."
         )
     )
+    unreachable_subscriptions: int = Field(
+        default=0,
+        description=(
+            "How many of the user's scheduled-job subscriptions deliver to a chat channel that "
+            "cannot reach them, because they have not signed in to Nannos from there. Those are "
+            "held until they do. Channels Nannos cannot judge (older sign-ins) are not counted."
+        ),
+    )
 
     @classmethod
-    def of(cls, sub: str, offline_token: str | None, is_service_account: bool) -> "UserOnboarding | None":
-        """*offline_token* is the `OFFLINE_TOKEN_STATE_SQL` column. None for a machine
-        identity: it never signs in interactively, so it has no onboarding."""
+    def of(
+        cls, sub: str, offline_token: str | None, is_service_account: bool, unreachable_subscriptions: int = 0
+    ) -> "UserOnboarding | None":
+        """*offline_token* is the `OFFLINE_TOKEN_STATE_SQL` column, *unreachable_subscriptions*
+        the `unreachable_subscriptions_sql` one. None for a machine identity: it never signs
+        in interactively, so it has no onboarding."""
         if is_service_account:
             return None
         return cls(
             signed_in=has_idp_identity(sub),
             scheduler_ready=offline_token == "live",
             sign_in_expired=offline_token == "expired",
+            unreachable_subscriptions=unreachable_subscriptions or 0,
         )
 
 
