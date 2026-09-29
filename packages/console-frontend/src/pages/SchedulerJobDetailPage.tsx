@@ -1500,6 +1500,11 @@ function ParkedRunNotice({ jobId, run }: { jobId: number; run: ScheduledJobRun }
 // Run history table
 // ---------------------------------------------------------------------------
 
+const UNDELIVERED_TEXT: Record<NonNullable<ScheduledJobRun['delivery_failure']>, string> = {
+  no_recipient: "Not delivered: the channel had no sign-in for the subscriber, so it reached nobody",
+  send_failed: 'Not delivered: the channel found the subscriber, but sending the message failed',
+};
+
 function RunHistoryTable({ runs, filtered }: { runs: ScheduledJobRun[]; filtered: boolean }) {
   const { isAdmin } = useAuth();
 
@@ -1554,7 +1559,17 @@ function RunHistoryTable({ runs, filtered }: { runs: ScheduledJobRun[]; filtered
                 )}
               </td>
               <td className="px-4 py-3 text-center">
-                {run.delivered ? (
+                {run.delivery_failure ? (
+                  // The channel's client reported the drop (#191): not the same as "no webhook".
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div>
+                        <AlertCircle className="mx-auto h-4 w-4 text-destructive" />
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>{UNDELIVERED_TEXT[run.delivery_failure]}</TooltipContent>
+                  </Tooltip>
+                ) : run.delivered ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <div>
@@ -1737,6 +1752,9 @@ export function SchedulerJobDetailPage() {
   const resumeMutation = useMutation({
     mutationFn: () => resumeJob(jobId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scheduler-job', jobId] }),
+    // A refusal (unreachable channel, lapsed sign-in, elapsed one-time job) says how to fix it.
+    onError: (e: unknown) =>
+      toast.error('The job could not be resumed', { description: e instanceof Error ? e.message : String(e) }),
   });
 
   const deleteMutation = useMutation({

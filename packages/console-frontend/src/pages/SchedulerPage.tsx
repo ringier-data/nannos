@@ -1130,6 +1130,9 @@ export function SchedulerPage() {
   const resumeMutation = useMutation({
     mutationFn: (jobId: number) => resumeJob(jobId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scheduler-jobs'] }),
+    // A refusal (unreachable channel, lapsed sign-in, elapsed one-time job) says how to fix it.
+    onError: (e: unknown) =>
+      toast.error('The job could not be resumed', { description: e instanceof Error ? e.message : String(e) }),
   });
 
   const deleteMutation = useMutation({
