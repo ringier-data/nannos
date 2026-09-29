@@ -74,9 +74,11 @@ _LIST_TTL = 10.0
 # LiteLLM reasoning_effort vocabulary in display order ("none" = off, covered by the
 # enable-thinking toggle, so excluded here).
 _EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"]
-# The portable tiers: every reasoning provider accepts them (agent-common passes them through
-# unchanged), and LiteLLM's model map never flags them True — it only ever marks one False to
-# exclude it. So they are offered to every reasoning model unless explicitly excluded.
+# The portable tiers: every reasoning provider accepts them, and LiteLLM's model map never flags
+# them True — it only ever marks one False to exclude it. So they are offered to every reasoning
+# model unless explicitly excluded. The complement (minimal/xhigh) must stay the keys of
+# agent-common's `_NON_PORTABLE_EFFORT` (model_factory.py), defined there from the other side;
+# test_thinking_levels.py pins the split so a new tier can't drift silently.
 _PORTABLE_EFFORTS = {"low", "medium", "high"}
 
 
@@ -88,11 +90,13 @@ def thinking_levels_for(info: dict) -> list[str]:
     path (sub_agent_service) so the UI and the persistence guard never disagree.
 
     Grounding rule, matching how LiteLLM's model map uses the ``supports_<effort>_reasoning_effort``
-    flags: a reasoning model gets the portable tiers (low/medium/high) unless one is flagged
-    ``False``, and the non-portable ones (minimal/xhigh) only when flagged ``True`` — the same
-    rule agent-common applies when it maps a level at request time. The map flags only the extra
-    tiers: returning just the flagged ones offered e.g. gpt-6-sol and Claude Sonnet 5 nothing but
-    "xhigh". A model reasons when it says so (``supports_reasoning``) or flags any tier.
+    flags (it only ever flags the extra tiers True): a reasoning model gets the portable tiers
+    (low/medium/high) unless one is flagged ``False``, and the non-portable ones (minimal/xhigh)
+    only when flagged ``True``. agent-common gates only minimal/xhigh at request time; a portable
+    tier passes through there, and the proxy's ``drop_params`` drops one the map excludes. A model
+    reasons when it says so (``supports_reasoning``) or flags any tier; one that reasons but has no
+    tier left (every portable one excluded, no extra flagged) keeps the portable tiers rather than
+    silently losing thinking.
 
     An explicitly-stored ``supports_reasoning: False`` is an admin override: the console writes
     the capability booleans into the deployment's model_info, which shadows the cost map (the
@@ -104,7 +108,10 @@ def thinking_levels_for(info: dict) -> list[str]:
     flags = {e: info.get(f"supports_{e}_reasoning_effort") for e in (*_EFFORT_ORDER, "none", "max")}
     if not (info.get("supports_reasoning") or any(v is True for v in flags.values())):
         return []
-    return [e for e in _EFFORT_ORDER if (flags[e] is not False if e in _PORTABLE_EFFORTS else flags[e] is True)]
+    levels = [e for e in _EFFORT_ORDER if (flags[e] is not False if e in _PORTABLE_EFFORTS else flags[e] is True)]
+    # An empty list reads as "no thinking" to the sub-agent write guard, which would switch thinking
+    # off on the next save; a model that says it reasons keeps the portable tiers instead.
+    return levels or [e for e in _EFFORT_ORDER if e in _PORTABLE_EFFORTS]
 
 
 class ModelGatewayError(Exception):

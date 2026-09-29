@@ -72,3 +72,23 @@ class TestThinkingLevelsFor:
 
     def test_false_flags_alone_do_not_make_a_model_reason(self):
         assert thinking_levels_for({"supports_minimal_reasoning_effort": False}) == []
+
+    def test_a_reasoning_model_with_every_tier_excluded_keeps_the_portable_ones(self):
+        """An empty list would read as "no thinking" to the sub-agent write guard and switch
+        thinking off on the next save; a model that says it reasons must never get one."""
+        info = {
+            "supports_reasoning": True,
+            "supports_low_reasoning_effort": False,
+            "supports_medium_reasoning_effort": False,
+            "supports_high_reasoning_effort": False,
+        }
+        assert thinking_levels_for(info) == ["low", "medium", "high"]
+
+
+def test_non_portable_tiers_match_agent_commons_vocabulary():
+    """The complement of the portable tiers must equal the keys of agent-common's
+    `_NON_PORTABLE_EFFORT`. console-backend does not import agent-common, so the two are pinned
+    here: a tier added to one side must be classified on the other too."""
+    from console_backend.services.model_gateway_service import _EFFORT_ORDER, _PORTABLE_EFFORTS
+
+    assert set(_EFFORT_ORDER) - _PORTABLE_EFFORTS == {"minimal", "xhigh"}
