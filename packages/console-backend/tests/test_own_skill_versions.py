@@ -3,15 +3,18 @@ writes the owner's config version, the owner is pinned by hash like a referrer, 
 restores skill content, and the version goes through the auto-approve rules.
 """
 
+import asyncio
 import os
 
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from console_backend.config import config
 from console_backend.models.skills_registry import SkillFile
@@ -22,6 +25,7 @@ from console_backend.models.sub_agent import (
     SubAgentUpdate,
 )
 from console_backend.models.user import User
+from console_backend.repositories.sub_agent_repository import SubAgentRepository
 from console_backend.services.skill_registry_service import SkillRegistryService
 from console_backend.services.sub_agent_service import PromptLimitError, SubAgentService
 from tests.test_skill_reference_modes import _agent, _default_version, _publish_skill, _resolved_skill
@@ -213,6 +217,32 @@ async def test_the_summary_names_the_baselines_hash_not_the_rows(wired, pg_sessi
 
 
 @pytest.mark.asyncio
+async def test_an_edit_back_to_the_approved_hash_while_a_version_is_pending_makes_the_default_current(
+    wired, pg_session, test_user_db, prompt_limit
+):
+    """Left current, the pending version would bring the edited-away content back on approval."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, v1_hash = await _own_skill(svc, pg_session, test_user_db, agent_id, "x" * 20, inline=True)
+    v1_files = (await registry.get_by_id(pg_session, registry_id)).files
+    approved = (await svc.get_sub_agent_by_id(pg_session, agent_id)).default_version
+    prompt_limit(50)
+    first = await _registry_edit(registry, pg_session, test_user_db, registry_id, "y" * 80)
+    assert first.owner_version is not None and first.owner_version.approved is False
+    versions = await _version_count(pg_session, agent_id)
+
+    back = await registry.update_skill(pg_session, test_user_db, registry_id, files=v1_files)
+    await pg_session.commit()
+
+    assert back.entry.content_hash == v1_hash
+    assert back.owner_version is not None
+    assert back.owner_version.version == approved and back.owner_version.approved is True
+    agent = await svc.get_sub_agent_by_id(pg_session, agent_id)
+    assert agent.current_version == approved and agent.default_version == approved
+    assert await _version_count(pg_session, agent_id) == versions  # the pending version survives, not current
+
+
+@pytest.mark.asyncio
 async def test_an_automated_agent_over_the_limit_refuses_the_edit(wired, pg_session, test_user_db, prompt_limit):
     svc, registry, _ = wired
     agent = await svc.create_sub_agent(
@@ -314,6 +344,89 @@ async def test_a_referrers_pin_is_untouched_by_the_publishers_own_version(wired,
     assert pinned.body == "v1"
     assert pinned.content_hash == v1_hash
     assert pinned.update_available is True
+
+
+@asynccontextmanager
+async def _other_session(postgres_with_migrations):
+    """A second connection to the test database, for a transaction that runs alongside pg_session."""
+    engine = create_async_engine(postgres_with_migrations["dsn"])
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            await session.execute(text(f"SET search_path TO {postgres_with_migrations['schema']}"))
+            await session.commit()
+            yield session
+    finally:
+        await engine.dispose()
+
+
+async def _wait_until_blocked(db: AsyncSession) -> None:
+    for _ in range(100):
+        waiting = (
+            await db.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+        ).scalar_one()
+        await db.rollback()
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the edit never waited on a lock")
+
+
+@pytest.mark.asyncio
+async def test_an_edit_takes_the_owner_before_the_row_and_reads_the_row_again_under_it(
+    wired, pg_session, test_user_db, postgres_with_migrations
+):
+    """Lock order agent-before-row (else it deadlocks against a config save), and the hash gate
+    sees what a config save it waited behind wrote: an edit back to the old content is a change."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, v1_hash = await _own_skill(svc, pg_session, test_user_db, agent_id, "v1")
+    v1_files = (await registry.get_by_id(pg_session, registry_id)).files
+    await pg_session.commit()
+
+    async with _other_session(postgres_with_migrations) as saver, _other_session(postgres_with_migrations) as probe:
+        await SubAgentRepository.lock_for_update(saver, agent_id)  # a config save has started
+        edit = asyncio.create_task(registry.update_skill(pg_session, test_user_db, registry_id, files=v1_files))
+        try:
+            await _wait_until_blocked(probe)
+            # While the edit waits on the owner, it holds nothing on the row.
+            try:
+                await probe.execute(
+                    text("SELECT id FROM skill_registry WHERE id = CAST(:id AS uuid) FOR UPDATE NOWAIT"),
+                    {"id": registry_id},
+                )
+            except DBAPIError:
+                pytest.fail("the edit locked the registry row before the owner")
+            await probe.rollback()
+
+            # The config save moves the row to v2 and commits; only then does the edit run.
+            await svc.update_sub_agent(
+                saver,
+                agent_id,
+                SubAgentUpdate(
+                    skills=[
+                        SkillDefinition(
+                            name="kb", description="knowledge", body="v2", registry_id=registry_id, scope="sub-agent"
+                        )
+                    ]
+                ),
+                test_user_db,
+            )
+            await saver.commit()
+            result = await asyncio.wait_for(edit, timeout=10)
+        finally:
+            if not edit.done():
+                edit.cancel()
+    await pg_session.commit()
+
+    assert result.entry.content_hash == v1_hash
+    assert result.owner_version is not None and result.owner_version.approved is True
+    own = await _resolved_skill(svc, pg_session, agent_id)
+    assert own.body == "v1" and own.content_hash == v1_hash
 
 
 @pytest.mark.asyncio

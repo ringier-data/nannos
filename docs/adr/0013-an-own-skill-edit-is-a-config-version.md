@@ -108,3 +108,16 @@ change goes through.
 - ADR-0011 decision 1 is amended: resolution still branches on ownership, but
   only for what is reported, not for which content is served. ADR-0012's known
   gap is closed.
+- Lock order: every writer of a version locks the agent before it writes one
+  of the agent's own registry rows (config save, host sync, own-skill edit),
+  and an own-skill edit reads the row again under that lock, so its hash gate
+  sees what a config save it waited behind wrote. The order does not cover
+  following bumps: two agents that follow each other's skills can still
+  deadlock when both are edited at the same time, as two config saves of such
+  a pair already could. The victim is the follower bump, which fails in its
+  savepoint: the edit commits, the follower keeps the old hash, and the
+  deadlock is recorded in its `last_bump_error`.
+- An edit back to the content the approved default already pins writes no
+  version. If a pending version that pins other content is current, it stops
+  being current: `current_version` returns to the approved default, and the
+  pending version survives in the history.

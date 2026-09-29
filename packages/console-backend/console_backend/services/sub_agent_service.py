@@ -3444,6 +3444,9 @@ class SubAgentService:
 
         Returns None without writing when the baseline does not hold the skill, or when a
         host publishes the agent's versions (ADR-0006: the next sync re-points the hash).
+        An edit back to the hash the baseline already pins writes nothing either, but a
+        pending current version that pins other content for the skill stops being current:
+        ``current_version`` returns to the baseline, and that is what is returned.
         """
         await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
@@ -3469,7 +3472,16 @@ class SubAgentService:
         for skill in baseline.skills or []:
             if skill.registry_id == registry_id:
                 if skill.content_hash == new_hash:
-                    return None
+                    current = existing.config_version
+                    if current is None or current.version == baseline.version:
+                        return None
+                    current_pin = next((c.content_hash for c in current.skills or [] if c.registry_id == registry_id), None)
+                    if current_pin == new_hash:
+                        return None
+                    # The pending current version pins content the row no longer holds; left
+                    # current, approving it would bring that content back.
+                    await self.repo.update_current_version(db, actor, sub_agent_id, baseline.version)
+                    return OwnerVersion(sub_agent_id=sub_agent_id, version=baseline.version, approved=True)
                 skills.append(skill.model_copy(update={"content_hash": new_hash}))
                 held = True
                 slug = skill.name
@@ -3606,6 +3618,10 @@ class SubAgentService:
         here) is NOT tool-less: the orchestrator gives it every tool the user has, the
         same lazy catalog the general-purpose agent gets (registry ``all_tools``).
         """
+        # Before _create_config_version writes the mirrored skill rows: the agent-before-row
+        # lock order every version writer keeps (see SubAgentRepository.lock_for_update).
+        # It also serializes the MAX(version)+1 below.
+        await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if existing is None:
             raise LookupError(f"Sub-agent {sub_agent_id} not found")

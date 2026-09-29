@@ -35,6 +35,7 @@ from console_backend.models.skills_registry import (
 )
 from console_backend.models.user import User
 from console_backend.repositories.skill_registry_repository import SkillRegistryRepository
+from console_backend.repositories.sub_agent_repository import SubAgentRepository
 from console_backend.services.skill_sources.base import SkillSourceDetail
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,10 @@ ContentChangedHook = Callable[[AsyncSession, "User | None", str, str, str], Awai
 
 @dataclass(frozen=True)
 class OwnerVersion:
-    """The config version an own-skill edit wrote on the owning sub-agent (ADR-0013).
+    """The config version an own-skill edit left current on the owning sub-agent (ADR-0013).
+
+    Normally the version the edit wrote; for an edit back to the approved default's hash
+    while a version is pending, the approved default it returned to.
 
     ``approved`` is False when the version waits for approval: the agent keeps running
     the previous content until then.
@@ -654,6 +658,26 @@ class SkillRegistryService:
         if not entry:
             raise ValueError(f"Registry entry not found: {skill_id}")
 
+        owner_edit = (
+            files is not None
+            and self._owner_edit_hook is not None
+            and entry.scope == "sub-agent"
+            and entry.sub_agent_id is not None
+        )
+        if owner_edit:
+            assert entry.sub_agent_id is not None
+            # Lock order: the owning sub-agent BEFORE the registry row, the order a config
+            # save and a host sync take them in (see SubAgentRepository.lock_for_update).
+            # Taking it only in the owner-edit hook, after repo.update, would deadlock
+            # against a concurrent config save. Held on an edit that turns out to change
+            # nothing too: whether it does is only known from the read below.
+            await SubAgentRepository.lock_for_update(db, entry.sub_agent_id)
+            # Read the row again under the lock: a config save we waited behind may have
+            # moved it, and the hash gate and previous_hash must see where it is now.
+            entry = await self.get_by_id(db, skill_id)
+            if not entry:
+                raise ValueError(f"Registry entry not found: {skill_id}")
+
         fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
 
         if name is not None:
@@ -689,21 +713,6 @@ class SkillRegistryService:
                     extracted = _extract_description_from_frontmatter(skill_md.content)
                     if extracted:
                         fields["description"] = extracted
-
-        owner_edit = (
-            files is not None
-            and self._owner_edit_hook is not None
-            and entry.scope == "sub-agent"
-            and entry.sub_agent_id is not None
-        )
-        if owner_edit:
-            # Lock order: the owning sub-agent BEFORE the registry row, the order a config
-            # save takes them in (update_sub_agent locks the agent, upsert_agent_skill then
-            # writes the row). The owner-edit hook locks the agent again; taking it only
-            # there, after repo.update, would deadlock against a concurrent config save.
-            await db.execute(
-                text("SELECT id FROM sub_agents WHERE id = :id FOR UPDATE"), {"id": entry.sub_agent_id}
-            )
 
         await self.repo.update(db=db, actor=actor, entity_id=skill_id, fields=fields)
 
