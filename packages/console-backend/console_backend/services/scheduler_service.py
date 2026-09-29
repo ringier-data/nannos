@@ -1351,6 +1351,7 @@ class SchedulerService:
             try:
                 if await self.resume_job(db, job.id, user):
                     released += 1
+                    logger.info("Switched on job %d for user %s: released its %s hold", job.id, user.id, job.pause_code.value)
             except ValueError as exc:
                 # Still held, now for the reason that is true, which the matching event
                 # releases (a sign-in from that channel, a sign-in at all). Anything else,
