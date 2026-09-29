@@ -479,6 +479,12 @@ class SkillActivationService:
             )
 
             if act.scope == "sub-agent":
+                if registry.scope == "sub-agent" and registry.sub_agent_id == sub_agent_id:
+                    # The agent's OWN row: the owner-edit hook (ADR-0013) already decided
+                    # its version in update_skill, including when to write none (an embed-
+                    # bound agent, a skill only a draft holds). A second writer here would
+                    # build from the current version and could approve a pending draft.
+                    continue
                 # Sub-agent activation — create a new config version with updated hash
                 if actor:
                     await self.sub_agent_service.update_skill_hash_in_config(

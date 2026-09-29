@@ -583,8 +583,8 @@ class SubAgentRepository(AuditedRepository):
             fetch_before=True,
         )
 
+    @staticmethod
     async def lock_for_update(
-        self,
         db: AsyncSession,
         sub_agent_id: int,
     ) -> None:
@@ -594,6 +594,12 @@ class SubAgentRepository(AuditedRepository):
         rebuilds the skills list from the current config — both are
         read-then-write, so concurrent transactions must be serialized per
         agent. The lock is held until the surrounding transaction commits.
+
+        Lock order: every writer of a version takes this lock BEFORE it writes one of
+        the agent's own ``skill_registry`` rows (config save, host sync, and an own-skill
+        edit in ``SkillRegistryService.update_skill``), so none of them can deadlock
+        against another on the (agent, row) pair. Static so the registry service can
+        take it without holding a repository.
         """
         await db.execute(
             text("SELECT id FROM sub_agents WHERE id = :id FOR UPDATE"),

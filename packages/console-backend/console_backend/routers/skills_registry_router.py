@@ -10,6 +10,7 @@ Provides endpoints for:
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +37,7 @@ from console_backend.models.skills_registry import (
     SkillSourceInfo,
 )
 from console_backend.models.user import User
-from console_backend.services.skill_registry_service import SkillReferencedError, SkillRegistryService
+from console_backend.services.skill_registry_service import OwnerVersion, SkillReferencedError, SkillRegistryService
 from console_backend.services.skills_registry_service import skills_registry_service
 from console_backend.services.sub_agent_service import PromptLimitError
 
@@ -51,6 +52,68 @@ router = APIRouter(prefix="/api/v1/skills/registry", tags=["skills-registry"])
 
 def get_skill_registry_service(request: Request) -> SkillRegistryService:
     return request.app.state.skill_registry_service
+
+
+def _owner_version_note(owner_version: OwnerVersion | None) -> str:
+    """What an own-skill edit did to the owning agent's config (ADR-0013), for a tool reply."""
+    if owner_version is None:
+        return ""
+    if owner_version.approved:
+        return f" The owning agent now runs it as config version {owner_version.version}."
+    return (
+        f" Config version {owner_version.version} of the owning agent is a draft: it must be submitted "
+        "for approval in the console, and the agent runs the previous skill content until it is approved."
+    )
+
+
+class OwnerVersionResponse(BaseModel):
+    """The owning agent's config version an own-skill edit left current (ADR-0013).
+
+    ``approved`` False: the version is a draft to submit for approval, and the agent runs
+    the previous content until then.
+    """
+
+    sub_agent_id: int
+    version: int
+    approved: bool
+
+
+def _owner_version_response(owner_version: OwnerVersion | None) -> OwnerVersionResponse | None:
+    if owner_version is None:
+        return None
+    return OwnerVersionResponse(
+        sub_agent_id=owner_version.sub_agent_id, version=owner_version.version, approved=owner_version.approved
+    )
+
+
+class RegistrySkillUpdateResponse(BaseModel):
+    id: str
+    slug: str
+    content_hash: str
+    owner_version: OwnerVersionResponse | None = None
+
+
+class RegistryFileWriteResponse(BaseModel):
+    id: str
+    file_path: str
+    content_hash: str
+    owner_version: OwnerVersionResponse | None = None
+
+
+def _with_file(path: str, content: str) -> Callable[[list[SkillFile]], list[SkillFile]]:
+    """An ``edit_files`` that writes one file: replaced in place, or appended when new."""
+
+    def edit(files: list[SkillFile]) -> list[SkillFile]:
+        if any(f.path == path for f in files):
+            return [SkillFile(path=path, content=content) if f.path == path else f for f in files]
+        return [*files, SkillFile(path=path, content=content)]
+
+    return edit
+
+
+def _without_file(path: str) -> Callable[[list[SkillFile]], list[SkillFile]]:
+    """An ``edit_files`` that removes one file (a no-op when it is already gone)."""
+    return lambda files: [f for f in files if f.path != path]
 
 
 def _referenced_conflict(exc: SkillReferencedError) -> HTTPException:
@@ -576,7 +639,7 @@ async def create_registry_skill(
     }
 
 
-@router.put("/{skill_id}")
+@router.put("/{skill_id}", response_model=RegistrySkillUpdateResponse)
 async def update_registry_skill(
     skill_id: str,
     body: RegistryUpdateRequest,
@@ -629,14 +692,15 @@ async def update_registry_skill(
 
     await db.commit()
 
-    return {
-        "id": updated.id,
-        "slug": updated.slug,
-        "content_hash": updated.content_hash,
-    }
+    return RegistrySkillUpdateResponse(
+        id=updated.entry.id,
+        slug=updated.entry.slug,
+        content_hash=updated.entry.content_hash,
+        owner_version=_owner_version_response(updated.owner_version),
+    )
 
 
-@router.put("/{skill_id}/files/{file_path:path}")
+@router.put("/{skill_id}/files/{file_path:path}", response_model=RegistryFileWriteResponse)
 async def write_registry_file(
     skill_id: str,
     file_path: str,
@@ -661,33 +725,27 @@ async def write_registry_file(
             detail="Imported skills are read-only. Use the copy endpoint to create an editable copy.",
         )
 
-    # Update the file in the files list
-    current_files = list(entry.files)
-    file_found = False
-    for i, f in enumerate(current_files):
-        if f.path == file_path:
-            current_files[i] = SkillFile(path=file_path, content=body.content)
-            file_found = True
-            break
-    if not file_found:
-        current_files.append(SkillFile(path=file_path, content=body.content))
-
     try:
         updated = await skill_registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=skill_id,
-            files=current_files,
+            edit_files=_with_file(file_path, body.content),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     await db.commit()
 
-    return {"id": updated.id, "file_path": file_path, "content_hash": updated.content_hash}
+    return RegistryFileWriteResponse(
+        id=updated.entry.id,
+        file_path=file_path,
+        content_hash=updated.entry.content_hash,
+        owner_version=_owner_version_response(updated.owner_version),
+    )
 
 
-@router.delete("/{skill_id}/files/{file_path:path}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{skill_id}/files/{file_path:path}", response_model=RegistryFileWriteResponse)
 async def delete_registry_file(
     skill_id: str,
     file_path: str,
@@ -718,22 +776,27 @@ async def delete_registry_file(
             detail="Imported skills are read-only. Use the copy endpoint to create an editable copy.",
         )
 
-    current_files = list(entry.files)
-    new_files = [f for f in current_files if f.path != file_path]
-    if len(new_files) == len(current_files):
+    if not any(f.path == file_path for f in entry.files):
         raise HTTPException(status_code=404, detail=f"File '{file_path}' not found in skill")
 
     try:
-        await skill_registry_service.update_skill(
+        updated = await skill_registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=skill_id,
-            files=new_files,
+            edit_files=_without_file(file_path),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     await db.commit()
+
+    return RegistryFileWriteResponse(
+        id=updated.entry.id,
+        file_path=file_path,
+        content_hash=updated.entry.content_hash,
+        owner_version=_owner_version_response(updated.owner_version),
+    )
 
 
 class CopyRequest(BaseModel):
@@ -975,8 +1038,8 @@ async def apply_skill_update(
     await db.commit()
 
     return {
-        "id": updated.id,
-        "content_hash": updated.content_hash,
+        "id": updated.entry.id,
+        "content_hash": updated.entry.content_hash,
         "files_updated": len(latest.files),
     }
 
@@ -2100,18 +2163,6 @@ async def mcp_update_skill(
     # Authorization: verify user can write to this registry entry
     await _check_registry_write_access(request, db, entry, user.id, sub_agent_id)
 
-    # Build updated files
-    current_files = entry.files or []
-    if body.files is not None:
-        # Replace all files (except SKILL.md which we handle separately)
-        new_files = []
-        for f in body.files:
-            new_files.append(SkillFile(path=f.path, content=f.content))
-        registry_files = new_files
-    else:
-        # Keep existing non-SKILL.md files
-        registry_files = [f for f in current_files if f.path != "SKILL.md"]
-
     # Build updated SKILL.md
     if body.content is not None:
         skill_content = body.content
@@ -2119,16 +2170,27 @@ async def mcp_update_skill(
         skill_content = _build_skill_content(body.skill_name, body.description or "", body.body)
     else:
         raise HTTPException(status_code=400, detail="Either 'body' or 'content' must be provided")
+    skill_md = SkillFile(path="SKILL.md", content=skill_content)
 
-    registry_files.insert(0, SkillFile(path="SKILL.md", content=skill_content))
+    # `files` given: the caller replaces the whole set. Otherwise only SKILL.md changes and
+    # the other files are kept as the row holds them under the write's lock, not as read
+    # above: a concurrent single-file write would otherwise be dropped.
+    registry_files: list[SkillFile] | None = None
+    keep_other_files: Callable[[list[SkillFile]], list[SkillFile]] | None = None
+    if body.files is not None:
+        registry_files = [skill_md, *(SkillFile(path=f.path, content=f.content) for f in body.files)]
+    else:
+        keep_other_files = lambda files: [skill_md, *(f for f in files if f.path != "SKILL.md")]  # noqa: E731
 
-    # Update registry (bumps following referrers in the same transaction, ADR-0011)
+    # Update registry (bumps following referrers in the same transaction, ADR-0011, and
+    # writes the owning agent's config version for an own skill, ADR-0013)
     try:
-        await registry_service.update_skill(
+        result = await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
             files=registry_files,
+            edit_files=keep_other_files,
             description=body.description,
         )
     except SkillReferencedError as e:
@@ -2150,7 +2212,8 @@ async def mcp_update_skill(
         scope=body.scope,
         agent_name=agent_name,
         registry_id=entry.id,
-        message=f"Skill '{body.skill_name}' updated in registry and refreshed on this agent.",
+        message=f"Skill '{body.skill_name}' updated in registry and refreshed on this agent."
+        + _owner_version_note(result.owner_version),
     )
 
 
@@ -2354,25 +2417,13 @@ async def mcp_write_skill_file(
     # Authorization: verify user can write to this registry entry
     await _check_registry_write_access(request, db, entry, user.id, sub_agent_id)
 
-    # Update the file in the registry files list
-    current_files = list(entry.files or [])
-    # Replace existing file or add new one
-    file_found = False
-    for i, f in enumerate(current_files):
-        if f.path == body.file_path:
-            current_files[i] = SkillFile(path=body.file_path, content=body.content)
-            file_found = True
-            break
-    if not file_found:
-        current_files.append(SkillFile(path=body.file_path, content=body.content))
-
     # Update registry
     try:
-        await registry_service.update_skill(
+        result = await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
-            files=current_files,
+            edit_files=_with_file(body.file_path, body.content),
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2391,7 +2442,8 @@ async def mcp_write_skill_file(
         scope=body.scope,
         agent_name=agent_name,
         registry_id=entry.id,
-        message=f"File '{body.file_path}' written to skill '{body.skill_name}' in registry.",
+        message=f"File '{body.file_path}' written to skill '{body.skill_name}' in registry."
+        + _owner_version_note(result.owner_version),
     )
 
 
@@ -2473,9 +2525,7 @@ async def mcp_delete_skill_file(
     await _check_registry_write_access(request, db, entry, user.id, sub_agent_id)
 
     # Remove the file from the registry files list
-    current_files = list(entry.files or [])
-    new_files = [f for f in current_files if f.path != body.file_path]
-    if len(new_files) == len(current_files):
+    if not any(f.path == body.file_path for f in entry.files or []):
         raise HTTPException(
             status_code=404,
             detail=f"File '{body.file_path}' not found in skill '{body.skill_name}'",
@@ -2483,11 +2533,11 @@ async def mcp_delete_skill_file(
 
     # Update registry
     try:
-        await registry_service.update_skill(
+        result = await registry_service.update_skill(
             db=db,
             actor=user,
             skill_id=entry.id,
-            files=new_files,
+            edit_files=_without_file(body.file_path),
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2506,5 +2556,6 @@ async def mcp_delete_skill_file(
         scope=body.scope,
         agent_name=agent_name,
         registry_id=entry.id,
-        message=f"File '{body.file_path}' removed from skill '{body.skill_name}' in registry.",
+        message=f"File '{body.file_path}' removed from skill '{body.skill_name}' in registry."
+        + _owner_version_note(result.owner_version),
     )

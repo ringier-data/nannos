@@ -4124,6 +4124,29 @@ export type OutboundScimTestResult = {
 export type OwnerStatus = 'active' | 'suspended' | 'deleted';
 
 /**
+ * OwnerVersionResponse
+ *
+ * The owning agent's config version an own-skill edit left current (ADR-0013).
+ *
+ * ``approved`` False: the version is a draft to submit for approval, and the agent runs
+ * the previous content until then.
+ */
+export type OwnerVersionResponse = {
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id: number;
+    /**
+     * Version
+     */
+    version: number;
+    /**
+     * Approved
+     */
+    approved: boolean;
+};
+
+/**
  * OwnershipFilter
  *
  * Which side of the console's owned / shared-with-me split to list.
@@ -4600,6 +4623,44 @@ export type RegistryFileWriteRequest = {
      * File content (text)
      */
     content: string;
+};
+
+/**
+ * RegistryFileWriteResponse
+ */
+export type RegistryFileWriteResponse = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * File Path
+     */
+    file_path: string;
+    /**
+     * Content Hash
+     */
+    content_hash: string;
+    owner_version?: OwnerVersionResponse | null;
+};
+
+/**
+ * RegistrySkillUpdateResponse
+ */
+export type RegistrySkillUpdateResponse = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Slug
+     */
+    slug: string;
+    /**
+     * Content Hash
+     */
+    content_hash: string;
+    owner_version?: OwnerVersionResponse | null;
 };
 
 /**
@@ -17394,8 +17455,10 @@ export type UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutResponses = {
     /**
      * Successful Response
      */
-    200: unknown;
+    200: RegistrySkillUpdateResponse;
 };
+
+export type UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutResponse = UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutResponses[keyof UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutResponses];
 
 export type CreateRegistrySkillApiV1SkillsRegistryPostData = {
     body: RegistryCreateRequest;
@@ -17449,7 +17512,7 @@ export type DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteRespo
     /**
      * Successful Response
      */
-    204: void;
+    200: RegistryFileWriteResponse;
 };
 
 export type DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteResponse = DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteResponses[keyof DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteResponses];
@@ -17483,8 +17546,10 @@ export type WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutResponses
     /**
      * Successful Response
      */
-    200: unknown;
+    200: RegistryFileWriteResponse;
 };
+
+export type WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutResponse = WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutResponses[keyof WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutResponses];
 
 export type CopySkillApiV1SkillsRegistrySkillIdCopyPostData = {
     body: CopyRequest;

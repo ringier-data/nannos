@@ -17,6 +17,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,6 +35,7 @@ from console_backend.models.skills_registry import (
 )
 from console_backend.models.user import User
 from console_backend.repositories.skill_registry_repository import SkillRegistryRepository
+from console_backend.repositories.sub_agent_repository import SubAgentRepository
 from console_backend.services.skill_sources.base import SkillSourceDetail
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,39 @@ logger = logging.getLogger(__name__)
 #: transaction: ``(db, actor, skill_id, previous_hash, new_hash)``. ADR-0011 hangs the
 #: following-referrer bump on it.
 ContentChangedHook = Callable[[AsyncSession, "User | None", str, str, str], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class OwnerVersion:
+    """The config version an own-skill edit left current on the owning sub-agent (ADR-0013).
+
+    Normally the version the edit wrote; for an edit back to the approved default's hash
+    while a version is pending, the approved default it returned to.
+
+    ``approved`` is False when the version is a draft that must be submitted for approval:
+    the agent keeps running the previous content until it is approved.
+    """
+
+    sub_agent_id: int
+    version: int
+    approved: bool
+
+
+#: Called when a sub-agent-scoped row is edited OUTSIDE a config save (registry UI, MCP
+#: skill tools): ``(db, actor, sub_agent_id, skill_id, previous_hash, new_hash)``. Writes
+#: the owner's config version carrying the new hash (ADR-0013). Returns None when no
+#: version was written (the owner's baseline does not hold the skill, or the host owns
+#: the agent's versions). Raises to refuse the edit, which the caller must not commit.
+OwnerEditHook = Callable[[AsyncSession, "User", int, str, str, str], Awaitable["OwnerVersion | None"]]
+
+
+@dataclass(frozen=True)
+class SkillUpdateResult:
+    """What :meth:`SkillRegistryService.update_skill` did: the row as it now stands, and
+    the owner's config version when the edit was an out-of-config edit of an own skill."""
+
+    entry: SkillRegistryEntry
+    owner_version: OwnerVersion | None = None
 
 
 class SkillReferencedError(ValueError):
@@ -68,6 +103,7 @@ class SkillRegistryService:
     def __init__(self) -> None:
         self.repo = SkillRegistryRepository()
         self._content_changed_hook: ContentChangedHook | None = None
+        self._owner_edit_hook: OwnerEditHook | None = None
 
     def set_repository(self, repo: SkillRegistryRepository) -> None:
         self.repo = repo
@@ -75,6 +111,10 @@ class SkillRegistryService:
     def set_content_changed_hook(self, hook: ContentChangedHook | None) -> None:
         """Register the one listener for "an existing row's content changed" (ADR-0011)."""
         self._content_changed_hook = hook
+
+    def set_owner_edit_hook(self, hook: OwnerEditHook | None) -> None:
+        """Register the listener for "an own skill was edited outside a config save" (ADR-0013)."""
+        self._owner_edit_hook = hook
 
     async def referrers(self, db: AsyncSession, skill_id: str) -> list[tuple[int, str]]:
         """Sub-agents that REFERENCE this row without owning it (ADR-0011).
@@ -399,6 +439,16 @@ class SkillRegistryService:
         }
 
         skill_id = await self.repo.create(db=db, actor=actor, fields=fields, returning="id")
+        # Like create_skill: a pinned ref resolves through the snapshot of its hash, so the
+        # imported content needs one before an update from the source moves the row.
+        await self._save_version_snapshot(
+            db=db,
+            skill_id=str(skill_id),
+            files_json=files_json,
+            content_hash=content_hash,
+            description=detail.description,
+            created_by=actor.id,
+        )
         entry = await self.get_by_id(db, str(skill_id))
         if not entry:
             raise RuntimeError("Failed to read back created registry entry")
@@ -600,15 +650,57 @@ class SkillRegistryService:
         name: str | None = None,
         sandbox_required: bool | None = None,
         visibility: RegistryVisibility | None = None,
-    ) -> SkillRegistryEntry:
-        """Update a skill in the registry. Returns entry with new content_hash.
+        edit_files: Callable[[list[SkillFile]], list[SkillFile]] | None = None,
+    ) -> SkillUpdateResult:
+        """Update a skill in the registry. Returns the entry with its new content_hash.
 
         Only updates fields that are provided (non-None).
         Recomputes content_hash if files change.
+
+        ``files`` replaces the whole file set. ``edit_files`` instead derives the new set
+        from the files the row holds when this write has it locked, for a single-file
+        write or delete: the caller's own read may be stale by then, and building from it
+        would drop a concurrent write.
+
+        This is the one write path for an edit made OUTSIDE a config save (registry UI,
+        MCP skill tools); a config save and a host sync go through
+        :meth:`upsert_agent_skill` and write their own version. So when the files of a
+        sub-agent-scoped row change here, the owner's config version is written by the
+        owner-edit hook in the same transaction (ADR-0013), and its outcome is returned as
+        ``owner_version``. The hook may refuse the edit (an AUTOMATED agent over the
+        auto-approve prompt limit): the error propagates and nothing is committed.
         """
+        if files is not None and edit_files is not None:
+            raise ValueError("Pass files or edit_files, not both")
         entry = await self.get_by_id(db, skill_id)
         if not entry:
             raise ValueError(f"Registry entry not found: {skill_id}")
+
+        changes_files = files is not None or edit_files is not None
+        owner_edit = (
+            changes_files
+            and self._owner_edit_hook is not None
+            and entry.scope == "sub-agent"
+            and entry.sub_agent_id is not None
+        )
+        if changes_files:
+            if owner_edit:
+                assert entry.sub_agent_id is not None
+                # Lock order: the owning sub-agent BEFORE the registry row, the order a
+                # config save and a host sync take them in (see
+                # SubAgentRepository.lock_for_update). Taking it only in the owner-edit
+                # hook, after repo.update, would deadlock against a concurrent config save.
+                # Held on an edit that turns out to change nothing too: whether it does is
+                # only known from the read below.
+                await SubAgentRepository.lock_for_update(db, entry.sub_agent_id)
+            await db.execute(text("SELECT id FROM skill_registry WHERE id = :id FOR UPDATE"), {"id": skill_id})
+            # Read the row again under the lock: a write we waited behind may have moved it,
+            # and the hash gate, previous_hash and edit_files must see where it is now.
+            entry = await self.get_by_id(db, skill_id)
+            if not entry:
+                raise ValueError(f"Registry entry not found: {skill_id}")
+            if edit_files is not None:
+                files = edit_files(list(entry.files))
 
         fields: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
 
@@ -649,6 +741,7 @@ class SkillRegistryService:
         await self.repo.update(db=db, actor=actor, entity_id=skill_id, fields=fields)
 
         # Save version snapshot if files changed
+        owner_version: OwnerVersion | None = None
         if files is not None:
             await self._save_version_snapshot(
                 db=db,
@@ -660,11 +753,21 @@ class SkillRegistryService:
                 previous_hash=entry.content_hash,
                 actor=actor,
             )
+            if owner_edit and entry.content_hash != content_hash:  # type: ignore[possibly-unbound]
+                assert self._owner_edit_hook is not None and entry.sub_agent_id is not None
+                owner_version = await self._owner_edit_hook(
+                    db,
+                    actor,
+                    entry.sub_agent_id,
+                    skill_id,
+                    entry.content_hash,
+                    content_hash,  # type: ignore[possibly-unbound]
+                )
 
         updated = await self.get_by_id(db, skill_id)
         if not updated:
             raise RuntimeError("Failed to read back updated registry entry")
-        return updated
+        return SkillUpdateResult(entry=updated, owner_version=owner_version)
 
     async def upsert_agent_skill(
         self,
