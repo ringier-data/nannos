@@ -461,6 +461,7 @@ AZURE_AI_API_KEY="${AZURE_AI_API_KEY:-$AZURE_OPENAI_API_KEY}"
 AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-$AZURE_AI_API_KEY}"
 if [[ -n "$AZURE_AI_API_KEY" ]]; then
   AZURE_API_BASE="${AZURE_API_BASE:-https://nannos-resource.openai.azure.com}"
+  AZURE_API_BASE="${AZURE_API_BASE%/}"; AZURE_API_BASE="${AZURE_API_BASE%/openai/v1}"
   AZURE_AI_API_BASE="${AZURE_AI_API_BASE:-https://nannos-resource.services.ai.azure.com}"
   ok "Azure (Nannos AI Foundry) configured"
 fi
@@ -987,9 +988,10 @@ if [[ "$_HAS_LOCAL_LLM" == true ]]; then
 fi
 if [[ "$_HAS_AWS" == true ]]; then
   _LLM_LINES="${_LLM_LINES}    ✓ AWS Bedrock (region: $AWS_BEDROCK_REGION)"$'\n'
-  [[ -n "$AZURE_AI_API_KEY" ]]     && _LLM_LINES="${_LLM_LINES}    ✓ Azure (Nannos AI Foundry)"$'\n'
   [[ -n "$GCP_KEY" ]]              && _LLM_LINES="${_LLM_LINES}    ✓ GCP Vertex AI"$'\n'
 fi
+# Azure no longer depends on AWS: the key can come from .env alone.
+[[ -n "$AZURE_AI_API_KEY" ]] && _LLM_LINES="${_LLM_LINES}    ✓ Azure (Nannos AI Foundry)"$'\n'
 
 # Build auth line
 if [[ "$_OIDC_MODE" == "local" ]]; then

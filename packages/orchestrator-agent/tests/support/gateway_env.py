@@ -54,8 +54,6 @@ CREDENTIAL_KEYS = frozenset(
         *GATEWAY_KEYS,
         # Per-provider credentials belong to the gateway process, not to the
         # tests. Kept only because the rest of the conftest still probes them.
-        "AZURE_OPENAI_API_KEY",
-        "AZURE_API_BASE",
         "GCP_KEY",
         "GCP_PROJECT_ID",
         "GCP_LOCATION",
@@ -75,7 +73,6 @@ FAKE_CREDENTIAL_VALUES = {
     "AWS_SECRET_ACCESS_KEY": "testing",
     "AWS_SECURITY_TOKEN": "testing",
     "AWS_SESSION_TOKEN": "testing",
-    "AZURE_OPENAI_API_KEY": "test-key",
     "LANGSMITH_API_KEY": "test-key",
 }
 

@@ -26,9 +26,11 @@ model_list:
 
   # --- Chat (Azure AI Foundry) ---
   # The azure/ route (not azure_ai/): only it bridges tool calls with reasoning on to the
-  # Responses API, which gpt-6 requires. base_model is the EU data-zone price.
+  # Responses API, which gpt-6 requires. base_model is the EU data-zone price; it and the
+  # token limits exist only in LiteLLM's remote model map (not the one bundled with v1.103.0),
+  # so the limits are stated here too.
   - model_name: gpt-6-sol
-    model_info: {base_model: azure/eu/gpt-6-sol}
+    model_info: {base_model: azure/eu/gpt-6-sol, max_input_tokens: 922000, max_output_tokens: 128000}
     litellm_params: {model: azure/gpt-6-sol, api_base: os.environ/AZURE_API_BASE, api_key: os.environ/AZURE_OPENAI_API_KEY, max_retries: 0}
 
   # --- Chat (Vertex AI) ---
