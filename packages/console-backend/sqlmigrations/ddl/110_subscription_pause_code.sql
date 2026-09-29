@@ -14,7 +14,7 @@ ALTER TABLE scheduled_job_subscriptions
     ADD COLUMN pause_code TEXT
         CONSTRAINT scheduled_job_subscriptions_pause_code_known CHECK (pause_code IN (
             'disabled_by_user', 'manually_paused', 'auto_paused', 'elapsed_on_subscribe',
-            'elapsed_on_inherit', 'agent_inaccessible', 'invalid_timezone', 'condition_met_once',
+            'elapsed_on_inherit', 'elapsed_while_held', 'agent_inaccessible', 'invalid_timezone', 'condition_met_once',
             'no_offline_token', 'awaiting_sign_in', 'sign_in_expired', 'access_revoked',
             'unreachable', 'undelivered', 'legacy'
         )),
@@ -72,6 +72,7 @@ UPDATE scheduled_job_subscriptions SET paused_reason = CASE pause_code
         WHEN 'auto_paused' THEN 'Auto-paused after ' || (pause_detail->>'max_failures') || ' consecutive failures'
         WHEN 'elapsed_on_subscribe' THEN 'This one-time job already ran before you subscribed'
         WHEN 'elapsed_on_inherit' THEN 'This one-time job had already run when this schedule took effect'
+        WHEN 'elapsed_while_held' THEN 'This one-time job''s time passed while it was held, so it did not run; set a new time to run it'
         WHEN 'agent_inaccessible' THEN 'Agent not accessible: you no longer have access to the sub-agent this job runs.'
         WHEN 'invalid_timezone' THEN 'Invalid timezone ''' || (pause_detail->>'timezone') || ''' — fix the job''s timezone and resume it.'
         WHEN 'condition_met_once' THEN 'Watch condition met (one-time trigger)'

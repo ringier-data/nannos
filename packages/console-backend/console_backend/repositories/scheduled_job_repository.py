@@ -137,10 +137,6 @@ _JOB_VIEW_SELECT = """
 """
 
 
-#: ``create_run`` without an explicit channel: copy the subscription's current one.
-_FROM_SUBSCRIPTION: Any = object()
-
-
 def _pause_fields(fields: dict[str, Any], *, clear_on_enable: bool = True) -> dict[str, Any]:
     """*fields* of a subscription write, with ``pause_code`` and ``pause_detail`` as the
     columns store them. A code written without a detail clears the old detail, and a write
@@ -1546,12 +1542,18 @@ class ScheduledJobRepository(AuditedRepository):
                     -- was in flight) keeps the stop it has, and the release that stop
                     -- promises.
                     pause_code           = CASE
+                        -- A reachability hold on a job that is now done promises a release
+                        -- that cannot happen: it goes with the job (the caller says so).
+                        WHEN :retires AND NOT s.enabled AND s.pause_code IN ('unreachable', 'undelivered')
+                            THEN CAST(:pause_code AS text)
                         WHEN :failed AND s.enabled AND (s.consecutive_failures + 1) >= d.max_failures THEN 'auto_paused'
                         WHEN CAST(:pause_code AS text) IS NOT NULL AND (:retires OR NOT s.enabled)
                             THEN CAST(:pause_code AS text)
                         ELSE s.pause_code
                     END,
                     pause_detail         = CASE
+                        WHEN :retires AND NOT s.enabled AND s.pause_code IN ('unreachable', 'undelivered')
+                            THEN CAST(:pause_detail AS jsonb)
                         WHEN :failed AND s.enabled AND (s.consecutive_failures + 1) >= d.max_failures
                             THEN jsonb_build_object('max_failures', d.max_failures)
                         WHEN CAST(:pause_code AS text) IS NOT NULL AND (:retires OR NOT s.enabled)
@@ -1648,7 +1650,8 @@ class ScheduledJobRepository(AuditedRepository):
         db: AsyncSession,
         subscription_id: int,
         trigger: RunTrigger = RunTrigger.SCHEDULED,
-        delivery_channel_id: Any = _FROM_SUBSCRIPTION,
+        *,
+        delivery_channel_id: int | None,
     ) -> int:
         """Insert a new 'running' run record. Returns run ID.
 
@@ -1658,24 +1661,16 @@ class ScheduledJobRepository(AuditedRepository):
         never stale before its first heartbeat. *delivery_channel_id* is the channel the
         dispatch will push to, taken from the same job snapshot: a delivery report about
         this run is judged against it, not a channel the subscription was moved to while
-        the run was in flight. Omitted, the subscription's current one is copied.
+        the run was in flight. Required, so no dispatch path can forget it.
         """
-        from_subscription = delivery_channel_id is _FROM_SUBSCRIPTION
         result = await db.execute(
             text("""
                 INSERT INTO scheduled_job_runs
                     (subscription_id, started_at, status, last_seen_at, trigger, delivery_channel_id)
-                SELECT :subscription_id, NOW(), 'running', NOW(), :trigger,
-                       CASE WHEN :from_subscription THEN s.delivery_channel_id ELSE CAST(:channel AS integer) END
-                FROM scheduled_job_subscriptions s WHERE s.id = :subscription_id
+                VALUES (:subscription_id, NOW(), 'running', NOW(), :trigger, :channel)
                 RETURNING id
             """),
-            {
-                "subscription_id": subscription_id,
-                "trigger": trigger.value,
-                "from_subscription": from_subscription,
-                "channel": None if from_subscription else delivery_channel_id,
-            },
+            {"subscription_id": subscription_id, "trigger": trigger.value, "channel": delivery_channel_id},
         )
         row = result.mappings().first()
         assert row is not None

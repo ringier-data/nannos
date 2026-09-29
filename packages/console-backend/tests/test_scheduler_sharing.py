@@ -645,7 +645,7 @@ class TestRunsAreTheSubscribers:
         await svc.update_permissions(db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"])
         mine = await svc.subscribe(db, job.definition_id, u["member"])
 
-        run_id = await repo.create_run(db, mine.id)
+        run_id = await repo.create_run(db, mine.id, delivery_channel_id=None)
         await db.commit()
         run = await svc.get_run(db, mine.id, run_id, u["member"].id)
         assert run is not None and run.job_id == mine.id

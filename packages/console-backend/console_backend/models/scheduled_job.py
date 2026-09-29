@@ -106,6 +106,8 @@ class PauseCode(str, Enum):
     ELAPSED_ON_SUBSCRIBE = "elapsed_on_subscribe"
     #: A one-shot whose moment had passed when a schedule took effect on it.
     ELAPSED_ON_INHERIT = "elapsed_on_inherit"
+    #: A held one-shot whose moment passed before it could be switched back on: it never ran.
+    ELAPSED_WHILE_HELD = "elapsed_while_held"
     #: The subscriber can no longer reach the sub-agent the job runs.
     AGENT_INACCESSIBLE = "agent_inaccessible"
     #: The stored timezone no longer resolves (detail: ``timezone``).
@@ -136,6 +138,7 @@ _PAUSE_TEXT: dict[PauseCode, str] = {
     PauseCode.AUTO_PAUSED: "Auto-paused after {max_failures} consecutive failures",
     PauseCode.ELAPSED_ON_SUBSCRIBE: "This one-time job already ran before you subscribed",
     PauseCode.ELAPSED_ON_INHERIT: "This one-time job had already run when this schedule took effect",
+    PauseCode.ELAPSED_WHILE_HELD: "This one-time job's time passed while it was held, so it did not run; set a new time to run it",
     PauseCode.AGENT_INACCESSIBLE: "Agent not accessible: you no longer have access to the sub-agent this job runs.",
     PauseCode.INVALID_TIMEZONE: "Invalid timezone '{timezone}' — fix the job's timezone and resume it.",
     PauseCode.CONDITION_MET_ONCE: "Watch condition met (one-time trigger)",

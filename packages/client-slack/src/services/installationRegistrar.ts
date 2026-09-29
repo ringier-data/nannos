@@ -114,7 +114,7 @@ async function clearRetiredWorkspaces(deps: InstallationRegistrarDeps, appIds: S
       channels: { id: number; installation_id: string | null; workspace_id: string | null }[];
     };
     for (const channel of channels) {
-      if (!channel.installation_id || !appIds.has(channel.installation_id) || channel.workspace_id === null) {
+      if (!channel.installation_id || !appIds.has(channel.installation_id) || channel.workspace_id == null) {
         continue;
       }
       try {

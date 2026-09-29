@@ -805,12 +805,16 @@ function EditForm({
         );
       }
     },
-    onSuccess: () => {
+    // On failure too: the edit may be saved and only the resume refused, and a page left
+    // on the old values would compute the next save from them.
+    onSettled: () => {
       qc.invalidateQueries({
         queryKey: ['scheduler-job', job.id],
       });
       // Resuming changes the job's status, which the list renders too.
       qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
+    },
+    onSuccess: () => {
       setDirty(false);
       setEditing(false);
     },

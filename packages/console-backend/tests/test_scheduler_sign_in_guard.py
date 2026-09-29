@@ -263,4 +263,4 @@ class TestTheFirstSignInReleasesTheHold:
         assert await svc.release_sign_in_holds(db, u["member"]) == 0
 
         held = await svc.repo.get_subscription_for(db, job.definition_id, u["member"].id)
-        assert (held.enabled, held.pause_code) == (False, PauseCode.ELAPSED_ON_INHERIT)
+        assert (held.enabled, held.pause_code) == (False, PauseCode.ELAPSED_WHILE_HELD)

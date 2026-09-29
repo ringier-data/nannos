@@ -1030,6 +1030,17 @@ class SchedulerService:
                 await self.resume_job(db, job_id, actor)
             except ValueError as exc:
                 await db.rollback()
+                # The move stands, so the reachability code no longer describes the stop:
+                # record the one that does, which also makes the right event release it.
+                code = (
+                    PauseCode.SIGN_IN_EXPIRED
+                    if isinstance(exc, SchedulerNotReadyError)
+                    else PauseCode.ELAPSED_WHILE_HELD
+                    if job.schedule_kind == ScheduleKind.ONCE
+                    else None
+                )
+                if code is not None and await self.repo.recode_stop(db, actor, job_id, code):
+                    await db.commit()
                 logger.info("Job %d moved but not switched on: %s", job_id, exc)
         return await self.repo.get_job(db, job_id)
 
@@ -1320,7 +1331,7 @@ class SchedulerService:
                 if moment is None or moment <= now:
                     # resume_job would refuse it: the one-shot's moment passed while it
                     # waited. It stays off, with the reason that says so.
-                    await self.repo.recode_stop(db, user, job.id, PauseCode.ELAPSED_ON_INHERIT)
+                    await self.repo.recode_stop(db, user, job.id, PauseCode.ELAPSED_WHILE_HELD)
                     await db.commit()
                     continue
             try:
@@ -1925,6 +1936,7 @@ class SchedulerService:
         channel = target["channel_name"]
         await self.repo.mark_run_undelivered(db, report.run_id, report.reason)
         held: PauseCode | None = None
+        finished = False
         # A run dispatched before the job moved says nothing about the channel it uses now.
         if report.reason == "no_recipient" and target["live"] and target["current_channel_id"] == target["channel_id"]:
             # A sign-in releases the hold only where the backend can see one: a subscriber
@@ -1932,6 +1944,12 @@ class SchedulerService:
             code = PauseCode.UNREACHABLE if target["reachability"] != "unknown" else PauseCode.UNDELIVERED
             if await self.repo.disable_subscription(db, target["subscription_id"], code, only_if_enabled=True):
                 held = code
+            else:
+                # Already off. If that is because the job is done (a one-shot retired, a
+                # one-time watch fired), nothing is left to hold, but its last result
+                # reached nobody and nothing else says so.
+                enabled, stop = await self.repo.subscription_state(db, target["subscription_id"])
+                finished = not enabled and stop in (None, PauseCode.CONDITION_MET_ONCE)
         await db.commit()
         # The one place what failed in detail is kept: the run stores only the code. A
         # missing recipient is the subscriber's to fix, and held and notified below, so it
@@ -1946,6 +1964,22 @@ class SchedulerService:
             f": {report.detail}" if report.detail else "",
             "; subscription held" if held else "",
         )
+        if finished:
+            await self._notify(
+                db,
+                [
+                    NotificationData(
+                        user_id=target["user_id"],
+                        notification_type=NotificationType.SCHEDULED_JOB_PAUSED,
+                        title=f"Scheduled job result not delivered: {target['job_name']}",
+                        message=(
+                            f"'{target['job_name']}' ran for the last time, but its result reached nobody on "
+                            f"'{channel}'. Its run history has it."
+                        ),
+                        metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
+                    )
+                ],
+            )
         if held is not None:
             # After the commit and best effort, like every scheduler notification: the hold
             # and the undelivered mark are the record, and must not roll back with it.

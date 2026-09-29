@@ -1687,10 +1687,12 @@ class SchedulerEngine:
                 # complete_job only flips enabled on the failure threshold, which this must
                 # never contribute to.
                 #
-                # Only on a row that is still on: one already off (paused, or held by a
-                # client's report while the run was in flight) keeps the stop it has, and
-                # the release that stop promises.
-                if not was_enabled:
+                # Not over a stop already in place (paused, or held by a client's report
+                # while the run was in flight): that keeps its code, and the release it
+                # promises. A row off with no stop (a retired one-shot's retry) gets the
+                # run's own. An invalid timezone always wins: it is a defect of the job
+                # that makes every release fail.
+                if not was_enabled and prior_code is not None and pause_code != PauseCode.INVALID_TIMEZONE:
                     pause_code = pause_detail = None
                 if not counts_as_failure and pause_code:
                     await self._repo.disable_subscription(db, job.id, pause_code, pause_detail)
@@ -1722,8 +1724,21 @@ class SchedulerEngine:
         # A fired one-shot watch is the other stop that must replace one already in place,
         # since the job is done. Replacing a reachability hold breaks the promise the
         # hold's notice made (a sign-in there switches it back on), so it says so too.
-        replaced_hold = should_disable and not was_enabled and prior_code in (PauseCode.UNREACHABLE, PauseCode.UNDELIVERED)
-        if ((was_enabled and not should_disable) or replaced_hold) and not enabled_after:
+        # A one-shot that retires is the same case: done, so its hold goes with it.
+        retired = next_run_at is None and not leave_schedule
+        replaced_hold = (
+            (should_disable or retired)
+            and not was_enabled
+            and prior_code in (PauseCode.UNREACHABLE, PauseCode.UNDELIVERED)
+        )
+        if replaced_hold and not enabled_after:
+            await self._notify_job_paused(
+                job,
+                f"{reason_after.rstrip('.') + '. ' if reason_after else 'This one-time job has run. '}"
+                "Its last result reached nobody on its delivery channel.",
+                run_id,
+            )
+        elif was_enabled and not should_disable and not enabled_after:
             await self._notify_job_paused(job, reason_after, run_id)
 
         try:

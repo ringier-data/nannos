@@ -4053,7 +4053,7 @@ export type PaginationMeta = {
  * subscription never has one. A subscription switched off with none was retired by its
  * own schedule (a one-shot that ran).
  */
-export type PauseCode = 'disabled_by_user' | 'manually_paused' | 'auto_paused' | 'elapsed_on_subscribe' | 'elapsed_on_inherit' | 'agent_inaccessible' | 'invalid_timezone' | 'condition_met_once' | 'no_offline_token' | 'awaiting_sign_in' | 'sign_in_expired' | 'access_revoked' | 'unreachable' | 'undelivered' | 'legacy';
+export type PauseCode = 'disabled_by_user' | 'manually_paused' | 'auto_paused' | 'elapsed_on_subscribe' | 'elapsed_on_inherit' | 'elapsed_while_held' | 'agent_inaccessible' | 'invalid_timezone' | 'condition_met_once' | 'no_offline_token' | 'awaiting_sign_in' | 'sign_in_expired' | 'access_revoked' | 'unreachable' | 'undelivered' | 'legacy';
 
 /**
  * PhoneVerificationCheckRequest

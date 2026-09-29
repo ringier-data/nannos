@@ -2597,3 +2597,21 @@ class TestARunDoesNotOverwriteAStopAlreadyInPlace:
         await engine._finalize(run_id=9, job=make_job(job_type=JobType.WATCH, destroy_after_trigger=True), status=JobRunStatus.SUCCESS)
 
         engine._notification_service.create_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_retired_one_shot_with_no_stop_gets_the_runs_own(self):
+        """Off, but with no stop to keep (its retry after it retired): the run's code is
+        recorded, so the row does not read as a one-shot that simply completed."""
+        engine = _make_engine()
+        engine._repo.subscription_state = AsyncMock(return_value=(False, None))
+        engine._repo.complete_job = AsyncMock(return_value=(False, "held"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+
+        await engine._finalize(
+            run_id=9, job=make_job(), status=JobRunStatus.FAILED,
+            pause_code=PauseCode.SIGN_IN_EXPIRED, counts_as_failure=False,
+        )
+
+        assert engine._repo.complete_job.await_args.kwargs["pause_code"] == PauseCode.SIGN_IN_EXPIRED
+
