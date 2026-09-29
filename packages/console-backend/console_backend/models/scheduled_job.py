@@ -132,9 +132,10 @@ class PauseCode(str, Enum):
 
 
 #: The holds a sign-in releases (`SchedulerService.release_sign_in_holds`): each waits for a
-#: live offline token. ``NO_OFFLINE_TOKEN`` is not one: it records a failed token refresh,
-#: and only a resume switches it back on.
-SIGN_IN_HOLD_CODES = (PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED)
+#: live offline token. ``NO_OFFLINE_TOKEN`` records a failed token refresh (and, from before
+#: the sign-in holds, a missing token); the fresh token a sign-in stores is what it lacked, and
+#: the release runs only after that store succeeded.
+SIGN_IN_HOLD_CODES = (PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED, PauseCode.NO_OFFLINE_TOKEN)
 
 
 #: What the subscriber reads for each code. ``{name}`` fields come from the detail.

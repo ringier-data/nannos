@@ -242,6 +242,20 @@ class TestTheFirstSignInReleasesTheHold:
         assert back.enabled is True and back.paused_reason is None
 
     @pytest.mark.asyncio
+    async def test_a_sign_in_also_releases_a_failed_token_refresh(self, world):
+        """``no_offline_token`` records a token the engine could not use; the fresh one a
+        sign-in stores is what it lacked, so the sign-in starts it again (#311)."""
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(db, _watch_create(), u["writer"])
+        await svc.repo.disable_subscription(db, job.id, PauseCode.NO_OFFLINE_TOKEN)
+        await db.commit()
+
+        assert await svc.release_sign_in_holds(db, u["writer"]) == 1
+
+        back = await svc.repo.get_job(db, job.id)
+        assert back.enabled is True and back.paused_reason is None
+
+    @pytest.mark.asyncio
     async def test_a_one_shot_that_elapsed_while_it_waited_stays_off_and_says_why(self, world):
         svc, db, u, gid = world["service"], world["db"], world["users"], world["group"]
         soon = datetime.now(timezone.utc) + timedelta(hours=1)

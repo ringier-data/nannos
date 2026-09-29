@@ -529,9 +529,9 @@ async def _hold(db, user_id: str, job: str, code: str, channel=None) -> int:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("code", [PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED, PauseCode.NO_OFFLINE_TOKEN])
-async def test_a_hold_nothing_releases_needs_a_resume(pg_session, people, code):
-    """A sign-in hold that outlived the sign-in, and a failed token refresh, stay off with a
-    live token; they must still show, as a blocking issue of their own."""
+async def test_a_sign_in_hold_that_outlived_the_sign_in_needs_a_resume(pg_session, people, code):
+    """With a live token the sign-in already happened; the hold must still show, as a
+    blocking issue of its own."""
     job = await _hold(pg_session, "ready-user", "Stuck", code.value)
 
     user = await UserService().get_user_with_groups(pg_session, "ready-user")
@@ -542,29 +542,28 @@ async def test_a_hold_nothing_releases_needs_a_resume(pg_session, people, code):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_refresh_is_not_a_sign_in_issue(pg_session, people):
-    """Signing in never releases ``no_offline_token``, so it must not be listed as a job the
-    sign-in would fix."""
+async def test_a_failed_refresh_waits_on_the_sign_in(pg_session, people):
+    """Without a live token a sign-in is what releases ``no_offline_token``, so the job is
+    the sign-in issue's, and makes it blocking."""
     job = await _hold(pg_session, "chat-only-user", "Refresh failed", PauseCode.NO_OFFLINE_TOKEN.value)
 
     user = await UserService().get_user_with_groups(pg_session, "chat-only-user")
 
     assert user is not None and user.onboarding is not None
-    assert user.onboarding.issues == [
-        _issue(K.NEEDS_RESUME, S.BLOCKING, [(job, "Refresh failed")]),
-        _issue(K.SCHEDULER_NOT_READY, S.PENDING, []),
-    ]
+    assert user.onboarding.issues == [_issue(K.SCHEDULER_NOT_READY, S.BLOCKING, [(job, "Refresh failed")])]
 
 
 @pytest.mark.asyncio
-async def test_a_hold_on_a_deleted_channel_still_shows(pg_session, people):
-    """The channel is ``ON DELETE SET NULL``: the hold stays, so the issue does, with no client."""
-    job = await _hold(pg_session, "ready-user", "Orphaned", PauseCode.UNREACHABLE.value, channel=None)
+@pytest.mark.parametrize("code", [PauseCode.UNREACHABLE, PauseCode.UNDELIVERED])
+async def test_a_hold_on_a_deleted_channel_needs_a_resume(pg_session, people, code):
+    """The channel is ``ON DELETE SET NULL``: the hold stays, with no client to sign in to,
+    so it is the member's to switch back on or move."""
+    job = await _hold(pg_session, "ready-user", "Orphaned", code.value, channel=None)
 
     user = await UserService().get_user_with_groups(pg_session, "ready-user")
 
     assert user is not None and user.onboarding is not None
-    assert _issue(K.UNREACHABLE, S.BLOCKING, [(job, "Orphaned")]) in user.onboarding.issues
+    assert _issue(K.NEEDS_RESUME, S.BLOCKING, [(job, "Orphaned")]) in user.onboarding.issues
 
 
 @pytest.mark.asyncio

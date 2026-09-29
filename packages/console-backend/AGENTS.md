@@ -933,10 +933,11 @@ summary, the user detail and every group member listing read it through `onboard
 A filter the UI offers is a condition on that derivation (`onboarding_conditions`), never
 a second copy of the rules.
 
-**The group scope is a privacy boundary, not a view preference.** Every member listing
-(`UserGroupService._MEMBER_COLUMNS`, `list_members`, `members_onboarding_summary`) passes the
-group, which limits the job-based issues to the subscriptions that group activated
-(`activated_by_groups`). Group managers read those listings. Unscoped, they would name the
+**The group scope is a privacy boundary, not a view preference.** The member listings a
+group manager or an administrator reads (`UserGroupService._MEMBER_COLUMNS`, `list_members`,
+`members_onboarding_summary`) pass the group, which limits the job-based issues to the
+subscriptions that group activated (`activated_by_groups`). The group lists
+(`_with_members`, `GET /groups`) are read by plain members too, so they carry no onboarding. Unscoped, they would name the
 member's jobs from other groups and private ones. The member's sign-in state is theirs and
 shows in both scopes, but in a group's scope it is only `blocking` when one of the group's
 own jobs waits on it. Only the admin-only `/admin/users` endpoints are unscoped.
