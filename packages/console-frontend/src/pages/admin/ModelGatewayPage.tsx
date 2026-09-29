@@ -49,6 +49,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
 import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
+import { compatibleBaseModels, hasWebSearchFee, pricesFromCatalogEntry } from '@/lib/catalogPricing';
 import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
@@ -243,6 +244,7 @@ export function ModelGatewayPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [basePickerOpen, setBasePickerOpen] = useState(false);
   // Provider credential overrides (region/project) are hidden by default — the gateway's
   // env defaults are the norm; only collapse-open them when overriding per model.
   const [credsOpen, setCredsOpen] = useState(false);
@@ -294,50 +296,53 @@ export function ModelGatewayPage() {
   );
   const visibleMatches = catalogMatches.slice(0, CATALOG_LIMIT);
 
+  // Base-model picker: only entries compatible with the gateway id (same route; the same model's
+  // region/date variants when the id names a known model), substring-filtered on what's typed.
+  const bq = form.base_model.trim().toLowerCase();
+  const baseMatches = compatibleBaseModels(catalog, form.litellm_model.trim(), form.mode).filter(
+    (c) => bq === '' || c.model_id.toLowerCase().includes(bq),
+  );
+  const visibleBaseMatches = baseMatches.slice(0, CATALOG_LIMIT);
+
   // Selecting a catalog model pre-fills the gateway id, provider, input modes and cost.
   const applyCatalogEntry = (entry: CatalogModel) => {
     const modes = ['text'];
     if (entry.supports_vision) modes.push('image');
     if (entry.supports_audio_input) modes.push('audio');
     if (entry.supports_pdf_input) modes.push('file');
-    const perM = (v?: number | null) => (v && v > 0 ? String(v * 1_000_000) : undefined);
-    const prices: Record<string, string> = {};
-    // Web search is a per-query fee keyed by context size; price the `medium` tier (what
-    // gateway_web_search sends), falling back to low/high — mirrors the backend cost-prefill.
-    const search = entry.search_context_cost_per_query;
-    const perQuery =
-      search?.search_context_size_medium ??
-      search?.search_context_size_low ??
-      search?.search_context_size_high;
-    const map: Array<[string, string | undefined]> = [
-      ['base_input_tokens', perM(entry.input_cost_per_token)],
-      ['base_output_tokens', perM(entry.output_cost_per_token)],
-      ['cache_read_input_tokens', perM(entry.cache_read_input_token_cost)],
-      ['cache_creation_input_tokens', perM(entry.cache_creation_input_token_cost)],
-      ['input_images', perM(entry.input_cost_per_image)],
-      ['web_search', perM(perQuery)],
-    ];
-    for (const [unit, val] of map) if (val) prices[unit] = val;
     const isEmbedding = entry.mode === 'embedding';
-    setForm((f) => ({
-      ...f,
-      litellm_model: entry.model_id,
-      // Pre-fill the alias from the model unless the user has already typed their own.
-      model_name: !editingId && !aliasEdited ? deriveAlias(entry.model_id) : f.model_name,
-      // The server-resolved route, not LiteLLM's cost-map tag — this only drives which
-      // credential inputs show; the request carries no provider (see effectiveProvider).
-      provider: entry.family ?? f.provider,
-      mode: isEmbedding ? 'embedding' : 'chat',
-      input_modes: isEmbedding ? embeddingInputModes(entry) : modes,
-      // Capabilities from the catalog entry; a listed per-query search fee also counts as
-      // "can search" (some entries carry the fee without the boolean). Editable after.
-      supports_reasoning: !isEmbedding && !!entry.supports_reasoning,
-      supports_web_search: !isEmbedding && (!!entry.supports_web_search || !!perQuery),
-      // Replace (not merge): selecting a different model must not leave a prior model's prices —
-      // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
-      prices,
-    }));
+    setForm((f) => {
+      // A base model already chosen and still compatible with the new id keeps pricing the
+      // deployment: it names the tier (e.g. EU Data Zone), which the id alone cannot.
+      const base = catalog.find((c) => c.model_id === f.base_model.trim());
+      const pricedBy =
+        base && compatibleBaseModels(catalog, entry.model_id, entry.mode ?? 'chat').includes(base) ? base : entry;
+      return {
+        ...f,
+        litellm_model: entry.model_id,
+        // Pre-fill the alias from the model unless the user has already typed their own.
+        model_name: !editingId && !aliasEdited ? deriveAlias(entry.model_id) : f.model_name,
+        // The server-resolved route, not LiteLLM's cost-map tag — this only drives which
+        // credential inputs show; the request carries no provider (see effectiveProvider).
+        provider: entry.family ?? f.provider,
+        mode: isEmbedding ? 'embedding' : 'chat',
+        input_modes: isEmbedding ? embeddingInputModes(entry) : modes,
+        // Capabilities from the catalog entry; a listed per-query search fee also counts as
+        // "can search" (some entries carry the fee without the boolean). Editable after.
+        supports_reasoning: !isEmbedding && !!entry.supports_reasoning,
+        supports_web_search: !isEmbedding && (!!entry.supports_web_search || hasWebSearchFee(entry)),
+        // Replace (not merge): selecting a different model must not leave a prior model's prices —
+        // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
+        prices: pricesFromCatalogEntry(pricedBy),
+      };
+    });
   };
+
+  // A base model names the priced catalog entry for a deployment whose id can't (an Azure
+  // deployment name says which model, not which tier). Choosing one re-seeds the prices from it,
+  // replacing the gateway id's: the base model is the more specific answer.
+  const applyBaseModelEntry = (entry: CatalogModel) =>
+    setForm((f) => ({ ...f, base_model: entry.model_id, prices: pricesFromCatalogEntry(entry) }));
 
   // The provider route this deployment will be served and billed under. ONE value answers all of it,
   // and the form never authors it — it mirrors the server's resolution so what you see is what will
@@ -995,16 +1000,57 @@ export function ModelGatewayPage() {
 
             {isAzureProvider(effectiveProvider) && (
               <div className="grid gap-1.5">
-                <Label>Base model (Azure)</Label>
-                <Input
-                  placeholder="azure/gpt-4o"
-                  value={form.base_model}
-                  onChange={(e) => setForm({ ...form, base_model: e.target.value })}
-                />
+                <Label>
+                  Base model (Azure){baseMatches.length > 0 ? ' — compatible catalog models, type to filter' : ''}
+                </Label>
+                <div className="relative">
+                  <Input
+                    placeholder="azure/eu/gpt-6-sol"
+                    value={form.base_model}
+                    autoComplete="off"
+                    onFocus={() => setBasePickerOpen(true)}
+                    onBlur={() => setTimeout(() => setBasePickerOpen(false), 150)}
+                    onChange={(e) => {
+                      setBasePickerOpen(true);
+                      const v = e.target.value;
+                      const entry = baseMatches.find((c) => c.model_id === v);
+                      if (entry) applyBaseModelEntry(entry);
+                      else setForm({ ...form, base_model: v });
+                    }}
+                  />
+                  {basePickerOpen && visibleBaseMatches.length > 0 && (
+                    <div className="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
+                      {visibleBaseMatches.map((c) => (
+                        <button
+                          type="button"
+                          key={c.model_id}
+                          className="flex w-full flex-col items-start rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground"
+                          onMouseDown={(e) => {
+                            e.preventDefault(); // keep focus / beat onBlur so the click registers
+                            applyBaseModelEntry(c);
+                            setBasePickerOpen(false);
+                          }}
+                        >
+                          <span className="font-mono text-xs">{c.model_id}</span>
+                          <span className="text-muted-foreground text-[11px]">
+                            {perMillion(c.input_cost_per_token) ?? 'no input price'} in ·{' '}
+                            {perMillion(c.output_cost_per_token) ?? 'no output price'} out
+                          </span>
+                        </button>
+                      ))}
+                      {baseMatches.length > visibleBaseMatches.length && (
+                        <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                          +{baseMatches.length - visibleBaseMatches.length} more — keep typing to narrow
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Azure deployment names aren’t recognised for cost/metadata. Map this deployment to a
-                  known model (e.g. <span className="font-mono">azure/gpt-4o</span>) so the gateway can
-                  identify it for max-tokens and native cost tracking.
+                  The catalog model this deployment serves, including its pricing tier (e.g.{' '}
+                  <span className="font-mono">azure/eu/gpt-6-sol</span> for an EU Data Zone deployment).
+                  Choosing one pre-fills the prices below from it, and lets the gateway identify the
+                  deployment for max-tokens and native cost tracking.
                 </p>
               </div>
             )}
