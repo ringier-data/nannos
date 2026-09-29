@@ -37,9 +37,12 @@ set -euo pipefail
 #                              set it low to exercise the pending-approval paths)
 #   AUTO_APPROVE_MAX_MCP_TOOLS_COUNT      - auto-approve MCP tool limit (defaults to 3)
 #
-# Cloud LLM providers (fetched from SSM when AWS_PROFILE is set):
-#   AZURE_OPENAI_API_KEY     - Azure OpenAI API key
-#   AZURE_API_BASE    - Azure OpenAI endpoint URL
+# Cloud LLM providers (fetched from SSM when AWS_PROFILE is set; a value in .env wins):
+#   AZURE_AI_API_KEY         - key of the Nannos Azure AI Foundry resource, used for both
+#                              azure/ and azure_ai/ models (AZURE_OPENAI_API_KEY defaults to it)
+#   AZURE_API_BASE           - endpoint for azure/<deployment> models (defaults to the Foundry
+#                              resource's OpenAI host; bare host, no /openai/v1)
+#   AZURE_AI_API_BASE        - endpoint for azure_ai/<model> models (defaults to the same resource)
 #   GCP_KEY                  - GCP service account key JSON (Vertex AI / Gemini)
 #   GCP_PROJECT_ID           - GCP project ID (defaults to "rcplus-alloy-gcp")
 #   GCP_LOCATION             - GCP region (defaults to "global")
@@ -348,6 +351,8 @@ fi
 # ── AWS secrets & cloud providers ──
 AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-}"
 AZURE_API_BASE="${AZURE_API_BASE:-}"
+AZURE_AI_API_KEY="${AZURE_AI_API_KEY:-}"
+AZURE_AI_API_BASE="${AZURE_AI_API_BASE:-}"
 AWS_BEDROCK_REGION="${AWS_BEDROCK_REGION:-}"
 GCP_KEY="${GCP_KEY:-}"
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-}"
@@ -369,12 +374,13 @@ TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 if [[ "$_HAS_AWS" == true ]]; then
   log "Fetching secrets from AWS SSM (profile: $AWS_PROFILE)..."
 
-  if AZURE_OPENAI_API_KEY=$(aws ssm get-parameter --name /nannos/openai-api-key-chatgpt-4o --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    AZURE_API_BASE="https://rcplus-alloy-eu-prod.openai.azure.com"
-    ok "Azure OpenAI configured"
-  else
-    warn "Could not fetch AZURE_OPENAI_API_KEY from SSM — Azure OpenAI disabled"
-    AZURE_OPENAI_API_KEY=""
+  # One Azure resource: the Nannos AI Foundry one. A key already set (e.g. in .env) wins.
+  if [[ -z "$AZURE_AI_API_KEY" && -z "$AZURE_OPENAI_API_KEY" ]]; then
+    if _AZURE_KEY=$(aws ssm get-parameter --name /nannos/azure-ai-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+      AZURE_AI_API_KEY="$_AZURE_KEY"
+    else
+      warn "Could not fetch /nannos/azure-ai-api-key from SSM — Azure models disabled"
+    fi
   fi
 
   if _GCP_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/gcp-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
@@ -445,6 +451,19 @@ if [[ "$_HAS_AWS" == true ]]; then
   fi
 
   ok "AWS resources configured (dev environment)"
+fi
+
+# Azure: the Nannos AI Foundry resource serves both routes with one key. `azure/<deployment>`
+# reads AZURE_API_BASE + AZURE_OPENAI_API_KEY; `azure_ai/<model>` reads AZURE_AI_API_BASE +
+# AZURE_AI_API_KEY. AZURE_API_BASE must be the bare host: LiteLLM appends /openai/... itself,
+# so a base ending in /openai/v1 doubles the path and every call 404s.
+AZURE_AI_API_KEY="${AZURE_AI_API_KEY:-$AZURE_OPENAI_API_KEY}"
+AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-$AZURE_AI_API_KEY}"
+if [[ -n "$AZURE_AI_API_KEY" ]]; then
+  AZURE_API_BASE="${AZURE_API_BASE:-https://nannos-resource.openai.azure.com}"
+  AZURE_API_BASE="${AZURE_API_BASE%/}"; AZURE_API_BASE="${AZURE_API_BASE%/openai/v1}"
+  AZURE_AI_API_BASE="${AZURE_AI_API_BASE:-https://nannos-resource.services.ai.azure.com}"
+  ok "Azure (Nannos AI Foundry) configured"
 fi
 
 # ── OIDC configuration ──
@@ -749,7 +768,7 @@ export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-nannos-local}"
 export GATEWAY_INGEST_TOKEN="${GATEWAY_INGEST_TOKEN:-sk-nannos-local-ingest}"
 # Pinned to match the prod base image (packages/litellm-proxy/Dockerfile) so local
 # reproduces prod's Vertex region-resolution behavior. Override with LITELLM_IMAGE.
-_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.90.7@sha256:917d480b7e4a7e61822e54f70be5c7cf753fb0b7328cbf6467612652ca748075}"
+_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.103.0@sha256:bd089afdcd35b894b14a93f9743cdc8b591f82da1a38dd43a010a7b0c9de5fd7}"
 _GW_CONTAINER="nannos-litellm-proxy-local"
 
 log "Starting local Model Gateway (LiteLLM proxy) on :${LLM_GATEWAY_PORT}..."
@@ -969,9 +988,10 @@ if [[ "$_HAS_LOCAL_LLM" == true ]]; then
 fi
 if [[ "$_HAS_AWS" == true ]]; then
   _LLM_LINES="${_LLM_LINES}    ✓ AWS Bedrock (region: $AWS_BEDROCK_REGION)"$'\n'
-  [[ -n "$AZURE_OPENAI_API_KEY" ]] && _LLM_LINES="${_LLM_LINES}    ✓ Azure OpenAI"$'\n'
   [[ -n "$GCP_KEY" ]]              && _LLM_LINES="${_LLM_LINES}    ✓ GCP Vertex AI"$'\n'
 fi
+# Azure no longer depends on AWS: the key can come from .env alone.
+[[ -n "$AZURE_AI_API_KEY" ]] && _LLM_LINES="${_LLM_LINES}    ✓ Azure (Nannos AI Foundry)"$'\n'
 
 # Build auth line
 if [[ "$_OIDC_MODE" == "local" ]]; then
