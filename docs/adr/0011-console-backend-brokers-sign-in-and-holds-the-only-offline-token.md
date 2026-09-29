@@ -56,7 +56,9 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > theirs with the channel's client is in the channel's workspace. **Unreachable**: the
 > channel's workspace is known and they have bindings with that client, none in it.
 > **Unknown**: no binding with the client at all (an old local sign-in looks exactly like
-> none) or a channel whose client has not named its workspace. It is one probe of the
+> none) or a channel whose client has not named its workspace, or has cleared it because
+> the installation was deactivated (a retired state of its own is ringier-data/nannos#310).
+> It is one probe of the
 > user's bindings, derived on every read. Only
 > unreachable changes anything, following point 6. A channel the user picks themselves
 > (create, change channel) or a job they switch on is refused with "message Nannos on

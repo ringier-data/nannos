@@ -145,11 +145,11 @@ _PAUSE_TEXT: dict[PauseCode, str] = {
     PauseCode.ACCESS_REVOKED: "Access to this shared job was revoked",
     PauseCode.UNREACHABLE: (
         "Nannos can't reach you on this job's delivery channel. Message Nannos there once to "
-        "activate it, and the job switches back on"
+        "activate it, or change the job's delivery, and the job switches back on"
     ),
     PauseCode.UNDELIVERED: (
         "Nannos couldn't reach you on this job's delivery channel. Message Nannos there once, "
-        "then switch the job back on"
+        "then switch the job back on, or change the job's delivery"
     ),
     PauseCode.LEGACY: "{text}",
 }

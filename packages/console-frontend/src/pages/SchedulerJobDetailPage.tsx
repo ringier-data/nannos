@@ -928,11 +928,16 @@ function EditForm({
     // the fix you just made looks applied while the scheduler keeps skipping the job.
     // Ask, rather than saving into a job that will not act on it. Except a job held
     // because its channel can't reach the user, moved to another: the move is the fix,
-    // and the backend switches it back on.
+    // so it is saved and resumed, and a refusal (a one-time job whose moment passed, a
+    // lapsed sign-in) is shown as "saved, but could not be resumed".
     const releasesHold =
       (job.pause_code === 'unreachable' || job.pause_code === 'undelivered') &&
       deliveryChannel !== String(job.delivery_channel_id ?? '');
-    if (!job.enabled && !releasesHold) {
+    if (releasesHold) {
+      mutation.mutate({ body, resume: true });
+      return;
+    }
+    if (!job.enabled) {
       setPendingSave(body);
       return;
     }

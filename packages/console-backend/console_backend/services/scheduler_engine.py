@@ -552,7 +552,9 @@ class SchedulerEngine:
         try:
             if run_id is None:
                 async with self._db_session_factory() as db:
-                    run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
+                    run_id = await self._repo.create_run(
+                        db, job.id, trigger=RunTrigger.RESUMED, delivery_channel_id=job.delivery_channel_id
+                    )
                     await db.commit()
 
             logger.info(
@@ -702,7 +704,9 @@ class SchedulerEngine:
         """
         if run_id is None:
             async with self._db_session_factory() as db:
-                run_id = await self._repo.create_run(db, job.id, trigger=RunTrigger.RESUMED)
+                run_id = await self._repo.create_run(
+                    db, job.id, trigger=RunTrigger.RESUMED, delivery_channel_id=job.delivery_channel_id
+                )
                 await db.commit()
 
         logger.info(
@@ -782,7 +786,9 @@ class SchedulerEngine:
         """
         if run_id is None:
             async with self._db_session_factory() as db:
-                run_id = await self._repo.create_run(db, job.id, trigger=trigger)
+                run_id = await self._repo.create_run(
+                    db, job.id, trigger=trigger, delivery_channel_id=job.delivery_channel_id
+                )
                 await db.commit()
 
         logger.info("Dispatching job %d (run %d, %s) to agent-runner", job.id, run_id, trigger.value)
@@ -1666,7 +1672,7 @@ class SchedulerEngine:
                 # As the row stands now, not as the claim saw it: a client's delivery
                 # report can switch it off while the run is in flight, and has told the
                 # subscriber itself. Locked, so such a report waits for this outcome.
-                was_enabled = await self._repo.subscription_enabled(db, job.id)
+                was_enabled, prior_code = await self._repo.subscription_state(db, job.id)
                 if should_disable:
                     logger.info(
                         "Job %d: Disabling watch job after successful trigger (destroy_after_trigger=True)",
@@ -1680,6 +1686,12 @@ class SchedulerEngine:
                 # real pause (enabled = FALSE + reason) so the claim loop leaves it alone —
                 # complete_job only flips enabled on the failure threshold, which this must
                 # never contribute to.
+                #
+                # Only on a row that is still on: one already off (paused, or held by a
+                # client's report while the run was in flight) keeps the stop it has, and
+                # the release that stop promises.
+                if not was_enabled:
+                    pause_code = pause_detail = None
                 if not counts_as_failure and pause_code:
                     await self._repo.disable_subscription(db, job.id, pause_code, pause_detail)
 
@@ -1706,7 +1718,12 @@ class SchedulerEngine:
         # it is optional, and a job without one is exactly the job whose silence goes
         # unnoticed — so the notice is a durable console notification, which also
         # survives the owner being offline in a way the WebSocket push does not.
-        if was_enabled and not enabled_after and not should_disable:
+        #
+        # A fired one-shot watch is the other stop that must replace one already in place,
+        # since the job is done. Replacing a reachability hold breaks the promise the
+        # hold's notice made (a sign-in there switches it back on), so it says so too.
+        replaced_hold = should_disable and not was_enabled and prior_code in (PauseCode.UNREACHABLE, PauseCode.UNDELIVERED)
+        if ((was_enabled and not should_disable) or replaced_hold) and not enabled_after:
             await self._notify_job_paused(job, reason_after, run_id)
 
         try:

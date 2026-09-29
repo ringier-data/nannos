@@ -137,6 +137,10 @@ _JOB_VIEW_SELECT = """
 """
 
 
+#: ``create_run`` without an explicit channel: copy the subscription's current one.
+_FROM_SUBSCRIPTION: Any = object()
+
+
 def _pause_fields(fields: dict[str, Any], *, clear_on_enable: bool = True) -> dict[str, Any]:
     """*fields* of a subscription write, with ``pause_code`` and ``pause_detail`` as the
     columns store them. A code written without a detail clears the old detail, and a write
@@ -1620,44 +1624,58 @@ class ScheduledJobRepository(AuditedRepository):
         )
         return result.first() is not None
 
-    async def subscription_enabled(self, db: AsyncSession, subscription_id: int) -> bool:
-        """Whether the subscription is on, locking the row for the rest of the transaction.
+    async def subscription_state(self, db: AsyncSession, subscription_id: int) -> tuple[bool, PauseCode | None]:
+        """Whether the subscription is on, and the code of its stop if not, locking the
+        row for the rest of the transaction.
 
         Read by ``_finalize`` before it writes the run's outcome, so "this run stopped the
         job" is judged against the row as the run found it: a client's delivery report can
         switch it off while the run is still in flight, and the claim's snapshot would
         still say it is on. The lock makes such a report wait for the outcome instead of
         interleaving with it."""
-        result = await db.execute(
-            text("SELECT enabled FROM scheduled_job_subscriptions WHERE id = :id FOR UPDATE"),
-            {"id": subscription_id},
-        )
-        return bool(result.scalar())
+        row = (
+            await db.execute(
+                text("SELECT enabled, pause_code FROM scheduled_job_subscriptions WHERE id = :id FOR UPDATE"),
+                {"id": subscription_id},
+            )
+        ).first()
+        if row is None:
+            return False, None
+        return bool(row.enabled), PauseCode(row.pause_code) if row.pause_code else None
 
     async def create_run(
         self,
         db: AsyncSession,
         subscription_id: int,
         trigger: RunTrigger = RunTrigger.SCHEDULED,
+        delivery_channel_id: Any = _FROM_SUBSCRIPTION,
     ) -> int:
         """Insert a new 'running' run record. Returns run ID.
 
         *trigger* is recorded on the row because the healer, which may run in a
         process that never saw this dispatch, decides from it what the run's
         interruption is worth. ``last_seen_at`` starts at insert time so a run is
-        never stale before its first heartbeat. The subscription's channel is copied onto
-        the run: a delivery report about this run is judged against the channel it was
-        sent to, not one the subscription was moved to while it was in flight.
+        never stale before its first heartbeat. *delivery_channel_id* is the channel the
+        dispatch will push to, taken from the same job snapshot: a delivery report about
+        this run is judged against it, not a channel the subscription was moved to while
+        the run was in flight. Omitted, the subscription's current one is copied.
         """
+        from_subscription = delivery_channel_id is _FROM_SUBSCRIPTION
         result = await db.execute(
             text("""
                 INSERT INTO scheduled_job_runs
                     (subscription_id, started_at, status, last_seen_at, trigger, delivery_channel_id)
-                SELECT :subscription_id, NOW(), 'running', NOW(), :trigger, s.delivery_channel_id
+                SELECT :subscription_id, NOW(), 'running', NOW(), :trigger,
+                       CASE WHEN :from_subscription THEN s.delivery_channel_id ELSE CAST(:channel AS integer) END
                 FROM scheduled_job_subscriptions s WHERE s.id = :subscription_id
                 RETURNING id
             """),
-            {"subscription_id": subscription_id, "trigger": trigger.value},
+            {
+                "subscription_id": subscription_id,
+                "trigger": trigger.value,
+                "from_subscription": from_subscription,
+                "channel": None if from_subscription else delivery_channel_id,
+            },
         )
         row = result.mappings().first()
         assert row is not None

@@ -58,6 +58,11 @@ def _make_engine(
         repo.complete_job.return_value, tuple
     ):
         repo.complete_job.return_value = (True, None)
+    # The same for the row _finalize locks before it writes: on, no stop in place.
+    if isinstance(repo.subscription_state, unittest.mock.NonCallableMock | unittest.mock.Mock) and not isinstance(
+        repo.subscription_state.return_value, tuple
+    ):
+        repo.subscription_state.return_value = (True, None)
     token_service = token_service or AsyncMock(spec=SchedulerTokenService)
     delivery_channel_repo = AsyncMock(spec=DeliveryChannelRepository)
     delivery_channel_repo.get_channel_for_dispatch.return_value = None
@@ -2187,7 +2192,9 @@ class TestAutoPauseIsNotSilent:
         engine = _make_engine()
         # The row as _finalize finds it; the claim's snapshot (``job``) unless a test says
         # something switched it off in flight.
-        engine._repo.subscription_enabled = AsyncMock(return_value=job.enabled if row_enabled is None else row_enabled)
+        engine._repo.subscription_state = AsyncMock(
+            return_value=(job.enabled if row_enabled is None else row_enabled, None)
+        )
         engine._repo.complete_job = AsyncMock(return_value=repo_result)
         engine._repo.complete_run = AsyncMock(return_value=True)
         engine._notification_service = AsyncMock()
@@ -2540,3 +2547,53 @@ class TestAnExpiredSignInHoldsTheSubscription:
         await engine._dispatch_job(make_job())
 
         assert repo.complete_job.await_args.kwargs["pause_code"] == PauseCode.SIGN_IN_EXPIRED
+
+
+class TestARunDoesNotOverwriteAStopAlreadyInPlace:
+    """A client's report can hold the job while its run is in flight (#191); the run's own
+    outcome must then leave that stop, and the release it promises, alone."""
+
+    @pytest.mark.asyncio
+    async def test_a_standing_stop_is_not_written_over_a_stop_in_place(self):
+        engine = _make_engine()
+        engine._repo.subscription_state = AsyncMock(return_value=(False, PauseCode.UNREACHABLE))
+        engine._repo.complete_job = AsyncMock(return_value=(False, "held"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+
+        await engine._finalize(
+            run_id=9, job=make_job(), status=JobRunStatus.FAILED,
+            pause_code=PauseCode.AWAITING_SIGN_IN, counts_as_failure=False,
+        )
+
+        engine._repo.disable_subscription.assert_not_awaited()
+        assert engine._repo.complete_job.await_args.kwargs["pause_code"] is None
+        engine._notification_service.create_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_fired_one_shot_watch_that_replaces_a_hold_says_so(self):
+        """The watch is done, so its stop must replace the hold; the hold's notice promised
+        a sign-in would switch it back on, so the subscriber is told the real reason."""
+        engine = _make_engine()
+        engine._repo.subscription_state = AsyncMock(return_value=(False, PauseCode.UNREACHABLE))
+        engine._repo.complete_job = AsyncMock(return_value=(False, "Watch condition met (one-time trigger)"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+        watch = make_job(job_type=JobType.WATCH, destroy_after_trigger=True)
+
+        await engine._finalize(run_id=9, job=watch, status=JobRunStatus.SUCCESS)
+
+        engine._repo.disable_subscription.assert_awaited_once()
+        engine._notification_service.create_notification.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_fired_one_shot_watch_on_a_live_job_says_nothing_extra(self):
+        """Its delivered result is the notice, as before."""
+        engine = _make_engine()
+        engine._repo.complete_job = AsyncMock(return_value=(False, "Watch condition met (one-time trigger)"))
+        engine._repo.complete_run = AsyncMock(return_value=True)
+        engine._notification_service = AsyncMock()
+
+        await engine._finalize(run_id=9, job=make_job(job_type=JobType.WATCH, destroy_after_trigger=True), status=JobRunStatus.SUCCESS)
+
+        engine._notification_service.create_notification.assert_not_awaited()

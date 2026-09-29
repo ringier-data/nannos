@@ -52,7 +52,14 @@ export function createDeliveryReporter(options: DeliveryReporterOptions): Delive
           ...(report.detail ? { detail: report.detail } : {}),
         }),
       });
-      if (!response.ok) {
+      if (response.status === 403) {
+        // Not this run's problem: every report will be refused until it is fixed.
+        logger.error(
+          `Delivery report for run ${report.runId} refused (403): console-backend requires this client's ` +
+            `client-credentials token to carry '${options.audience}' in aud. Add an audience mapper for it ` +
+            'on this client in the identity provider (see OIDC_CONSOLE_BACKEND_AUDIENCE in .env.example).'
+        );
+      } else if (!response.ok) {
         const text = await response.text().catch(() => '');
         logger.error(`Delivery report for run ${report.runId} refused: ${response.status} ${text}`);
       }

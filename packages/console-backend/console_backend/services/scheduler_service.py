@@ -1021,9 +1021,16 @@ class SchedulerService:
         if reset_subscribers:
             await self._notify_reset(db, actor, definition, reset_subscribers)
         if release_hold:
-            moved = await self.repo.get_job(db, job_id)
-            if moved is not None and moved.pause_code in _REACHABILITY_HOLDS:
-                await self._switch_on_held(db, actor, [moved])
+            # Exactly as the subscriber's own resume, after the move is saved: the move
+            # stands either way. What refuses the resume (a one-shot whose moment passed,
+            # a sign-in that lapsed) leaves the job held with the stop it has, and the
+            # console surfaces the reason by resuming it right after (never a false
+            # "already ran" code, as a sign-in release would write).
+            try:
+                await self.resume_job(db, job_id, actor)
+            except ValueError as exc:
+                await db.rollback()
+                logger.info("Job %d moved but not switched on: %s", job_id, exc)
         return await self.repo.get_job(db, job_id)
 
     # ------------------------------------------------------------------
@@ -1951,7 +1958,7 @@ class SchedulerService:
                         title=f"Scheduled job paused: {target['job_name']}",
                         message=(
                             f"'{target['job_name']}' ran, but its result reached nobody on '{channel}'. "
-                            f"{render_pause(held)}, or change its delivery."
+                            f"{render_pause(held)}."
                         ),
                         metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
                     )

@@ -555,6 +555,40 @@ class TestMovingAHeldJobReleasesIt:
         assert (moved.enabled, moved.pause_code) == (False, PauseCode.DISABLED_BY_USER)
 
     @pytest.mark.asyncio
+    async def test_a_move_that_cannot_switch_it_on_keeps_the_hold_it_has(self, world):
+        """A one-shot whose moment passed while it was held: the move stands, the job stays
+        off with the stop it had (never a false "already ran"), and resuming it says why."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await _shared_on(world, "A1")
+        writers = await svc.subscribe(db, job.definition_id, u["writer"])
+        await db.execute(
+            text("""
+                UPDATE scheduled_job_subscriptions
+                SET schedule_kind = 'once', run_at = NOW() - interval '1 day', next_run_at = NOW() - interval '1 day'
+                WHERE id = :id
+            """),
+            {"id": writers.id},
+        )
+        await db.commit()
+
+        moved = await svc.update_job(db, writers.id, ScheduledJobUpdate(), u["writer"], delivery_channel_id=ch["B1"])
+
+        assert (moved.enabled, moved.pause_code, moved.delivery_channel_id) == (False, PauseCode.UNREACHABLE, ch["B1"])
+        with pytest.raises(ValueError, match="already run"):
+            await svc.resume_job(db, writers.id, u["writer"])
+
+    @pytest.mark.asyncio
+    async def test_a_move_by_someone_whose_sign_in_lapsed_keeps_the_hold(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await _shared_on(world, "A1")
+        writers = await svc.subscribe(db, job.definition_id, u["writer"])
+        world["ready"].discard(u["writer"].id)
+
+        moved = await svc.update_job(db, writers.id, ScheduledJobUpdate(), u["writer"], delivery_channel_id=ch["B1"])
+
+        assert (moved.enabled, moved.delivery_channel_id) == (False, ch["B1"])
+
+    @pytest.mark.asyncio
     async def test_any_other_stop_is_not_lifted_by_a_move(self, world):
         svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
         job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["B1"]), u["writer"])
@@ -633,6 +667,21 @@ class TestAReportIsJudgedAgainstTheChannelTheRunUsed:
         still = await svc.get_job(db, job.id, u["owner"].id)
         assert (still.enabled, still.delivery_channel_id) == (True, ch["P1"]), "its new channel is not held"
         assert await _paused_notices(db, u["owner"].id) == 0
+
+
+class TestARunRecordsTheChannelItsPushUses:
+    @pytest.mark.asyncio
+    async def test_the_channel_given_is_the_one_recorded(self, world):
+        """The dispatch passes its own snapshot's channel: a move committed between the claim
+        and the run's insert must not be what the report is judged against."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
+        await db.execute(text("UPDATE scheduled_job_subscriptions SET delivery_channel_id = :p WHERE id = :id"), {"p": ch["P1"], "id": job.id})
+        run_id = await svc.repo.create_run(db, job.id, delivery_channel_id=ch["A1"])
+        await db.commit()
+
+        report = UndeliveredReport(run_id=run_id, installation_id="A1", reason="no_recipient")
+        assert await svc.report_undelivered(db, SLACK, report) is True
 
 
 class TestAReportAndTheRunsOutcomeStopTheJobOnce:

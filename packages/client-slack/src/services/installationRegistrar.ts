@@ -29,11 +29,9 @@ interface DeliveryChannelCreateBody {
   installation_id: string;
   /**
    * The Slack team the app is installed in: the workspace a brokered sign-in is bound to.
-   * A sign-in in that team reaches this channel (ADR-0011 amendment 2). Null for an app
-   * that was deactivated: it serves nobody, so a sign-in in its team must not read as
-   * reaching it.
+   * A sign-in in that team reaches this channel (ADR-0011 amendment 2).
    */
-  workspace_id: string | null;
+  workspace_id: string;
   /**
    * How this channel renders delivered text. The scheduler sends it to the run that
    * writes a notification, so scheduled messages arrive formatted for this client
@@ -88,28 +86,59 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
     }
   }
 
-  // A deactivated app keeps its channel, and with it the team it was registered in, so a
-  // sign-in in that team would still read as reaching it while its webhook refuses every
-  // push. Clear the team. Only for an app that was registered (it has a secret): a channel
-  // is never created for one that never ran.
-  for (const bot of installations.filter((b) => !b.isActive)) {
-    try {
-      if ((await deps.installationSecretService.get(bot.appId)) === null) continue;
-      await registerOne(deps, {
-        installationId: bot.appId,
-        workspaceId: null,
-        name: `Slack ${bot.botName} (${bot.teamId})`,
-        description: `Slack workspace ${bot.teamId} via ${bot.botName} (${bot.slashCommand}), deactivated`,
-      });
-    } catch (error) {
-      logger.error(error, `Failed to clear the workspace of deactivated appId=${bot.appId}: ${error}`);
+  const retired = new Set<string>(installations.filter((b) => !b.isActive).map((b) => b.appId));
+  if (retired.size > 0) {
+    await clearRetiredWorkspaces(deps, retired);
+  }
+}
+
+/**
+ * A deactivated app keeps its channel, and with it the team it was registered in, so a
+ * sign-in in that team would still read as reaching it while its webhook refuses every
+ * push. Clear the team of each such channel. Update only: a channel an admin deleted, or
+ * one that was never created, must not come back on every boot.
+ */
+async function clearRetiredWorkspaces(deps: InstallationRegistrarDeps, appIds: Set<string>): Promise<void> {
+  const { config, oidcClient } = deps;
+  if (!config.consoleBackend) return;
+  try {
+    const token = await oidcClient.getServiceToken(config.consoleBackend.audience);
+    const base = config.consoleBackend.url;
+    const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+    // With this client's own token the list holds only its channels.
+    const listed = await fetch(new URL('/api/v1/delivery-channels', base).toString(), { headers });
+    if (!listed.ok) {
+      throw new Error(`listing delivery channels returned ${listed.status}`);
     }
+    const { channels } = (await listed.json()) as {
+      channels: { id: number; installation_id: string | null; workspace_id: string | null }[];
+    };
+    for (const channel of channels) {
+      if (!channel.installation_id || !appIds.has(channel.installation_id) || channel.workspace_id === null) {
+        continue;
+      }
+      try {
+        const response = await fetch(new URL(`/api/v1/delivery-channels/${channel.id}`, base).toString(), {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ workspace_id: null }),
+        });
+        if (!response.ok) {
+          throw new Error(`Console-backend returned ${response.status}`);
+        }
+        logger.info(`Cleared the workspace of deactivated installation_id=${channel.installation_id}`);
+      } catch (error) {
+        logger.error(error, `Failed to clear the workspace of appId=${channel.installation_id}: ${error}`);
+      }
+    }
+  } catch (error) {
+    logger.error(error, `Could not clear the workspaces of deactivated apps: ${error}`);
   }
 }
 
 export async function registerOne(
   deps: InstallationRegistrarDeps,
-  opts: { installationId: string; workspaceId: string | null; name: string; description?: string }
+  opts: { installationId: string; workspaceId: string; name: string; description?: string }
 ): Promise<void> {
   const { config, oidcClient, installationSecretService } = deps;
   if (!config.consoleBackend) return;

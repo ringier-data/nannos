@@ -117,18 +117,43 @@ describe('registerInstallations', () => {
     ]);
   });
 
-  test("a deactivated app that was registered has its workspace cleared, one never registered is skipped", async () => {
+  test("a deactivated app has its existing channel's workspace cleared, update only", async () => {
     const gone = { ...installation('A0000000OLD', 'T000000AA', 'Old'), isActive: false };
-    const never = { ...installation('A000000NEVR', 'T000000AA', 'Never'), isActive: false };
-    const d = deps([installation('A00000000AA', 'T000000AA', 'Nannos'), gone, never]);
-    d.installationSecretService.get = async (id: string) => (id === gone.appId ? 'secret' : null);
+    // Deactivated, and its channel deleted by an admin (or never created): no row to update.
+    const deleted = { ...installation('A0000000DEL', 'T000000AA', 'Deleted'), isActive: false };
+    fetchMock.mockImplementation(async (url: unknown, init: unknown) => {
+      const listing = String(url).endsWith('/api/v1/delivery-channels') && !(init as { method?: string }).method;
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: async () => '',
+        json: async () =>
+          listing
+            ? {
+                channels: [
+                  { id: 5, installation_id: 'A0000000OLD', workspace_id: 'T000000AA' },
+                  { id: 6, installation_id: 'A00000000AA', workspace_id: 'T000000AA' },
+                ],
+              }
+            : {},
+      };
+    });
 
-    await registerInstallations(d);
+    await registerInstallations(deps([installation('A00000000AA', 'T000000AA', 'Nannos'), gone, deleted]));
 
-    const bodies = bodiesFrom(fetchMock);
-    expect(bodies.map((b) => [b.installation_id, b.workspace_id])).toEqual([
-      ['A00000000AA', 'T000000AA'],
-      ['A0000000OLD', null],
+    const calls = fetchMock.mock.calls.map(([url, init]) => [
+      (init as { method?: string }).method ?? 'GET',
+      String(url).replace('https://console.example.com', ''),
+      (init as { body?: string }).body ? JSON.parse((init as { body: string }).body) : undefined,
+    ]);
+    expect(calls.filter(([method]) => method !== 'POST')).toEqual([
+      ['GET', '/api/v1/delivery-channels', undefined],
+      ['PATCH', '/api/v1/delivery-channels/5', { workspace_id: null }],
+    ]);
+    // Registration (create-or-update) is for active apps only: nothing deactivated comes back.
+    expect(calls.filter(([method]) => method === 'POST').map(([, , body]) => body.installation_id)).toEqual([
+      'A00000000AA',
     ]);
   });
 });
