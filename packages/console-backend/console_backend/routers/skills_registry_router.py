@@ -2163,18 +2163,6 @@ async def mcp_update_skill(
     # Authorization: verify user can write to this registry entry
     await _check_registry_write_access(request, db, entry, user.id, sub_agent_id)
 
-    # Build updated files
-    current_files = entry.files or []
-    if body.files is not None:
-        # Replace all files (except SKILL.md which we handle separately)
-        new_files = []
-        for f in body.files:
-            new_files.append(SkillFile(path=f.path, content=f.content))
-        registry_files = new_files
-    else:
-        # Keep existing non-SKILL.md files
-        registry_files = [f for f in current_files if f.path != "SKILL.md"]
-
     # Build updated SKILL.md
     if body.content is not None:
         skill_content = body.content
@@ -2182,8 +2170,17 @@ async def mcp_update_skill(
         skill_content = _build_skill_content(body.skill_name, body.description or "", body.body)
     else:
         raise HTTPException(status_code=400, detail="Either 'body' or 'content' must be provided")
+    skill_md = SkillFile(path="SKILL.md", content=skill_content)
 
-    registry_files.insert(0, SkillFile(path="SKILL.md", content=skill_content))
+    # `files` given: the caller replaces the whole set. Otherwise only SKILL.md changes and
+    # the other files are kept as the row holds them under the write's lock, not as read
+    # above: a concurrent single-file write would otherwise be dropped.
+    registry_files: list[SkillFile] | None = None
+    keep_other_files: Callable[[list[SkillFile]], list[SkillFile]] | None = None
+    if body.files is not None:
+        registry_files = [skill_md, *(SkillFile(path=f.path, content=f.content) for f in body.files)]
+    else:
+        keep_other_files = lambda files: [skill_md, *(f for f in files if f.path != "SKILL.md")]  # noqa: E731
 
     # Update registry (bumps following referrers in the same transaction, ADR-0011, and
     # writes the owning agent's config version for an own skill, ADR-0013)
@@ -2193,6 +2190,7 @@ async def mcp_update_skill(
             actor=user,
             skill_id=entry.id,
             files=registry_files,
+            edit_files=keep_other_files,
             description=body.description,
         )
     except SkillReferencedError as e:

@@ -439,6 +439,16 @@ class SkillRegistryService:
         }
 
         skill_id = await self.repo.create(db=db, actor=actor, fields=fields, returning="id")
+        # Like create_skill: a pinned ref resolves through the snapshot of its hash, so the
+        # imported content needs one before an update from the source moves the row.
+        await self._save_version_snapshot(
+            db=db,
+            skill_id=str(skill_id),
+            files_json=files_json,
+            content_hash=content_hash,
+            description=detail.description,
+            created_by=actor.id,
+        )
         entry = await self.get_by_id(db, str(skill_id))
         if not entry:
             raise RuntimeError("Failed to read back created registry entry")
