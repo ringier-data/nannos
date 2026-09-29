@@ -1,4 +1,6 @@
 import { describe, test, expect, jest, beforeEach } from '@jest/globals';
+import type { WebClient } from '@slack/web-api';
+import { recoverOrphanedTasks } from '../../src/utils/taskRecovery.js';
 
 /**
  * The recovery loop is the safety net for a turn whose stream dropped. It used
@@ -13,17 +15,14 @@ import { describe, test, expect, jest, beforeEach } from '@jest/globals';
 
 const postMessageMock = jest.fn(async () => ({ ok: true, ts: '999.000' }) as any);
 
-jest.unstable_mockModule('@slack/web-api', () => ({
-  WebClient: class {
-    chat = {
-      postMessage: postMessageMock,
-      update: jest.fn(async () => ({ ok: true }) as any),
-      delete: jest.fn(async () => ({ ok: true }) as any),
-    };
+const slackClient = {
+  chat: {
+    postMessage: postMessageMock,
+    update: jest.fn(async () => ({ ok: true }) as any),
+    delete: jest.fn(async () => ({ ok: true }) as any),
   },
-}));
-
-const { recoverOrphanedTasks } = await import('../../src/utils/taskRecovery.js');
+} as unknown as WebClient;
+const slackClientFactory = jest.fn((_botToken: string) => slackClient);
 
 const THIRTY_ONE_MIN = 31 * 60 * 1000;
 
@@ -68,7 +67,8 @@ function harness(task: any, record: any, lastProcessedTs?: string) {
         get: jest.fn(async () => (lastProcessedTs ? { contextKey: 'k', contextId: 'ctx-1', lastProcessedTs } : null)),
       } as any,
       'xoxb-fallback',
-      0
+      0,
+      slackClientFactory
     );
   return { store, run };
 }
@@ -76,6 +76,7 @@ function harness(task: any, record: any, lastProcessedTs?: string) {
 describe('recoverOrphanedTasks', () => {
   beforeEach(() => {
     postMessageMock.mockClear();
+    slackClientFactory.mockClear();
   });
 
   test('keeps the in-flight record when the task is still non-terminal', async () => {
@@ -124,6 +125,10 @@ describe('recoverOrphanedTasks', () => {
     expect(String((postMessageMock.mock.calls[0] as any[])[0].markdown_text)).toContain('the answer');
     expect(store.records.has('task-1')).toBe(false);
     expect(stats.recovered).toBe(1);
+    // The installation's own token, not the fallback: posting with the fallback
+    // would answer through a different bot.
+    expect(slackClientFactory).toHaveBeenCalledWith('xoxb-test');
+    expect(slackClientFactory).not.toHaveBeenCalledWith('xoxb-fallback');
   });
 
   test('stays silent when the user already moved past the failure', async () => {

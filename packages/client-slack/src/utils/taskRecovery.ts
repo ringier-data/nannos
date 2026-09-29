@@ -21,6 +21,11 @@ const logger = Logger.getLogger('taskRecovery');
  */
 const MAX_RECOVERY_AGE_MS = 30 * 60 * 1000;
 
+/** Builds the Slack client for a bot token. */
+type SlackClientFactory = (botToken: string) => WebClient;
+
+const defaultSlackClientFactory: SlackClientFactory = (botToken) => new WebClient(botToken);
+
 /**
  * Recover a single orphaned task by polling A2A for its status
  */
@@ -31,7 +36,8 @@ async function recoverTask(
   a2aClientService: A2AClientService,
   userAuthService: IUserAuthService,
   contextStore: IContextStore,
-  inFlightTaskStore: IInFlightTaskStore
+  inFlightTaskStore: IInFlightTaskStore,
+  slackClientFactory: SlackClientFactory
 ): Promise<boolean> {
   const { taskId, userId, teamId, channelId, threadTs, messageTs, statusMessageTs, contextKey, appId } = task;
 
@@ -51,7 +57,7 @@ async function recoverTask(
       return false;
     }
 
-    const slackClient = new WebClient(botToken);
+    const slackClient = slackClientFactory(botToken);
 
     // Get user's access token for orchestrator audience (token exchange)
     const accessToken = await userAuthService.getOrchestratorToken(userId, teamId);
@@ -164,7 +170,9 @@ export async function recoverOrphanedTasks(
   botInstallationStore: IBotInstallationStore,
   contextStore: IContextStore,
   fallbackBotToken?: string,
-  minAgeMs: number = 10 * 60 * 1000 // Default: 10 minutes
+  minAgeMs: number = 10 * 60 * 1000, // Default: 10 minutes
+  // Test seam: builds the Slack client for the resolved bot token.
+  slackClientFactory: SlackClientFactory = defaultSlackClientFactory
 ): Promise<{ recovered: number; failed: number; inProgress: number }> {
   logger.info('Starting orphaned task recovery...');
 
@@ -191,7 +199,8 @@ export async function recoverOrphanedTasks(
           a2aClientService,
           userAuthService,
           contextStore,
-          inFlightTaskStore
+          inFlightTaskStore,
+          slackClientFactory
         );
 
         if (result) {
