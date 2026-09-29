@@ -247,6 +247,12 @@ release bump="":
     git push && git push --tags
     printf "${GREEN} ✓${RESET}\n"
 
+    for pkg in "${CHANGED[@]}"; do
+      if is_npm_package "$pkg"; then
+        npm_scan_notice "$pkg"
+      fi
+    done
+
     # Phase 5: Move registered hosts onto the SDK version just published. The
     # release is already out, so a host problem is reported with a retry command
     # rather than failing the run.
@@ -348,6 +354,10 @@ release-pkg pkg bump="":
     git push && git push --tags
     printf "${GREEN} ✓${RESET}\n"
 
+    if is_npm_package "$PKG"; then
+      npm_scan_notice "$PKG"
+    fi
+
     # Phase 5: Move registered hosts onto the SDK version just published (the
     # release is out — a host problem is reported with a retry command, not fatal).
     if [[ "$PKG" == "$SDK_PKG" ]]; then
@@ -381,6 +391,29 @@ publish-npm pkg *args:
     printf "${CYAN}📦 Publishing %s@%s to npm...${RESET}\n" "$(npm_package_name "$PKG")" "$(get_package_version "$PKG")"
     publish_npm_package "$PKG" {{ args }}
     printf "${GREEN}✅ Done${RESET}\n"
+    if [[ " {{ args }} " != *" --dry-run "* ]]; then
+      npm_scan_notice "$PKG"
+    fi
+
+# Defaults to the package's current version. Needs the npm token in ~/.npmrc.
+#
+# Show npm's status of a published version: validating (malware scan), published, …
+npm-status pkg version="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+
+    PKG="{{ pkg }}"
+    if ! is_npm_package "$PKG"; then
+      echo "❌ '$PKG' is not published to npm."
+      echo "   npm packages: $NPM_PACKAGES"
+      exit 1
+    fi
+    NAME="$(npm_package_name "$PKG")"
+    VERSION="{{ version }}"
+    [[ -n "$VERSION" ]] || VERSION="$(get_package_version "$PKG")"
+    STATUS="$(npm_version_status "$NAME" "$VERSION")"
+    echo "${NAME}@${VERSION}: ${STATUS:-unknown (not on the registry, or no npm token in ~/.npmrc)}"
 
 # ─── SDK Hosts (apps outside this repo that install @nannos/embed-sdk) ──
 #

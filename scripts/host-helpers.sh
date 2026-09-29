@@ -147,14 +147,23 @@ sdk_checkout_summary() {
 
 # ── Mutating a host ─────────────────────────────────────────────────
 
-# Block until a version is visible on the registry (publishes propagate with a
-# short delay). Usage: wait_for_npm_version <version> [timeout-seconds]
+# Block until a version is visible on the registry (npm scans a new version for
+# malware first, see npm_scan_notice). Usage: wait_for_npm_version <version> [timeout-seconds]
 wait_for_npm_version() {
-  local version="$1" timeout="${2:-90}" waited=0
+  local version="$1" timeout="${2:-90}" waited=0 status
   while ! npm_version_published "$SDK_NAME" "$version"; do
     if (( waited >= timeout )); then
+      status="$(npm_version_status "$SDK_NAME" "$version")"
+      (( waited > 0 )) && echo "" >&2
       echo "❌ ${SDK_NAME}@${version} is not on ${NPM_REGISTRY} (waited ${timeout}s)." >&2
-      echo "   Release it first (just release / just release-pkg embed-sdk), or pass a published version." >&2
+      if [[ "$status" == "validating" ]]; then
+        echo "   npm is still scanning it for malware (status: validating). Retry in a few minutes." >&2
+      elif [[ -n "$status" ]]; then
+        echo "   npm reports status '${status}'. Check npmjs.com and the npm account's email." >&2
+      else
+        echo "   Release it first (just release / just release-pkg embed-sdk), or pass a published version." >&2
+        echo "   Just published? npm scans new versions before install works — check: just npm-status ${SDK_PKG}" >&2
+      fi
       return 1
     fi
     if (( waited == 0 )); then

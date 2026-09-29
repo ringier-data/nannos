@@ -258,6 +258,38 @@ npm_version_published() {
   npm view "${1}@${2}" version --registry "$NPM_REGISTRY" >/dev/null 2>&1
 }
 
+# The registry's lifecycle status of one exact version: "validating" while npm
+# scans it for malware, "published" once installable. Empty when unknown (no token
+# in ~/.npmrc, version not on the registry, offline). Always returns 0 — the
+# release's rollback ERR trap must never fire on a status lookup.
+npm_version_status() {
+  local name="$1" version="$2" token=""
+  if [[ -f "${HOME}/.npmrc" ]]; then
+    token="$(sed -n 's#^//registry.npmjs.org/:_authToken=##p' "${HOME}/.npmrc" | head -1)" || true
+  fi
+  [[ -n "$token" ]] || return 0
+  curl -fsS --max-time 10 -H "Authorization: Bearer ${token}" \
+    "${NPM_REGISTRY}-/package/${name/\//%2f}/version/${version}/status" 2>/dev/null \
+    | sed -n 's/.*"status":"\([^"]*\)".*/\1/p' || true
+}
+
+# Since 2026-07-28 npm scans every new version for malware before anyone can
+# install it: npmjs.com shows "Validating", `npm view` / `npm install` get 404.
+# Say so after a publish, so the gap does not read as a failed release.
+npm_scan_notice() {
+  local pkg="$1" name version status
+  name="$(npm_package_name "$pkg")"
+  version="$(get_package_version "$pkg")"
+  status="$(npm_version_status "$name" "$version")"
+  if [[ "$status" == "published" ]]; then
+    return 0
+  fi
+  printf '\033[1;33m⏳ npm is scanning %s@%s for malware%s.\033[0m\n' "$name" "$version" "${status:+ (status: ${status})}"
+  echo "   Until the scan ends, npmjs.com shows \"Validating\" and npm view / npm install report 404."
+  echo "   It usually takes about 5 minutes, sometimes 15 or more. Do not publish again."
+  echo "   Check it with: just npm-status ${pkg}"
+}
+
 # Publish one package to the npm registry. Its `prepublishOnly` script rebuilds
 # dist, so the tarball always matches the committed source. Already-published
 # versions are skipped rather than failed: a re-run of a partly finished release
