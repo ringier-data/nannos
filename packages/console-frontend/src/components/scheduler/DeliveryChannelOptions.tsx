@@ -4,12 +4,22 @@ import type { DeliveryChannel, DeliveryReachability } from '@/api/scheduler';
 /**
  * The channel picker's options. A channel the user can't receive on (they never signed
  * in to Nannos from there, #192) is greyed out with how to activate it, since saving it
- * would be refused. The one already selected stays selectable, so a job whose channel
- * has since become unreachable still shows what it has.
+ * would be refused. The job's saved channel stays selectable even then, as the backend
+ * accepts it unchanged, so an edit that moved away from it can move back; so does the
+ * one currently selected, so the picker always shows what it holds.
  */
-export function DeliveryChannelOptions({ channels, selected }: { channels: DeliveryChannel[]; selected?: string }) {
+export function DeliveryChannelOptions({
+  channels,
+  selected,
+  saved,
+}: {
+  channels: DeliveryChannel[];
+  selected?: string;
+  saved?: string;
+}) {
   return channels.map((ch) => {
-    const unreachable = ch.reachability === 'unreachable' && String(ch.id) !== selected;
+    const id = String(ch.id);
+    const unreachable = ch.reachability === 'unreachable' && id !== selected && id !== saved;
     return (
       <SelectItem key={ch.id} value={String(ch.id)} disabled={unreachable}>
         {ch.name}

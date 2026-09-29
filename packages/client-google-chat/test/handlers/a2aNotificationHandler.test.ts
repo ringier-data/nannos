@@ -260,6 +260,14 @@ describe('a notification that reaches nobody is reported (#191)', () => {
     ]);
   });
 
+  test('a notice that belongs to no run (run id null) is not reported', async () => {
+    const { deps: d, reportUndelivered } = deps(false);
+
+    await handleA2ANotification(makeTask({ ...schedulerPayload, scheduled_job_run_id: null }), PROJECT_ID, d);
+
+    expect(reportUndelivered).not.toHaveBeenCalled();
+  });
+
   test('a delivered notification reports nothing', async () => {
     const { deps: d, reportUndelivered } = deps(true);
 

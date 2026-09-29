@@ -14,13 +14,13 @@ _FORMATTING_DESCRIPTION = (
     "for standard Markdown as the web console renders it."
 )
 
-#: Whether a user can receive on a delivery channel (#192, ADR-0011 amendment 1).
-#: ``reachable``: a brokered sign-in of theirs through the channel's client is in a
-#: workspace that lists the channel's installation. ``unreachable``: they have signed in
-#: through that client, the installation belongs to a workspace the client has published,
-#: and none of their sign-ins is in it. ``unknown``: nothing to go on, because they have no
-#: brokered sign-in with that client (an old local sign-in looks the same as none) or the
-#: client has not published the installation. Only ``unreachable`` refuses anything.
+#: Whether a user can receive on a delivery channel (#192, ADR-0011 amendments 1 and 2).
+#: ``reachable``: a brokered sign-in of theirs through the channel's client is bound to the
+#: channel's workspace. ``unreachable``: the channel's workspace is known, they have signed
+#: in through that client, and none of their sign-ins is in it. ``unknown``: nothing to go
+#: on, because they have no brokered sign-in with that client (an old local sign-in looks
+#: the same as none) or the channel has no workspace (``workspace_id IS NULL``). Only
+#: ``unreachable`` refuses anything.
 DeliveryReachability = Literal["reachable", "unreachable", "unknown"]
 
 #: Why a scheduled run's notification reached nobody, as the receiving client reported it
@@ -39,8 +39,8 @@ _REACHABILITY_DESCRIPTION = (
 _WORKSPACE_DESCRIPTION = (
     "The workspace this installation belongs to, in the vocabulary the client binds sign-ins "
     "under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace "
-    "reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it "
-    "reaches, so it warns rather than refuses."
+    "reaches the channel. Omitted means unchanged; null clears it, for an installation that no "
+    "longer runs. Unset means Nannos cannot tell who it reaches, so it warns rather than refuses."
 )
 
 

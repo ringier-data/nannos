@@ -40,7 +40,8 @@ interface SchedulerPayload {
   // Correlation fields echoed by agent-runner so thread replies under the
   // delivered notification can be linked back to the job/run/sub-agent.
   scheduled_job_id?: number;
-  scheduled_job_run_id?: number;
+  /** Null on a notice that belongs to no run (agent-runner sends `run_id or None`). */
+  scheduled_job_run_id?: number | null;
   sub_agent_id?: number;
   sub_agent_name?: string;
   prompt?: string;
@@ -113,8 +114,10 @@ export async function handleA2ANotification(
     } else {
       logger.error(message);
     }
+    // A notice that belongs to no run (an activation or recovery notice) arrives with
+    // `null`: nothing to mark, and the backend would refuse it.
     const runId = schedulerPayload.scheduled_job_run_id;
-    if (deps.reportUndelivered && runId !== undefined && installationId) {
+    if (deps.reportUndelivered && typeof runId === 'number' && installationId) {
       await deps.reportUndelivered({ runId, installationId, reason, detail });
     }
   };
@@ -199,7 +202,7 @@ export async function handleA2ANotification(
           contextKey: scheduledRunStore.buildKey(threadName),
           contextId: task.contextId,
           scheduledJobId: schedulerPayload.scheduled_job_id,
-          scheduledJobRunId: schedulerPayload.scheduled_job_run_id,
+          scheduledJobRunId: schedulerPayload.scheduled_job_run_id ?? undefined,
           subAgentId: schedulerPayload.sub_agent_id,
           subAgentName: schedulerPayload.sub_agent_name,
           prompt: schedulerPayload.prompt,

@@ -1834,7 +1834,7 @@ export type DeliveryChannelCreate = {
     /**
      * Workspace Id
      *
-     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; null clears it, for an installation that no longer runs. Unset means Nannos cannot tell who it reaches, so it warns rather than refuses.
      */
     workspace_id?: string | null;
     /**
@@ -1905,7 +1905,7 @@ export type DeliveryChannelResponse = {
     /**
      * Workspace Id
      *
-     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; null clears it, for an installation that no longer runs. Unset means Nannos cannot tell who it reaches, so it warns rather than refuses.
      */
     workspace_id?: string | null;
     /**
@@ -1949,7 +1949,7 @@ export type DeliveryChannelUpdate = {
     /**
      * Workspace Id
      *
-     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; never set means Nannos cannot tell who it reaches, so it warns rather than refuses.
+     * The workspace this installation belongs to, in the vocabulary the client binds sign-ins under (a Slack team id, a Google Chat project number). A sign-in bound to that workspace reaches the channel. Omitted means unchanged; null clears it, for an installation that no longer runs. Unset means Nannos cannot tell who it reaches, so it warns rather than refuses.
      */
     workspace_id?: string | null;
     /**

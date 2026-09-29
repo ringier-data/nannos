@@ -888,7 +888,7 @@ evidence about neither the job nor the runtime (#266):
   `OfflineTokenExpiredError`, a `NoOfflineTokenError`, so it takes the sign-in hold rather than the
   generic handler. The row is marked (`user_offline_tokens.expired_at`, migration 107), not deleted:
   it then counts as absent to `has_consent` and `users_with_consent`, the hold carries
-  `_SIGN_IN_EXPIRED_REASON`, and the next `store_offline_token` clears the mark, so
+  `PauseCode.SIGN_IN_EXPIRED`, and the next `store_offline_token` clears the mark, so
   `release_sign_in_holds` releases both reasons.
 
 What an interruption earns depends on the trigger:

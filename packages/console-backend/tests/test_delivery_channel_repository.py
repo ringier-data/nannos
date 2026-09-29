@@ -327,3 +327,16 @@ async def test_a_registration_names_its_workspace_and_omitting_it_keeps_it(
         pg_session, test_user_db, "client-a", _channel("slack", "A1")
     )
     assert (created, again.workspace_id) == (False, "T1")
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_null_workspace_clears_it(repo, pg_session: AsyncSession, test_user_db: User):
+    """A client clears the workspace of an installation that no longer runs (a deactivated
+    Slack app), so a sign-in in that team stops reading as reaching it. Only a sent null
+    does: omitting the field still keeps it."""
+    data = _channel("slack", "A1").model_copy(update={"workspace_id": "T1"})
+    await repo.upsert_channel_by_installation(pg_session, test_user_db, "client-a", data)
+
+    cleared = type(data).model_validate({**_channel("slack", "A1").model_dump(exclude_unset=True), "workspace_id": None})
+    channel, created = await repo.upsert_channel_by_installation(pg_session, test_user_db, "client-a", cleared)
+    assert (created, channel.workspace_id) == (False, None)

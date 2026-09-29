@@ -13,6 +13,7 @@ import pytest
 from fastapi import HTTPException, status
 
 import console_backend.routers.delivery_channel_router as router
+from console_backend.config import config
 
 
 def _request_with_repo(repo) -> MagicMock:
@@ -161,7 +162,7 @@ class TestUndeliveredReport:
 
     @pytest.mark.asyncio
     async def test_the_clients_own_service_account_is_heard(self, monkeypatch):
-        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client"}
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client", "aud": [config.oidc.client_id]}
         monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
         req, db = self._request(True), MagicMock()
 
@@ -182,8 +183,22 @@ class TestUndeliveredReport:
         req.app.state.scheduler_service.report_undelivered.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_a_token_the_client_got_for_another_service_is_refused(self, monkeypatch):
+        """Its own client-credentials token, but minted for the orchestrator: the same
+        audience rule as the token broker, since this endpoint switches jobs off."""
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client", "aud": ["orchestrator"]}
+        monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
+        req = self._request(True)
+
+        with pytest.raises(HTTPException) as exc:
+            await router.report_undelivered(self._REPORT, req, MagicMock())
+
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        req.app.state.scheduler_service.report_undelivered.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_a_run_not_on_the_clients_channels_is_a_404(self, monkeypatch):
-        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client"}
+        claims = {"azp": "slack-client", "preferred_username": "service-account-slack-client", "aud": config.oidc.client_id}
         monkeypatch.setattr(router, "get_token_claims_from_request", AsyncMock(return_value=claims))
 
         with pytest.raises(HTTPException) as exc:

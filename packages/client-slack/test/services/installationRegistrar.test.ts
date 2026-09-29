@@ -92,13 +92,6 @@ describe('registerInstallations', () => {
     expect(new Set(bodies.map((b) => b.secret)).size).toBe(2);
   });
 
-  test('skips inactive installations', async () => {
-    const inactive = { ...installation('A33333333DD', 'T000000AA', 'Ada'), isActive: false };
-    await registerInstallations(deps([installation('A00000000AA', 'T000000AA', 'Nannos'), inactive]));
-
-    expect(bodiesFrom(fetchMock).map((b) => b.installation_id)).toEqual(['A00000000AA']);
-  });
-
   test('one failing registration does not stop the rest', async () => {
     fetchMock
       .mockImplementationOnce(async () => ({ ok: false, status: 500, statusText: 'Boom', text: async () => 'boom' }))
@@ -121,6 +114,21 @@ describe('registerInstallations', () => {
     expect(bodiesFrom(fetchMock).map((b) => [b.installation_id, b.workspace_id])).toEqual([
       ['A00000000AA', 'T000000AA'],
       ['A00000000AB', 'T000000AA'],
+    ]);
+  });
+
+  test("a deactivated app that was registered has its workspace cleared, one never registered is skipped", async () => {
+    const gone = { ...installation('A0000000OLD', 'T000000AA', 'Old'), isActive: false };
+    const never = { ...installation('A000000NEVR', 'T000000AA', 'Never'), isActive: false };
+    const d = deps([installation('A00000000AA', 'T000000AA', 'Nannos'), gone, never]);
+    d.installationSecretService.get = async (id: string) => (id === gone.appId ? 'secret' : null);
+
+    await registerInstallations(d);
+
+    const bodies = bodiesFrom(fetchMock);
+    expect(bodies.map((b) => [b.installation_id, b.workspace_id])).toEqual([
+      ['A00000000AA', 'T000000AA'],
+      ['A0000000OLD', null],
     ]);
   });
 });

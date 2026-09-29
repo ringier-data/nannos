@@ -926,8 +926,13 @@ function EditForm({
 
     // A paused job does not run whatever you save, and nothing on the way out says so:
     // the fix you just made looks applied while the scheduler keeps skipping the job.
-    // Ask, rather than saving into a job that will not act on it.
-    if (!job.enabled) {
+    // Ask, rather than saving into a job that will not act on it. Except a job held
+    // because its channel can't reach the user, moved to another: the move is the fix,
+    // and the backend switches it back on.
+    const releasesHold =
+      (job.pause_code === 'unreachable' || job.pause_code === 'undelivered') &&
+      deliveryChannel !== String(job.delivery_channel_id ?? '');
+    if (!job.enabled && !releasesHold) {
       setPendingSave(body);
       return;
     }
@@ -1320,7 +1325,11 @@ function EditForm({
                   {channels.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-muted-foreground">No delivery channels registered</div>
                   ) : (
-                    <DeliveryChannelOptions channels={channels} selected={deliveryChannel} />
+                    <DeliveryChannelOptions
+                      channels={channels}
+                      selected={deliveryChannel}
+                      saved={String(job.delivery_channel_id ?? '')}
+                    />
                   )}
                 </SelectContent>
               </Select>

@@ -14,7 +14,7 @@ from ..dependencies import (
     get_client_id_from_request,
     get_token_claims_from_request,
     is_admin_mode,
-    is_own_client_credentials,
+    own_client_credentials_client,
     require_auth_or_bearer_token,
 )
 from ..models.delivery_channel import (
@@ -270,8 +270,8 @@ async def report_undelivered(report: UndeliveredReport, request: Request, db: Db
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    client_id = claims.get("azp") or claims.get("client_id")
-    if not is_own_client_credentials(claims, client_id):
+    client_id = own_client_credentials_client(claims)
+    if client_id is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="A delivery report must come from the channel's client, with its own client-credentials token",

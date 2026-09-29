@@ -27,6 +27,7 @@ from ..models.scheduled_job import (
     ScheduleKind,
     SharedJobDefinition,
     TriggerPolicy,
+    render_pause,
 )
 from ..config import config
 from ..models.user import User
@@ -81,8 +82,10 @@ assert _DEFINITION_FIELDS | _TRIGGER_FIELDS | _SUBSCRIPTION_FIELDS | {"scope"} =
 #: one. A group default holds a member's new subscription with the first, and the engine
 #: holds a subscription whose run found no token, or a refused one.
 _SIGN_IN_HOLDS = (PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED)
+#: Holds that are about the delivery channel, so moving the job to another lifts them.
+_REACHABILITY_HOLDS = (PauseCode.UNREACHABLE, PauseCode.UNDELIVERED)
 #: Holds under which the subscriber cannot be sent the chat activation notice.
-_NO_NOTICE_HOLDS = (*_SIGN_IN_HOLDS, PauseCode.UNREACHABLE, PauseCode.UNDELIVERED)
+_NO_NOTICE_HOLDS = (*_SIGN_IN_HOLDS, *_REACHABILITY_HOLDS)
 
 
 class SchedulerAccessError(PermissionError):
@@ -352,8 +355,8 @@ class SchedulerService:
     async def _require_reachable(self, db: AsyncSession, user: User, channel_id: int | None) -> None:
         """Refuse a subscription of *user* on a channel they cannot receive on (#192).
 
-        Only ``unreachable`` refuses. ``unknown`` (an old local sign-in, or a client that
-        has not published where it runs) is let through: the job carries its
+        Only ``unreachable`` refuses. ``unknown`` (an old local sign-in, or a channel with
+        no workspace) is let through: the job carries its
         ``delivery_reachability`` for the console to warn with, and if nothing arrives the
         client's report holds it then (#191). A channel that does not exist is left to
         ``_validate_delivery_channel``.
@@ -368,6 +371,18 @@ class SchedulerService:
             f"Nannos can't reach you on '{name}' yet, because you haven't signed in to Nannos "
             f"from there. Message Nannos on '{name}' once to activate it, then try again."
         )
+
+    async def _hold_if_unreachable(self, db: AsyncSession, user_id: str, fields: dict[str, Any]) -> None:
+        """Hold a new subscription (*fields*, before it is written) whose channel cannot
+        reach *user_id*, instead of refusing it.
+
+        Subscribe and copy take the channel they inherit, not one the user picked: the
+        owner's, which the subscriber may never be able to sign in from (another Slack
+        team). Refusing would leave them no way in; held, the job is theirs and waits, and
+        either a sign-in there or a move to a channel of their own switches it on.
+        """
+        if fields["enabled"] and user_id in await self._unreachable_members(db, fields["delivery_channel_id"], [user_id]):
+            fields["enabled"], fields["pause_code"] = False, PauseCode.UNREACHABLE
 
     async def _unreachable_members(self, db: AsyncSession, channel_id: int | None, user_ids: list[str]) -> set[str]:
         """Those of *user_ids* who cannot receive on *channel_id*."""
@@ -833,6 +848,17 @@ class SchedulerService:
                 if delivery_channel_id != job.delivery_channel_id:
                     await self._require_reachable(db, actor, delivery_channel_id)
             sub_fields["delivery_channel_id"] = delivery_channel_id
+        # A hold for reachability is about the channel, so moving the job to one that can
+        # reach the subscriber lifts it, as the hold's own notice says ("or change its
+        # delivery"): no sign-in will, since they are already bound where it now points.
+        # A move onto a channel that cannot reach them was refused above. An explicit
+        # ``enabled`` decides for itself.
+        release_hold = (
+            "delivery_channel_id" in sub_fields
+            and sub_fields["delivery_channel_id"] != job.delivery_channel_id
+            and job.pause_code in _REACHABILITY_HOLDS
+            and data.enabled is None
+        )
         if data.enabled is not None:
             if data.enabled and not job.enabled:
                 # Switching a job on is where it would start failing. An echo of an
@@ -994,6 +1020,10 @@ class SchedulerService:
 
         if reset_subscribers:
             await self._notify_reset(db, actor, definition, reset_subscribers)
+        if release_hold:
+            moved = await self.repo.get_job(db, job_id)
+            if moved is not None and moved.pause_code in _REACHABILITY_HOLDS:
+                await self._switch_on_held(db, actor, [moved])
         return await self.repo.get_job(db, job_id)
 
     # ------------------------------------------------------------------
@@ -1073,10 +1103,8 @@ class SchedulerService:
         ):
             raise ValueError("You cannot subscribe: this job runs a sub-agent you do not have access to")
         channel = await self._default_channel_for(db, definition)
-        # Subscribing is the user's own act, so an owner's channel they cannot receive on
-        # is refused with the way to activate it, not inherited into silence.
-        await self._require_reachable(db, actor, channel)
         fields = await self._own_subscription_fields(db, definition, actor.id, channel, activated_by="user")
+        await self._hold_if_unreachable(db, actor.id, fields)
         subscription_id = await self.repo.create_subscription(db, actor, fields)
         await db.commit()
         job = await self.repo.get_job(db, subscription_id)
@@ -1110,7 +1138,6 @@ class SchedulerService:
         # Before anything is written, including a copied inline agent.
         mine = await self.repo.get_subscription_for(db, definition_id, actor.id)
         channel = mine.delivery_channel_id if mine else await self._default_channel_for(db, src)
-        await self._require_reachable(db, actor, channel)
         agent_id = src.get("sub_agent_id")
         if agent_id is not None:
             agent = await self.sub_agents.get_sub_agent_by_id(db, agent_id)
@@ -1176,6 +1203,7 @@ class SchedulerService:
         new_id = await self.repo.create_definition(db, actor, fields)
         definition = {**fields, "id": new_id}
         sub_fields = await self._own_subscription_fields(db, definition, actor.id, channel)
+        await self._hold_if_unreachable(db, actor.id, sub_fields)
         subscription_id = await self.repo.create_subscription(db, actor, sub_fields)
         await db.commit()
         job = await self.repo.get_job(db, subscription_id)
@@ -1265,13 +1293,13 @@ class SchedulerService:
         """
         if self._reachability is None:
             return 0
+        held = await self.repo.list_held_jobs(db, user.id, (PauseCode.UNREACHABLE,))
+        if not held:
+            return 0
+        # Every channel in scope is reachable now: the binding for exactly this client and
+        # workspace was just committed. resume_job re-probes anyway.
         in_scope = await self._reachability.channel_ids_in(db, client_id, workspace_id)
-        held = [
-            job
-            for job in await self.repo.list_held_jobs(db, user.id, (PauseCode.UNREACHABLE,))
-            if job.delivery_channel_id in in_scope
-        ]
-        return await self._switch_on_held(db, user, [job for job in held if job.delivery_reachability == "reachable"])
+        return await self._switch_on_held(db, user, [job for job in held if job.delivery_channel_id in in_scope])
 
     async def _switch_on_held(self, db: AsyncSession, user: User, jobs: list[ScheduledJob]) -> int:
         """Resume each of *user*'s held *jobs* as ``resume_job`` would. A one-shot whose
@@ -1285,12 +1313,7 @@ class SchedulerService:
                 if moment is None or moment <= now:
                     # resume_job would refuse it: the one-shot's moment passed while it
                     # waited. It stays off, with the reason that says so.
-                    await self.repo.update_subscription(
-                        db=db,
-                        actor=user,
-                        subscription_id=job.id,
-                        fields={"pause_code": PauseCode.ELAPSED_ON_INHERIT, "updated_at": now},
-                    )
+                    await self.repo.recode_stop(db, user, job.id, PauseCode.ELAPSED_ON_INHERIT)
                     await db.commit()
                     continue
             try:
@@ -1300,12 +1323,7 @@ class SchedulerService:
                 # Signed in, but not from this job's channel: still held, now for the
                 # reason that is true, which a sign-in from that channel releases.
                 if job.pause_code != PauseCode.UNREACHABLE:
-                    await self.repo.update_subscription(
-                        db=db,
-                        actor=user,
-                        subscription_id=job.id,
-                        fields={"pause_code": PauseCode.UNREACHABLE, "updated_at": now},
-                    )
+                    await self.repo.recode_stop(db, user, job.id, PauseCode.UNREACHABLE)
                     await db.commit()
             except ValueError as exc:
                 # E.g. a stored timezone that no longer resolves: leave it held and visible.
@@ -1656,14 +1674,25 @@ class SchedulerService:
         # for exactly this reason. A freshly inserted row recomputes to what it already
         # holds, and ``compute_next_run`` returns None for a one-shot, leaving the elapsed
         # handling above untouched.
+        # Who is held for their channel, and which channel the notice names: the owner's
+        # for a new row, the row's own for one this call brought back.
+        unreachable_on: dict[str, int] = {}
         for uid in created:
             back = await self.repo.get_subscription_for(db, definition_id, uid)
-            if back is None or not back.enabled:
+            if back is None:
                 continue
-            if uid not in ready or uid in unreachable:
-                # A row this call brought back (access revoked earlier, now restored) is
-                # switched on by bulk_subscribe whatever the activation said. Hold it like
-                # a new one.
+            if not back.enabled:
+                if back.pause_code == PauseCode.UNREACHABLE and back.delivery_channel_id is not None:
+                    unreachable_on[uid] = back.delivery_channel_id
+                continue
+            # A row this call brought back (access revoked earlier, now restored) is
+            # switched on by bulk_subscribe whatever the activation said, and keeps its
+            # own channel. Judged on that channel, and held like a new one if it must be.
+            own = back.delivery_channel_id
+            cannot_reach = (
+                uid in unreachable if own == channel else bool(await self._unreachable_members(db, own, [uid]))
+            )
+            if uid not in ready or cannot_reach:
                 await self.repo.update_subscription(
                     db=db,
                     actor=actor,
@@ -1675,6 +1704,8 @@ class SchedulerService:
                         "updated_at": now,
                     },
                 )
+                if uid in ready and own is not None:
+                    unreachable_on[uid] = own
                 continue
             nxt = compute_next_run(
                 back.schedule_kind, back.cron_expr, back.interval_seconds, back.run_at, tz=back.timezone
@@ -1684,11 +1715,11 @@ class SchedulerService:
                     db=db, actor=actor, subscription_id=back.id, fields={"next_run_at": nxt, "updated_at": now}
                 )
         if created and self._notification_service is not None:
-            channel_name = (
-                await self._reachability.channel_name(db, channel)
-                if unreachable and channel is not None and self._reachability is not None
-                else None
-            ) or "its channel"
+            channel_names = {
+                cid: (await self._reachability.channel_name(db, cid) if self._reachability is not None else None)
+                or "its channel"
+                for cid in set(unreachable_on.values())
+            }
             # The console shares and sets the group default in one Save, so a member can
             # be handed "…has been shared with your group. Subscribe to run it under your
             # own account." moments before being subscribed for them. Activation answers
@@ -1716,10 +1747,11 @@ class SchedulerService:
                             if uid not in ready
                             else (
                                 f"'{definition['name']}' is a default job of one of your groups and will run under "
-                                f"your account, but Nannos can't reach you on its delivery channel ('{channel_name}'). "
+                                "your account, but Nannos can't reach you on its delivery channel "
+                                f"('{channel_names.get(unreachable_on.get(uid, -1), 'its channel')}'). "
                                 "Message Nannos there once and the job starts, or change its delivery."
                             )
-                            if uid in unreachable
+                            if uid in unreachable_on
                             else (
                                 f"'{definition['name']}' now runs under your account because it is a default job "
                                 "of one of your groups. You can disable it or change its delivery at any time."
@@ -1867,13 +1899,14 @@ class SchedulerService:
     async def report_undelivered(self, db: AsyncSession, client_id: str, report: "UndeliveredReport") -> bool:
         """Record a chat client's report that a run's notification reached nobody.
 
-        Accepted only from the client that owns the run's CURRENT channel, for that
+        Accepted only from the client that owns the channel the run was SENT to, for that
         channel's installation; anything else answers False (a 404, which says nothing
         about other clients' runs). The run keeps its status and is marked undelivered.
-        ``no_recipient`` also holds the subscription (``unreachable``, or ``undelivered``) and tells
-        the subscriber in the console: runs nobody receives are spend for nothing, and
-        only they can fix it. The binding is left alone, since it is also what mints the
-        subscriber's tokens there. Commits.
+        ``no_recipient`` also holds the subscription (``unreachable``, or ``undelivered``)
+        and tells the subscriber in the console, while it still notifies that channel:
+        runs nobody receives are spend for nothing, and only they can fix it. A
+        subscription already off keeps its stop, and is not told twice. The binding is
+        left alone, since it is also what mints the subscriber's tokens there. Commits.
         """
         target = await self.repo.run_delivery_target(db, report.run_id)
         if (
@@ -1884,42 +1917,18 @@ class SchedulerService:
             return False
         channel = target["channel_name"]
         await self.repo.mark_run_undelivered(db, report.run_id, report.reason)
-        held = report.reason == "no_recipient" and target["enabled"]
-        if held:
+        held: PauseCode | None = None
+        # A run dispatched before the job moved says nothing about the channel it uses now.
+        if report.reason == "no_recipient" and target["live"] and target["current_channel_id"] == target["channel_id"]:
             # A sign-in releases the hold only where the backend can see one: a subscriber
             # with no binding there (an old local sign-in) is asked to switch it on again.
-            states = (
-                await self._reachability.for_channel(db, target["channel_id"], [target["user_id"]])
-                if self._reachability is not None
-                else {}
-            )
-            released_by_sign_in = states.get(target["user_id"], "unknown") != "unknown"
-            await self.repo.disable_subscription(
-                db,
-                target["subscription_id"],
-                PauseCode.UNREACHABLE if released_by_sign_in else PauseCode.UNDELIVERED,
-            )
-            if self._notification_service is not None:
-                await self._notification_service.create_notification(
-                    db=db,
-                    user_id=target["user_id"],
-                    notification_type=NotificationType.SCHEDULED_JOB_PAUSED,
-                    title=f"Scheduled job paused: {target['job_name']}",
-                    message=(
-                        f"'{target['job_name']}' ran, but its result reached nobody: Nannos can't reach you "
-                        f"on '{channel}'. "
-                        + (
-                            "Message Nannos there once and the job switches back on, or change its delivery."
-                            if released_by_sign_in
-                            else "Message Nannos there once, then switch the job back on, or change its delivery."
-                        )
-                    ),
-                    metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
-                )
+            code = PauseCode.UNREACHABLE if target["reachability"] != "unknown" else PauseCode.UNDELIVERED
+            if await self.repo.disable_subscription(db, target["subscription_id"], code, only_if_enabled=True):
+                held = code
         await db.commit()
         # The one place what failed in detail is kept: the run stores only the code. A
-        # missing recipient is the subscriber's to fix, and already held and notified
-        # above, so it is no alert; a failed send is.
+        # missing recipient is the subscriber's to fix, and held and notified below, so it
+        # is no alert; a failed send is.
         logger.log(
             logging.INFO if report.reason == "no_recipient" else logging.ERROR,
             "Run %d of job %d was not delivered on '%s' (%s)%s%s",
@@ -1930,6 +1939,24 @@ class SchedulerService:
             f": {report.detail}" if report.detail else "",
             "; subscription held" if held else "",
         )
+        if held is not None:
+            # After the commit and best effort, like every scheduler notification: the hold
+            # and the undelivered mark are the record, and must not roll back with it.
+            await self._notify(
+                db,
+                [
+                    NotificationData(
+                        user_id=target["user_id"],
+                        notification_type=NotificationType.SCHEDULED_JOB_PAUSED,
+                        title=f"Scheduled job paused: {target['job_name']}",
+                        message=(
+                            f"'{target['job_name']}' ran, but its result reached nobody on '{channel}'. "
+                            f"{render_pause(held)}, or change its delivery."
+                        ),
+                        metadata={"job_id": target["subscription_id"], "run_id": report.run_id},
+                    )
+                ],
+            )
         return True
 
     # ------------------------------------------------------------------

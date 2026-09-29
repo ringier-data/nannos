@@ -48,7 +48,8 @@ export function createDeliveryReporter(options: DeliveryReporterOptions): Delive
           run_id: report.runId,
           installation_id: report.installationId,
           reason: report.reason,
-          ...(report.detail ? { detail: report.detail.slice(0, 500) } : {}),
+          // Uncut: the backend cuts it, and refusing it over length would lose the report.
+          ...(report.detail ? { detail: report.detail } : {}),
         }),
       });
       if (!response.ok) {

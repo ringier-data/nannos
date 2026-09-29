@@ -58,11 +58,16 @@ status: proposed (2026-09-23); implemented in console-backend, the three chat cl
 > **Unknown**: no binding with the client at all (an old local sign-in looks exactly like
 > none) or a channel whose client has not named its workspace. It is one probe of the
 > user's bindings, derived on every read. Only
-> unreachable changes anything, following point 6. What a user starts themselves (create,
-> subscribe, copy, change channel, switch on) is refused with "message Nannos on <channel>
-> once to activate it". A group default keeps the owner's channel and creates the member's
-> subscription switched off with a fixed reason; it is never moved to another channel on
-> their behalf. A sign-in bound to that channel's workspace switches those on.
+> unreachable changes anything, following point 6. A channel the user picks themselves
+> (create, change channel) or a job they switch on is refused with "message Nannos on
+> <channel> once to activate it". A subscription that inherits the owner's channel (a group
+> default, a subscribe, a copy) keeps it and is created switched off with a fixed reason
+> instead: the subscriber may never be able to sign in from the owner's workspace, and a
+> refusal would leave them no way in. It is never moved to another channel on their behalf.
+> A sign-in bound to that channel's workspace switches those on, and so does the subscriber
+> moving the job to a channel that does not refuse them. A run carries the channel it was
+> sent to (migration 112), and a report is judged against that channel; it holds the
+> subscription only while the subscription still notifies there.
 > Unknown only warns in the console. A user still served in a workspace from an old local
 > sign-in while holding a brokered one elsewhere reads as unreachable there; accepted, since
 > it lasts only until old sign-ins drain. Because the webhook acknowledges a push before it

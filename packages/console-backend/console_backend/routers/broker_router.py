@@ -17,7 +17,7 @@ from fastapi.responses import RedirectResponse
 from ..config import config
 from ..controllers.broker_controller import BrokerController
 from ..db.session import DbSession
-from ..dependencies import get_token_claims_from_request, is_own_client_credentials
+from ..dependencies import get_token_claims_from_request, own_client_credentials_client
 from ..models.broker import (
     BrokerClient,
     BrokerRedeemRequest,
@@ -59,7 +59,7 @@ async def require_broker_client(request: Request, db: DbSession) -> BrokerClient
     """Accept only a registered, enabled broker client calling as itself.
 
     The bearer must be the client's own client-credentials token
-    (``is_own_client_credentials``) whose audience includes this backend. A user's access
+    whose audience includes this backend (``own_client_credentials_client``). A user's access
     token issued to the same client is refused — ``/token`` mints for any user linked to
     the client, which only the client itself may ask for.
     """
@@ -72,12 +72,12 @@ async def require_broker_client(request: Request, db: DbSession) -> BrokerClient
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    client_id = claims.get("azp") or claims.get("client_id")
-    audiences = claims.get("aud") or []
-    if isinstance(audiences, str):
-        audiences = [audiences]
-    if not is_own_client_credentials(claims, client_id) or config.oidc.client_id not in audiences:
-        logger.warning("Broker call refused: not a service-account token for this backend (azp=%s)", client_id)
+    client_id = own_client_credentials_client(claims)
+    if client_id is None:
+        logger.warning(
+            "Broker call refused: not a service-account token for this backend (azp=%s)",
+            claims.get("azp") or claims.get("client_id"),
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="A broker client must call with its own client-credentials token",

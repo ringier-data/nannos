@@ -24,7 +24,7 @@ export function UserOnboardingBadge({ onboarding }: UserOnboardingBadgeProps) {
   const unreachable = onboarding.unreachable_subscriptions ?? 0;
   const unreachableHint =
     unreachable > 0
-      ? `${unreachable === 1 ? 'One of their scheduled jobs delivers' : `${unreachable} of their scheduled jobs deliver`} to a chat channel they've never signed in from, so it's held. Messaging Nannos there once activates it.`
+      ? `${unreachable === 1 ? 'One of their scheduled jobs delivers' : `${unreachable} of their scheduled jobs deliver`} to a chat channel Nannos can't reach them on, so its results don't arrive. Messaging Nannos there once, or moving the job to another channel, fixes it.`
       : null;
   if (onboarding.scheduler_ready && !unreachableHint) {
     return null;

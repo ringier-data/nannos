@@ -1663,6 +1663,10 @@ class SchedulerEngine:
         )
         try:
             async with self._db_session_factory() as db:
+                # As the row stands now, not as the claim saw it: a client's delivery
+                # report can switch it off while the run is in flight, and has told the
+                # subscriber itself. Locked, so such a report waits for this outcome.
+                was_enabled = await self._repo.subscription_enabled(db, job.id)
                 if should_disable:
                     logger.info(
                         "Job %d: Disabling watch job after successful trigger (destroy_after_trigger=True)",
@@ -1702,7 +1706,7 @@ class SchedulerEngine:
         # it is optional, and a job without one is exactly the job whose silence goes
         # unnoticed — so the notice is a durable console notification, which also
         # survives the owner being offline in a way the WebSocket push does not.
-        if job.enabled and not enabled_after and not should_disable:
+        if was_enabled and not enabled_after and not should_disable:
             await self._notify_job_paused(job, reason_after, run_id)
 
         try:

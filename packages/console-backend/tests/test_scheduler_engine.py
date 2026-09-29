@@ -2183,8 +2183,11 @@ class TestAutoPauseIsNotSilent:
             delivered=False,
         )
 
-    async def _finalize(self, repo_result, job):
+    async def _finalize(self, repo_result, job, row_enabled: bool | None = None):
         engine = _make_engine()
+        # The row as _finalize finds it; the claim's snapshot (``job``) unless a test says
+        # something switched it off in flight.
+        engine._repo.subscription_enabled = AsyncMock(return_value=job.enabled if row_enabled is None else row_enabled)
         engine._repo.complete_job = AsyncMock(return_value=repo_result)
         engine._repo.complete_run = AsyncMock(return_value=True)
         engine._notification_service = AsyncMock()
@@ -2212,6 +2215,15 @@ class TestAutoPauseIsNotSilent:
     @pytest.mark.asyncio
     async def test_a_job_that_was_already_paused_is_not_announced_again(self):
         notifications = await self._finalize((False, "Auto-paused after 3 consecutive failures"), self._job(enabled=False))
+        notifications.create_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_job_held_while_its_run_was_in_flight_is_not_announced_again(self):
+        """The claim saw it on; a client's delivery report switched it off (and told the
+        subscriber) before the run finished. Judged on the row, the run stopped nothing."""
+        notifications = await self._finalize(
+            (False, "Nannos can't reach you on this job's delivery channel"), self._job(), row_enabled=False
+        )
         notifications.create_notification.assert_not_awaited()
 
 

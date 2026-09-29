@@ -339,6 +339,18 @@ describe('a notification that reaches nobody is reported (#191)', () => {
     );
   });
 
+  test('a notice that belongs to no run (run id null) is not reported', async () => {
+    const reportUndelivered = reporter();
+
+    await handleA2ANotification(
+      makeTask({ ...schedulerPayload, scheduled_job_run_id: null }),
+      botInstallation,
+      { userAuthStorage: mockUserAuthStorage(false), reportUndelivered }
+    );
+
+    expect(reportUndelivered).not.toHaveBeenCalled();
+  });
+
   test('a delivered notification reports nothing', async () => {
     const reportUndelivered = reporter();
 

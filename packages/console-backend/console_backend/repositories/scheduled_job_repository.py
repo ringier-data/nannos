@@ -493,6 +493,35 @@ class ScheduledJobRepository(AuditedRepository):
         ``enabled`` (see ``_SubscriptionRepository.update``)."""
         await self._subs.update(db=db, actor=actor, entity_id=subscription_id, fields=fields)
 
+    async def recode_stop(self, db: AsyncSession, actor: User, subscription_id: int, code: PauseCode) -> bool:
+        """Rewrite why a switched-off subscription is off, only while it still is.
+
+        For a release that finds a held row cannot be switched on after all. It read the
+        row earlier, so a concurrent resume may have switched it on since: that wins, and
+        the write is skipped rather than tripping the check that a code only ever
+        describes a stop. Returns whether it wrote.
+        """
+        result = await db.execute(
+            text("""
+                UPDATE scheduled_job_subscriptions
+                SET pause_code = :code, pause_detail = NULL, updated_at = :now
+                WHERE id = :id AND NOT enabled
+                RETURNING id
+            """),
+            {"id": subscription_id, "code": code.value, "now": datetime.now(timezone.utc)},
+        )
+        if result.first() is None:
+            return False
+        await self.audit_service.log_action(
+            db=db,
+            actor=actor,
+            entity_type=AuditEntityType.SCHEDULED_JOB_SUBSCRIPTION,
+            entity_id=str(subscription_id),
+            action=AuditAction.UPDATE,
+            changes={"after": {"pause_code": code.value}},
+        )
+        return True
+
     async def delete_subscription(self, db: AsyncSession, actor: User, subscription_id: int) -> None:
         """Soft-delete one subscription (unsubscribe). The definition is untouched."""
         await self._subs.delete(db=db, actor=actor, entity_id=subscription_id)
@@ -1501,26 +1530,27 @@ class ScheduledJobRepository(AuditedRepository):
                     next_run_at          = COALESCE(:next_run_at, s.next_run_at),
                     retry_at             = COALESCE(CAST(:retry_at AS timestamptz), s.retry_at),
                     enabled              = CASE
-                        WHEN :next_run_at IS NULL AND NOT :leave_schedule                   THEN FALSE
-                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures      THEN FALSE
+                        WHEN :retires                                                                   THEN FALSE
+                        WHEN :failed AND s.enabled AND (s.consecutive_failures + 1) >= d.max_failures   THEN FALSE
                         ELSE s.enabled
                     END,
                     -- The same three cases as ``enabled`` (every expression here reads the
                     -- row as it was): an auto-pause records its own code, a given code is
                     -- recorded only where this write leaves the row switched off, and
-                    -- anything else keeps what the row had.
+                    -- anything else keeps what the row had. Only a row that was on can
+                    -- auto-pause: one already off (a client's report held it while the run
+                    -- was in flight) keeps the stop it has, and the release that stop
+                    -- promises.
                     pause_code           = CASE
-                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures THEN 'auto_paused'
-                        WHEN CAST(:pause_code AS text) IS NOT NULL
-                             AND ((:next_run_at IS NULL AND NOT :leave_schedule) OR NOT s.enabled)
+                        WHEN :failed AND s.enabled AND (s.consecutive_failures + 1) >= d.max_failures THEN 'auto_paused'
+                        WHEN CAST(:pause_code AS text) IS NOT NULL AND (:retires OR NOT s.enabled)
                             THEN CAST(:pause_code AS text)
                         ELSE s.pause_code
                     END,
                     pause_detail         = CASE
-                        WHEN :failed AND (s.consecutive_failures + 1) >= d.max_failures
+                        WHEN :failed AND s.enabled AND (s.consecutive_failures + 1) >= d.max_failures
                             THEN jsonb_build_object('max_failures', d.max_failures)
-                        WHEN CAST(:pause_code AS text) IS NOT NULL
-                             AND ((:next_run_at IS NULL AND NOT :leave_schedule) OR NOT s.enabled)
+                        WHEN CAST(:pause_code AS text) IS NOT NULL AND (:retires OR NOT s.enabled)
                             THEN CAST(:pause_detail AS jsonb)
                         ELSE s.pause_detail
                     END,
@@ -1536,7 +1566,8 @@ class ScheduledJobRepository(AuditedRepository):
                 "success": success,
                 "last_run_at": now,
                 "next_run_at": next_run_at,
-                "leave_schedule": leave_schedule,
+                # This write retires the subscription: its schedule has no next occurrence.
+                "retires": next_run_at is None and not leave_schedule,
                 "retry_at": retry_at,
                 "pause_code": pause_code.value if pause_code else None,
                 "pause_detail": json.dumps(pause_detail) if pause_detail is not None else None,
@@ -1561,17 +1592,24 @@ class ScheduledJobRepository(AuditedRepository):
         subscription_id: int,
         code: PauseCode,
         detail: dict[str, Any] | None = None,
-    ) -> None:
+        only_if_enabled: bool = False,
+    ) -> bool:
         """A system stop of one subscription (no actor): destroy-after-trigger, an
         agent the subscriber can no longer reach. Writes the code, as every deliberate stop
         must, so the retry branch of the claim leaves it alone, and the *detail* that goes
-        with it."""
-        await db.execute(
-            text("""
+        with it.
+
+        *only_if_enabled* leaves a subscription that is already off as it is, code and
+        all: for a stop that arrives from outside the run (a client's delivery report),
+        which must neither overwrite the stop already in place nor tell the subscriber
+        about it a second time. Returns whether this write switched it off."""
+        result = await db.execute(
+            text(f"""
                 UPDATE scheduled_job_subscriptions
                 SET enabled = FALSE, pause_code = :code, pause_detail = CAST(:detail AS jsonb),
                     retry_at = NULL, updated_at = :now
-                WHERE id = :id
+                WHERE id = :id {"AND enabled" if only_if_enabled else ""}
+                RETURNING id
             """),
             {
                 "id": subscription_id,
@@ -1580,6 +1618,21 @@ class ScheduledJobRepository(AuditedRepository):
                 "now": datetime.now(timezone.utc),
             },
         )
+        return result.first() is not None
+
+    async def subscription_enabled(self, db: AsyncSession, subscription_id: int) -> bool:
+        """Whether the subscription is on, locking the row for the rest of the transaction.
+
+        Read by ``_finalize`` before it writes the run's outcome, so "this run stopped the
+        job" is judged against the row as the run found it: a client's delivery report can
+        switch it off while the run is still in flight, and the claim's snapshot would
+        still say it is on. The lock makes such a report wait for the outcome instead of
+        interleaving with it."""
+        result = await db.execute(
+            text("SELECT enabled FROM scheduled_job_subscriptions WHERE id = :id FOR UPDATE"),
+            {"id": subscription_id},
+        )
+        return bool(result.scalar())
 
     async def create_run(
         self,
@@ -1592,12 +1645,16 @@ class ScheduledJobRepository(AuditedRepository):
         *trigger* is recorded on the row because the healer, which may run in a
         process that never saw this dispatch, decides from it what the run's
         interruption is worth. ``last_seen_at`` starts at insert time so a run is
-        never stale before its first heartbeat.
+        never stale before its first heartbeat. The subscription's channel is copied onto
+        the run: a delivery report about this run is judged against the channel it was
+        sent to, not one the subscription was moved to while it was in flight.
         """
         result = await db.execute(
             text("""
-                INSERT INTO scheduled_job_runs (subscription_id, started_at, status, last_seen_at, trigger)
-                VALUES (:subscription_id, NOW(), 'running', NOW(), :trigger)
+                INSERT INTO scheduled_job_runs
+                    (subscription_id, started_at, status, last_seen_at, trigger, delivery_channel_id)
+                SELECT :subscription_id, NOW(), 'running', NOW(), :trigger, s.delivery_channel_id
+                FROM scheduled_job_subscriptions s WHERE s.id = :subscription_id
                 RETURNING id
             """),
             {"subscription_id": subscription_id, "trigger": trigger.value},
@@ -1891,20 +1948,27 @@ class ScheduledJobRepository(AuditedRepository):
         )
 
     async def run_delivery_target(self, db: AsyncSession, run_id: int) -> dict[str, Any] | None:
-        """The subscription a run belongs to and the channel it notifies NOW, or None.
+        """The channel a run notified and the subscription it belongs to, or None.
 
-        Keys: ``subscription_id``, ``user_id``, ``enabled``, ``channel_id``, ``client_id``,
-        ``installation_id``, ``channel_name``, ``job_name``. A subscription with no channel
-        has none of the channel keys set.
+        Keys: ``subscription_id``, ``user_id``, ``live`` (neither the subscription nor its
+        definition deleted), ``current_channel_id`` (where the subscription notifies now),
+        ``job_name``, and of the run's own channel ``channel_id``, ``client_id``,
+        ``installation_id``, ``channel_name`` and the subscriber's ``reachability`` there.
+        A run recorded before runs carried their channel (migration 112) is taken to have
+        notified the subscription's current one. A run with no channel has none of the
+        channel keys set.
         """
         result = await db.execute(
-            text("""
-                SELECT r.subscription_id, s.user_id, s.enabled, d.name AS job_name,
-                       c.id AS channel_id, c.client_id, c.installation_id, c.name AS channel_name
+            text(f"""
+                SELECT r.subscription_id, s.user_id, d.name AS job_name,
+                       (s.deleted_at IS NULL AND d.deleted_at IS NULL) AS live,
+                       s.delivery_channel_id AS current_channel_id,
+                       c.id AS channel_id, c.client_id, c.installation_id, c.name AS channel_name,
+                       {reachability_sql("s.user_id", "c.client_id", "c.workspace_id")} AS reachability
                 FROM scheduled_job_runs r
-                JOIN scheduled_job_subscriptions s ON s.id = r.subscription_id AND s.deleted_at IS NULL
-                JOIN scheduled_job_definitions d ON d.id = s.definition_id AND d.deleted_at IS NULL
-                LEFT JOIN delivery_channels c ON c.id = s.delivery_channel_id
+                JOIN scheduled_job_subscriptions s ON s.id = r.subscription_id
+                JOIN scheduled_job_definitions d ON d.id = s.definition_id
+                LEFT JOIN delivery_channels c ON c.id = COALESCE(r.delivery_channel_id, s.delivery_channel_id)
                 WHERE r.id = :run_id
             """),
             {"run_id": run_id},

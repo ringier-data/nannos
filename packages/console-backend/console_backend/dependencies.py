@@ -191,6 +191,23 @@ def is_own_client_credentials(claims: dict, client_id: str | None) -> bool:
     return username == f"{_SERVICE_ACCOUNT_USERNAME_PREFIX}{client_id}".lower()
 
 
+def own_client_credentials_client(claims: dict) -> str | None:
+    """The client of *claims* when they are its own client-credentials token (see
+    ``is_own_client_credentials``) addressed to this backend, else None.
+
+    The audience matters because such a token is also what the client sends to other
+    services (the orchestrator), and a token minted for one of them must not act here.
+    The gate for every client-to-backend call with a write effect: the token broker and
+    the delivery reports."""
+    client_id = claims.get("azp") or claims.get("client_id")
+    audiences = claims.get("aud") or []
+    if isinstance(audiences, str):
+        audiences = [audiences]
+    if not is_own_client_credentials(claims, client_id) or config.oidc.client_id not in audiences:
+        return None
+    return client_id
+
+
 async def get_token_claims_from_request(request: Request) -> dict | None:
     """The validated claims of the request's Bearer JWT, or None.
 

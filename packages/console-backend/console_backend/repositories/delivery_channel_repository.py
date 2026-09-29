@@ -253,10 +253,14 @@ class DeliveryChannelRepository(AuditedRepository):
             return None
 
         fields: dict = {"updated_at": datetime.now(timezone.utc)}
-        for attr in ("name", "description", "webhook_url", "secret", "workspace_id", "message_formatting"):
+        for attr in ("name", "description", "webhook_url", "secret", "message_formatting"):
             val = getattr(data, attr)
             if val is not None:
                 fields[attr] = val
+        # The one field an explicit null writes: a client clears it for an installation
+        # that no longer runs, which then reaches nobody through a sign-in there.
+        if "workspace_id" in data.model_fields_set:
+            fields["workspace_id"] = data.workspace_id
 
         if len(fields) > 1:  # more than just updated_at
             await self.update(db=db, actor=actor, entity_id=channel_id, fields=fields)
@@ -343,8 +347,9 @@ class DeliveryChannelRepository(AuditedRepository):
             description=data.description,
             webhook_url=data.webhook_url,
             secret=data.secret,
-            workspace_id=data.workspace_id,
             message_formatting=data.message_formatting,
+            # Passed only when sent: an explicit null clears it, an omitted one keeps it.
+            **({"workspace_id": data.workspace_id} if "workspace_id" in data.model_fields_set else {}),
         )
         updated = await self.update_channel(db=db, actor=actor, channel_id=existing.id, data=update)
         if updated is None:

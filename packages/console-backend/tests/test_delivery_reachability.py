@@ -230,21 +230,21 @@ class TestWhatTheUserStartsIsRefused:
         assert updated.delivery_reachability == "unreachable"
 
     @pytest.mark.asyncio
-    async def test_subscribe_and_copy_refuse_an_owners_channel_the_caller_cannot_receive_on(self, world):
-        svc, db, u = world["service"], world["db"], world["users"]
+    async def test_subscribe_and_copy_hold_an_owners_channel_the_caller_cannot_receive_on(self, world):
+        """They take the owner's channel, which the caller may never be able to sign in
+        from (another team): held, not refused, so they still have a way in."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
         job = await _shared_on(world, "A1")
 
-        with pytest.raises(DeliveryUnreachableError):
-            await svc.subscribe(db, job.definition_id, u["writer"])
-        with pytest.raises(DeliveryUnreachableError):
-            await svc.copy_definition(db, job.definition_id, u["writer"])
-        assert await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id) is None
-        assert await _count(db, "scheduled_job_definitions") == 1
+        mine = await svc.subscribe(db, job.definition_id, u["writer"])
+        assert (mine.enabled, mine.pause_code, mine.delivery_channel_id) == (False, PauseCode.UNREACHABLE, ch["A1"])
+        copy = await svc.copy_definition(db, job.definition_id, u["writer"])
+        assert (copy.enabled, copy.pause_code) == (False, PauseCode.UNREACHABLE)
 
         # The member's old sign-in is unknown: they subscribe on the owner's channel as before.
-        mine = await svc.subscribe(db, job.definition_id, u["member"])
-        assert mine.delivery_channel_id == world["channels"]["A1"]
-        assert mine.delivery_reachability == "unknown"
+        members = await svc.subscribe(db, job.definition_id, u["member"])
+        assert (members.enabled, members.delivery_channel_id) == (True, ch["A1"])
+        assert members.delivery_reachability == "unknown"
 
     @pytest.mark.asyncio
     async def test_switching_on_a_job_whose_channel_cannot_reach_is_refused(self, world):
@@ -503,3 +503,194 @@ class TestAStopIsACodeAndItsSentenceIsRendered:
 
         await svc.repo.clear_trigger_override(db, u["writer"], writers.id, elapsed)
         assert (await svc.repo.get_job(db, writers.id)).pause_code == PauseCode.ELAPSED_ON_INHERIT
+
+
+async def _paused_notices(db, user_id: str) -> int:
+    return (
+        await db.execute(
+            text("SELECT count(*) FROM user_notifications WHERE user_id = :u AND type = :t"),
+            {"u": user_id, "t": NotificationType.SCHEDULED_JOB_PAUSED.value},
+        )
+    ).scalar_one()
+
+
+class TestMovingAHeldJobReleasesIt:
+    """The hold's notice says "or change its delivery"; no sign-in releases a job moved to
+    a channel the subscriber is already bound on."""
+
+    @pytest.mark.asyncio
+    async def test_a_move_to_a_channel_that_reaches_them_switches_it_on(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await _shared_on(world, "A1")
+        await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
+        writers = await svc.repo.get_subscription_for(db, job.definition_id, u["writer"].id)
+        assert writers.pause_code == PauseCode.UNREACHABLE
+
+        # As "Save, keep paused" and the MCP tool send it: no ``enabled``.
+        moved = await svc.update_job(db, writers.id, ScheduledJobUpdate(), u["writer"], delivery_channel_id=ch["B1"])
+
+        assert (moved.enabled, moved.pause_code, moved.delivery_channel_id) == (True, None, ch["B1"])
+
+    @pytest.mark.asyncio
+    async def test_a_move_where_nannos_cannot_tell_switches_it_on_too(self, world):
+        """``unknown`` is never refused; if nothing arrives there, the client's report holds it."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await _shared_on(world, "A1")
+        writers = await svc.subscribe(db, job.definition_id, u["writer"])
+
+        moved = await svc.update_job(db, writers.id, ScheduledJobUpdate(), u["writer"], delivery_channel_id=ch["P1"])
+
+        assert (moved.enabled, moved.pause_code) == (True, None)
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_enabled_decides_for_itself(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await _shared_on(world, "A1")
+        writers = await svc.subscribe(db, job.definition_id, u["writer"])
+
+        moved = await svc.update_job(
+            db, writers.id, ScheduledJobUpdate(enabled=False), u["writer"], delivery_channel_id=ch["B1"]
+        )
+
+        assert (moved.enabled, moved.pause_code) == (False, PauseCode.DISABLED_BY_USER)
+
+    @pytest.mark.asyncio
+    async def test_any_other_stop_is_not_lifted_by_a_move(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["B1"]), u["writer"])
+        await svc.pause_job(db, job.id, u["writer"])
+
+        moved = await svc.update_job(db, job.id, ScheduledJobUpdate(), u["writer"], delivery_channel_id=ch["P1"])
+
+        assert (moved.enabled, moved.pause_code) == (False, PauseCode.MANUALLY_PAUSED)
+
+
+class TestARowThatComesBackIsJudgedOnItsOwnChannel:
+    @pytest.mark.asyncio
+    async def test_a_revived_row_on_a_channel_that_reaches_them_is_not_held(self, world):
+        """Revoked on leave, restored on rejoin: it kept the member's own channel (B1, which
+        reaches them), so the owner's (A1, which does not) says nothing about it."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await _shared_on(world, "A1")
+        writers = await svc.subscribe(db, job.definition_id, u["writer"])
+        writers = await svc.update_job(db, writers.id, ScheduledJobUpdate(), u["writer"], delivery_channel_id=ch["B1"])
+        assert writers.enabled is True
+        await db.execute(
+            text("UPDATE scheduled_job_subscriptions SET enabled = FALSE, pause_code = 'access_revoked' WHERE id = :id"),
+            {"id": writers.id},
+        )
+        await db.commit()
+
+        await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
+
+        back = await svc.repo.get_job(db, writers.id)
+        assert (back.enabled, back.pause_code, back.delivery_channel_id) == (True, None, ch["B1"])
+
+    @pytest.mark.asyncio
+    async def test_a_revived_row_on_a_channel_that_cannot_reach_them_is_held_for_it(self, world):
+        """The reverse: the owner's channel reaches them, the row's own does not."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        await _bind(db, u["owner"].id, SLACK, "T2")
+        job = await _shared_on(world, "B1")  # the owner's channel is in T2, where the writer is bound
+        writers = await svc.subscribe(db, job.definition_id, u["writer"])
+        await db.execute(
+            text("""
+                UPDATE scheduled_job_subscriptions
+                SET enabled = FALSE, pause_code = 'access_revoked', delivery_channel_id = :a1 WHERE id = :id
+            """),
+            {"id": writers.id, "a1": ch["A1"]},
+        )
+        await db.commit()
+
+        await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
+
+        back = await svc.repo.get_job(db, writers.id)
+        assert (back.enabled, back.pause_code) == (False, PauseCode.UNREACHABLE)
+        note = (
+            await db.execute(
+                text("SELECT message FROM user_notifications WHERE user_id = :u AND type = :t"),
+                {"u": u["writer"].id, "t": NotificationType.JOB_SUBSCRIPTION_ACTIVATED.value},
+            )
+        ).scalar_one()
+        assert "('Slack Nannos (T1)')" in note, "the notice names the row's channel"
+
+
+class TestAReportIsJudgedAgainstTheChannelTheRunUsed:
+    @pytest.mark.asyncio
+    async def test_a_report_for_a_run_sent_before_a_move_is_heard_but_holds_nothing(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
+        run_id = await svc.repo.create_run(db, job.id)
+        await db.commit()
+        # Moved while the run is in flight, to a channel of another client.
+        await svc.update_job(db, job.id, ScheduledJobUpdate(), u["owner"], delivery_channel_id=ch["P1"])
+
+        report = UndeliveredReport(run_id=run_id, installation_id="A1", reason="no_recipient")
+        assert await svc.report_undelivered(db, SLACK, report) is True
+
+        run = await svc.repo.get_run(db, job.id, run_id)
+        assert (run.delivered, run.delivery_failure) == (False, "no_recipient"), "not recorded as delivered"
+        still = await svc.get_job(db, job.id, u["owner"].id)
+        assert (still.enabled, still.delivery_channel_id) == (True, ch["P1"]), "its new channel is not held"
+        assert await _paused_notices(db, u["owner"].id) == 0
+
+
+class TestAReportAndTheRunsOutcomeStopTheJobOnce:
+    @pytest.mark.asyncio
+    async def test_a_report_on_a_job_already_off_keeps_its_stop_and_says_nothing(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
+        run_id = await svc.repo.create_run(db, job.id)
+        await svc.pause_job(db, job.id, u["owner"])
+
+        report = UndeliveredReport(run_id=run_id, installation_id="A1", reason="no_recipient")
+        assert await svc.report_undelivered(db, SLACK, report) is True
+
+        assert (await svc.repo.get_job(db, job.id)).pause_code == PauseCode.MANUALLY_PAUSED
+        assert await _paused_notices(db, u["owner"].id) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_fails_past_the_limit_on_a_held_job_keeps_the_hold(self, world):
+        """The report landed first; the failed run that follows must not turn the hold
+        into an auto-pause, which no sign-in releases."""
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"], max_failures=1), u["owner"])
+        run_id = await svc.repo.create_run(db, job.id)
+        await db.commit()
+        report = UndeliveredReport(run_id=run_id, installation_id="A1", reason="no_recipient")
+        assert await svc.report_undelivered(db, SLACK, report) is True
+
+        enabled, reason = await svc.repo.complete_job(db, job.id, JobRunStatus.FAILED, next_run_at=None, leave_schedule=True)
+        await db.commit()
+
+        assert (enabled, reason) == (False, render_pause(PauseCode.UNREACHABLE))
+        assert await svc.release_reachability_holds(db, u["owner"], SLACK, "T1") == 1
+
+
+class TestTheCountIsOfJobsThatWouldRunAndDoNotArrive:
+    @pytest.mark.asyncio
+    async def test_a_job_off_for_another_reason_is_not_counted(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
+        paused = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
+        await svc.pause_job(db, paused.id, u["owner"])
+        # A1 moves to a workspace the owner never signed in to: both now read unreachable.
+        await db.execute(text("UPDATE delivery_channels SET workspace_id = 'T3' WHERE id = :id"), {"id": ch["A1"]})
+
+        count = (
+            await db.execute(
+                text(f"SELECT {unreachable_subscriptions_sql('u.id')} FROM users u WHERE u.id = :id"),
+                {"id": u["owner"].id},
+            )
+        ).scalar_one()
+        assert count == 1, "the one that runs and reaches nobody, not the one they paused"
+
+
+class TestARehold:
+    @pytest.mark.asyncio
+    async def test_a_rehold_never_overwrites_a_row_switched_on_meanwhile(self, world):
+        svc, db, u, ch = world["service"], world["db"], world["users"], world["channels"]
+        job = await svc.create_job(db, _watch_create(delivery_channel_id=ch["A1"]), u["owner"])
+
+        assert await svc.repo.recode_stop(db, u["owner"], job.id, PauseCode.UNREACHABLE) is False
+        assert (await svc.repo.get_job(db, job.id)).enabled is True

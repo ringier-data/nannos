@@ -29,9 +29,11 @@ interface DeliveryChannelCreateBody {
   installation_id: string;
   /**
    * The Slack team the app is installed in: the workspace a brokered sign-in is bound to.
-   * A sign-in in that team reaches this channel (ADR-0011 amendment 2).
+   * A sign-in in that team reaches this channel (ADR-0011 amendment 2). Null for an app
+   * that was deactivated: it serves nobody, so a sign-in in its team must not read as
+   * reaching it.
    */
-  workspace_id: string;
+  workspace_id: string | null;
   /**
    * How this channel renders delivered text. The scheduler sends it to the run that
    * writes a notification, so scheduled messages arrive formatted for this client
@@ -85,11 +87,29 @@ export async function registerInstallations(deps: InstallationRegistrarDeps): Pr
       logger.error(error, `Failed to register delivery channel for appId=${bot.appId}: ${error}`);
     }
   }
+
+  // A deactivated app keeps its channel, and with it the team it was registered in, so a
+  // sign-in in that team would still read as reaching it while its webhook refuses every
+  // push. Clear the team. Only for an app that was registered (it has a secret): a channel
+  // is never created for one that never ran.
+  for (const bot of installations.filter((b) => !b.isActive)) {
+    try {
+      if ((await deps.installationSecretService.get(bot.appId)) === null) continue;
+      await registerOne(deps, {
+        installationId: bot.appId,
+        workspaceId: null,
+        name: `Slack ${bot.botName} (${bot.teamId})`,
+        description: `Slack workspace ${bot.teamId} via ${bot.botName} (${bot.slashCommand}), deactivated`,
+      });
+    } catch (error) {
+      logger.error(error, `Failed to clear the workspace of deactivated appId=${bot.appId}: ${error}`);
+    }
+  }
 }
 
 export async function registerOne(
   deps: InstallationRegistrarDeps,
-  opts: { installationId: string; workspaceId: string; name: string; description?: string }
+  opts: { installationId: string; workspaceId: string | null; name: string; description?: string }
 ): Promise<void> {
   const { config, oidcClient, installationSecretService } = deps;
   if (!config.consoleBackend) return;
