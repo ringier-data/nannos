@@ -316,11 +316,13 @@ async def test_group_members_report_onboarding(pg_session, people, group_service
 
 
 @pytest.mark.asyncio
-async def test_group_detail_members_report_onboarding(pg_session, people, group_service):
+async def test_group_detail_carries_no_onboarding(pg_session, people, group_service):
+    """Nothing renders it there (the group page's badges come from the member listing), and
+    it would be derived for every member on every read."""
     group = await group_service.get_group_with_members(pg_session, GROUP_ID)
 
-    assert group is not None
-    assert {m.user_id: m.onboarding for m in group.members} == expected_in_group(people)
+    assert group is not None and group.members
+    assert all(m.onboarding is None for m in group.members)
 
 
 @pytest.mark.asyncio
@@ -499,7 +501,7 @@ async def test_service_account_has_no_onboarding(pg_session, people, group_servi
     assert {u.id: u.onboarding for u in users}["svc-user"] is None
     assert detail is not None and detail.onboarding is None
     assert {m.user_id: m.onboarding for m in members}["svc-user"] is None
-    assert group is not None and {m.user_id: m.onboarding for m in group.members}["svc-user"] is None
+    assert group is not None and "svc-user" in {m.user_id for m in group.members}
     assert "svc-user" not in {u.id for u in attention}
 
 

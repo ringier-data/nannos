@@ -53,8 +53,8 @@ _MEMBER_IDENTITY = "u.id as user_id, u.email, u.first_name, u.last_name, ugm.gro
 
 #: What a member listing that shows onboarding selects: the identity, plus the onboarding
 #: scoped to the group. A member list shows what this group enabled, never the member's jobs
-#: from elsewhere (a group manager reads it). Only the listings a group manager or an
-#: administrator reaches select it; the group lists (`_with_members`) do not.
+#: from elsewhere (a group manager reads it). Only the member listings a group manager or an
+#: administrator reaches select it; the group lists and group detail do not.
 _MEMBER_COLUMNS = f"{_MEMBER_IDENTITY}, {onboarding_column_sql('u.id', 'ugm.user_group_id')} AS onboarding"
 
 
@@ -210,9 +210,10 @@ class UserGroupService:
         if group is None:
             return None
 
-        # Get member count and member info
+        # Get member count and member info. No onboarding: nothing renders it here (the
+        # group page's badges come from `list_members`), and non-managers read this too.
         members_query = text(f"""
-            SELECT {_MEMBER_COLUMNS}
+            SELECT {_MEMBER_IDENTITY}
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             WHERE ugm.user_group_id = :group_id
