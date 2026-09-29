@@ -1,4 +1,6 @@
 import { describe, test, expect, jest, beforeEach } from '@jest/globals';
+import type { WebClient } from '@slack/web-api';
+import { recoverOrphanedTasks } from '../../src/utils/taskRecovery.js';
 
 /**
  * The recovery loop is the safety net for a turn whose stream dropped. It used
@@ -13,17 +15,13 @@ import { describe, test, expect, jest, beforeEach } from '@jest/globals';
 
 const postMessageMock = jest.fn(async () => ({ ok: true, ts: '999.000' }) as any);
 
-jest.unstable_mockModule('@slack/web-api', () => ({
-  WebClient: class {
-    chat = {
-      postMessage: postMessageMock,
-      update: jest.fn(async () => ({ ok: true }) as any),
-      delete: jest.fn(async () => ({ ok: true }) as any),
-    };
+const slackClient = {
+  chat: {
+    postMessage: postMessageMock,
+    update: jest.fn(async () => ({ ok: true }) as any),
+    delete: jest.fn(async () => ({ ok: true }) as any),
   },
-}));
-
-const { recoverOrphanedTasks } = await import('../../src/utils/taskRecovery.js');
+} as unknown as WebClient;
 
 const THIRTY_ONE_MIN = 31 * 60 * 1000;
 
@@ -68,7 +66,8 @@ function harness(task: any, record: any, lastProcessedTs?: string) {
         get: jest.fn(async () => (lastProcessedTs ? { contextKey: 'k', contextId: 'ctx-1', lastProcessedTs } : null)),
       } as any,
       'xoxb-fallback',
-      0
+      0,
+      () => slackClient
     );
   return { store, run };
 }
