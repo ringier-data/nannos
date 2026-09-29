@@ -290,8 +290,10 @@ export function SkillRegistryPage() {
   const isImported = detail?.source_type && detail.source_type !== 'nannos';
 
   const invalidateSearch = () => {
+    // Don't clear accumulatedSkills: a refetch that returns the same results keeps the
+    // same data reference (structural sharing), so the data effect would not run again
+    // and the list would stay empty. The effect replaces the list when page 0 arrives.
     setSearchOffset(0);
-    setAccumulatedSkills([]);
     queryClient.invalidateQueries({
       queryKey: searchSkillsApiV1SkillsRegistrySearchGetQueryKey({
         query: { q: searchQuery || '*', source: 'registry', limit: PAGE_SIZE, offset: 0 } as any,
