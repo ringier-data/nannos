@@ -166,6 +166,11 @@ async def people(pg_session):
     await subscribe("stuck-user", "Unshared", enabled=False, code=PauseCode.ACCESS_REVOKED.value)
     # Stops the user chose are not onboarding matters.
     await subscribe("stuck-user", "Paused by them", enabled=False, code=PauseCode.MANUALLY_PAUSED.value)
+    # A suspended definition runs for nobody, so its hold is not an onboarding matter.
+    await subscribe("stuck-user", "Suspended", enabled=False, code=PauseCode.UNREACHABLE.value, channel=channels["B1"])
+    await db.execute(
+        text("UPDATE scheduled_job_definitions SET suspended_at = NOW() WHERE id = :d"), {"d": jobs["Suspended"]}
+    )
     # ready-user's only job is on a channel Nannos can't judge: info, never a severity.
     await subscribe("ready-user", "Chat update", channel=channels["P1"])
     await db.commit()

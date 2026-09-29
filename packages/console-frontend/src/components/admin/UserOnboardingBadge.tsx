@@ -6,6 +6,12 @@ import { issueHint, issueLabel, severityClassName } from './onboarding';
 interface UserOnboardingBadgeProps {
   /** Null for a service account, which never signs in interactively. */
   onboarding: UserOnboarding | null;
+  /**
+   * Also badge a user whose only issues are ones Nannos can't judge. Off by default so a
+   * healthy list stays quiet; on while the list is filtered by an issue, so a row that
+   * matched says why.
+   */
+  showInfo?: boolean;
 }
 
 /**
@@ -17,8 +23,8 @@ interface UserOnboardingBadgeProps {
  * What the issues cover is the listing's scope: every job on the Users page, only the
  * group's default jobs on a group's member list.
  */
-export function UserOnboardingBadge({ onboarding }: UserOnboardingBadgeProps) {
-  if (!onboarding?.severity) {
+export function UserOnboardingBadge({ onboarding, showInfo = false }: UserOnboardingBadgeProps) {
+  if (!onboarding || (!onboarding.severity && !showInfo)) {
     return null;
   }
   const [worst, ...rest] = onboarding.issues;

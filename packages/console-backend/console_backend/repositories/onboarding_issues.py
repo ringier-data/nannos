@@ -24,15 +24,15 @@ A subscription contributes to at most one issue, the first that applies:
 3. switched on over a channel `reachability_sql` calls ``unreachable`` or ``unknown``.
 
 Anything else that is off (paused by the user, auto-paused, a one-shot that ran) would not
-run anyway, and is not an onboarding matter.
+run anyway, and is not an onboarding matter; nor is any job whose definition is suspended
+(it runs for nobody until a writer resumes it).
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.scheduled_job import PauseCode
 from ..models.user import (
     SCIM_PLACEHOLDER_SUB_PREFIX,
     SEVERITY_RANK,
@@ -41,31 +41,58 @@ from ..models.user import (
     OnboardingSummary,
     OnboardingSummaryEntry,
 )
-from ..services.scheduler_token_service import offline_token_state_sql
 from .delivery_reachability_repository import reachability_sql
 
+if TYPE_CHECKING:
+    from ..models.scheduled_job import PauseCode
 
-def _values(*items: PauseCode | OnboardingIssueKind) -> str:
+
+def _values(*items: "PauseCode | OnboardingIssueKind") -> str:
     return ", ".join(f"'{item.value}'" for item in items)
 
 
-_SIGN_IN_HOLDS = _values(
-    PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED, PauseCode.NO_OFFLINE_TOKEN
-)
-_JOB_HOLDS = _values(
-    PauseCode.UNREACHABLE,
-    PauseCode.UNDELIVERED,
-    PauseCode.AGENT_INACCESSIBLE,
-    PauseCode.ACCESS_REVOKED,
-)
+def _offline_token_state_sql(user_id: str) -> str:
+    """The state of *user_id*'s (a SQL expression) vaulted token: 'live' (what
+    `SchedulerTokenService.has_consent` counts), 'expired' (marked by `mark_expired`), or
+    NULL when none was ever stored."""
+    return (
+        "(SELECT CASE WHEN uot.expired_at IS NULL THEN 'live' ELSE 'expired' END"
+        f" FROM user_offline_tokens uot WHERE uot.user_id = {user_id})"
+    )
+
+
 _DELIVERY_KINDS = _values(
     OnboardingIssueKind.UNREACHABLE,
     OnboardingIssueKind.UNDELIVERED,
     OnboardingIssueKind.UNKNOWN_REACHABILITY,
 )
-# The job-hold codes above double as their issue kinds; pin that so a rename can't split them.
-assert {PauseCode.UNREACHABLE.value, PauseCode.UNDELIVERED.value, PauseCode.AGENT_INACCESSIBLE.value,
-        PauseCode.ACCESS_REVOKED.value} <= {k.value for k in OnboardingIssueKind}  # fmt: skip
+
+
+def _holds() -> tuple[str, str]:
+    """The pause codes that are sign-in holds, and those that are job holds. Imported at
+    call time: `models.scheduled_job` loads the services package, which imports this
+    module, so a module-level import breaks whenever this module is imported first."""
+    from ..models.scheduled_job import PauseCode
+
+    job_holds = (
+        PauseCode.UNREACHABLE,
+        PauseCode.UNDELIVERED,
+        PauseCode.AGENT_INACCESSIBLE,
+        PauseCode.ACCESS_REVOKED,
+    )
+    # A job hold's code doubles as its issue kind; a rename must not split them.
+    assert {code.value for code in job_holds} <= {
+        kind.value for kind in OnboardingIssueKind
+    }
+    return (
+        _values(
+            PauseCode.AWAITING_SIGN_IN,
+            PauseCode.SIGN_IN_EXPIRED,
+            PauseCode.NO_OFFLINE_TOKEN,
+        ),
+        _values(*job_holds),
+    )
+
 
 _JOBS = "jsonb_agg(jsonb_build_object('id', s.job_id, 'name', s.job_name) ORDER BY s.job_name, s.job_id)"
 
@@ -76,6 +103,7 @@ def onboarding_issues_sql(user_id: str, group_id: str | None = None) -> str:
     only the subscriptions that group activated count.
 
     Its aliases all start with ``o`` so *user_id* can name an outer ``u``."""
+    sign_in_holds, job_holds = _holds()
     in_scope = (
         ""
         if group_id is None
@@ -83,15 +111,15 @@ def onboarding_issues_sql(user_id: str, group_id: str | None = None) -> str:
     )
     return f"""
         WITH who AS (
-            SELECT ow.id, ow.sub, {offline_token_state_sql("ow.id")} AS token
+            SELECT ow.id, ow.sub, {_offline_token_state_sql("ow.id")} AS token
             FROM users ow
             WHERE ow.id = {user_id} AND NOT ow.is_service_account
         ), subs AS (
             SELECT od.id AS job_id, od.name AS job_name, od.sub_agent_id,
                    oc.client_id, oc.workspace_id, oc.name AS channel_name,
                    CASE
-                       WHEN os.pause_code IN ({_SIGN_IN_HOLDS}) THEN 'sign_in'
-                       WHEN os.pause_code IN ({_JOB_HOLDS}) THEN os.pause_code
+                       WHEN os.pause_code IN ({sign_in_holds}) THEN 'sign_in'
+                       WHEN os.pause_code IN ({job_holds}) THEN os.pause_code
                        WHEN NOT os.enabled THEN NULL
                        WHEN who.token IS DISTINCT FROM 'live' THEN 'sign_in'
                        WHEN oc.id IS NULL THEN NULL
@@ -103,6 +131,7 @@ def onboarding_issues_sql(user_id: str, group_id: str | None = None) -> str:
             FROM who
             JOIN scheduled_job_subscriptions os ON os.user_id = who.id AND os.deleted_at IS NULL {in_scope}
             JOIN scheduled_job_definitions od ON od.id = os.definition_id AND od.deleted_at IS NULL
+                 AND od.suspended_at IS NULL
             LEFT JOIN delivery_channels oc ON oc.id = os.delivery_channel_id
         )
         SELECT CASE
@@ -186,7 +215,9 @@ def onboarding_conditions(
     params: dict[str, Any] = {}
     if severity:
         conditions.append("ob.severity_rank = ANY(:severity_ranks)")
-        params["severity_ranks"] = sorted({SEVERITY_RANK[s] for s in severity if s in SEVERITY_RANK})
+        params["severity_ranks"] = sorted(
+            {SEVERITY_RANK[s] for s in severity if s in SEVERITY_RANK}
+        )
     matches = []
     if issue:
         matches.append("oe->>'kind' = ANY(:issue_kinds)")
@@ -195,12 +226,18 @@ def onboarding_conditions(
         matches.append("oe->>'client_id' = :client_id")
         params["client_id"] = client_id
     if matches:
-        conditions.append(f"EXISTS (SELECT 1 FROM jsonb_array_elements(ob.issues) oe WHERE {' AND '.join(matches)})")
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM jsonb_array_elements(ob.issues) oe WHERE {' AND '.join(matches)})"
+        )
     return conditions, params
 
 
 async def summarize_onboarding(
-    db: AsyncSession, where_clause: str, params: dict[str, Any], joins: str = "", group_id: str | None = None
+    db: AsyncSession,
+    where_clause: str,
+    params: dict[str, Any],
+    joins: str = "",
+    group_id: str | None = None,
 ) -> OnboardingSummary:
     """How many of the users ``users u {joins} {where_clause}`` keeps have each severity,
     and each issue (per client for delivery issues). *group_id* scopes the onboarding like

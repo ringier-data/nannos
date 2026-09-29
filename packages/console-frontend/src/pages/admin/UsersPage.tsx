@@ -191,12 +191,12 @@ export function UsersPage() {
           <h1 className="text-2xl font-bold tracking-tight">Users</h1>
           <p className="text-muted-foreground">Manage user accounts and permissions</p>
         </div>
-        {attentionCount > 0 && onboardingFilter.attention !== 'attention' && (
+        {attentionCount > 0 && (onboardingFilter.attention !== 'attention' || onboardingFilter.issue !== 'all') && (
           <Button
             variant="outline"
             size="sm"
             onClick={() => {
-              setOnboardingFilter({ ...onboardingFilter, attention: 'attention' });
+              setOnboardingFilter({ attention: 'attention', issue: 'all' });
               setPage(1);
             }}
           >
@@ -310,7 +310,7 @@ export function UsersPage() {
                   <TableCell>
                     <div className="flex flex-wrap items-center gap-1">
                       <UserStatusBadge status={user.status ?? 'active'} />
-                      <UserOnboardingBadge onboarding={user.onboarding} />
+                      <UserOnboardingBadge onboarding={user.onboarding} showInfo={onboardingFilter.issue !== 'all'} />
                     </div>
                   </TableCell>
                   <TableCell>

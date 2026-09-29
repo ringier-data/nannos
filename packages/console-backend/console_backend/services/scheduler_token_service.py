@@ -27,16 +27,6 @@ logger = logging.getLogger(__name__)
 _KMS_KEY_ID = os.environ.get("KMS_VAULT_KEY_ID", "alias/dev-nannos-sensitive-data-kms-key")
 _TOKEN_ENDPOINT_SUFFIX = "/protocol/openid-connect/token"
 
-def offline_token_state_sql(user_id: str) -> str:
-    """The state of *user_id*'s (a SQL expression) vaulted token as a SQL expression, for
-    queries that list people and report it in the same round trip: 'live' (what
-    `has_consent` counts), 'expired' (marked by `mark_expired`), or NULL when none was
-    ever stored."""
-    return (
-        "(SELECT CASE WHEN uot.expired_at IS NULL THEN 'live' ELSE 'expired' END"
-        f" FROM user_offline_tokens uot WHERE uot.user_id = {user_id})"
-    )
-
 
 def _get_kms_client():  # type: ignore[no-untyped-def]
     """Return an aiobotocore KMS client (lazy import to avoid heavy startup cost)."""

@@ -1070,7 +1070,7 @@ export function GroupDetailPage() {
                           <span className="font-medium">
                             {member.first_name} {member.last_name}
                           </span>
-                          <UserOnboardingBadge onboarding={member.onboarding} />
+                          <UserOnboardingBadge onboarding={member.onboarding} showInfo={memberOnboardingFilter.issue !== 'all'} />
                         </div>
                       </TableCell>
                       <TableCell>{member.email}</TableCell>
