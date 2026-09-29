@@ -749,7 +749,7 @@ export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-nannos-local}"
 export GATEWAY_INGEST_TOKEN="${GATEWAY_INGEST_TOKEN:-sk-nannos-local-ingest}"
 # Pinned to match the prod base image (packages/litellm-proxy/Dockerfile) so local
 # reproduces prod's Vertex region-resolution behavior. Override with LITELLM_IMAGE.
-_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.90.7@sha256:917d480b7e4a7e61822e54f70be5c7cf753fb0b7328cbf6467612652ca748075}"
+_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.103.0@sha256:bd089afdcd35b894b14a93f9743cdc8b591f82da1a38dd43a010a7b0c9de5fd7}"
 _GW_CONTAINER="nannos-litellm-proxy-local"
 
 log "Starting local Model Gateway (LiteLLM proxy) on :${LLM_GATEWAY_PORT}..."
