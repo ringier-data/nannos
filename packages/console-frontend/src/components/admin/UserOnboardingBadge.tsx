@@ -1,65 +1,54 @@
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { UserOnboarding } from '@/api/generated';
+import { issueHint, issueLabel, severityClassName } from './onboarding';
 
 interface UserOnboardingBadgeProps {
   /** Null for a service account, which never signs in interactively. */
   onboarding: UserOnboarding | null;
+  /**
+   * Also badge a user whose only issues are ones Nannos can't judge. Off by default so a
+   * healthy list stays quiet; on while the list is filtered by an issue, so a row that
+   * matched says why.
+   */
+  showInfo?: boolean;
 }
 
 /**
- * What still stands between a user and running scheduled jobs that reach them. Renders
- * nothing once they can run them and every job reaches them, so a healthy list stays
- * quiet. Not-yet-signed-in is the normal state right after SCIM provisioning, so it reads
- * as pending, never as an error.
+ * The worst thing standing between a user and scheduled jobs that run and reach them,
+ * plus how many more there are (#311). Renders nothing when nothing needs attention, so
+ * a healthy list stays quiet: an issue Nannos can't judge (`info`) never raises a badge
+ * on its own, but is listed in the tooltip behind one that does.
  *
- * Delivery is the third signal (#192): subscriptions on a chat channel the user never
- * signed in from. A channel Nannos can't judge (an older sign-in) isn't counted, so no
- * badge still doesn't prove every notification lands.
+ * What the issues cover is the listing's scope: every job on the Users page, only the
+ * group's default jobs on a group's member list.
  */
-export function UserOnboardingBadge({ onboarding }: UserOnboardingBadgeProps) {
-  if (!onboarding) {
+export function UserOnboardingBadge({ onboarding, showInfo = false }: UserOnboardingBadgeProps) {
+  if (!onboarding || (!onboarding.severity && !showInfo)) {
     return null;
   }
-  const unreachable = onboarding.unreachable_subscriptions ?? 0;
-  const unreachableHint =
-    unreachable > 0
-      ? `${unreachable === 1 ? 'One of their scheduled jobs delivers' : `${unreachable} of their scheduled jobs deliver`} to a chat channel Nannos can't reach them on, so its results don't arrive. Messaging Nannos there once, or moving the job to another channel, fixes it.`
-      : null;
-  if (onboarding.scheduler_ready && !unreachableHint) {
+  const [worst, ...rest] = onboarding.issues;
+  if (!worst) {
     return null;
   }
-  const { label, hint } = !onboarding.signed_in
-    ? {
-        label: 'Not signed in yet',
-        hint: "Provisioned, but hasn't signed in to Nannos yet. Scheduled jobs they're subscribed to wait switched off until their first sign-in.",
-      }
-    : onboarding.sign_in_expired
-      ? {
-          label: 'Sign-in expired',
-          hint: 'Their sign-in to Nannos expired (unused for 30 days, or revoked), so their scheduled jobs wait switched off until they sign in again.',
-        }
-      : !onboarding.scheduler_ready
-        ? {
-            label: 'Scheduled jobs not ready',
-            hint: "Has used Nannos, but hasn't signed in through the console or a client using the sign-in broker, so no scheduled job can run under their account yet.",
-          }
-        : {
-            label: unreachable === 1 ? "Can't be reached on 1 job" : `Can't be reached on ${unreachable} jobs`,
-            hint: unreachableHint,
-          };
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Badge variant="outline" className="text-muted-foreground">
-          {label}
+        <Badge variant="outline" className={severityClassName(worst.severity)}>
+          {issueLabel(worst)}
+          {rest.length > 0 && <span className="ml-1 opacity-70">+{rest.length}</span>}
         </Badge>
       </TooltipTrigger>
-      <TooltipContent className="max-w-xs space-y-1">
-        <p>{hint}</p>
-        {/* Behind a sign-in problem, the delivery one is the next thing they'll hit. */}
-        {!onboarding.scheduler_ready && unreachableHint && <p className="opacity-80">{unreachableHint}</p>}
+      <TooltipContent className="max-w-sm space-y-1.5">
+        <p>{issueHint(worst)}</p>
+        {rest.map((issue, i) => (
+          <p key={i} className="opacity-80">
+            {issueLabel(issue)}
+            {issue.workspace_id ? ` · workspace ${issue.workspace_id}` : ''}
+            {issue.jobs.length > 0 ? ` · ${issue.jobs.length} job${issue.jobs.length === 1 ? '' : 's'}` : ''}
+          </p>
+        ))}
       </TooltipContent>
     </Tooltip>
   );

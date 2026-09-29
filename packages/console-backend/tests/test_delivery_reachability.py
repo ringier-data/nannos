@@ -10,7 +10,7 @@ tests pin:
   member signs in from there;
 - a client's report that it found no recipient marks the run undelivered and holds the
   subscription (#191);
-- the onboarding count of subscriptions that cannot reach a user.
+- the onboarding issues counting subscriptions that cannot reach a user.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -26,8 +26,8 @@ from console_backend.models.sub_agent import SubAgentType
 from console_backend.models.user import UserSettings
 from console_backend.repositories.delivery_reachability_repository import (
     DeliveryReachabilityRepository,
-    unreachable_subscriptions_sql,
 )
+from console_backend.repositories.onboarding_issues import onboarding_column_sql
 from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
 from console_backend.services.audit_service import AuditService
 from console_backend.services.notification_service import NotificationService
@@ -63,6 +63,14 @@ async def _bind(db, user_id: str, client_id: str, workspace_id: str) -> None:
         """),
         {"c": client_id, "k": f"{workspace_id}:{user_id}", "u": user_id, "w": workspace_id, "h": f"h-{user_id}-{workspace_id}"},
     )
+
+
+async def _undelivered_jobs(db, user_id: str) -> int:
+    """How many jobs the user's onboarding issues say don't reach them (#311)."""
+    onboarding = (
+        await db.execute(text(f"SELECT {onboarding_column_sql('u.id')} FROM users u WHERE u.id = :id"), {"id": user_id})
+    ).scalar_one()
+    return sum(len(i["jobs"]) for i in onboarding["issues"] if i["kind"] in ("unreachable", "undelivered"))
 
 
 @pytest_asyncio.fixture
@@ -381,13 +389,7 @@ class TestAClientReportsWhatReachedNobody:
 
         held = await svc.get_job(db, job.id, u["member"].id)
         assert (held.enabled, held.pause_code) == (False, PauseCode.UNDELIVERED)
-        count = (
-            await db.execute(
-                text(f"SELECT {unreachable_subscriptions_sql('u.id')} FROM users u WHERE u.id = :id"),
-                {"id": u["member"].id},
-            )
-        ).scalar_one()
-        assert count == 1, "the onboarding badge counts it"
+        assert await _undelivered_jobs(db, u["member"].id) == 1, "the onboarding badge counts it"
         assert await svc.resume_job(db, job.id, u["member"]) is True
 
     def test_an_overlong_detail_is_cut_not_refused(self):
@@ -419,12 +421,7 @@ class TestOnboardingCountsSubscriptionsThatCannotReach:
         await svc.add_group_default_job(db, world["group"], job.definition_id, u["owner"])
 
         async def count(user) -> int:
-            return (
-                await db.execute(
-                    text(f"SELECT {unreachable_subscriptions_sql('u.id')} FROM users u WHERE u.id = :id"),
-                    {"id": user.id},
-                )
-            ).scalar_one()
+            return await _undelivered_jobs(db, user.id)
 
         assert await count(u["writer"]) == 1
         assert await count(u["member"]) == 0
@@ -731,14 +728,14 @@ class TestTheCountIsOfJobsThatWouldRunAndDoNotArrive:
         await svc.pause_job(db, paused.id, u["owner"])
         # A1 moves to a workspace the owner never signed in to: both now read unreachable.
         await db.execute(text("UPDATE delivery_channels SET workspace_id = 'T3' WHERE id = :id"), {"id": ch["A1"]})
+        # The world mocks consent in Python; the onboarding reads the vault, and a switched-on
+        # job under no live token is a sign-in issue, not a delivery one.
+        await db.execute(
+            text("INSERT INTO user_offline_tokens (user_id, encrypted_token) VALUES (:u, '\\x00')"),
+            {"u": u["owner"].id},
+        )
 
-        count = (
-            await db.execute(
-                text(f"SELECT {unreachable_subscriptions_sql('u.id')} FROM users u WHERE u.id = :id"),
-                {"id": u["owner"].id},
-            )
-        ).scalar_one()
-        assert count == 1, "the one that runs and reaches nobody, not the one they paused"
+        assert await _undelivered_jobs(db, u["owner"].id) == 1, "the one that runs and reaches nobody, not the one they paused"
 
 
 class TestARehold:

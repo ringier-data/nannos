@@ -8,7 +8,7 @@ that workspace. Neither side is written by anyone but the client and the broker,
 answer is derived on every read and never stored.
 
 The three answers are defined once, in ``reachability_sql``, and every reader (the job
-view, the checks, the channel list, the onboarding count) goes through it.
+view, the checks, the channel list, the onboarding issues) goes through it.
 """
 
 from collections.abc import Sequence
@@ -18,7 +18,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.delivery_channel import DeliveryReachability
-from ..models.scheduled_job import PauseCode
 
 
 def reachability_sql(user_id: str, client_id: str, workspace_id: str) -> str:
@@ -44,24 +43,6 @@ def reachability_sql(user_id: str, client_id: str, workspace_id: str) -> str:
             WHERE rb.user_id = {user_id} AND rb.client_id = {client_id}
             HAVING count(*) > 0
         ), 'unknown') END"""
-
-
-def unreachable_subscriptions_sql(user_id: str) -> str:
-    """A SQL expression counting the live subscriptions of *user_id* (a SQL expression)
-    whose results don't reach them: held for their channel (``unreachable`` or
-    ``undelivered``), or switched on over a channel they are ``unreachable`` on. Held covers
-    a client's report on a channel the bindings still call reachable, or cannot judge. A
-    job that is off for any other reason (paused by them, finished) would not run anyway,
-    so is not counted."""
-    held = ", ".join(f"'{code.value}'" for code in (PauseCode.UNREACHABLE, PauseCode.UNDELIVERED))
-    return f"""(
-        SELECT COUNT(*) FROM scheduled_job_subscriptions us
-        JOIN scheduled_job_definitions ud ON ud.id = us.definition_id AND ud.deleted_at IS NULL
-        JOIN delivery_channels uc ON uc.id = us.delivery_channel_id
-        WHERE us.user_id = {user_id} AND us.deleted_at IS NULL
-          AND (us.pause_code IN ({held})
-               OR (us.enabled AND {reachability_sql(user_id, "uc.client_id", "uc.workspace_id")} = 'unreachable'))
-    )"""
 
 
 class DeliveryReachabilityRepository:

@@ -18,6 +18,7 @@ import {
   getGroupApiV1GroupsGroupIdGetOptions,
   updateGroupApiV1AdminGroupsGroupIdPutMutation,
   listMembersApiV1GroupsGroupIdMembersGetOptions,
+  getMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetOptions,
   addMembersApiV1GroupsGroupIdMembersPostMutation,
   removeMembersApiV1GroupsGroupIdMembersRemovePostMutation,
   updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation,
@@ -52,6 +53,13 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Pagination } from '@/components/admin/Pagination';
 import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
+import { OnboardingFilters } from '@/components/admin/OnboardingFilters';
+import {
+  NO_ONBOARDING_FILTER,
+  isOnboardingFiltered,
+  onboardingQuery,
+  type OnboardingFilterValue,
+} from '@/components/admin/onboarding';
 
 const USER_PAGE_SIZE = 20;
 const ACCESSIBLE_PAGE_SIZE = 20;
@@ -88,6 +96,13 @@ export function GroupDetailPage() {
   // rows it referred to are no longer on screen to be unticked.
   const handleMemberSearchChange = (value: string) => {
     setMemberSearch(value);
+    setMembersPage(1);
+    setSelectedMembersToRemove(new Set());
+  };
+
+  const [memberOnboardingFilter, setMemberOnboardingFilter] = useState<OnboardingFilterValue>(NO_ONBOARDING_FILTER);
+  const handleMemberOnboardingFilterChange = (value: OnboardingFilterValue) => {
+    setMemberOnboardingFilter(value);
     setMembersPage(1);
     setSelectedMembersToRemove(new Set());
   };
@@ -140,10 +155,25 @@ export function GroupDetailPage() {
   const { data: membersData, isLoading: membersLoading } = useQuery({
     ...listMembersApiV1GroupsGroupIdMembersGetOptions({
       path: { group_id: groupId },
-      query: { page: membersPage, limit: 20, search: debouncedMemberSearch || undefined },
+      query: {
+        page: membersPage,
+        limit: 20,
+        search: debouncedMemberSearch || undefined,
+        ...onboardingQuery(memberOnboardingFilter),
+      },
     }),
     enabled: !isNaN(groupId),
     placeholderData: keepPreviousData,
+  });
+
+  // Scoped to this group on the server: a member's onboarding here covers only the
+  // jobs this group enabled for them, plus their own sign-in.
+  const { data: membersOnboardingSummary } = useQuery({
+    ...getMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetOptions({
+      path: { group_id: groupId },
+      query: { search: debouncedMemberSearch || undefined },
+    }),
+    enabled: !isNaN(groupId),
   });
 
   // The candidate list is narrowed by the server: filtering a single page of
@@ -266,6 +296,20 @@ export function GroupDetailPage() {
     },
   });
 
+  // Every paged, searched and filtered variant of the member list and its onboarding
+  // summary: `{path}`-only keys match them all by prefix. The members' onboarding is
+  // scoped to the group's default jobs, so default-job changes invalidate it too.
+  const invalidateMembers = () => {
+    queryClient.invalidateQueries({
+      queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({ path: { group_id: groupId } }).queryKey,
+    });
+    queryClient.invalidateQueries({
+      queryKey: getMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetOptions({
+        path: { group_id: groupId },
+      }).queryKey,
+    });
+  };
+
   const addMembersMutation = useMutation({
     ...addMembersApiV1GroupsGroupIdMembersPostMutation(),
     onSuccess: () => {
@@ -274,12 +318,7 @@ export function GroupDetailPage() {
       setSelectedUsersToAdd(new Set());
       setUserSearch('');
       setUserPage(1);
-      queryClient.invalidateQueries({
-        queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({
-          path: { group_id: groupId },
-          query: { page: membersPage, limit: 20 },
-        }).queryKey,
-      });
+      invalidateMembers();
       queryClient.invalidateQueries({
         queryKey: getGroupApiV1AdminGroupsGroupIdGetOptions({
           path: { group_id: groupId },
@@ -297,12 +336,7 @@ export function GroupDetailPage() {
     onSuccess: () => {
       toast.success(`Removed ${selectedMembersToRemove.size} member(s)`);
       setSelectedMembersToRemove(new Set());
-      queryClient.invalidateQueries({
-        queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({
-          path: { group_id: groupId },
-          query: { page: membersPage, limit: 20 },
-        }).queryKey,
-      });
+      invalidateMembers();
       queryClient.invalidateQueries({
         queryKey: getGroupApiV1AdminGroupsGroupIdGetOptions({
           path: { group_id: groupId },
@@ -325,12 +359,7 @@ export function GroupDetailPage() {
     ...updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation(),
     onSuccess: () => {
       toast.success('Member role updated');
-      queryClient.invalidateQueries({
-        queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({
-          path: { group_id: groupId },
-          query: { page: membersPage, limit: 20 },
-        }).queryKey,
-      });
+      invalidateMembers();
     },
     onError: (error: any) => {
       const message = error?.detail || error?.response?.data?.detail || 'Failed to update role';
@@ -498,6 +527,7 @@ export function GroupDetailPage() {
     ...schedulerAddGroupDefaultJobMutation(),
     onSuccess: () => {
       invalidateAccessibleJobs();
+      invalidateMembers();
       toast.success('Default jobs updated');
     },
     onError: (err) => toast.error('Could not update default jobs', { description: String(err) }),
@@ -506,6 +536,7 @@ export function GroupDetailPage() {
     ...schedulerRemoveGroupDefaultJobMutation(),
     onSuccess: () => {
       invalidateAccessibleJobs();
+      invalidateMembers();
       toast.success('Default jobs updated');
     },
     onError: (err) => toast.error('Could not update default jobs', { description: String(err) }),
@@ -935,7 +966,10 @@ export function GroupDetailPage() {
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
             <CardTitle>Members</CardTitle>
-            <CardDescription>Manage group membership</CardDescription>
+            <CardDescription>
+              Manage group membership. Onboarding issues count only the scheduled jobs this group enables for its
+              members, plus each member's own sign-in.
+            </CardDescription>
           </div>
           <div className="flex gap-2">
             {selectedMembersToRemove.size > 0 && (
@@ -955,13 +989,20 @@ export function GroupDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="relative mb-4">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search members by name or email..."
-              value={memberSearch}
-              onChange={(e) => handleMemberSearchChange(e.target.value)}
-              className="pl-9"
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[220px] flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search members by name or email..."
+                value={memberSearch}
+                onChange={(e) => handleMemberSearchChange(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+            <OnboardingFilters
+              value={memberOnboardingFilter}
+              summary={membersOnboardingSummary?.data}
+              onChange={handleMemberOnboardingFilterChange}
             />
           </div>
           <div className="border rounded-lg">
@@ -995,7 +1036,11 @@ export function GroupDetailPage() {
                 ) : members.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
-                      {debouncedMemberSearch ? 'No members match your search' : 'No members'}
+                      {isOnboardingFiltered(memberOnboardingFilter)
+                        ? 'No members match these onboarding filters'
+                        : debouncedMemberSearch
+                          ? 'No members match your search'
+                          : 'No members'}
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -1020,7 +1065,7 @@ export function GroupDetailPage() {
                           <span className="font-medium">
                             {member.first_name} {member.last_name}
                           </span>
-                          <UserOnboardingBadge onboarding={member.onboarding} />
+                          <UserOnboardingBadge onboarding={member.onboarding} showInfo={memberOnboardingFilter.issue !== 'all'} />
                         </div>
                       </TableCell>
                       <TableCell>{member.email}</TableCell>

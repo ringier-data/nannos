@@ -11,7 +11,14 @@ from ..dependencies import (
     require_group_member_management_permission,
 )
 from ..models.scheduled_job import GroupDefaultJobsSet, JobDefinitionRefWithStatus
-from ..models.user import PaginationMeta, User
+from ..models.user import (
+    IssueSeverity,
+    OnboardingIssueKind,
+    OnboardingSummaryResponse,
+    PaginationMeta,
+    User,
+    UserSort,
+)
 from ..models.user_group import (
     GroupMemberAdd,
     GroupSummary,
@@ -152,8 +159,21 @@ async def list_members(
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
     search: str | None = Query(None, description="Search by name or email"),
+    severity: list[IssueSeverity] | None = Query(
+        None, description="Keep members whose worst onboarding issue in this group is one of these"
+    ),
+    issue: list[OnboardingIssueKind] | None = Query(
+        None, description="Keep members with an onboarding issue of one of these kinds in this group"
+    ),
+    client_id: str | None = Query(
+        None, description="Keep members with an onboarding issue on this chat client (the same issue as `issue`)"
+    ),
+    sort: UserSort = Query(UserSort.NAME, description="name, or severity (worst first)"),
 ) -> GroupMemberListResponse:
     """List members of a group.
+
+    Each member's onboarding covers only what this group enabled for them (its default
+    jobs) plus their own sign-in state, never their jobs from elsewhere.
 
     Requires group admin role or system admin.
     """
@@ -169,12 +189,43 @@ async def list_members(
             detail="Group not found",
         )
 
-    members, total = await user_group_service.list_members(db, group_id, page=page, limit=limit, search=search)
+    members, total = await user_group_service.list_members(
+        db,
+        group_id,
+        page=page,
+        limit=limit,
+        search=search,
+        severity=severity,
+        issue=issue,
+        client_id=client_id,
+        sort=sort,
+    )
 
     return GroupMemberListResponse(
         data=members,
         meta=PaginationMeta(page=page, limit=limit, total=total),
     )
+
+
+@router.get("/{group_id}/members/onboarding-summary", response_model=OnboardingSummaryResponse)
+async def get_members_onboarding_summary(
+    group_id: int,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+    search: str | None = Query(None, description="Search by name or email"),
+) -> OnboardingSummaryResponse:
+    """How many members need attention, by severity and by onboarding issue, scoped to
+    what this group enabled for them.
+
+    Requires group admin role or system admin.
+    """
+    user_group_service = get_user_group_service(request)
+    await require_group_admin_or_admin(request, group_id, db)
+    if await user_group_service.get_group(db, group_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+    summary = await user_group_service.members_onboarding_summary(db, group_id, search=search)
+    return OnboardingSummaryResponse(data=summary)
 
 
 @router.post("/{group_id}/members", response_model=GroupMemberListResponse)

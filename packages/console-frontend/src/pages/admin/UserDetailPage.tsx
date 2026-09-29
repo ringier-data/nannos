@@ -41,6 +41,7 @@ import {
 } from '@/components/ui/table';
 import { UserStatusBadge } from '@/components/admin/UserStatusBadge';
 import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
+import { OnboardingIssuesCard } from '@/components/admin/OnboardingIssuesCard';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -481,6 +482,8 @@ export function UserDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      {user.onboarding && <OnboardingIssuesCard onboarding={user.onboarding} />}
 
       <Card>
         <CardHeader>

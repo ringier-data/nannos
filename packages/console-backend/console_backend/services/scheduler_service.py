@@ -18,6 +18,7 @@ from console_backend.services.user_settings_service import UserSettingsService
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.scheduled_job import (
+    SIGN_IN_HOLD_CODES,
     JobType,
     PauseCode,
     ScheduledJob,
@@ -81,7 +82,7 @@ assert _DEFINITION_FIELDS | _TRIGGER_FIELDS | _SUBSCRIPTION_FIELDS | {"scope"} =
 #: to Nannos, because every run uses their vaulted offline token and only a sign-in stores
 #: one. A group default holds a member's new subscription with the first, and the engine
 #: holds a subscription whose run found no token, or a refused one.
-_SIGN_IN_HOLDS = (PauseCode.AWAITING_SIGN_IN, PauseCode.SIGN_IN_EXPIRED)
+_SIGN_IN_HOLDS = SIGN_IN_HOLD_CODES
 #: Holds that are about the delivery channel, so moving the job to another lifts them.
 _REACHABILITY_HOLDS = (PauseCode.UNREACHABLE, PauseCode.UNDELIVERED)
 #: Holds under which the subscriber cannot be sent the chat activation notice.

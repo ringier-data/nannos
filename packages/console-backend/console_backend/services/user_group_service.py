@@ -14,7 +14,16 @@ from ..authorization import (
 )
 from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import ActivationSource
-from ..models.user import User, UserOnboarding, UserStatus, has_idp_identity
+from ..models.user import (
+    IssueSeverity,
+    OnboardingIssueKind,
+    OnboardingSummary,
+    User,
+    UserOnboarding,
+    UserSort,
+    UserStatus,
+    has_idp_identity,
+)
 from ..models.user_group import (
     BulkDeleteResult,
     MemberInfo,
@@ -27,20 +36,26 @@ from ..repositories.sub_agent_repository import SubAgentRepository
 from ..repositories.user_group_repository import UserGroupRepository
 from ..services.keycloak_admin_service import KeycloakAdminService
 from ..services.notification_service import NotificationService
-from ..repositories.delivery_reachability_repository import unreachable_subscriptions_sql
-from ..services.scheduler_token_service import OFFLINE_TOKEN_STATE_SQL
+from ..repositories.onboarding_issues import (
+    ONBOARDING_SORT,
+    onboarding_column_sql,
+    onboarding_conditions,
+    onboarding_sql,
+    summarize_onboarding,
+)
 from ..services.sub_agent_service import SubAgentService
 from ..utils.sql_search import like_clause, like_contains
 
 logger = logging.getLogger(__name__)
 
-#: What every member listing selects, over `user_group_members ugm JOIN users u`. The last
-#: four columns feed `MemberInfo.onboarding`, so a page of members costs no extra query.
-_MEMBER_COLUMNS = (
-    "u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role, "
-    f"u.sub, u.is_service_account, {OFFLINE_TOKEN_STATE_SQL} AS offline_token, "
-    f"{unreachable_subscriptions_sql('u.id')} AS unreachable"
-)
+#: Who a member is, over `user_group_members ugm JOIN users u`.
+_MEMBER_IDENTITY = "u.id as user_id, u.email, u.first_name, u.last_name, ugm.group_role, u.is_service_account"
+
+#: What a member listing that shows onboarding selects: the identity, plus the onboarding
+#: scoped to the group. A member list shows what this group enabled, never the member's jobs
+#: from elsewhere (a group manager reads it). Only the member listings a group manager or an
+#: administrator reaches select it; the group lists and group detail do not.
+_MEMBER_COLUMNS = f"{_MEMBER_IDENTITY}, {onboarding_column_sql('u.id', 'ugm.user_group_id')} AS onboarding"
 
 
 def _member_info(row: Any) -> MemberInfo:
@@ -50,8 +65,8 @@ def _member_info(row: Any) -> MemberInfo:
         first_name=row["first_name"],
         last_name=row["last_name"],
         group_role=row["group_role"],
-        onboarding=UserOnboarding.of(
-            row["sub"], row["offline_token"], row["is_service_account"], row.get("unreachable") or 0
+        onboarding=(
+            UserOnboarding.of(row["is_service_account"], row["onboarding"]) if "onboarding" in row else None
         ),
     )
 
@@ -195,9 +210,10 @@ class UserGroupService:
         if group is None:
             return None
 
-        # Get member count and member info
+        # Get member count and member info. No onboarding: nothing renders it here (the
+        # group page's badges come from `list_members`), and non-managers read this too.
         members_query = text(f"""
-            SELECT {_MEMBER_COLUMNS}
+            SELECT {_MEMBER_IDENTITY}
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
             WHERE ugm.user_group_id = :group_id
@@ -366,13 +382,17 @@ class UserGroupService:
 
         Hydrating group by group cost two round trips per row, which a search box
         re-running the list on every keystroke turns into real latency.
+
+        Members carry no onboarding here: plain members reach this list (`GET /groups`),
+        and it would name co-members' jobs and channels to them. The member listings a
+        manager reads carry it.
         """
         if not groups:
             return []
 
         result = await db.execute(
             text(f"""
-                SELECT ugm.user_group_id, {_MEMBER_COLUMNS}
+                SELECT ugm.user_group_id, {_MEMBER_IDENTITY}
                 FROM user_group_members ugm
                 JOIN users u ON u.id = ugm.user_id
                 WHERE ugm.user_group_id = ANY(:group_ids)
@@ -921,6 +941,10 @@ class UserGroupService:
         page: int = 1,
         limit: int = 20,
         search: str | None = None,
+        severity: list[IssueSeverity] | None = None,
+        issue: list[OnboardingIssueKind] | None = None,
+        client_id: str | None = None,
+        sort: UserSort = UserSort.NAME,
     ) -> tuple[list[MemberInfo], int]:
         """List members of a group.
 
@@ -930,6 +954,9 @@ class UserGroupService:
             page: Page number
             limit: Items per page
             search: Search term matched against first name, last name and email
+            severity, issue, client_id: the onboarding filters of the admin user list
+                (`onboarding_conditions`), over the onboarding scoped to this group
+            sort: ``name`` (default) or ``severity`` (worst first)
 
         Returns:
             Tuple of (members, total count)
@@ -947,25 +974,44 @@ class UserGroupService:
             search_clause = "AND " + like_clause("u.first_name", "u.last_name", "u.email")
             params["search"] = like_contains(search)
 
+        onboarding_filters, onboarding_params = onboarding_conditions(severity, issue, client_id)
+        params |= onboarding_params
+        # Only a filter or the sort needs the derived onboarding as a row; the listing
+        # itself reads it as the member column.
+        onboarding_join = (
+            f"CROSS JOIN LATERAL ({onboarding_sql('u.id', 'ugm.user_group_id')}) ob"
+            if onboarding_filters or sort == UserSort.SEVERITY
+            else ""
+        )
+        onboarding_clause = "".join(f" AND {c}" for c in onboarding_filters)
+        order_by = "u.first_name, u.last_name, u.id"
+        if sort == UserSort.SEVERITY:
+            order_by = f"{ONBOARDING_SORT}, {order_by}"
+
         count_query = text(f"""
             SELECT COUNT(*) as total
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
+            {onboarding_join if onboarding_filters else ""}
             WHERE ugm.user_group_id = :group_id
             AND u.deleted_at IS NULL
             AND u.status = 'active'
-            {search_clause}
+            {search_clause}{onboarding_clause}
         """)
 
+        # With the lateral join in place the row already has its onboarding; selecting the
+        # member column as well would derive it a second time.
+        member_columns = f"{_MEMBER_IDENTITY}, to_jsonb(ob) AS onboarding" if onboarding_join else _MEMBER_COLUMNS
         data_query = text(f"""
-            SELECT {_MEMBER_COLUMNS}
+            SELECT {member_columns}
             FROM user_group_members ugm
             JOIN users u ON u.id = ugm.user_id
+            {onboarding_join}
             WHERE ugm.user_group_id = :group_id
             AND u.deleted_at IS NULL
             AND u.status = 'active'
-            {search_clause}
-            ORDER BY u.first_name, u.last_name, u.id
+            {search_clause}{onboarding_clause}
+            ORDER BY {order_by}
             LIMIT :limit OFFSET :offset
         """)
 
@@ -982,6 +1028,25 @@ class UserGroupService:
         except Exception as e:
             logger.error(f"Failed to list members: {e}")
             raise
+
+    async def members_onboarding_summary(
+        self, db: AsyncSession, group_id: int, search: str | None = None
+    ) -> OnboardingSummary:
+        """The onboarding summary of this group's active members, scoped to what the group
+        enabled, for the group page's filters."""
+        params: dict[str, Any] = {"group_id": group_id}
+        search_clause = ""
+        if search:
+            search_clause = "AND " + like_clause("u.first_name", "u.last_name", "u.email")
+            params["search"] = like_contains(search)
+        return await summarize_onboarding(
+            db,
+            f"""WHERE ugm.user_group_id = :group_id AND u.deleted_at IS NULL AND u.status = 'active'
+                {search_clause}""",
+            params,
+            joins="JOIN user_group_members ugm ON ugm.user_id = u.id",
+            group_id="ugm.user_group_id",
+        )
 
     async def add_members(
         self,

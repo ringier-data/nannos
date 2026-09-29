@@ -924,6 +924,25 @@ not add another deliverer beside it. Notices are owed, not sent, where the loss 
 detected; `_deliver_due_notices` claims them on a later tick, retries a failed delivery, and abandons
 one that is older than `NOTICE_GIVE_UP_AFTER_SECONDS` or superseded by a later completed run.
 
+### Onboarding Issues Are Derived, and Scoped to Their Reader (repositories/onboarding_issues.py)
+
+What a person is missing to have scheduled jobs that run and reach them (#311) is derived on
+every read from their sign-in state and their subscriptions' `pause_code`s, never stored:
+`onboarding_issues_sql` is the one definition, and the user list, its filters, sort and
+summary, the user detail and every group member listing read it through `onboarding_sql`.
+A filter the UI offers is a condition on that derivation (`onboarding_conditions`), never
+a second copy of the rules.
+
+**The group scope is a privacy boundary, not a view preference.** The member listings a
+group manager or an administrator reads (`UserGroupService._MEMBER_COLUMNS`, `list_members`,
+`members_onboarding_summary`) pass the group, which limits the job-based issues to the
+subscriptions that group activated (`activated_by_groups`). The group lists
+(`_with_members`, `GET /groups`) and group detail are read by plain members too, and
+render no badges, so they carry no onboarding. Unscoped, the member listings would name the
+member's jobs from other groups and private ones. The member's sign-in state is theirs and
+shows in both scopes, but in a group's scope it is only `blocking` when one of the group's
+own jobs waits on it. Only the admin-only `/admin/users` endpoints are unscoped.
+
 ## Important Notes
 
 - Never bypass the repository pattern for data mutations

@@ -1,5 +1,6 @@
 """User model."""
 
+import json
 import os
 from datetime import datetime, timezone
 from enum import Enum
@@ -108,59 +109,139 @@ class UserGroupMembership(BaseModel):
     group_role: Literal["read", "write", "manager"]
 
 
+class OnboardingIssueKind(str, Enum):
+    """What stands between a user and scheduled jobs that run and reach them (#311)."""
+
+    #: Provisioned over SCIM, never signed in.
+    NOT_SIGNED_IN = "not_signed_in"
+    #: Had a vaulted offline token that Keycloak has since refused.
+    SIGN_IN_EXPIRED = "sign_in_expired"
+    #: Signed in, but never through the console or a brokered client, so no token is vaulted.
+    SCHEDULER_NOT_READY = "scheduler_not_ready"
+    #: Jobs deliver to a channel whose workspace the user has no sign-in in (per client + workspace).
+    UNREACHABLE = "unreachable"
+    #: A client reported it found no recipient for the user (per client + workspace).
+    UNDELIVERED = "undelivered"
+    #: The user lost access to the sub-agent a job runs (per agent).
+    AGENT_INACCESSIBLE = "agent_inaccessible"
+    #: The grant behind a job the user subscribed to was withdrawn.
+    ACCESS_REVOKED = "access_revoked"
+    #: Switched off with nothing left to release it but the member: a sign-in hold that
+    #: outlived their sign-in (a failed token refresh, or a release that did not run), or a
+    #: delivery hold whose channel was deleted. Signing in again, switching it back on from
+    #: their Scheduler page, or moving it to another channel fixes it; an administrator cannot.
+    NEEDS_RESUME = "needs_resume"
+    #: Jobs deliver to a channel Nannos cannot judge: no brokered sign-in with that client
+    #: (an older local sign-in looks the same), or a channel with no known workspace.
+    UNKNOWN_REACHABILITY = "unknown_reachability"
+
+
+class IssueSeverity(str, Enum):
+    """How much an issue costs the user right now."""
+
+    #: A job that should run or deliver does not.
+    BLOCKING = "blocking"
+    #: Nothing is lost yet (no job waits on it), but the next job will.
+    PENDING = "pending"
+    #: Nannos cannot tell. Filterable, never counts towards a user's severity.
+    INFO = "info"
+
+
+class OnboardingIssueJob(BaseModel):
+    """A job an issue stops, by its definition."""
+
+    id: int
+    name: str
+
+
+class OnboardingIssue(BaseModel):
+    """One thing a user is missing. Delivery issues are per client and workspace, so an
+    administrator sees where the user has to sign in; an agent issue names the agent."""
+
+    kind: OnboardingIssueKind
+    severity: IssueSeverity
+    jobs: list[OnboardingIssueJob] = Field(description="The jobs this stops, by name.")
+    client_id: str | None = Field(default=None, description="The chat client, for delivery issues.")
+    client_name: str | None = Field(default=None, description="Its display name (the broker client's).")
+    workspace_id: str | None = Field(
+        default=None, description="The client's workspace (a Slack team, a Google Chat project), when known."
+    )
+    channel_names: list[str] = Field(default_factory=list, description="The delivery channels involved.")
+    agent_id: int | None = Field(default=None, description="The sub-agent, for agent_inaccessible.")
+    agent_name: str | None = None
+
+
 class UserOnboarding(BaseModel):
-    """How far a user is from being able to run scheduled jobs, for administrators.
-    Derived, never stored.
+    """What stands between a user and scheduled jobs that run and reach them, for
+    administrators. Derived on every read by `onboarding_sql`, never stored.
 
-    Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
-    not an error: both flags turn true with the user's first sign-in (ADR-0011).
-
-    ``unreachable_subscriptions`` is the delivery side (#192): how many of the user's
-    subscriptions notify a channel that cannot reach them.
+    Provisioned-but-never-signed-in is the normal state right after SCIM provisioning:
+    it is only ``blocking`` once a job waits on it (ADR-0011).
     """
 
-    signed_in: bool = Field(
+    severity: IssueSeverity | None = Field(
         description=(
-            "The user has a real identity-provider subject, which only a sign-in supplies. "
-            "False for a user provisioned over SCIM who has not signed in yet."
+            "The worst of the user's issues, ignoring info ones: blocking, pending, or null when "
+            "nothing needs attention."
         )
     )
-    scheduler_ready: bool = Field(
-        description=(
-            "A live offline token is vaulted, so scheduled jobs can run under the user's account. "
-            "Without one, their subscriptions wait switched off for their next sign-in."
-        )
-    )
-    sign_in_expired: bool = Field(
-        description=(
-            "The user had a vaulted offline token that Keycloak has since refused (unused for "
-            "30 days, revoked, or its session ended). Implies scheduler_ready is false."
-        )
-    )
-    unreachable_subscriptions: int = Field(
-        default=0,
-        description=(
-            "How many of the user's scheduled-job subscriptions deliver to a chat channel that "
-            "cannot reach them, because they have not signed in to Nannos from there. Those are "
-            "held until they do. Channels Nannos cannot judge (older sign-ins) are not counted."
-        ),
+    issues: list[OnboardingIssue] = Field(
+        description="Worst first, then by how many jobs each stops.",
     )
 
     @classmethod
-    def of(
-        cls, sub: str, offline_token: str | None, is_service_account: bool, unreachable_subscriptions: int = 0
-    ) -> "UserOnboarding | None":
-        """*offline_token* is the `OFFLINE_TOKEN_STATE_SQL` column, *unreachable_subscriptions*
-        the `unreachable_subscriptions_sql` one. None for a machine identity: it never signs
-        in interactively, so it has no onboarding."""
+    def of(cls, is_service_account: bool, onboarding: dict[str, Any] | str | None) -> "UserOnboarding | None":
+        """*onboarding* is the `onboarding_sql` row as JSON (the driver may hand it over as
+        a string). None for a machine identity: it never signs in interactively, so it has
+        no onboarding."""
         if is_service_account:
             return None
+        if isinstance(onboarding, str):
+            onboarding = json.loads(onboarding)
+        onboarding = onboarding or {}
+        rank = onboarding.get("severity_rank") or 0
         return cls(
-            signed_in=has_idp_identity(sub),
-            scheduler_ready=offline_token == "live",
-            sign_in_expired=offline_token == "expired",
-            unreachable_subscriptions=unreachable_subscriptions or 0,
+            severity=_SEVERITY_BY_RANK.get(rank),
+            issues=[OnboardingIssue.model_validate(i) for i in onboarding.get("issues") or []],
         )
+
+
+#: `onboarding_sql`'s ``severity_rank``: the worst non-info severity, 0 for none.
+SEVERITY_RANK = {IssueSeverity.BLOCKING: 2, IssueSeverity.PENDING: 1}
+_SEVERITY_BY_RANK = {rank: severity for severity, rank in SEVERITY_RANK.items()}
+
+
+class UserSort(str, Enum):
+    """Orders of the admin user list and the group member list."""
+
+    #: Newest first (the user list's default).
+    CREATED = "created"
+    #: By name (the member list's default).
+    NAME = "name"
+    #: Worst onboarding severity first, then the most jobs stopped, then newest.
+    SEVERITY = "severity"
+
+
+class OnboardingSummaryEntry(BaseModel):
+    """How many users have an issue of one kind (on one client, for delivery issues)."""
+
+    kind: OnboardingIssueKind
+    client_id: str | None = None
+    client_name: str | None = None
+    users: int
+
+
+class OnboardingSummary(BaseModel):
+    """Counts behind the Users page's onboarding filters, over the users the list's own
+    search, group and status filters keep."""
+
+    blocking: int = Field(description="Users whose worst issue is blocking.")
+    pending: int = Field(description="Users whose worst issue is pending.")
+    issues: list[OnboardingSummaryEntry] = Field(description="Most users first.")
+
+
+class OnboardingSummaryResponse(BaseModel):
+    data: OnboardingSummary
 
 
 class UserWithGroups(User):

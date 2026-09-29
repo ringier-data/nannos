@@ -2637,6 +2637,13 @@ export type ImpersonateStartRequest = {
 };
 
 /**
+ * IssueSeverity
+ *
+ * How much an issue costs the user right now.
+ */
+export type IssueSeverity = 'blocking' | 'pending' | 'info';
+
+/**
  * JobDefinitionRefWithStatus
  *
  * A definition a group can reach, with its group-default flag.
@@ -3706,6 +3713,135 @@ export type NotificationListResponse = {
  * Notification type enum matching database enum.
  */
 export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_permission_changed' | 'group_added' | 'group_removed' | 'role_updated' | 'approval_requested' | 'approval_completed' | 'approval_rejected' | 'agent_shared' | 'agent_access_revoked' | 'secret_shared' | 'secret_access_revoked' | 'secret_permission_changed' | 'system_announcement' | 'bug_report_filed' | 'scheduled_job_paused' | 'job_shared' | 'job_access_revoked' | 'job_permission_changed' | 'job_subscription_activated' | 'job_subscription_reset' | 'job_suspended' | 'job_resumed' | 'job_deleted';
+
+/**
+ * OnboardingIssue
+ *
+ * One thing a user is missing. Delivery issues are per client and workspace, so an
+ * administrator sees where the user has to sign in; an agent issue names the agent.
+ */
+export type OnboardingIssue = {
+    kind: OnboardingIssueKind;
+    severity: IssueSeverity;
+    /**
+     * Jobs
+     *
+     * The jobs this stops, by name.
+     */
+    jobs: Array<OnboardingIssueJob>;
+    /**
+     * Client Id
+     *
+     * The chat client, for delivery issues.
+     */
+    client_id?: string | null;
+    /**
+     * Client Name
+     *
+     * Its display name (the broker client's).
+     */
+    client_name?: string | null;
+    /**
+     * Workspace Id
+     *
+     * The client's workspace (a Slack team, a Google Chat project), when known.
+     */
+    workspace_id?: string | null;
+    /**
+     * Channel Names
+     *
+     * The delivery channels involved.
+     */
+    channel_names?: Array<string>;
+    /**
+     * Agent Id
+     *
+     * The sub-agent, for agent_inaccessible.
+     */
+    agent_id?: number | null;
+    /**
+     * Agent Name
+     */
+    agent_name?: string | null;
+};
+
+/**
+ * OnboardingIssueJob
+ *
+ * A job an issue stops, by its definition.
+ */
+export type OnboardingIssueJob = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+};
+
+/**
+ * OnboardingIssueKind
+ *
+ * What stands between a user and scheduled jobs that run and reach them (#311).
+ */
+export type OnboardingIssueKind = 'not_signed_in' | 'sign_in_expired' | 'scheduler_not_ready' | 'unreachable' | 'undelivered' | 'agent_inaccessible' | 'access_revoked' | 'needs_resume' | 'unknown_reachability';
+
+/**
+ * OnboardingSummary
+ *
+ * Counts behind the Users page's onboarding filters, over the users the list's own
+ * search, group and status filters keep.
+ */
+export type OnboardingSummary = {
+    /**
+     * Blocking
+     *
+     * Users whose worst issue is blocking.
+     */
+    blocking: number;
+    /**
+     * Pending
+     *
+     * Users whose worst issue is pending.
+     */
+    pending: number;
+    /**
+     * Issues
+     *
+     * Most users first.
+     */
+    issues: Array<OnboardingSummaryEntry>;
+};
+
+/**
+ * OnboardingSummaryEntry
+ *
+ * How many users have an issue of one kind (on one client, for delivery issues).
+ */
+export type OnboardingSummaryEntry = {
+    kind: OnboardingIssueKind;
+    /**
+     * Client Id
+     */
+    client_id?: string | null;
+    /**
+     * Client Name
+     */
+    client_name?: string | null;
+    /**
+     * Users
+     */
+    users: number;
+};
+
+/**
+ * OnboardingSummaryResponse
+ */
+export type OnboardingSummaryResponse = {
+    data: OnboardingSummary;
+};
 
 /**
  * OrchestratorThinkingLevel
@@ -8285,40 +8421,23 @@ export type UserNotification = {
 /**
  * UserOnboarding
  *
- * How far a user is from being able to run scheduled jobs, for administrators.
- * Derived, never stored.
+ * What stands between a user and scheduled jobs that run and reach them, for
+ * administrators. Derived on every read by `onboarding_sql`, never stored.
  *
- * Provisioned-but-never-signed-in is the normal state right after SCIM provisioning,
- * not an error: both flags turn true with the user's first sign-in (ADR-0011).
- *
- * ``unreachable_subscriptions`` is the delivery side (#192): how many of the user's
- * subscriptions notify a channel that cannot reach them.
+ * Provisioned-but-never-signed-in is the normal state right after SCIM provisioning:
+ * it is only ``blocking`` once a job waits on it (ADR-0011).
  */
 export type UserOnboarding = {
     /**
-     * Signed In
-     *
-     * The user has a real identity-provider subject, which only a sign-in supplies. False for a user provisioned over SCIM who has not signed in yet.
+     * The worst of the user's issues, ignoring info ones: blocking, pending, or null when nothing needs attention.
      */
-    signed_in: boolean;
+    severity: IssueSeverity | null;
     /**
-     * Scheduler Ready
+     * Issues
      *
-     * A live offline token is vaulted, so scheduled jobs can run under the user's account. Without one, their subscriptions wait switched off for their next sign-in.
+     * Worst first, then by how many jobs each stops.
      */
-    scheduler_ready: boolean;
-    /**
-     * Sign In Expired
-     *
-     * The user had a vaulted offline token that Keycloak has since refused (unused for 30 days, revoked, or its session ended). Implies scheduler_ready is false.
-     */
-    sign_in_expired: boolean;
-    /**
-     * Unreachable Subscriptions
-     *
-     * How many of the user's scheduled-job subscriptions deliver to a chat channel that cannot reach them, because they have not signed in to Nannos from there. Those are held until they do. Channels Nannos cannot judge (older sign-ins) are not counted.
-     */
-    unreachable_subscriptions?: number;
+    issues: Array<OnboardingIssue>;
 };
 
 /**
@@ -8459,6 +8578,13 @@ export type UserSettingsUpdate = {
         [key: string]: unknown;
     } | null;
 };
+
+/**
+ * UserSort
+ *
+ * Orders of the admin user list and the group member list.
+ */
+export type UserSort = 'created' | 'name' | 'severity';
 
 /**
  * UserStatus
@@ -11362,6 +11488,28 @@ export type ListUsersApiV1AdminUsersGetData = {
          * Filter by user status
          */
         status?: UserStatus | null;
+        /**
+         * Severity
+         *
+         * Keep users whose worst onboarding issue is one of these (info never is)
+         */
+        severity?: Array<IssueSeverity> | null;
+        /**
+         * Issue
+         *
+         * Keep users with an onboarding issue of one of these kinds
+         */
+        issue?: Array<OnboardingIssueKind> | null;
+        /**
+         * Client Id
+         *
+         * Keep users with an onboarding issue on this chat client (the same issue as `issue`)
+         */
+        client_id?: string | null;
+        /**
+         * created (newest first) or severity (worst first)
+         */
+        sort?: UserSort;
     };
     url: '/api/v1/admin/users';
 };
@@ -11383,6 +11531,50 @@ export type ListUsersApiV1AdminUsersGetResponses = {
 };
 
 export type ListUsersApiV1AdminUsersGetResponse = ListUsersApiV1AdminUsersGetResponses[keyof ListUsersApiV1AdminUsersGetResponses];
+
+export type GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Search
+         *
+         * Search by name or email
+         */
+        search?: string | null;
+        /**
+         * Group Id
+         *
+         * Filter by group membership
+         */
+        group_id?: number | null;
+        /**
+         * Status
+         *
+         * Filter by user status
+         */
+        status?: UserStatus | null;
+    };
+    url: '/api/v1/admin/users/onboarding-summary';
+};
+
+export type GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetError = GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetErrors[keyof GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetErrors];
+
+export type GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: OnboardingSummaryResponse;
+};
+
+export type GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetResponse = GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetResponses[keyof GetOnboardingSummaryApiV1AdminUsersOnboardingSummaryGetResponses];
 
 export type GetUserApiV1AdminUsersUserIdGetData = {
     body?: never;
@@ -12184,6 +12376,28 @@ export type ListMembersApiV1GroupsGroupIdMembersGetData = {
          * Search by name or email
          */
         search?: string | null;
+        /**
+         * Severity
+         *
+         * Keep members whose worst onboarding issue in this group is one of these
+         */
+        severity?: Array<IssueSeverity> | null;
+        /**
+         * Issue
+         *
+         * Keep members with an onboarding issue of one of these kinds in this group
+         */
+        issue?: Array<OnboardingIssueKind> | null;
+        /**
+         * Client Id
+         *
+         * Keep members with an onboarding issue on this chat client (the same issue as `issue`)
+         */
+        client_id?: string | null;
+        /**
+         * name, or severity (worst first)
+         */
+        sort?: UserSort;
     };
     url: '/api/v1/groups/{group_id}/members';
 };
@@ -12235,6 +12449,43 @@ export type AddMembersApiV1GroupsGroupIdMembersPostResponses = {
 };
 
 export type AddMembersApiV1GroupsGroupIdMembersPostResponse = AddMembersApiV1GroupsGroupIdMembersPostResponses[keyof AddMembersApiV1GroupsGroupIdMembersPostResponses];
+
+export type GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: {
+        /**
+         * Search
+         *
+         * Search by name or email
+         */
+        search?: string | null;
+    };
+    url: '/api/v1/groups/{group_id}/members/onboarding-summary';
+};
+
+export type GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetError = GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetErrors[keyof GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetErrors];
+
+export type GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: OnboardingSummaryResponse;
+};
+
+export type GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetResponse = GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetResponses[keyof GetMembersOnboardingSummaryApiV1GroupsGroupIdMembersOnboardingSummaryGetResponses];
 
 export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData = {
     body: GroupMemberUpdate;
