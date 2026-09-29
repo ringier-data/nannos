@@ -937,7 +937,7 @@ class TestDiscoverMcpTools:
 
         assert exchanges == ["gatana"], "one exchange, via the provider"
         assert listing_connection["headers"] == {"Authorization": f"Bearer {minted['gatana']}"}, "listing used the bearer"
-        assert not (tool._connection.get("headers") or {}), "the tool's connection carries no credential"
+        assert "headers" not in tool._connection, "no credential, and no headers=None for the adapter to unpack"
         assert tool._interceptors and len(tool._interceptors) == 1
         seen = {}
 

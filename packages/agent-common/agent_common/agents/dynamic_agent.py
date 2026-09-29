@@ -1058,7 +1058,10 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             if interceptors is None or not isinstance(connection, dict) or not connection.get("headers"):
                 return connection
             headers = {k: v for k, v in connection["headers"].items() if k.lower() != "authorization"}
-            return {**connection, "headers": headers or None}
+            if headers:
+                return {**connection, "headers": headers}
+            # Drop the key: the adapter merges call headers via {**connection.get("headers", {})}, so None raises.
+            return {k: v for k, v in connection.items() if k != "headers"}
 
         # Console-backend names (console_*/scheduler_*) come from the ``console`` connection,
         # everything else from the gateway connection(s); a connection that can serve none of
