@@ -64,8 +64,9 @@ change goes through.
    previous content until it is approved. The MCP tools say so in their reply,
    and the registry `PUT` and the single-file write and delete return
    `owner_version {sub_agent_id, version, approved}`.
-5. **A revert writes the agent's own skill rows back** to the content the target
-   version pins (`_restore_own_skill_rows`), the way a config save writes them.
+5. **A revert, and setting a default version, write the agent's own skill rows
+   back** to the content that version pins (`_restore_own_skill_rows`), the way a
+   config save writes them.
    Without it the row keeps the newer content, and the next edit outside a config
    save (MCP file tools, registry UI) builds on it and brings the reverted content
    back with no warning. A revert is therefore an edit of the skill: following
