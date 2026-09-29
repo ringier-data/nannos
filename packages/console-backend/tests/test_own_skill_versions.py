@@ -173,6 +173,32 @@ async def test_a_file_edit_after_a_revert_builds_on_the_reverted_content(wired, 
 
 
 @pytest.mark.asyncio
+async def test_setting_an_older_default_restores_the_row_so_a_file_edit_keeps_its_content(
+    wired, pg_session, test_user_db
+):
+    """Found in QA: the default switched back to v2, then a file write built on the row's v1 and dropped v2."""
+    svc, registry, _ = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-owner")
+    registry_id, v1_hash = await _own_skill(svc, pg_session, test_user_db, agent_id, "v1")
+    v2 = await _registry_edit(registry, pg_session, test_user_db, registry_id, "v2")
+    await pg_session.commit()
+    assert v2.owner_version is not None
+    v1_files = [f for f in (await registry.get_version(pg_session, registry_id, v1_hash)).files]
+    await registry.update_skill(pg_session, test_user_db, registry_id, files=v1_files)  # back to v1: v3
+    await pg_session.commit()
+
+    await svc.set_default_version(pg_session, agent_id, v2.owner_version.version, actor=test_user_db)
+    assert await _row_hash(pg_session, registry_id) == v2.entry.content_hash
+
+    result = await registry.update_skill(
+        pg_session, test_user_db, registry_id, edit_files=_with_file("notes.md", "n")
+    )
+    await pg_session.commit()
+    assert result.owner_version is not None
+    assert (await _resolved_at(svc, pg_session, agent_id, result.owner_version.version)).body == "v2"
+
+
+@pytest.mark.asyncio
 async def test_a_config_save_of_an_own_skill_writes_exactly_one_version(wired, pg_session, test_user_db):
     """The owner-edit hook must not fire from the config-save path, which writes its own version."""
     svc, _, _ = wired

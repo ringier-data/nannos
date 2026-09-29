@@ -2234,7 +2234,14 @@ class SubAgentService:
         actor: User,
         is_admin: bool = False,
     ) -> SubAgent | None:
-        """Set an approved version as the default version."""
+        """Set an approved version as the default version.
+
+        The agent's own skill rows are written back to the content the new default pins
+        (ADR-0013 decision 5), as on a revert: otherwise the next edit outside a config
+        save builds on the row and drops what the agent now runs.
+        """
+        # Agent before its skill rows, the order every version writer keeps.
+        await self.repo.lock_for_update(db, sub_agent_id)
         existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
         if not existing:
             return None
@@ -2259,6 +2266,7 @@ class SubAgentService:
             sub_agent_id=sub_agent_id,
             version=version,
         )
+        await self._restore_own_skill_rows(db, actor, sub_agent_id, existing.config_version.skills or [])
 
         await db.commit()
         return await self.get_sub_agent_by_id(db, sub_agent_id)
@@ -2575,7 +2583,7 @@ class SubAgentService:
     async def _restore_own_skill_rows(
         self, db: AsyncSession, actor: User, sub_agent_id: int, skills: list[SkillDefinition]
     ) -> None:
-        """A revert restores the agent's OWN skill rows to the content the target version pins (ADR-0013).
+        """A revert or a new default restores the agent's OWN skill rows to the content the version pins (ADR-0013).
 
         Otherwise the row keeps the newer content, and the next edit outside a config
         save (MCP file tools, registry UI) builds on it and silently brings the
@@ -2585,7 +2593,8 @@ class SubAgentService:
         already and are not touched.
         """
         pins = {s.registry_id: s.content_hash for s in skills if s.registry_id and s.content_hash}
-        if not pins:
+        if not pins or await self.is_embed_bound(db, sub_agent_id):
+            # An embed-bound agent's rows belong to its host (ADR-0006).
             return
         assert self._skill_registry_service is not None
         registry = self._skill_registry_service
