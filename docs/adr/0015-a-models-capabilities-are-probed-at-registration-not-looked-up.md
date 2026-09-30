@@ -56,8 +56,19 @@ around failing is **recorded, not refused**; the record is what lets the harness
 - Registering a chat model costs about ten small inference calls instead of one, within a wall-clock
   budget. They go through the gateway under the console's management key, carry no Cost Attribution
   and are therefore not costed against a Rate Card — like the ping before them, only more of them.
-- Only a definite provider rejection is a verdict. A rate limit, a timeout, a 5xx or a cooled-down
-  deployment is *inconclusive*: the shape is reported as unmeasured, its earlier flag (if any)
+- A 200 is not a verdict either: a routable shape is graded on whether the reply shows it was
+  honoured. The gateway can rewrite a shape it knows the model refuses and answer the rewritten
+  request — LiteLLM's `drop_params` downgrades a forced `tool_choice` to `auto` and drops
+  `thinking: disabled` for models its map flags, both with a 200 — and in the first live QA of this
+  decision that recorded Sonnet 5.5 as accepting both. So the forced shapes ask for *no* tool call
+  and fail when none comes back; `response_format` fails when the reply is not the schema; a
+  thinking-off switch fails when the reply still shows reasoning, and one that shows none is checked
+  against a thinking-on control turn on the same question (the question must be hard enough that an
+  adaptive-thinking model reasons about it at all; without that evidence the switch is recorded as
+  unverified). The map is never consulted: it is what makes the rewrite happen, and it changes
+  under the proxy whenever the proxy restarts.
+- Otherwise only a definite provider rejection is a verdict. A rate limit, a timeout, a 5xx, a reply
+  cut off at `max_tokens` before it could be judged, or a cooled-down deployment is *inconclusive*: the shape is reported as unmeasured, its earlier flag (if any)
   stays in the record, and an unmeasured unavoidable shape fails the test as "re-run" rather than
   refusing the model. A record is knowledge, and noise must neither become nor erase knowledge.
 - Probe traffic is marked (`metadata.nannos_probe`) and pinned to its alias (`disable_fallbacks`),

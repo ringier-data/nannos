@@ -29,13 +29,29 @@ def _stream_ok():
     )
 
 
-class _Gateway:
-    """A fake gateway that rejects the shapes its ``reject`` predicate names and records
-    every body it was sent."""
+_WEATHER_CALL = {"id": "call_x", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
 
-    def __init__(self, reject=None, thinking_blocks=False):
+
+def _reasoning(tokens):
+    return {**_ok_response(content="21"), "usage": {"completion_tokens_details": {"reasoning_tokens": tokens}}}
+
+
+class _Gateway:
+    """A fake gateway in front of a model that honours what it accepts: a forced tool_choice
+    yields a tool call, response_format yields the schema, thinking on yields reasoning and a
+    thinking-off switch yields none. It rejects the shapes its ``reject`` predicate names and
+    records every body it was sent.
+
+    ``rewrites`` plays LiteLLM's ``drop_params``: ``"forced"`` answers a forced tool_choice as
+    ``auto`` would (the prompt forbids the tool, so no call), ``"thinking_disabled"`` drops
+    ``thinking: disabled`` so the model reasons anyway — both with a 200. ``reasons=False`` is
+    a model that shows no reasoning even with thinking on."""
+
+    def __init__(self, reject=None, thinking_blocks=False, rewrites=(), reasons=True):
         self.reject = reject or (lambda body: None)
         self.thinking_blocks = thinking_blocks
+        self.rewrites = set(rewrites)
+        self.reasons = reasons
         self.bodies: list[dict] = []
 
     async def __call__(self, body):
@@ -45,16 +61,23 @@ class _Gateway:
             raise mc.ProbeCallError(reason, status=400)
         if body.get("stream"):
             return _stream_ok()
-        if body.get("reasoning_effort") == "low" and self.thinking_blocks:
+        effort = body.get("reasoning_effort")
+        if effort == "low" and self.thinking_blocks:
             return _ok_response(
                 content=None,
                 thinking_blocks=[{"type": "thinking", "thinking": "hm", "signature": "sig"}],
-                tool_calls=[
-                    {"id": "call_x", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
-                ],
+                tool_calls=[_WEATHER_CALL],
             )
-        if body.get("reasoning_effort") == "none":
-            return {**_ok_response(), "usage": {"completion_tokens_details": {"reasoning_tokens": 0}}}
+        if effort == "high":
+            return _reasoning(250 if self.reasons else 0)
+        if effort == "none":
+            dropped = (body.get("thinking") or {}).get("type") == "disabled" and "thinking_disabled" in self.rewrites
+            return _reasoning(180 if dropped else 0)
+        tc = body.get("tool_choice")
+        if (tc == "required" or isinstance(tc, dict)) and "forced" not in self.rewrites:
+            return _ok_response(content=None, tool_calls=[_WEATHER_CALL])
+        if body.get("response_format"):
+            return _ok_response(content='{"answer": "yes", "confidence": 0.99}')
         return _ok_response()
 
 
@@ -104,6 +127,93 @@ async def test_routable_failures_are_recorded_not_rejected():
     # The error the admin sees is the provider's reason, not a stack trace.
     forced = next(r for r in report.results if r.shape == "forced_tool_choice")
     assert "not supported" in forced.error
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_rewrite_is_graded_as_the_rejection_it_hides():
+    """The same Sonnet 5.5 behind a LiteLLM whose map flags it: forced tool_choice is
+    downgraded to auto and thinking:disabled dropped, every call answers 200. Grading on the
+    status alone recorded the opposite of the truth (live QA, 2026-09-30); the reply shows it."""
+    gw = _Gateway(rewrites={"forced", "thinking_disabled"}, thinking_blocks=True)
+    report = await mc.probe_model("sonnet-5-5", gw, supports_reasoning=True)
+    assert report.rejected == []
+    assert report.capabilities[mc.FORCED_TOOL_CHOICE] is False
+    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_BETWEEN_TOOLS
+    forced = next(r for r in report.results if r.shape == "forced_tool_choice")
+    assert not forced.ok and not forced.inconclusive
+    assert "no tool call" in forced.error and "rewritten" in forced.error
+    assert [b["thinking"]["type"] for b in gw.bodies if "thinking" in b] == ["disabled", "between_tools"]
+
+
+@pytest.mark.asyncio
+async def test_a_named_tool_choice_answered_with_another_tool_is_not_honoured():
+    class _Gw(_Gateway):
+        async def __call__(self, body):
+            if isinstance(body.get("tool_choice"), dict):
+                self.bodies.append(body)
+                return _ok_response(content=None, tool_calls=[{**_WEATHER_CALL, "function": {"name": "other", "arguments": "{}"}}])
+            return await super().__call__(body)
+
+    report = await mc.probe_model("m", _Gw())
+    assert report.capabilities[mc.FORCED_TOOL_CHOICE] is False
+    assert "['other']" in next(r for r in report.results if r.shape == "named_tool_choice").error
+
+
+@pytest.mark.asyncio
+async def test_a_response_format_reply_that_is_not_the_schema_is_a_rejection():
+    class _Gw(_Gateway):
+        async def __call__(self, body):
+            if body.get("response_format"):
+                self.bodies.append(body)
+                return _ok_response(content="Yes, Zurich is in Switzerland.")
+            return await super().__call__(body)
+
+    report = await mc.probe_model("m", _Gw())
+    assert report.capabilities[mc.RESPONSE_FORMAT] is False
+    rf = next(r for r in report.results if r.shape == "response_format")
+    assert not rf.inconclusive and "not JSON matching the schema" in rf.error
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_before_it_can_be_judged_is_inconclusive():
+    """No tool call because max_tokens ran out is not evidence the force was rewritten."""
+
+    class _Gw(_Gateway):
+        async def __call__(self, body):
+            if body.get("tool_choice") == "required":
+                self.bodies.append(body)
+                return {"choices": [{"message": {"role": "assistant", "content": None}, "finish_reason": "length"}]}
+            return await super().__call__(body)
+
+    report = await mc.probe_model("m", _Gw())
+    assert mc.FORCED_TOOL_CHOICE not in report.capabilities
+    assert next(r for r in report.results if r.shape == "forced_tool_choice").inconclusive
+
+
+@pytest.mark.asyncio
+async def test_a_clean_switch_is_verified_against_a_control_turn_once():
+    gw = _Gateway()
+    report = await mc.probe_model("m", gw)
+    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_DISABLED
+    assert len([b for b in gw.bodies if b.get("reasoning_effort") == "high"]) == 1
+    assert "unverified" not in next(r for r in report.results if r.shape == "thinking_off").note
+
+
+@pytest.mark.asyncio
+async def test_a_switch_is_recorded_but_unverified_when_the_control_does_not_reason():
+    """A model that shows no reasoning even with thinking on gives the grade nothing to go on:
+    the switch was accepted and nothing contradicts it, so it is kept — and said to be unchecked."""
+    report = await mc.probe_model("m", _Gateway(reasons=False))
+    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_DISABLED
+    assert "unverified" in next(r for r in report.results if r.shape == "thinking_off").note
+
+
+@pytest.mark.asyncio
+async def test_no_control_turn_when_every_switch_still_reasons():
+    gw = _Gateway(rewrites={"thinking_disabled"}, reject=lambda b: "no" if (b.get("thinking") or {}).get("type") == "between_tools" else None)
+    report = await mc.probe_model("m", gw)
+    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_NONE
+    assert not any(b.get("reasoning_effort") == "high" for b in gw.bodies)
 
 
 @pytest.mark.asyncio

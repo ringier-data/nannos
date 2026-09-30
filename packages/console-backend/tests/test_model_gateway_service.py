@@ -384,7 +384,15 @@ def _probe_gateway(svc, monkeypatch, *, reject=None, deployment=None):
             raise ProbeCallError(reason, status=calls.get("reject_status", 400))
         if body.get("stream"):
             return 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\ndata: [DONE]\n'
-        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {}}
+        # A model that honours what it accepts: the probe grades the reply, not just the 200.
+        message: dict = {"role": "assistant", "content": "ok"}
+        tc = body.get("tool_choice")
+        if tc == "required" or isinstance(tc, dict):
+            call = {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+            message = {"role": "assistant", "content": None, "tool_calls": [call]}
+        elif body.get("response_format"):
+            message["content"] = '{"answer": "yes", "confidence": 0.9}'
+        return {"choices": [{"message": message}], "usage": {}}
 
     monkeypatch.setattr(svc, "_request", _fake_request)
     monkeypatch.setattr(svc, "_probe_call", _fake_probe_call)

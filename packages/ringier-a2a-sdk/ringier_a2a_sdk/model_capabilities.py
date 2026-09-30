@@ -62,7 +62,7 @@ FORCED_TOOL_CHOICE = "forced_tool_choice"
 #: bool — the deployment accepts ``response_format: {type: json_schema}``.
 RESPONSE_FORMAT = "response_format"
 #: str — which explicit ``thinking`` value turns thinking off next to ``reasoning_effort: none``
-#: and tools: ``"disabled"``, ``"between_tools"`` or ``"none"`` (no explicit switch is accepted;
+#: and tools: ``"disabled"``, ``"between_tools"`` or ``"none"`` (no explicit switch turns it off;
 #: send ``reasoning_effort: none`` alone and let the provider do what it does).
 THINKING_OFF = "thinking_off"
 #: bool | None — a signed thinking block from the model can be replayed with its tool result.
@@ -113,7 +113,19 @@ PROBE_SCHEMA: dict[str, Any] = {
 }
 
 _ASK_TOOL = "What is the weather in Zurich right now? Use the get_weather tool to find out."
+#: The forced shapes ask for NO tool call, so only an honoured force produces one: under
+#: ``auto`` the model would follow the prompt, and a gateway that silently rewrote the force
+#: to ``auto`` shows up as a reply without a tool call.
+_FORBID_TOOL = "Reply with the single word OK. Do not call any tool."
+#: A question the model reasons about when thinking is on, so a thinking-off switch that was
+#: dropped on the way shows up as reasoning in the reply. It has to be hard enough that an
+#: adaptive-thinking model does not answer it outright: "how many primes between 100 and 200"
+#: was answered in 3 tokens at reasoning_effort medium by Sonnet 5.5, which verifies nothing.
+_THINK = "Think it through carefully: what is 48271 * 69621 - 1234567? Reply with only the number."
 _MAX_TOKENS = 64
+#: Graded shapes need room for the answer the grade reads; a model that thinks regardless
+#: (adaptive thinking) must not be cut off before it gets there.
+_GRADED_MAX_TOKENS = 1024
 
 
 class ProbeCallError(Exception):
@@ -288,7 +300,8 @@ def shape_forced_tool_choice(model: str) -> dict[str, Any]:
     ``tool_choice: any``, which the OpenAI client sends as ``required``."""
     return _base(
         model,
-        messages=[{"role": "user", "content": _ASK_TOOL}],
+        max_tokens=_GRADED_MAX_TOKENS,
+        messages=[{"role": "user", "content": _FORBID_TOOL}],
         tools=[PROBE_TOOL],
         tool_choice="required",
     )
@@ -299,7 +312,8 @@ def shape_named_tool_choice(model: str) -> dict[str, Any]:
     named ``tool_choice``, ``parallel_tool_calls: false``."""
     return _base(
         model,
-        messages=[{"role": "user", "content": _ASK_TOOL}],
+        max_tokens=_GRADED_MAX_TOKENS,
+        messages=[{"role": "user", "content": _FORBID_TOOL}],
         tools=[PROBE_TOOL],
         tool_choice={"type": "function", "function": {"name": "get_weather"}},
         parallel_tool_calls=False,
@@ -311,6 +325,7 @@ def shape_response_format(model: str) -> dict[str, Any]:
     the HITL reply classifier, tool-call summaries, toolset selection, file filtering."""
     return _base(
         model,
+        max_tokens=_GRADED_MAX_TOKENS,
         messages=[{"role": "user", "content": "Is Zurich in Switzerland? Answer with your confidence."}],
         response_format={
             "type": "json_schema",
@@ -326,11 +341,25 @@ def shape_thinking_off(model: str, switch: str) -> dict[str, Any]:
     the request carries the probe marker (any other caller's value is replaced)."""
     return _base(
         model,
-        messages=[{"role": "user", "content": _ASK_TOOL}],
+        max_tokens=_GRADED_MAX_TOKENS,
+        messages=[{"role": "user", "content": _THINK}],
         tools=[PROBE_TOOL],
         tool_choice="auto",
         reasoning_effort="none",
         thinking={"type": switch},
+    )
+
+
+def shape_thinking_control(model: str) -> dict[str, Any]:
+    """The thinking-off question with thinking ON: shows the question makes this model reason
+    at all, so a reply without reasoning under a switch means the switch worked."""
+    return _base(
+        model,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": _THINK}],
+        tools=[PROBE_TOOL],
+        tool_choice="auto",
+        reasoning_effort="high",
     )
 
 
@@ -446,6 +475,58 @@ def _reasoning_tokens(response: Any) -> int | None:
     return int(value) if isinstance(value, (int, float)) else None
 
 
+def _truncated(response: Any) -> bool:
+    if not isinstance(response, dict):
+        return False
+    choices = response.get("choices") or []
+    return bool(choices) and (choices[0] or {}).get("finish_reason") == "length"
+
+
+def _tool_call_names(response: Any) -> list[str]:
+    return [((tc or {}).get("function") or {}).get("name") or "" for tc in _message(response).get("tool_calls") or []]
+
+
+def _reasoned(response: Any) -> bool:
+    """Whether the reply shows the model reasoned: reasoning tokens billed, or reasoning text or
+    thinking blocks returned (providers report one, the other, or both)."""
+    message = _message(response)
+    return bool((_reasoning_tokens(response) or 0) > 0 or message.get("reasoning_content") or message.get("thinking_blocks"))
+
+
+def _matches_probe_schema(response: Any) -> bool:
+    content = _message(response).get("content")
+    try:
+        parsed = json.loads(content) if isinstance(content, str) else None
+    except ValueError:
+        return False
+    return (
+        isinstance(parsed, dict)
+        and isinstance(parsed.get("answer"), str)
+        and isinstance(parsed.get("confidence"), (int, float))
+    )
+
+
+#: Why a 200 can still be a rejection: the gateway may rewrite a shape it knows the model
+#: refuses (LiteLLM's ``drop_params`` downgrades a forced ``tool_choice`` and drops
+#: ``thinking: disabled`` for models its map flags) and answer the rewritten request.
+_REWRITTEN = "accepted, but {what}: the gateway may have rewritten the request"
+
+
+def _check_forced(response: Any) -> str:
+    return "" if _tool_call_names(response) else _REWRITTEN.format(what="the reply made no tool call")
+
+
+def _check_named(response: Any) -> str:
+    names = _tool_call_names(response)
+    if PROBE_TOOL["function"]["name"] in names:
+        return ""
+    return _REWRITTEN.format(what=f"the reply called {names} instead of the named tool" if names else "the reply made no tool call")
+
+
+def _check_response_format(response: Any) -> str:
+    return "" if _matches_probe_schema(response) else _REWRITTEN.format(what="the reply is not JSON matching the schema")
+
+
 # --- the probe -----------------------------------------------------------------------------
 
 
@@ -463,8 +544,11 @@ async def probe_model(
     deployment) gates the thinking shapes: a model registered without thinking never gets a
     thinking request from the harness, so there is nothing to learn.
 
-    Only a definite provider rejection (a 4xx other than 408/429) is a verdict. A transient
-    failure, or a shape not reached within ``budget_seconds``, is *inconclusive*: it is reported
+    A verdict is either a definite provider rejection (a 4xx other than 408/429) or, for a
+    routable shape, a reply that shows the shape was not honoured — a 200 alone proves only that
+    *some* request succeeded, and the gateway may have rewritten it on the way (see
+    ``_REWRITTEN``). A transient failure, a reply cut off at ``max_tokens`` before it could be
+    judged, or a shape not reached within ``budget_seconds`` is *inconclusive*: it is reported
     but writes no flag, and it never refuses a model. ``report.capabilities`` therefore holds
     exactly the keys that were measured.
     """
@@ -485,6 +569,16 @@ async def probe_model(
         except Exception as e:  # noqa: BLE001 — a transport failure is inconclusive, not a crash
             return False, None, f"{type(e).__name__}: {e}", True
 
+    async def graded(body: dict[str, Any], check: Callable[[Any], str]) -> tuple[bool, str, bool]:
+        """Send one routable shape and judge the reply; (ok, reason, inconclusive)."""
+        ok, response, err, transient = await attempt(body)
+        if not ok:
+            return False, err, transient
+        failure = check(response)
+        if failure and _truncated(response):
+            return False, "reply cut off at max_tokens before the shape could be judged", True
+        return not failure, failure, False
+
     # Unavoidable ----------------------------------------------------------------------
     for shape, body in (
         ("tools_auto", shape_tools_auto(model)),
@@ -495,30 +589,53 @@ async def probe_model(
         report.results.append(ShapeResult(shape, ok, err, unavoidable=True, inconclusive=not ok and transient))
 
     # Forced tool choice: both forms must work for the flag to be True ------------------
-    forced_ok, _, forced_err, forced_t = await attempt(shape_forced_tool_choice(model))
-    report.results.append(ShapeResult("forced_tool_choice", forced_ok, forced_err, inconclusive=not forced_ok and forced_t))
-    named_ok, _, named_err, named_t = await attempt(shape_named_tool_choice(model))
-    report.results.append(ShapeResult("named_tool_choice", named_ok, named_err, inconclusive=not named_ok and named_t))
+    forced_ok, forced_err, forced_inc = await graded(shape_forced_tool_choice(model), _check_forced)
+    report.results.append(ShapeResult("forced_tool_choice", forced_ok, forced_err, inconclusive=forced_inc))
+    named_ok, named_err, named_inc = await graded(shape_named_tool_choice(model), _check_named)
+    report.results.append(ShapeResult("named_tool_choice", named_ok, named_err, inconclusive=named_inc))
     if forced_ok and named_ok:
         report.capabilities[FORCED_TOOL_CHOICE] = True
-    elif (not forced_ok and not forced_t) or (not named_ok and not named_t):
+    elif (not forced_ok and not forced_inc) or (not named_ok and not named_inc):
         report.capabilities[FORCED_TOOL_CHOICE] = False  # a definite rejection of either form
 
     # response_format ------------------------------------------------------------------
-    rf_ok, _, rf_err, rf_t = await attempt(shape_response_format(model))
-    report.results.append(ShapeResult("response_format", rf_ok, rf_err, inconclusive=not rf_ok and rf_t))
-    if rf_ok or not rf_t:
+    rf_ok, rf_err, rf_inc = await graded(shape_response_format(model), _check_response_format)
+    report.results.append(ShapeResult("response_format", rf_ok, rf_err, inconclusive=rf_inc))
+    if not rf_inc:
         report.capabilities[RESPONSE_FORMAT] = rf_ok
 
     # Thinking off: the first explicit switch that works, else none ----------------------
+    # "Works" means the reply shows no reasoning. That only means something if the same
+    # question makes the model reason with thinking on, so a clean reply is checked against a
+    # control turn (sent once, and only when needed); without that evidence the switch is
+    # still recorded, since it was accepted and nothing contradicts it, but noted as unverified.
+    control: str | None = None  # "" = the control reasoned; otherwise why it could not verify
+
+    async def verify() -> str:
+        nonlocal control
+        if control is None:
+            ok, response, err, _ = await attempt(shape_thinking_control(model))
+            if not ok:
+                control = f"unverified: the thinking-on control turn failed ({err})"
+            elif not _reasoned(response):
+                control = "unverified: the thinking-on control turn showed no reasoning either"
+            else:
+                control = ""
+        return control
+
     off_switch: str | None = THINKING_OFF_NONE
     off_note = ""
     for switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS):
         ok, response, err, transient = await attempt(shape_thinking_off(model, switch))
+        if ok and _reasoned(response):
+            rt = _reasoning_tokens(response)
+            what = f"the model still reasoned ({rt} reasoning tokens)" if rt else "the model still reasoned"
+            off_note = f"{switch}: " + _REWRITTEN.format(what=what)
+            continue
         if ok:
             off_switch = switch
             rt = _reasoning_tokens(response)
-            off_note = f"{rt} reasoning tokens" if rt is not None else ""
+            off_note = "; ".join(n for n in (f"{rt} reasoning tokens" if rt is not None else "", await verify()) if n)
             break
         if transient:
             off_switch = None  # cannot tell which switch works; leave no record
@@ -533,7 +650,7 @@ async def probe_model(
             ShapeResult(
                 "thinking_off",
                 conclusive_ok,
-                "" if conclusive_ok else f"no explicit switch accepted; last error: {off_note}",
+                "" if conclusive_ok else f"no explicit switch turned thinking off; last: {off_note}",
                 note=off_note if conclusive_ok else "",
             )
         )
