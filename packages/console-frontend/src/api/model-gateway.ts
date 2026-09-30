@@ -23,9 +23,11 @@ import {
   gatewayUiConfigApiV1AdminModelGatewayConfigGet,
   getSystemStatusApiV1AdminSystemStatusGet,
   listModelsApiV1AdminModelGatewayModelsGet,
+  listTierGroupsApiV1AdminModelGatewayTiersGet,
   modelCatalogApiV1AdminModelGatewayCatalogGet,
   registerModelApiV1AdminModelGatewayModelsPost,
   setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost,
+  setTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPut,
   testModelApiV1AdminModelGatewayModelsModelNameTestPost,
   webSearchConfigApiV1AdminModelGatewayWebSearchGet,
 } from './generated/sdk.gen';
@@ -39,6 +41,7 @@ import type {
   ModelRegistrationRequest,
   ModelRegistrationResponse,
   RateCardPricingEntryInput,
+  TierGroup,
   WebSearchConfig,
   WebSearchModelOption,
 } from './generated/types.gen';
@@ -52,6 +55,7 @@ export type {
   GatewayUiConfig,
   ModelRegistrationRequest,
   ModelRegistrationResponse,
+  TierGroup,
   WebSearchConfig,
   WebSearchModelOption,
 };
@@ -70,6 +74,25 @@ export type DefaultRole =
   | 'embedding'
   | 'multimodal_embedding'
   | 'search';
+
+/**
+ * Human label for a default role / tier slot. Keyed on the `DefaultRole` union, so adding a
+ * role is a compile error here rather than a raw `chat:low` leaking into the UI. Shared:
+ * the model cards and the failover card render the same tiers one screen apart, and used to
+ * disagree ("low tier" vs "Low").
+ */
+const ROLE_LABELS: Record<DefaultRole, string> = {
+  chat: 'chat',
+  'chat:low': 'low tier',
+  'chat:premium': 'premium tier',
+  embedding: 'embedding',
+  multimodal_embedding: 'multimodal embedding',
+  search: 'search',
+};
+
+/** Accepts a plain string because the gateway types `default_roles` loosely; unknown roles
+ * fall through to their raw value rather than rendering blank. */
+export const roleLabel = (role: string): string => ROLE_LABELS[role as DefaultRole] ?? role;
 
 /** The live model picker — models registered on the gateway (read by every model dropdown). */
 export async function listAvailableModels(): Promise<AvailableModel[]> {
@@ -186,12 +209,24 @@ export async function getWebSearchConfig(): Promise<WebSearchConfig> {
   return data as WebSearchConfig;
 }
 
-export async function setGatewayModelDefault(modelId: string, role: DefaultRole): Promise<void> {
-  const { error } = await setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost({
+/**
+ * Set a model as a role's fleet default.
+ *
+ * Returns the backend's `warning` when the default was stored but its failover chain could not
+ * be re-declared on the proxy: the write succeeded, so this is not an error, but the tier is
+ * left routing to the previous head's chain and the admin has to be told. Dropping it on the
+ * floor would leave that state visible only on the next tier-page load.
+ */
+export async function setGatewayModelDefault(
+  modelId: string,
+  role: DefaultRole,
+): Promise<{ warning?: string | null }> {
+  const { data, error } = await setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost({
     path: { model_id: modelId },
     body: { role },
   });
   if (error) throw error;
+  return (data ?? {}) as { warning?: string | null };
 }
 
 export async function deleteGatewayModel(modelId: string): Promise<void> {
@@ -199,4 +234,29 @@ export async function deleteGatewayModel(modelId: string): Promise<void> {
     path: { model_id: modelId },
   });
   if (error) throw error;
+}
+
+/**
+ * Tier groups — a chat tier's ordered models: its default, then the failover chain the
+ * gateway walks when the default's provider is unavailable (nannos#204).
+ *
+ * Chat tiers only. Embedding roles are refused by the backend on purpose: a failed-over
+ * embedding call writes vectors from a different embedding space into the same pgvector
+ * index, which inserts cleanly and silently degrades search for everything embedded during
+ * the outage.
+ */
+export async function listTierGroups(): Promise<TierGroup[]> {
+  const { data, error } = await listTierGroupsApiV1AdminModelGatewayTiersGet();
+  if (error) throw error;
+  return (data ?? []) as TierGroup[];
+}
+
+/** Replace one chat tier's failover chain (the tier's default stays its head). */
+export async function setTierFailoverChain(role: string, fallbacks: string[]): Promise<TierGroup> {
+  const { data, error } = await setTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPut({
+    path: { role },
+    body: { fallbacks },
+  });
+  if (error) throw error;
+  return data as TierGroup;
 }

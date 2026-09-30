@@ -96,3 +96,65 @@ class ModelDefaultsRepository(AuditedRepository):
 
         await db.commit()
         logger.info("Set default for role=%s to '%s' by %s", role, model_alias, actor.sub)
+
+    # --- Tier groups (nannos#204) --------------------------------------------------------
+    # A tier group is the ordered list of aliases serving one chat tier: its head is the
+    # tier's default (model_defaults, above) and its tail is the failover chain stored here.
+    # Only the tail is persisted, so re-pointing a tier's default re-heads its chain for
+    # free rather than leaving two rows to disagree about which alias comes first.
+
+    async def get_all_fallbacks(self, db: AsyncSession) -> dict[str, list[str]]:
+        """{role: [alias, ...]} in chain order, for every role with a failover chain."""
+        result = await db.execute(text("SELECT role, alias FROM model_tier_fallbacks ORDER BY role, position"))
+        chains: dict[str, list[str]] = {}
+        for row in result:
+            chains.setdefault(row.role, []).append(row.alias)
+        return chains
+
+    async def get_fallbacks(self, db: AsyncSession, role: str) -> list[str]:
+        """The failover chain for one role, in order (empty when none is configured)."""
+        result = await db.execute(
+            text("SELECT alias FROM model_tier_fallbacks WHERE role = :role ORDER BY position"),
+            {"role": role},
+        )
+        return [row.alias for row in result]
+
+    async def replace_fallbacks(
+        self,
+        db: AsyncSession,
+        actor: User,
+        role: str,
+        aliases: list[str],
+    ) -> None:
+        """Replace a role's failover chain wholesale, with audit.
+
+        Replace rather than patch: the chain is an ordered whole and an admin edits it as
+        one, so a partial write has no meaning. The (role, position) unique constraint is
+        DEFERRABLE, so delete-then-insert inside one transaction never trips it on a
+        reorder that reuses positions.
+        """
+        before = await self.get_fallbacks(db, role)
+
+        await db.execute(text("DELETE FROM model_tier_fallbacks WHERE role = :role"), {"role": role})
+        for position, alias in enumerate(aliases, start=1):
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO model_tier_fallbacks (role, alias, position, updated_at)
+                    VALUES (:role, :alias, :position, NOW())
+                    """
+                ),
+                {"role": role, "alias": alias, "position": position},
+            )
+
+        await self.audit_service.log_action(
+            db=db,
+            actor=actor,
+            entity_type=self.entity_type,
+            entity_id=role,
+            action=AuditAction.SET_DEFAULT,
+            changes={"before": before, "after": aliases, "field": "fallbacks"},
+        )
+
+        await db.commit()
+        logger.info("Set failover chain for role=%s to %s by %s", role, aliases, actor.sub)
