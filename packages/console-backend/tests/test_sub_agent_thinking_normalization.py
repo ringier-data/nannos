@@ -224,3 +224,4 @@ class TestThinkingConfigScenarios:
         # Should preserve None values (defaults will be applied in database)
         assert normalized_enable is None
         assert normalized_level is None
+

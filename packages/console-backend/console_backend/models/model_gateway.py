@@ -1,6 +1,6 @@
 """Schemas for runtime model registration via the Model Gateway."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -64,6 +64,11 @@ class GatewayModel(BaseModel):
     # Whether the gateway advertises server-side web search for this model. Drives the console's
     # Web Search picker (which models can back the gateway-native search provider).
     supports_web_search: bool | None = None
+    # What the registration probe saw the deployment accept (nannos#318,
+    # ``ringier_a2a_sdk.model_capabilities``): ``forced_tool_choice``, ``response_format``,
+    # ``thinking_off``, ``thinking_replay``, ``probed_at``. ``None`` for a deployment that was
+    # registered before the probe existed or is defined in the proxy's config.
+    capabilities: dict[str, Any] | None = None
 
 
 class WebSearchModelOption(BaseModel):

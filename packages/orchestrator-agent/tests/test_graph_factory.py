@@ -366,7 +366,7 @@ class TestStoreSelfHeal:
         sentinel = Mock()
         with patch.object(factory, "_create_graph", return_value=sentinel):
             factory.get_graph("claude-sonnet-4.5")
-        assert ("claude-sonnet-4.5", None) in factory._graphs
+        assert ("claude-sonnet-4.5", None, None) in factory._graphs
 
     @pytest.mark.asyncio
     async def test_ensure_store_ready_rebuilds_when_default_appears(self, mock_config):
@@ -406,15 +406,17 @@ class TestModelAliasResolution:
         factory = GraphFactory(config=mock_config)
         with (
             patch("app.core.graph_factory.resolve_chat_model", return_value="live-model") as resolve,
+            patch("app.core.graph_factory.reasoning_effort_for_choice", return_value="none") as effort,
             patch.object(factory, "_create_graph", return_value=MagicMock()) as create,
         ):
             factory._store_enabled = False
             factory.get_graph("retired-model", thinking_level=None)
 
         resolve.assert_called_once_with("retired-model")
-        assert ("live-model", None) in factory._graphs
-        assert ("retired-model", None) not in factory._graphs
-        create.assert_called_once_with("live-model", None)
+        effort.assert_called_once_with(None, "live-model")  # the record of the model that runs
+        assert ("live-model", None, "none") in factory._graphs
+        assert not any(key[0] == "retired-model" for key in factory._graphs)
+        create.assert_called_once_with("live-model", None, "none")
 
     def test_a_retired_alias_does_not_latch_after_the_snapshot_moves(self, mock_config):
         """The point of resolving per request: once the registry moves, the next request
@@ -429,7 +431,26 @@ class TestModelAliasResolution:
             second = factory.get_graph("some-alias", thinking_level=None)
 
         assert first is not second
-        assert {"old-model", "new-model"} == {alias for alias, _ in factory._graphs}
+        assert {"old-model", "new-model"} == {key[0] for key in factory._graphs}
+
+    def test_a_probe_record_written_after_the_first_turn_takes_effect_on_the_next(self, mock_config):
+        """The send-off decision follows the alias's probe record, which appears at runtime (an
+        admin re-runs Test after rollout). Keyed without it, the first turn's "send nothing"
+        would stick until the pod restarts — _models and _graphs are never evicted (review
+        round 8)."""
+        factory = GraphFactory(config=mock_config)
+        factory._store_enabled = False
+        with (
+            patch("app.core.graph_factory.resolve_chat_model", return_value="m"),
+            patch("app.core.graph_factory.reasoning_effort_for_choice", side_effect=[None, "none", "none"]),
+            patch.object(factory, "_create_graph", side_effect=[MagicMock(), MagicMock()]) as create,
+        ):
+            before = factory.get_graph("m", thinking_level=None)  # unprobed: send nothing
+            after = factory.get_graph("m", thinking_level=None)  # recorded: send off
+            again = factory.get_graph("m", thinking_level=None)  # same record: cached
+
+        assert before is not after and after is again
+        assert [c.args for c in create.call_args_list] == [("m", None, None), ("m", None, "none")]
 
     def test_create_model_is_told_the_alias_is_already_resolved(self, mock_config):
         """Resolving again inside create_model could read a snapshot that moved in between,

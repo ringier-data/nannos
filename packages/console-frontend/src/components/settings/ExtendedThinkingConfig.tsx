@@ -3,7 +3,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
+import { useAvailableModels, modelSupportsThinking, modelThinksAlways, getAvailableThinkingLevels } from '@/config/models';
 import type { OrchestratorThinkingLevel } from '@/api/generated/types.gen';
 
 interface ExtendedThinkingConfigProps {
@@ -54,6 +54,11 @@ export function ExtendedThinkingConfig({
 }: ExtendedThinkingConfigProps) {
   const { models: availableModels } = useAvailableModels();
   const supportsThinking = modelSupportsThinking(model, availableModels);
+  // Nothing turns this model's thinking off (the registration probe measured it): "off" would
+  // be a setting the model ignores, so the toggle is shown locked on and only the level is a
+  // choice. Display only — a stored "off" is left as it is: the gateway sends it as the model's
+  // floor, and it stays right if a later probe finds a way to turn thinking off after all.
+  const alwaysOn = supportsThinking && modelThinksAlways(model, availableModels);
 
   // Don't show anything if model doesn't support thinking
   if (!supportsThinking) {
@@ -69,28 +74,36 @@ export function ExtendedThinkingConfig({
           <Label htmlFor="enable-thinking" className="text-base font-medium cursor-pointer">
             Extended Thinking
           </Label>
-          <p className="text-sm text-muted-foreground">Enable extended thinking for complex reasoning tasks</p>
+          <p className="text-sm text-muted-foreground">
+            {alwaysOn
+              ? 'This model always thinks — nothing turns it off. Choose how much.'
+              : 'Enable extended thinking for complex reasoning tasks'}
+          </p>
         </div>
         <Switch
           id="enable-thinking"
-          checked={enableThinking ?? false}
+          checked={alwaysOn || (enableThinking ?? false)}
           onCheckedChange={onEnableThinkingChange}
-          disabled={disabled}
+          disabled={disabled || alwaysOn}
           className="mt-1"
         />
       </div>
 
-      {enableThinking && (
+      {(enableThinking || alwaysOn) && (
         <>
           <div className="space-y-2 pt-4 border-t">
             <Label htmlFor="thinking-level">Thinking Level</Label>
             <Select
               value={thinkingLevel || undefined}
-              onValueChange={(value) => onThinkingLevelChange(value as OrchestratorThinkingLevel)}
+              onValueChange={(value) => {
+                // On an always-on model stored as "off", picking a level is what turns it on.
+                if (!enableThinking) onEnableThinkingChange(true);
+                onThinkingLevelChange(value as OrchestratorThinkingLevel);
+              }}
               disabled={disabled}
             >
               <SelectTrigger id="thinking-level" className="w-full max-w-xs">
-                <SelectValue placeholder="Select thinking level">
+                <SelectValue placeholder={alwaysOn && !enableThinking ? "Lowest (the model's floor)" : 'Select thinking level'}>
                   {thinkingLevel &&
                     getAvailableThinkingLevels(model, availableModels).find((opt) => opt.value === thinkingLevel)
                       ?.label}

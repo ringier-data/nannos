@@ -221,9 +221,9 @@ class TestGraphCreationWithThinking:
 
             # Should have created 3 separate graphs
             assert len(factory._graphs) == 3
-            assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._graphs
-            assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._graphs
-            assert ("claude-sonnet-4.5", None) in factory._graphs
+            assert ("claude-sonnet-4.5", ThinkingLevel.low, None) in factory._graphs
+            assert ("claude-sonnet-4.5", ThinkingLevel.high, None) in factory._graphs
+            assert ("claude-sonnet-4.5", None, None) in factory._graphs
 
 
 class TestExecutorThinkingFlow:

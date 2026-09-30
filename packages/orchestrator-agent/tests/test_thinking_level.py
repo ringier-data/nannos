@@ -112,8 +112,9 @@ class TestThinkingLevelCaching:
             factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
             factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.high)
             assert len(factory._models) == 2
-            assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._models
-            assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._models
+            # Keyed (alias, level, effort): with a level set the effort override is None.
+            assert ("claude-sonnet-4.5", ThinkingLevel.low, None) in factory._models
+            assert ("claude-sonnet-4.5", ThinkingLevel.high, None) in factory._models
 
     @patch.dict(os.environ, _GW_ENV)
     @patch("agent_common.core.model_factory._gateway_chat_openai_cls")

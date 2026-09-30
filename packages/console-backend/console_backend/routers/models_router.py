@@ -15,6 +15,7 @@ from ..db.session import DbSession
 from ..dependencies import require_auth_or_bearer_token
 from ..models.user import User
 from ..services.model_gateway_service import ModelGatewayError, thinking_levels_for
+from ringier_a2a_sdk.model_capabilities import capabilities_of, thinking_always_on
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ class AvailableModel(BaseModel):
     provider: str
     supports_thinking: bool = False
     thinking_levels: list[str] | None = None
+    # The registration probe saw that nothing turns this model's thinking off (nannos#318):
+    # pickers offer a level but no "off". False when unprobed (no opinion).
+    thinking_always_on: bool = False
     is_default: bool = False
     # Gateway list price per 1M tokens (USD), or None when the gateway has no price for
     # the model. Informational — for model-selection guidance, not authoritative billing
@@ -61,10 +65,32 @@ def _to_available(model: dict, default_model: str | None) -> AvailableModel | No
         provider=info.get("provider") or info.get("litellm_provider") or "Model Gateway",
         supports_thinking=bool(levels),
         thinking_levels=levels or None,
+        thinking_always_on=bool(levels) and thinking_always_on(capabilities_of(info)),
         is_default=(name == default_model),
         input_price_per_million=_price_per_million(info.get("input_cost_per_token")),
         output_price_per_million=_price_per_million(info.get("output_cost_per_token")),
     )
+
+
+def _picker_models(raw: list[dict], default_model: str | None) -> list[AvailableModel]:
+    """One picker entry per alias. /model/info lists deployments, and an alias can have several
+    (LiteLLM load-balancing, or the same name in the proxy config and in the DB); the pickers and
+    the MCP tool select by alias, so a repeat would render twice under one React key. The DB
+    deployment wins — it is the console-managed record carrying the label, prices and probed
+    capabilities — otherwise the first listed. Gateway order is kept.
+
+    Filtered before deduplicated: a non-chat deployment must not win the alias and then be
+    dropped, taking the chat deployment of the same name with it."""
+    chosen: dict[str, tuple[bool, AvailableModel]] = {}
+    for d in raw:
+        entry = _to_available(d, default_model)
+        if entry is None:
+            continue
+        is_db = bool((d.get("model_info") or {}).get("db_model"))
+        held = chosen.get(entry.value)
+        if held is None or (not held[0] and is_db):
+            chosen[entry.value] = (is_db, entry)
+    return [entry for _, entry in chosen.values()]
 
 
 @router.get("/models", response_model=list[AvailableModel], tags=["MCP"], operation_id="console_list_models")
@@ -102,7 +128,7 @@ async def list_available_models(request: Request, db: DbSession, _user: User = D
     # this list to pick a model and configure the default in the first place.
     defaults = await request.app.state.model_defaults_service.get_all(db)
     default_model = defaults.get("chat")
-    models = [m for m in (_to_available(d, default_model) for d in raw) if m is not None]
+    models = _picker_models(raw, default_model)
     _cache["models"] = (now, models)
     return models
 

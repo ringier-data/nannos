@@ -190,12 +190,117 @@ export async function updateGatewayModel(
   return data as ModelRegistrationResponse;
 }
 
-export async function testGatewayModel(modelName: string): Promise<{ status: string }> {
+/** One request shape the registration probe replayed (ringier_a2a_sdk.model_capabilities). */
+export interface ProbeShapeResult {
+  shape: string;
+  /** What the admin reads for this shape (ringier_a2a_sdk.model_capabilities.SHAPE_LABELS). */
+  label?: string;
+  ok: boolean;
+  /** The provider's reason when the shape failed. */
+  error: string;
+  /** True for a shape every agent turn sends: failing it refuses registration. */
+  unavoidable: boolean;
+  note: string;
+  /** The shape could not be measured (transient failure): no verdict; an earlier result, if any, stays. */
+  inconclusive: boolean;
+}
+
+/** What the probe saw a chat model accept; absent for embedding models. */
+export interface ProbeReport {
+  model: string;
+  /** The flags stored on the deployment: forced_tool_choice, response_format, thinking_off, thinking_replay. */
+  capabilities: Record<string, unknown>;
+  rejected: string[];
+  results: ProbeShapeResult[];
+}
+
+export interface ModelTestResult {
+  status: string;
+  model_name?: string;
+  probe?: ProbeReport;
+  /** true: the record was written; false: the write failed or was skipped (readers treat the
+   *  deployment as unprobed — re-run Test); null: nothing to write (config-defined deployment). */
+  recorded?: boolean | null;
+  /** Set when the model just recorded a limitation that breaks a tier it already serves. */
+  warning?: string | null;
+}
+
+/** The shapes the harness can route around that this model was seen to reject. */
+export function probeLimitations(report: ProbeReport | undefined): ProbeShapeResult[] {
+  return (report?.results ?? []).filter((r) => !r.ok && !r.unavoidable && !r.inconclusive);
+}
+
+/** Shapes the probe could not measure (transient failure or budget): no verdict; an earlier result stays. */
+export function probeInconclusive(report: ProbeReport | undefined): ProbeShapeResult[] {
+  return (report?.results ?? []).filter((r) => r.inconclusive);
+}
+
+/** One line of the Test endpoint's NDJSON stream (see the endpoint's docstring). */
+export type ProbeEvent =
+  | { type: 'plan'; shapes: { shape: string; label: string }[] }
+  | { type: 'step'; shape: string; step: string; label: string }
+  | ({ type: 'result' } & ProbeShapeResult)
+  | ({ type: 'done' } & ModelTestResult)
+  | { type: 'error'; status_code: number; detail: string };
+
+/**
+ * Run the model Test and resolve with its verdict; `onProgress` sees every event as it arrives
+ * (the probe takes several seconds — the console shows what is being probed).
+ *
+ * The verdict is in-band: the stream starts before it exists, so a refused model is an `error`
+ * event on a 200, thrown here as an Error with the server's reason — callers keep their
+ * try/catch (the registration rollback relies on it). `modelId` pins the deployment the probe's
+ * record is written to (pass it right after register/edit).
+ */
+export async function testGatewayModel(
+  modelName: string,
+  modelId?: string | null,
+  onProgress?: (event: ProbeEvent) => void,
+): Promise<ModelTestResult> {
   const { data, error } = await testModelApiV1AdminModelGatewayModelsModelNameTestPost({
     path: { model_name: modelName },
+    query: modelId ? { model_id: modelId } : undefined,
+    parseAs: 'stream',
   });
   if (error) throw error;
-  return (data ?? { status: 'ok' }) as { status: string };
+  const reader = (data as unknown as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  const handle = (line: string): ModelTestResult | null => {
+    if (!line.trim()) return null;
+    const event = JSON.parse(line) as ProbeEvent;
+    onProgress?.(event);
+    if (event.type === 'error') throw new Error(event.detail);
+    if (event.type === 'done') return event;
+    return null;
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffered += decoder.decode(value, { stream: !done });
+    const lines = buffered.split('\n');
+    buffered = done ? '' : (lines.pop() ?? '');
+    for (const line of lines) {
+      const verdict = handle(line);
+      if (verdict) {
+        reader.cancel().catch(() => {});
+        return verdict;
+      }
+    }
+    if (done) throw new Error('The test ended without a verdict — re-run Test.');
+  }
+}
+
+/** The limitations recorded on a listed model, as short labels — [] when unprobed or clean. */
+export function recordedLimitations(model: GatewayModel): string[] {
+  const caps = (model.capabilities ?? {}) as Record<string, unknown>;
+  const out: string[] = [];
+  if (caps.forced_tool_choice === false) out.push('no forced tool choice');
+  if (caps.response_format === false) out.push('no response_format');
+  if (caps.thinking_off === 'between_tools') out.push('thinking off = between tools');
+  if (caps.thinking_off === 'always_on') out.push('always thinks');
+  if (caps.thinking_off === 'unsupported') out.push('no thinking-off switch');
+  if (caps.thinking_replay === false) out.push('no thinking replay');
+  return out;
 }
 
 /**

@@ -40,24 +40,20 @@ class _FakeRepo:
 
 
 class _FakeGateway:
-    """Records what would be declared on the proxy; can be made to fail."""
+    """Records each whole-list declaration (head → chain) sent to the proxy; can be made to fail."""
 
     def __init__(self, registered=(), fail_on_set=False):
         self.registered = list(registered)
         self.fail_on_set = fail_on_set
-        self.set_calls: list[tuple[str, list[str]]] = []
-        self.deleted: list[str] = []
+        self.declared: list[dict[str, list[str]]] = []
 
     async def list_models(self):
         return [{"model_name": name} for name in self.registered]
 
-    async def set_fallbacks(self, model_name, fallback_models):
+    async def set_all_fallbacks(self, chains):
         if self.fail_on_set:
             raise ModelGatewayError("proxy said no")
-        self.set_calls.append((model_name, list(fallback_models)))
-
-    async def delete_fallbacks(self, model_name):
-        self.deleted.append(model_name)
+        self.declared.append({k: list(v) for k, v in chains.items()})
 
 
 def _service(repo):
@@ -103,7 +99,7 @@ async def test_non_chat_roles_are_refused(role):
     gateway = _FakeGateway(registered=["titan", "gemini-embed"])
     with pytest.raises(ValueError, match="only supported for chat tiers"):
         await svc.set_failover_chain(_DB, actor=None, role=role, aliases=["gemini-embed"], gateway=gateway)
-    assert gateway.set_calls == []
+    assert gateway.declared == []
     assert repo.replaced == []
 
 
@@ -119,7 +115,7 @@ async def test_chain_is_stored_then_projected():
     )
     assert models == ["claude", "claude-vertex", "gpt"]
     assert repo.replaced == [("chat", ["claude-vertex", "gpt"])]
-    assert gateway.set_calls == [("claude", ["claude-vertex", "gpt"])]
+    assert gateway.declared == [{"claude": ["claude-vertex", "gpt"]}]
 
 
 @pytest.mark.asyncio
@@ -137,7 +133,7 @@ async def test_unregistered_alias_is_refused():
     gateway = _FakeGateway(registered=["claude"])
     with pytest.raises(ValueError, match="Not registered on the gateway"):
         await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["ghost"], gateway=gateway)
-    assert gateway.set_calls == []
+    assert gateway.declared == []
 
 
 @pytest.mark.asyncio
@@ -174,7 +170,7 @@ async def test_empty_chain_clears_the_route():
     models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=[], gateway=gateway)
     assert models == ["claude"]
     assert repo.chains["chat"] == []
-    assert gateway.set_calls == [("claude", [])]
+    assert gateway.declared == [{"claude": []}]  # the gateway leaves an empty chain undeclared
 
 
 # --- re-pointing a tier's default --------------------------------------------------------
@@ -182,22 +178,24 @@ async def test_empty_chain_clears_the_route():
 
 @pytest.mark.asyncio
 async def test_changing_the_default_moves_the_chain_to_the_new_head():
-    repo = _FakeRepo({"chat": "gpt"}, {"chat": ["claude-vertex"]})  # already re-pointed
+    repo = _FakeRepo({"chat": "gpt"}, {"chat": ["claude-vertex"]})  # already re-pointed from 'claude'
     gateway = _FakeGateway(registered=["gpt", "claude", "claude-vertex"])
-    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway, previous_head="claude")
-    assert gateway.set_calls == [("gpt", ["claude-vertex"])]
-    assert gateway.deleted == ["claude"]  # the old head must stop failing over
+    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway)
+    # The whole list replaces what the proxy held: the old head is simply absent, so it stops
+    # failing over — no per-entry delete that a stale proxy cache can 404.
+    assert gateway.declared == [{"gpt": ["claude-vertex"]}]
 
 
 @pytest.mark.asyncio
 async def test_the_old_head_is_kept_when_it_still_serves_another_tier():
     """One alias can be the default of several tiers at once; dropping its chain because one
     tier moved on would silently disarm the tier still using it."""
-    repo = _FakeRepo({"chat": "gpt", "chat:premium": "claude"}, {"chat": ["claude-vertex"]})
+    repo = _FakeRepo(
+        {"chat": "gpt", "chat:premium": "claude"}, {"chat": ["claude-vertex"], "chat:premium": ["gpt"]}
+    )
     gateway = _FakeGateway(registered=["gpt", "claude", "claude-vertex"])
-    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway, previous_head="claude")
-    assert gateway.deleted == []
-    assert gateway.set_calls == [("gpt", ["claude-vertex"])]
+    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway)
+    assert gateway.declared == [{"gpt": ["claude-vertex"], "claude": ["gpt"]}]
 
 
 @pytest.mark.asyncio
@@ -205,7 +203,65 @@ async def test_reprojecting_a_non_chat_role_is_a_no_op():
     repo = _FakeRepo({"embedding": "titan"})
     gateway = _FakeGateway(registered=["titan"])
     await _service(repo).reproject_tier_group(_DB, "embedding", actor=None, gateway=gateway)
-    assert gateway.set_calls == [] and gateway.deleted == []
+    assert gateway.declared == []
+
+
+# --- every chain in one write (live QA 2026-09-30) ----------------------------------------
+# LiteLLM's per-entry /fallback endpoints read-modify-write ONE row holding every chain,
+# through a 60 s config cache they never invalidate: a quick second edit worked on a stale
+# copy — a delete 404'd while the chain stayed live, and a second add erased the first.
+
+
+@pytest.mark.asyncio
+async def test_editing_one_tier_redeclares_every_tier_from_the_table():
+    """The other tiers' chains ride along on every write, so no edit can erase them."""
+    repo = _FakeRepo({"chat": "claude", "chat:low": "flash"}, {"chat:low": ["flash-lite"]})
+    gateway = _FakeGateway(registered=["claude", "gpt", "flash", "flash-lite"])
+    await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["gpt"], gateway=gateway)
+    assert gateway.declared == [{"claude": ["gpt"], "flash": ["flash-lite"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_head_shared_by_two_tiers_declares_the_first_tiers_chain():
+    """The proxy holds one chain per alias; which one it gets is deterministic (tier order),
+    and the other tier shows as drifted in the listing rather than silently flapping."""
+    repo = _FakeRepo({"chat": "claude", "chat:premium": "claude"}, {"chat": ["gpt"], "chat:premium": ["opus"]})
+    gateway = _FakeGateway(registered=["claude", "gpt", "opus"])
+    declared = await _service(repo).project_chains(_DB, gateway=gateway)
+    assert declared == {"claude": ["gpt"]}
+
+
+@pytest.mark.asyncio
+async def test_an_empty_chain_on_a_shared_head_does_not_cancel_the_other_tiers_chain():
+    """chat and chat:low both default to X; chat has no chain. Setting chat:low's chain must
+    reach the gateway — the empty one asks for nothing (review round 7)."""
+    repo = _FakeRepo({"chat": "x", "chat:low": "x"})
+    gateway = _FakeGateway(registered=["x", "y"])
+    await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["y"], gateway=gateway)
+    assert gateway.declared == [{"x": ["y"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_chain_conflicting_with_another_tier_on_the_same_head_is_refused():
+    """The gateway holds one chain per default model; storing a second one would report
+    success for a chain it never gets."""
+    repo = _FakeRepo({"chat": "x", "chat:low": "x"}, {"chat": ["y"]})
+    gateway = _FakeGateway(registered=["x", "y", "z"])
+    with pytest.raises(ValueError, match="one chain per default model"):
+        await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["z"], gateway=gateway)
+    assert repo.replaced == [] and gateway.declared == []
+    # The same chain, or clearing this tier's, is fine.
+    await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["y"], gateway=gateway)
+    await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=[], gateway=gateway)
+
+
+@pytest.mark.asyncio
+async def test_retiring_an_alias_cleans_every_chain_and_declares_once():
+    repo = _FakeRepo({"chat": "claude", "chat:low": "flash"}, {"chat": ["gpt", "old"], "chat:low": ["old"]})
+    gateway = _FakeGateway(registered=["claude", "gpt", "flash"])
+    changed = await _service(repo).drop_alias_from_chains(_DB, None, "old", gateway=gateway)
+    assert sorted(changed) == ["chat", "chat:low"]
+    assert gateway.declared == [{"claude": ["gpt"], "flash": []}]
 
 
 # --- validation and repair added after review round 1 -------------------------------------
@@ -231,7 +287,7 @@ async def test_an_embedding_alias_cannot_be_a_chat_tier_fallback():
     gateway = _ModeGateway({"claude": "chat", "titan-embed": "embedding"})
     with pytest.raises(ValueError, match="Not chat models"):
         await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["titan-embed"], gateway=gateway)
-    assert gateway.set_calls == []
+    assert gateway.declared == []
 
 
 @pytest.mark.asyncio
@@ -250,9 +306,9 @@ async def test_promoting_an_alias_already_in_the_chain_removes_it_from_the_chain
     rejects a chain containing the head."""
     repo = _FakeRepo({"chat": "gpt"}, {"chat": ["gpt", "vertex"]})  # 'gpt' just promoted
     gateway = _FakeGateway(registered=["gpt", "claude", "vertex"])
-    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway, previous_head="claude")
+    await _service(repo).reproject_tier_group(_DB, "chat", actor=None, gateway=gateway)
 
-    assert gateway.set_calls == [("gpt", ["vertex"])]  # no self-reference projected
+    assert gateway.declared == [{"gpt": ["vertex"]}]  # no self-reference projected
     assert repo.chains["chat"] == ["vertex"]  # and the correction is persisted, not just projected
     assert repo.replaced == [("chat", ["vertex"])]
 
@@ -265,3 +321,79 @@ async def test_an_explicit_null_mode_is_treated_as_chat():
     gateway = _ModeGateway({"claude": "chat", "gpt": None})
     models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["gpt"], gateway=gateway)
     assert models == ["claude", "gpt"]
+
+
+# --- utility-tier guard (nannos#318) -------------------------------------------------------
+# The registration probe records ``response_format`` support on the deployment. chat and
+# chat:low carry every classifier/summarizer call, which has no other shape, so a model
+# recorded as rejecting it must not become their default or enter their chain.
+
+_NO_RF = {"nannos_capabilities": {"response_format": False, "forced_tool_choice": False}}
+
+
+class _FakeGatewayWithInfo(_FakeGateway):
+    def __init__(self, infos: dict):
+        super().__init__(registered=list(infos))
+        self.infos = infos
+
+    async def list_models(self):
+        return [{"model_name": name, "model_info": {"mode": "chat", **info}} for name, info in self.infos.items()]
+
+
+class _RecordingRepo(_FakeRepo):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.upserts: list[tuple[str, str]] = []
+
+    async def upsert_default(self, db, actor, role, model_alias):
+        self.upserts.append((role, model_alias))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["chat", "chat:low"])
+async def test_a_model_that_rejects_response_format_cannot_default_a_utility_tier(role):
+    repo = _RecordingRepo()
+    with pytest.raises(ValueError, match="rejects response_format"):
+        await _service(repo).set_default(_DB, actor=None, role=role, model_alias="sonnet-5-5", model_info=_NO_RF)
+    assert repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_model_may_default_chat_premium_or_an_unprobed_deployment_any_tier():
+    """chat:premium is a user's explicit pick and carries no utility traffic; an unprobed
+    deployment has no record, and the absence of a record is not a verdict."""
+    repo = _RecordingRepo()
+    svc = _service(repo)
+    await svc.set_default(_DB, actor=None, role="chat:premium", model_alias="sonnet-5-5", model_info=_NO_RF)
+    await svc.set_default(_DB, actor=None, role="chat", model_alias="legacy", model_info={})
+    await svc.set_default(_DB, actor=None, role="chat:low", model_alias="old", model_info=None)
+    assert [r for r, _ in repo.upserts] == ["chat:premium", "chat", "chat:low"]
+
+
+@pytest.mark.asyncio
+async def test_a_utility_tier_chain_refuses_a_member_that_rejects_response_format():
+    """Failover lands the tier's traffic — utility calls included — on the member."""
+    repo = _FakeRepo({"chat:low": "flash"})
+    gateway = _FakeGatewayWithInfo({"flash": {}, "sonnet-5-5": _NO_RF, "gpt": {"nannos_capabilities": {"response_format": True}}})
+    with pytest.raises(ValueError, match="rejects response_format"):
+        await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["gpt", "sonnet-5-5"], gateway=gateway)
+    assert gateway.declared == [] and repo.replaced == []
+
+    models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["gpt"], gateway=gateway)
+    assert models == ["flash", "gpt"]
+
+
+@pytest.mark.asyncio
+async def test_a_premium_chain_takes_the_same_member():
+    repo = _FakeRepo({"chat:premium": "opus"})
+    gateway = _FakeGatewayWithInfo({"opus": {}, "sonnet-5-5": _NO_RF})
+    models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat:premium", aliases=["sonnet-5-5"], gateway=gateway)
+    assert models == ["opus", "sonnet-5-5"]
+
+
+@pytest.mark.asyncio
+async def test_utility_tiers_served_by_names_default_and_chain_membership():
+    repo = _FakeRepo({"chat": "sonnet-5-5", "chat:low": "flash", "chat:premium": "sonnet-5-5"}, {"chat:low": ["sonnet-5-5"]})
+    served = await _service(repo).utility_tiers_served_by(_DB, "sonnet-5-5")
+    assert served == ["chat (default)", "chat:low (failover chain)"]
+    assert await _service(repo).utility_tiers_served_by(_DB, "other") == []

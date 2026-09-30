@@ -4037,7 +4037,28 @@ export const editModelApiV1AdminModelGatewayModelsModelIdPutMutation = (options?
 /**
  * Test Model
  *
- * Run a cheap call (chat or embedding, per the model's mode) to validate it end to end.
+ * Validate a model end to end: an embedding ping, or for chat the harness's request
+ * shapes (nannos#318), streamed as NDJSON so the console can show what is being probed.
+ *
+ * Events, one JSON object per line:
+ *
+ * * ``{"type": "plan", "shapes": [{"shape", "label"}]}`` — chat only, first: what will be
+ * reported, in order.
+ * * ``{"type": "step", "shape", "step", "label"}`` — right before each probe request.
+ * * ``{"type": "result", "shape", "label", "ok", "error", "unavoidable", "note",
+ * "inconclusive"}`` — a shape's verdict.
+ * * ``{"type": "done", "status": "ok", "model_name", "probe", "recorded", "warning"}`` — last,
+ * on success; ``probe``/``recorded`` as ``ModelGatewayService.test_model`` returns them.
+ * * ``{"type": "error", "status_code": 502, "detail"}`` — last, when the test fails: a chat
+ * model that rejects a shape every agent turn sends (the provider's reason), a probe that
+ * could not reach the model, or an embedding ping that failed. The HTTP status is 200
+ * either way — it is sent before the verdict exists.
+ *
+ * ``warning`` names the utility tiers (chat, chat:low) this alias already serves as default
+ * or chain member when the probe has just recorded that it rejects ``response_format``: the
+ * guard on those roles only runs when a role is assigned, and a re-test of a sitting default
+ * is the one way a model gets there with that record. The probe does not change which tiers
+ * the alias serves, so they are read before it starts, on the request's own session.
  */
 export const testModelApiV1AdminModelGatewayModelsModelNameTestPostMutation = (options?: Partial<Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData>>): UseMutationOptions<unknown, TestModelApiV1AdminModelGatewayModelsModelNameTestPostError, Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData>> => {
     const mutationOptions: UseMutationOptions<unknown, TestModelApiV1AdminModelGatewayModelsModelNameTestPostError, Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData>> = {

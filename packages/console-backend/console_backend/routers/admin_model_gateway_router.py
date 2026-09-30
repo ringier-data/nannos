@@ -7,11 +7,13 @@ never usable before it is billable. Master-key access stays server-side.
 """
 
 import asyncio
+import json
 import logging
 from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from ..config import config
 from ..db.session import DbSession
@@ -37,6 +39,7 @@ from ..services.model_defaults_service import ModelDefaultsService
 from ..services.model_gateway_service import ModelGatewayError, ModelGatewayService
 from ..services.rate_card_service import resolve_deployment_provider, route_family
 from ..services.rate_card_service import runtime_billing_provider as _billing_provider
+from ringier_a2a_sdk.model_capabilities import RESPONSE_FORMAT, capabilities_of
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +254,7 @@ async def list_models(request: Request, db: DbSession, user: User = Depends(requ
                 supports_reasoning=info.get("supports_reasoning"),
                 supports_vision=info.get("supports_vision"),
                 supports_web_search=info.get("supports_web_search"),
+                capabilities=capabilities_of(info) or None,
             )
         )
     return out
@@ -501,14 +505,81 @@ async def edit_model(
     )
 
 
-@router.post("/models/{model_name}/test")
-async def test_model(model_name: str, request: Request, user: User = Depends(require_admin)):
-    """Run a cheap call (chat or embedding, per the model's mode) to validate it end to end."""
-    try:
-        await get_model_gateway_service(request).test_model(model_name)
-    except ModelGatewayError as e:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Test call failed: {e}")
-    return {"status": "ok", "model_name": model_name}
+#: Probe runs outlive a closed dialog: the probe finishes and writes its record whether or not
+#: anyone still reads the stream. Rolling back a refused registration is the client's step (as
+#: before streaming), so a tab closed mid-probe leaves a refused model registered, for the admin
+#: to remove. Held here so the event loop does not garbage-collect a task nobody awaits any more.
+_background_probes: set[asyncio.Task] = set()
+
+
+@router.post(
+    "/models/{model_name}/test",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/x-ndjson": {}}, "description": "Probe progress, then the verdict"}},
+)
+async def test_model(
+    model_name: str,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_admin),
+    model_id: str | None = Query(None, description="Deployment id to record the probe on (from register/edit)"),
+):
+    """Validate a model end to end: an embedding ping, or for chat the harness's request
+    shapes (nannos#318), streamed as NDJSON so the console can show what is being probed.
+
+    Events, one JSON object per line:
+
+    * ``{"type": "plan", "shapes": [{"shape", "label"}]}`` — chat only, first: what will be
+      reported, in order.
+    * ``{"type": "step", "shape", "step", "label"}`` — right before each probe request.
+    * ``{"type": "result", "shape", "label", "ok", "error", "unavoidable", "note",
+      "inconclusive"}`` — a shape's verdict.
+    * ``{"type": "done", "status": "ok", "model_name", "probe", "recorded", "warning"}`` — last,
+      on success; ``probe``/``recorded`` as ``ModelGatewayService.test_model`` returns them.
+    * ``{"type": "error", "status_code": 502, "detail"}`` — last, when the test fails: a chat
+      model that rejects a shape every agent turn sends (the provider's reason), a probe that
+      could not reach the model, or an embedding ping that failed. The HTTP status is 200
+      either way — it is sent before the verdict exists.
+
+    ``warning`` names the utility tiers (chat, chat:low) this alias already serves as default
+    or chain member when the probe has just recorded that it rejects ``response_format``: the
+    guard on those roles only runs when a role is assigned, and a re-test of a sitting default
+    is the one way a model gets there with that record. The probe does not change which tiers
+    the alias serves, so they are read before it starts, on the request's own session."""
+    served = await get_model_defaults_service(request).utility_tiers_served_by(db, model_name)
+    service = get_model_gateway_service(request)
+    events: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def run() -> None:
+        try:
+            result = await service.test_model(model_name, model_id=model_id, on_progress=events.put_nowait)
+            warning: str | None = None
+            if served and ((result.get("probe") or {}).get("capabilities") or {}).get(RESPONSE_FORMAT) is False:
+                warning = (
+                    f"'{model_name}' rejects response_format but serves {', '.join(served)}; every classifier "
+                    f"and summarizer call on those tiers will fail until another model takes its place."
+                )
+            events.put_nowait({"type": "done", "status": "ok", "model_name": model_name, **result, "warning": warning})
+        except ModelGatewayError as e:
+            events.put_nowait({"type": "error", "status_code": 502, "detail": f"Test call failed: {e}"})
+        except Exception:
+            logger.exception("[probe] %s: test failed unexpectedly", model_name)
+            events.put_nowait({"type": "error", "status_code": 500, "detail": "Test failed unexpectedly — see the console-backend log"})
+        finally:
+            events.put_nowait(None)
+
+    task = asyncio.create_task(run())
+    _background_probes.add(task)
+    task.add_done_callback(_background_probes.discard)
+
+    async def stream():
+        while (event := await events.get()) is not None:
+            yield json.dumps(event, default=str) + "\n"
+
+    # No buffering between here and the browser: each line is a progress update.
+    return StreamingResponse(
+        stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 @router.post("/models/{model_id}/default")
@@ -530,13 +601,12 @@ async def set_default(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model id {model_id} not registered")
     alias = model.get("model_name") or ""
     defaults_service = get_model_defaults_service(request)
-    # Captured before the write: a tier's failover chain is keyed proxy-side on the tier's
-    # head alias, so re-pointing the default has to move the chain off the old head.
-    previous_head = (await defaults_service.get_all(db)).get(body.role)
     # The audited repository records this fleet-wide config change and commits
     # (AGENTS.md: admin writes go through the repository pattern → automatic audit).
     try:
-        await defaults_service.set_default(db, actor=user, role=body.role, model_alias=alias)
+        await defaults_service.set_default(
+            db, actor=user, role=body.role, model_alias=alias, model_info=model.get("model_info") or {}
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     logger.info("Set '%s' (id=%s) as default for role=%s by %s", alias, model_id, body.role, user.id)
@@ -552,7 +622,6 @@ async def set_default(
             body.role,
             actor=user,
             gateway=get_model_gateway_service(request),
-            previous_head=previous_head,
         )
     except ModelGatewayError as e:
         # The gateway's own message is logged, never returned: it can carry transport detail
@@ -617,6 +686,9 @@ async def list_tier_groups(request: Request, db: DbSession, user: User = Depends
     defaults_service = get_model_defaults_service(request)
     gateway = get_model_gateway_service(request)
     groups = await defaults_service.get_all_tier_groups(db)
+    # What the gateway was told, per head: on a head shared by two tiers the tier with an empty
+    # stored chain carries the other's, so its own stored chain is the wrong thing to compare.
+    declared = await defaults_service.declared_chains(db)
 
     async def _live(head: str) -> list[str]:
         return await gateway.get_fallbacks(head)
@@ -635,7 +707,7 @@ async def list_tier_groups(request: Request, db: DbSession, user: User = Depends
         elif isinstance(live, BaseException):
             logger.warning("Could not read live fallbacks for '%s': %s", head, live)
             state, mismatch = "unknown", None
-        elif live == stored:
+        elif live == declared.get(head, []):
             state, mismatch = "in_sync", None
         else:
             state, mismatch = "drifted", list(live)

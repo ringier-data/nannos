@@ -6,11 +6,16 @@ list/register/update/delete models, read capability+cost for pre-fill, and a
 cheap test completion for the validation step.
 """
 
+import asyncio
 import logging
 import os
 import time
+from collections.abc import Callable
+from datetime import datetime, timezone
 
 import httpx
+
+from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of
 
 from ..config import config
 
@@ -114,6 +119,19 @@ def thinking_levels_for(info: dict) -> list[str]:
     # An empty list reads as "no thinking" to the sub-agent write guard, which would switch thinking
     # off on the next save; a model that says it reasons keeps the portable tiers instead.
     return levels or [e for e in _EFFORT_ORDER if e in _PORTABLE_EFFORTS]
+
+
+# The litellm_params that decide which endpoint answers: a record measured on one of them says
+# nothing about another (a model's capabilities can differ by region or project).
+_ROUTE_PARAMS = ("model", "aws_region_name", "vertex_location", "vertex_project", "api_base")
+
+
+def _same_route(a: dict, b: dict) -> bool:
+    return all(a.get(k) == b.get(k) for k in _ROUTE_PARAMS)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 class ModelGatewayError(Exception):
@@ -275,6 +293,18 @@ class ModelGatewayService:
         private key, never serialized to the API client) so the endpoint can surface it rather
         than reporting a clean success.
         """
+        # The registration probe's record (nannos#318) is not part of the edit form, so a
+        # rebuilt model_info would silently drop it — and every reader would then treat a model
+        # known to reject `response_format` as unprobed. Carry it over while the deployment
+        # still points at the same provider model; a re-routed edit is a different model, and
+        # the edit flow re-tests anyway.
+        model_info = dict(model_info or {})
+        if CAPABILITIES_KEY not in model_info:
+            previous = await self.get_model_by_id(model_id)
+            if previous and _same_route((previous.get("litellm_params") or {}), litellm_params):
+                inherited = capabilities_of(previous.get("model_info"))
+                if inherited:
+                    model_info[CAPABILITIES_KEY] = inherited
         result = await self.register_model(model_name, litellm_params, model_info)
         try:
             await self.delete_model(model_id)
@@ -300,39 +330,27 @@ class ModelGatewayService:
     # chain is projected here rather than written into the proxy's config.yaml, which in
     # Nannos deliberately carries no model knowledge at all.
 
-    async def set_fallbacks(self, model_name: str, fallback_models: list[str]) -> None:
-        """Declare ``model_name``'s failover chain on the proxy (replaces any existing one).
+    async def set_all_fallbacks(self, chains: dict[str, list[str]]) -> None:
+        """Declare EVERY failover chain on the proxy in one write (head alias → chain).
 
-        An empty chain deletes the entry rather than writing a zero-length one: LiteLLM
-        treats a declared-but-empty fallback list as a configured route, and a stale empty
-        route is harder to notice than no route.
+        Whole-list, never one entry at a time. LiteLLM keeps all chains in a single
+        ``router_settings`` row and its per-entry ``POST``/``DELETE /fallback`` endpoints
+        read-modify-write that row through a config cache (60 s TTL) they never invalidate:
+        for up to a minute after any chain change, the next per-entry write edited a stale
+        copy — a delete 404'd while the chain stayed live, and a second add silently erased
+        the first. ``/config/update`` reads the row uncached, replaces the ``fallbacks`` key
+        wholesale, invalidates the cache and reloads the router, so the proxy ends up holding
+        exactly what our table says — the table being the only authority (ADR-0014).
+
+        An empty chain is left out rather than declared empty: LiteLLM treats a
+        declared-but-empty list as a configured route, and a stale empty route is harder to
+        notice than none.
         """
-        if not fallback_models:
-            await self.delete_fallbacks(model_name)
-            return
         await self._request(
             "POST",
-            "/fallback",
-            json={
-                "model": model_name,
-                "fallback_models": list(fallback_models),
-                "fallback_type": "general",
-            },
+            "/config/update",
+            json={"router_settings": {"fallbacks": [{head: list(chain)} for head, chain in chains.items() if chain]}},
         )
-
-    async def delete_fallbacks(self, model_name: str) -> None:
-        """Remove ``model_name``'s failover chain; a proxy holding no such entry is success.
-
-        The 404 must be swallowed here rather than by ``optional=True``, which only lowers the
-        log level and still raises. LiteLLM 404s ``DELETE /fallback/{model}`` when no entry
-        exists — the common case (a tier whose chain has always been empty), and letting that
-        propagate would abort a reprojection before it re-declared the new head's chain.
-        """
-        try:
-            await self._request("DELETE", f"/fallback/{model_name}", optional=True)
-        except ModelGatewayError as e:
-            if e.status_code != 404:
-                raise
 
     async def get_fallbacks(self, model_name: str) -> list[str]:
         """The failover chain the proxy currently holds for ``model_name`` (live, uncached).
@@ -480,8 +498,10 @@ class ModelGatewayService:
         """
         return next((c for c in await self.get_catalog() if c.get("model_id") == model_id), None)
 
-    async def test_model(self, model_name: str) -> dict:
-        """Cheap call to validate a freshly-registered model end to end.
+    async def test_model(
+        self, model_name: str, model_id: str | None = None, on_progress: Callable[[dict], object] | None = None
+    ) -> dict:
+        """Validate a freshly-registered model end to end, and record what it accepts.
 
         Mode-aware: embedding models must be hit on /v1/embeddings — sending them a chat
         payload makes the provider reject the request (e.g. Bedrock Titan errors on the
@@ -491,22 +511,152 @@ class ModelGatewayService:
         adapter would send for this model's profile, so a model that rejects the Matryoshka
         param fails *registration* instead of passing here and crashing mid-sync (the runtime
         always requested ``dimensions`` regardless of provider — the gap this closes).
+
+        Shape-aware for chat (nannos#318): not a ping but the request shapes the harness
+        actually sends (``ringier_a2a_sdk.model_capabilities``). A shape every agent turn
+        needs failing raises — registration is refused with the provider's reason; one that
+        could not be measured (a transient failure) raises too, as "inconclusive", so nothing
+        is written and the admin re-tests. A shape the harness can route around failing is
+        recorded on the deployment's ``model_info`` under ``nannos_capabilities`` for the
+        gateway hook and the app to act on, and the report is returned for the admin.
+
+        ``model_id`` pins the deployment the record is written to (the caller has it right
+        after register/edit); otherwise the alias's listed deployment is used. The gateway
+        serves ``/model/info`` from per-replica memory, so a just-registered alias can be
+        missing from one replica's list for a moment — the lookup retries briefly.
+
+        ``on_progress`` receives the probe's progress events (``ProbeProgress``), preceded by one
+        ``{"type": "plan", "shapes": [...]}`` for a chat model; nothing for an embedding ping.
+
+        Returns ``{"probe": ProbeReport.as_dict(), "recorded": bool | None}`` for chat
+        models, ``{}`` for embeddings. ``recorded`` is None for a deployment that has no
+        writable record (config-defined), False when the write failed or was skipped: the
+        probe's verdict still stands, but every reader will treat the deployment as unprobed.
         """
         from ringier_a2a_sdk.embeddings import _DEFAULT_DIMENSION, profile_for
+        from ringier_a2a_sdk.model_capabilities import PROBED_AT, SHAPE_LABELS, planned_shapes, probe_model
 
-        model = await self.get_model(model_name)
-        mode = ((model or {}).get("model_info") or {}).get("mode", "chat")
+        # The pinned deployment's own model_info when the caller has the id (an edit can leave
+        # the old deployment listed under the alias for a moment); the alias's otherwise.
+        model = (await self._get_model_by_id_with_retry(model_id)) if model_id else None
+        if model is None:
+            if model_id:
+                logger.warning("[probe] %s: pinned deployment %s not listed; falling back to the alias", model_name, model_id)
+            model = await self._get_model_with_retry(model_name)
+        info = (model or {}).get("model_info") or {}
+        mode = info.get("mode", "chat")
         if mode == "embedding":
             litellm_model = ((model or {}).get("litellm_params") or {}).get("model")
-            provider = ((model or {}).get("model_info") or {}).get("litellm_provider")
+            provider = info.get("litellm_provider")
             body: dict = {"model": model_name, "input": ["ping"]}
             if profile_for(litellm_model, provider).send_dimensions:
                 body["dimensions"] = _DEFAULT_DIMENSION
-            return await self._request("POST", "/v1/embeddings", json=body, timeout=30.0, expose_error=True)
-        return await self._request(
-            "POST",
-            "/v1/chat/completions",
-            json={"model": model_name, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 4},
-            timeout=30.0,
-            expose_error=True,
+            await self._request("POST", "/v1/embeddings", json=body, timeout=30.0, expose_error=True)
+            return {}
+
+        supports_reasoning = bool(info.get("supports_reasoning"))
+        if on_progress is not None:
+            shapes = planned_shapes(supports_reasoning=supports_reasoning)
+            on_progress({"type": "plan", "shapes": [{"shape": sh, "label": SHAPE_LABELS[sh]} for sh in shapes]})
+        report = await probe_model(
+            model_name, self._probe_call, supports_reasoning=supports_reasoning, on_progress=on_progress
         )
+        if report.rejected:
+            reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.rejected)
+            raise ModelGatewayError(f"the model rejects request shapes every agent turn sends — {reasons}")
+        if report.inconclusive_unavoidable:
+            reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.inconclusive_unavoidable)
+            raise ModelGatewayError(f"inconclusive — the probe could not reach the model; re-run the test ({reasons})")
+
+        target_id = model_id or info.get("id")
+        # Only a DB deployment can be written (LiteLLM rejects /model/update on config-defined
+        # ones) — judged on the looked-up deployment, not on whether an id was passed. `None`
+        # = not recordable at all (the console shows no warning); False = a write that failed.
+        target_is_db = bool(info.get("db_model")) if info.get("id") == target_id else True
+        recorded: bool | None = False
+        if not target_id:
+            # Nothing found at all (alias still unlisted on this replica): a writable deployment
+            # was left unprobed, which is a failed write, not "nothing to write".
+            logger.warning("[probe] %s: no deployment found to record on", model_name)
+        elif not target_is_db:
+            logger.info("[probe] %s has no DB deployment to record on: %s", model_name, report.capabilities)
+            recorded = None
+        else:
+            try:
+                # Measured keys overwrite. A shape that was attempted but inconclusive keeps
+                # whatever is recorded (noise must not erase knowledge, ADR-0015); a shape not
+                # attempted (thinking replay on a model no longer declared to think) is dropped
+                # — but only when the probe ran on the target's own declaration; on the alias
+                # fallback the whole prior is kept. The prior is read right before the write.
+                kept: dict = {}
+                if report.inconclusive or info.get("id") != target_id:
+                    src = await self._get_model_by_id_with_retry(target_id)
+                    if src is None:
+                        raise ModelGatewayError("stored record unreadable; not overwriting it with a partial probe")
+                    if not (src.get("model_info") or {}).get("db_model"):
+                        # A stale row id that resolved to a config-defined deployment: nothing to write.
+                        logger.info("[probe] %s: %s is not a DB deployment; not recorded", model_name, target_id)
+                        return {"probe": report.as_dict(), "recorded": None}
+                    prior = dict(capabilities_of(src.get("model_info")))
+                    prior.pop(PROBED_AT, None)
+                    if info.get("id") == target_id:
+                        kept = {k: v for k, v in prior.items() if k in report.inconclusive_keys}
+                    else:
+                        kept = prior
+                await self.record_capabilities(
+                    target_id, {**kept, **report.capabilities, PROBED_AT: _utc_now_iso()}
+                )
+                recorded = True
+            except ModelGatewayError as e:
+                # The verdict is sound; only the write failed. A passing model must not be
+                # reported as failed (the console would roll its registration back).
+                logger.warning("[probe] %s: capabilities not recorded on %s: %s", model_name, target_id, e)
+        return {"probe": report.as_dict(), "recorded": recorded}
+
+    async def _get_model_with_retry(self, model_name: str, attempts: int = 4, delay: float = 0.75) -> dict | None:
+        """``get_model`` with a short retry for a deployment registered a moment ago."""
+        return await self._retry_lookup(lambda: self.get_model(model_name), attempts, delay)
+
+    async def _get_model_by_id_with_retry(self, model_id: str, attempts: int = 4, delay: float = 0.75) -> dict | None:
+        return await self._retry_lookup(lambda: self.get_model_by_id(model_id), attempts, delay)
+
+    async def _retry_lookup(self, lookup, attempts: int, delay: float) -> dict | None:
+        for i in range(attempts):
+            model = await lookup()
+            if model is not None:
+                return model
+            if i + 1 < attempts:
+                self._invalidate_list_cache()
+                await asyncio.sleep(delay)
+        return None
+
+    async def _probe_call(self, body: dict) -> object:
+        """One probe request on the inference API. JSON for a plain body, the raw SSE text for
+        a streaming one (``probe_model`` assembles it). Provider errors surface as
+        ``ProbeCallError`` with the provider's reason — safe, the body carries no credentials."""
+        from ringier_a2a_sdk.model_capabilities import ProbeCallError
+
+        try:
+            client = self._get_client()
+            resp = await client.request(
+                "POST", f"{self._base_url}/v1/chat/completions", headers=self._headers(), json=body, timeout=60.0
+            )
+            resp.raise_for_status()
+            return resp.text if body.get("stream") else resp.json()
+        except httpx.HTTPStatusError as e:
+            detail = _provider_error_detail(e.response) or f"gateway returned {e.response.status_code}"
+            raise ProbeCallError(detail, status=e.response.status_code) from e
+        except httpx.HTTPError as e:
+            raise ProbeCallError(f"gateway unreachable: {type(e).__name__}") from e
+
+    async def record_capabilities(self, model_id: str, capabilities: dict) -> None:
+        """Store the probe's flags under ``model_info.nannos_capabilities`` on a deployment.
+
+        ``PATCH /model/{id}/update`` merges ``model_info`` (stored ∪ patch) on the proxy
+        version the gateway pins, so the deployment's other keys survive and its id is kept —
+        unlike ``update_model``, which re-registers. The router picks the change up on its
+        next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
+        await self._request(
+            "PATCH", f"/model/{model_id}/update", json={"model_info": {"id": model_id, CAPABILITIES_KEY: capabilities}}
+        )
+        self._invalidate_list_cache()

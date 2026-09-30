@@ -293,6 +293,10 @@ export type AvailableModel = {
      */
     thinking_levels?: Array<string> | null;
     /**
+     * Thinking Always On
+     */
+    thinking_always_on?: boolean;
+    /**
      * Is Default
      */
     is_default?: boolean;
@@ -2292,6 +2296,12 @@ export type GatewayModel = {
      * Supports Web Search
      */
     supports_web_search?: boolean | null;
+    /**
+     * Capabilities
+     */
+    capabilities?: {
+        [key: string]: unknown;
+    } | null;
 };
 
 /**
@@ -13916,7 +13926,14 @@ export type TestModelApiV1AdminModelGatewayModelsModelNameTestPostData = {
          */
         model_name: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Model Id
+         *
+         * Deployment id to record the probe on (from register/edit)
+         */
+        model_id?: string | null;
+    };
     url: '/api/v1/admin/model-gateway/models/{model_name}/test';
 };
 
@@ -13931,7 +13948,7 @@ export type TestModelApiV1AdminModelGatewayModelsModelNameTestPostError = TestMo
 
 export type TestModelApiV1AdminModelGatewayModelsModelNameTestPostResponses = {
     /**
-     * Successful Response
+     * Probe progress, then the verdict
      */
     200: unknown;
 };

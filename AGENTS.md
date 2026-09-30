@@ -79,11 +79,22 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
   - **Usage Event** — one LLM call's measured consumption (token breakdown + model + Cost Attribution), captured proxy-side via a LiteLLM `CustomLogger`; costed against the Rate Card.
   - **Tier group** — a chat tier's *ordered* models: the tier's default (`model_defaults`)
 followed by its failover chain (`model_tier_fallbacks`). Declared by console-backend onto the proxy
-via `POST /fallback` (DB-backed, so it cannot drift against the DB-backed model registry) and
+as one whole-list `POST /config/update` of every chain (DB-backed, so it cannot drift against the
+DB-backed model registry; never the per-entry `/fallback` endpoints, which read-modify-write a
+60 s-cached copy of all chains and lose edits made in quick succession) and
 executed entirely by LiteLLM — retries, cooldown, then the next alias. Within-tier only: a tier
 never chains into another tier, because availability and cost/quality are separate axes. Chat tiers
 only — an embedding call must never fail over, since a second model's vectors insert cleanly into
 the same pgvector index and silently degrade search. See ADR-0014.
+  - **Capability record** — what the registration probe *saw* a deployment accept
+(`model_info.nannos_capabilities`: forced tool choice, `response_format`, the thinking-off switch —
+`always_on` when nothing turns thinking off, which the console shows as a locked Extended
+Thinking toggle, or `unsupported` when every off request is refused — and thinking replay), as opposed to a Capability the admin declares or a provider map claims. The shapes
+probed are the harness's own, defined once in `ringier_a2a_sdk.model_capabilities` and read by
+console-backend (writes the record), the gateway hook (rewrites a request for the deployment that
+serves it) and agent-common (picks the shape the alias accepts). An unavoidable shape failing refuses
+registration; a routable one failing is recorded. A model recorded as rejecting `response_format`
+cannot default `chat`/`chat:low` or join their chains. See ADR-0015.
   - **Failover** vs **alias degradation** — *failover* is runtime (a live alias's provider is
 unavailable, the gateway tries the next in the tier group); *alias degradation* is registry-time (a
 **retired** alias resolves to its tier's successor, `resolve_chat_model`). Both were once called

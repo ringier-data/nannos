@@ -23,6 +23,7 @@ from agent_common.models.base import ModelType, ThinkingLevel
 # The gateway URL/key resolvers live in the SDK (the lowest shared layer) so the chat path
 # (here) and the embeddings path (ringier_a2a_sdk.embeddings) can never drift — notably the
 # virtual-key default, which used to be copy-pasted and silently 401'd a path when missed.
+from ringier_a2a_sdk.model_capabilities import capabilities_of, thinking_off_sendable
 from ringier_a2a_sdk.utils.gateway import gateway_api_key as _gateway_api_key
 from ringier_a2a_sdk.utils.gateway import gateway_base_url as _gateway_base_url
 
@@ -261,6 +262,43 @@ _NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
 # the router picks. The gateway adds it per deployment (litellm-proxy `_apply_thinking_off`);
 # never add `thinking` here.
 REASONING_OFF = "none"
+
+
+def reasoning_effort_for_choice(thinking_level: ThinkingLevel | str | None, model_type: ModelType | None) -> str | None:
+    """The `create_model(reasoning_effort=...)` override for a USER's thinking choice — the
+    orchestrator's Extended Thinking setting, a sub-agent's config, a scheduled job's agent.
+
+    Extended Thinking is opt-in: no level means the user left it off, and off has to be SENT.
+    Sending nothing inherits the provider default, which is thinking ON on the Claude 5
+    family and Gemini 3 — a toggle that read "off" and did nothing. `REASONING_OFF` lets the
+    gateway apply the serving deployment's recorded off switch (`between_tools` on Claude 5.5;
+    the lowest level where nothing turns it off, which the console then shows as always on).
+
+    Only where the probe record of EVERY deployment behind the (resolved) alias says how thinking
+    goes off (`thinking_off_sendable`).
+    Unprobed, the gateway would fall back to its family heuristic, which sends Claude 5.5 a
+    `thinking: disabled` it rejects; and where every off request was refused (`unsupported`)
+    sending one is that refusal. In both cases nothing is sent — the provider default, exactly
+    as before the record existed. A failover attempt reads its own deployment's record in the
+    gateway hook.
+
+    Utility callers (risk scoring, HITL resume, indexing, tool selection) are NOT user choices
+    and keep passing no level; converting them is the quality judgement `create_fast_model`
+    describes."""
+    if thinking_level or not model_type:
+        return None
+    # The record of the model that will run: a retired alias degrades to its successor in
+    # create_model, so the lookup must follow it, not read the dead alias's absent record.
+    try:
+        model_type = resolve_chat_model(model_type)
+    except Exception:  # noqa: BLE001 — no registry to resolve against: decide on the alias as given
+        pass
+    records = get_deployment_capabilities(model_type)
+    # Every deployment under the alias, since load-balancing may pick any of them: one unprobed
+    # config twin of a probed DB deployment keeps the whole alias on the provider default.
+    if records and all(thinking_off_sendable(caps) for caps in records):
+        return REASONING_OFF
+    return None
 
 
 def get_reasoning_effort(thinking_level: ThinkingLevel | None, model_type: ModelType | None = None) -> str | None:
@@ -544,7 +582,7 @@ def _refresh_if_stale(cache: dict, key: str, ttl: float, cond: threading.Conditi
         threading.Thread(target=_run, daemon=True, name=f"refresh-{key}").start()
 
 
-_GW_CACHE: dict = {"ts": _COLD, "models": {}, "inflight": False, "last_error": None}
+_GW_CACHE: dict = {"ts": _COLD, "models": {}, "deployment_capabilities": {}, "inflight": False, "last_error": None}
 _GW_TTL = 60.0
 _GW_LOCK = threading.Condition()
 
@@ -559,7 +597,24 @@ def _fetch_gateway_models() -> dict[str, dict]:
     )
     with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310 (internal cluster URL)
         data = json.loads(resp.read()).get("data", [])
-    return {m["model_name"]: (m.get("model_info") or {}) for m in data if m.get("model_name")}
+    # /model/info lists deployments; an alias can have several (load-balancing, or the same
+    # name in the proxy config and the DB). One model_info per alias, by the console picker's
+    # rule: the DB deployment wins — it carries the console's label, prices and probe record —
+    # else the first listed. Every deployment's probe record is kept too, for decisions that
+    # must hold on whichever one the router picks (see get_deployment_capabilities).
+    out: dict[str, dict] = {}
+    every: dict[str, list[dict]] = {}
+    for m in data:
+        name = m.get("model_name")
+        if not name:
+            continue
+        info = m.get("model_info") or {}
+        every.setdefault(name, []).append(capabilities_of(info))
+        held = out.get(name)
+        if held is None or (not held.get("db_model") and info.get("db_model")):
+            out[name] = info
+    _GW_CACHE["deployment_capabilities"] = every
+    return out
 
 
 def _gateway_models() -> dict[str, dict]:
@@ -842,6 +897,23 @@ def get_model_provider(model_type: ModelType) -> str:
     """
     info = _gateway_models().get(model_type) or {}
     return info.get("litellm_provider") or ""
+
+
+def get_deployment_capabilities(model_type: ModelType) -> list[dict]:
+    """The probe record of EVERY deployment serving this alias, one dict each (``{}`` for an
+    unprobed one); ``[]`` for an unknown alias. For a decision that must hold on whichever
+    deployment the router picks — load-balancing spreads an alias's traffic across all of them."""
+    _gateway_models()  # refresh the snapshot the list is built alongside
+    return list((_GW_CACHE.get("deployment_capabilities") or {}).get(model_type) or [])
+
+
+def get_model_capabilities(model_type: ModelType) -> dict:
+    """What the registration probe saw this alias accept (nannos#318): the
+    ``nannos_capabilities`` dict from the gateway model_info — ``forced_tool_choice``,
+    ``response_format``, ``thinking_off``, ``thinking_replay`` — or ``{}`` for an alias that
+    was never probed or is unknown. Flag names live in
+    ``ringier_a2a_sdk.model_capabilities``; the absence of a flag is not a verdict."""
+    return capabilities_of(_gateway_models().get(model_type) or {})
 
 
 def is_gemini_model(model_type: ModelType) -> bool:

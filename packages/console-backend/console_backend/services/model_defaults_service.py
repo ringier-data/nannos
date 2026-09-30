@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ringier_a2a_sdk.model_capabilities import RESPONSE_FORMAT, capabilities_of
+
 from ..models.model_gateway import CHAT_TIER_ROLES, VALID_ROLES  # single source of truth for role keys
 from ..models.user import User
 
@@ -23,6 +25,29 @@ if TYPE_CHECKING:
     from .model_gateway_service import ModelGatewayService
 
 logger = logging.getLogger(__name__)
+
+
+# The chat tiers whose default (and chain) must serve the harness's utility calls: every
+# classifier, summarizer and risk-scorer call goes to the fast model (chat:low, falling back to
+# chat), and those calls use ``response_format`` with no alternative shape. A model recorded as
+# rejecting it would break each of them the moment it became the tier's default or was failed
+# over to — so it is refused for those tiers, and only those. chat:premium is a user's explicit
+# choice for a conversation and carries no utility traffic.
+UTILITY_TIER_ROLES = ("chat", "chat:low")
+
+
+def _require_utility_capable(role: str, alias: str, model_info: dict | None) -> None:
+    """Refuse ``alias`` for a utility tier when its probe recorded ``response_format`` as
+    unsupported (nannos#318). Unprobed deployments pass: the flag is knowledge, and its
+    absence is not a verdict."""
+    if role not in UTILITY_TIER_ROLES:
+        return
+    if capabilities_of(model_info).get(RESPONSE_FORMAT) is False:
+        raise ValueError(
+            f"'{alias}' cannot serve the '{role}' tier: its registration probe found it rejects "
+            f"response_format, which every classifier and summarizer call on this tier sends. "
+            f"Use it in chat:premium or as a user-selected model instead."
+        )
 
 
 class ModelDefaultsService:
@@ -47,14 +72,32 @@ class ModelDefaultsService:
         """{alias: chat-tier role} — the most-recent chat tier each alias served as default."""
         return await self.repository.get_alias_tiers(db)
 
-    async def set_default(self, db: AsyncSession, actor: User, role: str, model_alias: str) -> None:
+    async def set_default(
+        self, db: AsyncSession, actor: User, role: str, model_alias: str, *, model_info: dict | None = None
+    ) -> None:
         """Upsert the default alias for a role (exactly one alias per role).
 
         Writes through the audited repository so the fleet-wide config change is recorded
-        automatically (AGENTS.md repository-pattern rule)."""
+        automatically (AGENTS.md repository-pattern rule). ``model_info`` is the deployment's
+        gateway model_info, checked by ``_require_utility_capable`` for the tiers the
+        harness's utility calls run on."""
         if role not in VALID_ROLES:
             raise ValueError(f"role must be one of {VALID_ROLES}")
+        _require_utility_capable(role, model_alias, model_info)
         await self.repository.upsert_default(db, actor=actor, role=role, model_alias=model_alias)
+
+    async def utility_tiers_served_by(self, db: AsyncSession, alias: str) -> list[str]:
+        """The utility tiers (see UTILITY_TIER_ROLES) ``alias`` serves right now, as default or
+        as a chain member — what a fresh `response_format: false` record breaks (nannos#318)."""
+        defaults = await self.get_all(db)
+        chains = await self.repository.get_all_fallbacks(db)
+        out = []
+        for role in UTILITY_TIER_ROLES:
+            if defaults.get(role) == alias:
+                out.append(f"{role} (default)")
+            elif alias in chains.get(role, []):
+                out.append(f"{role} (failover chain)")
+        return out
 
     # --- Tier groups (nannos#204) --------------------------------------------------------
 
@@ -98,9 +141,22 @@ class ModelDefaultsService:
         proxy routing somewhere the console cannot show or revoke.
         """
         self._require_chat_tier(role)
-        head = (await self.get_all(db)).get(role)
+        defaults = await self.get_all(db)
+        head = defaults.get(role)
         if not head:
             raise ValueError(f"Tier '{role}' has no default model; set one before giving it a failover chain.")
+        # The gateway holds ONE chain per default alias. A second tier with the same default and
+        # a different non-empty chain cannot both be honoured, so refuse rather than store a
+        # chain the gateway will never hold and report it as saved.
+        if aliases:
+            chains = await self.repository.get_all_fallbacks(db)
+            for other in CHAT_TIER_ROLES:
+                other_chain = chains.get(other) or []
+                if other != role and defaults.get(other) == head and other_chain and other_chain != list(aliases):
+                    raise ValueError(
+                        f"'{head}' also defaults the '{other}' tier, whose chain is {other_chain}. The gateway "
+                        f"holds one chain per default model: give both tiers the same chain, or different defaults."
+                    )
 
         seen: set[str] = {head}
         for alias in aliases:
@@ -134,10 +190,56 @@ class ModelDefaultsService:
             raise ValueError(
                 f"Not chat models: {', '.join(sorted(not_chat))}. A chat tier may only fail over to chat models."
             )
+        # A chain member serves the tier's traffic when failover lands on it — including the
+        # utility calls the tier's default was vetted for.
+        infos = {m.get("model_name"): m.get("model_info") or {} for m in deployments}
+        for alias in aliases:
+            _require_utility_capable(role, alias, infos.get(alias))
 
         await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=aliases)
-        await gateway.set_fallbacks(head, aliases)
+        await self.project_chains(db, gateway=gateway)
         return [head, *aliases]
+
+    async def declared_chains(self, db: AsyncSession) -> dict[str, list[str]]:
+        """What ``project_chains`` declares on the proxy, head alias → chain, without declaring
+        it. The tier listing compares the gateway against this rather than against each tier's
+        own stored chain, which differs from it on a shared head (see ``project_chains``)."""
+        defaults = await self.get_all(db)
+        chains = await self.repository.get_all_fallbacks(db)
+        declared: dict[str, list[str]] = {}
+        for role in CHAT_TIER_ROLES:
+            head = defaults.get(role)
+            if not head:
+                continue
+            chain = [a for a in chains.get(role, []) if a != head]
+            if head in declared:
+                if not declared[head]:
+                    declared[head] = chain
+                elif chain and declared[head] != chain:
+                    logger.warning(
+                        "'%s' defaults several tiers with different chains; the gateway holds one chain per "
+                        "alias, so %s's chain %s is not declared (keeping %s)",
+                        head, role, chain, declared[head],
+                    )
+                continue
+            declared[head] = chain
+        return declared
+
+    async def project_chains(self, db: AsyncSession, *, gateway: "ModelGatewayService") -> dict[str, list[str]]:
+        """Declare every chat tier's chain on the proxy, from our table, in one write.
+
+        The proxy keys a chain on its head alias, so the declaration is head → chain. One
+        alias may default several tiers at once, but the proxy holds one chain per head: a
+        non-empty chain wins over an empty one (a tier with no chain asks for nothing, so it
+        must not cancel another tier's), and between two different non-empty chains — which
+        ``set_failover_chain`` refuses, but a default change can still create — the first tier in
+        ``CHAT_TIER_ROLES`` order wins and the conflict is logged; the tier listing's drift
+        check compares against the declaration, so only a real divergence shows. Returns what
+        was declared.
+        """
+        declared = await self.declared_chains(db)
+        await gateway.set_all_fallbacks(declared)
+        return declared
 
     async def reproject_tier_group(
         self,
@@ -146,40 +248,29 @@ class ModelDefaultsService:
         *,
         actor: User,
         gateway: "ModelGatewayService",
-        previous_head: str | None = None,
     ) -> None:
-        """Re-declare a tier's chain on the proxy after its *default* changed.
+        """Re-declare the chains on the proxy after a tier's *default* changed.
 
-        Proxy-side a chain is keyed on its head alias, so re-pointing a tier's default has to
-        move the chain rather than add a second one. Both halves matter: without re-writing,
-        the new default has no chain at all; without deleting, the old head keeps failing
-        over long after it stopped being anyone's default.
-
-        ``previous_head`` is only dropped when it is no longer the default of *any* chat tier
-        — one alias may serve several tiers at once (``model_alias_tiers`` exists precisely
-        because of that), and deleting its chain would silently disarm the tier still using it.
+        Proxy-side a chain is keyed on its head alias, so re-pointing a tier's default moves
+        the chain: the new head gets it and the old head, unless it still defaults another
+        tier, stops failing over. Both fall out of declaring every chain from our table in one
+        write (``project_chains``) — there is no per-entry delete left to get wrong.
         """
         if role not in CHAT_TIER_ROLES:
             return
-        defaults = await self.get_all(db)
-        head = defaults.get(role)
-        if previous_head and previous_head != head:
-            still_in_use = any(defaults.get(other) == previous_head for other in CHAT_TIER_ROLES)
-            if not still_in_use:
-                await gateway.delete_fallbacks(previous_head)
-        if not head:
-            return
-        chain = await self.repository.get_fallbacks(db, role)
-        if head in chain:
-            # The alias just promoted to default was already in this tier's chain. Projecting it
-            # unchanged would declare a chain that falls back from the head to itself — burning a
-            # hop on the provider just found unavailable — and would then make every later edit
-            # 400, since set_failover_chain rejects a chain containing the head. Drop it here and
-            # persist the correction so the console and the proxy agree.
-            chain = [a for a in chain if a != head]
-            await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=chain)
-            logger.info("Removed newly-promoted default '%s' from the '%s' failover chain", head, role)
-        await gateway.set_fallbacks(head, chain)
+        head = (await self.get_all(db)).get(role)
+        if head:
+            chain = await self.repository.get_fallbacks(db, role)
+            if head in chain:
+                # The alias just promoted to default was already in this tier's chain. Projecting it
+                # unchanged would declare a chain that falls back from the head to itself — burning a
+                # hop on the provider just found unavailable — and would then make every later edit
+                # 400, since set_failover_chain rejects a chain containing the head. Drop it here and
+                # persist the correction so the console and the proxy agree.
+                chain = [a for a in chain if a != head]
+                await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=chain)
+                logger.info("Removed newly-promoted default '%s' from the '%s' failover chain", head, role)
+        await self.project_chains(db, gateway=gateway)
 
     async def drop_alias_from_chains(
         self, db: AsyncSession, actor: User, alias: str, *, gateway: "ModelGatewayService"
@@ -191,11 +282,10 @@ class ModelDefaultsService:
         precisely the moment the primary is down. The stored registration check only catches it
         on the next manual edit, which may never come.
 
-        Returns the roles that changed. Best-effort per tier: one unprojectable tier must not
-        stop the others from being cleaned up.
+        Returns the roles that changed. The table is cleaned up whatever the proxy says; a failed
+        projection is logged and shows as drift until the next chain write re-declares them all.
         """
         chains = await self.repository.get_all_fallbacks(db)
-        defaults = await self.get_all(db)
         changed: list[str] = []
         for role, chain in chains.items():
             if alias not in chain:
@@ -204,13 +294,11 @@ class ModelDefaultsService:
                 db, actor=actor, role=role, aliases=[a for a in chain if a != alias]
             )
             changed.append(role)
-            head = defaults.get(role)
-            if not head:
-                continue
+        if changed:
             try:
-                await gateway.set_fallbacks(head, [a for a in chain if a != alias])
+                await self.project_chains(db, gateway=gateway)
             except ModelGatewayError as e:
-                logger.error("Removed '%s' from tier '%s' but could not reproject: %s", alias, role, e)
+                logger.error("Removed '%s' from tiers %s but could not reproject: %s", alias, changed, e)
         if changed:
             logger.info("Removed retired alias '%s' from failover chains: %s", alias, changed)
         return changed

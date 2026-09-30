@@ -891,6 +891,7 @@ docker run -d --name "$_GW_CONTAINER" \
   --add-host=host.docker.internal:host-gateway \
   -v "$_GW_CONFIG:/etc/litellm/config.yaml:ro" \
   -v "$ROOT_DIR/packages/litellm-proxy/custom_logger.py:/etc/litellm/custom_logger.py:ro" \
+  -v "$ROOT_DIR/packages/ringier-a2a-sdk/ringier_a2a_sdk/model_capabilities.py:/etc/litellm/nannos_model_capabilities.py:ro" \
   -e PYTHONPATH=/etc/litellm \
   -e LITELLM_MASTER_KEY="$LLM_GATEWAY_API_KEY" \
   -e LITELLM_DATABASE_URL="$LITELLM_DATABASE_URL" \

@@ -20,11 +20,27 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import httpx
 from litellm.integrations.custom_logger import CustomLogger
 
 logger = logging.getLogger("nannos.litellm.custom_logger")
+
+# The request shapes the harness sends and the capability flags the registration probe
+# records on a deployment (nannos#318). One file, copied out of ringier-a2a-sdk by the
+# Dockerfile (like the span filter), so the probe that writes the flags and the hook that
+# reads them cannot drift. Unlike the span filter this is load-bearing — without it a
+# recorded limitation could not be honoured — so a missing module fails the proxy at startup.
+from nannos_model_capabilities import (  # noqa: E402
+    THINKING_OFF,
+    THINKING_OFF_UNSUPPORTED,
+    THINKING_REPLAY,
+    capabilities_of,
+    downgrade_forced_tool_choice,
+    is_probe_request,
+    thinking_off_switch,
+)
 
 CONSOLE_BACKEND_URL = os.environ.get("CONSOLE_BACKEND_URL", "").rstrip("/")
 # Shared service secret: the gateway-only ingestion route on
@@ -241,6 +257,24 @@ def _should_strip_cache_control(provider: str | None, model: str) -> bool:
 # claude-… on the anthropic provider), or in `model_info.base_model` for a deployment that
 # names its model only through an ARN or other opaque id.
 _THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
+#: Claude 5.5 and later reject `disabled` and turn thinking off with `between_tools` (measured
+#: by the registration probe on Sonnet 5.5). Used only where a deployment has no record.
+_THINKING_BETWEEN_TOOLS: dict[str, str] = {"type": "between_tools"}
+# "claude-sonnet-5-5", "claude-opus-5", "claude-haiku-4-5-20251001", "claude-3-7-sonnet": the
+# first number after "claude-" (and an optional family word) is the major version, a single
+# digit right after it the minor. A date suffix is not a minor (it has more than one digit).
+_CLAUDE_VERSION = re.compile(r"claude-(?:[a-z]+-)?(\d+)(?:[-.](\d)(?!\d))?")
+
+
+def _claude_version(kwargs: dict) -> tuple[int, int] | None:
+    """(major, minor) of a Claude deployment, read the way _is_claude_deployment recognises one
+    (the model string, then `model_info.base_model`); None when neither names a version."""
+    base_model = (kwargs.get("model_info") or {}).get("base_model") or ""
+    for text in (str(kwargs.get("model") or ""), str(base_model)):
+        match = _CLAUDE_VERSION.search(text.lower())
+        if match:
+            return int(match.group(1)), int(match.group(2) or 0)
+    return None
 
 
 def _is_claude_deployment(kwargs: dict) -> bool:
@@ -249,23 +283,80 @@ def _is_claude_deployment(kwargs: dict) -> bool:
 
 
 def _apply_thinking_off(kwargs: dict) -> bool:
-    """Make a `reasoning_effort: "none"` request carry `thinking: disabled` exactly when its
-    deployment is a Claude model; True when ``kwargs`` changed.
+    """Make a `reasoning_effort: "none"` request carry the deployment's thinking-off switch;
+    True when ``kwargs`` changed.
 
-    Top-level keys only: the router hands each attempt its own shallow copy, so this never
-    leaks into a fallback attempt on another family.
+    The switch is the deployment's, never the caller's: whatever `thinking` arrived is
+    replaced by the right one, or removed where none is accepted (Gemini 3 400s on the pair,
+    and an older client may still send it). Two sources, in order:
+
+    * A probed deployment (nannos#318) carries the answer in `model_info.nannos_capabilities`:
+      `disabled`, `between_tools` (Claude 5.5 and later reject `disabled` and want this),
+      `none` — no explicit switch is taken, so `reasoning_effort: none` goes alone — or
+      `always_on`: nothing turns thinking off (Gemini 3), and the effort alone is the lowest
+      it goes, so it is sent the same way — or `unsupported`: every off request, the effort
+      alone included, was refused (OpenAI-direct gpt-5 / o-series 400 on `none`), so both the
+      effort and any `thinking` are removed and the request goes out with the provider default.
+    * Unprobed: the family heuristic. Claude thinks by default and needs an explicit switch —
+      `disabled`, or `between_tools` on Claude 5.5 and later, which reject `disabled`;
+      everything else gets no `thinking` at all.
+
+    Probe traffic (``is_probe_request``) is exempt — it sends each switch itself to learn
+    which one the deployment takes, and rewriting it would make the probe measure this hook.
+
+    Top-level keys only: the router hands each attempt its own shallow copy of the caller's
+    request, so this never leaks into a fallback attempt on another deployment — which reads
+    its own record.
     """
     if kwargs.get("reasoning_effort") != "none":
         return False
-    if _is_claude_deployment(kwargs):
-        if kwargs.get("thinking") == _THINKING_DISABLED:
-            return False
-        kwargs["thinking"] = dict(_THINKING_DISABLED)
+    caps = capabilities_of(kwargs.get("model_info"))
+    if caps.get(THINKING_OFF) == THINKING_OFF_UNSUPPORTED:
+        del kwargs["reasoning_effort"]
+        kwargs.pop("thinking", None)
         return True
-    if "thinking" in kwargs:
-        del kwargs["thinking"]
-        return True
-    return False
+    if THINKING_OFF in caps:
+        wanted = thinking_off_switch(caps)
+    elif _is_claude_deployment(kwargs):
+        # Unprobed Claude. `disabled` is what Claude 5.0 needs (it thinks by default, #272) but a
+        # 400 on 5.5+, which reaches this branch on a failover to an unprobed chain member or
+        # an unprobed twin deployment of a probed alias — the attempts the app did not decide
+        # for (review round 8). Version-aware, so nothing that works today changes.
+        version = _claude_version(kwargs)
+        wanted = dict(_THINKING_BETWEEN_TOOLS if version and version >= (5, 5) else _THINKING_DISABLED)
+    else:
+        wanted = None
+    if wanted is None:
+        if "thinking" in kwargs:
+            del kwargs["thinking"]
+            return True
+        return False
+    if kwargs.get("thinking") == wanted:
+        return False
+    kwargs["thinking"] = wanted
+    return True
+
+
+def _apply_forced_tool_choice(kwargs: dict) -> bool:
+    """Downgrade a forced `tool_choice` to `auto` on a deployment whose probe recorded that it
+    rejects forcing (nannos#318); True when ``kwargs`` changed.
+
+    LiteLLM does the same downgrade from its own model map (`supports_forced_tool_use`), but
+    only for models the map lists — and the bundled map lags releases while the remote map
+    fetch at startup is best-effort. The probe's record is the authority here: it was made
+    against this deployment, and it is read on the attempt that actually serves the request.
+    Unprobed deployments are left to LiteLLM.
+    """
+    return downgrade_forced_tool_choice(kwargs, capabilities_of(kwargs.get("model_info")))
+
+
+def _rejects_thinking_replay(kwargs: dict) -> bool:
+    """The probe saw this deployment refuse its own signed thinking block replayed with a
+    tool result (nannos#318): the blocks are stripped per attempt, like on a non-Anthropic
+    fallback, and the turn goes on without extended thinking rather than not at all. Stripping
+    is enough because LiteLLM (with ``modify_params: true``, set in litellm-settings.yaml)
+    drops the ``thinking`` parameter itself when no assistant turn carries blocks."""
+    return capabilities_of(kwargs.get("model_info")).get(THINKING_REPLAY) is False
 
 
 def _strip_cache_control_entries(items: list) -> list | None:
@@ -640,8 +731,13 @@ class NannosCostLogger(CustomLogger):
         no longer names the serving deployment, so this is the only place with a correct answer
         (ADR-0014).
 
-        * Thinking off: a `reasoning_effort: "none"` request gets `thinking: disabled` on a
-          Claude deployment and loses any `thinking` elsewhere. See ``_apply_thinking_off``.
+        * Thinking off: a `reasoning_effort: "none"` request gets the deployment's recorded
+          off-switch, or the family heuristic when unprobed. See ``_apply_thinking_off``.
+        * Forced tool_choice: downgraded to `auto` on a deployment recorded as rejecting it.
+          See ``_apply_forced_tool_choice``.
+        * thinking_blocks: also stripped on a deployment recorded as rejecting their replay.
+        * None of the record-driven rewrites touch registration-probe traffic
+          (``is_probe_request``): the probe must measure the deployment, not this hook.
         * Anthropic idiom: `cache_control` markers and top-level `thinking_blocks` are stripped
           from requests routed to a deployment that does not speak it. See
           ``_CACHE_CONTROL_KEEP_RULES`` for the why.
@@ -650,8 +746,15 @@ class NannosCostLogger(CustomLogger):
         None leaves it unchanged. Never raise: each fix is logged and skipped on failure.
         """
         changed = False
+        probe = False
         try:
-            changed = _apply_thinking_off(kwargs)
+            probe = is_probe_request(kwargs)
+        except Exception:  # noqa: BLE001 — a malformed metadata bucket is not probe traffic
+            probe = False
+        try:
+            # The probe measures the deployment as it is; every record-driven rewrite would
+            # make it measure this hook instead (and flip its own record on a re-test).
+            changed = not probe and _apply_thinking_off(kwargs)
         except Exception as e:  # never break the call on a failed fix
             logger.warning(
                 "[thinking] off-switch failed for model=%s: %s",
@@ -660,12 +763,24 @@ class NannosCostLogger(CustomLogger):
                 exc_info=True,
             )
         try:
+            if not probe and _apply_forced_tool_choice(kwargs):
+                changed = True
+                logger.info(
+                    "[tool-choice] forced tool_choice downgraded to 'auto' for model=%s (probe record)",
+                    kwargs.get("model"),
+                )
+        except Exception as e:  # never break the call on a failed fix
+            logger.warning(
+                "[tool-choice] downgrade failed for model=%s: %s", kwargs.get("model"), e, exc_info=True
+            )
+        try:
             model = kwargs.get("model") or ""
             provider = kwargs.get("custom_llm_provider")
             if not provider and "/" in model:
                 provider = model.split("/", 1)[0]
             bare_model = model.split("/", 1)[1] if "/" in model else model
-            if not _speaks_anthropic_idiom(provider, bare_model):
+            speaks_idiom = _speaks_anthropic_idiom(provider, bare_model)
+            if not speaks_idiom:
                 for key in ("messages", "tools"):
                     items = kwargs.get(key)
                     if isinstance(items, list):
@@ -673,6 +788,7 @@ class NannosCostLogger(CustomLogger):
                         if stripped is not None:
                             kwargs[key] = stripped
                             changed = True
+            if not speaks_idiom or (not probe and _rejects_thinking_replay(kwargs)):
                 messages = kwargs.get("messages")
                 if isinstance(messages, list):
                     stripped = _strip_thinking_blocks(messages)
