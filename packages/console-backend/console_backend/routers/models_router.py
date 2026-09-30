@@ -72,6 +72,23 @@ def _to_available(model: dict, default_model: str | None) -> AvailableModel | No
     )
 
 
+def _picker_models(raw: list[dict], default_model: str | None) -> list[AvailableModel]:
+    """One picker entry per alias. /model/info lists deployments, and an alias can have several
+    (LiteLLM load-balancing, or the same name in the proxy config and in the DB); the pickers and
+    the MCP tool select by alias, so a repeat would render twice under one React key. The DB
+    deployment wins — it is the console-managed record carrying the label, prices and probed
+    capabilities — otherwise the first listed. Gateway order is kept."""
+    chosen: dict[str, dict] = {}
+    for d in raw:
+        name = d.get("model_name", "")
+        held = chosen.get(name)
+        if held is None or (
+            not (held.get("model_info") or {}).get("db_model") and (d.get("model_info") or {}).get("db_model")
+        ):
+            chosen[name] = d
+    return [m for m in (_to_available(d, default_model) for d in chosen.values()) if m is not None]
+
+
 @router.get("/models", response_model=list[AvailableModel], tags=["MCP"], operation_id="console_list_models")
 async def list_available_models(request: Request, db: DbSession, _user: User = Depends(require_auth_or_bearer_token)):
     """List the LLM models currently registered on the Model Gateway, with capabilities.
@@ -107,7 +124,7 @@ async def list_available_models(request: Request, db: DbSession, _user: User = D
     # this list to pick a model and configure the default in the first place.
     defaults = await request.app.state.model_defaults_service.get_all(db)
     default_model = defaults.get("chat")
-    models = [m for m in (_to_available(d, default_model) for d in raw) if m is not None]
+    models = _picker_models(raw, default_model)
     _cache["models"] = (now, models)
     return models
 
