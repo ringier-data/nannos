@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ringier_a2a_sdk.model_capabilities import RESPONSE_FORMAT, capabilities_of
+
 from ..models.model_gateway import CHAT_TIER_ROLES, VALID_ROLES  # single source of truth for role keys
 from ..models.user import User
 
@@ -23,6 +25,29 @@ if TYPE_CHECKING:
     from .model_gateway_service import ModelGatewayService
 
 logger = logging.getLogger(__name__)
+
+
+# The chat tiers whose default (and chain) must serve the harness's utility calls: every
+# classifier, summarizer and risk-scorer call goes to the fast model (chat:low, falling back to
+# chat), and those calls use ``response_format`` with no alternative shape. A model recorded as
+# rejecting it would break each of them the moment it became the tier's default or was failed
+# over to — so it is refused for those tiers, and only those. chat:premium is a user's explicit
+# choice for a conversation and carries no utility traffic.
+UTILITY_TIER_ROLES = ("chat", "chat:low")
+
+
+def _require_utility_capable(role: str, alias: str, model_info: dict | None) -> None:
+    """Refuse ``alias`` for a utility tier when its probe recorded ``response_format`` as
+    unsupported (nannos#318). Unprobed deployments pass: the flag is knowledge, and its
+    absence is not a verdict."""
+    if role not in UTILITY_TIER_ROLES:
+        return
+    if capabilities_of(model_info).get(RESPONSE_FORMAT) is False:
+        raise ValueError(
+            f"'{alias}' cannot serve the '{role}' tier: its registration probe found it rejects "
+            f"response_format, which every classifier and summarizer call on this tier sends. "
+            f"Use it in chat:premium or as a user-selected model instead."
+        )
 
 
 class ModelDefaultsService:
@@ -47,13 +72,18 @@ class ModelDefaultsService:
         """{alias: chat-tier role} — the most-recent chat tier each alias served as default."""
         return await self.repository.get_alias_tiers(db)
 
-    async def set_default(self, db: AsyncSession, actor: User, role: str, model_alias: str) -> None:
+    async def set_default(
+        self, db: AsyncSession, actor: User, role: str, model_alias: str, *, model_info: dict | None = None
+    ) -> None:
         """Upsert the default alias for a role (exactly one alias per role).
 
         Writes through the audited repository so the fleet-wide config change is recorded
-        automatically (AGENTS.md repository-pattern rule)."""
+        automatically (AGENTS.md repository-pattern rule). ``model_info`` is the deployment's
+        gateway model_info, checked by ``_require_utility_capable`` for the tiers the
+        harness's utility calls run on."""
         if role not in VALID_ROLES:
             raise ValueError(f"role must be one of {VALID_ROLES}")
+        _require_utility_capable(role, model_alias, model_info)
         await self.repository.upsert_default(db, actor=actor, role=role, model_alias=model_alias)
 
     # --- Tier groups (nannos#204) --------------------------------------------------------
@@ -134,6 +164,11 @@ class ModelDefaultsService:
             raise ValueError(
                 f"Not chat models: {', '.join(sorted(not_chat))}. A chat tier may only fail over to chat models."
             )
+        # A chain member serves the tier's traffic when failover lands on it — including the
+        # utility calls the tier's default was vetted for.
+        infos = {m.get("model_name"): m.get("model_info") or {} for m in deployments}
+        for alias in aliases:
+            _require_utility_capable(role, alias, infos.get(alias))
 
         await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=aliases)
         await gateway.set_fallbacks(head, aliases)

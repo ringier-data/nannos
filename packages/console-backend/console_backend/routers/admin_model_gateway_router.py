@@ -37,6 +37,7 @@ from ..services.model_defaults_service import ModelDefaultsService
 from ..services.model_gateway_service import ModelGatewayError, ModelGatewayService
 from ..services.rate_card_service import resolve_deployment_provider, route_family
 from ..services.rate_card_service import runtime_billing_provider as _billing_provider
+from ringier_a2a_sdk.model_capabilities import capabilities_of
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +252,7 @@ async def list_models(request: Request, db: DbSession, user: User = Depends(requ
                 supports_reasoning=info.get("supports_reasoning"),
                 supports_vision=info.get("supports_vision"),
                 supports_web_search=info.get("supports_web_search"),
+                capabilities=capabilities_of(info) or None,
             )
         )
     return out
@@ -503,12 +505,15 @@ async def edit_model(
 
 @router.post("/models/{model_name}/test")
 async def test_model(model_name: str, request: Request, user: User = Depends(require_admin)):
-    """Run a cheap call (chat or embedding, per the model's mode) to validate it end to end."""
+    """Validate a model end to end: an embedding ping, or for chat the harness's request
+    shapes (nannos#318). A chat model that rejects a shape every agent turn sends fails here
+    (502 with the provider's reason); one that rejects a shape the harness can route around
+    passes with the limitation recorded on its deployment and listed in ``probe``."""
     try:
-        await get_model_gateway_service(request).test_model(model_name)
+        result = await get_model_gateway_service(request).test_model(model_name)
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Test call failed: {e}")
-    return {"status": "ok", "model_name": model_name}
+    return {"status": "ok", "model_name": model_name, **result}
 
 
 @router.post("/models/{model_id}/default")
@@ -536,7 +541,9 @@ async def set_default(
     # The audited repository records this fleet-wide config change and commits
     # (AGENTS.md: admin writes go through the repository pattern → automatic audit).
     try:
-        await defaults_service.set_default(db, actor=user, role=body.role, model_alias=alias)
+        await defaults_service.set_default(
+            db, actor=user, role=body.role, model_alias=alias, model_info=model.get("model_info") or {}
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     logger.info("Set '%s' (id=%s) as default for role=%s by %s", alias, model_id, body.role, user.id)

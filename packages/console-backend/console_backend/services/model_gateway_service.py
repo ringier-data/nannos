@@ -9,6 +9,7 @@ cheap test completion for the validation step.
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 import httpx
 
@@ -114,6 +115,10 @@ def thinking_levels_for(info: dict) -> list[str]:
     # An empty list reads as "no thinking" to the sub-agent write guard, which would switch thinking
     # off on the next save; a model that says it reasons keeps the portable tiers instead.
     return levels or [e for e in _EFFORT_ORDER if e in _PORTABLE_EFFORTS]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 class ModelGatewayError(Exception):
@@ -481,7 +486,7 @@ class ModelGatewayService:
         return next((c for c in await self.get_catalog() if c.get("model_id") == model_id), None)
 
     async def test_model(self, model_name: str) -> dict:
-        """Cheap call to validate a freshly-registered model end to end.
+        """Validate a freshly-registered model end to end, and record what it accepts.
 
         Mode-aware: embedding models must be hit on /v1/embeddings — sending them a chat
         payload makes the provider reject the request (e.g. Bedrock Titan errors on the
@@ -491,22 +496,72 @@ class ModelGatewayService:
         adapter would send for this model's profile, so a model that rejects the Matryoshka
         param fails *registration* instead of passing here and crashing mid-sync (the runtime
         always requested ``dimensions`` regardless of provider — the gap this closes).
+
+        Shape-aware for chat (nannos#318): not a ping but the request shapes the harness
+        actually sends (``ringier_a2a_sdk.model_capabilities``). A shape every agent turn
+        needs failing raises — registration is refused with the provider's reason. A shape
+        the harness can route around failing is recorded on the deployment's ``model_info``
+        under ``nannos_capabilities`` for the gateway hook and the app to act on, and the
+        report is returned for the admin. Returns ``{"probe": ProbeReport.as_dict()}`` for
+        chat models, ``{}`` for embeddings.
         """
         from ringier_a2a_sdk.embeddings import _DEFAULT_DIMENSION, profile_for
+        from ringier_a2a_sdk.model_capabilities import PROBED_AT, probe_model
 
         model = await self.get_model(model_name)
-        mode = ((model or {}).get("model_info") or {}).get("mode", "chat")
+        info = (model or {}).get("model_info") or {}
+        mode = info.get("mode", "chat")
         if mode == "embedding":
             litellm_model = ((model or {}).get("litellm_params") or {}).get("model")
-            provider = ((model or {}).get("model_info") or {}).get("litellm_provider")
+            provider = info.get("litellm_provider")
             body: dict = {"model": model_name, "input": ["ping"]}
             if profile_for(litellm_model, provider).send_dimensions:
                 body["dimensions"] = _DEFAULT_DIMENSION
-            return await self._request("POST", "/v1/embeddings", json=body, timeout=30.0, expose_error=True)
-        return await self._request(
-            "POST",
-            "/v1/chat/completions",
-            json={"model": model_name, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 4},
-            timeout=30.0,
-            expose_error=True,
+            await self._request("POST", "/v1/embeddings", json=body, timeout=30.0, expose_error=True)
+            return {}
+
+        report = await probe_model(model_name, self._probe_call, supports_reasoning=bool(info.get("supports_reasoning")))
+        if report.rejected:
+            reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.rejected)
+            raise ModelGatewayError(f"the model rejects request shapes every agent turn sends — {reasons}")
+        model_id = info.get("id")
+        if model_id and info.get("db_model"):
+            await self.record_capabilities(model_id, {**report.capabilities, PROBED_AT: _utc_now_iso()})
+        else:
+            # Config-defined deployments can't be updated through the management API
+            # (LiteLLM rejects /model/update on them); the report still reaches the admin.
+            logger.info("[probe] %s is not a DB deployment; capabilities not recorded: %s", model_name, report.capabilities)
+        return {"probe": report.as_dict()}
+
+    async def _probe_call(self, body: dict) -> object:
+        """One probe request on the inference API. JSON for a plain body, the raw SSE text for
+        a streaming one (``probe_model`` assembles it). Provider errors surface as
+        ``ProbeCallError`` with the provider's reason — safe, the body carries no credentials."""
+        from ringier_a2a_sdk.model_capabilities import ProbeCallError
+
+        try:
+            client = self._get_client()
+            resp = await client.request(
+                "POST", f"{self._base_url}/v1/chat/completions", headers=self._headers(), json=body, timeout=60.0
+            )
+            resp.raise_for_status()
+            return resp.text if body.get("stream") else resp.json()
+        except httpx.HTTPStatusError as e:
+            detail = _provider_error_detail(e.response) or f"gateway returned {e.response.status_code}"
+            raise ProbeCallError(detail, status=e.response.status_code) from e
+        except httpx.HTTPError as e:
+            raise ProbeCallError(f"gateway unreachable: {type(e).__name__}") from e
+
+    async def record_capabilities(self, model_id: str, capabilities: dict) -> None:
+        """Store the probe's flags under ``model_info.nannos_capabilities`` on a deployment.
+
+        ``PATCH /model/{id}/update`` merges ``model_info`` (stored ∪ patch) on the proxy
+        version the gateway pins, so the deployment's other keys survive and its id is kept —
+        unlike ``update_model``, which re-registers. The router picks the change up on its
+        next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
+        from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY
+
+        await self._request(
+            "PATCH", f"/model/{model_id}/update", json={"model_info": {"id": model_id, CAPABILITIES_KEY: capabilities}}
         )
+        self._invalidate_list_cache()

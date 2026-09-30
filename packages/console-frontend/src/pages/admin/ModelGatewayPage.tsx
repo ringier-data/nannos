@@ -34,6 +34,8 @@ import {
   type ModelRegistrationRequest,
   type RateCardPricingEntry,
   roleLabel,
+  probeLimitations,
+  recordedLimitations,
 } from '@/api/model-gateway';
 import { Button } from '@/components/ui/button';
 import {
@@ -76,6 +78,14 @@ const ALL_INPUT_MODES = ['text', 'image', 'audio', 'video', 'file'] as const;
 
 // The openapi client rejects with the parsed error body (e.g. {detail: "..."}), so
 // String(e) yields "[object Object]". Pull out a human-readable message instead.
+/** One line per shape the probe saw the model reject, with the provider's reason. */
+function limitationsMessage(name: string, limitations: { shape: string; error: string }[]): string {
+  return (
+    `${name} registered with limitations the gateway will route around: ` +
+    limitations.map((l) => `${l.shape.replace(/_/g, ' ')} (${l.error || 'rejected'})`).join('; ')
+  );
+}
+
 function errMsg(e: unknown): string {
   if (typeof e === 'string') return e;
   if (e && typeof e === 'object') {
@@ -480,12 +490,16 @@ export function ModelGatewayPage() {
     mutationFn: async (body: ModelRegistrationRequest) => {
       if (editingId) {
         await updateGatewayModel(editingId, body);
-        await testGatewayModel(body.model_name); // throws on a failed ping
-        return { name: body.model_name, created: null as GatewayModel | null };
+        const test = await testGatewayModel(body.model_name); // throws when the probe refuses
+        return { name: body.model_name, created: null as GatewayModel | null, limitations: probeLimitations(test.probe) };
       }
       const res = await registerGatewayModel(body);
+      let limitations: ReturnType<typeof probeLimitations> = [];
       try {
-        await testGatewayModel(res.model_name); // throws on a failed ping
+        // Throws when the model rejects a shape every agent turn sends; a shape the harness
+        // can route around is recorded on the deployment and reported here instead.
+        const test = await testGatewayModel(res.model_name);
+        limitations = probeLimitations(test.probe);
       } catch (testErr) {
         if (res.gateway_model_id) {
           // Best-effort rollback; surface the original test error regardless of cleanup outcome.
@@ -510,6 +524,14 @@ export function ModelGatewayPage() {
         supports_vision: (body.input_modes ?? []).includes('image'),
         supports_reasoning: (body.model_info?.supports_reasoning as boolean | undefined) ?? false,
         supports_web_search: (body.model_info?.supports_web_search as boolean | undefined) ?? false,
+        // Mirror of the record the probe just wrote (see recordedLimitations for the keys).
+        capabilities: Object.fromEntries(
+          limitations.map((l) =>
+            l.shape === 'thinking_off'
+              ? ['thinking_off', 'none']
+              : [l.shape === 'named_tool_choice' ? 'forced_tool_choice' : l.shape, false],
+          ),
+        ),
       };
       // First model to serve a role becomes the fleet default automatically, so a fresh
       // system always has a fallback without a separate "Make default" click. Only fill
@@ -518,8 +540,11 @@ export function ModelGatewayPage() {
       // low/premium tier is an explicit admin decision, not something a new model silently
       // grabs. Best-effort: a failed set must not roll back the good registration, and it
       // runs after the test so we never default an alias we're about to delete.
+      // A model the probe saw reject response_format can't hold the chat default either: the
+      // server refuses it (every classifier and summarizer call would break), so don't ask.
+      const utilityCapable = !limitations.some((l) => l.shape === 'response_format');
       const autoRoles = defaultRolesFor(created).filter(
-        (role) => role !== 'chat:low' && role !== 'chat:premium',
+        (role) => role !== 'chat:low' && role !== 'chat:premium' && (role !== 'chat' || utilityCapable),
       ).filter(
         (role) => !models.some((m) => (m.default_roles ?? []).includes(role)),
       );
@@ -529,15 +554,16 @@ export function ModelGatewayPage() {
         }
         created.default_roles = autoRoles;
       }
-      return { name: res.model_name, created };
+      return { name: res.model_name, created, limitations };
     },
-    onSuccess: ({ name, created }) => {
+    onSuccess: ({ name, created, limitations }) => {
       const auto = created?.default_roles ?? [];
       toast.success(
         auto.length
           ? `Saved & tested ${name} — set as default ${auto.map((r) => r.replace('_', ' ')).join(' & ')}`
           : `Saved & tested ${name}`,
       );
+      if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
       closeDialog();
       if (created) {
         // The gateway runs multiple replicas and serves /model/info from per-pod memory,
@@ -582,7 +608,12 @@ export function ModelGatewayPage() {
 
   const testMutation = useMutation({
     mutationFn: testGatewayModel,
-    onSuccess: (_r, name) => toast.success(`Test call to ${name} succeeded`),
+    onSuccess: (r, name) => {
+      const limitations = probeLimitations(r.probe);
+      if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
+      else toast.success(r.probe ? `${name} accepts every request shape the harness sends` : `Test call to ${name} succeeded`);
+      invalidate(); // the probe re-recorded the model's capabilities
+    },
     onError: (e: unknown) => toast.error(`Test failed: ${errMsg(e)}`),
   });
 
@@ -778,6 +809,14 @@ export function ModelGatewayPage() {
                     {m.supports_web_search && (
                       <Badge variant="outline">
                         <Globe className="mr-1 h-3 w-3" /> web search
+                      </Badge>
+                    )}
+                    {recordedLimitations(m).length > 0 && (
+                      <Badge
+                        variant="outline"
+                        title={`Registration probe: ${recordedLimitations(m).join(', ')}. The gateway routes around these; the model cannot hold the chat or chat:low default if it rejects response_format.`}
+                      >
+                        <AlertTriangle className="mr-1 h-3 w-3" /> {recordedLimitations(m).join(' · ')}
                       </Badge>
                     )}
                   </div>

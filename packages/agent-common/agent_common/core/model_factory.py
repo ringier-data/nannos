@@ -23,6 +23,7 @@ from agent_common.models.base import ModelType, ThinkingLevel
 # The gateway URL/key resolvers live in the SDK (the lowest shared layer) so the chat path
 # (here) and the embeddings path (ringier_a2a_sdk.embeddings) can never drift — notably the
 # virtual-key default, which used to be copy-pasted and silently 401'd a path when missed.
+from ringier_a2a_sdk.model_capabilities import capabilities_of
 from ringier_a2a_sdk.utils.gateway import gateway_api_key as _gateway_api_key
 from ringier_a2a_sdk.utils.gateway import gateway_base_url as _gateway_base_url
 
@@ -842,6 +843,15 @@ def get_model_provider(model_type: ModelType) -> str:
     """
     info = _gateway_models().get(model_type) or {}
     return info.get("litellm_provider") or ""
+
+
+def get_model_capabilities(model_type: ModelType) -> dict:
+    """What the registration probe saw this alias accept (nannos#318): the
+    ``nannos_capabilities`` dict from the gateway model_info — ``forced_tool_choice``,
+    ``response_format``, ``thinking_off``, ``thinking_replay`` — or ``{}`` for an alias that
+    was never probed or is unknown. Flag names live in
+    ``ringier_a2a_sdk.model_capabilities``; the absence of a flag is not a verdict."""
+    return capabilities_of(_gateway_models().get(model_type) or {})
 
 
 def is_gemini_model(model_type: ModelType) -> bool:

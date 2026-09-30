@@ -339,3 +339,143 @@ async def test_catalog_is_cached_across_calls(monkeypatch):
     await svc.get_catalog()
     await svc.get_catalog()
     assert len(calls) == 1
+
+
+# --- registration probe (nannos#318) ---------------------------------------------------------
+# The chat test is no longer a ping: it replays the harness's request shapes (defined once in
+# ringier_a2a_sdk.model_capabilities) and records what the model accepts on its deployment.
+# Pinned here: the refuse/record split, where the record goes, and what the admin gets back.
+
+
+def _chat_deployment(model_id="dep-1", db_model=True, **info):
+    return {
+        "data": [
+            {
+                "model_name": "m",
+                "litellm_params": {"model": "bedrock/eu.anthropic.claude-sonnet-5-5"},
+                "model_info": {"mode": "chat", "id": model_id, "db_model": db_model, **info},
+            }
+        ]
+    }
+
+
+def _probe_gateway(svc, monkeypatch, *, reject=None, deployment=None):
+    """Fake the management API (list + patch) and the inference API the probe hits."""
+    from ringier_a2a_sdk.model_capabilities import ProbeCallError
+
+    calls: dict = {"patched": [], "probe_bodies": []}
+
+    async def _fake_request(method, path, **kwargs):
+        if path == "/model/info":
+            return deployment or _chat_deployment()
+        if method == "PATCH":
+            calls["patched"].append((path, kwargs.get("json")))
+            return {}
+        raise AssertionError(f"unexpected management call {method} {path}")
+
+    async def _fake_probe_call(body):
+        calls["probe_bodies"].append(body)
+        reason = reject(body) if reject else None
+        if reason:
+            raise ProbeCallError(reason, status=400)
+        if body.get("stream"):
+            return 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\ndata: [DONE]\n'
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {}}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+    monkeypatch.setattr(svc, "_probe_call", _fake_probe_call)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_chat_test_records_the_probe_on_the_deployment_and_returns_the_report(svc, monkeypatch):
+    calls = _probe_gateway(svc, monkeypatch)
+
+    result = await svc.test_model("m")
+
+    assert result["probe"]["rejected"] == []
+    caps = result["probe"]["capabilities"]
+    assert caps["forced_tool_choice"] is True and caps["response_format"] is True
+    # Stored via the merging PATCH, keyed on the deployment id, with a probe timestamp.
+    (path, body), = calls["patched"]
+    assert path == "/model/dep-1/update"
+    assert body["model_info"]["id"] == "dep-1"
+    assert body["model_info"]["nannos_capabilities"]["forced_tool_choice"] is True
+    assert body["model_info"]["nannos_capabilities"]["probed_at"]
+    # Every probe request names the alias under test and carries no credentials.
+    assert {b["model"] for b in calls["probe_bodies"]} == {"m"}
+    assert not any("api_key" in b for b in calls["probe_bodies"])
+
+
+@pytest.mark.asyncio
+async def test_a_routable_limitation_registers_with_the_limitation_recorded(svc, monkeypatch):
+    """Sonnet 5.5's case: forced tool_choice and response_format 400. The model must still
+    register — the record is what lets the hook and the app route around it."""
+
+    def _reject(body):
+        if body.get("tool_choice") not in (None, "auto") or body.get("response_format"):
+            return 'tool_choice: type "tool" and "any" are not supported for this model'
+        return None
+
+    calls = _probe_gateway(svc, monkeypatch, reject=_reject)
+    result = await svc.test_model("m")
+    caps = calls["patched"][0][1]["model_info"]["nannos_capabilities"]
+    assert caps["forced_tool_choice"] is False and caps["response_format"] is False
+    assert {r["shape"] for r in result["probe"]["results"] if not r["ok"]} == {
+        "forced_tool_choice",
+        "named_tool_choice",
+        "response_format",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_unavoidable_shape_failing_refuses_registration_with_the_providers_reason(svc, monkeypatch):
+    calls = _probe_gateway(svc, monkeypatch, reject=lambda b: "streaming is not supported" if b.get("stream") else None)
+    with pytest.raises(ModelGatewayError, match="streaming_tools: streaming is not supported"):
+        await svc.test_model("m")
+    assert calls["patched"] == []  # nothing recorded on a refused model
+
+
+@pytest.mark.asyncio
+async def test_a_config_defined_deployment_is_probed_but_not_written(svc, monkeypatch):
+    """LiteLLM rejects /model/update on config-defined deployments; the report still
+    reaches the admin, and the absence of a record keeps the hook on its heuristics."""
+    calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(db_model=False))
+    result = await svc.test_model("m")
+    assert "probe" in result
+    assert calls["patched"] == []
+
+
+@pytest.mark.asyncio
+async def test_thinking_shapes_follow_the_admins_reasoning_declaration(svc, monkeypatch):
+    calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(supports_reasoning=True))
+    await svc.test_model("m")
+    assert any(b.get("reasoning_effort") == "low" for b in calls["probe_bodies"])
+
+    calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(supports_reasoning=False))
+    await svc.test_model("m")
+    assert not any(b.get("reasoning_effort") == "low" for b in calls["probe_bodies"])
+
+
+@pytest.mark.asyncio
+async def test_probe_call_surfaces_the_provider_reason_and_raw_stream_text(svc, monkeypatch):
+    """The one place the probe touches the wire: JSON for a plain body, raw SSE text for a
+    stream, and the provider's message (never a credential-bearing body) on a 4xx."""
+    import httpx
+    import json
+    from ringier_a2a_sdk.model_capabilities import ProbeCallError
+
+    def _handler(request):
+        body = json.loads(request.content)
+        if body.get("stream"):
+            return httpx.Response(200, text="data: {}\ndata: [DONE]\n")
+        if body.get("tool_choice") == "required":
+            return httpx.Response(400, json={"error": {"message": "forced tool use rejected"}})
+        return httpx.Response(200, json={"choices": []})
+
+    monkeypatch.setattr(svc, "_client", httpx.AsyncClient(transport=httpx.MockTransport(_handler)))
+    assert await svc._probe_call({"model": "m", "stream": True}) == "data: {}\ndata: [DONE]\n"
+    assert await svc._probe_call({"model": "m"}) == {"choices": []}
+    with pytest.raises(ProbeCallError, match="forced tool use rejected") as e:
+        await svc._probe_call({"model": "m", "tool_choice": "required"})
+    assert e.value.status == 400

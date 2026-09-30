@@ -22,7 +22,9 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
-from agent_common.core.model_factory import get_model_provider
+from ringier_a2a_sdk.model_capabilities import FORCED_TOOL_CHOICE
+
+from agent_common.core.model_factory import get_model_capabilities, get_model_provider
 
 from .stream_events import (
     TaskResponseData,
@@ -102,6 +104,8 @@ def select_response_format(
         when tool_choice forces tool use"); only OpenAI/Azure are known-safe to force.
         Anything else — Gemini, or an unknown/cold-cache provider (``""``) — is treated
         as unsafe, so a stale gateway snapshot can never force a forbidden combination.
+      - The alias's registration probe recorded ``forced_tool_choice: false`` (nannos#318):
+        the model rejects ``tool_choice: required`` outright, thinking or not.
       - ``has_builtin_tools=True`` (the orchestrator passes this for Gemini): a forced
         function-call ``tool_choice`` can't coexist with server-side built-in tools that must
         run before the final response. The orchestrator no longer binds those tools, but it
@@ -120,6 +124,13 @@ def select_response_format(
     is_openai_like = "openai" in provider or provider.startswith("azure")
 
     if has_builtin_tools or (thinking_enabled and not is_openai_like):
+        return None, True
+    # The registration probe (nannos#318) recorded that this alias rejects a forced
+    # tool_choice (Claude 5.5 and later do). The gateway would downgrade the force to `auto`
+    # on the serving deployment anyway; choosing the bind-as-tool path here makes the request
+    # the shape the model accepts from the start, and keeps the app's decision honest with
+    # what the hook will do. Unprobed aliases keep the ToolStrategy default.
+    if model_type and get_model_capabilities(model_type).get(FORCED_TOOL_CHOICE) is False:
         return None, True
     return ToolStrategy(schema=schema), False
 

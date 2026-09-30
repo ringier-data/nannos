@@ -43,6 +43,12 @@ COPY custom_logger.py /etc/litellm/custom_logger.py
 # swamps every trace that crosses the gateway.
 COPY --from=ringier-a2a-sdk ringier_a2a_sdk/telemetry/span_filter.py /etc/litellm/nannos_span_filter.py
 
+# The harness's request shapes and the capability flags the registration probe records on a
+# deployment (nannos#318): console-backend writes them, this hook reads them off the serving
+# deployment. Same single-file copy, same no-intra-package-imports rule — and unlike the span
+# filter it is load-bearing, so custom_logger imports it unguarded.
+COPY --from=ringier-a2a-sdk ringier_a2a_sdk/model_capabilities.py /etc/litellm/nannos_model_capabilities.py
+
 # So `callbacks: custom_logger.proxy_handler_instance` resolves — and so
 # `import nannos_span_filter` does.
 ENV PYTHONPATH=/etc/litellm

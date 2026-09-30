@@ -265,3 +265,71 @@ async def test_an_explicit_null_mode_is_treated_as_chat():
     gateway = _ModeGateway({"claude": "chat", "gpt": None})
     models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat", aliases=["gpt"], gateway=gateway)
     assert models == ["claude", "gpt"]
+
+
+# --- utility-tier guard (nannos#318) -------------------------------------------------------
+# The registration probe records ``response_format`` support on the deployment. chat and
+# chat:low carry every classifier/summarizer call, which has no other shape, so a model
+# recorded as rejecting it must not become their default or enter their chain.
+
+_NO_RF = {"nannos_capabilities": {"response_format": False, "forced_tool_choice": False}}
+
+
+class _FakeGatewayWithInfo(_FakeGateway):
+    def __init__(self, infos: dict):
+        super().__init__(registered=list(infos))
+        self.infos = infos
+
+    async def list_models(self):
+        return [{"model_name": name, "model_info": {"mode": "chat", **info}} for name, info in self.infos.items()]
+
+
+class _RecordingRepo(_FakeRepo):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.upserts: list[tuple[str, str]] = []
+
+    async def upsert_default(self, db, actor, role, model_alias):
+        self.upserts.append((role, model_alias))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["chat", "chat:low"])
+async def test_a_model_that_rejects_response_format_cannot_default_a_utility_tier(role):
+    repo = _RecordingRepo()
+    with pytest.raises(ValueError, match="rejects response_format"):
+        await _service(repo).set_default(_DB, actor=None, role=role, model_alias="sonnet-5-5", model_info=_NO_RF)
+    assert repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_model_may_default_chat_premium_or_an_unprobed_deployment_any_tier():
+    """chat:premium is a user's explicit pick and carries no utility traffic; an unprobed
+    deployment has no record, and the absence of a record is not a verdict."""
+    repo = _RecordingRepo()
+    svc = _service(repo)
+    await svc.set_default(_DB, actor=None, role="chat:premium", model_alias="sonnet-5-5", model_info=_NO_RF)
+    await svc.set_default(_DB, actor=None, role="chat", model_alias="legacy", model_info={})
+    await svc.set_default(_DB, actor=None, role="chat:low", model_alias="old", model_info=None)
+    assert [r for r, _ in repo.upserts] == ["chat:premium", "chat", "chat:low"]
+
+
+@pytest.mark.asyncio
+async def test_a_utility_tier_chain_refuses_a_member_that_rejects_response_format():
+    """Failover lands the tier's traffic — utility calls included — on the member."""
+    repo = _FakeRepo({"chat:low": "flash"})
+    gateway = _FakeGatewayWithInfo({"flash": {}, "sonnet-5-5": _NO_RF, "gpt": {"nannos_capabilities": {"response_format": True}}})
+    with pytest.raises(ValueError, match="rejects response_format"):
+        await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["gpt", "sonnet-5-5"], gateway=gateway)
+    assert gateway.set_calls == [] and repo.replaced == []
+
+    models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["gpt"], gateway=gateway)
+    assert models == ["flash", "gpt"]
+
+
+@pytest.mark.asyncio
+async def test_a_premium_chain_takes_the_same_member():
+    repo = _FakeRepo({"chat:premium": "opus"})
+    gateway = _FakeGatewayWithInfo({"opus": {}, "sonnet-5-5": _NO_RF})
+    models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat:premium", aliases=["sonnet-5-5"], gateway=gateway)
+    assert models == ["opus", "sonnet-5-5"]

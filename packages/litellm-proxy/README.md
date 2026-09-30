@@ -26,6 +26,17 @@ model registration, and proxy-side cost capture. Apps talk to it via
     ("`additionalProperties: object` is not supported. Please set to false"); LangChain's
     native `ProviderStrategy`/`AutoStrategy` path emits non-strict schemas that omit it.
     Fixing it here covers every structured-output path uniformly and is safe across providers.
+  - **Capability record** (`async_pre_call_deployment_hook`, nannos#318 / ADR-0015): the
+    registration probe stores what each deployment accepts under `model_info.nannos_capabilities`,
+    and the hook reads it off the deployment the router picked for *this attempt* — the fallback's
+    own record on a failover attempt. A forced `tool_choice` is downgraded to `auto` where the record
+    says forcing is rejected (LiteLLM's map-driven downgrade covers only models its map lists, and
+    the map fetch is best-effort); `reasoning_effort: none` gets the recorded thinking-off switch
+    (`disabled`, `between_tools`, or none at all) instead of the family heuristic. A `thinking` the
+    caller sent is left alone — only the probe sends one. The flag names and the rewrite helpers live
+    in `ringier_a2a_sdk/model_capabilities.py`, copied into the image as
+    `nannos_model_capabilities.py`; unlike the span filter the import is unguarded, since without it
+    a recorded limitation could not be honoured.
   - **Gemini cache_control stripping** (`async_pre_call_deployment_hook`): removes
     Anthropic-style `cache_control` markers from requests routed to gemini-format models
     (`_CACHE_CONTROL_KEEP_RULES`, an allowlist keyed provider + model markers — Anthropic-format

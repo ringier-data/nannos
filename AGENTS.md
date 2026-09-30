@@ -84,6 +84,14 @@ executed entirely by LiteLLM — retries, cooldown, then the next alias. Within-
 never chains into another tier, because availability and cost/quality are separate axes. Chat tiers
 only — an embedding call must never fail over, since a second model's vectors insert cleanly into
 the same pgvector index and silently degrade search. See ADR-0014.
+  - **Capability record** — what the registration probe *saw* a deployment accept
+(`model_info.nannos_capabilities`: forced tool choice, `response_format`, the thinking-off switch,
+thinking replay), as opposed to a Capability the admin declares or a provider map claims. The shapes
+probed are the harness's own, defined once in `ringier_a2a_sdk.model_capabilities` and read by
+console-backend (writes the record), the gateway hook (rewrites a request for the deployment that
+serves it) and agent-common (picks the shape the alias accepts). An unavoidable shape failing refuses
+registration; a routable one failing is recorded. A model recorded as rejecting `response_format`
+cannot default `chat`/`chat:low` or join their chains. See ADR-0015.
   - **Failover** vs **alias degradation** — *failover* is runtime (a live alias's provider is
 unavailable, the gateway tries the next in the tier group); *alias degradation* is registry-time (a
 **retired** alias resolves to its tier's successor, `resolve_chat_model`). Both were once called

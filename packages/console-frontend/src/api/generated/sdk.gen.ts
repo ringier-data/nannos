@@ -1986,7 +1986,10 @@ export const editModelApiV1AdminModelGatewayModelsModelIdPut = <ThrowOnError ext
 /**
  * Test Model
  *
- * Run a cheap call (chat or embedding, per the model's mode) to validate it end to end.
+ * Validate a model end to end: an embedding ping, or for chat the harness's request
+ * shapes (nannos#318). A chat model that rejects a shape every agent turn sends fails here
+ * (502 with the provider's reason); one that rejects a shape the harness can route around
+ * passes with the limitation recorded on its deployment and listed in ``probe``.
  */
 export const testModelApiV1AdminModelGatewayModelsModelNameTestPost = <ThrowOnError extends boolean = false>(options: Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData, ThrowOnError>) => (options.client ?? client).post<TestModelApiV1AdminModelGatewayModelsModelNameTestPostResponses, TestModelApiV1AdminModelGatewayModelsModelNameTestPostErrors, ThrowOnError>({ url: '/api/v1/admin/model-gateway/models/{model_name}/test', ...options });
 

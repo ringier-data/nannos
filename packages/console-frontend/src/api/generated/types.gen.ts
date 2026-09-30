@@ -2292,6 +2292,12 @@ export type GatewayModel = {
      * Supports Web Search
      */
     supports_web_search?: boolean | null;
+    /**
+     * Capabilities
+     */
+    capabilities?: {
+        [key: string]: unknown;
+    } | null;
 };
 
 /**

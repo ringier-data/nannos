@@ -4037,7 +4037,10 @@ export const editModelApiV1AdminModelGatewayModelsModelIdPutMutation = (options?
 /**
  * Test Model
  *
- * Run a cheap call (chat or embedding, per the model's mode) to validate it end to end.
+ * Validate a model end to end: an embedding ping, or for chat the harness's request
+ * shapes (nannos#318). A chat model that rejects a shape every agent turn sends fails here
+ * (502 with the provider's reason); one that rejects a shape the harness can route around
+ * passes with the limitation recorded on its deployment and listed in ``probe``.
  */
 export const testModelApiV1AdminModelGatewayModelsModelNameTestPostMutation = (options?: Partial<Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData>>): UseMutationOptions<unknown, TestModelApiV1AdminModelGatewayModelsModelNameTestPostError, Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData>> => {
     const mutationOptions: UseMutationOptions<unknown, TestModelApiV1AdminModelGatewayModelsModelNameTestPostError, Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData>> = {
