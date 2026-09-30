@@ -71,6 +71,16 @@ THINKING_REPLAY = "thinking_replay"
 #: ISO-8601 timestamp of the probe that wrote the flags.
 PROBED_AT = "probed_at"
 
+#: Which record key each routable probe shape decides. Whoever merges a partial probe over a
+#: stored record needs this to keep exactly the keys of the shapes that were inconclusive.
+SHAPE_KEYS: dict[str, str] = {
+    "forced_tool_choice": FORCED_TOOL_CHOICE,
+    "named_tool_choice": FORCED_TOOL_CHOICE,
+    "response_format": RESPONSE_FORMAT,
+    "thinking_off": THINKING_OFF,
+    "thinking_replay": THINKING_REPLAY,
+}
+
 THINKING_OFF_DISABLED = "disabled"
 THINKING_OFF_BETWEEN_TOOLS = "between_tools"
 THINKING_OFF_NONE = "none"
@@ -173,6 +183,12 @@ class ProbeReport:
     @property
     def inconclusive(self) -> list[ShapeResult]:
         return [r for r in self.results if r.inconclusive]
+
+    @property
+    def inconclusive_keys(self) -> set[str]:
+        """Record keys whose shape was attempted but could not be measured: a stored value for
+        them must survive this probe's write."""
+        return {SHAPE_KEYS[r.shape] for r in self.inconclusive if r.shape in SHAPE_KEYS}
 
     @property
     def inconclusive_unavoidable(self) -> list[ShapeResult]:

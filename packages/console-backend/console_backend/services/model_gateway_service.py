@@ -14,14 +14,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from ringier_a2a_sdk.model_capabilities import (
-    CAPABILITIES_KEY,
-    FORCED_TOOL_CHOICE,
-    RESPONSE_FORMAT,
-    THINKING_OFF,
-    THINKING_REPLAY,
-    capabilities_of,
-)
+from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of
 
 from ..config import config
 
@@ -134,20 +127,6 @@ _ROUTE_PARAMS = ("model", "aws_region_name", "vertex_location", "vertex_project"
 
 def _same_route(a: dict, b: dict) -> bool:
     return all(a.get(k) == b.get(k) for k in _ROUTE_PARAMS)
-
-
-# Probe shape → the record key it decides (ringier_a2a_sdk.model_capabilities).
-_SHAPE_KEYS = {
-    "forced_tool_choice": FORCED_TOOL_CHOICE,
-    "named_tool_choice": FORCED_TOOL_CHOICE,
-    "response_format": RESPONSE_FORMAT,
-    "thinking_off": THINKING_OFF,
-    "thinking_replay": THINKING_REPLAY,
-}
-
-
-def _keys_for_shapes(shapes) -> set[str]:
-    return {_SHAPE_KEYS[s] for s in shapes if s in _SHAPE_KEYS}
 
 
 def _utc_now_iso() -> str:
@@ -555,10 +534,10 @@ class ModelGatewayService:
         serves ``/model/info`` from per-replica memory, so a just-registered alias can be
         missing from one replica's list for a moment — the lookup retries briefly.
 
-        Returns ``{"probe": ProbeReport.as_dict(), "recorded": bool}`` for chat models,
-        ``{}`` for embeddings. ``recorded`` is False when the record could not be written
-        (a config-defined deployment, an unknown id, or a failed PATCH): the probe's verdict
-        still stands, but every reader will treat the deployment as unprobed.
+        Returns ``{"probe": ProbeReport.as_dict(), "recorded": bool | None}`` for chat
+        models, ``{}`` for embeddings. ``recorded`` is None for a deployment that has no
+        writable record (config-defined), False when the write failed or was skipped: the
+        probe's verdict still stands, but every reader will treat the deployment as unprobed.
         """
         from ringier_a2a_sdk.embeddings import _DEFAULT_DIMENSION, profile_for
         from ringier_a2a_sdk.model_capabilities import PROBED_AT, probe_model
@@ -590,21 +569,32 @@ class ModelGatewayService:
             raise ModelGatewayError(f"inconclusive — the probe could not reach the model; re-run the test ({reasons})")
 
         target_id = model_id or info.get("id")
-        recorded = False
         # Only a DB deployment can be written (LiteLLM rejects /model/update on config-defined
-        # ones) — judged on the looked-up deployment, not on whether an id was passed.
+        # ones) — judged on the looked-up deployment, not on whether an id was passed. `None`
+        # = not recordable at all (the console shows no warning); False = a write that failed.
         target_is_db = bool(info.get("db_model")) if info.get("id") == target_id else True
-        if target_id and target_is_db:
+        recorded: bool | None = False
+        if not target_id or not target_is_db:
+            logger.info("[probe] %s has no DB deployment to record on: %s", model_name, report.capabilities)
+            recorded = None
+        else:
             try:
-                # Measured keys overwrite; a shape that was attempted but inconclusive keeps
-                # whatever was recorded before (noise must not erase knowledge, ADR-0015); a
-                # shape not attempted at all (thinking replay on a model no longer declared to
-                # think) is dropped. The stored record comes from the target deployment itself.
-                src = model if info.get("id") == target_id else await self._get_model_by_id_with_retry(target_id)
-                if src is None and report.inconclusive:
-                    raise ModelGatewayError("stored record unreadable; not overwriting it with a partial probe")
-                prior = dict(capabilities_of((src or {}).get("model_info")))
-                kept = {k: v for k, v in prior.items() if k in _keys_for_shapes(r.shape for r in report.inconclusive)}
+                # Measured keys overwrite. A shape that was attempted but inconclusive keeps
+                # whatever is recorded (noise must not erase knowledge, ADR-0015); a shape not
+                # attempted (thinking replay on a model no longer declared to think) is dropped
+                # — but only when the probe ran on the target's own declaration; on the alias
+                # fallback the whole prior is kept. The prior is read right before the write.
+                kept: dict = {}
+                if report.inconclusive or info.get("id") != target_id:
+                    src = await self._get_model_by_id_with_retry(target_id)
+                    if src is None:
+                        raise ModelGatewayError("stored record unreadable; not overwriting it with a partial probe")
+                    prior = dict(capabilities_of(src.get("model_info")))
+                    prior.pop(PROBED_AT, None)
+                    if info.get("id") == target_id:
+                        kept = {k: v for k, v in prior.items() if k in report.inconclusive_keys}
+                    else:
+                        kept = prior
                 await self.record_capabilities(
                     target_id, {**kept, **report.capabilities, PROBED_AT: _utc_now_iso()}
                 )
@@ -613,10 +603,6 @@ class ModelGatewayService:
                 # The verdict is sound; only the write failed. A passing model must not be
                 # reported as failed (the console would roll its registration back).
                 logger.warning("[probe] %s: capabilities not recorded on %s: %s", model_name, target_id, e)
-        else:
-            # Config-defined deployments can't be updated through the management API
-            # (LiteLLM rejects /model/update on them); the report still reaches the admin.
-            logger.info("[probe] %s has no DB deployment id; capabilities not recorded: %s", model_name, report.capabilities)
         return {"probe": report.as_dict(), "recorded": recorded}
 
     async def _get_model_with_retry(self, model_name: str, attempts: int = 4, delay: float = 0.75) -> dict | None:

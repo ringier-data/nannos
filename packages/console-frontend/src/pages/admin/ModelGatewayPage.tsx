@@ -507,14 +507,14 @@ export function ModelGatewayPage() {
           created: null as GatewayModel | null,
           limitations: probeLimitations(test.probe),
           inconclusive: probeInconclusive(test.probe),
-          recorded: test.recorded ?? false,
+          recorded: test.recorded ?? null,
           warning: test.warning ?? null,
         };
       }
       const res = await registerGatewayModel(body);
       let limitations: ReturnType<typeof probeLimitations> = [];
       let inconclusive: ReturnType<typeof probeInconclusive> = [];
-      let recorded = false;
+      let recorded: boolean | null = null;
       let warning: string | null = null;
       try {
         // Throws when the model rejects a shape every agent turn sends (or could not be
@@ -523,7 +523,7 @@ export function ModelGatewayPage() {
         const test = await testGatewayModel(res.model_name, res.gateway_model_id);
         limitations = probeLimitations(test.probe);
         inconclusive = probeInconclusive(test.probe);
-        recorded = test.recorded ?? false;
+        recorded = test.recorded ?? null;
         warning = test.warning ?? null;
       } catch (testErr) {
         if (res.gateway_model_id) {
@@ -551,7 +551,7 @@ export function ModelGatewayPage() {
         supports_web_search: (body.model_info?.supports_web_search as boolean | undefined) ?? false,
         // Mirror of the record the probe just wrote (see recordedLimitations for the keys) —
         // only when it was actually written; otherwise every reader treats the model as unprobed.
-        capabilities: recorded
+        capabilities: recorded === true
           ? Object.fromEntries(
               limitations.map((l) =>
                 l.shape === 'thinking_off'
@@ -593,8 +593,8 @@ export function ModelGatewayPage() {
       );
       if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
       if (inconclusive.length) toast.warning(inconclusiveMessage(name, inconclusive), { duration: 12000 });
-      if (limitations.length && !recorded)
-        toast.warning(`${name}: the limitations could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
+      if (recorded === false)
+        toast.warning(`${name}: the probe's result could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
       if (warning) toast.error(warning, { duration: 15000 });
       closeDialog();
       if (created) {
@@ -862,10 +862,10 @@ export function ModelGatewayPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() =>
-                        // Only a DB deployment has a writable record; a config-defined one is probed and reported.
-                        testMutation.mutate({ name: m.model_name, modelId: m.db_model ? m.model_id : undefined })
-                      }
+                      // The row's own id, always: the backend judges writability from the deployment it
+                      // looks up (a config-defined one is probed and reported, `recorded: null`), and an
+                      // alias lookup could land on a sibling deployment.
+                      onClick={() => testMutation.mutate({ name: m.model_name, modelId: m.model_id })}
                       disabled={testing}
                     >
                       {testing ? (

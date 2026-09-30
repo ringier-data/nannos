@@ -343,3 +343,17 @@ def test_thinking_off_switch_follows_the_record():
     assert mc.thinking_off_switch({mc.THINKING_OFF: "none"}) is None
     assert mc.thinking_off_switch({mc.THINKING_OFF: "disabled"}) == {"type": "disabled"}
     assert mc.thinking_off_switch({mc.THINKING_OFF: "between_tools"}) == {"type": "between_tools"}
+
+
+@pytest.mark.asyncio
+async def test_every_routable_shape_maps_to_a_record_key():
+    """A merge over a stored record keeps the keys of inconclusive shapes; a routable shape
+    the map does not know would have its earlier flag silently erased."""
+
+    async def transient(body):
+        raise mc.ProbeCallError("throttled", status=429)
+
+    report = await mc.probe_model("m", transient, supports_reasoning=True)
+    routable = {r.shape for r in report.inconclusive if not r.unavoidable}
+    assert routable == set(mc.SHAPE_KEYS)
+    assert report.inconclusive_keys == {mc.FORCED_TOOL_CHOICE, mc.RESPONSE_FORMAT, mc.THINKING_OFF, mc.THINKING_REPLAY}

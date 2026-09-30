@@ -447,7 +447,7 @@ async def test_a_config_defined_deployment_is_probed_but_not_written(svc, monkey
     reaches the admin, and the absence of a record keeps the hook on its heuristics."""
     calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(db_model=False))
     result = await svc.test_model("m")
-    assert "probe" in result
+    assert "probe" in result and result["recorded"] is None
     assert calls["patched"] == []
 
 
@@ -512,7 +512,8 @@ async def test_a_failed_record_write_does_not_fail_a_passing_model(svc, monkeypa
 async def test_the_record_is_written_to_the_pinned_deployment_id(svc, monkeypatch):
     """Register/edit hand the new deployment's id to the test, so the record lands on the
     live deployment even when the listing still shows the one about to be deleted."""
-    calls = _probe_gateway(svc, monkeypatch)
+    listing = {"data": _chat_deployment()["data"] + _chat_deployment(model_id="dep-new")["data"]}
+    calls = _probe_gateway(svc, monkeypatch, deployment=listing)
     await svc.test_model("m", model_id="dep-new")
     assert calls["patched"][0][0] == "/model/dep-new/update"
 
@@ -641,7 +642,7 @@ async def test_a_pinned_config_defined_deployment_is_not_written(svc, monkeypatc
     but no writable record, so the probe reports and stops — no failed PATCH, no warning."""
     calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(db_model=False))
     result = await svc.test_model("m", model_id="dep-1")
-    assert result["recorded"] is False and calls["patched"] == []
+    assert result["recorded"] is None and calls["patched"] == []  # None: not recordable, no warning
 
 
 @pytest.mark.asyncio
@@ -676,3 +677,29 @@ async def test_the_prior_record_read_does_not_mutate_the_cached_listing(svc, mon
     await svc.test_model("m")
     listed = (await svc.get_model("m"))["model_info"]["nannos_capabilities"]
     assert listed == {"probed_at": "old"}
+
+
+@pytest.mark.asyncio
+async def test_a_probe_run_on_the_alias_fallback_keeps_the_pinned_deployments_whole_record(svc, monkeypatch):
+    """The pinned deployment stays unlisted through the retries, so the probe ran on the old
+    deployment's declaration (no reasoning); by the write the new one is listed. Only the
+    target's own declaration may decide what was 'not attempted', so the whole prior stays."""
+    old = {"model_name": "m", "litellm_params": {"model": "x"}, "model_info": {"mode": "chat", "id": "old", "db_model": True, "supports_reasoning": False}}
+    new = {"model_name": "m", "litellm_params": {"model": "x"}, "model_info": {"mode": "chat", "id": "new", "db_model": True, "supports_reasoning": True, "nannos_capabilities": {"thinking_replay": False, "response_format": True}}}
+    calls = _probe_gateway(svc, monkeypatch, deployment={"data": [old]})
+    monkeypatch.setattr("console_backend.services.model_gateway_service.asyncio.sleep", _noop_sleep)
+    seen = {"n": 0}
+    real = svc._request
+
+    async def _request(method, path, **kwargs):
+        if path == "/model/info":
+            seen["n"] += 1
+            if seen["n"] > 6:  # listed only after the probe ran
+                return {"data": [old, new]}
+        return await real(method, path, **kwargs)
+
+    monkeypatch.setattr(svc, "_request", _request)
+    result = await svc.test_model("m", model_id="new")
+    assert result["recorded"] is True
+    written = calls["patched"][0][1]["model_info"]["nannos_capabilities"]
+    assert written["thinking_replay"] is False

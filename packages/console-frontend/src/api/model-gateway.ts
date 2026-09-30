@@ -216,8 +216,9 @@ export interface ModelTestResult {
   status: string;
   model_name?: string;
   probe?: ProbeReport;
-  /** Whether the probe's record was written to the deployment (false: readers treat it as unprobed). */
-  recorded?: boolean;
+  /** true: the record was written; false: the write failed or was skipped (readers treat the
+   *  deployment as unprobed — re-run Test); null: nothing to write (config-defined deployment). */
+  recorded?: boolean | null;
   /** Set when the model just recorded a limitation that breaks a tier it already serves. */
   warning?: string | null;
 }
