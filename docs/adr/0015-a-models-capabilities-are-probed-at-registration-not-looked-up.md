@@ -53,8 +53,17 @@ around failing is **recorded, not refused**; the record is what lets the harness
 
 ## Consequences
 
-- Registering a chat model costs about ten small inference calls instead of one. They go through the
-  gateway with the alias under test, so they are billed and attributed like any other call.
+- Registering a chat model costs about ten small inference calls instead of one, within a wall-clock
+  budget. They go through the gateway under the console's management key, carry no Cost Attribution
+  and are therefore not costed against a Rate Card — like the ping before them, only more of them.
+- Only a definite provider rejection is a verdict. A rate limit, a timeout, a 5xx or a cooled-down
+  deployment is *inconclusive*: the shape is reported as unmeasured, its flag is left out of the
+  record, and an unmeasured unavoidable shape fails the test as "re-run" rather than refusing the
+  model. A record is knowledge, and noise must not become knowledge.
+- Probe traffic is marked (`metadata.nannos_probe`) and pinned to its alias (`disable_fallbacks`),
+  and the hook applies none of its record-driven rewrites to it. Otherwise a re-test of a deployment
+  recorded as unable to force a tool call would have its forced probe downgraded, pass, and flip its
+  own record; and a rejected shape could be answered by the next alias in a tier group.
 - A deployment registered before this decision carries no record. Every reader treats the absence of
   a flag as *no opinion*, not as a verdict: the hook keeps its family heuristic for thinking-off and
   leaves forced `tool_choice` to LiteLLM, the app keeps `ToolStrategy`, the default-role guard lets
@@ -62,9 +71,16 @@ around failing is **recorded, not refused**; the record is what lets the harness
 - The record is written with LiteLLM's merging `PATCH /model/{id}/update`, so the deployment keeps its
   id and its other `model_info` keys. The router reads it on its next database reload, so a freshly
   written record is live within the proxy's reload interval rather than instantly.
-- The probe sends an explicit `thinking` value to learn which switch a deployment takes, and the hook
-  now honours any `thinking` a caller sends rather than rewriting it. The app has not sent one since
-  #278 and must not start: the switch is the deployment's, decided by the hook from the record.
+- The probe sends an explicit `thinking` value to learn which switch a deployment takes; for every
+  other caller the switch stays the deployment's, decided by the hook from the record (or the family
+  heuristic) and replacing whatever was sent.
+- A deployment recorded as rejecting the replay of its own signed thinking block has the blocks
+  stripped by the hook per attempt, the way a non-Anthropic fallback does: the turn continues without
+  extended thinking rather than not at all.
+- An edit re-registers the deployment from the form; the record is carried over while the edit keeps
+  the same provider model, and the edit's own re-test rewrites it. A re-test that newly records
+  `response_format` as rejected on a model that already serves `chat` or `chat:low` cannot be
+  refused after the fact; it is reported as a warning naming the affected tiers.
 - Config-defined deployments cannot be written through the management API, so they are probed and
   reported but never recorded. Registering models through the console is what makes the record exist.
 - The next model with a new restriction fails the same probe — or passes it and breaks something the

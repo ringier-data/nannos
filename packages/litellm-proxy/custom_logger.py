@@ -33,8 +33,10 @@ logger = logging.getLogger("nannos.litellm.custom_logger")
 # recorded limitation could not be honoured — so a missing module fails the proxy at startup.
 from nannos_model_capabilities import (  # noqa: E402
     THINKING_OFF,
+    THINKING_REPLAY,
     capabilities_of,
     downgrade_forced_tool_choice,
+    is_probe_request,
     thinking_off_switch,
 )
 
@@ -264,25 +266,24 @@ def _apply_thinking_off(kwargs: dict) -> bool:
     """Make a `reasoning_effort: "none"` request carry the deployment's thinking-off switch;
     True when ``kwargs`` changed.
 
-    Three sources, in order:
+    The switch is the deployment's, never the caller's: whatever `thinking` arrived is
+    replaced by the right one, or removed where none is accepted (Gemini 3 400s on the pair,
+    and an older client may still send it). Two sources, in order:
 
-    * A `thinking` the caller sent itself is left untouched. The app never sends one — the
-      switch is decided here, per deployment, since #278 — but the registration probe does,
-      to learn which switch this deployment takes; rewriting it would make the probe measure
-      the hook instead of the model.
     * A probed deployment (nannos#318) carries the answer in `model_info.nannos_capabilities`:
       `disabled`, `between_tools` (Claude 5.5 and later reject `disabled` and want this), or
       `none` — no explicit switch is accepted, so `reasoning_effort: none` goes alone.
     * Unprobed: the family heuristic. Claude thinks by default and needs the explicit
-      `disabled`; everything else (Gemini 3 400s on the pair) gets no `thinking` at all.
+      `disabled`; everything else gets no `thinking` at all.
+
+    Probe traffic (``is_probe_request``) is exempt — it sends each switch itself to learn
+    which one the deployment takes, and rewriting it would make the probe measure this hook.
 
     Top-level keys only: the router hands each attempt its own shallow copy of the caller's
     request, so this never leaks into a fallback attempt on another deployment — which reads
     its own record.
     """
     if kwargs.get("reasoning_effort") != "none":
-        return False
-    if "thinking" in kwargs:
         return False
     caps = capabilities_of(kwargs.get("model_info"))
     if THINKING_OFF in caps:
@@ -292,6 +293,11 @@ def _apply_thinking_off(kwargs: dict) -> bool:
     else:
         wanted = None
     if wanted is None:
+        if "thinking" in kwargs:
+            del kwargs["thinking"]
+            return True
+        return False
+    if kwargs.get("thinking") == wanted:
         return False
     kwargs["thinking"] = wanted
     return True
@@ -308,6 +314,13 @@ def _apply_forced_tool_choice(kwargs: dict) -> bool:
     Unprobed deployments are left to LiteLLM.
     """
     return downgrade_forced_tool_choice(kwargs, capabilities_of(kwargs.get("model_info")))
+
+
+def _rejects_thinking_replay(kwargs: dict) -> bool:
+    """The probe saw this deployment refuse its own signed thinking block replayed with a
+    tool result (nannos#318): the blocks are stripped per attempt, like on a non-Anthropic
+    fallback, and the turn goes on without extended thinking rather than not at all."""
+    return capabilities_of(kwargs.get("model_info")).get(THINKING_REPLAY) is False
 
 
 def _strip_cache_control_entries(items: list) -> list | None:
@@ -686,6 +699,9 @@ class NannosCostLogger(CustomLogger):
           off-switch, or the family heuristic when unprobed. See ``_apply_thinking_off``.
         * Forced tool_choice: downgraded to `auto` on a deployment recorded as rejecting it.
           See ``_apply_forced_tool_choice``.
+        * thinking_blocks: also stripped on a deployment recorded as rejecting their replay.
+        * None of the record-driven rewrites touch registration-probe traffic
+          (``is_probe_request``): the probe must measure the deployment, not this hook.
         * Anthropic idiom: `cache_control` markers and top-level `thinking_blocks` are stripped
           from requests routed to a deployment that does not speak it. See
           ``_CACHE_CONTROL_KEEP_RULES`` for the why.
@@ -694,8 +710,15 @@ class NannosCostLogger(CustomLogger):
         None leaves it unchanged. Never raise: each fix is logged and skipped on failure.
         """
         changed = False
+        probe = False
         try:
-            changed = _apply_thinking_off(kwargs)
+            probe = is_probe_request(kwargs)
+        except Exception:  # noqa: BLE001 — a malformed metadata bucket is not probe traffic
+            probe = False
+        try:
+            # The probe measures the deployment as it is; every record-driven rewrite would
+            # make it measure this hook instead (and flip its own record on a re-test).
+            changed = not probe and _apply_thinking_off(kwargs)
         except Exception as e:  # never break the call on a failed fix
             logger.warning(
                 "[thinking] off-switch failed for model=%s: %s",
@@ -704,7 +727,7 @@ class NannosCostLogger(CustomLogger):
                 exc_info=True,
             )
         try:
-            if _apply_forced_tool_choice(kwargs):
+            if not probe and _apply_forced_tool_choice(kwargs):
                 changed = True
                 logger.info(
                     "[tool-choice] forced tool_choice downgraded to 'auto' for model=%s (probe record)",
@@ -720,7 +743,8 @@ class NannosCostLogger(CustomLogger):
             if not provider and "/" in model:
                 provider = model.split("/", 1)[0]
             bare_model = model.split("/", 1)[1] if "/" in model else model
-            if not _speaks_anthropic_idiom(provider, bare_model):
+            speaks_idiom = _speaks_anthropic_idiom(provider, bare_model)
+            if not speaks_idiom:
                 for key in ("messages", "tools"):
                     items = kwargs.get(key)
                     if isinstance(items, list):
@@ -728,6 +752,7 @@ class NannosCostLogger(CustomLogger):
                         if stripped is not None:
                             kwargs[key] = stripped
                             changed = True
+            if not speaks_idiom or (not probe and _rejects_thinking_replay(kwargs)):
                 messages = kwargs.get("messages")
                 if isinstance(messages, list):
                     stripped = _strip_thinking_blocks(messages)

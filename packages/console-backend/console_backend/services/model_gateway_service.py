@@ -6,12 +6,15 @@ list/register/update/delete models, read capability+cost for pre-fill, and a
 cheap test completion for the validation step.
 """
 
+import asyncio
 import logging
 import os
 import time
 from datetime import datetime, timezone
 
 import httpx
+
+from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of
 
 from ..config import config
 
@@ -280,6 +283,18 @@ class ModelGatewayService:
         private key, never serialized to the API client) so the endpoint can surface it rather
         than reporting a clean success.
         """
+        # The registration probe's record (nannos#318) is not part of the edit form, so a
+        # rebuilt model_info would silently drop it — and every reader would then treat a model
+        # known to reject `response_format` as unprobed. Carry it over while the deployment
+        # still points at the same provider model; a re-routed edit is a different model, and
+        # the edit flow re-tests anyway.
+        model_info = dict(model_info or {})
+        if CAPABILITIES_KEY not in model_info:
+            previous = await self.get_model_by_id(model_id)
+            if previous and ((previous.get("litellm_params") or {}).get("model") == litellm_params.get("model")):
+                inherited = capabilities_of(previous.get("model_info"))
+                if inherited:
+                    model_info[CAPABILITIES_KEY] = inherited
         result = await self.register_model(model_name, litellm_params, model_info)
         try:
             await self.delete_model(model_id)
@@ -485,7 +500,7 @@ class ModelGatewayService:
         """
         return next((c for c in await self.get_catalog() if c.get("model_id") == model_id), None)
 
-    async def test_model(self, model_name: str) -> dict:
+    async def test_model(self, model_name: str, model_id: str | None = None) -> dict:
         """Validate a freshly-registered model end to end, and record what it accepts.
 
         Mode-aware: embedding models must be hit on /v1/embeddings — sending them a chat
@@ -499,16 +514,26 @@ class ModelGatewayService:
 
         Shape-aware for chat (nannos#318): not a ping but the request shapes the harness
         actually sends (``ringier_a2a_sdk.model_capabilities``). A shape every agent turn
-        needs failing raises — registration is refused with the provider's reason. A shape
-        the harness can route around failing is recorded on the deployment's ``model_info``
-        under ``nannos_capabilities`` for the gateway hook and the app to act on, and the
-        report is returned for the admin. Returns ``{"probe": ProbeReport.as_dict()}`` for
-        chat models, ``{}`` for embeddings.
+        needs failing raises — registration is refused with the provider's reason; one that
+        could not be measured (a transient failure) raises too, as "inconclusive", so nothing
+        is written and the admin re-tests. A shape the harness can route around failing is
+        recorded on the deployment's ``model_info`` under ``nannos_capabilities`` for the
+        gateway hook and the app to act on, and the report is returned for the admin.
+
+        ``model_id`` pins the deployment the record is written to (the caller has it right
+        after register/edit); otherwise the alias's listed deployment is used. The gateway
+        serves ``/model/info`` from per-replica memory, so a just-registered alias can be
+        missing from one replica's list for a moment — the lookup retries briefly.
+
+        Returns ``{"probe": ProbeReport.as_dict(), "recorded": bool}`` for chat models,
+        ``{}`` for embeddings. ``recorded`` is False when the record could not be written
+        (a config-defined deployment, an unknown id, or a failed PATCH): the probe's verdict
+        still stands, but every reader will treat the deployment as unprobed.
         """
         from ringier_a2a_sdk.embeddings import _DEFAULT_DIMENSION, profile_for
         from ringier_a2a_sdk.model_capabilities import PROBED_AT, probe_model
 
-        model = await self.get_model(model_name)
+        model = await self._get_model_with_retry(model_name)
         info = (model or {}).get("model_info") or {}
         mode = info.get("mode", "chat")
         if mode == "embedding":
@@ -524,14 +549,36 @@ class ModelGatewayService:
         if report.rejected:
             reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.rejected)
             raise ModelGatewayError(f"the model rejects request shapes every agent turn sends — {reasons}")
-        model_id = info.get("id")
-        if model_id and info.get("db_model"):
-            await self.record_capabilities(model_id, {**report.capabilities, PROBED_AT: _utc_now_iso()})
+        if report.inconclusive_unavoidable:
+            reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.inconclusive_unavoidable)
+            raise ModelGatewayError(f"inconclusive — the probe could not reach the model; re-run the test ({reasons})")
+
+        target_id = model_id or info.get("id")
+        recorded = False
+        if target_id and (model_id or info.get("db_model")):
+            try:
+                await self.record_capabilities(target_id, {**report.capabilities, PROBED_AT: _utc_now_iso()})
+                recorded = True
+            except ModelGatewayError as e:
+                # The verdict is sound; only the write failed. A passing model must not be
+                # reported as failed (the console would roll its registration back).
+                logger.warning("[probe] %s: capabilities not recorded on %s: %s", model_name, target_id, e)
         else:
             # Config-defined deployments can't be updated through the management API
             # (LiteLLM rejects /model/update on them); the report still reaches the admin.
-            logger.info("[probe] %s is not a DB deployment; capabilities not recorded: %s", model_name, report.capabilities)
-        return {"probe": report.as_dict()}
+            logger.info("[probe] %s has no DB deployment id; capabilities not recorded: %s", model_name, report.capabilities)
+        return {"probe": report.as_dict(), "recorded": recorded}
+
+    async def _get_model_with_retry(self, model_name: str, attempts: int = 4, delay: float = 0.75) -> dict | None:
+        """``get_model`` with a short retry for a deployment registered a moment ago."""
+        for i in range(attempts):
+            model = await self.get_model(model_name)
+            if model is not None:
+                return model
+            if i + 1 < attempts:
+                self._invalidate_list_cache()
+                await asyncio.sleep(delay)
+        return None
 
     async def _probe_call(self, body: dict) -> object:
         """One probe request on the inference API. JSON for a plain body, the raw SSE text for
@@ -559,8 +606,6 @@ class ModelGatewayService:
         version the gateway pins, so the deployment's other keys survive and its id is kept —
         unlike ``update_model``, which re-registers. The router picks the change up on its
         next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
-        from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY
-
         await self._request(
             "PATCH", f"/model/{model_id}/update", json={"model_info": {"id": model_id, CAPABILITIES_KEY: capabilities}}
         )

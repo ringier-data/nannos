@@ -199,6 +199,8 @@ export interface ProbeShapeResult {
   /** True for a shape every agent turn sends: failing it refuses registration. */
   unavoidable: boolean;
   note: string;
+  /** The shape could not be measured (transient failure); no verdict, nothing recorded. */
+  inconclusive: boolean;
 }
 
 /** What the probe saw a chat model accept; absent for embedding models. */
@@ -214,16 +216,22 @@ export interface ModelTestResult {
   status: string;
   model_name?: string;
   probe?: ProbeReport;
+  /** Whether the probe's record was written to the deployment (false: readers treat it as unprobed). */
+  recorded?: boolean;
+  /** Set when the model just recorded a limitation that breaks a tier it already serves. */
+  warning?: string | null;
 }
 
 /** The shapes the harness can route around that this model was seen to reject. */
 export function probeLimitations(report: ProbeReport | undefined): ProbeShapeResult[] {
-  return (report?.results ?? []).filter((r) => !r.ok && !r.unavoidable);
+  return (report?.results ?? []).filter((r) => !r.ok && !r.unavoidable && !r.inconclusive);
 }
 
-export async function testGatewayModel(modelName: string): Promise<ModelTestResult> {
+/** `modelId` pins the deployment the probe's record is written to (pass it right after register/edit). */
+export async function testGatewayModel(modelName: string, modelId?: string | null): Promise<ModelTestResult> {
   const { data, error } = await testModelApiV1AdminModelGatewayModelsModelNameTestPost({
     path: { model_name: modelName },
+    query: modelId ? { model_id: modelId } : undefined,
   });
   if (error) throw error;
   return (data ?? { status: 'ok' }) as ModelTestResult;

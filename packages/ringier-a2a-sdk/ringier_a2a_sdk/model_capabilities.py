@@ -30,19 +30,31 @@ agent turn sends and the harness has no alternative for: a model that fails one 
 turn, so registration is refused. *Routable* shapes have a second form the harness can pick
 once it knows the limitation — a forced ``tool_choice`` becomes ``auto`` plus the prompt's
 instruction, ``thinking: disabled`` becomes ``between_tools``, a forced structured-output tool
-becomes an ordinary bound tool, a replayed thinking block is dropped. Those are recorded, not
-refused: the record is exactly what the hook and the app need in order to route around them.
+becomes an ordinary bound tool, a replayed thinking block is stripped by the hook. Those are
+recorded, not refused: the record is exactly what the hook and the app need in order to route
+around them. A transient failure records nothing (see ``probe_model``).
 """
 
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 #: model_info key under which the probe's findings are stored on a gateway deployment.
 CAPABILITIES_KEY = "nannos_capabilities"
+
+#: Request ``metadata`` key that marks a probe request. The gateway hook skips every
+#: record-driven rewrite for a marked request, so a re-probe measures the model and not the
+#: hook (otherwise a deployment recorded as unable to force a tool call would have its forced
+#: probe downgraded to ``auto``, pass, and flip its own record). The proxy keeps the caller's
+#: ``metadata`` dict on the request the router sees, merged with its own fields.
+PROBE_MARKER = "nannos_probe"
+
+#: Wall-clock budget for one whole probe. Shapes not reached in time are inconclusive.
+DEFAULT_BUDGET_SECONDS = 180.0
 
 # --- the flags ---------------------------------------------------------------------------
 #: bool — the deployment accepts ``tool_choice: required`` and a named ``tool_choice``.
@@ -107,6 +119,17 @@ class ProbeCallError(Exception):
         self.message = message
         self.status = status
 
+    @property
+    def transient(self) -> bool:
+        """A failure that says nothing about the model: rate limit, timeout, a 5xx, the
+        gateway unreachable (``status`` None), or a cooled-down deployment. Such a shape is
+        *inconclusive* and leaves no record, instead of being written down as a limitation."""
+        return is_transient_status(self.status)
+
+
+def is_transient_status(status: int | None) -> bool:
+    return status is None or status in (408, 429) or status >= 500
+
 
 #: ``call(body) -> response``. For a non-streaming body the response is the parsed JSON dict;
 #: for a body with ``"stream": True`` it is the raw SSE text, which ``probe_model`` assembles.
@@ -125,6 +148,9 @@ class ShapeResult:
     unavoidable: bool = False
     #: Free-form observations the admin may want ("0 reasoning tokens", "no thinking block").
     note: str = ""
+    #: The shape could not be measured (transient failure or out of budget): no verdict, no
+    #: record. Never counts as a limitation or a rejection.
+    inconclusive: bool = False
 
 
 @dataclass
@@ -138,19 +164,37 @@ class ProbeReport:
 
     @property
     def rejected(self) -> list[ShapeResult]:
-        return [r for r in self.results if r.unavoidable and not r.ok]
+        return [r for r in self.results if r.unavoidable and not r.ok and not r.inconclusive]
 
     @property
     def limitations(self) -> list[ShapeResult]:
-        return [r for r in self.results if not r.unavoidable and not r.ok]
+        return [r for r in self.results if not r.unavoidable and not r.ok and not r.inconclusive]
+
+    @property
+    def inconclusive(self) -> list[ShapeResult]:
+        return [r for r in self.results if r.inconclusive]
+
+    @property
+    def inconclusive_unavoidable(self) -> list[ShapeResult]:
+        """Unavoidable shapes that could not be measured: the model may be fine, but nothing
+        says so — registration cannot be confirmed, and must not be refused either."""
+        return [r for r in self.inconclusive if r.unavoidable]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "model": self.model,
             "capabilities": dict(self.capabilities),
             "rejected": [r.shape for r in self.rejected],
+            "inconclusive": [r.shape for r in self.inconclusive],
             "results": [
-                {"shape": r.shape, "ok": r.ok, "error": r.error, "unavoidable": r.unavoidable, "note": r.note}
+                {
+                    "shape": r.shape,
+                    "ok": r.ok,
+                    "error": r.error,
+                    "unavoidable": r.unavoidable,
+                    "note": r.note,
+                    "inconclusive": r.inconclusive,
+                }
                 for r in self.results
             ],
         }
@@ -162,7 +206,15 @@ class ProbeReport:
 
 
 def _base(model: str, **extra: Any) -> dict[str, Any]:
-    body: dict[str, Any] = {"model": model, "max_tokens": _MAX_TOKENS}
+    # `disable_fallbacks`: the verdict is about THIS alias's deployment, so a tier-group chain
+    # must not answer a rejected shape from the next alias. The marker lets the hook tell probe
+    # traffic from the app's (see PROBE_MARKER).
+    body: dict[str, Any] = {
+        "model": model,
+        "max_tokens": _MAX_TOKENS,
+        "disable_fallbacks": True,
+        "metadata": {PROBE_MARKER: True},
+    }
     body.update(extra)
     return body
 
@@ -381,27 +433,41 @@ def _reasoning_tokens(response: Any) -> int | None:
 # --- the probe -----------------------------------------------------------------------------
 
 
-async def probe_model(model: str, call: ProbeCall, *, supports_reasoning: bool = False) -> ProbeReport:
+async def probe_model(
+    model: str,
+    call: ProbeCall,
+    *,
+    supports_reasoning: bool = False,
+    budget_seconds: float = DEFAULT_BUDGET_SECONDS,
+) -> ProbeReport:
     """Replay every harness shape against ``model`` through ``call`` and report.
 
     The unavoidable shapes run first; if any fails the routable ones still run, so the admin
     sees the whole picture in one go. ``supports_reasoning`` (the admin's declaration on the
     deployment) gates the thinking shapes: a model registered without thinking never gets a
     thinking request from the harness, so there is nothing to learn.
+
+    Only a definite provider rejection (a 4xx other than 408/429) is a verdict. A transient
+    failure, or a shape not reached within ``budget_seconds``, is *inconclusive*: it is reported
+    but writes no flag, and it never refuses a model. ``report.capabilities`` therefore holds
+    exactly the keys that were measured.
     """
     report = ProbeReport(model=model)
+    started = time.monotonic()
 
-    async def attempt(body: dict[str, Any]) -> tuple[bool, Any, str]:
-        """Send one shape; (ok, response, provider reason)."""
+    async def attempt(body: dict[str, Any]) -> tuple[bool, Any, str, bool]:
+        """Send one shape; (ok, response, provider reason, transient)."""
+        if time.monotonic() - started > budget_seconds:
+            return False, None, f"probe budget of {budget_seconds:.0f}s exhausted before this shape", True
         try:
             response = await call(body)
             if body.get("stream"):
                 response = assemble_stream(response if isinstance(response, str) else "")
-            return True, response, ""
+            return True, response, "", False
         except ProbeCallError as e:
-            return False, None, e.message
-        except Exception as e:  # noqa: BLE001 — a transport failure is a failed shape, not a crash
-            return False, None, f"{type(e).__name__}: {e}"
+            return False, None, e.message, e.transient
+        except Exception as e:  # noqa: BLE001 — a transport failure is inconclusive, not a crash
+            return False, None, f"{type(e).__name__}: {e}", True
 
     # Unavoidable ----------------------------------------------------------------------
     for shape, body in (
@@ -409,56 +475,72 @@ async def probe_model(model: str, call: ProbeCall, *, supports_reasoning: bool =
         ("tool_round_trip", shape_tool_round_trip(model)),
         ("streaming_tools", shape_streaming_tools(model)),
     ):
-        ok, _, err = await attempt(body)
-        report.results.append(ShapeResult(shape, ok, err, unavoidable=True))
+        ok, _, err, transient = await attempt(body)
+        report.results.append(ShapeResult(shape, ok, err, unavoidable=True, inconclusive=not ok and transient))
 
     # Forced tool choice: both forms must work for the flag to be True ------------------
-    forced_ok, _, forced_err = await attempt(shape_forced_tool_choice(model))
-    report.results.append(ShapeResult("forced_tool_choice", forced_ok, forced_err))
-    named_ok, _, named_err = await attempt(shape_named_tool_choice(model))
-    report.results.append(ShapeResult("named_tool_choice", named_ok, named_err))
-    report.capabilities[FORCED_TOOL_CHOICE] = forced_ok and named_ok
+    forced_ok, _, forced_err, forced_t = await attempt(shape_forced_tool_choice(model))
+    report.results.append(ShapeResult("forced_tool_choice", forced_ok, forced_err, inconclusive=not forced_ok and forced_t))
+    named_ok, _, named_err, named_t = await attempt(shape_named_tool_choice(model))
+    report.results.append(ShapeResult("named_tool_choice", named_ok, named_err, inconclusive=not named_ok and named_t))
+    if forced_ok and named_ok:
+        report.capabilities[FORCED_TOOL_CHOICE] = True
+    elif (not forced_ok and not forced_t) or (not named_ok and not named_t):
+        report.capabilities[FORCED_TOOL_CHOICE] = False  # a definite rejection of either form
 
     # response_format ------------------------------------------------------------------
-    rf_ok, _, rf_err = await attempt(shape_response_format(model))
-    report.results.append(ShapeResult("response_format", rf_ok, rf_err))
-    report.capabilities[RESPONSE_FORMAT] = rf_ok
+    rf_ok, _, rf_err, rf_t = await attempt(shape_response_format(model))
+    report.results.append(ShapeResult("response_format", rf_ok, rf_err, inconclusive=not rf_ok and rf_t))
+    if rf_ok or not rf_t:
+        report.capabilities[RESPONSE_FORMAT] = rf_ok
 
     # Thinking off: the first explicit switch that works, else none ----------------------
-    off_switch = THINKING_OFF_NONE
+    off_switch: str | None = THINKING_OFF_NONE
     off_note = ""
     for switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS):
-        ok, response, err = await attempt(shape_thinking_off(model, switch))
+        ok, response, err, transient = await attempt(shape_thinking_off(model, switch))
         if ok:
             off_switch = switch
             rt = _reasoning_tokens(response)
             off_note = f"{rt} reasoning tokens" if rt is not None else ""
             break
+        if transient:
+            off_switch = None  # cannot tell which switch works; leave no record
+            off_note = err
+            break
         off_note = err
-    report.results.append(
-        ShapeResult(
-            "thinking_off",
-            off_switch != THINKING_OFF_NONE,
-            "" if off_switch != THINKING_OFF_NONE else f"no explicit switch accepted; last error: {off_note}",
-            note=off_note if off_switch != THINKING_OFF_NONE else "",
+    if off_switch is None:
+        report.results.append(ShapeResult("thinking_off", False, off_note, inconclusive=True))
+    else:
+        conclusive_ok = off_switch != THINKING_OFF_NONE
+        report.results.append(
+            ShapeResult(
+                "thinking_off",
+                conclusive_ok,
+                "" if conclusive_ok else f"no explicit switch accepted; last error: {off_note}",
+                note=off_note if conclusive_ok else "",
+            )
         )
-    )
-    report.capabilities[THINKING_OFF] = off_switch
+        report.capabilities[THINKING_OFF] = off_switch
 
     # Thinking replay: only for models declared to think ---------------------------------
     if supports_reasoning:
-        on_ok, response, on_err = await attempt(shape_thinking_on(model))
+        on_ok, response, on_err, on_t = await attempt(shape_thinking_on(model))
         assistant = _message(response) if on_ok else {}
         if on_ok and assistant.get("thinking_blocks"):
-            ok, _, err = await attempt(shape_thinking_replay(model, assistant))
-            report.results.append(ShapeResult("thinking_replay", ok, err))
-            report.capabilities[THINKING_REPLAY] = ok
+            ok, _, err, transient = await attempt(shape_thinking_replay(model, assistant))
+            report.results.append(ShapeResult("thinking_replay", ok, err, inconclusive=not ok and transient))
+            if ok or not transient:
+                report.capabilities[THINKING_REPLAY] = ok
         elif on_ok:
             report.results.append(ShapeResult("thinking_replay", True, note="no thinking block returned; nothing to replay"))
             report.capabilities[THINKING_REPLAY] = None
         else:
-            report.results.append(ShapeResult("thinking_replay", False, f"thinking turn failed: {on_err}"))
-            report.capabilities[THINKING_REPLAY] = False
+            report.results.append(
+                ShapeResult("thinking_replay", False, f"thinking turn failed: {on_err}", inconclusive=on_t)
+            )
+            if not on_t:
+                report.capabilities[THINKING_REPLAY] = False
 
     return report
 
@@ -467,6 +549,17 @@ async def probe_model(model: str, call: ProbeCall, *, supports_reasoning: bool =
 # Read by the gateway's pre-call deployment hook with the SERVING deployment's model_info in
 # hand, and by agent-common with the requested alias's model_info. Every helper tolerates an
 # unprobed deployment (no flags) by returning "no opinion".
+
+
+def is_probe_request(kwargs: dict[str, Any]) -> bool:
+    """Whether a request the hook sees is registration-probe traffic (see PROBE_MARKER). The
+    proxy keeps the caller's ``metadata`` under ``metadata`` (chat completions) or
+    ``litellm_metadata`` (the assistants-style routes); both are checked."""
+    for key in ("metadata", "litellm_metadata"):
+        bucket = kwargs.get(key)
+        if isinstance(bucket, dict) and bucket.get(PROBE_MARKER):
+            return True
+    return False
 
 
 def capabilities_of(model_info: Any) -> dict[str, Any]:

@@ -1990,6 +1990,11 @@ export const editModelApiV1AdminModelGatewayModelsModelIdPut = <ThrowOnError ext
  * shapes (nannos#318). A chat model that rejects a shape every agent turn sends fails here
  * (502 with the provider's reason); one that rejects a shape the harness can route around
  * passes with the limitation recorded on its deployment and listed in ``probe``.
+ *
+ * ``warning`` names the utility tiers (chat, chat:low) this alias already serves as default
+ * or chain member when the probe has just recorded that it rejects ``response_format``: the
+ * guard on those roles only runs when a role is assigned, and a re-test of a sitting default
+ * is the one way a model gets there with that record.
  */
 export const testModelApiV1AdminModelGatewayModelsModelNameTestPost = <ThrowOnError extends boolean = false>(options: Options<TestModelApiV1AdminModelGatewayModelsModelNameTestPostData, ThrowOnError>) => (options.client ?? client).post<TestModelApiV1AdminModelGatewayModelsModelNameTestPostResponses, TestModelApiV1AdminModelGatewayModelsModelNameTestPostErrors, ThrowOnError>({ url: '/api/v1/admin/model-gateway/models/{model_name}/test', ...options });
 

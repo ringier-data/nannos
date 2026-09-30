@@ -156,14 +156,106 @@ async def test_an_unavoidable_shape_failing_rejects_the_model(predicate, shape):
     assert {r.shape for r in report.results} >= {"forced_tool_choice", "response_format", "thinking_off"}
 
 
+# --- transient failures are inconclusive, never a verdict ---------------------------------
+
+
 @pytest.mark.asyncio
-async def test_a_transport_failure_is_a_failed_shape_not_a_crash():
+async def test_a_transport_failure_is_inconclusive_not_a_rejection():
+    """A gateway that cannot be reached says nothing about the model: no rejection, no
+    limitation, no flag — the admin is told the probe could not measure."""
+
     async def boom(body):
         raise RuntimeError("connection reset")
 
     report = await mc.probe_model("m", boom)
-    assert {r.shape for r in report.rejected} == {"tools_auto", "tool_round_trip", "streaming_tools"}
-    assert all("connection reset" in r.error for r in report.rejected)
+    assert report.rejected == [] and report.limitations == []
+    assert {r.shape for r in report.inconclusive_unavoidable} == {"tools_auto", "tool_round_trip", "streaming_tools"}
+    assert report.capabilities == {}
+    assert all("connection reset" in r.error for r in report.inconclusive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 408, None])
+async def test_a_transient_status_on_a_routable_shape_leaves_the_key_out(status):
+    """A Bedrock 429 on `response_format` must not be written down as 'rejects
+    response_format' — that record would keep the model out of the utility tiers."""
+
+    def _reject(body):
+        return "throttled" if body.get("response_format") else None
+
+    class _Gw(_Gateway):
+        async def __call__(self, body):
+            if _reject(body):
+                raise mc.ProbeCallError("throttled", status=status)
+            return await super().__call__(body)
+
+    report = await mc.probe_model("m", _Gw())
+    assert mc.RESPONSE_FORMAT not in report.capabilities
+    assert mc.FORCED_TOOL_CHOICE in report.capabilities  # the others were measured
+    rf = next(r for r in report.results if r.shape == "response_format")
+    assert rf.inconclusive and not rf.ok
+    assert report.limitations == []
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_on_a_thinking_switch_records_no_switch():
+    """`disabled` timing out does not mean `between_tools` is the answer."""
+
+    def _reject(body):
+        return "timeout" if (body.get("thinking") or {}).get("type") == "disabled" else None
+
+    class _Gw(_Gateway):
+        async def __call__(self, body):
+            if _reject(body):
+                self.bodies.append(body)
+                raise mc.ProbeCallError("timeout", status=None)
+            return await super().__call__(body)
+
+    gw = _Gw()
+    report = await mc.probe_model("m", gw)
+    assert mc.THINKING_OFF not in report.capabilities
+    assert [b["thinking"]["type"] for b in gw.bodies if "thinking" in b] == ["disabled"]
+
+
+@pytest.mark.asyncio
+async def test_a_definite_4xx_is_still_a_verdict():
+    class _Gw(_Gateway):
+        async def __call__(self, body):
+            if body.get("response_format"):
+                raise mc.ProbeCallError("not supported", status=400)
+            return await super().__call__(body)
+
+    report = await mc.probe_model("m", _Gw())
+    assert report.capabilities[mc.RESPONSE_FORMAT] is False
+
+
+@pytest.mark.asyncio
+async def test_the_budget_makes_unreached_shapes_inconclusive():
+    gw = _Gateway()
+    report = await mc.probe_model("m", gw, budget_seconds=-1)
+    assert report.capabilities == {}
+    assert len(report.inconclusive) == len(report.results)
+    assert gw.bodies == []
+
+
+# --- probe traffic is marked and never fails over ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_every_probe_request_is_marked_and_pinned_to_the_alias():
+    gw = _Gateway(thinking_blocks=True)
+    await mc.probe_model("m", gw, supports_reasoning=True)
+    assert gw.bodies
+    for body in gw.bodies:
+        assert body["metadata"] == {mc.PROBE_MARKER: True}
+        assert body["disable_fallbacks"] is True
+
+
+def test_is_probe_request_reads_either_metadata_bucket():
+    assert mc.is_probe_request({}) is False
+    assert mc.is_probe_request({"metadata": {"user_api_key": "x"}}) is False
+    assert mc.is_probe_request({"metadata": {mc.PROBE_MARKER: True, "user_api_key": "x"}}) is True
+    assert mc.is_probe_request({"litellm_metadata": {mc.PROBE_MARKER: True}}) is True
 
 
 # --- thinking replay ----------------------------------------------------------------------

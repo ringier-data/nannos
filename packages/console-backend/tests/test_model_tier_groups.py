@@ -333,3 +333,11 @@ async def test_a_premium_chain_takes_the_same_member():
     gateway = _FakeGatewayWithInfo({"opus": {}, "sonnet-5-5": _NO_RF})
     models = await _service(repo).set_failover_chain(_DB, actor=None, role="chat:premium", aliases=["sonnet-5-5"], gateway=gateway)
     assert models == ["opus", "sonnet-5-5"]
+
+
+@pytest.mark.asyncio
+async def test_utility_tiers_served_by_names_default_and_chain_membership():
+    repo = _FakeRepo({"chat": "sonnet-5-5", "chat:low": "flash", "chat:premium": "sonnet-5-5"}, {"chat:low": ["sonnet-5-5"]})
+    served = await _service(repo).utility_tiers_served_by(_DB, "sonnet-5-5")
+    assert served == ["chat (default)", "chat:low (failover chain)"]
+    assert await _service(repo).utility_tiers_served_by(_DB, "other") == []

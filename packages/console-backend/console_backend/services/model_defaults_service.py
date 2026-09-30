@@ -86,6 +86,19 @@ class ModelDefaultsService:
         _require_utility_capable(role, model_alias, model_info)
         await self.repository.upsert_default(db, actor=actor, role=role, model_alias=model_alias)
 
+    async def utility_tiers_served_by(self, db: AsyncSession, alias: str) -> list[str]:
+        """The utility tiers (see UTILITY_TIER_ROLES) ``alias`` serves right now, as default or
+        as a chain member — what a fresh `response_format: false` record breaks (nannos#318)."""
+        defaults = await self.get_all(db)
+        chains = await self.repository.get_all_fallbacks(db)
+        out = []
+        for role in UTILITY_TIER_ROLES:
+            if defaults.get(role) == alias:
+                out.append(f"{role} (default)")
+            elif alias in chains.get(role, []):
+                out.append(f"{role} (failover chain)")
+        return out
+
     # --- Tier groups (nannos#204) --------------------------------------------------------
 
     async def get_tier_group(self, db: AsyncSession, role: str) -> list[str]:

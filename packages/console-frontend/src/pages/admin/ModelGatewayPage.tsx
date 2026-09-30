@@ -489,17 +489,29 @@ export function ModelGatewayPage() {
   const saveMutation = useMutation({
     mutationFn: async (body: ModelRegistrationRequest) => {
       if (editingId) {
-        await updateGatewayModel(editingId, body);
-        const test = await testGatewayModel(body.model_name); // throws when the probe refuses
-        return { name: body.model_name, created: null as GatewayModel | null, limitations: probeLimitations(test.probe) };
+        const updated = await updateGatewayModel(editingId, body);
+        // Throws when the probe refuses; the record goes to the re-registered deployment.
+        const test = await testGatewayModel(body.model_name, updated.gateway_model_id);
+        return {
+          name: body.model_name,
+          created: null as GatewayModel | null,
+          limitations: probeLimitations(test.probe),
+          recorded: test.recorded ?? false,
+          warning: test.warning ?? null,
+        };
       }
       const res = await registerGatewayModel(body);
       let limitations: ReturnType<typeof probeLimitations> = [];
+      let recorded = false;
+      let warning: string | null = null;
       try {
-        // Throws when the model rejects a shape every agent turn sends; a shape the harness
-        // can route around is recorded on the deployment and reported here instead.
-        const test = await testGatewayModel(res.model_name);
+        // Throws when the model rejects a shape every agent turn sends (or could not be
+        // measured); a shape the harness can route around is recorded on the deployment and
+        // reported here instead.
+        const test = await testGatewayModel(res.model_name, res.gateway_model_id);
         limitations = probeLimitations(test.probe);
+        recorded = test.recorded ?? false;
+        warning = test.warning ?? null;
       } catch (testErr) {
         if (res.gateway_model_id) {
           // Best-effort rollback; surface the original test error regardless of cleanup outcome.
@@ -524,14 +536,17 @@ export function ModelGatewayPage() {
         supports_vision: (body.input_modes ?? []).includes('image'),
         supports_reasoning: (body.model_info?.supports_reasoning as boolean | undefined) ?? false,
         supports_web_search: (body.model_info?.supports_web_search as boolean | undefined) ?? false,
-        // Mirror of the record the probe just wrote (see recordedLimitations for the keys).
-        capabilities: Object.fromEntries(
-          limitations.map((l) =>
-            l.shape === 'thinking_off'
-              ? ['thinking_off', 'none']
-              : [l.shape === 'named_tool_choice' ? 'forced_tool_choice' : l.shape, false],
-          ),
-        ),
+        // Mirror of the record the probe just wrote (see recordedLimitations for the keys) —
+        // only when it was actually written; otherwise every reader treats the model as unprobed.
+        capabilities: recorded
+          ? Object.fromEntries(
+              limitations.map((l) =>
+                l.shape === 'thinking_off'
+                  ? ['thinking_off', 'none']
+                  : [l.shape === 'named_tool_choice' ? 'forced_tool_choice' : l.shape, false],
+              ),
+            )
+          : null,
       };
       // First model to serve a role becomes the fleet default automatically, so a fresh
       // system always has a fallback without a separate "Make default" click. Only fill
@@ -554,9 +569,9 @@ export function ModelGatewayPage() {
         }
         created.default_roles = autoRoles;
       }
-      return { name: res.model_name, created, limitations };
+      return { name: res.model_name, created, limitations, recorded, warning };
     },
-    onSuccess: ({ name, created, limitations }) => {
+    onSuccess: ({ name, created, limitations, recorded, warning }) => {
       const auto = created?.default_roles ?? [];
       toast.success(
         auto.length
@@ -564,6 +579,9 @@ export function ModelGatewayPage() {
           : `Saved & tested ${name}`,
       );
       if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
+      if (limitations.length && !recorded)
+        toast.warning(`${name}: the limitations could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
+      if (warning) toast.error(warning, { duration: 15000 });
       closeDialog();
       if (created) {
         // The gateway runs multiple replicas and serves /model/info from per-pod memory,
@@ -607,11 +625,14 @@ export function ModelGatewayPage() {
   });
 
   const testMutation = useMutation({
-    mutationFn: testGatewayModel,
+    mutationFn: (name: string) => testGatewayModel(name),
     onSuccess: (r, name) => {
       const limitations = probeLimitations(r.probe);
       if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
       else toast.success(r.probe ? `${name} accepts every request shape the harness sends` : `Test call to ${name} succeeded`);
+      if (r.probe && r.recorded === false)
+        toast.warning(`${name}: the probe's result could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
+      if (r.warning) toast.error(r.warning, { duration: 15000 });
       invalidate(); // the probe re-recorded the model's capabilities
     },
     onError: (e: unknown) => toast.error(`Test failed: ${errMsg(e)}`),

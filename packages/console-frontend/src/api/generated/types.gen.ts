@@ -13922,7 +13922,14 @@ export type TestModelApiV1AdminModelGatewayModelsModelNameTestPostData = {
          */
         model_name: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Model Id
+         *
+         * Deployment id to record the probe on (from register/edit)
+         */
+        model_id?: string | null;
+    };
     url: '/api/v1/admin/model-gateway/models/{model_name}/test';
 };
 

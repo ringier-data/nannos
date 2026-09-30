@@ -128,12 +128,14 @@ async def test_update_model_recreates_deployment_to_persist_model_info(svc, monk
 
     paths = [p for p, _ in calls]
     assert "/model/update" not in paths  # the whole point: /model/update can't persist model_info
-    assert paths == ["/model/new", "/model/delete"]  # register first, then delete old
+    # The old deployment is read first (its probe record is carried over, nannos#318), then
+    # register before delete so the alias is never without a live deployment.
+    assert paths == ["/model/info", "/model/new", "/model/delete"]
 
-    _, new_body = calls[0]
+    _, new_body = calls[1]
     assert new_body["model_name"] == "claude-sonnet-4-6"
     assert new_body["model_info"]["input_modes"] == ["text", "image", "file"]
-    assert calls[1][1] == {"id": "old-id"}  # old deployment deleted by id
+    assert calls[2][1] == {"id": "old-id"}  # old deployment deleted by id
     assert result["model_info"]["id"] == "new-id"
 
 
@@ -370,6 +372,8 @@ def _probe_gateway(svc, monkeypatch, *, reject=None, deployment=None):
             return deployment or _chat_deployment()
         if method == "PATCH":
             calls["patched"].append((path, kwargs.get("json")))
+            if calls.get("patch_fails"):
+                raise ModelGatewayError("Gateway returned 500", status_code=500)
             return {}
         raise AssertionError(f"unexpected management call {method} {path}")
 
@@ -377,7 +381,7 @@ def _probe_gateway(svc, monkeypatch, *, reject=None, deployment=None):
         calls["probe_bodies"].append(body)
         reason = reject(body) if reject else None
         if reason:
-            raise ProbeCallError(reason, status=400)
+            raise ProbeCallError(reason, status=calls.get("reject_status", 400))
         if body.get("stream"):
             return 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\ndata: [DONE]\n'
         return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {}}
@@ -394,6 +398,7 @@ async def test_chat_test_records_the_probe_on_the_deployment_and_returns_the_rep
     result = await svc.test_model("m")
 
     assert result["probe"]["rejected"] == []
+    assert result["recorded"] is True
     caps = result["probe"]["capabilities"]
     assert caps["forced_tool_choice"] is True and caps["response_format"] is True
     # Stored via the merging PATCH, keyed on the deployment id, with a probe timestamp.
@@ -479,3 +484,90 @@ async def test_probe_call_surfaces_the_provider_reason_and_raw_stream_text(svc, 
     with pytest.raises(ProbeCallError, match="forced tool use rejected") as e:
         await svc._probe_call({"model": "m", "tool_choice": "required"})
     assert e.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_on_an_unavoidable_shape_is_inconclusive_and_records_nothing(svc, monkeypatch):
+    """A 429 on the streaming shape says nothing about the model: the test fails as
+    'inconclusive' so the admin re-runs it, and no record is written — never a rejection."""
+    calls = _probe_gateway(svc, monkeypatch, reject=lambda b: "throttled" if b.get("stream") else None)
+    calls["reject_status"] = 429
+    with pytest.raises(ModelGatewayError, match="inconclusive"):
+        await svc.test_model("m")
+    assert calls["patched"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_record_write_does_not_fail_a_passing_model(svc, monkeypatch):
+    """The console rolls a failed test back; a PATCH hiccup must not delete a model that
+    accepted every shape. The report says so via ``recorded``."""
+    calls = _probe_gateway(svc, monkeypatch)
+    calls["patch_fails"] = True
+    result = await svc.test_model("m")
+    assert result["recorded"] is False
+    assert result["probe"]["rejected"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_record_is_written_to_the_pinned_deployment_id(svc, monkeypatch):
+    """Register/edit hand the new deployment's id to the test, so the record lands on the
+    live deployment even when the listing still shows the one about to be deleted."""
+    calls = _probe_gateway(svc, monkeypatch)
+    await svc.test_model("m", model_id="dep-new")
+    assert calls["patched"][0][0] == "/model/dep-new/update"
+
+
+@pytest.mark.asyncio
+async def test_a_model_missing_from_the_listing_is_retried_then_still_probed(svc, monkeypatch):
+    """One replica's /model/info can lag a just-registered alias; the probe still runs
+    against the alias, and the pinned id lets the record be written."""
+    listings = iter([{"data": []}, {"data": []}, _chat_deployment()])
+    calls = _probe_gateway(svc, monkeypatch)
+    real_request = svc._request
+
+    async def _lagging(method, path, **kwargs):
+        if path == "/model/info":
+            return next(listings, _chat_deployment())
+        return await real_request(method, path, **kwargs)
+
+    monkeypatch.setattr(svc, "_request", _lagging)
+    monkeypatch.setattr("console_backend.services.model_gateway_service.asyncio.sleep", _noop_sleep)
+    result = await svc.test_model("m", model_id="dep-1")
+    assert result["recorded"] is True and calls["patched"]
+
+
+async def _noop_sleep(_):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_an_edit_carries_the_record_over_unless_the_model_changed(svc, monkeypatch):
+    """The edit form knows nothing of the probe's record; re-registering from it would drop
+    the record and make every reader treat the model as unprobed."""
+    registered: list[dict] = []
+
+    async def _fake_request(method, path, **kwargs):
+        if path == "/model/info":
+            return {
+                "data": [
+                    {
+                        "model_name": "m",
+                        "litellm_params": {"model": "bedrock/eu.anthropic.claude-sonnet-5-5"},
+                        "model_info": {"id": "old", "db_model": True, "nannos_capabilities": {"response_format": False}},
+                    }
+                ]
+            }
+        if path == "/model/new":
+            registered.append(kwargs["json"])
+            return {"model_info": {"id": "new"}}
+        if path == "/model/delete":
+            return {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+    await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5-5"}, {"mode": "chat"})
+    assert registered[-1]["model_info"]["nannos_capabilities"] == {"response_format": False}
+    assert registered[-1]["model_info"]["mode"] == "chat"
+
+    await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5"}, {"mode": "chat"})
+    assert "nannos_capabilities" not in registered[-1]["model_info"]

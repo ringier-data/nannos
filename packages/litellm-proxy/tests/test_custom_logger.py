@@ -858,23 +858,20 @@ def test_thinking_off_adds_the_explicit_switch_on_claude(model, extra):
 @pytest.mark.parametrize(
     "model", ["vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "azure/gpt-4o"]
 )
-def test_thinking_off_adds_nothing_elsewhere(model):
-    # Gemini 3 refuses thinking + reasoning_effort together ("Cannot specify both"), so an
-    # unprobed non-Claude deployment gets no `thinking` at all.
-    assert _run_deployment_hook(_off_kwargs(model)) is None
+def test_thinking_off_removes_the_switch_elsewhere(model):
+    # Gemini 3 refuses thinking + reasoning_effort together ("Cannot specify both"); an
+    # older client that still sends both must not get a 400.
+    out = _run_deployment_hook(_off_kwargs(model, thinking={"type": "disabled"}))
+    assert "thinking" not in out
+    assert out["reasoning_effort"] == "none"
 
 
-@pytest.mark.parametrize(
-    "model", ["vertex_ai/gemini-3.5-flash", "bedrock/eu.anthropic.claude-sonnet-5", "azure/gpt-4o"]
-)
-def test_an_explicit_client_thinking_is_the_callers_decision(model):
-    # The app never sends `thinking` (the switch is decided here since #278); the registration
-    # probe does, to learn which switch the deployment takes. Rewriting it would make the
-    # probe measure this hook instead of the model — so whatever the caller sent stands.
-    for switch in ("disabled", "between_tools"):
-        kwargs = _off_kwargs(model, thinking={"type": switch})
-        assert _run_deployment_hook(kwargs) is None
-        assert kwargs["thinking"] == {"type": switch}
+def test_a_client_sent_switch_is_replaced_by_the_deployments():
+    # The switch is the deployment's, never the caller's (decided here since #278).
+    out = _run_deployment_hook(
+        _off_kwargs("bedrock/eu.anthropic.claude-sonnet-5", thinking={"type": "between_tools"})
+    )
+    assert out["thinking"] == {"type": "disabled"}
 
 
 def test_thinking_off_leaves_a_clean_non_claude_request_alone():
@@ -1013,3 +1010,56 @@ def test_record_fixes_compose_with_the_idiom_strip():
     assert out["tool_choice"] == "auto"
     assert "thinking" not in out
     assert out["messages"][0]["content"][0] == {"type": "text", "text": "sys"}
+
+
+# --- probe traffic measures the deployment, not this hook ------------------------------------
+
+
+def _probe(model, caps=None, **overrides):
+    kwargs = _probed(model, caps or {}, **overrides)
+    kwargs["metadata"] = {"nannos_probe": True, "user_api_key": "hash"}
+    return kwargs
+
+
+def test_a_re_probe_of_a_recorded_deployment_keeps_its_forced_tool_choice():
+    # Without this, a deployment recorded as unable to force would have its forced probe
+    # downgraded to `auto`, pass, and flip its own record to True on every Test.
+    kwargs = _probe("bedrock/eu.anthropic.claude-sonnet-5-5", {"forced_tool_choice": False}, tool_choice="required")
+    assert _run_deployment_hook(kwargs) is None
+    assert kwargs["tool_choice"] == "required"
+
+
+@pytest.mark.parametrize("switch", ["disabled", "between_tools"])
+def test_a_probe_thinking_switch_is_sent_as_is_on_every_deployment(switch):
+    for model, caps in (
+        ("bedrock/eu.anthropic.claude-sonnet-5-5", {"thinking_off": "between_tools"}),
+        ("vertex_ai/gemini-3.5-flash", {}),
+        ("bedrock/eu.anthropic.claude-sonnet-5", {}),
+    ):
+        kwargs = _probe(model, caps, reasoning_effort="none", thinking={"type": switch})
+        _run_deployment_hook(kwargs)
+        assert kwargs["thinking"] == {"type": switch}, model
+
+
+def test_a_probe_still_gets_the_idiom_strip():
+    # The strip is about the wire format the provider defines, not about capability.
+    kwargs = _gemini_kwargs(metadata={"nannos_probe": True})
+    out = _run_deployment_hook(kwargs)
+    assert out["messages"][0]["content"][0] == {"type": "text", "text": "sys"}
+
+
+# --- thinking replay recorded as rejected ---------------------------------------------------
+
+
+def test_thinking_blocks_are_stripped_on_a_deployment_recorded_as_rejecting_replay():
+    kwargs = _thinking_kwargs(model_info={"id": "dep", "nannos_capabilities": {"thinking_replay": False}})
+    original = kwargs["messages"]
+    out = _run_deployment_hook(kwargs)
+    assert "thinking_blocks" not in out["messages"][1]
+    assert original[1]["thinking_blocks"]  # copy-on-write: the caller's list is intact
+
+
+def test_thinking_blocks_are_kept_when_replay_is_recorded_fine_or_unknown():
+    for caps in ({}, {"thinking_replay": True}, {"thinking_replay": None}):
+        kwargs = _thinking_kwargs(model_info={"id": "dep", "nannos_capabilities": caps})
+        assert _run_deployment_hook(kwargs) is None, caps
