@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
@@ -49,6 +49,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
 import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
+import {
+  compatibleBaseModels,
+  hasWebSearchFee,
+  pricePerMillion,
+  pricesFromCatalogEntry,
+  routeOf,
+} from '@/lib/catalogPricing';
 import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
@@ -194,9 +201,9 @@ function deriveAlias(modelId: string): string {
 // server's own resolution — the display only, never a submitted value.
 // Empty when the id has no prefix (the norm for Bedrock cost-map ids): the catalog entry's
 // server-resolved `family` answers those, and the server re-derives it the same way on save.
-function deriveProvider(modelId: string): string {
-  return modelId.includes('/') ? modelId.slice(0, modelId.indexOf('/')) : '';
-}
+// One definition (`routeOf`), shared with the base-model compatibility filter so the two can
+// never parse a route differently.
+const deriveProvider = routeOf;
 
 const CATALOG_LIMIT = 50; // cap the rendered match list; the rest surface as you keep typing
 
@@ -243,6 +250,14 @@ export function ModelGatewayPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [basePickerOpen, setBasePickerOpen] = useState(false);
+  // The base-model list filters only on text typed since the field was focused: a value already
+  // in place (picked, or loaded on edit) must not hide the other tiers of the same model.
+  const [baseTyped, setBaseTyped] = useState(false);
+  // The base model as it was on focus. Leaving the field with a DIFFERENT compatible catalog id
+  // (pasted, or edited to another tier) re-seeds the prices; typing through an id or retyping the
+  // same one does not, so stored rates in edit mode are only replaced by a deliberate change.
+  const baseOnFocus = useRef('');
   // Provider credential overrides (region/project) are hidden by default — the gateway's
   // env defaults are the norm; only collapse-open them when overriding per model.
   const [credsOpen, setCredsOpen] = useState(false);
@@ -294,50 +309,57 @@ export function ModelGatewayPage() {
   );
   const visibleMatches = catalogMatches.slice(0, CATALOG_LIMIT);
 
+  // Base-model picker: only entries compatible with the gateway id (same route; the same model's
+  // region/date variants when the id names a known model), substring-filtered on what's typed.
+  const compatibleBases = compatibleBaseModels(catalog, form.litellm_model.trim(), form.mode);
+  const bq = baseTyped ? form.base_model.trim().toLowerCase() : '';
+  const baseMatches = compatibleBases.filter((c) => bq === '' || c.model_id.toLowerCase().includes(bq));
+  const visibleBaseMatches = baseMatches.slice(0, CATALOG_LIMIT);
+
   // Selecting a catalog model pre-fills the gateway id, provider, input modes and cost.
   const applyCatalogEntry = (entry: CatalogModel) => {
     const modes = ['text'];
     if (entry.supports_vision) modes.push('image');
     if (entry.supports_audio_input) modes.push('audio');
     if (entry.supports_pdf_input) modes.push('file');
-    const perM = (v?: number | null) => (v && v > 0 ? String(v * 1_000_000) : undefined);
-    const prices: Record<string, string> = {};
-    // Web search is a per-query fee keyed by context size; price the `medium` tier (what
-    // gateway_web_search sends), falling back to low/high — mirrors the backend cost-prefill.
-    const search = entry.search_context_cost_per_query;
-    const perQuery =
-      search?.search_context_size_medium ??
-      search?.search_context_size_low ??
-      search?.search_context_size_high;
-    const map: Array<[string, string | undefined]> = [
-      ['base_input_tokens', perM(entry.input_cost_per_token)],
-      ['base_output_tokens', perM(entry.output_cost_per_token)],
-      ['cache_read_input_tokens', perM(entry.cache_read_input_token_cost)],
-      ['cache_creation_input_tokens', perM(entry.cache_creation_input_token_cost)],
-      ['input_images', perM(entry.input_cost_per_image)],
-      ['web_search', perM(perQuery)],
-    ];
-    for (const [unit, val] of map) if (val) prices[unit] = val;
     const isEmbedding = entry.mode === 'embedding';
-    setForm((f) => ({
-      ...f,
-      litellm_model: entry.model_id,
-      // Pre-fill the alias from the model unless the user has already typed their own.
-      model_name: !editingId && !aliasEdited ? deriveAlias(entry.model_id) : f.model_name,
-      // The server-resolved route, not LiteLLM's cost-map tag — this only drives which
-      // credential inputs show; the request carries no provider (see effectiveProvider).
-      provider: entry.family ?? f.provider,
-      mode: isEmbedding ? 'embedding' : 'chat',
-      input_modes: isEmbedding ? embeddingInputModes(entry) : modes,
-      // Capabilities from the catalog entry; a listed per-query search fee also counts as
-      // "can search" (some entries carry the fee without the boolean). Editable after.
-      supports_reasoning: !isEmbedding && !!entry.supports_reasoning,
-      supports_web_search: !isEmbedding && (!!entry.supports_web_search || !!perQuery),
-      // Replace (not merge): selecting a different model must not leave a prior model's prices —
-      // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
-      prices,
-    }));
+    setForm((f) => {
+      // A base model already chosen and still compatible with the new id keeps pricing the
+      // deployment: it names the tier (e.g. EU Data Zone), which the id alone cannot.
+      const base = catalog.find((c) => c.model_id === f.base_model.trim());
+      const pricedBy =
+        base && compatibleBaseModels(catalog, entry.model_id, entry.mode ?? 'chat').includes(base) ? base : entry;
+      return {
+        ...f,
+        litellm_model: entry.model_id,
+        // Pre-fill the alias from the model unless the user has already typed their own.
+        model_name: !editingId && !aliasEdited ? deriveAlias(entry.model_id) : f.model_name,
+        // The server-resolved route, not LiteLLM's cost-map tag — this only drives which
+        // credential inputs show; the request carries no provider (see effectiveProvider).
+        provider: entry.family ?? f.provider,
+        mode: isEmbedding ? 'embedding' : 'chat',
+        input_modes: isEmbedding ? embeddingInputModes(entry) : modes,
+        // Capabilities from the catalog entry; a listed per-query search fee also counts as
+        // "can search" (some entries carry the fee without the boolean). Editable after.
+        supports_reasoning: !isEmbedding && !!entry.supports_reasoning,
+        // Same entry as the prices, so a web-search fee and the capability can't disagree.
+        supports_web_search: !isEmbedding && (!!pricedBy.supports_web_search || hasWebSearchFee(pricedBy)),
+        // A catalog base model that no longer fits the new id is dropped rather than submitted:
+        // the gateway would read max-tokens and cost metadata off a different model. Off-catalog
+        // free text is kept; nothing here can tell whether it fits.
+        base_model: base && pricedBy !== base ? '' : f.base_model,
+        // Replace (not merge): selecting a different model must not leave a prior model's prices —
+        // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
+        prices: pricesFromCatalogEntry(pricedBy),
+      };
+    });
   };
+
+  // A base model names the priced catalog entry for a deployment whose id can't (an Azure
+  // deployment name says which model, not which tier). Choosing one re-seeds the prices from it,
+  // replacing the gateway id's: the base model is the more specific answer.
+  const applyBaseModelEntry = (entry: CatalogModel) =>
+    setForm((f) => ({ ...f, base_model: entry.model_id, prices: pricesFromCatalogEntry(entry) }));
 
   // The provider route this deployment will be served and billed under. ONE value answers all of it,
   // and the form never authors it — it mirrors the server's resolution so what you see is what will
@@ -452,7 +474,9 @@ export function ModelGatewayPage() {
       const { pricing } = await getCostPrefill(m.model_name);
       const prices: Record<string, string> = {};
       for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(entry.price_per_million);
-      setForm((f) => ({ ...f, prices }));
+      // The dialog is already open while this loads: if the admin picked a base model (or typed
+      // a price) in the meantime, those prices are newer than the stored ones and win.
+      setForm((f) => (Object.keys(f.prices).length ? f : { ...f, prices }));
     } catch {
       /* no seed — admin enters rates */
     }
@@ -995,16 +1019,77 @@ export function ModelGatewayPage() {
 
             {isAzureProvider(effectiveProvider) && (
               <div className="grid gap-1.5">
-                <Label>Base model (Azure)</Label>
-                <Input
-                  placeholder="azure/gpt-4o"
-                  value={form.base_model}
-                  onChange={(e) => setForm({ ...form, base_model: e.target.value })}
-                />
+                <Label>
+                  Base model (Azure){compatibleBases.length > 0 ? ' — compatible catalog models, type to filter' : ''}
+                </Label>
+                <div className="relative">
+                  <Input
+                    placeholder="azure/eu/gpt-6-sol"
+                    value={form.base_model}
+                    autoComplete="off"
+                    onFocus={() => {
+                      baseOnFocus.current = form.base_model.trim();
+                      setBaseTyped(false);
+                      setBasePickerOpen(true);
+                    }}
+                    onBlur={(e) => {
+                      setTimeout(() => setBasePickerOpen(false), 150);
+                      // A pasted or edited value that names a different compatible tier re-prices
+                      // the deployment; looked up in the unfiltered list, not the typed-filtered one.
+                      const v = e.target.value.trim();
+                      const entry = compatibleBases.find((c) => c.model_id === v);
+                      if (entry && v !== baseOnFocus.current) applyBaseModelEntry(entry);
+                    }}
+                    onChange={(e) => {
+                      setBasePickerOpen(true);
+                      setBaseTyped(true);
+                      setForm({ ...form, base_model: e.target.value });
+                    }}
+                  />
+                  {basePickerOpen && visibleBaseMatches.length > 0 && (
+                    <div className="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
+                      {visibleBaseMatches.map((c) => (
+                        <button
+                          type="button"
+                          key={c.model_id}
+                          className="flex w-full flex-col items-start rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground"
+                          onMouseDown={(e) => {
+                            e.preventDefault(); // keep focus / beat onBlur so the click registers
+                            applyBaseModelEntry(c);
+                            // The pick is the change: blur must not re-apply it, and the list
+                            // reopens unfiltered.
+                            baseOnFocus.current = c.model_id;
+                            setBaseTyped(false);
+                            setBasePickerOpen(false);
+                          }}
+                        >
+                          <span className="font-mono text-xs">{c.model_id}</span>
+                          <span className="text-muted-foreground text-[11px]">
+                            {/* The precision the price fields get, so a regional uplift stays visible. */}
+                            {pricePerMillion(c.input_cost_per_token)
+                              ? `$${pricePerMillion(c.input_cost_per_token)}/M`
+                              : 'no input price'}{' '}
+                            in ·{' '}
+                            {pricePerMillion(c.output_cost_per_token)
+                              ? `$${pricePerMillion(c.output_cost_per_token)}/M`
+                              : 'no output price'}{' '}
+                            out
+                          </span>
+                        </button>
+                      ))}
+                      {baseMatches.length > visibleBaseMatches.length && (
+                        <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                          +{baseMatches.length - visibleBaseMatches.length} more — keep typing to narrow
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Azure deployment names aren’t recognised for cost/metadata. Map this deployment to a
-                  known model (e.g. <span className="font-mono">azure/gpt-4o</span>) so the gateway can
-                  identify it for max-tokens and native cost tracking.
+                  The catalog model this deployment serves, including its pricing tier (e.g.{' '}
+                  <span className="font-mono">azure/eu/gpt-6-sol</span> for an EU Data Zone deployment).
+                  Choosing one pre-fills the prices below from it, and lets the gateway identify the
+                  deployment for max-tokens and native cost tracking.
                 </p>
               </div>
             )}
