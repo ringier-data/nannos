@@ -1446,7 +1446,10 @@ export function ModelGatewayPage() {
         open={runOpen && !!run}
         onOpenChange={(o) => (o ? setRunOpen(true) : run?.phase === 'done' ? setRunOpen(false) : setConfirmCloseRun(true))}
       >
-        <DialogContent className="max-w-lg max-h-[90vh] flex flex-col">
+        {/* Anchored near the top, not centred: the window grows as verdicts and notes arrive, and a
+            centred dialog re-centres on every height change — the whole modal jumped as the last
+            shape and then the notes landed. */}
+        <DialogContent className="max-w-lg top-[8vh] translate-y-0 max-h-[84vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>
               {run?.kind === 'register' ? 'Registering' : run?.kind === 'edit' ? 'Saving' : 'Testing'} {run?.model}
@@ -1458,15 +1461,25 @@ export function ModelGatewayPage() {
             </DialogDescription>
           </DialogHeader>
           {run && (
-            <div className="min-h-0 space-y-4 overflow-y-auto">
+            // overflow-x-hidden: a spinning icon's rotated corners count as overflow, and with
+            // overflow-y auto the browser makes x auto too — a scrollbar flashed on every turn.
+            // The stable gutter keeps the width from changing when the list reaches max height.
+            <div className="min-h-0 space-y-4 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]">
               {run.phase === 'saving' && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   {run.kind === 'register' ? 'Writing the rate card and the gateway deployment…' : 'Saving the deployment…'}
                 </div>
               )}
-              {run.phase !== 'saving' && (run.state.rows.length > 0 || run.phase === 'probing') && (
+              {run.phase !== 'saving' && (run.state.rows.length > 0 || run.phase === 'done') && (
                 <ProbeProgress state={run.state} />
+              )}
+              {run.phase === 'probing' && run.state.rows.length === 0 && (
+                // Until the plan lands (a few ms for a chat model), or for an embedding ping.
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Testing {run.model}…
+                </div>
               )}
               {run.notes.map((n, i) => (
                 <div
