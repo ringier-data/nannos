@@ -695,7 +695,7 @@ def _off_kwargs(model, **overrides):
     return kwargs
 
 
-# ---- cache_control allowlist (ADR-0008) -------------------------------------------------
+# ---- cache_control allowlist (ADR-0014) -------------------------------------------------
 # The rule keeps markers only for deployments that speak Anthropic's idiom. These cover the
 # inversion from the old denylist: everything unlisted now strips instead of forwarding.
 
@@ -803,7 +803,7 @@ def test_shipped_settings_file_passes_its_own_check():
     assert config["litellm_settings"]["callbacks"] == "custom_logger.proxy_handler_instance"
 
 
-# ---- thinking_blocks normalization (ADR-0008, review round 1) ----------------------------
+# ---- thinking_blocks normalization (ADR-0014, review round 1) ----------------------------
 # The app attaches signed thinking_blocks as a TOP-LEVEL message field, keyed on the requested
 # alias' provider. Under failover the alias no longer names the serving provider, so the strip
 # has to happen here, where the resolved deployment is known.

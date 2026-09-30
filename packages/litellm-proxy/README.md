@@ -29,7 +29,7 @@ model registration, and proxy-side cost capture. Apps talk to it via
   - **Gemini cache_control stripping** (`async_pre_call_deployment_hook`): removes
     Anthropic-style `cache_control` markers from requests routed to gemini-format models
     (`_CACHE_CONTROL_KEEP_RULES`, an allowlist keyed provider + model markers — Anthropic-format
-    deployments keep their markers, everything else is stripped; see ADR-0008). The app attaches the markers to every provider's messages (ADR-0001, one client);
+    deployments keep their markers, everything else is stripped; see ADR-0014). The app attaches the markers to every provider's messages (ADR-0001, one client);
     on Gemini, LiteLLM silently reinterprets them as *explicit* Vertex context caching: a
     `cachedContents` object is created before the first generate call, so the first call of a
     conversation reports its whole prefix as cache-read. The create call bills full-price input

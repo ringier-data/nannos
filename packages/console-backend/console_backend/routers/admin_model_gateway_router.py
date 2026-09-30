@@ -595,7 +595,7 @@ async def delete_model(model_id: str, request: Request, db: DbSession, user: Use
             logger.error("Deleted '%s' but failed to clean its failover-chain entries: %s", alias, e)
 
 
-# --- Tier groups (nannos#204, ADR-0008) ------------------------------------------------
+# --- Tier groups (nannos#204, ADR-0014) ------------------------------------------------
 # A tier group is one chat tier's ordered models: the tier default, then the aliases the
 # gateway falls back to when the default's provider is unavailable. Nannos stores the chain
 # and projects it onto the proxy (POST /fallback); LiteLLM executes the routing. Chat tiers

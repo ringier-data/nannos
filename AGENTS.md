@@ -83,7 +83,7 @@ via `POST /fallback` (DB-backed, so it cannot drift against the DB-backed model 
 executed entirely by LiteLLM — retries, cooldown, then the next alias. Within-tier only: a tier
 never chains into another tier, because availability and cost/quality are separate axes. Chat tiers
 only — an embedding call must never fail over, since a second model's vectors insert cleanly into
-the same pgvector index and silently degrade search. See ADR-0008.
+the same pgvector index and silently degrade search. See ADR-0014.
   - **Failover** vs **alias degradation** — *failover* is runtime (a live alias's provider is
 unavailable, the gateway tries the next in the tier group); *alias degradation* is registry-time (a
 **retired** alias resolves to its tier's successor, `resolve_chat_model`). Both were once called

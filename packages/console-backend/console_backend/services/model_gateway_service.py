@@ -294,7 +294,7 @@ class ModelGatewayService:
         await self._request("POST", "/model/delete", json={"id": model_id})
         self._invalidate_list_cache()
 
-    # --- Failover chains (nannos#204, ADR-0008) ------------------------------------------
+    # --- Failover chains (nannos#204, ADR-0014) ------------------------------------------
     # LiteLLM stores fallbacks in its own DB when store_model_in_db is on, alongside the
     # model registry, so a chain cannot drift against the aliases it names. That is why the
     # chain is projected here rather than written into the proxy's config.yaml, which in

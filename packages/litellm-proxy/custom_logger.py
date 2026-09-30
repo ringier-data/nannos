@@ -146,7 +146,7 @@ def _sanitize_response_format(data: dict) -> None:
         _force_additional_properties_false(schema)
 
 
-# --- cache_control normalization at the resolved deployment (ADR-0008) ------------------
+# --- cache_control normalization at the resolved deployment (ADR-0014) ------------------
 # The app attaches Anthropic-style `cache_control: {"type": "ephemeral"}` markers to every
 # model's messages (ADR-0001: one ChatOpenAI client for all providers). On gemini-format
 # models LiteLLM turns those markers into EXPLICIT Vertex context caching: it creates a
@@ -165,7 +165,7 @@ def _sanitize_response_format(data: dict) -> None:
 # README "Gemini cache_control stripping".
 #
 # This is an ALLOWLIST: markers are kept only for deployments that speak Anthropic's
-# cache_control idiom, and stripped for everything else (ADR-0008). It used to be a denylist
+# cache_control idiom, and stripped for everything else (ADR-0014). It used to be a denylist
 # naming vertex_ai/gemini, which fails open — any provider not on the list received Anthropic
 # markers, so a deployment on an OpenAI-format provider was already being sent a field it does
 # not define, and a *fallback* onto one would tear the safety net at the moment it was needed.
@@ -638,7 +638,7 @@ class NannosCostLogger(CustomLogger):
         """Per-deployment request fixes; each needs the deployment the router picked, which
         ``async_pre_call_hook`` runs too early to see — and under failover the requested alias
         no longer names the serving deployment, so this is the only place with a correct answer
-        (ADR-0008).
+        (ADR-0014).
 
         * Thinking off: a `reasoning_effort: "none"` request gets `thinking: disabled` on a
           Claude deployment and loses any `thinking` elsewhere. See ``_apply_thinking_off``.
