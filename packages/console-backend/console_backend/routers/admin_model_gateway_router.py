@@ -7,11 +7,13 @@ never usable before it is billable. Master-key access stays server-side.
 """
 
 import asyncio
+import json
 import logging
 from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from ..config import config
 from ..db.session import DbSession
@@ -503,7 +505,17 @@ async def edit_model(
     )
 
 
-@router.post("/models/{model_name}/test")
+#: Probe runs outlive a closed dialog: the record is written either way, and a registration
+#: whose client went away must still end with a verdict on the deployment. Held here so the
+#: event loop does not garbage-collect a task nobody awaits any more.
+_background_probes: set[asyncio.Task] = set()
+
+
+@router.post(
+    "/models/{model_name}/test",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/x-ndjson": {}}, "description": "Probe progress, then the verdict"}},
+)
 async def test_model(
     model_name: str,
     request: Request,
@@ -512,27 +524,61 @@ async def test_model(
     model_id: str | None = Query(None, description="Deployment id to record the probe on (from register/edit)"),
 ):
     """Validate a model end to end: an embedding ping, or for chat the harness's request
-    shapes (nannos#318). A chat model that rejects a shape every agent turn sends fails here
-    (502 with the provider's reason); one that rejects a shape the harness can route around
-    passes with the limitation recorded on its deployment and listed in ``probe``.
+    shapes (nannos#318), streamed as NDJSON so the console can show what is being probed.
+
+    Events, one JSON object per line:
+
+    * ``{"type": "plan", "shapes": [{"shape", "label"}]}`` — chat only, first: what will be
+      reported, in order.
+    * ``{"type": "step", "shape", "step", "label"}`` — right before each probe request.
+    * ``{"type": "result", "shape", "label", "ok", "error", "unavoidable", "note",
+      "inconclusive"}`` — a shape's verdict.
+    * ``{"type": "done", "status": "ok", "model_name", "probe", "recorded", "warning"}`` — last,
+      on success; ``probe``/``recorded`` as ``ModelGatewayService.test_model`` returns them.
+    * ``{"type": "error", "status_code": 502, "detail"}`` — last, when the test fails: a chat
+      model that rejects a shape every agent turn sends (the provider's reason), a probe that
+      could not reach the model, or an embedding ping that failed. The HTTP status is 200
+      either way — it is sent before the verdict exists.
 
     ``warning`` names the utility tiers (chat, chat:low) this alias already serves as default
     or chain member when the probe has just recorded that it rejects ``response_format``: the
     guard on those roles only runs when a role is assigned, and a re-test of a sitting default
-    is the one way a model gets there with that record."""
-    try:
-        result = await get_model_gateway_service(request).test_model(model_name, model_id=model_id)
-    except ModelGatewayError as e:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Test call failed: {e}")
-    warning: str | None = None
-    if ((result.get("probe") or {}).get("capabilities") or {}).get(RESPONSE_FORMAT) is False:
-        affected = await get_model_defaults_service(request).utility_tiers_served_by(db, model_name)
-        if affected:
-            warning = (
-                f"'{model_name}' rejects response_format but serves {', '.join(affected)}; every classifier "
-                f"and summarizer call on those tiers will fail until another model takes its place."
-            )
-    return {"status": "ok", "model_name": model_name, **result, "warning": warning}
+    is the one way a model gets there with that record. The probe does not change which tiers
+    the alias serves, so they are read before it starts, on the request's own session."""
+    served = await get_model_defaults_service(request).utility_tiers_served_by(db, model_name)
+    service = get_model_gateway_service(request)
+    events: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def run() -> None:
+        try:
+            result = await service.test_model(model_name, model_id=model_id, on_progress=events.put_nowait)
+            warning: str | None = None
+            if served and ((result.get("probe") or {}).get("capabilities") or {}).get(RESPONSE_FORMAT) is False:
+                warning = (
+                    f"'{model_name}' rejects response_format but serves {', '.join(served)}; every classifier "
+                    f"and summarizer call on those tiers will fail until another model takes its place."
+                )
+            events.put_nowait({"type": "done", "status": "ok", "model_name": model_name, **result, "warning": warning})
+        except ModelGatewayError as e:
+            events.put_nowait({"type": "error", "status_code": 502, "detail": f"Test call failed: {e}"})
+        except Exception:
+            logger.exception("[probe] %s: test failed unexpectedly", model_name)
+            events.put_nowait({"type": "error", "status_code": 500, "detail": "Test failed unexpectedly — see the console-backend log"})
+        finally:
+            events.put_nowait(None)
+
+    task = asyncio.create_task(run())
+    _background_probes.add(task)
+    task.add_done_callback(_background_probes.discard)
+
+    async def stream():
+        while (event := await events.get()) is not None:
+            yield json.dumps(event, default=str) + "\n"
+
+    # No buffering between here and the browser: each line is a progress update.
+    return StreamingResponse(
+        stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 @router.post("/models/{model_id}/default")

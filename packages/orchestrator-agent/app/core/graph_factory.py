@@ -35,6 +35,7 @@ from agent_common.core.model_factory import (
     _has_aws_credentials,
     create_model,
     is_gemini_model,
+    reasoning_effort_for_choice,
     require_default_model,
     resolve_chat_model,
 )
@@ -536,7 +537,15 @@ class GraphFactory:
         # result. Resolving a second time here would re-read a snapshot that may have moved
         # in between, leaving a permanently-cached graph whose key names one model and whose
         # client calls another. get_graph is the only path into here.
-        return create_model(model_type, thinking_level, callbacks=None, pre_resolved=True)
+        # No level = the user's Extended Thinking is off, which has to be sent as off
+        # (see reasoning_effort_for_choice) or the provider default thinks anyway.
+        return create_model(
+            model_type,
+            thinking_level,
+            callbacks=None,
+            pre_resolved=True,
+            reasoning_effort=reasoning_effort_for_choice(thinking_level),
+        )
 
     def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
         """Get or create a model instance

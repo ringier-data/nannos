@@ -15,6 +15,9 @@ export interface ModelOption {
   provider?: string;
   supportsThinking?: boolean; // Indicates if model supports extended thinking mode
   thinkingLevels?: string[]; // Per-model reasoning_effort levels (from the gateway)
+  // The registration probe saw that nothing turns this model's thinking off (e.g. Gemini 3):
+  // pickers offer a level but no "off". Unset when unprobed.
+  thinkingAlwaysOn?: boolean;
 }
 
 /**
@@ -55,6 +58,14 @@ export function modelSupportsThinking(modelValue: string | null | undefined, _mo
   if (!modelValue) return false;
   const models = _models ?? MODEL_OPTIONS;
   return models.find(m => m.value === modelValue)?.supportsThinking || false;
+}
+
+/**
+ * Whether nothing turns the model's thinking off — the toggle is shown locked on.
+ */
+export function modelThinksAlways(modelValue: string | null | undefined, models?: ModelOption[]): boolean {
+  if (!modelValue) return false;
+  return (models ?? MODEL_OPTIONS).find((m) => m.value === modelValue)?.thinkingAlwaysOn || false;
 }
 
 /**
@@ -113,6 +124,7 @@ export function useAvailableModels() {
           provider: m.provider,
           supportsThinking: m.supports_thinking,
           thinkingLevels: m.thinking_levels ?? undefined,
+          thinkingAlwaysOn: m.thinking_always_on ?? false,
         }))
       : (MODEL_OPTIONS as ModelOption[]);
   return { models, isLoading };

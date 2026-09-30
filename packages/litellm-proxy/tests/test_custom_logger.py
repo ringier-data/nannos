@@ -974,6 +974,16 @@ def test_thinking_off_recorded_as_none_sends_no_switch_even_on_claude():
     assert "thinking" not in kwargs
 
 
+def test_thinking_off_recorded_as_always_on_sends_the_effort_alone():
+    # Gemini 3: nothing turns thinking off; the effort alone is the lowest level, and a
+    # `thinking` a caller still sends would be the "Cannot specify both" 400.
+    kwargs = _probed(
+        "vertex_ai/gemini-3.5-flash", {"thinking_off": "always_on"}, reasoning_effort="none", thinking={"type": "disabled"}
+    )
+    _run_deployment_hook(kwargs)
+    assert "thinking" not in kwargs and kwargs["reasoning_effort"] == "none"
+
+
 def test_thinking_off_record_is_read_per_attempt():
     # A failover attempt carries the fallback's model_info; a Gemini fallback recorded as
     # `none` must not inherit the Claude primary's `disabled`.

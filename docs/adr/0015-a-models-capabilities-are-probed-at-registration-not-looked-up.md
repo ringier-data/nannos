@@ -56,6 +56,10 @@ around failing is **recorded, not refused**; the record is what lets the harness
 - Registering a chat model costs about ten small inference calls instead of one, within a wall-clock
   budget. They go through the gateway under the console's management key, carry no Cost Attribution
   and are therefore not costed against a Rate Card — like the ping before them, only more of them.
+  That takes several seconds, so the Test endpoint streams its progress (NDJSON: the plan, each
+  request as it is sent, each shape's verdict, then the verdict of the whole test) and the console
+  shows what is being probed. The verdict is in-band — the stream starts before it exists — and the
+  probe runs to completion and records even when the admin closes the view.
 - A 200 is not a verdict either: a routable shape is graded on whether the reply shows it was
   honoured. The gateway can rewrite a shape it knows the model refuses and answer the rewritten
   request — LiteLLM's `drop_params` downgrades a forced `tool_choice` to `auto` and drops
@@ -85,6 +89,20 @@ around failing is **recorded, not refused**; the record is what lets the harness
 - The probe sends an explicit `thinking` value to learn which switch a deployment takes; for every
   other caller the switch stays the deployment's, decided by the hook from the record (or the family
   heuristic) and replacing whatever was sent.
+- Thinking off is tried in order — `thinking: disabled`, `thinking: between_tools`, then
+  `reasoning_effort: none` alone — and the first that shows no reasoning is recorded. When even the
+  effort alone still reasons, nothing turns the deployment's thinking off (Gemini 3.1 Pro: LiteLLM
+  maps `none` to its floor, `thinkingLevel: low`), and the record says `always_on`. The console then
+  offers no "off" for that model: the Extended Thinking toggle is locked on in the user settings and
+  the sub-agent form, and a sub-agent saved as "off" on it is stored at the model's lowest level —
+  what it actually runs at. Gemini 3.5 Flash is *not* always-on: its floor, `minimal`, measured as no
+  reasoning, so its "off" is real.
+- A user's "off" is sent as off. The app models Extended Thinking as opt-in — no level means off —
+  but used to send nothing for it, which leaves the provider default: thinking ON on the Claude 5
+  family and Gemini 3, so the toggle read "off" and did nothing. The orchestrator, sub-agents and
+  scheduled agents now send `reasoning_effort: none` when no level is chosen, and the hook applies
+  the serving deployment's recorded switch. Utility calls (risk scoring, HITL resume, indexing, tool
+  selection) are not user choices and are unchanged.
 - A deployment recorded as rejecting the replay of its own signed thinking block has the blocks
   stripped by the hook per attempt, the way a non-Anthropic fallback does: the turn continues without
   extended thinking rather than not at all.

@@ -162,7 +162,12 @@ def build_runtime_context(
     from agent_common.agents.foundry_agent import create_foundry_local_subagent
     from agent_common.core.document_store_tools import create_document_store_tools
     from agent_common.core.graph_utils import code_interpreter_ptc_enabled
-    from agent_common.core.model_factory import create_model, require_default_model, resolve_chat_model
+    from agent_common.core.model_factory import (
+        create_model,
+        reasoning_effort_for_choice,
+        require_default_model,
+        resolve_chat_model,
+    )
     from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
     from deepagents import CompiledSubAgent
     from langchain_core.tools import BaseTool
@@ -400,6 +405,7 @@ def build_runtime_context(
                             subagent_model_type,
                             thinking_level=thinking_level_to_use,
                             callbacks=callbacks,
+                            reasoning_effort=reasoning_effort_for_choice(thinking_level_to_use),
                         )
                         logger.info(
                             f"Sub-agent '{config.name}' model created with cost tracking "
@@ -410,6 +416,7 @@ def build_runtime_context(
                         subagent_model = create_model(
                             subagent_model_type,
                             thinking_level=thinking_level_to_use,
+                            reasoning_effort=reasoning_effort_for_choice(thinking_level_to_use),
                         )
                         logger.warning(
                             f"Sub-agent '{config.name}' model created WITHOUT cost tracking "

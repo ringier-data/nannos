@@ -224,3 +224,31 @@ class TestThinkingConfigScenarios:
         # Should preserve None values (defaults will be applied in database)
         assert normalized_enable is None
         assert normalized_level is None
+
+
+class TestAlwaysThinkingModels:
+    """A model the registration probe recorded as impossible to turn thinking off for
+    (``thinking_off: always_on``, e.g. Gemini 3) runs at its lowest level when "off" is asked
+    for — so that is what gets stored, not an "off" the model never does."""
+
+    ALWAYS_ON = {"gemini-3.1-pro-preview": "low"}
+
+    def test_off_on_an_always_thinking_model_is_stored_as_its_lowest_level(self):
+        for enable in (False, None):
+            assert _normalize_thinking_config(
+                "gemini-3.1-pro-preview", None, enable, None, SUPPORTED, always_on=self.ALWAYS_ON
+            ) == (True, ThinkingLevel.LOW)
+
+    def test_a_chosen_level_is_kept(self):
+        assert _normalize_thinking_config(
+            "gemini-3.1-pro-preview", None, True, ThinkingLevel.HIGH, SUPPORTED, always_on=self.ALWAYS_ON
+        ) == (True, ThinkingLevel.HIGH)
+
+    def test_other_models_and_unknown_records_keep_off(self):
+        assert _normalize_thinking_config(
+            "claude-sonnet-4.6", None, False, None, SUPPORTED, always_on=self.ALWAYS_ON
+        ) == (False, None)
+        assert _normalize_thinking_config("gemini-3.1-pro-preview", None, False, None, SUPPORTED, always_on=None) == (
+            False,
+            None,
+        )

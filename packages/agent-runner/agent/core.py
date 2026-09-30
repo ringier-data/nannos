@@ -56,6 +56,7 @@ from agent_common.core.model_factory import (
     create_model,
     get_default_model,
     is_valid_model,
+    reasoning_effort_for_choice,
     require_default_model,
 )
 from agent_common.core.step_budget import (
@@ -1536,7 +1537,10 @@ class AgentRunner(BaseAgent):
         if sub_agent_cfg.get("enable_thinking") and sub_agent_cfg.get("thinking_level"):
             thinking_level = sub_agent_cfg["thinking_level"]
 
-        llm = create_model(model_name, thinking_level=thinking_level)
+        # Thinking off has to be sent as off, or the provider default thinks anyway.
+        llm = create_model(
+            model_name, thinking_level=thinking_level, reasoning_effort=reasoning_effort_for_choice(thinking_level)
+        )
 
         # context_id should always be present in the A2A protocol — fail loudly if not.
         # It is the run's conversation, and with the agent name it is the checkpoint

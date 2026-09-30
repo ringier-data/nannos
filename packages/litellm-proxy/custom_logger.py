@@ -271,8 +271,10 @@ def _apply_thinking_off(kwargs: dict) -> bool:
     and an older client may still send it). Two sources, in order:
 
     * A probed deployment (nannos#318) carries the answer in `model_info.nannos_capabilities`:
-      `disabled`, `between_tools` (Claude 5.5 and later reject `disabled` and want this), or
-      `none` — no explicit switch is accepted, so `reasoning_effort: none` goes alone.
+      `disabled`, `between_tools` (Claude 5.5 and later reject `disabled` and want this),
+      `none` — no explicit switch is taken, so `reasoning_effort: none` goes alone — or
+      `always_on`: nothing turns thinking off (Gemini 3), and the effort alone is the lowest
+      it goes, so it is sent the same way.
     * Unprobed: the family heuristic. Claude thinks by default and needs the explicit
       `disabled`; everything else gets no `thinking` at all.
 

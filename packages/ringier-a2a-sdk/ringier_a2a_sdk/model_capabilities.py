@@ -37,6 +37,7 @@ around them. A transient failure records nothing (see ``probe_model``).
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -61,9 +62,12 @@ DEFAULT_BUDGET_SECONDS = 180.0
 FORCED_TOOL_CHOICE = "forced_tool_choice"
 #: bool — the deployment accepts ``response_format: {type: json_schema}``.
 RESPONSE_FORMAT = "response_format"
-#: str — which explicit ``thinking`` value turns thinking off next to ``reasoning_effort: none``
-#: and tools: ``"disabled"``, ``"between_tools"`` or ``"none"`` (no explicit switch turns it off;
-#: send ``reasoning_effort: none`` alone and let the provider do what it does).
+#: str — how thinking goes off next to ``reasoning_effort: none`` and tools: an explicit
+#: ``thinking`` value (``"disabled"``, ``"between_tools"``), ``"none"`` (no explicit switch is
+#: taken; ``reasoning_effort: none`` alone turns it off), or ``"always_on"`` (nothing turns it
+#: off — Gemini 3's floor is ``thinkingLevel: minimal``/``low`` — so the console offers no
+#: thinking-off for the model and the gateway sends ``reasoning_effort: none`` alone, the lowest
+#: it goes).
 THINKING_OFF = "thinking_off"
 #: bool | None — a signed thinking block from the model can be replayed with its tool result.
 #: ``None`` when the model returned no thinking block to replay (nothing to record).
@@ -84,6 +88,43 @@ SHAPE_KEYS: dict[str, str] = {
 THINKING_OFF_DISABLED = "disabled"
 THINKING_OFF_BETWEEN_TOOLS = "between_tools"
 THINKING_OFF_NONE = "none"
+THINKING_OFF_ALWAYS_ON = "always_on"
+
+#: What the admin sees for each shape while the probe runs and in its report. Order is the
+#: order the probe sends them; ``thinking_replay`` only runs for a model declared to think.
+SHAPE_LABELS: dict[str, str] = {
+    "tools_auto": "Tools, model decides",
+    "tool_round_trip": "Tool result round-trip",
+    "streaming_tools": "Streaming with tools",
+    "forced_tool_choice": "Forced tool call",
+    "named_tool_choice": "Named tool call",
+    "response_format": "Structured output (response_format)",
+    "thinking_off": "Thinking off",
+    "thinking_replay": "Thinking replay",
+}
+
+#: The individual requests inside a shape, for the progress line under the running shape.
+STEP_LABELS: dict[str, str] = {
+    "thinking_off:disabled": "trying thinking: disabled",
+    "thinking_off:between_tools": "trying thinking: between_tools",
+    "thinking_off:effort_only": "trying reasoning_effort: none alone",
+    "thinking_off:control": "control turn with thinking on",
+    "thinking_replay:turn": "thinking turn",
+    "thinking_replay:replay": "replaying the signed thinking block",
+}
+
+
+def planned_shapes(*, supports_reasoning: bool) -> list[str]:
+    """The shapes ``probe_model`` will report, in order — for a progress display to lay out
+    before the first result arrives."""
+    return [s for s in SHAPE_LABELS if s != "thinking_replay" or supports_reasoning]
+
+
+#: ``on_progress(event)``: ``{"type": "step", "shape", "step", "label"}`` right before each
+#: request, ``{"type": "result", **ShapeResult}`` when a shape's verdict is in. Awaited when it
+#: returns an awaitable; an exception in it is logged by nobody and ignored — progress must
+#: never change a verdict.
+ProbeProgress = Callable[[dict[str, Any]], Any]
 
 #: The one small tool every probe binds. Deliberately boring: the point is the wire shape,
 #: not the answer.
@@ -147,6 +188,19 @@ class ProbeCallError(Exception):
         gateway unreachable (``status`` None), or a cooled-down deployment. Such a shape is
         *inconclusive* and leaves no record, instead of being written down as a limitation."""
         return is_transient_status(self.status)
+
+
+#: What LiteLLM's router answers once it has cooled a deployment down (after a 404, a 401, a
+#: rate limit…): no provider was asked, so it says nothing about the shape.
+_COOLDOWN_MARKERS = ("No deployments available", "cooldown_list")
+_NOT_PROBED_COOLDOWN = (
+    "not probed — the gateway took this deployment out of rotation after an earlier failure; "
+    "fix that failure and re-run Test"
+)
+
+
+def _is_cooldown(message: str) -> bool:
+    return any(m in message for m in _COOLDOWN_MARKERS)
 
 
 def is_transient_status(status: int | None) -> bool:
@@ -214,18 +268,20 @@ class ProbeReport:
             "capabilities": dict(self.capabilities),
             "rejected": [r.shape for r in self.rejected],
             "inconclusive": [r.shape for r in self.inconclusive],
-            "results": [
-                {
-                    "shape": r.shape,
-                    "ok": r.ok,
-                    "error": r.error,
-                    "unavoidable": r.unavoidable,
-                    "note": r.note,
-                    "inconclusive": r.inconclusive,
-                }
-                for r in self.results
-            ],
+            "results": [_result_dict(r) for r in self.results],
         }
+
+
+def _result_dict(r: ShapeResult) -> dict[str, Any]:
+    return {
+        "shape": r.shape,
+        "label": SHAPE_LABELS.get(r.shape, r.shape),
+        "ok": r.ok,
+        "error": r.error,
+        "unavoidable": r.unavoidable,
+        "note": r.note,
+        "inconclusive": r.inconclusive,
+    }
 
 
 # --- request builders ---------------------------------------------------------------------
@@ -334,20 +390,23 @@ def shape_response_format(model: str) -> dict[str, Any]:
     )
 
 
-def shape_thinking_off(model: str, switch: str) -> dict[str, Any]:
-    """The fast model, summaries and classifiers: ``reasoning_effort: none`` with tools. The
-    explicit ``thinking`` value is what the gateway hook adds per deployment; the probe sends
-    it itself to learn which one the deployment takes, and the hook leaves it alone because
-    the request carries the probe marker (any other caller's value is replaced)."""
-    return _base(
+def shape_thinking_off(model: str, switch: str | None) -> dict[str, Any]:
+    """Every thinking-off call (the fast model, summaries, a turn with Extended Thinking off):
+    ``reasoning_effort: none`` with tools. The explicit ``thinking`` value is what the gateway
+    hook adds per deployment; the probe sends it itself to learn which one the deployment
+    takes, and the hook leaves it alone because the request carries the probe marker (any
+    other caller's value is replaced). ``switch=None`` sends the effort alone."""
+    body = _base(
         model,
         max_tokens=_GRADED_MAX_TOKENS,
         messages=[{"role": "user", "content": _THINK}],
         tools=[PROBE_TOOL],
         tool_choice="auto",
         reasoning_effort="none",
-        thinking={"type": switch},
     )
+    if switch is not None:
+        body["thinking"] = {"type": switch}
+    return body
 
 
 def shape_thinking_control(model: str) -> dict[str, Any]:
@@ -536,6 +595,7 @@ async def probe_model(
     *,
     supports_reasoning: bool = False,
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
+    on_progress: ProbeProgress | None = None,
 ) -> ProbeReport:
     """Replay every harness shape against ``model`` through ``call`` and report.
 
@@ -555,8 +615,30 @@ async def probe_model(
     report = ProbeReport(model=model)
     started = time.monotonic()
 
-    async def attempt(body: dict[str, Any]) -> tuple[bool, Any, str, bool]:
-        """Send one shape; (ok, response, provider reason, transient)."""
+    async def emit(event: dict[str, Any]) -> None:
+        if on_progress is None:
+            return
+        try:
+            pending = on_progress(event)
+            if inspect.isawaitable(pending):
+                await pending
+        except Exception:  # noqa: BLE001, S110 — progress is cosmetic; it must never change a verdict
+            pass
+
+    async def add(result: ShapeResult) -> None:
+        report.results.append(result)
+        await emit({"type": "result", **_result_dict(result)})
+
+    cooled_down = False
+
+    async def attempt(body: dict[str, Any], step: str) -> tuple[bool, Any, str, bool]:
+        """Send one request of shape ``step`` (``shape`` or ``shape:detail``); (ok, response,
+        provider reason, transient)."""
+        nonlocal cooled_down
+        shape = step.split(":", 1)[0]
+        await emit({"type": "step", "shape": shape, "step": step, "label": STEP_LABELS.get(step, SHAPE_LABELS.get(shape, step))})
+        if cooled_down:
+            return False, None, _NOT_PROBED_COOLDOWN, True
         if time.monotonic() - started > budget_seconds:
             return False, None, f"probe budget of {budget_seconds:.0f}s exhausted before this shape", True
         try:
@@ -565,13 +647,18 @@ async def probe_model(
                 response = assemble_stream(response if isinstance(response, str) else "")
             return True, response, "", False
         except ProbeCallError as e:
+            if _is_cooldown(e.message):
+                # The gateway took the deployment out of rotation after an earlier failure;
+                # every further request would get this same answer, so none is sent.
+                cooled_down = True
+                return False, None, _NOT_PROBED_COOLDOWN, True
             return False, None, e.message, e.transient
         except Exception as e:  # noqa: BLE001 — a transport failure is inconclusive, not a crash
             return False, None, f"{type(e).__name__}: {e}", True
 
-    async def graded(body: dict[str, Any], check: Callable[[Any], str]) -> tuple[bool, str, bool]:
+    async def graded(body: dict[str, Any], step: str, check: Callable[[Any], str]) -> tuple[bool, str, bool]:
         """Send one routable shape and judge the reply; (ok, reason, inconclusive)."""
-        ok, response, err, transient = await attempt(body)
+        ok, response, err, transient = await attempt(body, step)
         if not ok:
             return False, err, transient
         failure = check(response)
@@ -585,36 +672,37 @@ async def probe_model(
         ("tool_round_trip", shape_tool_round_trip(model)),
         ("streaming_tools", shape_streaming_tools(model)),
     ):
-        ok, _, err, transient = await attempt(body)
-        report.results.append(ShapeResult(shape, ok, err, unavoidable=True, inconclusive=not ok and transient))
+        ok, _, err, transient = await attempt(body, shape)
+        await add(ShapeResult(shape, ok, err, unavoidable=True, inconclusive=not ok and transient))
 
     # Forced tool choice: both forms must work for the flag to be True ------------------
-    forced_ok, forced_err, forced_inc = await graded(shape_forced_tool_choice(model), _check_forced)
-    report.results.append(ShapeResult("forced_tool_choice", forced_ok, forced_err, inconclusive=forced_inc))
-    named_ok, named_err, named_inc = await graded(shape_named_tool_choice(model), _check_named)
-    report.results.append(ShapeResult("named_tool_choice", named_ok, named_err, inconclusive=named_inc))
+    forced_ok, forced_err, forced_inc = await graded(shape_forced_tool_choice(model), "forced_tool_choice", _check_forced)
+    await add(ShapeResult("forced_tool_choice", forced_ok, forced_err, inconclusive=forced_inc))
+    named_ok, named_err, named_inc = await graded(shape_named_tool_choice(model), "named_tool_choice", _check_named)
+    await add(ShapeResult("named_tool_choice", named_ok, named_err, inconclusive=named_inc))
     if forced_ok and named_ok:
         report.capabilities[FORCED_TOOL_CHOICE] = True
     elif (not forced_ok and not forced_inc) or (not named_ok and not named_inc):
         report.capabilities[FORCED_TOOL_CHOICE] = False  # a definite rejection of either form
 
     # response_format ------------------------------------------------------------------
-    rf_ok, rf_err, rf_inc = await graded(shape_response_format(model), _check_response_format)
-    report.results.append(ShapeResult("response_format", rf_ok, rf_err, inconclusive=rf_inc))
+    rf_ok, rf_err, rf_inc = await graded(shape_response_format(model), "response_format", _check_response_format)
+    await add(ShapeResult("response_format", rf_ok, rf_err, inconclusive=rf_inc))
     if not rf_inc:
         report.capabilities[RESPONSE_FORMAT] = rf_ok
 
-    # Thinking off: the first explicit switch that works, else none ----------------------
-    # "Works" means the reply shows no reasoning. That only means something if the same
+    # Thinking off: the first way that turns it off — an explicit switch, then the effort
+    # alone — else it cannot be turned off at all ------------------------------------------
+    # "Turns it off" means the reply shows no reasoning. That only means something if the same
     # question makes the model reason with thinking on, so a clean reply is checked against a
-    # control turn (sent once, and only when needed); without that evidence the switch is
-    # still recorded, since it was accepted and nothing contradicts it, but noted as unverified.
+    # control turn (sent once, and only when needed); without that evidence the way is still
+    # recorded, since it was accepted and nothing contradicts it, but noted as unverified.
     control: str | None = None  # "" = the control reasoned; otherwise why it could not verify
 
     async def verify() -> str:
         nonlocal control
         if control is None:
-            ok, response, err, _ = await attempt(shape_thinking_control(model))
+            ok, response, err, _ = await attempt(shape_thinking_control(model), "thinking_off:control")
             if not ok:
                 control = f"unverified: the thinking-on control turn failed ({err})"
             elif not _reasoned(response):
@@ -623,55 +711,59 @@ async def probe_model(
                 control = ""
         return control
 
-    off_switch: str | None = THINKING_OFF_NONE
-    off_note = ""
-    for switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS):
-        ok, response, err, transient = await attempt(shape_thinking_off(model, switch))
-        if ok and _reasoned(response):
-            rt = _reasoning_tokens(response)
-            what = f"the model still reasoned ({rt} reasoning tokens)" if rt else "the model still reasoned"
-            off_note = f"{switch}: " + _REWRITTEN.format(what=what)
+    def still_reasoned(response: Any) -> str:
+        rt = _reasoning_tokens(response)
+        return f"the model still reasoned ({rt} reasoning tokens)" if rt else "the model still reasoned"
+
+    off_way: str | None = None  # the recorded value; None = inconclusive, no record
+    off_ok, off_error, off_note = False, "", ""
+    tried: list[str] = []
+    for switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS, None):
+        label = switch or "reasoning_effort: none alone"
+        ok, response, err, transient = await attempt(shape_thinking_off(model, switch), f"thinking_off:{switch or 'effort_only'}")
+        if not ok and transient:
+            off_error = err  # cannot tell which way works; leave no record
+            break
+        if not ok:
+            tried.append(f"{label}: {err}")
+            if switch is None:
+                # The effort alone is refused outright. The hook still sends it (there is
+                # nothing lower), so record that no explicit switch works and say why.
+                off_way, off_error = THINKING_OFF_NONE, "; ".join(tried)
             continue
-        if ok:
-            off_switch = switch
-            rt = _reasoning_tokens(response)
-            off_note = "; ".join(n for n in (f"{rt} reasoning tokens" if rt is not None else "", await verify()) if n)
-            break
-        if transient:
-            off_switch = None  # cannot tell which switch works; leave no record
-            off_note = err
-            break
-        off_note = err
-    if off_switch is None:
-        report.results.append(ShapeResult("thinking_off", False, off_note, inconclusive=True))
+        if _reasoned(response):
+            if switch is None:
+                # Nothing is rewritten here: the effort alone is the model's own floor.
+                tried.append(f"{label}: {still_reasoned(response)}")
+                off_way = THINKING_OFF_ALWAYS_ON
+                off_error = "thinking cannot be turned off — " + "; ".join(tried)
+            else:
+                tried.append(f"{label}: " + _REWRITTEN.format(what=still_reasoned(response)))
+            continue
+        rt = _reasoning_tokens(response)
+        off_way, off_ok = (switch or THINKING_OFF_NONE), True
+        off_note = "; ".join(n for n in (f"{rt} reasoning tokens" if rt is not None else "", await verify()) if n)
+        break
+    if off_way is None:
+        await add(ShapeResult("thinking_off", False, off_error, inconclusive=True))
     else:
-        conclusive_ok = off_switch != THINKING_OFF_NONE
-        report.results.append(
-            ShapeResult(
-                "thinking_off",
-                conclusive_ok,
-                "" if conclusive_ok else f"no explicit switch turned thinking off; last: {off_note}",
-                note=off_note if conclusive_ok else "",
-            )
-        )
-        report.capabilities[THINKING_OFF] = off_switch
+        await add(ShapeResult("thinking_off", off_ok, off_error, note=off_note))
+        report.capabilities[THINKING_OFF] = off_way
 
     # Thinking replay: only for models declared to think ---------------------------------
     if supports_reasoning:
-        on_ok, response, on_err, on_t = await attempt(shape_thinking_on(model))
+        on_ok, response, on_err, on_t = await attempt(shape_thinking_on(model), "thinking_replay:turn")
         assistant = _message(response) if on_ok else {}
         if on_ok and assistant.get("thinking_blocks"):
-            ok, _, err, transient = await attempt(shape_thinking_replay(model, assistant))
-            report.results.append(ShapeResult("thinking_replay", ok, err, inconclusive=not ok and transient))
+            ok, _, err, transient = await attempt(shape_thinking_replay(model, assistant), "thinking_replay:replay")
+            await add(ShapeResult("thinking_replay", ok, err, inconclusive=not ok and transient))
             if ok or not transient:
                 report.capabilities[THINKING_REPLAY] = ok
         elif on_ok:
-            report.results.append(ShapeResult("thinking_replay", True, note="no thinking block returned; nothing to replay"))
+            await add(ShapeResult("thinking_replay", True, note="no thinking block returned; nothing to replay"))
             report.capabilities[THINKING_REPLAY] = None
         else:
-            report.results.append(
-                ShapeResult("thinking_replay", False, f"thinking turn failed: {on_err}", inconclusive=on_t)
-            )
+            await add(ShapeResult("thinking_replay", False, f"thinking turn failed: {on_err}", inconclusive=on_t))
             if not on_t:
                 report.capabilities[THINKING_REPLAY] = False
 
@@ -735,3 +827,10 @@ def thinking_off_switch(caps: dict[str, Any]) -> dict[str, str] | None:
     if switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS):
         return {"type": switch}
     return None
+
+
+def thinking_always_on(caps: dict[str, Any]) -> bool:
+    """The probe saw that nothing turns this deployment's thinking off: the console offers no
+    thinking-off for it, and a thinking-off request gets its lowest level instead. False when
+    unprobed (no opinion)."""
+    return caps.get(THINKING_OFF) == THINKING_OFF_ALWAYS_ON

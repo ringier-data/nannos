@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
@@ -32,6 +32,7 @@ import {
   type DefaultRole,
   type GatewayModel,
   type ModelRegistrationRequest,
+  type ProbeEvent,
   type RateCardPricingEntry,
   roleLabel,
   probeInconclusive,
@@ -51,6 +52,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { ProbeProgress } from '@/components/admin/ProbeProgress';
+import { initialProbeState, reduceProbe, type ProbeState } from '@/lib/probeProgress';
 import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
 import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
 import {
@@ -89,10 +92,56 @@ function inconclusiveMessage(name: string, shapes: { shape: string; error: strin
 }
 
 /** One line per shape the probe saw the model reject, with the provider's reason. */
-function limitationsMessage(name: string, limitations: { shape: string; error: string }[]): string {
+/** One line of what a finished run has to say, shown in the run window. */
+interface ProbeNote {
+  tone: 'success' | 'warning' | 'error';
+  text: string;
+}
+
+/** A save-and-test or a card's Test, shown in the run window from submit to Close. */
+interface ProbeRun {
+  kind: 'register' | 'edit' | 'test';
+  model: string;
+  /** saving: the rate card + deployment write; probing: the Test stream; done: verdict in. */
+  phase: 'saving' | 'probing' | 'done';
+  state: ProbeState;
+  notes: ProbeNote[];
+  /** The form's values are kept for another try (a failed save). */
+  backToForm: boolean;
+}
+
+/** The warnings a passing probe leaves — each a note, where they used to be one toast each. */
+function probeNotes(
+  name: string,
+  r: {
+    limitations: ReturnType<typeof probeLimitations>;
+    inconclusive: ReturnType<typeof probeInconclusive>;
+    recorded: boolean | null;
+    warning: string | null;
+  },
+): ProbeNote[] {
+  const notes: ProbeNote[] = [];
+  if (r.limitations.length) notes.push({ tone: 'warning', text: limitationsMessage(name, r.limitations) });
+  if (r.inconclusive.length) notes.push({ tone: 'warning', text: inconclusiveMessage(name, r.inconclusive) });
+  if (r.recorded === false)
+    notes.push({ tone: 'warning', text: `The probe's result could not be recorded on the gateway — re-run Test.` });
+  if (r.warning) notes.push({ tone: 'error', text: r.warning });
+  return notes;
+}
+
+function limitationsMessage(name: string, limitations: { shape: string; label?: string; error: string }[]): string {
+  // The full provider reasons are in the probe's progress view; a toast gets the gist.
+  const clip = (s: string) => (s.length > 160 ? `${s.slice(0, 157)}…` : s);
   return (
-    `${name} registered with limitations the gateway will route around: ` +
-    limitations.map((l) => `${l.shape.replace(/_/g, ' ')} (${l.error || 'rejected'})`).join('; ')
+    `${name} has limitations the gateway routes around: ` +
+    limitations
+      .map((l) =>
+        // ringier_a2a_sdk.model_capabilities words an always-on verdict this way.
+        l.shape === 'thinking_off' && l.error.startsWith('thinking cannot be turned off')
+          ? 'it always thinks — nothing turns thinking off, so pickers offer a level but no "off"'
+          : `${l.label ?? l.shape.replace(/_/g, ' ')} (${clip(l.error || 'rejected')})`,
+      )
+      .join('; ')
   );
 }
 
@@ -258,6 +307,37 @@ const perMillion = (v?: number | null): string | null =>
 export function ModelGatewayPage() {
   const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
+  // The running (or last) save-and-test or Test, shown in its own window: the form closes when
+  // the admin submits, and everything the run has to say — each shape's verdict, the failure's
+  // reason, the warnings that used to be toasts — stays readable there until they close it.
+  const [run, setRun] = useState<ProbeRun | null>(null);
+  const [runOpen, setRunOpen] = useState(false);
+  const [confirmCloseRun, setConfirmCloseRun] = useState(false);
+  // Read from mutation callbacks, which close over a render that may be stale by the time the
+  // probe ends: a run that finishes after its window was closed says so in a toast instead.
+  const runOpenRef = useRef(false);
+  useEffect(() => {
+    runOpenRef.current = runOpen;
+  }, [runOpen]);
+  const startRun = (kind: ProbeRun['kind'], model: string) => {
+    setRun({ kind, model, phase: kind === 'test' ? 'probing' : 'saving', state: initialProbeState(model), notes: [], backToForm: false });
+    setRunOpen(true);
+  };
+  const probeStarted = (model: string) =>
+    setRun((r) => (r && r.model === model ? { ...r, phase: 'probing' } : r));
+  const onProbeEvent = (model: string) => (event: ProbeEvent) =>
+    setRun((r) => (r && r.model === model ? { ...r, state: reduceProbe(r.state, event) } : r));
+  const finishRun = (model: string, notes: ProbeNote[], backToForm = false) => {
+    setRun((r) => (r && r.model === model ? { ...r, phase: 'done', notes, backToForm } : r));
+    if (!runOpenRef.current) {
+      const worst = notes.find((n) => n.tone === 'error') ?? notes.find((n) => n.tone === 'warning') ?? notes[0];
+      const show = worst?.tone === 'error' ? toast.error : worst?.tone === 'warning' ? toast.warning : toast.success;
+      show(worst?.text ?? `${model}: finished`, {
+        duration: 12000,
+        action: { label: 'Details', onClick: () => setRunOpen(true) },
+      });
+    }
+  };
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [basePickerOpen, setBasePickerOpen] = useState(false);
@@ -292,6 +372,19 @@ export function ModelGatewayPage() {
     queryKey: ['gateway-models'],
     queryFn: listGatewayModels,
   });
+  // A stable order for the grid: the gateway lists a deployment LAST after any write to it (a
+  // Test records its probe with PATCH /model/{id}/update), so its own order moved a card out
+  // from under the admin's cursor. Config models first, then by alias; the id breaks ties.
+  const sortedModels = useMemo(
+    () =>
+      [...models].sort(
+        (a, b) =>
+          Number(!!a.db_model) - Number(!!b.db_model) ||
+          a.model_name.localeCompare(b.model_name) ||
+          (a.model_id ?? '').localeCompare(b.model_id ?? ''),
+      ),
+    [models],
+  );
 
   // LiteLLM's known-model catalog, pre-filtered server-side to integrated providers.
   const { data: catalog = [] } = useQuery({
@@ -498,10 +591,14 @@ export function ModelGatewayPage() {
   // snapshot of the prior params) — the admin is told the change landed but failed its test.
   const saveMutation = useMutation({
     mutationFn: async (body: ModelRegistrationRequest) => {
+      // The form steps aside (its values kept, for "Back to form") and the run window takes over.
+      setDialogOpen(false);
+      startRun(editingId ? 'edit' : 'register', body.model_name);
       if (editingId) {
         const updated = await updateGatewayModel(editingId, body);
+        probeStarted(body.model_name);
         // Throws when the probe refuses; the record goes to the re-registered deployment.
-        const test = await testGatewayModel(body.model_name, updated.gateway_model_id);
+        const test = await testGatewayModel(body.model_name, updated.gateway_model_id, onProbeEvent(body.model_name));
         return {
           name: body.model_name,
           created: null as GatewayModel | null,
@@ -516,15 +613,18 @@ export function ModelGatewayPage() {
       let inconclusive: ReturnType<typeof probeInconclusive> = [];
       let recorded: boolean | null = null;
       let warning: string | null = null;
+      let capabilities: Record<string, unknown> | null = null;
       try {
         // Throws when the model rejects a shape every agent turn sends (or could not be
         // measured); a shape the harness can route around is recorded on the deployment and
         // reported here instead.
-        const test = await testGatewayModel(res.model_name, res.gateway_model_id);
+        probeStarted(body.model_name);
+        const test = await testGatewayModel(res.model_name, res.gateway_model_id, onProbeEvent(body.model_name));
         limitations = probeLimitations(test.probe);
         inconclusive = probeInconclusive(test.probe);
         recorded = test.recorded ?? null;
         warning = test.warning ?? null;
+        capabilities = test.probe?.capabilities ?? null;
       } catch (testErr) {
         if (res.gateway_model_id) {
           // Best-effort rollback; surface the original test error regardless of cleanup outcome.
@@ -549,17 +649,10 @@ export function ModelGatewayPage() {
         supports_vision: (body.input_modes ?? []).includes('image'),
         supports_reasoning: (body.model_info?.supports_reasoning as boolean | undefined) ?? false,
         supports_web_search: (body.model_info?.supports_web_search as boolean | undefined) ?? false,
-        // Mirror of the record the probe just wrote (see recordedLimitations for the keys) —
-        // only when it was actually written; otherwise every reader treats the model as unprobed.
-        capabilities: recorded === true
-          ? Object.fromEntries(
-              limitations.map((l) =>
-                l.shape === 'thinking_off'
-                  ? ['thinking_off', 'none']
-                  : [l.shape === 'named_tool_choice' ? 'forced_tool_choice' : l.shape, false],
-              ),
-            )
-          : null,
+        // The record the probe just wrote — only when it was actually written; otherwise every
+        // reader treats the model as unprobed. (A re-probe merges over a stored record, but a
+        // fresh registration has none, so the probe's own flags are the record.)
+        capabilities: recorded === true ? capabilities : null,
       };
       // First model to serve a role becomes the fleet default automatically, so a fresh
       // system always has a fallback without a separate "Make default" click. Only fill
@@ -584,18 +677,17 @@ export function ModelGatewayPage() {
       }
       return { name: res.model_name, created, limitations, inconclusive, recorded, warning };
     },
-    onSuccess: ({ name, created, limitations, inconclusive, recorded, warning }) => {
+    onSuccess: ({ name, created, limitations, inconclusive, recorded, warning }, body) => {
       const auto = created?.default_roles ?? [];
-      toast.success(
-        auto.length
-          ? `Saved & tested ${name} — set as default ${auto.map((r) => r.replace('_', ' ')).join(' & ')}`
-          : `Saved & tested ${name}`,
-      );
-      if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
-      if (inconclusive.length) toast.warning(inconclusiveMessage(name, inconclusive), { duration: 12000 });
-      if (recorded === false)
-        toast.warning(`${name}: the probe's result could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
-      if (warning) toast.error(warning, { duration: 15000 });
+      finishRun(body.model_name, [
+        {
+          tone: 'success',
+          text: auto.length
+            ? `Saved & tested ${name} — set as default ${auto.map((r) => r.replace('_', ' ')).join(' & ')}.`
+            : `Saved & tested ${name}.`,
+        },
+        ...probeNotes(name, { limitations, inconclusive, recorded, warning }),
+      ]);
       closeDialog();
       if (created) {
         // The gateway runs multiple replicas and serves /model/info from per-pod memory,
@@ -613,7 +705,7 @@ export function ModelGatewayPage() {
         invalidate(); // edit landed in place — reflect the gateway's real state
       }
     },
-    onError: (e: unknown) => {
+    onError: (e: unknown, body) => {
       const message = errMsg(e);
       // Bedrock's "invalid model identifier" is a region verdict in disguise. Keep it in the dialog,
       // next to the field that fixes it, and open that section so it's visible without a click.
@@ -629,30 +721,50 @@ export function ModelGatewayPage() {
         setRegionError(hint);
         setCredsOpen(true);
       }
-      toast.error(
-        editingId
-          ? `Update applied but its test failed — please verify: ${hint ?? message}`
-          : `Test failed — registration rolled back: ${hint ?? message}`,
+      finishRun(
+        body.model_name,
+        [
+          {
+            tone: 'error',
+            text: editingId
+              ? `The update was applied but its test failed — please verify: ${hint ?? message}`
+              : `Test failed — the registration was rolled back: ${hint ?? message}`,
+          },
+        ],
+        true,
       );
       invalidate(); // an edit may have landed; reflect the gateway's real state
     },
   });
 
   const testMutation = useMutation({
-    mutationFn: ({ name, modelId }: { name: string; modelId?: string | null }) => testGatewayModel(name, modelId),
+    mutationFn: ({ name, modelId }: { name: string; modelId?: string | null }) => {
+      startRun('test', name);
+      return testGatewayModel(name, modelId, onProbeEvent(name));
+    },
     onSuccess: (r, { name }) => {
       const limitations = probeLimitations(r.probe);
       const inconclusive = probeInconclusive(r.probe);
-      if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
-      if (inconclusive.length) toast.warning(inconclusiveMessage(name, inconclusive), { duration: 12000 });
-      if (!limitations.length && !inconclusive.length)
-        toast.success(r.probe ? `${name} accepts every request shape the harness sends` : `Test call to ${name} succeeded`);
-      if (r.probe && r.recorded === false)
-        toast.warning(`${name}: the probe's result could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
-      if (r.warning) toast.error(r.warning, { duration: 15000 });
+      const notes = probeNotes(name, {
+        limitations,
+        inconclusive,
+        recorded: r.probe ? (r.recorded ?? null) : null,
+        warning: r.warning ?? null,
+      });
+      finishRun(
+        name,
+        notes.length
+          ? notes
+          : [
+              {
+                tone: 'success',
+                text: r.probe ? `${name} accepts every request shape the harness sends.` : `Test call to ${name} succeeded.`,
+              },
+            ],
+      );
       invalidate(); // the probe re-recorded the model's capabilities
     },
-    onError: (e: unknown) => toast.error(`Test failed: ${errMsg(e)}`),
+    onError: (e: unknown, { name }) => finishRun(name, [{ tone: 'error', text: `Test failed: ${errMsg(e)}` }]),
   });
 
   const deleteMutation = useMutation({
@@ -795,7 +907,7 @@ export function ModelGatewayPage() {
         <p className="text-muted-foreground">No models registered yet.</p>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {models.map((m: GatewayModel) => {
+          {sortedModels.map((m: GatewayModel) => {
             const testing = testMutation.isPending && testMutation.variables?.name === m.model_name;
             return (
               <Card
@@ -917,7 +1029,7 @@ export function ModelGatewayPage() {
       )}
 
       <Dialog open={dialogOpen} onOpenChange={(o) => (o ? setDialogOpen(true) : closeDialog())}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingId ? 'Edit model' : 'Register model'}</DialogTitle>
             <DialogDescription>
@@ -1327,6 +1439,89 @@ export function ModelGatewayPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* The run window: a save-and-test or a card's Test, from submit until the admin closes it.
+          Everything the run has to say is here, so nothing flashes past in a toast. */}
+      <Dialog
+        open={runOpen && !!run}
+        onOpenChange={(o) => (o ? setRunOpen(true) : run?.phase === 'done' ? setRunOpen(false) : setConfirmCloseRun(true))}
+      >
+        <DialogContent className="max-w-lg max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>
+              {run?.kind === 'register' ? 'Registering' : run?.kind === 'edit' ? 'Saving' : 'Testing'} {run?.model}
+            </DialogTitle>
+            <DialogDescription>
+              {run?.kind === 'test'
+                ? 'Replays the request shapes every agent turn sends and records what this model accepts.'
+                : 'Writes the rate card and the gateway deployment, then replays the request shapes every agent turn sends and records what the model accepts.'}
+            </DialogDescription>
+          </DialogHeader>
+          {run && (
+            <div className="min-h-0 space-y-4 overflow-y-auto">
+              {run.phase === 'saving' && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  {run.kind === 'register' ? 'Writing the rate card and the gateway deployment…' : 'Saving the deployment…'}
+                </div>
+              )}
+              {run.phase !== 'saving' && (run.state.rows.length > 0 || run.phase === 'probing') && (
+                <ProbeProgress state={run.state} />
+              )}
+              {run.notes.map((n, i) => (
+                <div
+                  key={i}
+                  className={
+                    n.tone === 'error'
+                      ? 'rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm break-words'
+                      : n.tone === 'warning'
+                        ? 'rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm break-words'
+                        : 'rounded-md border border-green-600/30 bg-green-600/5 px-3 py-2 text-sm break-words'
+                  }
+                >
+                  {n.text}
+                </div>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            {run?.phase === 'done' && run.backToForm && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setRunOpen(false);
+                  setDialogOpen(true);
+                }}
+              >
+                Back to form
+              </Button>
+            )}
+            <Button
+              variant={run?.phase === 'done' ? 'default' : 'outline'}
+              onClick={() => (run?.phase === 'done' ? setRunOpen(false) : setConfirmCloseRun(true))}
+            >
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={confirmCloseRun}
+        onOpenChange={setConfirmCloseRun}
+        title="Close while it runs?"
+        description={
+          run?.kind === 'test'
+            ? 'The probe keeps running on the server and records its result. You will get a notification when it finishes.'
+            : 'The save keeps running as long as this page stays open, and the probe records its result. You will get a notification when it finishes.'
+        }
+        confirmLabel="Close"
+        cancelLabel="Keep watching"
+        onConfirm={() => {
+          setConfirmCloseRun(false);
+          setRunOpen(false);
+        }}
+      />
 
       {/* Switching an embedding default re-points indexing — warn about re-indexing. */}
       <AlertDialog open={!!pendingDefault} onOpenChange={(o) => !o && setPendingDefault(null)}>

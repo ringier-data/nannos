@@ -10,11 +10,12 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 import httpx
 
-from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of
+from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of, thinking_always_on
 
 from ..config import config
 
@@ -261,6 +262,19 @@ class ModelGatewayService:
             for m in await self.list_models()
             if m.get("model_name") and thinking_levels_for(m.get("model_info") or {})
         }
+
+    async def always_thinking_aliases(self) -> dict[str, str]:
+        """Thinking-capable aliases whose probe recorded that nothing turns thinking off
+        (``thinking_off: always_on``), each with its lowest thinking level — what a
+        thinking-off config on that model actually gets. Same source as the model picker's
+        ``thinking_always_on``, so the UI and the sub-agent write path never disagree."""
+        out: dict[str, str] = {}
+        for m in await self.list_models():
+            info = m.get("model_info") or {}
+            levels = thinking_levels_for(info)
+            if m.get("model_name") and levels and thinking_always_on(capabilities_of(info)):
+                out[m["model_name"]] = levels[0]
+        return out
 
     async def register_model(self, model_name: str, litellm_params: dict, model_info: dict | None = None) -> dict:
         result = await self._request(
@@ -509,7 +523,9 @@ class ModelGatewayService:
         """
         return next((c for c in await self.get_catalog() if c.get("model_id") == model_id), None)
 
-    async def test_model(self, model_name: str, model_id: str | None = None) -> dict:
+    async def test_model(
+        self, model_name: str, model_id: str | None = None, on_progress: Callable[[dict], object] | None = None
+    ) -> dict:
         """Validate a freshly-registered model end to end, and record what it accepts.
 
         Mode-aware: embedding models must be hit on /v1/embeddings — sending them a chat
@@ -534,13 +550,16 @@ class ModelGatewayService:
         serves ``/model/info`` from per-replica memory, so a just-registered alias can be
         missing from one replica's list for a moment — the lookup retries briefly.
 
+        ``on_progress`` receives the probe's progress events (``ProbeProgress``), preceded by one
+        ``{"type": "plan", "shapes": [...]}`` for a chat model; nothing for an embedding ping.
+
         Returns ``{"probe": ProbeReport.as_dict(), "recorded": bool | None}`` for chat
         models, ``{}`` for embeddings. ``recorded`` is None for a deployment that has no
         writable record (config-defined), False when the write failed or was skipped: the
         probe's verdict still stands, but every reader will treat the deployment as unprobed.
         """
         from ringier_a2a_sdk.embeddings import _DEFAULT_DIMENSION, profile_for
-        from ringier_a2a_sdk.model_capabilities import PROBED_AT, probe_model
+        from ringier_a2a_sdk.model_capabilities import PROBED_AT, SHAPE_LABELS, planned_shapes, probe_model
 
         # The pinned deployment's own model_info when the caller has the id (an edit can leave
         # the old deployment listed under the alias for a moment); the alias's otherwise.
@@ -560,7 +579,13 @@ class ModelGatewayService:
             await self._request("POST", "/v1/embeddings", json=body, timeout=30.0, expose_error=True)
             return {}
 
-        report = await probe_model(model_name, self._probe_call, supports_reasoning=bool(info.get("supports_reasoning")))
+        supports_reasoning = bool(info.get("supports_reasoning"))
+        if on_progress is not None:
+            shapes = planned_shapes(supports_reasoning=supports_reasoning)
+            on_progress({"type": "plan", "shapes": [{"shape": sh, "label": SHAPE_LABELS[sh]} for sh in shapes]})
+        report = await probe_model(
+            model_name, self._probe_call, supports_reasoning=supports_reasoning, on_progress=on_progress
+        )
         if report.rejected:
             reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.rejected)
             raise ModelGatewayError(f"the model rejects request shapes every agent turn sends — {reasons}")

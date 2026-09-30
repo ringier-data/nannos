@@ -15,6 +15,7 @@ from ..db.session import DbSession
 from ..dependencies import require_auth_or_bearer_token
 from ..models.user import User
 from ..services.model_gateway_service import ModelGatewayError, thinking_levels_for
+from ringier_a2a_sdk.model_capabilities import capabilities_of, thinking_always_on
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ class AvailableModel(BaseModel):
     provider: str
     supports_thinking: bool = False
     thinking_levels: list[str] | None = None
+    # The registration probe saw that nothing turns this model's thinking off (nannos#318):
+    # pickers offer a level but no "off". False when unprobed (no opinion).
+    thinking_always_on: bool = False
     is_default: bool = False
     # Gateway list price per 1M tokens (USD), or None when the gateway has no price for
     # the model. Informational — for model-selection guidance, not authoritative billing
@@ -61,6 +65,7 @@ def _to_available(model: dict, default_model: str | None) -> AvailableModel | No
         provider=info.get("provider") or info.get("litellm_provider") or "Model Gateway",
         supports_thinking=bool(levels),
         thinking_levels=levels or None,
+        thinking_always_on=bool(levels) and thinking_always_on(capabilities_of(info)),
         is_default=(name == default_model),
         input_price_per_million=_price_per_million(info.get("input_cost_per_token")),
         output_price_per_million=_price_per_million(info.get("output_cost_per_token")),

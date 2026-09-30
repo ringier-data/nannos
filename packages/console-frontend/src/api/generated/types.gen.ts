@@ -293,6 +293,10 @@ export type AvailableModel = {
      */
     thinking_levels?: Array<string> | null;
     /**
+     * Thinking Always On
+     */
+    thinking_always_on?: boolean;
+    /**
      * Is Default
      */
     is_default?: boolean;
@@ -13944,7 +13948,7 @@ export type TestModelApiV1AdminModelGatewayModelsModelNameTestPostError = TestMo
 
 export type TestModelApiV1AdminModelGatewayModelsModelNameTestPostResponses = {
     /**
-     * Successful Response
+     * Probe progress, then the verdict
      */
     200: unknown;
 };

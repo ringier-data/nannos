@@ -85,8 +85,9 @@ never chains into another tier, because availability and cost/quality are separa
 only — an embedding call must never fail over, since a second model's vectors insert cleanly into
 the same pgvector index and silently degrade search. See ADR-0014.
   - **Capability record** — what the registration probe *saw* a deployment accept
-(`model_info.nannos_capabilities`: forced tool choice, `response_format`, the thinking-off switch,
-thinking replay), as opposed to a Capability the admin declares or a provider map claims. The shapes
+(`model_info.nannos_capabilities`: forced tool choice, `response_format`, the thinking-off switch —
+or `always_on` when nothing turns thinking off, which the console shows as a locked Extended
+Thinking toggle — and thinking replay), as opposed to a Capability the admin declares or a provider map claims. The shapes
 probed are the harness's own, defined once in `ringier_a2a_sdk.model_capabilities` and read by
 console-backend (writes the record), the gateway hook (rewrites a request for the deployment that
 serves it) and agent-common (picks the shape the alias accepts). An unavoidable shape failing refuses

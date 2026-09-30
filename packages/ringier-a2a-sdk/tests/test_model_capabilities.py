@@ -45,13 +45,15 @@ class _Gateway:
     ``rewrites`` plays LiteLLM's ``drop_params``: ``"forced"`` answers a forced tool_choice as
     ``auto`` would (the prompt forbids the tool, so no call), ``"thinking_disabled"`` drops
     ``thinking: disabled`` so the model reasons anyway — both with a 200. ``reasons=False`` is
-    a model that shows no reasoning even with thinking on."""
+    a model that shows no reasoning even with thinking on; ``floor=True`` one whose
+    ``reasoning_effort: none`` still reasons (Gemini 3 maps it to thinkingLevel minimal)."""
 
-    def __init__(self, reject=None, thinking_blocks=False, rewrites=(), reasons=True):
+    def __init__(self, reject=None, thinking_blocks=False, rewrites=(), reasons=True, floor=False):
         self.reject = reject or (lambda body: None)
         self.thinking_blocks = thinking_blocks
         self.rewrites = set(rewrites)
         self.reasons = reasons
+        self.floor = floor
         self.bodies: list[dict] = []
 
     async def __call__(self, body):
@@ -71,8 +73,9 @@ class _Gateway:
         if effort == "high":
             return _reasoning(250 if self.reasons else 0)
         if effort == "none":
-            dropped = (body.get("thinking") or {}).get("type") == "disabled" and "thinking_disabled" in self.rewrites
-            return _reasoning(180 if dropped else 0)
+            switch = (body.get("thinking") or {}).get("type")
+            dropped = switch == "disabled" and "thinking_disabled" in self.rewrites
+            return _reasoning(180 if dropped or (switch is None and self.floor) else 0)
         tc = body.get("tool_choice")
         if (tc == "required" or isinstance(tc, dict)) and "forced" not in self.rewrites:
             return _ok_response(content=None, tool_calls=[_WEATHER_CALL])
@@ -208,12 +211,33 @@ async def test_a_switch_is_recorded_but_unverified_when_the_control_does_not_rea
     assert "unverified" in next(r for r in report.results if r.shape == "thinking_off").note
 
 
+_GEMINI_3 = lambda b: "Cannot specify both `thinking` and `thinking_level`" if "thinking" in b else None  # noqa: E731
+
+
 @pytest.mark.asyncio
-async def test_no_control_turn_when_every_switch_still_reasons():
-    gw = _Gateway(rewrites={"thinking_disabled"}, reject=lambda b: "no" if (b.get("thinking") or {}).get("type") == "between_tools" else None)
+async def test_a_model_whose_effort_alone_still_reasons_is_always_on():
+    """Gemini 3: no explicit switch is taken, and `reasoning_effort: none` alone becomes
+    thinkingLevel minimal — it still reasons. Nothing turns thinking off, which is what the
+    console needs to know to stop offering the toggle."""
+    gw = _Gateway(reject=_GEMINI_3, floor=True)
+    report = await mc.probe_model("gemini", gw)
+    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_ALWAYS_ON
+    assert mc.thinking_always_on(report.capabilities) is True
+    off = next(r for r in report.results if r.shape == "thinking_off")
+    assert not off.ok and not off.inconclusive and "cannot be turned off" in off.error
+    # A reasoning reply is its own evidence: no control turn is needed.
+    assert not any(b.get("reasoning_effort") == "high" for b in gw.bodies)
+    # The hook sends the effort alone — the lowest the model goes.
+    assert mc.thinking_off_switch(report.capabilities) is None
+
+
+@pytest.mark.asyncio
+async def test_a_refused_effort_is_recorded_as_no_switch_with_the_reason():
+    gw = _Gateway(reject=lambda b: "no reasoning_effort none" if b.get("reasoning_effort") == "none" else None)
     report = await mc.probe_model("m", gw)
     assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_NONE
-    assert not any(b.get("reasoning_effort") == "high" for b in gw.bodies)
+    off = next(r for r in report.results if r.shape == "thinking_off")
+    assert not off.ok and "no reasoning_effort none" in off.error
 
 
 @pytest.mark.asyncio
@@ -234,16 +258,19 @@ async def test_thinking_off_tries_disabled_before_between_tools():
 
 
 @pytest.mark.asyncio
-async def test_no_explicit_switch_is_a_recorded_state_not_a_failure_to_register():
-    """Gemini 3 refuses ``thinking`` next to ``reasoning_effort`` in any form. That is
-    'send reasoning_effort: none alone', which the hook already does — so it is recorded as
-    ``none`` and the model still registers."""
-    gw = _Gateway(reject=lambda b: "Cannot specify both" if "thinking" in b else None)
+async def test_the_effort_alone_is_recorded_when_it_turns_thinking_off():
+    """A model that refuses `thinking` next to `reasoning_effort` in any form but whose
+    `reasoning_effort: none` alone does turn thinking off: recorded as ``none`` — a way that
+    works, not a limitation — and still registers."""
+    gw = _Gateway(reject=_GEMINI_3)
     report = await mc.probe_model("gemini", gw)
-    assert report.rejected == []
+    assert report.rejected == [] and report.limitations == []
     assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_NONE
+    assert mc.thinking_always_on(report.capabilities) is False
     off = next(r for r in report.results if r.shape == "thinking_off")
-    assert off.ok is False and "Cannot specify both" in off.error
+    assert off.ok and "unverified" not in off.note
+    efforts_alone = [b for b in gw.bodies if b.get("reasoning_effort") == "none" and "thinking" not in b]
+    assert len(efforts_alone) == 1
 
 
 # --- unavoidable shapes refuse registration ----------------------------------------------
@@ -264,6 +291,26 @@ async def test_an_unavoidable_shape_failing_rejects_the_model(predicate, shape):
     assert [r.shape for r in report.rejected] == [shape]
     # The routable shapes still ran, so the admin sees the whole picture at once.
     assert {r.shape for r in report.results} >= {"forced_tool_choice", "response_format", "thinking_off"}
+
+
+@pytest.mark.asyncio
+async def test_a_cooled_down_deployment_stops_the_probe_instead_of_repeating_the_cooldown():
+    """A 404 on the first shape makes LiteLLM cool the deployment down; every later request
+    would come back "No deployments available". The probe stops asking and says why once."""
+    sent: list[dict] = []
+
+    async def gateway(body):
+        sent.append(body)
+        if len(sent) == 1:
+            raise mc.ProbeCallError("Publisher model was not found", status=404)
+        raise mc.ProbeCallError("No deployments available for selected model, cooldown_list=['d']", status=429)
+
+    report = await mc.probe_model("m", gateway, supports_reasoning=True)
+    assert len(sent) == 2
+    assert [r.shape for r in report.rejected] == ["tools_auto"]
+    rest = [r for r in report.results if r.shape != "tools_auto"]
+    assert rest and all(r.inconclusive and "not probed" in r.error for r in rest)
+    assert report.capabilities == {}
 
 
 # --- transient failures are inconclusive, never a verdict ---------------------------------
@@ -396,6 +443,38 @@ async def test_a_thinking_model_that_returns_no_block_records_nothing_to_replay(
     report = await mc.probe_model("m", gw, supports_reasoning=True)
     assert report.capabilities[mc.THINKING_REPLAY] is None
     assert next(r for r in report.results if r.shape == "thinking_replay").ok is True
+
+
+# --- progress ----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_progress_announces_every_request_and_every_verdict_in_order():
+    events: list[dict] = []
+    gw = _Gateway(thinking_blocks=True)
+    report = await mc.probe_model("m", gw, supports_reasoning=True, on_progress=events.append)
+    steps = [e for e in events if e["type"] == "step"]
+    results = [e for e in events if e["type"] == "result"]
+    assert len(steps) == len(gw.bodies)  # one announcement per request, before it is sent
+    assert [e["shape"] for e in results] == [r.shape for r in report.results]
+    assert [e["shape"] for e in results] == mc.planned_shapes(supports_reasoning=True)
+    assert all(e["label"] for e in steps + results)
+    assert {"thinking_off:disabled", "thinking_off:control"} <= {e["step"] for e in steps}
+
+
+@pytest.mark.asyncio
+async def test_a_failing_progress_callback_never_changes_the_verdict():
+    async def broken(event):
+        raise RuntimeError("socket closed")
+
+    assert (await mc.probe_model("m", _Gateway(), on_progress=broken)).capabilities == (
+        await mc.probe_model("m", _Gateway())
+    ).capabilities
+
+
+def test_planned_shapes_leave_out_replay_for_models_not_declared_to_think():
+    assert "thinking_replay" not in mc.planned_shapes(supports_reasoning=False)
+    assert mc.planned_shapes(supports_reasoning=True)[-1] == "thinking_replay"
 
 
 # --- stream assembly ----------------------------------------------------------------------
