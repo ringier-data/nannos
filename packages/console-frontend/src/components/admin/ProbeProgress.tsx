@@ -26,7 +26,9 @@ export function ProbeProgress({ state, className }: { state: ProbeState; classNa
         {state.finished ? (
           state.error ? <XCircle className="h-4 w-4 text-destructive" /> : <CheckCircle2 className="h-4 w-4 text-green-600" />
         ) : (
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <span className="flex h-4 w-4 overflow-hidden">
+            <Loader2 className="h-4 w-4 animate-spin" />
+          </span>
         )}
         {state.finished ? (state.error ? 'Test call failed' : 'Test call succeeded') : `Testing ${state.model}…`}
       </div>
@@ -51,7 +53,11 @@ export function ProbeProgress({ state, className }: { state: ProbeState; classNa
           const { icon: Icon, className: iconClass, title } = ICONS[r.status];
           return (
             <li key={r.shape} className="flex gap-2 text-sm">
-              <Icon className={cn('mt-0.5 h-4 w-4 flex-shrink-0', iconClass)} aria-label={title} />
+              {/* The box clips the spinner: a rotating icon's corners count as scrollable
+                  overflow, and on the last row they toggled the window's scrollbar each turn. */}
+              <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 overflow-hidden">
+                <Icon className={cn('h-4 w-4', iconClass)} aria-label={title} />
+              </span>
               <div className="min-w-0">
                 <span className={cn(r.status === 'pending' && 'text-muted-foreground')}>{r.label}</span>
                 {r.step && <span className="ml-2 text-xs text-muted-foreground">{r.step}…</span>}

@@ -1464,10 +1464,12 @@ export function ModelGatewayPage() {
             // overflow-x-hidden: a spinning icon's rotated corners count as overflow, and with
             // overflow-y auto the browser makes x auto too — a scrollbar flashed on every turn.
             // The stable gutter keeps the width from changing when the list reaches max height.
-            <div className="min-h-0 space-y-4 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]">
+            <div className="min-h-0 space-y-4 overflow-y-auto overflow-x-hidden pb-1 [scrollbar-gutter:stable]">
               {run.phase === 'saving' && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span className="flex h-4 w-4 flex-shrink-0 overflow-hidden">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  </span>
                   {run.kind === 'register' ? 'Writing the rate card and the gateway deployment…' : 'Saving the deployment…'}
                 </div>
               )}
@@ -1477,7 +1479,9 @@ export function ModelGatewayPage() {
               {run.phase === 'probing' && run.state.rows.length === 0 && (
                 // Until the plan lands (a few ms for a chat model), or for an embedding ping.
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span className="flex h-4 w-4 flex-shrink-0 overflow-hidden">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  </span>
                   Testing {run.model}…
                 </div>
               )}
