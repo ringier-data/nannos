@@ -574,7 +574,11 @@ class ModelGatewayService:
         # = not recordable at all (the console shows no warning); False = a write that failed.
         target_is_db = bool(info.get("db_model")) if info.get("id") == target_id else True
         recorded: bool | None = False
-        if not target_id or not target_is_db:
+        if not target_id:
+            # Nothing found at all (alias still unlisted on this replica): a writable deployment
+            # was left unprobed, which is a failed write, not "nothing to write".
+            logger.warning("[probe] %s: no deployment found to record on", model_name)
+        elif not target_is_db:
             logger.info("[probe] %s has no DB deployment to record on: %s", model_name, report.capabilities)
             recorded = None
         else:
@@ -589,6 +593,10 @@ class ModelGatewayService:
                     src = await self._get_model_by_id_with_retry(target_id)
                     if src is None:
                         raise ModelGatewayError("stored record unreadable; not overwriting it with a partial probe")
+                    if not (src.get("model_info") or {}).get("db_model"):
+                        # A stale row id that resolved to a config-defined deployment: nothing to write.
+                        logger.info("[probe] %s: %s is not a DB deployment; not recorded", model_name, target_id)
+                        return {"probe": report.as_dict(), "recorded": None}
                     prior = dict(capabilities_of(src.get("model_info")))
                     prior.pop(PROBED_AT, None)
                     if info.get("id") == target_id:

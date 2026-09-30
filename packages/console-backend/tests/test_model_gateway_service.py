@@ -703,3 +703,32 @@ async def test_a_probe_run_on_the_alias_fallback_keeps_the_pinned_deployments_wh
     assert result["recorded"] is True
     written = calls["patched"][0][1]["model_info"]["nannos_capabilities"]
     assert written["thinking_replay"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_deployment_found_at_all_is_a_failed_write_not_nothing_to_write(svc, monkeypatch):
+    calls = _probe_gateway(svc, monkeypatch, deployment={"data": []})
+    monkeypatch.setattr("console_backend.services.model_gateway_service.asyncio.sleep", _noop_sleep)
+    result = await svc.test_model("m")
+    assert result["recorded"] is False and calls["patched"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_id_resolving_to_a_config_deployment_on_re_read_is_not_recordable(svc, monkeypatch):
+    cfg = {"model_name": "m", "litellm_params": {"model": "x"}, "model_info": {"mode": "chat", "id": "cfg", "db_model": False}}
+    dbdep = _chat_deployment()["data"][0]
+    calls = _probe_gateway(svc, monkeypatch, deployment={"data": [dbdep]})
+    monkeypatch.setattr("console_backend.services.model_gateway_service.asyncio.sleep", _noop_sleep)
+    seen = {"n": 0}
+    real = svc._request
+
+    async def _request(method, path, **kwargs):
+        if path == "/model/info":
+            seen["n"] += 1
+            if seen["n"] > 6:
+                return {"data": [dbdep, cfg]}
+        return await real(method, path, **kwargs)
+
+    monkeypatch.setattr(svc, "_request", _request)
+    result = await svc.test_model("m", model_id="cfg")
+    assert result["recorded"] is None and calls["patched"] == []
