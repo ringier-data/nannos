@@ -14,7 +14,14 @@ from datetime import datetime, timezone
 
 import httpx
 
-from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of
+from ringier_a2a_sdk.model_capabilities import (
+    CAPABILITIES_KEY,
+    FORCED_TOOL_CHOICE,
+    RESPONSE_FORMAT,
+    THINKING_OFF,
+    THINKING_REPLAY,
+    capabilities_of,
+)
 
 from ..config import config
 
@@ -127,6 +134,20 @@ _ROUTE_PARAMS = ("model", "aws_region_name", "vertex_location", "vertex_project"
 
 def _same_route(a: dict, b: dict) -> bool:
     return all(a.get(k) == b.get(k) for k in _ROUTE_PARAMS)
+
+
+# Probe shape → the record key it decides (ringier_a2a_sdk.model_capabilities).
+_SHAPE_KEYS = {
+    "forced_tool_choice": FORCED_TOOL_CHOICE,
+    "named_tool_choice": FORCED_TOOL_CHOICE,
+    "response_format": RESPONSE_FORMAT,
+    "thinking_off": THINKING_OFF,
+    "thinking_replay": THINKING_REPLAY,
+}
+
+
+def _keys_for_shapes(shapes) -> set[str]:
+    return {_SHAPE_KEYS[s] for s in shapes if s in _SHAPE_KEYS}
 
 
 def _utc_now_iso() -> str:
@@ -546,6 +567,8 @@ class ModelGatewayService:
         # the old deployment listed under the alias for a moment); the alias's otherwise.
         model = (await self._get_model_by_id_with_retry(model_id)) if model_id else None
         if model is None:
+            if model_id:
+                logger.warning("[probe] %s: pinned deployment %s not listed; falling back to the alias", model_name, model_id)
             model = await self._get_model_with_retry(model_name)
         info = (model or {}).get("model_info") or {}
         mode = info.get("mode", "chat")
@@ -568,15 +591,22 @@ class ModelGatewayService:
 
         target_id = model_id or info.get("id")
         recorded = False
-        if target_id and (model_id or info.get("db_model")):
+        # Only a DB deployment can be written (LiteLLM rejects /model/update on config-defined
+        # ones) — judged on the looked-up deployment, not on whether an id was passed.
+        target_is_db = bool(info.get("db_model")) if info.get("id") == target_id else True
+        if target_id and target_is_db:
             try:
-                # Measured keys overwrite; an inconclusive shape keeps whatever was recorded
-                # before (noise must not erase knowledge, ADR-0015). The stored record is read
-                # from the target deployment, not the alias listing.
-                prior = capabilities_of(((await self.get_model_by_id(target_id)) or {}).get("model_info"))
-                prior.pop(PROBED_AT, None)
+                # Measured keys overwrite; a shape that was attempted but inconclusive keeps
+                # whatever was recorded before (noise must not erase knowledge, ADR-0015); a
+                # shape not attempted at all (thinking replay on a model no longer declared to
+                # think) is dropped. The stored record comes from the target deployment itself.
+                src = model if info.get("id") == target_id else await self._get_model_by_id_with_retry(target_id)
+                if src is None and report.inconclusive:
+                    raise ModelGatewayError("stored record unreadable; not overwriting it with a partial probe")
+                prior = dict(capabilities_of((src or {}).get("model_info")))
+                kept = {k: v for k, v in prior.items() if k in _keys_for_shapes(r.shape for r in report.inconclusive)}
                 await self.record_capabilities(
-                    target_id, {**prior, **report.capabilities, PROBED_AT: _utc_now_iso()}
+                    target_id, {**kept, **report.capabilities, PROBED_AT: _utc_now_iso()}
                 )
                 recorded = True
             except ModelGatewayError as e:

@@ -57,9 +57,9 @@ around failing is **recorded, not refused**; the record is what lets the harness
   budget. They go through the gateway under the console's management key, carry no Cost Attribution
   and are therefore not costed against a Rate Card — like the ping before them, only more of them.
 - Only a definite provider rejection is a verdict. A rate limit, a timeout, a 5xx or a cooled-down
-  deployment is *inconclusive*: the shape is reported as unmeasured, its flag is left out of the
-  record, and an unmeasured unavoidable shape fails the test as "re-run" rather than refusing the
-  model. A record is knowledge, and noise must not become knowledge.
+  deployment is *inconclusive*: the shape is reported as unmeasured, its earlier flag (if any)
+  stays in the record, and an unmeasured unavoidable shape fails the test as "re-run" rather than
+  refusing the model. A record is knowledge, and noise must neither become nor erase knowledge.
 - Probe traffic is marked (`metadata.nannos_probe`) and pinned to its alias (`disable_fallbacks`),
   and the hook applies none of its record-driven rewrites to it. Otherwise a re-test of a deployment
   recorded as unable to force a tool call would have its forced probe downgraded, pass, and flip its

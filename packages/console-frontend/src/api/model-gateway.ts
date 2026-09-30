@@ -199,7 +199,7 @@ export interface ProbeShapeResult {
   /** True for a shape every agent turn sends: failing it refuses registration. */
   unavoidable: boolean;
   note: string;
-  /** The shape could not be measured (transient failure); no verdict, nothing recorded. */
+  /** The shape could not be measured (transient failure): no verdict; an earlier result, if any, stays. */
   inconclusive: boolean;
 }
 
@@ -227,12 +227,12 @@ export function probeLimitations(report: ProbeReport | undefined): ProbeShapeRes
   return (report?.results ?? []).filter((r) => !r.ok && !r.unavoidable && !r.inconclusive);
 }
 
-/** `modelId` pins the deployment the probe's record is written to (pass it right after register/edit). */
-/** Shapes the probe could not measure (transient failure or budget): no verdict, nothing recorded. */
+/** Shapes the probe could not measure (transient failure or budget): no verdict; an earlier result stays. */
 export function probeInconclusive(report: ProbeReport | undefined): ProbeShapeResult[] {
   return (report?.results ?? []).filter((r) => r.inconclusive);
 }
 
+/** `modelId` pins the deployment the probe's record is written to (pass it right after register/edit). */
 export async function testGatewayModel(modelName: string, modelId?: string | null): Promise<ModelTestResult> {
   const { data, error } = await testModelApiV1AdminModelGatewayModelsModelNameTestPost({
     path: { model_name: modelName },

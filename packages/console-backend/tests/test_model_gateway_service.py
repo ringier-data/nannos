@@ -633,3 +633,46 @@ async def test_an_edit_that_moves_region_does_not_inherit_the_record(svc, monkey
     monkeypatch.setattr(svc, "_request", _fake_request)
     await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5-5", "aws_region_name": "us-east-1"}, {})
     assert "nannos_capabilities" not in registered[-1]["model_info"]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_config_defined_deployment_is_not_written(svc, monkeypatch):
+    """The Test button passes the row's id for every row; a config-file deployment has an id
+    but no writable record, so the probe reports and stops — no failed PATCH, no warning."""
+    calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(db_model=False))
+    result = await svc.test_model("m", model_id="dep-1")
+    assert result["recorded"] is False and calls["patched"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_shape_not_attempted_is_dropped_from_the_record(svc, monkeypatch):
+    """Reasoning turned off in an edit: the replay shape is no longer attempted, so a stale
+    `thinking_replay: false` must not be carried forever (only inconclusive shapes keep theirs)."""
+    calls = _probe_gateway(
+        svc,
+        monkeypatch,
+        deployment=_chat_deployment(supports_reasoning=False, nannos_capabilities={"thinking_replay": False, "response_format": True}),
+    )
+    await svc.test_model("m")
+    written = calls["patched"][0][1]["model_info"]["nannos_capabilities"]
+    assert "thinking_replay" not in written
+
+
+@pytest.mark.asyncio
+async def test_an_inconclusive_probe_with_an_unreadable_prior_record_does_not_write(svc, monkeypatch):
+    """Replica lag: the pinned deployment is unlisted, a shape is inconclusive — writing the
+    partial dict would erase the flags the edit carried over, so nothing is written."""
+    calls = _probe_gateway(svc, monkeypatch, reject=lambda b: "throttled" if b.get("response_format") else None)
+    calls["reject_status"] = 429
+    monkeypatch.setattr("console_backend.services.model_gateway_service.asyncio.sleep", _noop_sleep)
+    result = await svc.test_model("m", model_id="unlisted")
+    assert result["recorded"] is False and calls["patched"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_prior_record_read_does_not_mutate_the_cached_listing(svc, monkeypatch):
+    calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(nannos_capabilities={"probed_at": "old"}))
+    calls["patch_fails"] = True
+    await svc.test_model("m")
+    listed = (await svc.get_model("m"))["model_info"]["nannos_capabilities"]
+    assert listed == {"probed_at": "old"}

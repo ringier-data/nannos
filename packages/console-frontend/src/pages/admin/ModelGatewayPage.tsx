@@ -79,11 +79,12 @@ const ALL_INPUT_MODES = ['text', 'image', 'audio', 'video', 'file'] as const;
 
 // The openapi client rejects with the parsed error body (e.g. {detail: "..."}), so
 // String(e) yields "[object Object]". Pull out a human-readable message instead.
-/** The shapes the probe could not measure: nothing was recorded for them, so re-run Test. */
+/** The shapes the probe could not measure: any earlier result for them is kept, so re-run Test. */
 function inconclusiveMessage(name: string, shapes: { shape: string; error: string }[]): string {
   return (
-    `${name}: the probe could not measure ${shapes.map((s) => s.shape.replace(/_/g, ' ')).join(', ')} ` +
-    `(${shapes[0]?.error || 'transient failure'}) — nothing recorded for them; re-run Test.`
+    `${name}: the probe could not measure ` +
+    shapes.map((s) => `${s.shape.replace(/_/g, ' ')} (${s.error || 'transient failure'})`).join(', ') +
+    ` — any earlier result for them is kept; re-run Test.`
   );
 }
 
@@ -861,7 +862,10 @@ export function ModelGatewayPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => testMutation.mutate({ name: m.model_name, modelId: m.model_id })}
+                      onClick={() =>
+                        // Only a DB deployment has a writable record; a config-defined one is probed and reported.
+                        testMutation.mutate({ name: m.model_name, modelId: m.db_model ? m.model_id : undefined })
+                      }
                       disabled={testing}
                     >
                       {testing ? (
