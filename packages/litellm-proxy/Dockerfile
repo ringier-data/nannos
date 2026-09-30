@@ -50,7 +50,9 @@ COPY --from=ringier-a2a-sdk ringier_a2a_sdk/telemetry/span_filter.py /etc/litell
 COPY --from=ringier-a2a-sdk ringier_a2a_sdk/model_capabilities.py /etc/litellm/nannos_model_capabilities.py
 
 # So `callbacks: custom_logger.proxy_handler_instance` resolves — and so
-# `import nannos_span_filter` does.
+# `import nannos_span_filter` does. Not relied on for the SDK imports: a mutating webhook can
+# replace the pod's PYTHONPATH (OpenTelemetry Python auto-instrumentation does), so
+# custom_logger puts its own directory on sys.path before importing them.
 ENV PYTHONPATH=/etc/litellm
 
 EXPOSE 4000
