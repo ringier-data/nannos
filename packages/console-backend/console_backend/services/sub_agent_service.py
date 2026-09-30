@@ -1334,7 +1334,7 @@ class SubAgentService:
                 version_enable_thinking,
                 version_thinking_level,
                 await self._thinking_capable_models(),
-                )
+            )
 
             # Create new version
             await self._create_config_version(
