@@ -365,11 +365,11 @@ def _probe_gateway(svc, monkeypatch, *, reject=None, deployment=None):
     """Fake the management API (list + patch) and the inference API the probe hits."""
     from ringier_a2a_sdk.model_capabilities import ProbeCallError
 
-    calls: dict = {"patched": [], "probe_bodies": []}
+    calls: dict = {"patched": [], "probe_bodies": [], "deployment": deployment}
 
     async def _fake_request(method, path, **kwargs):
         if path == "/model/info":
-            return deployment or _chat_deployment()
+            return calls["deployment"] or _chat_deployment()
         if method == "PATCH":
             calls["patched"].append((path, kwargs.get("json")))
             if calls.get("patch_fails"):
@@ -570,4 +570,66 @@ async def test_an_edit_carries_the_record_over_unless_the_model_changed(svc, mon
     assert registered[-1]["model_info"]["mode"] == "chat"
 
     await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5"}, {"mode": "chat"})
+    assert "nannos_capabilities" not in registered[-1]["model_info"]
+
+
+@pytest.mark.asyncio
+async def test_an_inconclusive_re_probe_keeps_the_flags_already_recorded(svc, monkeypatch):
+    """Recorded {response_format: false, thinking_off: between_tools}; on re-test
+    response_format gets a 429. The known `false` must survive — dropping it would let the
+    model into the utility tiers, and noise must not erase knowledge (ADR-0015)."""
+    calls = _probe_gateway(
+        svc,
+        monkeypatch,
+        reject=lambda b: "throttled" if b.get("response_format") else None,
+        deployment=_chat_deployment(nannos_capabilities={"response_format": False, "thinking_off": "between_tools", "probed_at": "old"}),
+    )
+    calls["reject_status"] = 429
+    result = await svc.test_model("m")
+    assert result["recorded"] is True
+    written = calls["patched"][0][1]["model_info"]["nannos_capabilities"]
+    assert written["response_format"] is False  # kept from the prior record
+    assert written["thinking_off"] == "disabled"  # measured this time, overwrites
+    assert written["probed_at"] != "old"
+    assert "response_format" in result["probe"]["inconclusive"]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_id_reads_the_deployments_own_model_info(svc, monkeypatch):
+    """After an edit the alias may still list the old deployment; the thinking shapes must
+    follow the NEW deployment's declaration, and the record goes to it."""
+    listing = {
+        "data": [
+            {"model_name": "m", "litellm_params": {"model": "x"}, "model_info": {"mode": "chat", "id": "old", "db_model": True, "supports_reasoning": False}},
+            {"model_name": "m", "litellm_params": {"model": "x"}, "model_info": {"mode": "chat", "id": "new", "db_model": True, "supports_reasoning": True}},
+        ]
+    }
+    calls = _probe_gateway(svc, monkeypatch, deployment=listing)
+    await svc.test_model("m", model_id="new")
+    assert any(b.get("reasoning_effort") == "low" for b in calls["probe_bodies"])
+    assert calls["patched"][0][0] == "/model/new/update"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_moves_region_does_not_inherit_the_record(svc, monkeypatch):
+    registered: list[dict] = []
+
+    async def _fake_request(method, path, **kwargs):
+        if path == "/model/info":
+            return {
+                "data": [
+                    {
+                        "model_name": "m",
+                        "litellm_params": {"model": "bedrock/eu.anthropic.claude-sonnet-5-5", "aws_region_name": "eu-central-1"},
+                        "model_info": {"id": "old", "db_model": True, "nannos_capabilities": {"response_format": False}},
+                    }
+                ]
+            }
+        if path == "/model/new":
+            registered.append(kwargs["json"])
+            return {"model_info": {"id": "new"}}
+        return {}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+    await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5-5", "aws_region_name": "us-east-1"}, {})
     assert "nannos_capabilities" not in registered[-1]["model_info"]

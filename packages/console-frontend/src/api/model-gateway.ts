@@ -228,6 +228,11 @@ export function probeLimitations(report: ProbeReport | undefined): ProbeShapeRes
 }
 
 /** `modelId` pins the deployment the probe's record is written to (pass it right after register/edit). */
+/** Shapes the probe could not measure (transient failure or budget): no verdict, nothing recorded. */
+export function probeInconclusive(report: ProbeReport | undefined): ProbeShapeResult[] {
+  return (report?.results ?? []).filter((r) => r.inconclusive);
+}
+
 export async function testGatewayModel(modelName: string, modelId?: string | null): Promise<ModelTestResult> {
   const { data, error } = await testModelApiV1AdminModelGatewayModelsModelNameTestPost({
     path: { model_name: modelName },

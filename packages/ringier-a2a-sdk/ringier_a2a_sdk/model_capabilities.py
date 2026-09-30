@@ -306,8 +306,8 @@ def shape_response_format(model: str) -> dict[str, Any]:
 def shape_thinking_off(model: str, switch: str) -> dict[str, Any]:
     """The fast model, summaries and classifiers: ``reasoning_effort: none`` with tools. The
     explicit ``thinking`` value is what the gateway hook adds per deployment; the probe sends
-    it itself to learn which one the deployment takes (the hook leaves a client-sent
-    ``thinking`` alone for exactly this reason)."""
+    it itself to learn which one the deployment takes, and the hook leaves it alone because
+    the request carries the probe marker (any other caller's value is replaced)."""
     return _base(
         model,
         messages=[{"role": "user", "content": _ASK_TOOL}],

@@ -120,6 +120,15 @@ def thinking_levels_for(info: dict) -> list[str]:
     return levels or [e for e in _EFFORT_ORDER if e in _PORTABLE_EFFORTS]
 
 
+# The litellm_params that decide which endpoint answers: a record measured on one of them says
+# nothing about another (a model's capabilities can differ by region or project).
+_ROUTE_PARAMS = ("model", "aws_region_name", "vertex_location", "vertex_project", "api_base")
+
+
+def _same_route(a: dict, b: dict) -> bool:
+    return all(a.get(k) == b.get(k) for k in _ROUTE_PARAMS)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -291,7 +300,7 @@ class ModelGatewayService:
         model_info = dict(model_info or {})
         if CAPABILITIES_KEY not in model_info:
             previous = await self.get_model_by_id(model_id)
-            if previous and ((previous.get("litellm_params") or {}).get("model") == litellm_params.get("model")):
+            if previous and _same_route((previous.get("litellm_params") or {}), litellm_params):
                 inherited = capabilities_of(previous.get("model_info"))
                 if inherited:
                     model_info[CAPABILITIES_KEY] = inherited
@@ -533,7 +542,11 @@ class ModelGatewayService:
         from ringier_a2a_sdk.embeddings import _DEFAULT_DIMENSION, profile_for
         from ringier_a2a_sdk.model_capabilities import PROBED_AT, probe_model
 
-        model = await self._get_model_with_retry(model_name)
+        # The pinned deployment's own model_info when the caller has the id (an edit can leave
+        # the old deployment listed under the alias for a moment); the alias's otherwise.
+        model = (await self._get_model_by_id_with_retry(model_id)) if model_id else None
+        if model is None:
+            model = await self._get_model_with_retry(model_name)
         info = (model or {}).get("model_info") or {}
         mode = info.get("mode", "chat")
         if mode == "embedding":
@@ -557,7 +570,14 @@ class ModelGatewayService:
         recorded = False
         if target_id and (model_id or info.get("db_model")):
             try:
-                await self.record_capabilities(target_id, {**report.capabilities, PROBED_AT: _utc_now_iso()})
+                # Measured keys overwrite; an inconclusive shape keeps whatever was recorded
+                # before (noise must not erase knowledge, ADR-0015). The stored record is read
+                # from the target deployment, not the alias listing.
+                prior = capabilities_of(((await self.get_model_by_id(target_id)) or {}).get("model_info"))
+                prior.pop(PROBED_AT, None)
+                await self.record_capabilities(
+                    target_id, {**prior, **report.capabilities, PROBED_AT: _utc_now_iso()}
+                )
                 recorded = True
             except ModelGatewayError as e:
                 # The verdict is sound; only the write failed. A passing model must not be
@@ -571,8 +591,14 @@ class ModelGatewayService:
 
     async def _get_model_with_retry(self, model_name: str, attempts: int = 4, delay: float = 0.75) -> dict | None:
         """``get_model`` with a short retry for a deployment registered a moment ago."""
+        return await self._retry_lookup(lambda: self.get_model(model_name), attempts, delay)
+
+    async def _get_model_by_id_with_retry(self, model_id: str, attempts: int = 4, delay: float = 0.75) -> dict | None:
+        return await self._retry_lookup(lambda: self.get_model_by_id(model_id), attempts, delay)
+
+    async def _retry_lookup(self, lookup, attempts: int, delay: float) -> dict | None:
         for i in range(attempts):
-            model = await self.get_model(model_name)
+            model = await lookup()
             if model is not None:
                 return model
             if i + 1 < attempts:

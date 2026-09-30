@@ -34,6 +34,7 @@ import {
   type ModelRegistrationRequest,
   type RateCardPricingEntry,
   roleLabel,
+  probeInconclusive,
   probeLimitations,
   recordedLimitations,
 } from '@/api/model-gateway';
@@ -78,6 +79,14 @@ const ALL_INPUT_MODES = ['text', 'image', 'audio', 'video', 'file'] as const;
 
 // The openapi client rejects with the parsed error body (e.g. {detail: "..."}), so
 // String(e) yields "[object Object]". Pull out a human-readable message instead.
+/** The shapes the probe could not measure: nothing was recorded for them, so re-run Test. */
+function inconclusiveMessage(name: string, shapes: { shape: string; error: string }[]): string {
+  return (
+    `${name}: the probe could not measure ${shapes.map((s) => s.shape.replace(/_/g, ' ')).join(', ')} ` +
+    `(${shapes[0]?.error || 'transient failure'}) — nothing recorded for them; re-run Test.`
+  );
+}
+
 /** One line per shape the probe saw the model reject, with the provider's reason. */
 function limitationsMessage(name: string, limitations: { shape: string; error: string }[]): string {
   return (
@@ -496,12 +505,14 @@ export function ModelGatewayPage() {
           name: body.model_name,
           created: null as GatewayModel | null,
           limitations: probeLimitations(test.probe),
+          inconclusive: probeInconclusive(test.probe),
           recorded: test.recorded ?? false,
           warning: test.warning ?? null,
         };
       }
       const res = await registerGatewayModel(body);
       let limitations: ReturnType<typeof probeLimitations> = [];
+      let inconclusive: ReturnType<typeof probeInconclusive> = [];
       let recorded = false;
       let warning: string | null = null;
       try {
@@ -510,6 +521,7 @@ export function ModelGatewayPage() {
         // reported here instead.
         const test = await testGatewayModel(res.model_name, res.gateway_model_id);
         limitations = probeLimitations(test.probe);
+        inconclusive = probeInconclusive(test.probe);
         recorded = test.recorded ?? false;
         warning = test.warning ?? null;
       } catch (testErr) {
@@ -569,9 +581,9 @@ export function ModelGatewayPage() {
         }
         created.default_roles = autoRoles;
       }
-      return { name: res.model_name, created, limitations, recorded, warning };
+      return { name: res.model_name, created, limitations, inconclusive, recorded, warning };
     },
-    onSuccess: ({ name, created, limitations, recorded, warning }) => {
+    onSuccess: ({ name, created, limitations, inconclusive, recorded, warning }) => {
       const auto = created?.default_roles ?? [];
       toast.success(
         auto.length
@@ -579,6 +591,7 @@ export function ModelGatewayPage() {
           : `Saved & tested ${name}`,
       );
       if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
+      if (inconclusive.length) toast.warning(inconclusiveMessage(name, inconclusive), { duration: 12000 });
       if (limitations.length && !recorded)
         toast.warning(`${name}: the limitations could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
       if (warning) toast.error(warning, { duration: 15000 });
@@ -625,11 +638,14 @@ export function ModelGatewayPage() {
   });
 
   const testMutation = useMutation({
-    mutationFn: (name: string) => testGatewayModel(name),
-    onSuccess: (r, name) => {
+    mutationFn: ({ name, modelId }: { name: string; modelId?: string | null }) => testGatewayModel(name, modelId),
+    onSuccess: (r, { name }) => {
       const limitations = probeLimitations(r.probe);
+      const inconclusive = probeInconclusive(r.probe);
       if (limitations.length) toast.warning(limitationsMessage(name, limitations), { duration: 12000 });
-      else toast.success(r.probe ? `${name} accepts every request shape the harness sends` : `Test call to ${name} succeeded`);
+      if (inconclusive.length) toast.warning(inconclusiveMessage(name, inconclusive), { duration: 12000 });
+      if (!limitations.length && !inconclusive.length)
+        toast.success(r.probe ? `${name} accepts every request shape the harness sends` : `Test call to ${name} succeeded`);
       if (r.probe && r.recorded === false)
         toast.warning(`${name}: the probe's result could not be recorded on the gateway — re-run Test.`, { duration: 12000 });
       if (r.warning) toast.error(r.warning, { duration: 15000 });
@@ -779,7 +795,7 @@ export function ModelGatewayPage() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {models.map((m: GatewayModel) => {
-            const testing = testMutation.isPending && testMutation.variables === m.model_name;
+            const testing = testMutation.isPending && testMutation.variables?.name === m.model_name;
             return (
               <Card
                 key={m.model_id ?? m.model_name}
@@ -845,7 +861,7 @@ export function ModelGatewayPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => testMutation.mutate(m.model_name)}
+                      onClick={() => testMutation.mutate({ name: m.model_name, modelId: m.model_id })}
                       disabled={testing}
                     >
                       {testing ? (

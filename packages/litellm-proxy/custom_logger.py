@@ -319,7 +319,9 @@ def _apply_forced_tool_choice(kwargs: dict) -> bool:
 def _rejects_thinking_replay(kwargs: dict) -> bool:
     """The probe saw this deployment refuse its own signed thinking block replayed with a
     tool result (nannos#318): the blocks are stripped per attempt, like on a non-Anthropic
-    fallback, and the turn goes on without extended thinking rather than not at all."""
+    fallback, and the turn goes on without extended thinking rather than not at all. Stripping
+    is enough because LiteLLM (with ``modify_params: true``, set in litellm-settings.yaml)
+    drops the ``thinking`` parameter itself when no assistant turn carries blocks."""
     return capabilities_of(kwargs.get("model_info")).get(THINKING_REPLAY) is False
 
 
