@@ -79,7 +79,9 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
   - **Usage Event** — one LLM call's measured consumption (token breakdown + model + Cost Attribution), captured proxy-side via a LiteLLM `CustomLogger`; costed against the Rate Card.
   - **Tier group** — a chat tier's *ordered* models: the tier's default (`model_defaults`)
 followed by its failover chain (`model_tier_fallbacks`). Declared by console-backend onto the proxy
-via `POST /fallback` (DB-backed, so it cannot drift against the DB-backed model registry) and
+as one whole-list `POST /config/update` of every chain (DB-backed, so it cannot drift against the
+DB-backed model registry; never the per-entry `/fallback` endpoints, which read-modify-write a
+60 s-cached copy of all chains and lose edits made in quick succession) and
 executed entirely by LiteLLM — retries, cooldown, then the next alias. Within-tier only: a tier
 never chains into another tier, because availability and cost/quality are separate axes. Chat tiers
 only — an embedding call must never fail over, since a second model's vectors insert cleanly into
