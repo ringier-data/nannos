@@ -421,6 +421,22 @@ async def test_chat_test_records_the_probe_on_the_deployment_and_returns_the_rep
 
 
 @pytest.mark.asyncio
+async def test_all_chains_are_declared_in_one_config_write(svc, monkeypatch):
+    """Not LiteLLM's per-entry /fallback endpoints: they read-modify-write the row holding
+    every chain through a 60 s cache they never invalidate, so a quick second edit worked on
+    a stale copy. /config/update replaces the whole `fallbacks` key from our table."""
+    calls: list = []
+
+    async def _fake_request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        return {}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+    await svc.set_all_fallbacks({"claude": ["gpt", "vertex"], "flash": []})
+    assert calls == [("POST", "/config/update", {"router_settings": {"fallbacks": [{"claude": ["gpt", "vertex"]}]}})]
+
+
+@pytest.mark.asyncio
 async def test_progress_starts_with_the_plan_and_reports_each_shape(svc, monkeypatch):
     _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(supports_reasoning=False))
     events: list[dict] = []

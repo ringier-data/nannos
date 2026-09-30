@@ -184,8 +184,37 @@ class ModelDefaultsService:
             _require_utility_capable(role, alias, infos.get(alias))
 
         await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=aliases)
-        await gateway.set_fallbacks(head, aliases)
+        await self.project_chains(db, gateway=gateway)
         return [head, *aliases]
+
+    async def project_chains(self, db: AsyncSession, *, gateway: "ModelGatewayService") -> dict[str, list[str]]:
+        """Declare every chat tier's chain on the proxy, from our table, in one write.
+
+        The proxy keys a chain on its head alias, so the declaration is head → chain. One
+        alias may default several tiers at once, but the proxy holds one chain per head: the
+        first tier in ``CHAT_TIER_ROLES`` order wins and the conflict is logged — the tier
+        listing's drift check shows the other tier as not what the gateway holds. Returns what
+        was declared.
+        """
+        defaults = await self.get_all(db)
+        chains = await self.repository.get_all_fallbacks(db)
+        declared: dict[str, list[str]] = {}
+        for role in CHAT_TIER_ROLES:
+            head = defaults.get(role)
+            if not head:
+                continue
+            chain = [a for a in chains.get(role, []) if a != head]
+            if head in declared:
+                if declared[head] != chain:
+                    logger.warning(
+                        "'%s' defaults several tiers with different chains; the gateway holds one chain per "
+                        "alias, so %s's chain %s is not declared (keeping %s)",
+                        head, role, chain, declared[head],
+                    )
+                continue
+            declared[head] = chain
+        await gateway.set_all_fallbacks(declared)
+        return declared
 
     async def reproject_tier_group(
         self,
@@ -194,40 +223,29 @@ class ModelDefaultsService:
         *,
         actor: User,
         gateway: "ModelGatewayService",
-        previous_head: str | None = None,
     ) -> None:
-        """Re-declare a tier's chain on the proxy after its *default* changed.
+        """Re-declare the chains on the proxy after a tier's *default* changed.
 
-        Proxy-side a chain is keyed on its head alias, so re-pointing a tier's default has to
-        move the chain rather than add a second one. Both halves matter: without re-writing,
-        the new default has no chain at all; without deleting, the old head keeps failing
-        over long after it stopped being anyone's default.
-
-        ``previous_head`` is only dropped when it is no longer the default of *any* chat tier
-        — one alias may serve several tiers at once (``model_alias_tiers`` exists precisely
-        because of that), and deleting its chain would silently disarm the tier still using it.
+        Proxy-side a chain is keyed on its head alias, so re-pointing a tier's default moves
+        the chain: the new head gets it and the old head, unless it still defaults another
+        tier, stops failing over. Both fall out of declaring every chain from our table in one
+        write (``project_chains``) — there is no per-entry delete left to get wrong.
         """
         if role not in CHAT_TIER_ROLES:
             return
-        defaults = await self.get_all(db)
-        head = defaults.get(role)
-        if previous_head and previous_head != head:
-            still_in_use = any(defaults.get(other) == previous_head for other in CHAT_TIER_ROLES)
-            if not still_in_use:
-                await gateway.delete_fallbacks(previous_head)
-        if not head:
-            return
-        chain = await self.repository.get_fallbacks(db, role)
-        if head in chain:
-            # The alias just promoted to default was already in this tier's chain. Projecting it
-            # unchanged would declare a chain that falls back from the head to itself — burning a
-            # hop on the provider just found unavailable — and would then make every later edit
-            # 400, since set_failover_chain rejects a chain containing the head. Drop it here and
-            # persist the correction so the console and the proxy agree.
-            chain = [a for a in chain if a != head]
-            await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=chain)
-            logger.info("Removed newly-promoted default '%s' from the '%s' failover chain", head, role)
-        await gateway.set_fallbacks(head, chain)
+        head = (await self.get_all(db)).get(role)
+        if head:
+            chain = await self.repository.get_fallbacks(db, role)
+            if head in chain:
+                # The alias just promoted to default was already in this tier's chain. Projecting it
+                # unchanged would declare a chain that falls back from the head to itself — burning a
+                # hop on the provider just found unavailable — and would then make every later edit
+                # 400, since set_failover_chain rejects a chain containing the head. Drop it here and
+                # persist the correction so the console and the proxy agree.
+                chain = [a for a in chain if a != head]
+                await self.repository.replace_fallbacks(db, actor=actor, role=role, aliases=chain)
+                logger.info("Removed newly-promoted default '%s' from the '%s' failover chain", head, role)
+        await self.project_chains(db, gateway=gateway)
 
     async def drop_alias_from_chains(
         self, db: AsyncSession, actor: User, alias: str, *, gateway: "ModelGatewayService"
@@ -239,11 +257,10 @@ class ModelDefaultsService:
         precisely the moment the primary is down. The stored registration check only catches it
         on the next manual edit, which may never come.
 
-        Returns the roles that changed. Best-effort per tier: one unprojectable tier must not
-        stop the others from being cleaned up.
+        Returns the roles that changed. The table is cleaned up whatever the proxy says; a failed
+        projection is logged and shows as drift until the next chain write re-declares them all.
         """
         chains = await self.repository.get_all_fallbacks(db)
-        defaults = await self.get_all(db)
         changed: list[str] = []
         for role, chain in chains.items():
             if alias not in chain:
@@ -252,13 +269,11 @@ class ModelDefaultsService:
                 db, actor=actor, role=role, aliases=[a for a in chain if a != alias]
             )
             changed.append(role)
-            head = defaults.get(role)
-            if not head:
-                continue
+        if changed:
             try:
-                await gateway.set_fallbacks(head, [a for a in chain if a != alias])
+                await self.project_chains(db, gateway=gateway)
             except ModelGatewayError as e:
-                logger.error("Removed '%s' from tier '%s' but could not reproject: %s", alias, role, e)
+                logger.error("Removed '%s' from tiers %s but could not reproject: %s", alias, changed, e)
         if changed:
             logger.info("Removed retired alias '%s' from failover chains: %s", alias, changed)
         return changed

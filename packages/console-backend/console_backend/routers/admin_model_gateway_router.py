@@ -600,9 +600,6 @@ async def set_default(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model id {model_id} not registered")
     alias = model.get("model_name") or ""
     defaults_service = get_model_defaults_service(request)
-    # Captured before the write: a tier's failover chain is keyed proxy-side on the tier's
-    # head alias, so re-pointing the default has to move the chain off the old head.
-    previous_head = (await defaults_service.get_all(db)).get(body.role)
     # The audited repository records this fleet-wide config change and commits
     # (AGENTS.md: admin writes go through the repository pattern → automatic audit).
     try:
@@ -624,7 +621,6 @@ async def set_default(
             body.role,
             actor=user,
             gateway=get_model_gateway_service(request),
-            previous_head=previous_head,
         )
     except ModelGatewayError as e:
         # The gateway's own message is logged, never returned: it can carry transport detail
