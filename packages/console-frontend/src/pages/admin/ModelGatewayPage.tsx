@@ -1446,10 +1446,7 @@ export function ModelGatewayPage() {
         open={runOpen && !!run}
         onOpenChange={(o) => (o ? setRunOpen(true) : run?.phase === 'done' ? setRunOpen(false) : setConfirmCloseRun(true))}
       >
-        {/* Anchored near the top, not centred: the window grows as verdicts and notes arrive, and a
-            centred dialog re-centres on every height change — the whole modal jumped as the last
-            shape and then the notes landed. */}
-        <DialogContent className="max-w-lg top-[8vh] translate-y-0 max-h-[84vh] flex flex-col">
+        <DialogContent className="max-w-lg max-h-[90vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>
               {run?.kind === 'register' ? 'Registering' : run?.kind === 'edit' ? 'Saving' : 'Testing'} {run?.model}
