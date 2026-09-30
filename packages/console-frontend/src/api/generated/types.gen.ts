@@ -5817,6 +5817,20 @@ export type SetDefaultRequest = {
 };
 
 /**
+ * SetFailoverChainRequest
+ *
+ * Replace a chat tier's failover chain. The tier's default stays its head.
+ */
+export type SetFailoverChainRequest = {
+    /**
+     * Fallbacks
+     *
+     * Aliases to try, in order, when the tier's default is unavailable. Empty removes the chain.
+     */
+    fallbacks?: Array<string>;
+};
+
+/**
  * SharedJobDefinition
  *
  * A job definition the viewer can reach but need not be subscribed to.
@@ -7594,6 +7608,39 @@ export type SuspendJobRequest = {
 export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 /**
+ * TierGroup
+ *
+ * One chat tier's ordered models: the default, then its failover chain.
+ *
+ * ``models`` is the whole group in routing order (``models[0] == default``); ``fallbacks``
+ * is the tail on its own, which is what a client edits. Both are returned so a client never
+ * has to re-derive one from the other and get the head wrong.
+ */
+export type TierGroup = {
+    /**
+     * Role
+     */
+    role: string;
+    /**
+     * Default
+     */
+    default?: string | null;
+    /**
+     * Fallbacks
+     */
+    fallbacks?: Array<string>;
+    /**
+     * Models
+     */
+    models?: Array<string>;
+    gateway_state?: GatewayStateEnum;
+    /**
+     * Gateway Mismatch
+     */
+    gateway_mismatch?: Array<string> | null;
+};
+
+/**
  * TimeSeriesPoint
  *
  * A single data point in a time series.
@@ -9341,6 +9388,11 @@ export type _0Enum4 = 'mine' | 'everyone';
 export type OpEnum = 'add' | 'remove' | 'replace';
 
 export type _0Enum5 = 'standalone' | 'sub-agent';
+
+/**
+ * Gateway State
+ */
+export type GatewayStateEnum = 'in_sync' | 'drifted' | 'unknown';
 
 /**
  * Reason
@@ -13911,6 +13963,54 @@ export type SetDefaultApiV1AdminModelGatewayModelsModelIdDefaultPostResponses = 
      */
     200: unknown;
 };
+
+export type ListTierGroupsApiV1AdminModelGatewayTiersGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/model-gateway/tiers';
+};
+
+export type ListTierGroupsApiV1AdminModelGatewayTiersGetResponses = {
+    /**
+     * Response List Tier Groups Api V1 Admin Model Gateway Tiers Get
+     *
+     * Successful Response
+     */
+    200: Array<TierGroup>;
+};
+
+export type ListTierGroupsApiV1AdminModelGatewayTiersGetResponse = ListTierGroupsApiV1AdminModelGatewayTiersGetResponses[keyof ListTierGroupsApiV1AdminModelGatewayTiersGetResponses];
+
+export type SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutData = {
+    body: SetFailoverChainRequest;
+    path: {
+        /**
+         * Role
+         */
+        role: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/model-gateway/tiers/{role}/fallbacks';
+};
+
+export type SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutError = SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutErrors[keyof SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutErrors];
+
+export type SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: TierGroup;
+};
+
+export type SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutResponse = SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutResponses[keyof SetTierFailoverChainApiV1AdminModelGatewayTiersRoleFallbacksPutResponses];
 
 export type GetBudgetSettingsApiV1AdminBudgetSettingsGetData = {
     body?: never;
