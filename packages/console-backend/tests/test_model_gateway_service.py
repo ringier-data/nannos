@@ -452,23 +452,6 @@ async def test_progress_starts_with_the_plan_and_reports_each_shape(svc, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_always_thinking_aliases_come_from_the_record_with_the_lowest_level(svc, monkeypatch):
-    listing = {
-        "data": [
-            {"model_name": "gem", "model_info": {"supports_reasoning": True, "nannos_capabilities": {"thinking_off": "always_on"}}},
-            {"model_name": "cla", "model_info": {"supports_reasoning": True, "nannos_capabilities": {"thinking_off": "between_tools"}}},
-            {"model_name": "unprobed", "model_info": {"supports_reasoning": True}},
-        ]
-    }
-
-    async def _fake_request(method, path, **kwargs):
-        return listing
-
-    monkeypatch.setattr(svc, "_request", _fake_request)
-    assert await svc.always_thinking_aliases() == {"gem": "low"}
-
-
-@pytest.mark.asyncio
 async def test_a_routable_limitation_registers_with_the_limitation_recorded(svc, monkeypatch):
     """Sonnet 5.5's case: forced tool_choice and response_format 400. The model must still
     register — the record is what lets the hook and the app route around it."""

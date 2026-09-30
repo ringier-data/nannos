@@ -298,6 +298,7 @@ export function recordedLimitations(model: GatewayModel): string[] {
   if (caps.response_format === false) out.push('no response_format');
   if (caps.thinking_off === 'between_tools') out.push('thinking off = between tools');
   if (caps.thinking_off === 'always_on') out.push('always thinks');
+  if (caps.thinking_off === 'unsupported') out.push('no thinking-off switch');
   if (caps.thinking_replay === false) out.push('no thinking replay');
   return out;
 }

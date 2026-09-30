@@ -94,15 +94,24 @@ around failing is **recorded, not refused**; the record is what lets the harness
   effort alone still reasons, nothing turns the deployment's thinking off (Gemini 3.1 Pro: LiteLLM
   maps `none` to its floor, `thinkingLevel: low`), and the record says `always_on`. The console then
   offers no "off" for that model: the Extended Thinking toggle is locked on in the user settings and
-  the sub-agent form, and a sub-agent saved as "off" on it is stored at the model's lowest level —
-  what it actually runs at. Gemini 3.5 Flash is *not* always-on: its floor, `minimal`, measured as no
-  reasoning, so its "off" is real.
+  the sub-agent form — as display only: a stored "off" is kept, the gateway sends it as the model's
+  floor, and it stays right if a later probe finds a way to turn thinking off. Gemini 3.5 Flash is
+  *not* always-on: its floor, `minimal`, measured as no reasoning, so its "off" is real. When every
+  off request is refused outright, the effort alone included (OpenAI-direct gpt-5 and the o-series
+  400 on `none`), the record says `unsupported`: the hook strips the effort and the switch, so a
+  thinking-off request goes out with the provider default — the one shape seen to work. `always_on`
+  depends on the model map too: with `drop_params`, a map miss can strip both the switch and the
+  effort from every off attempt, and a model that thinks by default then records `always_on`
+  falsely — a re-test after a map update corrects it.
 - A user's "off" is sent as off. The app models Extended Thinking as opt-in — no level means off —
   but used to send nothing for it, which leaves the provider default: thinking ON on the Claude 5
   family and Gemini 3, so the toggle read "off" and did nothing. The orchestrator, sub-agents and
-  scheduled agents now send `reasoning_effort: none` when no level is chosen, and the hook applies
-  the serving deployment's recorded switch. Utility calls (risk scoring, HITL resume, indexing, tool
-  selection) are not user choices and are unchanged.
+  scheduled agents now send `reasoning_effort: none` when no level is chosen — but only for an alias
+  whose record says how thinking goes off. Unprobed, the hook's family heuristic would send Claude
+  5.5 the `thinking: disabled` it rejects, and an `unsupported` record says the request is refused;
+  both keep sending nothing, the provider default, as before any record existed. The hook applies
+  the serving deployment's recorded switch per attempt, a failover attempt included. Utility calls
+  (risk scoring, HITL resume, indexing, tool selection) are not user choices and are unchanged.
 - A deployment recorded as rejecting the replay of its own signed thinking block has the blocks
   stripped by the hook per attempt, the way a non-Anthropic fallback does: the turn continues without
   extended thinking rather than not at all.

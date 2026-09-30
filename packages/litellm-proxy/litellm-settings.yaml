@@ -39,8 +39,8 @@ litellm_settings:
   json_logs: true
 
 # Resilience. These are what make a provider outage survivable, and they are config-only —
-# unlike the fallback *chains*, which are DB-backed and written by console-backend through
-# `POST /fallback` (see ADR-0014 and the console's tier groups). Declaring a chain without
+# unlike the fallback *chains*, which are DB-backed and written by console-backend as one
+# whole-list `POST /config/update` (see ADR-0014 and the console's tier groups). Declaring a chain without
 # these settings produces a fallback that never fires.
 router_settings:
   # Gateway-native retries on transient failures/timeouts, replacing the per-call boto3

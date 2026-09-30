@@ -505,9 +505,10 @@ async def edit_model(
     )
 
 
-#: Probe runs outlive a closed dialog: the record is written either way, and a registration
-#: whose client went away must still end with a verdict on the deployment. Held here so the
-#: event loop does not garbage-collect a task nobody awaits any more.
+#: Probe runs outlive a closed dialog: the probe finishes and writes its record whether or not
+#: anyone still reads the stream. Rolling back a refused registration is the client's step (as
+#: before streaming), so a tab closed mid-probe leaves a refused model registered, for the admin
+#: to remove. Held here so the event loop does not garbage-collect a task nobody awaits any more.
 _background_probes: set[asyncio.Task] = set()
 
 

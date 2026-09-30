@@ -23,7 +23,7 @@ from agent_common.models.base import ModelType, ThinkingLevel
 # The gateway URL/key resolvers live in the SDK (the lowest shared layer) so the chat path
 # (here) and the embeddings path (ringier_a2a_sdk.embeddings) can never drift — notably the
 # virtual-key default, which used to be copy-pasted and silently 401'd a path when missed.
-from ringier_a2a_sdk.model_capabilities import capabilities_of
+from ringier_a2a_sdk.model_capabilities import capabilities_of, thinking_off_sendable
 from ringier_a2a_sdk.utils.gateway import gateway_api_key as _gateway_api_key
 from ringier_a2a_sdk.utils.gateway import gateway_base_url as _gateway_base_url
 
@@ -264,7 +264,7 @@ _NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
 REASONING_OFF = "none"
 
 
-def reasoning_effort_for_choice(thinking_level: ThinkingLevel | str | None) -> str | None:
+def reasoning_effort_for_choice(thinking_level: ThinkingLevel | str | None, model_type: ModelType | None) -> str | None:
     """The `create_model(reasoning_effort=...)` override for a USER's thinking choice — the
     orchestrator's Extended Thinking setting, a sub-agent's config, a scheduled job's agent.
 
@@ -274,10 +274,21 @@ def reasoning_effort_for_choice(thinking_level: ThinkingLevel | str | None) -> s
     gateway apply the serving deployment's recorded off switch (`between_tools` on Claude 5.5;
     the lowest level where nothing turns it off, which the console then shows as always on).
 
+    Only where the alias's probe record says how thinking goes off (`thinking_off_sendable`).
+    Unprobed, the gateway would fall back to its family heuristic, which sends Claude 5.5 a
+    `thinking: disabled` it rejects; and where every off request was refused (`unsupported`)
+    sending one is that refusal. In both cases nothing is sent — the provider default, exactly
+    as before the record existed. A failover attempt reads its own deployment's record in the
+    gateway hook.
+
     Utility callers (risk scoring, HITL resume, indexing, tool selection) are NOT user choices
     and keep passing no level; converting them is the quality judgement `create_fast_model`
     describes."""
-    return None if thinking_level else REASONING_OFF
+    if thinking_level:
+        return None
+    if model_type and thinking_off_sendable(get_model_capabilities(model_type)):
+        return REASONING_OFF
+    return None
 
 
 def get_reasoning_effort(thinking_level: ThinkingLevel | None, model_type: ModelType | None = None) -> str | None:

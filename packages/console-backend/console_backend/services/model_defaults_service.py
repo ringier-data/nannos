@@ -141,9 +141,22 @@ class ModelDefaultsService:
         proxy routing somewhere the console cannot show or revoke.
         """
         self._require_chat_tier(role)
-        head = (await self.get_all(db)).get(role)
+        defaults = await self.get_all(db)
+        head = defaults.get(role)
         if not head:
             raise ValueError(f"Tier '{role}' has no default model; set one before giving it a failover chain.")
+        # The gateway holds ONE chain per default alias. A second tier with the same default and
+        # a different non-empty chain cannot both be honoured, so refuse rather than store a
+        # chain the gateway will never hold and report it as saved.
+        if aliases:
+            chains = await self.repository.get_all_fallbacks(db)
+            for other in CHAT_TIER_ROLES:
+                other_chain = chains.get(other) or []
+                if other != role and defaults.get(other) == head and other_chain and other_chain != list(aliases):
+                    raise ValueError(
+                        f"'{head}' also defaults the '{other}' tier, whose chain is {other_chain}. The gateway "
+                        f"holds one chain per default model: give both tiers the same chain, or different defaults."
+                    )
 
         seen: set[str] = {head}
         for alias in aliases:
@@ -191,10 +204,12 @@ class ModelDefaultsService:
         """Declare every chat tier's chain on the proxy, from our table, in one write.
 
         The proxy keys a chain on its head alias, so the declaration is head → chain. One
-        alias may default several tiers at once, but the proxy holds one chain per head: the
-        first tier in ``CHAT_TIER_ROLES`` order wins and the conflict is logged — the tier
-        listing's drift check shows the other tier as not what the gateway holds. Returns what
-        was declared.
+        alias may default several tiers at once, but the proxy holds one chain per head: a
+        non-empty chain wins over an empty one (a tier with no chain asks for nothing, so it
+        must not cancel another tier's), and between two different non-empty chains — which
+        ``set_failover_chain`` refuses, but a default change can still create — the first tier in
+        ``CHAT_TIER_ROLES`` order wins and the conflict is logged; the tier listing's drift
+        check shows the other tier as not what the gateway holds. Returns what was declared.
         """
         defaults = await self.get_all(db)
         chains = await self.repository.get_all_fallbacks(db)
@@ -205,7 +220,9 @@ class ModelDefaultsService:
                 continue
             chain = [a for a in chains.get(role, []) if a != head]
             if head in declared:
-                if declared[head] != chain:
+                if not declared[head]:
+                    declared[head] = chain
+                elif chain and declared[head] != chain:
                     logger.warning(
                         "'%s' defaults several tiers with different chains; the gateway holds one chain per "
                         "alias, so %s's chain %s is not declared (keeping %s)",

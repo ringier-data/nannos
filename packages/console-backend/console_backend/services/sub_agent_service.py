@@ -120,16 +120,12 @@ def _normalize_thinking_config(
     enable_thinking: bool | None,
     thinking_level: ThinkingLevel | None,
     supported_models: set[str] | None,
-    *,
-    always_on: dict[str, str] | None = None,
 ) -> tuple[bool | None, ThinkingLevel | None]:
     """Normalize Extended Thinking configuration against live model support.
 
     Returns (enable_thinking, thinking_level) with automatic nullification:
     - If neither a model nor a tier is set (agent inherits the orchestrator's model): both None
     - If a concrete model is set and known NOT to support thinking: both None
-    - If a concrete model is recorded as always thinking: enabled, at the given level or the
-      model's lowest — "off" is not something it does, so it is not stored as if it were
     - If enable_thinking is False: thinking_level set to None
     - Otherwise: preserve the provided values
 
@@ -146,9 +142,6 @@ def _normalize_thinking_config(
             truth (see ModelGatewayService.thinking_capable_aliases). Pass None when the
             capability set couldn't be determined (e.g. gateway unreachable): the caller's
             choice is then preserved rather than silently dropped.
-        always_on: Aliases the registration probe recorded as impossible to turn thinking off
-            for, each with its lowest level (ModelGatewayService.always_thinking_aliases).
-            None when unknown — the choice is preserved.
 
     Returns:
         Tuple of (normalized_enable_thinking, normalized_thinking_level)
@@ -164,13 +157,6 @@ def _normalize_thinking_config(
     # silently nullifying it (the gateway is the source of truth).
     if model is not None and supported_models is not None and model not in supported_models:
         return (None, None)
-
-    # A model nothing turns thinking off for runs at its lowest level when "off" is asked
-    # for; store that, so the config says what the agent actually does.
-    if model is not None and always_on and model in always_on:
-        if enable_thinking is not True or thinking_level is None:
-            return (True, ThinkingLevel(always_on[model]))
-        return (True, thinking_level)
 
     # If thinking is explicitly disabled, set level to None
     if enable_thinking is False:
@@ -242,17 +228,6 @@ class SubAgentService:
             return await self._model_gateway_service.thinking_capable_aliases()
         except ModelGatewayError as e:
             logger.warning("Could not fetch thinking-capable models from gateway: %s", e)
-            return None
-
-    async def _always_thinking_models(self) -> dict[str, str] | None:
-        """Aliases nothing turns thinking off for, with their lowest level; None if unknown
-        (the choice is then preserved, as for ``_thinking_capable_models``)."""
-        if self._model_gateway_service is None:
-            return None
-        try:
-            return await self._model_gateway_service.always_thinking_aliases()
-        except ModelGatewayError as e:
-            logger.warning("Could not fetch always-thinking models from gateway: %s", e)
             return None
 
     def set_skill_registry_service(self, service: "SkillRegistryService") -> None:
@@ -1029,7 +1004,6 @@ class SubAgentService:
             data.enable_thinking,
             data.thinking_level,
             await self._thinking_capable_models(),
-            always_on=await self._always_thinking_models(),
         )
 
         # Create initial version with all configuration data
@@ -1360,8 +1334,7 @@ class SubAgentService:
                 version_enable_thinking,
                 version_thinking_level,
                 await self._thinking_capable_models(),
-                always_on=await self._always_thinking_models(),
-            )
+                )
 
             # Create new version
             await self._create_config_version(

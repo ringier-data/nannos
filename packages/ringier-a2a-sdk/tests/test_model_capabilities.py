@@ -235,7 +235,10 @@ async def test_a_model_whose_effort_alone_still_reasons_is_always_on():
 async def test_a_refused_effort_is_recorded_as_no_switch_with_the_reason():
     gw = _Gateway(reject=lambda b: "no reasoning_effort none" if b.get("reasoning_effort") == "none" else None)
     report = await mc.probe_model("m", gw)
-    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_NONE
+    # Not ``none`` — that means the effort alone works, and the hook would keep sending the
+    # request the probe just saw refused (review round 7).
+    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_UNSUPPORTED
+    assert mc.thinking_off_sendable(report.capabilities) is False
     off = next(r for r in report.results if r.shape == "thinking_off")
     assert not off.ok and "no reasoning_effort none" in off.error
 
@@ -525,6 +528,13 @@ def test_an_unforced_tool_choice_is_never_touched(tool_choice):
     kwargs = {"tool_choice": tool_choice}
     assert mc.downgrade_forced_tool_choice(kwargs, {mc.FORCED_TOOL_CHOICE: False}) is False
     assert kwargs["tool_choice"] == tool_choice
+
+
+def test_thinking_off_is_sendable_only_where_the_record_says_how_it_goes_off():
+    assert mc.thinking_off_sendable({}) is False  # unprobed: no opinion, send no effort
+    assert mc.thinking_off_sendable({mc.THINKING_OFF: mc.THINKING_OFF_UNSUPPORTED}) is False
+    for way in ("disabled", "between_tools", "none", "always_on"):
+        assert mc.thinking_off_sendable({mc.THINKING_OFF: way}) is True
 
 
 def test_thinking_off_switch_follows_the_record():

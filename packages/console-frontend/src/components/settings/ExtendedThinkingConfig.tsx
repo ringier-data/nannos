@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { AlertCircle } from 'lucide-react';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -56,15 +55,10 @@ export function ExtendedThinkingConfig({
   const { models: availableModels } = useAvailableModels();
   const supportsThinking = modelSupportsThinking(model, availableModels);
   // Nothing turns this model's thinking off (the registration probe measured it): "off" would
-  // be a setting the model ignores, so the toggle is locked on and only the level is a choice.
+  // be a setting the model ignores, so the toggle is shown locked on and only the level is a
+  // choice. Display only — a stored "off" is left as it is: the gateway sends it as the model's
+  // floor, and it stays right if a later probe finds a way to turn thinking off after all.
   const alwaysOn = supportsThinking && modelThinksAlways(model, availableModels);
-
-  // A config saved as "off" before the model was probed (or before it was picked) is shown as
-  // what actually runs; the parent marks the form changed, so saving stores it.
-  useEffect(() => {
-    if (alwaysOn && !enableThinking && !disabled) onEnableThinkingChange(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the callback is re-created each render
-  }, [alwaysOn, enableThinking, disabled]);
 
   // Don't show anything if model doesn't support thinking
   if (!supportsThinking) {
@@ -101,11 +95,15 @@ export function ExtendedThinkingConfig({
             <Label htmlFor="thinking-level">Thinking Level</Label>
             <Select
               value={thinkingLevel || undefined}
-              onValueChange={(value) => onThinkingLevelChange(value as OrchestratorThinkingLevel)}
+              onValueChange={(value) => {
+                // On an always-on model stored as "off", picking a level is what turns it on.
+                if (!enableThinking) onEnableThinkingChange(true);
+                onThinkingLevelChange(value as OrchestratorThinkingLevel);
+              }}
               disabled={disabled}
             >
               <SelectTrigger id="thinking-level" className="w-full max-w-xs">
-                <SelectValue placeholder="Select thinking level">
+                <SelectValue placeholder={alwaysOn && !enableThinking ? "Lowest (the model's floor)" : 'Select thinking level'}>
                   {thinkingLevel &&
                     getAvailableThinkingLevels(model, availableModels).find((opt) => opt.value === thinkingLevel)
                       ?.label}

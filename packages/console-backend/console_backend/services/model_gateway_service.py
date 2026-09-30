@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of, thinking_always_on
+from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of
 
 from ..config import config
 
@@ -262,19 +262,6 @@ class ModelGatewayService:
             for m in await self.list_models()
             if m.get("model_name") and thinking_levels_for(m.get("model_info") or {})
         }
-
-    async def always_thinking_aliases(self) -> dict[str, str]:
-        """Thinking-capable aliases whose probe recorded that nothing turns thinking off
-        (``thinking_off: always_on``), each with its lowest thinking level — what a
-        thinking-off config on that model actually gets. Same source as the model picker's
-        ``thinking_always_on``, so the UI and the sub-agent write path never disagree."""
-        out: dict[str, str] = {}
-        for m in await self.list_models():
-            info = m.get("model_info") or {}
-            levels = thinking_levels_for(info)
-            if m.get("model_name") and levels and thinking_always_on(capabilities_of(info)):
-                out[m["model_name"]] = levels[0]
-        return out
 
     async def register_model(self, model_name: str, litellm_params: dict, model_info: dict | None = None) -> dict:
         result = await self._request(

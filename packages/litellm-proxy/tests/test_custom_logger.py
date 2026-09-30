@@ -984,6 +984,14 @@ def test_thinking_off_recorded_as_always_on_sends_the_effort_alone():
     assert "thinking" not in kwargs and kwargs["reasoning_effort"] == "none"
 
 
+def test_thinking_off_recorded_as_unsupported_strips_the_refused_effort():
+    # The probe saw every off request refused, the effort alone included (gpt-5 / o-series on
+    # OpenAI direct): forwarding reasoning_effort "none" would be that same 400 on every turn.
+    kwargs = _probed("openai/gpt-5", {"thinking_off": "unsupported"}, reasoning_effort="none", thinking={"type": "disabled"})
+    _run_deployment_hook(kwargs)
+    assert "reasoning_effort" not in kwargs and "thinking" not in kwargs
+
+
 def test_thinking_off_record_is_read_per_attempt():
     # A failover attempt carries the fallback's model_info; a Gemini fallback recorded as
     # `none` must not inherit the Claude primary's `disabled`.

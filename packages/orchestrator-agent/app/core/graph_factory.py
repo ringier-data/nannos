@@ -544,7 +544,7 @@ class GraphFactory:
             thinking_level,
             callbacks=None,
             pre_resolved=True,
-            reasoning_effort=reasoning_effort_for_choice(thinking_level),
+            reasoning_effort=reasoning_effort_for_choice(thinking_level, model_type),
         )
 
     def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:

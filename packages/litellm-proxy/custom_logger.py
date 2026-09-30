@@ -33,6 +33,7 @@ logger = logging.getLogger("nannos.litellm.custom_logger")
 # recorded limitation could not be honoured — so a missing module fails the proxy at startup.
 from nannos_model_capabilities import (  # noqa: E402
     THINKING_OFF,
+    THINKING_OFF_UNSUPPORTED,
     THINKING_REPLAY,
     capabilities_of,
     downgrade_forced_tool_choice,
@@ -274,7 +275,9 @@ def _apply_thinking_off(kwargs: dict) -> bool:
       `disabled`, `between_tools` (Claude 5.5 and later reject `disabled` and want this),
       `none` — no explicit switch is taken, so `reasoning_effort: none` goes alone — or
       `always_on`: nothing turns thinking off (Gemini 3), and the effort alone is the lowest
-      it goes, so it is sent the same way.
+      it goes, so it is sent the same way — or `unsupported`: every off request, the effort
+      alone included, was refused (OpenAI-direct gpt-5 / o-series 400 on `none`), so both the
+      effort and any `thinking` are removed and the request goes out with the provider default.
     * Unprobed: the family heuristic. Claude thinks by default and needs the explicit
       `disabled`; everything else gets no `thinking` at all.
 
@@ -288,6 +291,10 @@ def _apply_thinking_off(kwargs: dict) -> bool:
     if kwargs.get("reasoning_effort") != "none":
         return False
     caps = capabilities_of(kwargs.get("model_info"))
+    if caps.get(THINKING_OFF) == THINKING_OFF_UNSUPPORTED:
+        del kwargs["reasoning_effort"]
+        kwargs.pop("thinking", None)
+        return True
     if THINKING_OFF in caps:
         wanted = thinking_off_switch(caps)
     elif _is_claude_deployment(kwargs):

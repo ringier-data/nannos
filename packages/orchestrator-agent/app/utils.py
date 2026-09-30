@@ -405,7 +405,7 @@ def build_runtime_context(
                             subagent_model_type,
                             thinking_level=thinking_level_to_use,
                             callbacks=callbacks,
-                            reasoning_effort=reasoning_effort_for_choice(thinking_level_to_use),
+                            reasoning_effort=reasoning_effort_for_choice(thinking_level_to_use, subagent_model_type),
                         )
                         logger.info(
                             f"Sub-agent '{config.name}' model created with cost tracking "
@@ -416,7 +416,7 @@ def build_runtime_context(
                         subagent_model = create_model(
                             subagent_model_type,
                             thinking_level=thinking_level_to_use,
-                            reasoning_effort=reasoning_effort_for_choice(thinking_level_to_use),
+                            reasoning_effort=reasoning_effort_for_choice(thinking_level_to_use, subagent_model_type),
                         )
                         logger.warning(
                             f"Sub-agent '{config.name}' model created WITHOUT cost tracking "

@@ -67,7 +67,7 @@ RESPONSE_FORMAT = "response_format"
 #: taken; ``reasoning_effort: none`` alone turns it off), or ``"always_on"`` (nothing turns it
 #: off — Gemini 3's floor is ``thinkingLevel: minimal``/``low`` — so the console offers no
 #: thinking-off for the model and the gateway sends ``reasoning_effort: none`` alone, the lowest
-#: it goes).
+#: it goes), or ``"unsupported"`` (every off request was refused; see THINKING_OFF_UNSUPPORTED).
 THINKING_OFF = "thinking_off"
 #: bool | None — a signed thinking block from the model can be replayed with its tool result.
 #: ``None`` when the model returned no thinking block to replay (nothing to record).
@@ -89,6 +89,12 @@ THINKING_OFF_DISABLED = "disabled"
 THINKING_OFF_BETWEEN_TOOLS = "between_tools"
 THINKING_OFF_NONE = "none"
 THINKING_OFF_ALWAYS_ON = "always_on"
+#: Every way of asking for thinking off was refused outright — the explicit switches AND
+#: ``reasoning_effort: none`` alone (OpenAI-direct gpt-5 / o-series 400 on ``none``). Distinct
+#: from ``none``, which means the effort alone *works*: here the gateway strips the effort and
+#: the switch from a thinking-off request, so it goes out as a plain request with the
+#: provider's default — the only shape this deployment was seen to accept.
+THINKING_OFF_UNSUPPORTED = "unsupported"
 
 #: What the admin sees for each shape while the probe runs and in its report. Order is the
 #: order the probe sends them; ``thinking_replay`` only runs for a model declared to think.
@@ -414,7 +420,9 @@ def shape_thinking_control(model: str) -> dict[str, Any]:
     at all, so a reply without reasoning under a switch means the switch worked."""
     return _base(
         model,
-        max_tokens=2048,
+        # Above the reasoning budget LiteLLM maps ``high`` to on budget-thinking Claude (4096):
+        # at or below it every control turn 400s and every switch reads "unverified".
+        max_tokens=8192,
         messages=[{"role": "user", "content": _THINK}],
         tools=[PROBE_TOOL],
         tool_choice="auto",
@@ -727,9 +735,10 @@ async def probe_model(
         if not ok:
             tried.append(f"{label}: {err}")
             if switch is None:
-                # The effort alone is refused outright. The hook still sends it (there is
-                # nothing lower), so record that no explicit switch works and say why.
-                off_way, off_error = THINKING_OFF_NONE, "; ".join(tried)
+                # Every way of asking for off is refused, the effort alone included: recorded
+                # as its own value so the gateway stops sending what was just refused.
+                off_way = THINKING_OFF_UNSUPPORTED
+                off_error = "no thinking-off request is accepted — " + "; ".join(tried)
             continue
         if _reasoned(response):
             if switch is None:
@@ -827,6 +836,20 @@ def thinking_off_switch(caps: dict[str, Any]) -> dict[str, str] | None:
     if switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS):
         return {"type": switch}
     return None
+
+
+def thinking_off_sendable(caps: dict[str, Any]) -> bool:
+    """Whether a thinking-off request (``reasoning_effort: none``) may be sent to this deployment
+    at all: the probe recorded a way it goes off (or that nothing does, where the effort alone
+    is its floor). False when unprobed — no opinion, so a caller sends no effort and the
+    provider default applies, as before any record existed — and False when every off request
+    was refused (``unsupported``)."""
+    return caps.get(THINKING_OFF) in (
+        THINKING_OFF_DISABLED,
+        THINKING_OFF_BETWEEN_TOOLS,
+        THINKING_OFF_NONE,
+        THINKING_OFF_ALWAYS_ON,
+    )
 
 
 def thinking_always_on(caps: dict[str, Any]) -> bool:

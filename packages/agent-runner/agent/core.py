@@ -1539,7 +1539,7 @@ class AgentRunner(BaseAgent):
 
         # Thinking off has to be sent as off, or the provider default thinks anyway.
         llm = create_model(
-            model_name, thinking_level=thinking_level, reasoning_effort=reasoning_effort_for_choice(thinking_level)
+            model_name, thinking_level=thinking_level, reasoning_effort=reasoning_effort_for_choice(thinking_level, model_name)
         )
 
         # context_id should always be present in the A2A protocol — fail loudly if not.

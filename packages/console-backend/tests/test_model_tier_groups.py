@@ -232,6 +232,30 @@ async def test_a_head_shared_by_two_tiers_declares_the_first_tiers_chain():
 
 
 @pytest.mark.asyncio
+async def test_an_empty_chain_on_a_shared_head_does_not_cancel_the_other_tiers_chain():
+    """chat and chat:low both default to X; chat has no chain. Setting chat:low's chain must
+    reach the gateway — the empty one asks for nothing (review round 7)."""
+    repo = _FakeRepo({"chat": "x", "chat:low": "x"})
+    gateway = _FakeGateway(registered=["x", "y"])
+    await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["y"], gateway=gateway)
+    assert gateway.declared == [{"x": ["y"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_chain_conflicting_with_another_tier_on_the_same_head_is_refused():
+    """The gateway holds one chain per default model; storing a second one would report
+    success for a chain it never gets."""
+    repo = _FakeRepo({"chat": "x", "chat:low": "x"}, {"chat": ["y"]})
+    gateway = _FakeGateway(registered=["x", "y", "z"])
+    with pytest.raises(ValueError, match="one chain per default model"):
+        await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["z"], gateway=gateway)
+    assert repo.replaced == [] and gateway.declared == []
+    # The same chain, or clearing this tier's, is fine.
+    await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=["y"], gateway=gateway)
+    await _service(repo).set_failover_chain(_DB, actor=None, role="chat:low", aliases=[], gateway=gateway)
+
+
+@pytest.mark.asyncio
 async def test_retiring_an_alias_cleans_every_chain_and_declares_once():
     repo = _FakeRepo({"chat": "claude", "chat:low": "flash"}, {"chat": ["gpt", "old"], "chat:low": ["old"]})
     gateway = _FakeGateway(registered=["claude", "gpt", "flash"])
