@@ -21,11 +21,22 @@ import json
 import logging
 import os
 import re
+import sys
 
 import httpx
 from litellm.integrations.custom_logger import CustomLogger
 
 logger = logging.getLogger("nannos.litellm.custom_logger")
+
+# The SDK modules below are copied next to this file by the Dockerfile and imported by name.
+# LiteLLM loads this file by path, which does not put its directory on sys.path, so the image
+# sets PYTHONPATH=/etc/litellm — but a Kubernetes mutating webhook can replace the pod's
+# PYTHONPATH (OpenTelemetry's Python auto-instrumentation sets it to its own directories), and
+# the import then fails and the proxy does not start. Putting this file's own directory on the
+# path makes the import independent of the environment.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 # The request shapes the harness sends and the capability flags the registration probe
 # records on a deployment (nannos#318). One file, copied out of ringier-a2a-sdk by the
