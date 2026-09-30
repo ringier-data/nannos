@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import httpx
 from litellm.integrations.custom_logger import CustomLogger
@@ -256,6 +257,24 @@ def _should_strip_cache_control(provider: str | None, model: str) -> bool:
 # claude-… on the anthropic provider), or in `model_info.base_model` for a deployment that
 # names its model only through an ARN or other opaque id.
 _THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
+#: Claude 5.5 and later reject `disabled` and turn thinking off with `between_tools` (measured
+#: by the registration probe on Sonnet 5.5). Used only where a deployment has no record.
+_THINKING_BETWEEN_TOOLS: dict[str, str] = {"type": "between_tools"}
+# "claude-sonnet-5-5", "claude-opus-5", "claude-haiku-4-5-20251001", "claude-3-7-sonnet": the
+# first number after "claude-" (and an optional family word) is the major version, a single
+# digit right after it the minor. A date suffix is not a minor (it has more than one digit).
+_CLAUDE_VERSION = re.compile(r"claude-(?:[a-z]+-)?(\d+)(?:[-.](\d)(?!\d))?")
+
+
+def _claude_version(kwargs: dict) -> tuple[int, int] | None:
+    """(major, minor) of a Claude deployment, read the way _is_claude_deployment recognises one
+    (the model string, then `model_info.base_model`); None when neither names a version."""
+    base_model = (kwargs.get("model_info") or {}).get("base_model") or ""
+    for text in (str(kwargs.get("model") or ""), str(base_model)):
+        match = _CLAUDE_VERSION.search(text.lower())
+        if match:
+            return int(match.group(1)), int(match.group(2) or 0)
+    return None
 
 
 def _is_claude_deployment(kwargs: dict) -> bool:
@@ -278,8 +297,9 @@ def _apply_thinking_off(kwargs: dict) -> bool:
       it goes, so it is sent the same way — or `unsupported`: every off request, the effort
       alone included, was refused (OpenAI-direct gpt-5 / o-series 400 on `none`), so both the
       effort and any `thinking` are removed and the request goes out with the provider default.
-    * Unprobed: the family heuristic. Claude thinks by default and needs the explicit
-      `disabled`; everything else gets no `thinking` at all.
+    * Unprobed: the family heuristic. Claude thinks by default and needs an explicit switch —
+      `disabled`, or `between_tools` on Claude 5.5 and later, which reject `disabled`;
+      everything else gets no `thinking` at all.
 
     Probe traffic (``is_probe_request``) is exempt — it sends each switch itself to learn
     which one the deployment takes, and rewriting it would make the probe measure this hook.
@@ -298,7 +318,12 @@ def _apply_thinking_off(kwargs: dict) -> bool:
     if THINKING_OFF in caps:
         wanted = thinking_off_switch(caps)
     elif _is_claude_deployment(kwargs):
-        wanted = dict(_THINKING_DISABLED)
+        # Unprobed Claude. `disabled` is what Claude 5.0 needs (it thinks by default, #272) but a
+        # 400 on 5.5+, which reaches this branch on a failover to an unprobed chain member or
+        # an unprobed twin deployment of a probed alias — the attempts the app did not decide
+        # for (review round 8). Version-aware, so nothing that works today changes.
+        version = _claude_version(kwargs)
+        wanted = dict(_THINKING_BETWEEN_TOOLS if version and version >= (5, 5) else _THINKING_DISABLED)
     else:
         wanted = None
     if wanted is None:

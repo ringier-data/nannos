@@ -992,6 +992,38 @@ def test_thinking_off_recorded_as_unsupported_strips_the_refused_effort():
     assert "reasoning_effort" not in kwargs and "thinking" not in kwargs
 
 
+@pytest.mark.parametrize(
+    "model, version",
+    [
+        ("bedrock/global.anthropic.claude-sonnet-5-5", (5, 5)),
+        ("bedrock/eu.anthropic.claude-opus-5", (5, 0)),
+        ("bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0", (4, 5)),
+        ("claude-3-7-sonnet-20250219", (3, 7)),
+        ("vertex_ai/claude-opus-5-5@default", (5, 5)),
+        ("vertex_ai/gemini-3.5-flash", None),
+    ],
+)
+def test_the_claude_version_is_read_from_the_model_id(model, version):
+    assert cl._claude_version({"model": model}) == version
+
+
+@pytest.mark.parametrize(
+    "model, switch",
+    [
+        ("bedrock/global.anthropic.claude-sonnet-5-5", "between_tools"),
+        ("bedrock/eu.anthropic.claude-opus-5-5", "between_tools"),
+        ("bedrock/eu.anthropic.claude-sonnet-5", "disabled"),
+        ("bedrock/eu.anthropic.claude-sonnet-4-6", "disabled"),
+    ],
+)
+def test_an_unprobed_claude_gets_the_switch_its_version_accepts(model, switch):
+    """No record — a failover to an unprobed chain member, or an unprobed twin of a probed alias
+    (review round 8). Claude 5.5+ 400 on `disabled`; earlier Claude 5 needs it (#272)."""
+    kwargs = {"model": model, "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "none", "model_info": {}}
+    _run_deployment_hook(kwargs)
+    assert kwargs["thinking"] == {"type": switch}
+
+
 def test_thinking_off_record_is_read_per_attempt():
     # A failover attempt carries the fallback's model_info; a Gemini fallback recorded as
     # `none` must not inherit the Claude primary's `disabled`.

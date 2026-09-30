@@ -173,3 +173,36 @@ def test_warm_refresh_does_not_block_caller():
     assert elapsed < 0.5  # returned without waiting for the background fetch
     assert cache["models"] == {"old": {}}  # still serving the stale snapshot
     release.set()  # let the background thread finish so it doesn't leak
+
+
+def test_an_alias_with_several_deployments_keeps_the_db_one_and_every_record(monkeypatch):
+    """/model/info lists deployments. The per-alias model_info follows the console picker (the
+    DB deployment wins), and every deployment's probe record is kept for decisions that must
+    hold on whichever one the router picks (review round 8)."""
+    import io
+    import json
+
+    listing = {
+        "data": [
+            {"model_name": "gpt", "model_info": {"db_model": False}},
+            {"model_name": "gpt", "model_info": {"db_model": True, "nannos_capabilities": {"thinking_off": "disabled"}}},
+            {"model_name": "solo", "model_info": {"nannos_capabilities": {"thinking_off": "none"}}},
+        ]
+    }
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(mf, "_gateway_base_url", lambda: "http://gw")
+    monkeypatch.setattr(mf, "_gateway_api_key", lambda: "k")
+    monkeypatch.setattr(mf.urllib.request, "urlopen", lambda req, timeout: _Resp(json.dumps(listing).encode()))
+
+    models = mf._fetch_gateway_models()
+
+    assert models["gpt"]["db_model"] is True
+    assert mf._GW_CACHE["deployment_capabilities"]["gpt"] == [{}, {"thinking_off": "disabled"}]
+    assert mf._GW_CACHE["deployment_capabilities"]["solo"] == [{"thinking_off": "none"}]

@@ -79,6 +79,10 @@ from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
 
+# "Not decided by the caller": compute the effort from the alias's probe record. A sentinel,
+# not None — None is a real decision (send no effort, the provider default).
+_EFFORT_FROM_RECORD = object()
+
 
 def _create_hitl_middleware(
     platform_tools: list[BaseTool] | None = None, *, exhaustive: bool = False
@@ -520,7 +524,9 @@ class GraphFactory:
             await self._connection_pool.close()
             logger.info("Closed AsyncConnectionPool for document store")
 
-    def _create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
+    def _create_model(
+        self, model_type: ModelType, thinking_level: Optional[ThinkingLevel], effort: object = _EFFORT_FROM_RECORD
+    ) -> BaseChatModel:
         """Create a model instance for the given model type.
 
         Args:
@@ -537,17 +543,22 @@ class GraphFactory:
         # result. Resolving a second time here would re-read a snapshot that may have moved
         # in between, leaving a permanently-cached graph whose key names one model and whose
         # client calls another. get_graph is the only path into here.
-        # No level = the user's Extended Thinking is off, which has to be sent as off
-        # (see reasoning_effort_for_choice) or the provider default thinks anyway.
+        # No level = the user's Extended Thinking is off, which has to be sent as off where the
+        # record says how (see reasoning_effort_for_choice) or the provider default thinks anyway.
+        # get_graph decides it per turn and passes it in; it is part of both cache keys.
+        if effort is _EFFORT_FROM_RECORD:
+            effort = reasoning_effort_for_choice(thinking_level, model_type)
         return create_model(
             model_type,
             thinking_level,
             callbacks=None,
             pre_resolved=True,
-            reasoning_effort=reasoning_effort_for_choice(thinking_level, model_type),
+            reasoning_effort=effort,
         )
 
-    def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
+    def _get_or_create_model(
+        self, model_type: ModelType, thinking_level: Optional[ThinkingLevel], effort: object = _EFFORT_FROM_RECORD
+    ) -> BaseChatModel:
         """Get or create a model instance
 
         It will be cached by model_type AND thinking_level, even though ideally we could
@@ -559,11 +570,16 @@ class GraphFactory:
         Returns:
             BaseChatModel: The model instance (cached or newly created)
         """
-        # Create compound cache key: (model_type, thinking_level)
-        cache_key = (model_type, thinking_level)
+        # Compound cache key: (model_type, thinking_level, effort). The effort is in the key
+        # because it follows the alias's probe record, which changes at runtime (an admin
+        # re-runs Test after rollout): keyed without it, the first decision would stick for the
+        # process lifetime, since _models is never evicted.
+        if effort is _EFFORT_FROM_RECORD:
+            effort = reasoning_effort_for_choice(thinking_level, model_type)
+        cache_key = (model_type, thinking_level, effort)
         if cache_key not in self._models:
             logger.info(f"Creating model instance for: {model_type} with thinking_level={thinking_level}")
-            self._models[cache_key] = self._create_model(model_type, thinking_level)
+            self._models[cache_key] = self._create_model(model_type, thinking_level, effort)
         return self._models[cache_key]
 
     def _create_middleware_stack(self, model: BaseChatModel | None = None, is_gemini: bool = False) -> list[Any]:
@@ -833,7 +849,9 @@ class GraphFactory:
             return list(self._static_tools_cache) + extras
         return self._static_tools_cache
 
-    def _create_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
+    def _create_graph(
+        self, model_type: ModelType, thinking_level: Optional[ThinkingLevel], effort: object = _EFFORT_FROM_RECORD
+    ) -> CompiledStateGraph:
         """Create a graph for the given model type.
 
         Args:
@@ -842,7 +860,7 @@ class GraphFactory:
         Returns:
             CompiledStateGraph: The newly created graph
         """
-        model = self._get_or_create_model(model_type, thinking_level)
+        model = self._get_or_create_model(model_type, thinking_level, effort)
 
         # Ensure store is initialized before creating graph (required for longterm memory)
         # Access the store property to trigger lazy initialization (may be None if not configured)
@@ -967,14 +985,18 @@ class GraphFactory:
         # instead of building two.
         requested: ModelType = model_type or require_default_model()
         effective_model: ModelType = resolve_chat_model(requested)
+        # Decided per turn, for the same reason the alias is resolved per turn: a user's "off"
+        # is sent only where the alias's probe record says how thinking goes off, and that
+        # record appears or changes at runtime (a re-run Test). A cached dict read.
+        effort = reasoning_effort_for_choice(thinking_level, effective_model)
 
-        cache_key = (effective_model, thinking_level)
+        cache_key = (effective_model, thinking_level, effort)
 
         if cache_key in self._graphs:
             return self._graphs[cache_key]
 
         logger.info(f"Creating graph for model: {effective_model}, thinking_level={thinking_level}")
-        graph = self._create_graph(effective_model, thinking_level)
+        graph = self._create_graph(effective_model, thinking_level, effort)
         # Don't cache a graph built while the store is still resolving (transient cold-start):
         # it binds store=None permanently. A decided mode ("indexed"/"absent") is stable and
         # safe to cache; ensure_store_ready() busts the cache if "absent" later upgrades.

@@ -77,16 +77,20 @@ def _picker_models(raw: list[dict], default_model: str | None) -> list[Available
     (LiteLLM load-balancing, or the same name in the proxy config and in the DB); the pickers and
     the MCP tool select by alias, so a repeat would render twice under one React key. The DB
     deployment wins — it is the console-managed record carrying the label, prices and probed
-    capabilities — otherwise the first listed. Gateway order is kept."""
-    chosen: dict[str, dict] = {}
+    capabilities — otherwise the first listed. Gateway order is kept.
+
+    Filtered before deduplicated: a non-chat deployment must not win the alias and then be
+    dropped, taking the chat deployment of the same name with it."""
+    chosen: dict[str, tuple[bool, AvailableModel]] = {}
     for d in raw:
-        name = d.get("model_name", "")
-        held = chosen.get(name)
-        if held is None or (
-            not (held.get("model_info") or {}).get("db_model") and (d.get("model_info") or {}).get("db_model")
-        ):
-            chosen[name] = d
-    return [m for m in (_to_available(d, default_model) for d in chosen.values()) if m is not None]
+        entry = _to_available(d, default_model)
+        if entry is None:
+            continue
+        is_db = bool((d.get("model_info") or {}).get("db_model"))
+        held = chosen.get(entry.value)
+        if held is None or (not held[0] and is_db):
+            chosen[entry.value] = (is_db, entry)
+    return [entry for _, entry in chosen.values()]
 
 
 @router.get("/models", response_model=list[AvailableModel], tags=["MCP"], operation_id="console_list_models")

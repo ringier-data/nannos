@@ -686,6 +686,9 @@ async def list_tier_groups(request: Request, db: DbSession, user: User = Depends
     defaults_service = get_model_defaults_service(request)
     gateway = get_model_gateway_service(request)
     groups = await defaults_service.get_all_tier_groups(db)
+    # What the gateway was told, per head: on a head shared by two tiers the tier with an empty
+    # stored chain carries the other's, so its own stored chain is the wrong thing to compare.
+    declared = await defaults_service.declared_chains(db)
 
     async def _live(head: str) -> list[str]:
         return await gateway.get_fallbacks(head)
@@ -704,7 +707,7 @@ async def list_tier_groups(request: Request, db: DbSession, user: User = Depends
         elif isinstance(live, BaseException):
             logger.warning("Could not read live fallbacks for '%s': %s", head, live)
             state, mismatch = "unknown", None
-        elif live == stored:
+        elif live == declared.get(head, []):
             state, mismatch = "in_sync", None
         else:
             state, mismatch = "drifted", list(live)

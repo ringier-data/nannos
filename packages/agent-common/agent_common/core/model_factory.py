@@ -274,7 +274,8 @@ def reasoning_effort_for_choice(thinking_level: ThinkingLevel | str | None, mode
     gateway apply the serving deployment's recorded off switch (`between_tools` on Claude 5.5;
     the lowest level where nothing turns it off, which the console then shows as always on).
 
-    Only where the alias's probe record says how thinking goes off (`thinking_off_sendable`).
+    Only where the probe record of EVERY deployment behind the (resolved) alias says how thinking
+    goes off (`thinking_off_sendable`).
     Unprobed, the gateway would fall back to its family heuristic, which sends Claude 5.5 a
     `thinking: disabled` it rejects; and where every off request was refused (`unsupported`)
     sending one is that refusal. In both cases nothing is sent — the provider default, exactly
@@ -284,9 +285,18 @@ def reasoning_effort_for_choice(thinking_level: ThinkingLevel | str | None, mode
     Utility callers (risk scoring, HITL resume, indexing, tool selection) are NOT user choices
     and keep passing no level; converting them is the quality judgement `create_fast_model`
     describes."""
-    if thinking_level:
+    if thinking_level or not model_type:
         return None
-    if model_type and thinking_off_sendable(get_model_capabilities(model_type)):
+    # The record of the model that will run: a retired alias degrades to its successor in
+    # create_model, so the lookup must follow it, not read the dead alias's absent record.
+    try:
+        model_type = resolve_chat_model(model_type)
+    except Exception:  # noqa: BLE001 — no registry to resolve against: decide on the alias as given
+        pass
+    records = get_deployment_capabilities(model_type)
+    # Every deployment under the alias, since load-balancing may pick any of them: one unprobed
+    # config twin of a probed DB deployment keeps the whole alias on the provider default.
+    if records and all(thinking_off_sendable(caps) for caps in records):
         return REASONING_OFF
     return None
 
@@ -572,7 +582,7 @@ def _refresh_if_stale(cache: dict, key: str, ttl: float, cond: threading.Conditi
         threading.Thread(target=_run, daemon=True, name=f"refresh-{key}").start()
 
 
-_GW_CACHE: dict = {"ts": _COLD, "models": {}, "inflight": False, "last_error": None}
+_GW_CACHE: dict = {"ts": _COLD, "models": {}, "deployment_capabilities": {}, "inflight": False, "last_error": None}
 _GW_TTL = 60.0
 _GW_LOCK = threading.Condition()
 
@@ -587,7 +597,24 @@ def _fetch_gateway_models() -> dict[str, dict]:
     )
     with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310 (internal cluster URL)
         data = json.loads(resp.read()).get("data", [])
-    return {m["model_name"]: (m.get("model_info") or {}) for m in data if m.get("model_name")}
+    # /model/info lists deployments; an alias can have several (load-balancing, or the same
+    # name in the proxy config and the DB). One model_info per alias, by the console picker's
+    # rule: the DB deployment wins — it carries the console's label, prices and probe record —
+    # else the first listed. Every deployment's probe record is kept too, for decisions that
+    # must hold on whichever one the router picks (see get_deployment_capabilities).
+    out: dict[str, dict] = {}
+    every: dict[str, list[dict]] = {}
+    for m in data:
+        name = m.get("model_name")
+        if not name:
+            continue
+        info = m.get("model_info") or {}
+        every.setdefault(name, []).append(capabilities_of(info))
+        held = out.get(name)
+        if held is None or (not held.get("db_model") and info.get("db_model")):
+            out[name] = info
+    _GW_CACHE["deployment_capabilities"] = every
+    return out
 
 
 def _gateway_models() -> dict[str, dict]:
@@ -870,6 +897,14 @@ def get_model_provider(model_type: ModelType) -> str:
     """
     info = _gateway_models().get(model_type) or {}
     return info.get("litellm_provider") or ""
+
+
+def get_deployment_capabilities(model_type: ModelType) -> list[dict]:
+    """The probe record of EVERY deployment serving this alias, one dict each (``{}`` for an
+    unprobed one); ``[]`` for an unknown alias. For a decision that must hold on whichever
+    deployment the router picks — load-balancing spreads an alias's traffic across all of them."""
+    _gateway_models()  # refresh the snapshot the list is built alongside
+    return list((_GW_CACHE.get("deployment_capabilities") or {}).get(model_type) or [])
 
 
 def get_model_capabilities(model_type: ModelType) -> dict:

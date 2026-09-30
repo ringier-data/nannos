@@ -200,17 +200,10 @@ class ModelDefaultsService:
         await self.project_chains(db, gateway=gateway)
         return [head, *aliases]
 
-    async def project_chains(self, db: AsyncSession, *, gateway: "ModelGatewayService") -> dict[str, list[str]]:
-        """Declare every chat tier's chain on the proxy, from our table, in one write.
-
-        The proxy keys a chain on its head alias, so the declaration is head → chain. One
-        alias may default several tiers at once, but the proxy holds one chain per head: a
-        non-empty chain wins over an empty one (a tier with no chain asks for nothing, so it
-        must not cancel another tier's), and between two different non-empty chains — which
-        ``set_failover_chain`` refuses, but a default change can still create — the first tier in
-        ``CHAT_TIER_ROLES`` order wins and the conflict is logged; the tier listing's drift
-        check shows the other tier as not what the gateway holds. Returns what was declared.
-        """
+    async def declared_chains(self, db: AsyncSession) -> dict[str, list[str]]:
+        """What ``project_chains`` declares on the proxy, head alias → chain, without declaring
+        it. The tier listing compares the gateway against this rather than against each tier's
+        own stored chain, which differs from it on a shared head (see ``project_chains``)."""
         defaults = await self.get_all(db)
         chains = await self.repository.get_all_fallbacks(db)
         declared: dict[str, list[str]] = {}
@@ -230,6 +223,21 @@ class ModelDefaultsService:
                     )
                 continue
             declared[head] = chain
+        return declared
+
+    async def project_chains(self, db: AsyncSession, *, gateway: "ModelGatewayService") -> dict[str, list[str]]:
+        """Declare every chat tier's chain on the proxy, from our table, in one write.
+
+        The proxy keys a chain on its head alias, so the declaration is head → chain. One
+        alias may default several tiers at once, but the proxy holds one chain per head: a
+        non-empty chain wins over an empty one (a tier with no chain asks for nothing, so it
+        must not cancel another tier's), and between two different non-empty chains — which
+        ``set_failover_chain`` refuses, but a default change can still create — the first tier in
+        ``CHAT_TIER_ROLES`` order wins and the conflict is logged; the tier listing's drift
+        check compares against the declaration, so only a real divergence shows. Returns what
+        was declared.
+        """
+        declared = await self.declared_chains(db)
         await gateway.set_all_fallbacks(declared)
         return declared
 

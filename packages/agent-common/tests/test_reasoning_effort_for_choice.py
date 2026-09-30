@@ -20,9 +20,23 @@ from agent_common.core.model_factory import REASONING_OFF, create_model, reasoni
 from agent_common.models.base import ThinkingLevel
 
 
+_MF = "agent_common.core.model_factory"
+
+
+def _records(*ways):
+    """One deployment per value: None = unprobed ({}), else its recorded thinking_off."""
+    caps = [{} if w is None else {"thinking_off": w} for w in ways]
+    return patch(f"{_MF}.get_deployment_capabilities", return_value=caps)
+
+
+@pytest.fixture(autouse=True)
+def _no_alias_degradation():
+    with patch(f"{_MF}.resolve_chat_model", side_effect=lambda alias: alias):
+        yield
+
+
 def _record(thinking_off):
-    caps = {} if thinking_off is None else {"thinking_off": thinking_off}
-    return patch("agent_common.core.model_factory.get_model_capabilities", return_value=caps)
+    return _records(thinking_off)
 
 
 @pytest.mark.parametrize("way", ["disabled", "between_tools", "none", "always_on"])
@@ -39,6 +53,33 @@ def test_no_level_sends_nothing_without_a_usable_record(way):
     `thinking: disabled` Claude 5.5 rejects."""
     with _record(way):
         assert reasoning_effort_for_choice(None, "claude-sonnet-5-5") is None
+
+
+def test_a_probed_alias_with_an_unprobed_twin_sends_nothing():
+    """A probed DB deployment and an unprobed config deployment under one alias: the router
+    may pick either, and the unprobed one would get the hook's family heuristic (review
+    round 8)."""
+    with _records("between_tools", None):
+        assert reasoning_effort_for_choice(None, "gpt-6-sol") is None
+    with _records("between_tools", "disabled"):
+        assert reasoning_effort_for_choice(None, "m") == REASONING_OFF
+
+
+def test_a_retired_alias_is_decided_on_its_successors_record():
+    """create_model degrades a retired alias to its successor; the send decision must read the
+    successor's record, not the retired alias's absent one."""
+    seen = []
+
+    def _caps(alias):
+        seen.append(alias)
+        return [{"thinking_off": "between_tools"}] if alias == "successor" else []
+
+    with (
+        patch(f"{_MF}.resolve_chat_model", return_value="successor"),
+        patch(f"{_MF}.get_deployment_capabilities", side_effect=_caps),
+    ):
+        assert reasoning_effort_for_choice(None, "retired") == REASONING_OFF
+    assert seen == ["successor"]
 
 
 def test_no_model_type_sends_nothing():

@@ -106,12 +106,14 @@ around failing is **recorded, not refused**; the record is what lets the harness
 - A user's "off" is sent as off. The app models Extended Thinking as opt-in — no level means off —
   but used to send nothing for it, which leaves the provider default: thinking ON on the Claude 5
   family and Gemini 3, so the toggle read "off" and did nothing. The orchestrator, sub-agents and
-  scheduled agents now send `reasoning_effort: none` when no level is chosen — but only for an alias
-  whose record says how thinking goes off. Unprobed, the hook's family heuristic would send Claude
-  5.5 the `thinking: disabled` it rejects, and an `unsupported` record says the request is refused;
-  both keep sending nothing, the provider default, as before any record existed. The hook applies
-  the serving deployment's recorded switch per attempt, a failover attempt included. Utility calls
-  (risk scoring, HITL resume, indexing, tool selection) are not user choices and are unchanged.
+  scheduled agents now send `reasoning_effort: none` when no level is chosen — but only where the
+  record of every deployment behind the (resolved) alias says how thinking goes off, decided per
+  turn so a re-run Test takes effect on the next one. Unprobed, or with an `unsupported` record,
+  they keep sending nothing, the provider default, as before any record existed. The hook applies
+  the serving deployment's recorded switch per attempt, a failover attempt included; an attempt
+  landing on an unprobed Claude deployment gets the family switch by version — `between_tools`
+  from Claude 5.5 on (which rejects `disabled`), `disabled` before. Utility calls (risk scoring,
+  HITL resume, indexing, tool selection) are not user choices and are unchanged.
 - A deployment recorded as rejecting the replay of its own signed thinking block has the blocks
   stripped by the hook per attempt, the way a non-Anthropic fallback does: the turn continues without
   extended thinking rather than not at all.

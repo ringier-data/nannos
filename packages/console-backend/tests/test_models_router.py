@@ -39,3 +39,11 @@ def test_non_chat_models_stay_out():
     raw = [_deployment("embed", db=True, mode="embedding"), _deployment("chat", db=False)]
 
     assert [m.value for m in _picker_models(raw, default_model="chat")] == ["chat"]
+
+
+def test_a_non_chat_db_deployment_does_not_hide_the_chat_one():
+    """Filtered before deduplicated (review round 8): the DB entry is an embedding, so the chat
+    config deployment of the same alias is the one the picker lists."""
+    raw = [_deployment("m", db=False, label="Chat"), _deployment("m", db=True, label="Embed", mode="embedding")]
+
+    assert [m.label for m in _picker_models(raw, default_model=None)] == ["Chat"]
