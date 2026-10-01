@@ -145,6 +145,45 @@ class TestListRiskScores:
         assert data["limit"] == 2
         assert data["offset"] == 1
 
+    async def test_search_matches_tool_name_or_server_slug(self, client_with_db: AsyncClient, pg_session: AsyncSession):
+        """`search` is a case-insensitive substring match on either key column; `total` counts matches."""
+        await _insert_risk_score(pg_session, tool_name="zz_Widget_delete", server_slug="srv-a")
+        await _insert_risk_score(pg_session, tool_name="other_tool", server_slug="zz-widget-mcp")
+        await _insert_risk_score(pg_session, tool_name="unrelated", server_slug="srv-b")
+
+        response = await client_with_db.get("/api/mcp/tools/risk-scores?search=WIDGET")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert {(i["tool_name"], i["server_slug"]) for i in data["items"]} == {
+            ("zz_Widget_delete", "srv-a"),
+            ("other_tool", "zz-widget-mcp"),
+        }
+
+    async def test_search_total_spans_pages(self, client_with_db: AsyncClient, pg_session: AsyncSession):
+        """With a search, `total` is the match count, not the page size or the table size."""
+        for i in range(3):
+            await _insert_risk_score(pg_session, tool_name=f"zz_paged_{i}", server_slug="srv")
+
+        response = await client_with_db.get("/api/mcp/tools/risk-scores?search=zz_paged&limit=2&offset=0")
+        first = response.json()
+        response = await client_with_db.get("/api/mcp/tools/risk-scores?search=zz_paged&limit=2&offset=2")
+        second = response.json()
+        assert first["total"] == second["total"] == 3
+        names = [i["tool_name"] for i in first["items"] + second["items"]]
+        assert sorted(names) == ["zz_paged_0", "zz_paged_1", "zz_paged_2"]
+
+    async def test_search_treats_like_wildcards_literally(self, client_with_db: AsyncClient, pg_session: AsyncSession):
+        """A `_` or `%` in the search term is a literal character, not a LIKE wildcard."""
+        await _insert_risk_score(pg_session, tool_name="zzaxb", server_slug="srv")
+        await _insert_risk_score(pg_session, tool_name="zza_b", server_slug="srv")
+
+        response = await client_with_db.get("/api/mcp/tools/risk-scores?search=zza_b")
+        assert [i["tool_name"] for i in response.json()["items"]] == ["zza_b"]
+
+        response = await client_with_db.get("/api/mcp/tools/risk-scores?search=%25")
+        assert response.json()["total"] == 0
+
     async def test_validates_limit_bounds(self, client_with_db: AsyncClient):
         """Limit must be within [1, 500]."""
         response = await client_with_db.get("/api/mcp/tools/risk-scores?limit=0")

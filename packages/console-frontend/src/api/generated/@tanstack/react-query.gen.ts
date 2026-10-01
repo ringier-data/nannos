@@ -435,7 +435,7 @@ export const toggleAdminModeApiV1AuthAdminModePostMutation = (options?: Partial<
  *
  * Raises:
  * 401 Unauthorized: If the user is not authenticated.
- * 403 Forbidden: If the user is not an administrator or admin mode is not enabled.
+ * 403 Forbidden: If the user is not an active administrator or admin mode is not enabled.
  * 404 Not Found: If the target user does not exist.
  */
 export const startImpersonationApiV1AuthImpersonateStartPostMutation = (options?: Partial<Options<StartImpersonationApiV1AuthImpersonateStartPostData>>): UseMutationOptions<StartImpersonationApiV1AuthImpersonateStartPostResponse, StartImpersonationApiV1AuthImpersonateStartPostError, Options<StartImpersonationApiV1AuthImpersonateStartPostData>> => {
@@ -7219,7 +7219,8 @@ export const listRiskScoresApiMcpToolsRiskScoresGetQueryKey = (options?: Options
  *
  * Get paginated tool risk scores sorted by updated_at desc.
  *
- * Used by the orchestrator's ToolRiskCache periodic refresh.
+ * Used by the orchestrator's ToolRiskCache periodic refresh (unfiltered) and by the
+ * console's admin page (with `search`). `total` counts the matches, not the table.
  */
 export const listRiskScoresApiMcpToolsRiskScoresGetOptions = (options?: Options<ListRiskScoresApiMcpToolsRiskScoresGetData>) => queryOptions<ListRiskScoresApiMcpToolsRiskScoresGetResponse, ListRiskScoresApiMcpToolsRiskScoresGetError, ListRiskScoresApiMcpToolsRiskScoresGetResponse, ReturnType<typeof listRiskScoresApiMcpToolsRiskScoresGetQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -7241,7 +7242,8 @@ export const listRiskScoresApiMcpToolsRiskScoresGetInfiniteQueryKey = (options?:
  *
  * Get paginated tool risk scores sorted by updated_at desc.
  *
- * Used by the orchestrator's ToolRiskCache periodic refresh.
+ * Used by the orchestrator's ToolRiskCache periodic refresh (unfiltered) and by the
+ * console's admin page (with `search`). `total` counts the matches, not the table.
  */
 export const listRiskScoresApiMcpToolsRiskScoresGetInfiniteOptions = (options?: Options<ListRiskScoresApiMcpToolsRiskScoresGetData>) => infiniteQueryOptions<ListRiskScoresApiMcpToolsRiskScoresGetResponse, ListRiskScoresApiMcpToolsRiskScoresGetError, InfiniteData<ListRiskScoresApiMcpToolsRiskScoresGetResponse>, QueryKey<Options<ListRiskScoresApiMcpToolsRiskScoresGetData>>, number | Pick<QueryKey<Options<ListRiskScoresApiMcpToolsRiskScoresGetData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
 // @ts-ignore

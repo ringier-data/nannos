@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ShieldAlert, Trash2, Loader2, RefreshCw, Plus, Pencil } from 'lucide-react';
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { ShieldAlert, Trash2, Loader2, RefreshCw, Plus, Pencil, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -21,6 +21,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Pagination } from '@/components/admin/Pagination';
 import { client } from '@/api/generated/client.gen';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 
 interface RiskFactor {
   risky_values: Record<string, number>;
@@ -46,11 +47,15 @@ interface UpsertPayload {
   allowed_actions: string[];
 }
 
-/** Fetch paginated risk scores. */
-async function fetchRiskScores(limit = 100, offset = 0): Promise<{ items: ToolRiskScore[]; total: number }> {
+/** Fetch paginated risk scores, narrowed server-side by `search` on tool name or server slug. */
+async function fetchRiskScores(
+  limit = 100,
+  offset = 0,
+  search?: string,
+): Promise<{ items: ToolRiskScore[]; total: number }> {
   const res = await client.get({
     url: '/api/mcp/tools/risk-scores',
-    query: { limit, offset },
+    query: { limit, offset, search },
   });
   return res.data as { items: ToolRiskScore[]; total: number };
 }
@@ -119,10 +124,13 @@ export function ToolRiskScoresPage() {
   const [form, setForm] = useState<FormState>(emptyForm());
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search.trim());
 
-  const { data, isLoading, isRefetching } = useQuery({
-    queryKey: ['adminToolRiskScores', page],
-    queryFn: () => fetchRiskScores(PAGE_SIZE, (page - 1) * PAGE_SIZE),
+  const { data, isLoading, isFetching, isRefetching } = useQuery({
+    queryKey: ['adminToolRiskScores', page, debouncedSearch],
+    queryFn: () => fetchRiskScores(PAGE_SIZE, (page - 1) * PAGE_SIZE, debouncedSearch || undefined),
+    placeholderData: keepPreviousData,
   });
 
   const deleteMutation = useMutation({
@@ -237,17 +245,32 @@ export function ToolRiskScoresPage() {
         </div>
       </div>
 
+      <div className="relative max-w-sm">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          placeholder="Search tool name or server..."
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
+          className="pl-9"
+        />
+      </div>
+
       {/* Table */}
       {isLoading ? (
         <TableSkeleton columns={6} />
       ) : scores.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
-            No tool risk scores found. Scores are generated automatically when tools are first used.
+            {debouncedSearch
+              ? `No tool risk scores match "${debouncedSearch}".`
+              : 'No tool risk scores found. Scores are generated automatically when tools are first used.'}
           </CardContent>
         </Card>
       ) : (
-        <div className="rounded-md border">
+        <div className={`rounded-md border transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}>
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/50">

@@ -281,7 +281,7 @@ export const toggleAdminModeApiV1AuthAdminModePost = <ThrowOnError extends boole
  *
  * Raises:
  * 401 Unauthorized: If the user is not authenticated.
- * 403 Forbidden: If the user is not an administrator or admin mode is not enabled.
+ * 403 Forbidden: If the user is not an active administrator or admin mode is not enabled.
  * 404 Not Found: If the target user does not exist.
  */
 export const startImpersonationApiV1AuthImpersonateStartPost = <ThrowOnError extends boolean = false>(options: Options<StartImpersonationApiV1AuthImpersonateStartPostData, ThrowOnError>) => (options.client ?? client).post<StartImpersonationApiV1AuthImpersonateStartPostResponses, StartImpersonationApiV1AuthImpersonateStartPostErrors, ThrowOnError>({
@@ -3464,7 +3464,8 @@ export const bulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePost = <ThrowO
  *
  * Get paginated tool risk scores sorted by updated_at desc.
  *
- * Used by the orchestrator's ToolRiskCache periodic refresh.
+ * Used by the orchestrator's ToolRiskCache periodic refresh (unfiltered) and by the
+ * console's admin page (with `search`). `total` counts the matches, not the table.
  */
 export const listRiskScoresApiMcpToolsRiskScoresGet = <ThrowOnError extends boolean = false>(options?: Options<ListRiskScoresApiMcpToolsRiskScoresGetData, ThrowOnError>) => (options?.client ?? client).get<ListRiskScoresApiMcpToolsRiskScoresGetResponses, ListRiskScoresApiMcpToolsRiskScoresGetErrors, ThrowOnError>({ url: '/api/mcp/tools/risk-scores', ...options });
 

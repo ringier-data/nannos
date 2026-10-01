@@ -18158,6 +18158,12 @@ export type ListRiskScoresApiMcpToolsRiskScoresGetData = {
          * Offset
          */
         offset?: number;
+        /**
+         * Search
+         *
+         * Search by tool name or server slug
+         */
+        search?: string | null;
     };
     url: '/api/mcp/tools/risk-scores';
 };

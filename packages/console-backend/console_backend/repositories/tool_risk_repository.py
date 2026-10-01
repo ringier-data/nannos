@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import User
+from ..utils.sql_search import like_clause, like_contains
 from .base import AuditedRepository, _serialize_for_audit
 
 logger = logging.getLogger(__name__)
@@ -73,23 +74,29 @@ class ToolRiskRepository(AuditedRepository):
         db: AsyncSession,
         limit: int = 100,
         offset: int = 0,
+        search: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Get paginated scores sorted by updated_at desc."""
+        """Get paginated scores sorted by updated_at desc, optionally narrowed by `search`."""
+        where_clause, params = _search_filter(search)
+        # The key breaks ties: scores written in the same clock tick would otherwise be
+        # ordered arbitrarily, and a paging caller could see one twice or not at all.
         result = await db.execute(
-            text("""
+            text(f"""
                 SELECT tool_name, server_slug, schema_hash, base_score,
                        risk_factors, allowed_actions, updated_at, created_at
                 FROM tool_risk_scores
-                ORDER BY updated_at DESC
+                {where_clause}
+                ORDER BY updated_at DESC, tool_name, server_slug
                 LIMIT :limit OFFSET :offset
             """),
-            {"limit": limit, "offset": offset},
+            {**params, "limit": limit, "offset": offset},
         )
         return [dict(row) for row in result.mappings().all()]
 
-    async def get_count(self, db: AsyncSession) -> int:
-        """Get total count of risk scores."""
-        result = await db.execute(text("SELECT COUNT(*) FROM tool_risk_scores"))
+    async def get_count(self, db: AsyncSession, search: str | None = None) -> int:
+        """Get the count of risk scores matching `search` (all of them when omitted)."""
+        where_clause, params = _search_filter(search)
+        result = await db.execute(text(f"SELECT COUNT(*) FROM tool_risk_scores {where_clause}"), params)
         return result.scalar() or 0
 
     async def upsert_score(
@@ -202,3 +209,10 @@ class ToolRiskRepository(AuditedRepository):
 
         await db.commit()
         return deleted
+
+
+def _search_filter(search: str | None) -> tuple[str, dict[str, Any]]:
+    """WHERE clause + params matching `search` against the tool name or server slug."""
+    if not search:
+        return "", {}
+    return f"WHERE {like_clause('tool_name', 'server_slug')}", {"search": like_contains(search)}
